@@ -89,3 +89,28 @@ fn derived_generic_packet_checks_id_and_consumes_entire_payload() {
         Err(Error::TrailingBytes)
     );
 }
+
+#[test]
+fn bounded_collections_and_optional_values_reject_invalid_input() {
+    use chunk_protocol::{BoundedArray, ByteArray, RemainingBytes, Uuid};
+
+    let bytes = ByteArray::<2>::new(vec![0xab, 0xcd]).unwrap();
+    let mut encoded = vec![];
+    bytes.encode(&mut encoded).unwrap();
+    assert_eq!(encoded, [2, 0xab, 0xcd]);
+    assert_eq!(ByteArray::<2>::decode(&mut encoded.as_slice()).unwrap(), bytes);
+    assert_eq!(ByteArray::<2>::new(vec![0; 3]), Err(Error::CollectionTooLong));
+    assert_eq!(ByteArray::<2>::decode(&mut &[3][..]), Err(Error::CollectionTooLong));
+    assert_eq!(ByteArray::<2>::decode(&mut &[2, 0][..]), Err(Error::Incomplete));
+    assert_eq!(
+        BoundedArray::<VarInt, 2>::decode(&mut &[0xff, 0xff, 0xff, 0xff, 0x0f][..]),
+        Err(Error::CollectionTooLong)
+    );
+    assert_eq!(Option::<VarInt>::decode(&mut &[2][..]), Err(Error::InvalidBoolean));
+    assert_eq!(Option::<VarInt>::decode(&mut &[1][..]), Err(Error::Incomplete));
+    assert_eq!(Uuid::decode(&mut &[0; 15][..]), Err(Error::Incomplete));
+    assert_eq!(
+        RemainingBytes::<2>::decode(&mut &[0; 3][..]),
+        Err(Error::CollectionTooLong)
+    );
+}
