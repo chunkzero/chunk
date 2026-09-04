@@ -1,0 +1,14 @@
+[package]
+name = "chunk-store"
+description = "Per-app SQLite database, serialized writer, subscriptions and durable jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-contract = { path = "../chunk-contract" }
+
+[lints]
+workspace = true

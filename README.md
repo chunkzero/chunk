@@ -1,30 +1,40 @@
 # chunk
 
-A portable Minecraft server runtime.
+**Cloudflare for Minecraft servers.** chunk is the toolchain, the edge, the
+session runtime, and the control plane for the chunkzero platform. It owns the
+player's connection, runs an application's coordination code at the edge, and
+supervises the JVM processes where play happens.
 
-chunk wraps a Minecraft server in a small supervisor that owns the server's
-lifecycle and its network edge. The same runtime runs wherever you want to
-host: a cloud sandbox, a container, a bare VM, or a plain Java process on your
-laptop. Hosting is a backend detail; the server and the players see the same
-thing everywhere.
+An application has two tiers, chosen by what the code needs:
 
-## How it fits together
+- **Edge** code is TypeScript shaped like Convex: a schema-defined database,
+  `query`, `mutation` and `action` functions, reactive queries, a durable
+  scheduler, and Minecraft primitives such as the login decision, queues,
+  players and packs. chunk compiles it into one module and runs it in a
+  per-app QuickJS runtime with no ambient capabilities.
+- **Session** code is Kotlin or Java with Minestom fully visible, written
+  against the [block](https://github.com/chunkzero) framework and run in JVM
+  processes that chunk starts, supervises and restarts with players held.
 
-Much like `cloudflared` sits between an origin and the edge, chunk sits between
-the Minecraft server and the players:
+chunk sits between them the way a proxy sits between players and backends,
+except a backend is one session with a lifecycle rather than a whole server,
+and one process hosts many. Players stay connected to the edge across moves
+and restarts; no app code ever opens a socket.
 
-- **Runtime (Rust, `crates/`)** runs next to the server process. It starts,
-  stops, pauses, and health-checks the server, and exposes the server's
-  connection over a tunnel so the host does not need to expose raw TCP.
-- **Connector (Rust, `crates/`)** runs wherever players connect. It listens on
-  a normal Minecraft port, finds or wakes the right server, and tunnels each
-  player's session to its runtime.
-- **Server-side integration (Kotlin, `jvm/`)** runs inside the JVM alongside
-  the Minecraft server, handling anything that has to happen in-process such
-  as coordinated saves before a pause.
+## Repository
 
-Hosts plug in behind the runtime and connector. The first targets are a
-cloud sandbox backend, a container runtime, and a bare local Java process.
+| path            | what                                                             |
+| --------------- | ---------------------------------------------------------------- |
+| `crates/`       | Rust: the `chunk` binary and the platform and toolchain crates   |
+| `jvm/`          | Kotlin: the session-side runtime client, build API, Gradle plugin |
+| `packages/`     | TypeScript: `@chunk/edge`, the module edge code imports          |
+| `proto/`        | the internal gRPC transport, shared by Rust and the JVM          |
+| `docs/`         | architecture notes for this repository                           |
+
+[docs/architecture.md](docs/architecture.md) maps processes to crates and
+records the boundaries between them. The platform design itself, including
+the edge API, the session framework and the decisions behind the two tiers,
+lives in the [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase).
 
 ## Development
 
@@ -43,5 +53,6 @@ just ready
 chunk is licensed under the
 [Functional Source License, Version 1.1, MIT Future License](LICENSE.md).
 You may use, modify, and redistribute it for any purpose except offering it
-as a competing commercial product. Each release converts to the MIT license
-two years after it is published.
+as a competing commercial product. Running your own applications on chunk is
+not a competing use. Each release converts to the MIT license two years after
+it is published.

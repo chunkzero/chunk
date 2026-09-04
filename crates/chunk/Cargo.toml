@@ -1,0 +1,21 @@
+[package]
+name = "chunk"
+description = "The chunk command: toolchain and platform processes in one binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "chunk"
+path = "src/main.rs"
+
+[dependencies]
+chunk-build = { path = "../chunk-build" }
+chunk-control = { path = "../chunk-control" }
+chunk-edge = { path = "../chunk-edge" }
+chunk-runtime = { path = "../chunk-runtime" }
+
+[lints]
+workspace = true

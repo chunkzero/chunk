@@ -1,0 +1,15 @@
+[package]
+name = "chunk-proxy"
+description = "Owns the player's connection: login, configuration, relay, parking and moves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-protocol = { path = "../chunk-protocol" }
+chunk-proto = { path = "../chunk-proto" }
+
+[lints]
+workspace = true

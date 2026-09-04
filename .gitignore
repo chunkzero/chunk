@@ -19,3 +19,10 @@ build/
 .env.*
 *.log
 .DS_Store
+
+# Node
+node_modules/
+
+# chunk app state (example apps, fixtures)
+.chunk/
+dist/

@@ -1,0 +1,18 @@
+[package]
+name = "chunk-edge"
+description = "Hosts apps at the edge: functions, events, primitives and reactive queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-contract = { path = "../chunk-contract" }
+chunk-proto = { path = "../chunk-proto" }
+chunk-store = { path = "../chunk-store" }
+chunk-js = { path = "../chunk-js" }
+chunk-proxy = { path = "../chunk-proxy" }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "chunk-build"
+description = "Edge compiler, code generation and manifest writer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-contract = { path = "../chunk-contract" }
+chunk-js = { path = "../chunk-js" }
+
+[lints]
+workspace = true

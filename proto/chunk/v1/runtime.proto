@@ -1,0 +1,129 @@
+// The session runtime SPI: one control stream between a session process and
+// the chunk supervisor that started it. The process dials out and never
+// listens; commands toward it travel down this stream and are answered by
+// id. Proposed.
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+
+service Runtime {
+  // Opened once per process, immediately after start, and kept for its life.
+  rpc Attach(stream ProcessMessage) returns (stream RuntimeCommand);
+}
+
+// Process -> supervisor.
+message ProcessMessage {
+  oneof body {
+    Register register = 1;
+    Reply reply = 2;
+    SessionEvent session_event = 3;
+    PlayerLeft player_left = 4;
+    Health health = 5;
+    Diagnostic diagnostic = 6;
+  }
+}
+
+// First message. Names the session types this process hosts and carries the
+// registry data a Minestom server would send in configuration, so the edge
+// can send it instead.
+message Register {
+  string token = 1;
+  string app = 2;
+  repeated string session_types = 3;
+  bytes registry = 4;
+}
+
+// Answers the command with the same id.
+message Reply {
+  uint64 command_id = 1;
+  oneof outcome {
+    Ok ok = 2;
+    SessionRef created = 3;
+    bytes call_result = 4;
+    Error error = 5;
+  }
+}
+
+message Ok {}
+
+message SessionEvent {
+  SessionRef session = 1;
+  oneof event {
+    Ok ended = 2;
+  }
+}
+
+// The player left on their own or the session sent them back through login.
+message PlayerLeft {
+  PlayerRef player = 1;
+  SessionRef session = 2;
+}
+
+message Health {
+  uint32 sessions = 1;
+  uint32 players = 2;
+  double tick_millis = 3;
+}
+
+message Diagnostic {
+  string level = 1;
+  string message = 2;
+  optional SessionRef session = 3;
+}
+
+// Supervisor -> process. Every command is replied to by id.
+message RuntimeCommand {
+  uint64 id = 1;
+  oneof body {
+    CreateSession create_session = 2;
+    EndSession end_session = 3;
+    Call call = 4;
+    Deliver deliver = 5;
+    Withdraw withdraw = 6;
+    Prepare prepare = 7;
+    Stop stop = 8;
+  }
+}
+
+message CreateSession {
+  string session_type = 1;
+  // Creation parameters in the contract's wire encoding.
+  bytes params = 2;
+}
+
+message EndSession {
+  SessionRef session = 1;
+}
+
+// Invoke an @Expose method on the session's tick thread.
+message Call {
+  SessionRef session = 1;
+  string method = 2;
+  bytes args = 3;
+}
+
+// Hand an authenticated player to a session. The process then opens a
+// Players.Stream for this delivery.
+message Deliver {
+  string delivery_id = 1;
+  SessionRef session = 2;
+  PlayerRef player = 3;
+  Identity identity = 4;
+  int32 protocol = 5;
+  string locale = 6;
+  // The login listener's attachments in the contract's wire encoding.
+  bytes attachments = 7;
+}
+
+// Take the player back without the session sending a disconnect.
+message Withdraw {
+  PlayerRef player = 1;
+}
+
+// Save and stop accepting; a restart follows.
+message Prepare {}
+
+// End every session and exit.
+message Stop {}

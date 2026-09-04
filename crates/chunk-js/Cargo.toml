@@ -1,0 +1,14 @@
+[package]
+name = "chunk-js"
+description = "QuickJS executor for edge bundles behind an engine-independent interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-contract = { path = "../chunk-contract" }
+
+[lints]
+workspace = true

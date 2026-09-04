@@ -1,0 +1,34 @@
+// Types shared by every internal service. Proposed; versioned with the manifest.
+syntax = "proto3";
+
+package chunk.v1;
+
+// A stable player identity. Never a raw UUID: the edge issues it at login and
+// it survives moves, restarts and edge-to-edge transfers.
+message PlayerRef {
+  string id = 1;
+}
+
+// A running session, wherever its process is.
+message SessionRef {
+  string id = 1;
+}
+
+// What the edge verified at login and forwards on delivery.
+message Identity {
+  string uuid = 1;
+  string username = 2;
+  repeated Property properties = 3;
+}
+
+message Property {
+  string name = 1;
+  string value = 2;
+  optional string signature = 3;
+}
+
+// A stable platform error code plus the message the function threw.
+message Error {
+  string code = 1;
+  string message = 2;
+}

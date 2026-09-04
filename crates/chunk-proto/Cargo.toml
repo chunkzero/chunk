@@ -1,0 +1,11 @@
+[package]
+name = "chunk-proto"
+description = "Internal gRPC and protobuf definitions shared by the platform processes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

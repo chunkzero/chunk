@@ -18,5 +18,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "chunk"
 
-// JVM modules live under jvm/. Declare each one here, e.g.:
-// include(":jvm:example")
+include(":jvm:proto")
+include(":jvm:runtime")
+include(":jvm:build-api")
+include(":jvm:gradle-plugin")

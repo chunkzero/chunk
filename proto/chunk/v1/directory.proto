@@ -1,0 +1,41 @@
+// The control plane's directory and placement. Clients are edges and runtime
+// supervisors. Proposed.
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+
+service Directory {
+  rpc ResolveSession(ResolveSessionRequest) returns (ResolveSessionResponse);
+  rpc ResolveDatabase(ResolveDatabaseRequest) returns (ResolveDatabaseResponse);
+  rpc Place(PlaceRequest) returns (PlaceResponse);
+}
+
+message ResolveSessionRequest {
+  SessionRef session = 1;
+}
+
+message ResolveSessionResponse {
+  string process = 1;
+  string edge = 2;
+}
+
+message ResolveDatabaseRequest {
+  string app = 1;
+}
+
+message ResolveDatabaseResponse {
+  string edge = 1;
+}
+
+// Choose a process for a new session of this type.
+message PlaceRequest {
+  string app = 1;
+  string session_type = 2;
+  optional string region = 3;
+}
+
+message PlaceResponse {
+  string process = 1;
+}

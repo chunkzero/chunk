@@ -1,0 +1,16 @@
+{
+  "name": "@chunk/edge",
+  "version": "0.1.0",
+  "description": "The module edge code imports: schema, functions, events, commands, and ctx types",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
