@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Gradle / JVM
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.fleet/
+
+# Environment
+.env
+.env.*
+*.log
+.DS_Store
