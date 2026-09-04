@@ -51,6 +51,7 @@ pieces fit together.
 
 - Do not revert unrelated changes.
 - Commit messages follow Conventional Commits.
+- Squash merge pull requests.
 - Do not rely on pre-commit hooks; CI is the source of truth for formatting,
   linting, tests, and builds.
 
