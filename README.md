@@ -39,7 +39,8 @@ lives in the [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebas
 ## Development
 
 Toolchains are pinned in `mise.toml`. Install [mise](https://mise.jdx.dev)
-and [just](https://just.systems), then:
+and [just](https://just.systems), plus OpenSSL development headers and
+`pkg-config` for the proxy's RSA/AES implementation, then:
 
 ```sh
 mise install
@@ -55,10 +56,12 @@ cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk edge"
 ```
 
 Add `localhost:25565` to a Java Edition client's server list to see the MOTD
-and ping. The proxy advertises 26.1 (protocol 775), rejects its logins with a
-sessions-unavailable message, and rejects other versions with a mismatch message.
-Only handshake/status and login rejection are implemented; legacy pre-1.7 pings
-and transfer handshakes are unsupported.
+and ping. The proxy advertises 26.1 (protocol 775) and authenticates logins
+through Mojang's session service in online mode. A successful Login Acknowledged
+produces an `authenticated player reached configuration` log entry, then closes
+the connection until configuration parking is implemented. Playable sessions
+are not available yet. Other versions receive a mismatch message; legacy
+pre-1.7 pings and transfer handshakes are unsupported.
 
 `mc-26-1` is the only version feature and is enabled by default. Features are
 forwarded from `chunk` through the edge and proxy to `chunk-protocol`.
@@ -72,8 +75,14 @@ Without version features, protocol primitives remain available but the proxy
 refuses to start. Features select releases; they do not translate versions.
 
 `--max-connections` limits concurrent exchanges (default 1024). Each exchange
-has a ten-second deadline. Ctrl-C or SIGTERM closes the listener and active
-connections. Set `RUST_LOG=debug` to log individual connection failures.
+has a ten-second deadline, including authentication and Login Acknowledged.
+Mojang requests use HTTPS with a five-second timeout and bounded responses;
+failed verification never falls back to offline identities. The authenticated
+UUID and profile properties come from Mojang, not the client's claimed UUID.
+Compression defaults to 256 bytes; library callers can set
+`Config::compression_threshold` to `None` to disable it. Ctrl-C or SIGTERM closes
+the listener and active connections. Set `RUST_LOG=debug` to log individual
+connection failures.
 
 Packet generation and codec usage are covered in the
 [protocol crate documentation](crates/chunk-protocol/src/lib.rs).

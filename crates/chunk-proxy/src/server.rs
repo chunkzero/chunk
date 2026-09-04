@@ -1,5 +1,11 @@
+#[path = "authentication.rs"]
+mod authentication;
 #[path = "connection.rs"]
 mod connection;
+#[path = "transport.rs"]
+mod transport;
+
+use authentication::Authentication;
 
 use std::{future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 
@@ -18,7 +24,6 @@ use crate::Config;
 
 struct Responses {
     status: Vec<u8>,
-    disconnect: Vec<u8>,
     unsupported_version: Vec<u8>,
 }
 
@@ -39,11 +44,6 @@ impl Responses {
             json: McString::new(json.to_string()).map_err(invalid_config)?,
         })
         .map_err(invalid_config)?;
-        let disconnect = encode_packet(&LoginDisconnect {
-            reason: McString::new(serde_json::json!({ "text": config.login_rejection }).to_string())
-                .map_err(invalid_config)?,
-        })
-        .map_err(invalid_config)?;
         let supported_names = SUPPORTED
             .iter()
             .map(|version| version.name)
@@ -61,7 +61,6 @@ impl Responses {
         .map_err(invalid_config)?;
         Ok(Self {
             status,
-            disconnect,
             unsupported_version,
         })
     }
@@ -75,6 +74,7 @@ pub struct Proxy {
     listener: TcpListener,
     config: Config,
     responses: Arc<Responses>,
+    authentication: Arc<Authentication>,
 }
 
 impl Proxy {
@@ -89,13 +89,24 @@ impl Proxy {
                 "connection timeout must be positive",
             ));
         }
+        if config
+            .compression_threshold
+            .is_some_and(|threshold| threshold > chunk_protocol::MAX_FRAME_SIZE)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compression threshold exceeds frame limit",
+            ));
+        }
         let responses = Arc::new(Responses::new(&config)?);
+        let authentication = Arc::new(Authentication::new().await?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
         Ok(Self {
             listener,
             config,
             responses,
+            authentication,
         })
     }
 
@@ -140,10 +151,18 @@ impl Proxy {
                         continue;
                     }
                     let responses = Arc::clone(&self.responses);
+                    let authentication = Arc::clone(&self.authentication);
                     let deadline = self.config.connection_timeout;
+                    let compression = self.config.compression_threshold;
                     connections.spawn(async move {
-                        if let Err(error) = connection::serve(stream, &responses, deadline).await {
-                            tracing::debug!(%peer, %error, "connection closed");
+                        match connection::serve(stream, &responses, &authentication, deadline, compression).await {
+                            Ok(Some(mut authenticated)) => {
+                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration");
+                                // No configuration handler is installed yet.
+                                let _ = authenticated.transport.shutdown().await;
+                            }
+                            Ok(None) => {}
+                            Err(error) => tracing::debug!(%peer, %error, "connection closed"),
                         }
                     });
                 }

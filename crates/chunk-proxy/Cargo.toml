@@ -1,6 +1,6 @@
 [package]
 name = "chunk-proxy"
-description = "Minecraft TCP listener with status responses and login rejection"
+description = "Minecraft TCP listener with status responses and authenticated login"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,18 @@ publish = false
 
 [features]
 default = ["mc-26-1"]
-mc-26-1 = ["chunk-protocol/mc-26-1"]
+mc-26-1 = ["chunk-protocol/mc-26-1", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
 
 [dependencies]
 chunk-protocol = { path = "../chunk-protocol", default-features = false }
 chunk-proto = { path = "../chunk-proto" }
 bytes = "1"
 serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+openssl = { version = "0.10", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+flate2 = { version = "1", optional = true }
+zeroize = { version = "1", optional = true }
 tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "sync", "time"] }
 tracing = "0.1"
 
