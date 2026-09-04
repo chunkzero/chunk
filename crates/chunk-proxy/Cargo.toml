@@ -7,9 +7,20 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["mc-26-1"]
+mc-26-1 = ["chunk-protocol/mc-26-1"]
+
 [dependencies]
-chunk-protocol = { path = "../chunk-protocol" }
+chunk-protocol = { path = "../chunk-protocol", default-features = false }
 chunk-proto = { path = "../chunk-proto" }
+bytes = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

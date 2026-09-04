@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["mc-26-1"]
+mc-26-1 = ["chunk-edge/mc-26-1"]
+
 [[bin]]
 name = "chunk"
 path = "src/main.rs"
@@ -14,8 +18,12 @@ path = "src/main.rs"
 [dependencies]
 chunk-build = { path = "../chunk-build" }
 chunk-control = { path = "../chunk-control" }
-chunk-edge = { path = "../chunk-edge" }
+chunk-edge = { path = "../chunk-edge", default-features = false }
 chunk-runtime = { path = "../chunk-runtime" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]
 workspace = true
