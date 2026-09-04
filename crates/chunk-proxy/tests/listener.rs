@@ -5,7 +5,7 @@ use std::{io, time::Duration};
 use bytes::BytesMut;
 use chunk_protocol::{
     decode_frame, decode_packet,
-    versions::v26_1::{LoginDisconnect, StatusResponse},
+    versions::v26_1::{EncryptionRequest, LoginDisconnect, StatusResponse},
 };
 use chunk_proxy::{Config, Proxy};
 use tokio::{
@@ -84,7 +84,7 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
 }
 
 #[tokio::test]
-async fn rejects_login_and_malformed_clients_and_closes_idle_sockets_on_shutdown() {
+async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_on_shutdown() {
     let proxy = Proxy::bind(
         "127.0.0.1:0".parse().unwrap(),
         Config {
@@ -108,10 +108,16 @@ async fn rejects_login_and_malformed_clients_and_closes_idle_sockets_on_shutdown
         .write_all(b"\x10\x00\x87\x06\x09localhost\x63\xdd\x02")
         .await
         .unwrap();
+    // Login Start is pipelined after the handshake. Claimed UUID is not an identity.
+    login
+        .write_all(b"\x16\x00\x04Alex\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
     let frame = read_frame(&mut login).await;
-    let disconnect = decode_packet::<LoginDisconnect>(&frame).unwrap();
-    let json: serde_json::Value = serde_json::from_str(disconnect.reason.as_str()).unwrap();
-    assert_eq!(json["text"], Config::default().login_rejection);
+    let request = decode_packet::<EncryptionRequest>(&frame).unwrap();
+    assert!(request.should_authenticate);
+    assert_eq!(request.verify_token.as_slice().len(), 4);
+    login.shutdown().await.unwrap();
     closed(&mut login).await;
     let mut outdated = TcpStream::connect(address).await.unwrap();
     outdated

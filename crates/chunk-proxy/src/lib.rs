@@ -1,4 +1,4 @@
-//! Owns player sockets, serves Java Edition status, and rejects login.
+//! Owns player sockets, serves Java Edition status, and authenticates online-mode login.
 
 #[cfg(feature = "mc-26-1")]
 mod server;
@@ -16,19 +16,20 @@ use std::{num::NonZeroUsize, time::Duration};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub motd: String,
-    pub login_rejection: String,
     pub max_connections: NonZeroUsize,
     /// Deadline for the entire exchange, including writes; not reset by traffic.
     pub connection_timeout: Duration,
+    /// Uncompressed packet size at which zlib is enabled. None disables compression.
+    pub compression_threshold: Option<usize>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             motd: "chunk — sessions coming soon".into(),
-            login_rejection: "This edge is running, but sessions are not available yet.".into(),
             max_connections: NonZeroUsize::new(1024).unwrap(),
             connection_timeout: Duration::from_secs(10),
+            compression_threshold: Some(256),
         }
     }
 }

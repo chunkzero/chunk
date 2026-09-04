@@ -14,7 +14,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve Minecraft status and login rejection (sessions are not yet available).
+    /// Serve Minecraft status and online-mode login (sessions are not yet available).
     Edge {
         #[arg(long, default_value = "127.0.0.1:25565")]
         bind: SocketAddr,
