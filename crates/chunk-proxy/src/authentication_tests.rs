@@ -59,7 +59,7 @@ fn encrypt_response(request: &EncryptionRequest, secret: &[u8], token: &[u8]) ->
     }
 }
 
-async fn begin_login(client: &mut Transport<tokio::io::DuplexStream>) -> EncryptionRequest {
+async fn begin_login<S: AsyncRead + AsyncWrite + Unpin>(client: &mut Transport<S>) -> EncryptionRequest {
     client
         .write_packet(&LoginStart {
             username: McString::new("Alex").unwrap(),
@@ -286,4 +286,71 @@ async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
     };
     tokio::join!(server, client);
     request_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() {
+    use crate::{Config, Proxy};
+    use chunk_protocol::versions::v26_1::{ConfigurationKeepAlive, Handshake};
+    use std::sync::Arc;
+    use tokio::{net::TcpStream, sync::oneshot};
+
+    timeout(Duration::from_secs(5), async {
+        let (auth, request_task) = mock_session(http_response("200 OK", &profile_json())).await;
+        let mut proxy = Proxy::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Config {
+                max_connections: std::num::NonZeroUsize::new(1).unwrap(),
+                ..Config::default()
+            },
+        )
+        .await
+        .unwrap();
+        proxy.authentication = Arc::new(auth);
+        let address = proxy.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(proxy.run(async { stopped.await.map_err(io::Error::other) }));
+        let mut client = Transport::new(TcpStream::connect(address).await.unwrap());
+        client
+            .write_packet(&Handshake {
+                protocol_version: VarInt(775),
+                server_address: McString::new("localhost").unwrap(),
+                server_port: 25565,
+                next_state: VarInt(2),
+            })
+            .await
+            .unwrap();
+        let request = begin_login(&mut client).await;
+        let secret = [5; 16];
+        client
+            .write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice()))
+            .await
+            .unwrap();
+        client.enable_encryption(&secret).unwrap();
+        decode_packet::<SetCompression>(&client.read_frame(4096).await.unwrap()).unwrap();
+        client.enable_compression(256);
+        decode_packet::<LoginSuccess>(&client.read_frame(65536).await.unwrap()).unwrap();
+        client.write_packet(&LoginAcknowledged).await.unwrap();
+        let keepalive = decode_packet::<ConfigurationKeepAlive>(&client.read_frame(4096).await.unwrap()).unwrap();
+        client
+            .write_packet(&ConfigurationKeepAliveResponse {
+                keep_alive_id: keepalive.keep_alive_id,
+            })
+            .await
+            .unwrap();
+        // A waiting player retains its capacity slot.
+        let mut excess = TcpStream::connect(address).await.unwrap();
+        let result = excess.read(&mut [0]).await;
+        assert!(matches!(result, Ok(0)) || result.is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset));
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        let error = client.read_frame(4096).await.unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+        ));
+        request_task.await.unwrap();
+    })
+    .await
+    .unwrap();
 }

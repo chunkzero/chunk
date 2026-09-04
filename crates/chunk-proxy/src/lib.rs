@@ -12,7 +12,7 @@ pub use disabled::Proxy;
 
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Limits and responses for the initial connection exchange.
+/// Limits for login and configuration waiting, and the server-list response.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub motd: String,
@@ -21,6 +21,8 @@ pub struct Config {
     pub connection_timeout: Duration,
     /// Uncompressed packet size at which zlib is enabled. None disables compression.
     pub compression_threshold: Option<usize>,
+    /// Maximum time to wait in configuration for a destination, even while responsive.
+    pub configuration_timeout: Duration,
 }
 
 impl Default for Config {
@@ -30,6 +32,7 @@ impl Default for Config {
             max_connections: NonZeroUsize::new(1024).unwrap(),
             connection_timeout: Duration::from_secs(10),
             compression_threshold: Some(256),
+            configuration_timeout: Duration::from_secs(300),
         }
     }
 }

@@ -1,5 +1,7 @@
 #[path = "authentication.rs"]
 mod authentication;
+#[path = "configuration.rs"]
+mod configuration;
 #[path = "connection.rs"]
 mod connection;
 #[path = "transport.rs"]
@@ -83,10 +85,10 @@ impl Proxy {
     /// # Errors
     /// Returns configuration validation or socket binding errors.
     pub async fn bind(address: SocketAddr, config: Config) -> io::Result<Self> {
-        if config.connection_timeout.is_zero() {
+        if config.connection_timeout.is_zero() || config.configuration_timeout.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "connection timeout must be positive",
+                "connection and configuration timeouts must be positive",
             ));
         }
         if config
@@ -154,12 +156,17 @@ impl Proxy {
                     let authentication = Arc::clone(&self.authentication);
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
+                    let configuration_timeout = self.config.configuration_timeout;
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression).await {
-                            Ok(Some(mut authenticated)) => {
-                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration");
-                                // No configuration handler is installed yet.
-                                let _ = authenticated.transport.shutdown().await;
+                            Ok(Some(authenticated)) => {
+                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; waiting for a destination");
+                                // Destination selection will supply this future when sessions are available.
+                                if let Err(error) = configuration::wait_for_destination(
+                                    authenticated, std::future::pending::<io::Result<()>>(), configuration_timeout,
+                                ).await {
+                                    tracing::debug!(%peer, %error, "configuration connection closed");
+                                }
                             }
                             Ok(None) => {}
                             Err(error) => tracing::debug!(%peer, %error, "connection closed"),
