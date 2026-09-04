@@ -72,7 +72,62 @@ macro_rules! fixed_integer {
     )+};
 }
 
-fixed_integer!(u8, u16, i32, i64);
+fixed_integer!(u8, i8, u16, i32, i64);
+
+/// A UUID in network byte order, without a string or length prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uuid(pub [u8; 16]);
+
+impl Encode for Uuid {
+    fn encode(&self, output: &mut Vec<u8>) -> Result<()> {
+        output.extend_from_slice(&self.0);
+        Ok(())
+    }
+}
+
+impl Decode for Uuid {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        let (bytes, rest) = input.split_at_checked(16).ok_or(Error::Incomplete)?;
+        *input = rest;
+        Ok(Self(bytes.try_into().expect("UUID size")))
+    }
+}
+
+impl Encode for bool {
+    fn encode(&self, output: &mut Vec<u8>) -> Result<()> {
+        u8::from(*self).encode(output)
+    }
+}
+
+impl Decode for bool {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        match u8::decode(input)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::InvalidBoolean),
+        }
+    }
+}
+
+impl<T: Encode> Encode for Option<T> {
+    fn encode(&self, output: &mut Vec<u8>) -> Result<()> {
+        self.is_some().encode(output)?;
+        if let Some(value) = self {
+            value.encode(output)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Decode> Decode for Option<T> {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        if bool::decode(input)? {
+            Ok(Some(T::decode(input)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 /// UTF-8 on the wire with a `VarInt` byte length and a UTF-16 length limit.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,59 +1,19 @@
-use std::fmt::Write as _;
-
 use serde_json::Value;
 
 use super::{Result, string};
 
-struct PacketSpec {
-    state: &'static str,
-    direction: &'static str,
-    source: &'static str,
-    name: &'static str,
-}
+mod schema;
+mod specs;
 
-const PACKETS: &[PacketSpec] = &[
-    PacketSpec {
-        state: "handshaking",
-        direction: "toServer",
-        source: "set_protocol",
-        name: "Handshake",
-    },
-    PacketSpec {
-        state: "status",
-        direction: "toServer",
-        source: "ping_start",
-        name: "StatusRequest",
-    },
-    PacketSpec {
-        state: "status",
-        direction: "toClient",
-        source: "server_info",
-        name: "StatusResponse",
-    },
-    PacketSpec {
-        state: "status",
-        direction: "toServer",
-        source: "ping",
-        name: "Ping",
-    },
-    PacketSpec {
-        state: "status",
-        direction: "toClient",
-        source: "ping",
-        name: "Pong",
-    },
-    PacketSpec {
-        state: "login",
-        direction: "toClient",
-        source: "disconnect",
-        name: "LoginDisconnect",
-    },
-];
+use specs::{PACKETS, PacketSpec};
 
 pub(super) fn generate(protocol: &Value) -> Result<proc_macro2::TokenStream> {
     let mut output = String::new();
     for packet in PACKETS {
-        output.push_str(&generate_packet(protocol, packet)?);
+        output.push_str(
+            &generate_packet(protocol, packet)
+                .map_err(|error| format!("{}.{}.{}: {error}", packet.state, packet.direction, packet.source))?,
+        );
     }
     Ok(output.parse()?)
 }
@@ -104,13 +64,18 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
         return Err("packet switch must use name".into());
     }
     let type_name = string(&switch["fields"][spec.source])?;
-    let fields = tagged(&types[type_name], "container")?
+    let definition = types
+        .get(type_name)
+        .or_else(|| protocol["types"].get(type_name))
+        .ok_or_else(|| format!("missing packet type {type_name}"))?;
+    let fields = tagged(definition, "container")?
         .as_array()
         .ok_or("missing packet fields")?;
     let state = match spec.state {
         "handshaking" => "Handshake",
         "status" => "Status",
         "login" => "Login",
+        "configuration" => "Configuration",
         _ => return Err("unsupported packet state".into()),
     };
     let direction = match spec.direction {
@@ -119,69 +84,19 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
         _ => return Err("unsupported packet direction".into()),
     };
     let mut output = format!(
-        "\n#[derive(Debug, Encode, Decode, Packet)]\n#[packet(id = {id:#04x}, state = {state}, direction = {direction})]\npub struct {}",
+        "\n#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]\n#[packet(id = {id:#04x}, state = {state}, direction = {direction})]\npub struct {}",
         spec.name
     );
+    let mut definitions = String::new();
     if fields.is_empty() {
         output.push_str(";\n");
     } else {
         output.push_str(" {\n");
-        for field in fields {
-            let source_name = string(&field["name"])?;
-            let rust_name = field_name(source_name)?;
-            let ty = field_type(spec, source_name, &field["type"])?;
-            writeln!(output, "    pub {rust_name}: {ty},")?;
-        }
+        output.push_str(&schema::fields(spec, fields, "", spec.name, &mut definitions)?);
         output.push_str("}\n");
     }
+    output.push_str(&definitions);
     Ok(output)
-}
-
-fn field_name(source: &str) -> Result<String> {
-    // Map upstream field names to the public API.
-    let rename = match source {
-        "serverHost" => "server_address",
-        "time" => "payload",
-        "response" => "json",
-        other => other,
-    };
-    let mut name = String::new();
-    for character in rename.chars() {
-        if character.is_ascii_uppercase() {
-            name.push('_');
-            name.push(character.to_ascii_lowercase());
-        } else if character.is_ascii_lowercase() || character == '_' || (!name.is_empty() && character.is_ascii_digit())
-        {
-            name.push(character);
-        } else {
-            return Err(format!("unsupported field name {source}").into());
-        }
-    }
-    if name.is_empty() {
-        return Err("empty field name".into());
-    }
-    Ok(name)
-}
-
-fn field_type(spec: &PacketSpec, field: &str, schema: &Value) -> Result<String> {
-    let ty = match string(schema)? {
-        "varint" => "VarInt",
-        "u16" => "u16",
-        "i64" => "i64",
-        "string" => {
-            // ProtoDef omits these required per-field string limits.
-            let limit = match (spec.state, spec.direction, spec.source, field) {
-                ("handshaking", "toServer", "set_protocol", "serverHost") => 255,
-                ("status", "toClient", "server_info", "response") | ("login", "toClient", "disconnect", "reason") => {
-                    32767
-                }
-                _ => return Err(format!("missing string limit for {}.{field}", spec.source).into()),
-            };
-            return Ok(format!("McString<{limit}>"));
-        }
-        other => return Err(format!("unsupported wire type {other} in {}.{field}", spec.source).into()),
-    };
-    Ok(ty.into())
 }
 
 #[cfg(test)]
@@ -199,6 +114,40 @@ mod tests {
                 .to_string()
                 .contains("unsupported wire type")
         );
-        assert!(field_type(&PACKETS[0], "newField", &Value::String("string".into())).is_err());
+        data["handshaking"]["toServer"]["types"]["packet_set_protocol"][1][0]["type"] = "string".into();
+        assert!(
+            generate(&data)
+                .unwrap_err()
+                .to_string()
+                .contains("protocolVersion: missing limit")
+        );
+    }
+
+    #[test]
+    fn unsupported_nested_shapes_report_packet_and_field() {
+        use serde_json::json;
+
+        let original: Value =
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
+        for schema in [
+            json!(["buffer", {"countType": "i32"}]),
+            json!(["buffer", {"countType": "varint", "count": 8}]),
+            json!(["switch", {"compareTo": "other", "fields": {}}]),
+            json!(["option", "unknown"]),
+            json!(["array", {"countType": "varint", "type": ["container", [{"name": "bytes", "type": "restBuffer"}]]}]),
+        ] {
+            let mut data = original.clone();
+            data["login"]["toClient"]["types"]["packet_encryption_begin"][1][1]["type"] = schema;
+            let error = generate(&data).unwrap_err().to_string();
+            assert!(error.contains("login.toClient.encryption_begin: publicKey:"), "{error}");
+        }
+        let mut data = original;
+        data["login"]["toClient"]["types"]["packet_encryption_begin"][1][1]["type"] = json!("restBuffer");
+        assert!(
+            generate(&data)
+                .unwrap_err()
+                .to_string()
+                .contains("restBuffer must be the last field")
+        );
     }
 }

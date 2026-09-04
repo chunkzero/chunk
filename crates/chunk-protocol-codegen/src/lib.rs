@@ -84,7 +84,7 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
     let packets = packets::generate(&protocol)?;
     let module = &invocation.module;
     let documentation = format!(
-        "Java Edition {version_name}; initial exchange only. Generated from `PrismarineJS/minecraft-data` @ {} (MIT). Attribution accompanies the dataset.",
+        "Java Edition {version_name}; selected handshake, status, login and configuration packets. Generated from `PrismarineJS/minecraft-data` @ {} (MIT). Attribution accompanies the dataset.",
         string(&source["revision"])?
     );
     let dependencies = dependencies
@@ -97,7 +97,7 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
             // Track dataset changes without exposing their bytes in the public API.
             #(const _: &[u8] = ::core::include_bytes!(#dependencies);)*
 
-            use ::chunk_protocol::{Decode, Encode, McString, Packet, VarInt};
+            use ::chunk_protocol::{BoundedArray, ByteArray, Decode, Encode, McString, Packet, RemainingBytes, Uuid, VarInt};
 
             pub const VERSION: ::chunk_protocol::versions::Version = ::chunk_protocol::versions::Version {
                 name: #version_name,

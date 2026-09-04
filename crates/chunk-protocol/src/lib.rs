@@ -23,16 +23,35 @@
 //! a module from a directory relative to the invoking crate's manifest.
 //! Snapshots include upstream attribution and a source manifest with revision
 //! and SHA-256 checksums. Generation verifies local inputs and tracks changes;
-//! disabled versions skip dataset loading.
+//! disabled versions skip dataset loading. Only the pinned 26.1 release has been
+//! validated, so the generator retains its release guard.
+//!
+//! The selected login packets cover login start, encryption negotiation, profile
+//! properties, compression negotiation, plugin queries, and acknowledgment.
+//! Configuration packets cover client information, plugin messages, keepalives,
+//! ping/pong, known packs, feature flags, and completion. Registry/NBT and play
+//! packets are not generated yet. These are wire definitions; authentication,
+//! encryption, compression framing, and connection state handling belong to the
+//! proxy and are not implemented by this crate.
+//!
+//! [`Uuid`] holds 16 network-order bytes. [`ByteArray<N>`] and
+//! [`BoundedArray<T, N>`] carry `VarInt` lengths; [`RemainingBytes<N>`] consumes
+//! the rest of a packet. `Option<T>` uses a boolean presence byte. Generated
+//! nested containers and enum mappers have typed structs and enums. Every
+//! variable-length field has an explicit limit in its packet specification;
+//! collection limits are local resource bounds. Callers should also enforce
+//! a phase-specific frame limit before decoding.
 
 extern crate self as chunk_protocol;
 
 mod codec;
+mod collections;
 mod frame;
 pub mod versions;
 
 pub use chunk_protocol_derive::{Decode, Encode, Packet};
-pub use codec::{Decode, Encode, McString, VarInt};
+pub use codec::{Decode, Encode, McString, Uuid, VarInt};
+pub use collections::{BoundedArray, ByteArray, RemainingBytes};
 pub use frame::{MAX_FRAME_SIZE, decode_frame, decode_packet, encode_packet};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -47,6 +66,12 @@ pub enum Error {
     InvalidFrameLength,
     #[error("string exceeds its wire limit")]
     StringTooLong,
+    #[error("collection exceeds its wire limit")]
+    CollectionTooLong,
+    #[error("invalid boolean (expected 0 or 1)")]
+    InvalidBoolean,
+    #[error("unknown enum value")]
+    InvalidEnumValue,
     #[error("invalid UTF-8 string")]
     InvalidUtf8,
     #[error("unexpected packet id")]
