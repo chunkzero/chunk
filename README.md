@@ -48,6 +48,36 @@ just ready
 
 `just --list` shows the available tasks.
 
+### Run the proxy
+
+```sh
+cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk edge"
+```
+
+Add `localhost:25565` to a Java Edition client's server list to see the MOTD
+and ping. The proxy advertises 26.1 (protocol 775), rejects its logins with a
+sessions-unavailable message, and rejects other versions with a mismatch message.
+Only handshake/status and login rejection are implemented; legacy pre-1.7 pings
+and transfer handshakes are unsupported.
+
+`mc-26-1` is the only version feature and is enabled by default. Features are
+forwarded from `chunk` through the edge and proxy to `chunk-protocol`.
+To select it explicitly:
+
+```sh
+cargo run -p chunk --no-default-features --features mc-26-1 -- edge
+```
+
+Without version features, protocol primitives remain available but the proxy
+refuses to start. Features select releases; they do not translate versions.
+
+`--max-connections` limits concurrent exchanges (default 1024). Each exchange
+has a ten-second deadline. Ctrl-C or SIGTERM closes the listener and active
+connections. Set `RUST_LOG=debug` to log individual connection failures.
+
+Packet generation and codec usage are covered in the
+[protocol crate documentation](crates/chunk-protocol/src/lib.rs).
+
 ## License
 
 chunk is licensed under the

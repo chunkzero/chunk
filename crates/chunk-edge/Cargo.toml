@@ -7,12 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["mc-26-1"]
+mc-26-1 = ["chunk-proxy/mc-26-1"]
+
 [dependencies]
 chunk-contract = { path = "../chunk-contract" }
 chunk-proto = { path = "../chunk-proto" }
 chunk-store = { path = "../chunk-store" }
 chunk-js = { path = "../chunk-js" }
-chunk-proxy = { path = "../chunk-proxy" }
+chunk-proxy = { path = "../chunk-proxy", default-features = false }
 
 [lints]
 workspace = true

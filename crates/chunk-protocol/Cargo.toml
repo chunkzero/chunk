@@ -1,11 +1,21 @@
 [package]
 name = "chunk-protocol"
-description = "Minecraft wire protocol: framing, the decoded packets, encryption and compression"
+description = "Minecraft wire types, packet codecs and uncompressed framing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+
+[features]
+default = ["mc-26-1"]
+mc-26-1 = []
+
+[dependencies]
+bytes = "1"
+chunk-protocol-derive = { path = "../chunk-protocol-derive" }
+chunk-protocol-codegen = { path = "../chunk-protocol-codegen" }
+thiserror = "2"
 
 [lints]
 workspace = true

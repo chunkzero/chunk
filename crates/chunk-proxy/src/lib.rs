@@ -1,14 +1,34 @@
-//! The connection owner.
-//!
-//! Accepts a client's TCP connection and keeps it for the whole session with
-//! the network. Drives handshake and login (encryption, Mojang
-//! authentication, compression, transfer cookie verification), owns the
-//! configuration phase, relays play frames to a session process over the
-//! player stream, and parks the client in configuration while nobody owns
-//! them. A move, a session ending and a process restart are all the same
-//! withdraw, park, deliver sequence; a move to a session behind another edge
-//! is a transfer packet with a signed cookie.
-//!
-//! The proxy asks the edge for decisions (the ping response, where to place a
-//! player, whether a chat message may pass) through a narrow interface and
-//! knows nothing about JavaScript, the database or the app.
+//! Owns player sockets, serves Java Edition status, and rejects login.
+
+#[cfg(feature = "mc-26-1")]
+mod server;
+#[cfg(feature = "mc-26-1")]
+pub use server::Proxy;
+
+#[cfg(not(feature = "mc-26-1"))]
+mod disabled;
+#[cfg(not(feature = "mc-26-1"))]
+pub use disabled::Proxy;
+
+use std::{num::NonZeroUsize, time::Duration};
+
+/// Limits and responses for the initial connection exchange.
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub motd: String,
+    pub login_rejection: String,
+    pub max_connections: NonZeroUsize,
+    /// Deadline for the entire exchange, including writes; not reset by traffic.
+    pub connection_timeout: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            motd: "chunk — sessions coming soon".into(),
+            login_rejection: "This edge is running, but sessions are not available yet.".into(),
+            max_connections: NonZeroUsize::new(1024).unwrap(),
+            connection_timeout: Duration::from_secs(10),
+        }
+    }
+}

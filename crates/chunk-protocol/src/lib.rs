@@ -1,10 +1,77 @@
-//! The Minecraft wire protocol, without sockets.
+//! Minecraft wire types and uncompressed framing, without sockets or policy.
 //!
-//! Framing, varints, the handshake, login and configuration phases, and the
-//! short list of play packets the edge decodes (see `docs/architecture.md`).
-//! Every other play packet is read as a length and an id and passed through
-//! as an opaque frame. Encryption and compression codecs live here because
-//! the edge terminates both on the client side and sends plain frames inward.
+//! Codec derives serialize struct fields in declaration order. Wire types are
+//! explicit: `VarInt` differs from a fixed-width `i32`, and `McString<N>` limits
+//! strings to N UTF-16 code units, matching Java's string length.
 //!
-//! One protocol version per deploy. This crate has no I/O and no policy about
-//! what to do with a packet; that is `chunk-proxy`.
+//! ```
+//! use chunk_protocol::{Decode, Encode, Packet};
+//!
+//! #[derive(Encode, Decode, Packet)]
+//! #[packet(id = 0x01, state = Status, direction = Serverbound)]
+//! struct Ping { payload: i64 }
+//! ```
+//!
+//! Derives support named, tuple and unit structs, including generics. Packet
+//! IDs belong to a state and direction. Packet APIs live in [`versions`],
+//! generated from local datasets and gated by explicit Cargo features.
+//! The default feature is `mc-26-1`. With no version features, wire primitives
+//! remain usable but no Minecraft version is enabled. There is no gameplay
+//! version translation.
+//!
+//! `chunk_protocol_codegen::protocol_version!(v26_1, "data/26.1")` generates
+//! a module from a directory relative to the invoking crate's manifest.
+//! Snapshots include upstream attribution and a source manifest with revision
+//! and SHA-256 checksums. Generation verifies local inputs and tracks changes;
+//! disabled versions skip dataset loading.
+
+extern crate self as chunk_protocol;
+
+mod codec;
+mod frame;
+pub mod versions;
+
+pub use chunk_protocol_derive::{Decode, Encode, Packet};
+pub use codec::{Decode, Encode, McString, VarInt};
+pub use frame::{MAX_FRAME_SIZE, decode_frame, decode_packet, encode_packet};
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum Error {
+    #[error("incomplete packet")]
+    Incomplete,
+    #[error("invalid or overflowing VarInt")]
+    InvalidVarInt,
+    #[error("invalid frame length")]
+    InvalidFrameLength,
+    #[error("string exceeds its wire limit")]
+    StringTooLong,
+    #[error("invalid UTF-8 string")]
+    InvalidUtf8,
+    #[error("unexpected packet id")]
+    UnexpectedPacket,
+    #[error("trailing bytes in packet")]
+    TrailingBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Handshake,
+    Status,
+    Login,
+    Configuration,
+    Play,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Serverbound,
+    Clientbound,
+}
+
+pub trait Packet {
+    const ID: i32;
+    const STATE: State;
+    const DIRECTION: Direction;
+}
