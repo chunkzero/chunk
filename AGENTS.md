@@ -1,8 +1,10 @@
 # chunk
 
-A Minecraft server runtime for AWS Lambda MicroVMs. Rust crates in `crates/`
-run inside and in front of the MicroVM; Kotlin modules in `jvm/` run inside
-the Minecraft server's JVM. See `README.md` for how the pieces fit together.
+A portable Minecraft server runtime. Rust crates in `crates/` supervise the
+server and carry player traffic to it; Kotlin modules in `jvm/` run inside the
+Minecraft server's JVM. Hosting backends (cloud sandboxes, containers, plain
+Java processes) plug in behind the same runtime. See `README.md` for how the
+pieces fit together.
 
 ## General guidelines
 
@@ -54,20 +56,15 @@ the Minecraft server's JVM. See `README.md` for how the pieces fit together.
 
 ## Glossary
 
-- **MicroVM**: an AWS Lambda MicroVM, a Firecracker VM restored from an image
-  snapshot. States: `PENDING`, `RUNNING`, `SUSPENDING`, `SUSPENDED`,
-  `TERMINATING`, `TERMINATED`.
-- **Image**: a MicroVM image, built by Lambda from a `Dockerfile` into a
-  memory-and-disk snapshot. Everything created at build time is shared by
-  every MicroVM started from that image, so secrets and unique IDs must be
-  generated in the `/run` hook.
-- **Lifecycle hooks**: HTTP endpoints the application exposes and Lambda
-  calls under `/aws/lambda-microvms/runtime/v1/`: `ready` and `validate`
-  at build time, `run`, `suspend`, and `terminate` at runtime.
-- **Runtime**: the chunk process inside the MicroVM that supervises the
-  Minecraft server and serves the lifecycle hooks and tunnel endpoint.
+- **Runtime**: the chunk process that runs next to a Minecraft server,
+  owns its lifecycle (start, pause, resume, stop, health), and serves the
+  tunnel endpoint.
 - **Connector**: the chunk process that accepts raw Minecraft TCP connections
-  and tunnels them to a MicroVM over its HTTPS/WebSocket endpoint.
-- **Tunnel**: one player's TCP session carried over the MicroVM endpoint.
-- **Idle policy**: the MicroVM setting that controls auto-suspend after
-  inactivity, how long a suspended MicroVM is retained, and auto-resume.
+  from players and tunnels them to a runtime.
+- **Tunnel**: one player's TCP session carried between a connector and a
+  runtime.
+- **Host**: a backend that provides the machine a runtime runs on and knows
+  how to start, pause, and stop it. Examples: a cloud sandbox, a container
+  runtime, a local Java process.
+- **Pause / resume**: a host-level suspension of an idle server that keeps its
+  state, as opposed to a full stop and restart.

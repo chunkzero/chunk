@@ -1,29 +1,30 @@
 # chunk
 
-A Minecraft server runtime for [AWS Lambda MicroVMs](https://aws.amazon.com/lambda/lambda-microvms/).
+A portable Minecraft server runtime.
 
-Lambda MicroVMs are Firecracker-backed, single-tenant VMs that start from a
-pre-initialized memory and disk snapshot, suspend when idle, and resume on
-demand. chunk packages a Minecraft server into that model: a world boots in
-milliseconds from a snapshot, pauses when nobody is online, and costs nothing
-while suspended.
+chunk wraps a Minecraft server in a small supervisor that owns the server's
+lifecycle and its network edge. The same runtime runs wherever you want to
+host: a cloud sandbox, a container, a bare VM, or a plain Java process on your
+laptop. Hosting is a backend detail; the server and the players see the same
+thing everywhere.
 
 ## How it fits together
 
-MicroVMs only accept inbound traffic over HTTPS, WebSocket, or gRPC on an
-authenticated endpoint. Minecraft speaks raw TCP. chunk bridges the two the
-way `cloudflared` bridges an origin to Cloudflare's edge:
+Much like `cloudflared` sits between an origin and the edge, chunk sits between
+the Minecraft server and the players:
 
-- **Runtime (Rust, `crates/`)** runs inside the MicroVM. It supervises the
-  server process, answers the Lambda lifecycle hooks (`/ready`, `/validate`,
-  `/run`, `/suspend`, `/terminate`), and exposes the server's TCP port over
-  the MicroVM's WebSocket endpoint.
+- **Runtime (Rust, `crates/`)** runs next to the server process. It starts,
+  stops, pauses, and health-checks the server, and exposes the server's
+  connection over a tunnel so the host does not need to expose raw TCP.
 - **Connector (Rust, `crates/`)** runs wherever players connect. It listens on
-  a normal Minecraft port, launches or resumes the right MicroVM, and tunnels
-  each player's TCP session to the runtime.
+  a normal Minecraft port, finds or wakes the right server, and tunnels each
+  player's session to its runtime.
 - **Server-side integration (Kotlin, `jvm/`)** runs inside the JVM alongside
-  the Minecraft server, handling snapshot-safe startup, save-on-suspend, and
-  anything that needs to happen in-process.
+  the Minecraft server, handling anything that has to happen in-process such
+  as coordinated saves before a pause.
+
+Hosts plug in behind the runtime and connector. The first targets are a
+cloud sandbox backend, a container runtime, and a bare local Java process.
 
 ## Development
 
