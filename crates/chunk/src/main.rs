@@ -52,22 +52,34 @@ async fn run(cli: Cli) -> io::Result<()> {
                 max_connections,
                 ..Default::default()
             };
-            chunk_edge::run(bind, config, shutdown_signal()).await
+            chunk_edge::run(bind, config, shutdown_signal()?).await
         }
     }
 }
 
-async fn shutdown_signal() -> io::Result<()> {
+fn shutdown_signal() -> io::Result<impl std::future::Future<Output = io::Result<()>>> {
     #[cfg(unix)]
-    {
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result?,
-            _ = terminate.recv() => {}
+    let wait = {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        async move {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {}
+            }
         }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down");
-    Ok(())
+    };
+    #[cfg(windows)]
+    let wait = {
+        let mut interrupt = tokio::signal::windows::ctrl_c()?;
+        async move {
+            interrupt.recv().await;
+        }
+    };
+    Ok(async move {
+        wait.await;
+        tracing::info!("shutting down");
+        Ok(())
+    })
 }

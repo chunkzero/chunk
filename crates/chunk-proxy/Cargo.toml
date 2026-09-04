@@ -1,6 +1,6 @@
 [package]
 name = "chunk-proxy"
-description = "Owns the player's connection: login, configuration, relay, parking and moves"
+description = "Minecraft TCP listener with status responses and login rejection"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

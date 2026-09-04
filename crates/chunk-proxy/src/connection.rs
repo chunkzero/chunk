@@ -35,7 +35,13 @@ async fn exchange(mut stream: impl AsyncRead + AsyncWrite + Unpin, responses: &R
             let frame = read_frame(&mut stream, &mut buffer).await?;
             decode_packet::<StatusRequest>(&frame).map_err(invalid_packet)?;
             stream.write_all(&responses.status).await?;
-            let frame = read_frame(&mut stream, &mut buffer).await?;
+            let frame = match read_frame(&mut stream, &mut buffer).await {
+                Ok(frame) => frame,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && buffer.is_empty() => {
+                    return stream.shutdown().await;
+                }
+                Err(error) => return Err(error),
+            };
             let ping = decode_packet::<Ping>(&frame).map_err(invalid_packet)?;
             let response = encode_packet(&Pong { payload: ping.payload }).map_err(invalid_packet)?;
             stream.write_all(&response).await?;
@@ -87,6 +93,36 @@ fn invalid_packet(error: chunk_protocol::Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::Config;
+
+    #[tokio::test]
+    async fn status_allows_clean_eof_but_rejects_truncated_ping() {
+        for suffix in [&[][..], &[0x80][..]] {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let handshake = Handshake {
+                protocol_version: chunk_protocol::VarInt(775),
+                server_address: chunk_protocol::McString::new("localhost").unwrap(),
+                server_port: 25565,
+                next_state: chunk_protocol::VarInt(1),
+            };
+            client.write_all(&encode_packet(&handshake).unwrap()).await.unwrap();
+            client
+                .write_all(&encode_packet(&StatusRequest {}).unwrap())
+                .await
+                .unwrap();
+            client.write_all(suffix).await.unwrap();
+            client.shutdown().await.unwrap();
+            let responses = Responses::new(&Config::default()).unwrap();
+            let result = serve(server, &responses, Duration::from_secs(10)).await;
+            if suffix.is_empty() {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+            }
+            let mut received = Vec::new();
+            client.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, responses.status);
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn incomplete_handshake_has_a_total_deadline() {

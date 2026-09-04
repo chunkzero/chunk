@@ -1,6 +1,6 @@
 [package]
 name = "chunk-protocol"
-description = "Minecraft wire protocol: framing, the decoded packets, encryption and compression"
+description = "Minecraft wire types, packet codecs and uncompressed framing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

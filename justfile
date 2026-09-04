@@ -28,6 +28,7 @@ typecheck:
 # Run the test suites.
 test:
     cargo test --workspace
+    cargo test -p chunk-proxy --no-default-features
     ./gradlew test
 
 # Build everything.

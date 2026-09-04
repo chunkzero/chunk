@@ -62,7 +62,9 @@ Layered bottom to top. A crate may depend only on crates in rows above it.
 | ---------------- | --------------------------------------------------------------- | ----------------------------------- |
 | `chunk-contract` | contract IR and manifest as data                                | nothing                             |
 | `chunk-proto`    | Rust bindings for `proto/`                                      | nothing                             |
-| `chunk-protocol` | Minecraft wire protocol, no sockets                             | nothing                             |
+| `chunk-protocol-derive` | wire codec and packet derives                            | nothing                             |
+| `chunk-protocol-codegen` | packet generation from pinned datasets                  | nothing                             |
+| `chunk-protocol` | Minecraft wire protocol, no sockets                             | protocol-derive, protocol-codegen    |
 | `chunk-store`    | per-app SQLite, single writer, subscriptions, durable jobs      | contract                            |
 | `chunk-js`       | QuickJS executor behind an engine-independent interface         | contract                            |
 | `chunk-proxy`    | connection ownership: login, configuration, relay, park, move   | protocol, proto                     |
@@ -75,8 +77,9 @@ Layered bottom to top. A crate may depend only on crates in rows above it.
 Rules the layering encodes:
 
 - `chunk-protocol` decodes bytes and has no opinion. `chunk-proxy` has the
-  opinion and asks the edge for decisions through a narrow interface. Neither
-  knows JavaScript exists.
+  connection policy. The edge currently supplies MOTD and login rejection text
+  through `chunk_proxy::Config`; app-driven decisions are not implemented.
+  Neither crate knows JavaScript exists.
 - `chunk-js` and `chunk-store` never meet directly. `chunk-edge` installs
   store-backed capabilities on `ctx`, so the database outlives any runtime.
 - Nothing in Rust ever sees a Minestom type. The manifest and contract are the

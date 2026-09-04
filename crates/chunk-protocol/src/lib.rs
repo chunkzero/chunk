@@ -18,6 +18,12 @@
 //! The default feature is `mc-26-1`. With no version features, wire primitives
 //! remain usable but no Minecraft version is enabled. There is no gameplay
 //! version translation.
+//!
+//! `chunk_protocol_codegen::protocol_version!(v26_1, "data/26.1")` generates
+//! a module from a directory relative to the invoking crate's manifest.
+//! Snapshots include upstream attribution and a source manifest with revision
+//! and SHA-256 checksums. Generation verifies local inputs and tracks changes;
+//! disabled versions skip dataset loading.
 
 extern crate self as chunk_protocol;
 

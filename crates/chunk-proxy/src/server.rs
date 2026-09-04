@@ -1,14 +1,18 @@
 #[path = "connection.rs"]
 mod connection;
 
-use std::{future::Future, io, net::SocketAddr, sync::Arc};
+use std::{future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use chunk_protocol::{
     McString, encode_packet,
     versions::SUPPORTED,
     versions::v26_1::{LoginDisconnect, StatusResponse},
 };
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{
+    net::TcpListener,
+    task::JoinSet,
+    time::{Instant, sleep_until},
+};
 
 use crate::Config;
 
@@ -104,11 +108,12 @@ impl Proxy {
     /// Serves until shutdown, then closes all player sockets and joins tasks.
     ///
     /// # Errors
-    /// Returns listener or shutdown-signal errors. Individual client failures
-    /// are logged and do not stop the listener.
+    /// Returns shutdown-signal errors. Accept errors are retried with backoff.
+    /// Client failures are logged and do not stop the listener.
     pub async fn run(self, shutdown: impl Future<Output = io::Result<()>>) -> io::Result<()> {
         tokio::pin!(shutdown);
         let mut connections = JoinSet::new();
+        let mut accept_after = Instant::now();
         let result = loop {
             tokio::select! {
                 biased;
@@ -118,10 +123,17 @@ impl Proxy {
                         tracing::error!(%error, "connection task failed");
                     }
                 }
-                accepted = self.listener.accept() => {
+                accepted = async {
+                    sleep_until(accept_after).await;
+                    self.listener.accept().await
+                } => {
                     let (stream, peer) = match accepted {
                         Ok(accepted) => accepted,
-                        Err(error) => break Err(error),
+                        Err(error) => {
+                            tracing::warn!(%error, "accept failed; retrying");
+                            accept_after = Instant::now() + Duration::from_millis(100);
+                            continue;
+                        }
                     };
                     if connections.len() >= self.config.max_connections.get() {
                         drop(stream);
