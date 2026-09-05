@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Pencil } from "lucide-react";
 import { Panel, Row, Rows } from "@/components/panel";
 import { RemoveTargetDialog, TargetDialog } from "@/components/target-dialog";
 import { Button } from "@/components/ui/button";
 import { useEditable } from "@/lib/api";
 import { environmentLabels, repoLabel, timeAgo } from "@/lib/format";
 import { useDeployment } from "@/routes/deployment";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { EditIcon } from "@hugeicons/core-free-icons";
 
 export function Settings() {
     const { project, deployment } = useDeployment();
@@ -30,7 +31,7 @@ export function Settings() {
                         title={reason}
                         onClick={() => setDialog("edit")}
                     >
-                        <Pencil /> Edit
+                        <HugeiconsIcon icon={EditIcon} /> Edit
                     </Button>
                 }
             >

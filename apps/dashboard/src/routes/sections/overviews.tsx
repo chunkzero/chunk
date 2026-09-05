@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Folder, History, Upload } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Panel, Row, Rows } from "@/components/panel";
 import { useDeployment } from "@/routes/deployment";
 import { timeAgo } from "@/lib/format";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Folder01Icon, Time03Icon, Upload01Icon } from "@hugeicons/core-free-icons";
 
 export function Application() {
     const { deployment } = useDeployment();
@@ -61,7 +63,7 @@ export function Assets() {
             <div className="flex items-center justify-between gap-4">
                 <h1 className="text-xl font-semibold">Assets</h1>
                 <Button size="sm" disabled title="Asset uploads are not available yet">
-                    <Upload /> Upload files
+                    <HugeiconsIcon icon={Upload01Icon} /> Upload files
                 </Button>
             </div>
             <div className="overflow-hidden rounded-lg border bg-card">
@@ -73,7 +75,7 @@ export function Assets() {
                             aria-pressed={view === "files"}
                             onClick={() => setView("files")}
                         >
-                            <Folder /> Files
+                            <HugeiconsIcon icon={Folder01Icon} /> Files
                         </Button>
                         <Button
                             size="sm"
@@ -81,7 +83,7 @@ export function Assets() {
                             aria-pressed={view === "versions"}
                             onClick={() => setView("versions")}
                         >
-                            <History /> Versions
+                            <HugeiconsIcon icon={Time03Icon} /> Versions
                         </Button>
                     </div>
                     <span className="ml-auto text-xs text-muted-foreground">
@@ -91,7 +93,11 @@ export function Assets() {
                 {view === "files" ? (
                     <>
                         <div className="flex items-center gap-2 border-b px-5 py-3 text-sm">
-                            <Folder className="size-4 text-muted-foreground" /> All files
+                            <HugeiconsIcon
+                                icon={Folder01Icon}
+                                className="size-4 text-muted-foreground"
+                            />{" "}
+                            All files
                         </div>
                         <EmptyTable
                             columns={["Name", "Size", "Last changed", "Version"]}

@@ -1,5 +1,4 @@
 import { Link, useParams } from "@tanstack/react-router";
-import { ChevronRight, LogOut } from "lucide-react";
 import { LayoutGroup, motion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,6 +10,8 @@ import {
 import { useProjects, useStatus } from "@/lib/api";
 import { sections } from "@/lib/format";
 import { useSession } from "@/lib/session";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ArrowRight01Icon, Logout01Icon } from "@hugeicons/core-free-icons";
 
 export function TopNav() {
     const params = useParams({ strict: false });
@@ -79,7 +80,7 @@ export function TopNav() {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                             <DropdownMenuItem onSelect={disconnect}>
-                                <LogOut />
+                                <HugeiconsIcon icon={Logout01Icon} />
                                 Disconnect
                             </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -123,7 +124,9 @@ function Tabs({ project, deployment }: { project: string; deployment: string }) 
     );
 }
 
-const Crumb = () => <ChevronRight className="size-4 text-muted-foreground/60" />;
+const Crumb = () => (
+    <HugeiconsIcon icon={ArrowRight01Icon} className="size-4 text-muted-foreground/60" />
+);
 
 export function StatusDot({ ok }: { ok: boolean }) {
     return (

@@ -1,10 +1,23 @@
 import { useState } from "react";
-import { Check, ChevronsUpDown, GitBranch, Loader2 } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+    Tick02Icon,
+    UnfoldMoreIcon,
+    GitBranchIcon,
+    Loading03Icon,
+} from "@hugeicons/core-free-icons";
 import { useBranches } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import {
+    Command,
+    CommandGroup,
+    CommandInput,
+    CommandItem,
+    CommandList,
+} from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-/// A combobox over the remote's branches that also accepts a typed branch name.
 export function BranchPicker({
     id,
     repository,
@@ -25,25 +38,34 @@ export function BranchPicker({
     const names = branches.data?.branches ?? [];
     const matches = names.filter((name) => name.toLowerCase().includes(trimmed.toLowerCase()));
     const custom = trimmed && !names.includes(trimmed) ? trimmed : null;
-
     function select(branch: string) {
         onChange(branch);
         setQuery("");
         setOpen(false);
     }
-
     return (
-        <Popover open={open} onOpenChange={setOpen}>
+        <Popover
+            modal
+            open={open}
+            onOpenChange={(next) => {
+                setOpen(next);
+                if (!next) setQuery("");
+            }}
+        >
             <PopoverTrigger asChild>
-                <button
+                <Button
                     id={id}
                     type="button"
+                    variant="outline"
                     role="combobox"
                     aria-expanded={open}
                     disabled={disabled}
-                    className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="w-full justify-start font-normal"
                 >
-                    <GitBranch className="size-4 shrink-0 text-muted-foreground" />
+                    <HugeiconsIcon
+                        icon={GitBranchIcon}
+                        className="size-4 shrink-0 text-muted-foreground"
+                    />
                     <span
                         className={cn(
                             "flex-1 truncate text-left font-mono text-xs",
@@ -52,83 +74,85 @@ export function BranchPicker({
                     >
                         {value || "Select a branch"}
                     </span>
-                    <ChevronsUpDown className="size-4 shrink-0 opacity-50" />
-                </button>
+                    <HugeiconsIcon icon={UnfoldMoreIcon} className="size-4 shrink-0 opacity-50" />
+                </Button>
             </PopoverTrigger>
-            <PopoverContent className="w-(--radix-popover-trigger-width) p-0">
-                <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                        if (event.key !== "Enter") return;
-                        event.preventDefault();
-                        const first = matches[0] ?? custom;
-                        if (first) select(first);
-                    }}
-                    placeholder="Search or type a branch"
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="h-9 w-full border-b bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground"
-                />
-                <ul role="listbox" className="max-h-60 overflow-y-auto p-1">
-                    {branches.isLoading && (
-                        <Note>
-                            <Loader2 className="size-3.5 animate-spin" /> Loading branches…
-                        </Note>
-                    )}
-                    {branches.error && <Note>{branches.error.message}</Note>}
-                    {matches.map((name) => (
-                        <Option key={name} selected={name === value} onSelect={() => select(name)}>
-                            <span className="truncate">{name}</span>
-                            {name === branches.data?.default_branch && (
-                                <span className="ml-auto font-sans text-muted-foreground">
-                                    default
-                                </span>
+            <PopoverContent
+                align="start"
+                collisionPadding={12}
+                className="w-(--radix-popover-trigger-width) max-h-(--radix-popover-content-available-height) overflow-hidden p-0"
+            >
+                <Command shouldFilter={false}>
+                    <CommandInput
+                        value={query}
+                        onValueChange={setQuery}
+                        placeholder="Search or type a branch"
+                        aria-label="Search branches"
+                        autoComplete="off"
+                        spellCheck={false}
+                    />
+                    <CommandList className="max-h-[min(15rem,calc(var(--radix-popover-content-available-height)-3rem))] overscroll-contain">
+                        {branches.isLoading && (
+                            <Note>
+                                <HugeiconsIcon
+                                    icon={Loading03Icon}
+                                    className="size-3.5 animate-spin"
+                                />{" "}
+                                Loading branches…
+                            </Note>
+                        )}
+                        {branches.error && <Note>{branches.error.message}</Note>}
+                        <CommandGroup>
+                            {matches.map((name) => (
+                                <CommandItem
+                                    key={name}
+                                    value={name}
+                                    onSelect={() => select(name)}
+                                    className="font-mono text-xs"
+                                >
+                                    <HugeiconsIcon
+                                        icon={Tick02Icon}
+                                        className={cn(
+                                            "size-3.5 shrink-0",
+                                            name !== value && "opacity-0",
+                                        )}
+                                    />
+                                    <span className="truncate">{name}</span>
+                                    {name === branches.data?.default_branch && (
+                                        <span className="ml-auto font-sans text-muted-foreground">
+                                            default
+                                        </span>
+                                    )}
+                                </CommandItem>
+                            ))}
+                            {custom && (
+                                <CommandItem
+                                    value={custom}
+                                    onSelect={() => select(custom)}
+                                    className="font-mono text-xs"
+                                >
+                                    <span className="font-sans">Use</span>
+                                    <span className="truncate">{custom}</span>
+                                </CommandItem>
                             )}
-                        </Option>
-                    ))}
-                    {custom && (
-                        <Option selected={false} onSelect={() => select(custom)}>
-                            <span className="font-sans">Use</span>
-                            <span className="truncate">{custom}</span>
-                        </Option>
-                    )}
-                    {branches.isSuccess && !matches.length && !custom && (
-                        <Note>No branches match.</Note>
-                    )}
-                </ul>
+                        </CommandGroup>
+                        {branches.isSuccess && !matches.length && !custom && (
+                            <Note>No branches match.</Note>
+                        )}
+                    </CommandList>
+                </Command>
             </PopoverContent>
         </Popover>
     );
 }
 
-function Option({
-    selected,
-    onSelect,
-    children,
-}: {
-    selected: boolean;
-    onSelect: () => void;
-    children: React.ReactNode;
-}) {
-    return (
-        <li role="option" aria-selected={selected}>
-            <button
-                type="button"
-                onClick={onSelect}
-                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left font-mono text-xs outline-none hover:bg-accent focus-visible:bg-accent"
-            >
-                <Check className={cn("size-3.5 shrink-0", !selected && "opacity-0")} />
-                {children}
-            </button>
-        </li>
-    );
-}
-
 function Note({ children }: { children: React.ReactNode }) {
     return (
-        <li className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+        <div
+            role="status"
+            className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"
+        >
             {children}
-        </li>
+        </div>
     );
 }

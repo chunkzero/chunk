@@ -1,15 +1,6 @@
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import {
-    ChevronRight,
-    GitBranch,
-    GitCommitHorizontal,
-    MoreHorizontal,
-    Pencil,
-    Plus,
-    RefreshCw,
-    Trash2,
-} from "lucide-react";
+
 import { Page } from "@/components/page";
 import { Panel, Row, Rows } from "@/components/panel";
 import { RepoSource } from "@/components/repo-source";
@@ -30,6 +21,17 @@ import {
     useProject,
 } from "@/lib/api";
 import { environmentLabels, environmentOrder, repoLabel, timeAgo } from "@/lib/format";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+    ArrowRight01Icon,
+    GitBranchIcon,
+    MoreHorizontalCircle01Icon,
+    EditIcon,
+    Add01Icon,
+    RepeatIcon,
+    Delete02Icon,
+    GitCommitIcon,
+} from "@hugeicons/core-free-icons";
 
 type Dialog =
     | { kind: "source" }
@@ -43,6 +45,11 @@ export function Project() {
     const { project, data, error } = useProject(projectId);
     const { editable, reason } = useEditable();
     const [dialog, setDialog] = useState<Dialog>(null);
+    const [dialogOpen, setDialogOpen] = useState(false);
+    function showDialog(next: Exclude<Dialog, null>) {
+        setDialog(next);
+        setDialogOpen(true);
+    }
     if (error && !project)
         return (
             <Page>
@@ -64,7 +71,7 @@ export function Project() {
         .sort((a, b) => Date.parse(b.deployed_at ?? "") - Date.parse(a.deployed_at ?? ""))
         .slice(0, 5);
     const close = (open: boolean) => {
-        if (!open) setDialog(null);
+        setDialogOpen(open);
     };
 
     return (
@@ -91,22 +98,28 @@ export function Project() {
                                     reason ??
                                     (project.source ? undefined : "Link a repository first")
                                 }
-                                onClick={() => setDialog({ kind: "add" })}
+                                onClick={() => showDialog({ kind: "add" })}
                             >
-                                <Plus /> Add target
+                                <HugeiconsIcon icon={Add01Icon} /> Add target
                             </Button>
                         }
                     >
                         {targets.length ? (
                             <ul className="divide-y">
                                 {targets.map((target) => (
-                                    <li key={target.id} className="flex items-center pr-3">
+                                    <li
+                                        key={target.id}
+                                        className="flex items-center pr-3 transition-colors duration-150 last:rounded-b-lg hover:bg-accent/60 focus-within:bg-accent/60"
+                                    >
                                         <Link
                                             to="/p/$project/$deployment"
                                             params={{ project: project.id, deployment: target.id }}
-                                            className="flex min-w-0 flex-1 items-center gap-3 px-5 py-4 hover:bg-accent/60"
+                                            className="flex min-w-0 flex-1 items-center gap-3 px-5 py-4"
                                         >
-                                            <GitBranch className="size-4 shrink-0 text-muted-foreground" />
+                                            <HugeiconsIcon
+                                                icon={GitBranchIcon}
+                                                className="size-4 shrink-0 text-muted-foreground"
+                                            />
                                             <div className="min-w-0 flex-1">
                                                 <p className="truncate text-sm font-medium">
                                                     {target.name}
@@ -121,12 +134,15 @@ export function Project() {
                                                     <p className="mt-1">Not deployed</p>
                                                 )}
                                             </div>
-                                            <ChevronRight className="size-4 shrink-0 text-muted-foreground/60" />
+                                            <HugeiconsIcon
+                                                icon={ArrowRight01Icon}
+                                                className="size-4 shrink-0 text-muted-foreground/60"
+                                            />
                                         </Link>
                                         <TargetMenu
                                             disabled={!editable}
-                                            onEdit={() => setDialog({ kind: "edit", target })}
-                                            onRemove={() => setDialog({ kind: "remove", target })}
+                                            onEdit={() => showDialog({ kind: "edit", target })}
+                                            onRemove={() => showDialog({ kind: "remove", target })}
                                         />
                                     </li>
                                 ))}
@@ -150,9 +166,12 @@ export function Project() {
                                                 project: project.id,
                                                 deployment: deployment.id,
                                             }}
-                                            className="flex items-center gap-3 px-5 py-4 hover:bg-accent/60"
+                                            className="flex items-center gap-3 px-5 py-4 transition-colors duration-150 hover:bg-accent/60"
                                         >
-                                            <GitCommitHorizontal className="size-4 shrink-0 text-muted-foreground" />
+                                            <HugeiconsIcon
+                                                icon={GitCommitIcon}
+                                                className="size-4 shrink-0 text-muted-foreground"
+                                            />
                                             <div className="min-w-0 flex-1">
                                                 <p className="truncate text-sm font-medium">
                                                     {deployment.name}
@@ -190,9 +209,9 @@ export function Project() {
                                     variant="ghost"
                                     disabled={!editable}
                                     title={reason}
-                                    onClick={() => setDialog({ kind: "source" })}
+                                    onClick={() => showDialog({ kind: "source" })}
                                 >
-                                    <Pencil /> Edit
+                                    <HugeiconsIcon icon={EditIcon} /> Edit
                                 </Button>
                             )
                         }
@@ -222,7 +241,7 @@ export function Project() {
                                     size="sm"
                                     disabled={!editable}
                                     title={reason}
-                                    onClick={() => setDialog({ kind: "source" })}
+                                    onClick={() => showDialog({ kind: "source" })}
                                 >
                                     Link a repository
                                 </Button>
@@ -233,24 +252,28 @@ export function Project() {
                         <Branches
                             project={project}
                             canAdd={editable}
-                            onAdd={(branch) => setDialog({ kind: "add", branch })}
+                            onAdd={(branch) => showDialog({ kind: "add", branch })}
                         />
                     )}
                 </div>
             </div>
-            <SourceDialog project={project} open={dialog?.kind === "source"} onOpenChange={close} />
+            <SourceDialog
+                project={project}
+                open={dialogOpen && dialog?.kind === "source"}
+                onOpenChange={close}
+            />
             <TargetDialog
                 project={project}
                 target={dialog?.kind === "edit" ? dialog.target : undefined}
                 initialBranch={dialog?.kind === "add" ? dialog.branch : undefined}
-                open={dialog?.kind === "add" || dialog?.kind === "edit"}
+                open={dialogOpen && (dialog?.kind === "add" || dialog?.kind === "edit")}
                 onOpenChange={close}
             />
             {dialog?.kind === "remove" && (
                 <RemoveTargetDialog
                     project={project}
                     target={dialog.target}
-                    open
+                    open={dialogOpen}
                     onOpenChange={close}
                 />
             )}
@@ -277,15 +300,15 @@ function TargetMenu({
                     aria-label="Target actions"
                     className="text-muted-foreground"
                 >
-                    <MoreHorizontal />
+                    <HugeiconsIcon icon={MoreHorizontalCircle01Icon} />
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={onEdit}>
-                    <Pencil /> Edit
+                    <HugeiconsIcon icon={EditIcon} /> Edit
                 </DropdownMenuItem>
                 <DropdownMenuItem variant="destructive" onSelect={onRemove}>
-                    <Trash2 /> Remove
+                    <HugeiconsIcon icon={Delete02Icon} /> Remove
                 </DropdownMenuItem>
             </DropdownMenuContent>
         </DropdownMenu>
@@ -319,7 +342,10 @@ function Branches({
                     disabled={branches.isFetching}
                     onClick={() => void branches.refetch()}
                 >
-                    <RefreshCw className={branches.isFetching ? "animate-spin" : ""} />
+                    <HugeiconsIcon
+                        icon={RepeatIcon}
+                        className={branches.isFetching ? "animate-spin" : ""}
+                    />
                 </Button>
             }
         >
@@ -335,7 +361,10 @@ function Branches({
                         const count = tracked.get(branch) ?? 0;
                         return (
                             <li key={branch} className="flex items-center gap-3 px-5 py-2.5">
-                                <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+                                <HugeiconsIcon
+                                    icon={GitBranchIcon}
+                                    className="size-3.5 shrink-0 text-muted-foreground"
+                                />
                                 <span className="min-w-0 flex-1 truncate font-mono text-xs">
                                     {branch}
                                 </span>
@@ -357,7 +386,7 @@ function Branches({
                                     disabled={!canAdd}
                                     onClick={() => onAdd(branch)}
                                 >
-                                    <Plus />
+                                    <HugeiconsIcon icon={Add01Icon} />
                                 </Button>
                             </li>
                         );

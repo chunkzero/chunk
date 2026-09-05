@@ -128,10 +128,10 @@ function TargetForm({
                             }
                         }}
                     >
-                        <SelectTrigger id="target-environment">
+                        <SelectTrigger id="target-environment" className="w-full">
                             <SelectValue />
                         </SelectTrigger>
-                        <SelectContent>
+                        <SelectContent position="popper">
                             {environmentOrder.map((value) => (
                                 <SelectItem key={value} value={value}>
                                     {environmentLabels[value]}

@@ -1,4 +1,6 @@
-import { ArrowDownToLine, Pause, Play } from "lucide-react";
+import { ArrowDownToLineIcon, PauseIcon, PlayIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,7 +84,11 @@ export function Logs() {
                     onClick={() => setFrozen(frozen ? null : (logs.data?.entries ?? []))}
                     aria-pressed={frozen !== null}
                 >
-                    {frozen ? <Play /> : <Pause />}
+                    {frozen ? (
+                        <HugeiconsIcon icon={PlayIcon} />
+                    ) : (
+                        <HugeiconsIcon icon={PauseIcon} />
+                    )}
                     {frozen ? "Resume" : "Pause"}
                 </Button>
                 <Button
@@ -92,7 +98,7 @@ export function Logs() {
                     aria-pressed={following}
                     className={following ? "" : "text-muted-foreground"}
                 >
-                    <ArrowDownToLine />
+                    <HugeiconsIcon icon={ArrowDownToLineIcon} />
                     Follow
                 </Button>
             </div>

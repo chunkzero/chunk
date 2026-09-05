@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
 
 export function Page({ children }: { children: ReactNode }) {
-    return <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-6 py-8">{children}</main>;
+    return (
+        <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-6 py-8 animate-in fade-in duration-200">
+            {children}
+        </main>
+    );
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
