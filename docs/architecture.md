@@ -114,8 +114,8 @@ supplies only the language. The bundler (Rolldown) is embedded in
 
 `apps/dashboard` is a React/Vite CSR application using TanStack Router and
 Query, styled with Tailwind and shadcn/ui components under
-`src/components/ui`. The binary serves its built files, `/api/status`, and
-`/api/projects` on an optional management listener alongside Minecraft TCP.
+`src/components/ui`. The binary serves its built files and a small management API (`status`,
+`projects`, `logs`, `system`) on an optional listener alongside Minecraft TCP.
 All management API data requires an operator bearer token. The dashboard is
 organised as applications (one per repository) that own deployments
 (production, development, preview), each with its own health, functions,

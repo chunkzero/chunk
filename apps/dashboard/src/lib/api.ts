@@ -7,6 +7,22 @@ const statusSchema = z.object({
     functions: z.boolean(),
     reconciliation: z.boolean(),
     asset_uploads: z.boolean(),
+    uptime_seconds: z.number(),
+    minecraft_bind: z.string(),
+    management_bind: z.string(),
+    motd: z.string(),
+    max_connections: z.number(),
+    connections: z.number(),
+    dashboard_dir: z.string(),
+    projects_file: z.string().nullable(),
+});
+
+const logSchema = z.object({
+    seq: z.number(),
+    time_ms: z.number(),
+    level: z.enum(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]),
+    target: z.string(),
+    message: z.string(),
 });
 
 const deploymentSchema = z.object({
@@ -25,9 +41,26 @@ const projectSchema = z.object({
     deployments: z.array(deploymentSchema),
 });
 
+const systemSchema = z.object({
+    hostname: z.string().nullable(),
+    os: z.string().nullable(),
+    cpus: z.number(),
+    cpu_percent: z.number(),
+    load_average: z.tuple([z.number(), z.number(), z.number()]),
+    memory_total: z.number(),
+    memory_used: z.number(),
+    memory_available: z.number(),
+    swap_total: z.number(),
+    swap_used: z.number(),
+    process_memory: z.number(),
+    process_cpu_percent: z.number(),
+});
+
 export type Status = z.infer<typeof statusSchema>;
+export type SystemSample = z.infer<typeof systemSchema>;
 export type Project = z.infer<typeof projectSchema>;
 export type Deployment = z.infer<typeof deploymentSchema>;
+export type LogEntry = z.infer<typeof logSchema>;
 
 export class UnauthorizedError extends Error {
     constructor() {
@@ -55,7 +88,7 @@ export const getStatus = (token: string, signal?: AbortSignal) =>
     request("status", statusSchema, token, signal);
 
 /// Polls an endpoint while connected and signs out when the token stops being accepted.
-function useBackend<T>(path: string, schema: z.ZodType<T>) {
+function useBackend<T>(path: string, schema: z.ZodType<T>, interval = 10_000) {
     const { token, disconnect } = useSession();
     const client = useQueryClient();
     return useQuery({
@@ -73,11 +106,13 @@ function useBackend<T>(path: string, schema: z.ZodType<T>) {
         },
         enabled: token !== null,
         retry: false,
-        refetchInterval: (query) => (query.state.status === "error" ? false : 10_000),
+        refetchInterval: (query) => (query.state.status === "error" ? false : interval),
     });
 }
 
-export const useStatus = () => useBackend("status", statusSchema);
+export const useStatus = () => useBackend("status", statusSchema, 5_000);
+export const useSystem = () => useBackend("system", systemSchema, 5_000);
+export const useLogs = () => useBackend("logs", z.array(logSchema), 2_000);
 export const useProjects = () => useBackend("projects", z.array(projectSchema));
 
 export function useProject(projectId: string) {

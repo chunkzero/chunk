@@ -1,7 +1,7 @@
 import { Link, useParams } from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, GitBranch, GitCommitHorizontal } from "lucide-react";
 import { EmptyState, Page } from "@/components/page";
-import { Commit, RepoSource } from "@/components/repo-source";
+import { RepoSource } from "@/components/repo-source";
 import { type Deployment, useProject } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 
@@ -34,19 +34,31 @@ export function Project() {
                             <Link
                                 to="/p/$project/$deployment"
                                 params={{ project: project.id, deployment: deployment.id }}
-                                className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 gap-y-1 px-5 py-4 hover:bg-accent/60 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)_auto_auto]"
+                                className="flex items-center gap-4 px-5 py-4 hover:bg-accent/60"
                             >
-                                <div className="min-w-0">
+                                <div className="min-w-0 flex-1 space-y-1">
                                     <p className="font-medium">{deployment.name}</p>
-                                    <p className="text-sm text-muted-foreground">
-                                        {labels[deployment.environment]}
+                                    <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                                        <span>{labels[deployment.environment]}</span>
+                                        {deployment.git_ref && (
+                                            <>
+                                                <Dot />
+                                                <span className="flex items-center gap-1 font-mono">
+                                                    <GitBranch className="size-3" />
+                                                    {deployment.git_ref}
+                                                </span>
+                                            </>
+                                        )}
+                                        {deployment.commit && (
+                                            <>
+                                                <Dot />
+                                                <span className="flex items-center gap-1 font-mono">
+                                                    <GitCommitHorizontal className="size-3" />
+                                                    {deployment.commit.slice(0, 7)}
+                                                </span>
+                                            </>
+                                        )}
                                     </p>
-                                </div>
-                                <div className="col-span-3 sm:col-span-1">
-                                    <Commit
-                                        commit={deployment.commit}
-                                        gitRef={deployment.git_ref}
-                                    />
                                 </div>
                                 <span className="text-sm text-muted-foreground">
                                     {deployment.deployed_at ? timeAgo(deployment.deployed_at) : ""}
@@ -60,6 +72,8 @@ export function Project() {
         </Page>
     );
 }
+
+const Dot = () => <span aria-hidden>·</span>;
 
 export function Missing() {
     return (

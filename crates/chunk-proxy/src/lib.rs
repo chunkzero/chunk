@@ -10,7 +10,11 @@ mod disabled;
 #[cfg(not(feature = "mc-26-1"))]
 pub use disabled::Proxy;
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, atomic::AtomicUsize},
+    time::Duration,
+};
 
 /// Limits for login and configuration, and the server-list response.
 #[derive(Debug, Clone)]
@@ -23,6 +27,8 @@ pub struct Config {
     pub compression_threshold: Option<usize>,
     /// Deadline for configuration waiting and for the subsequent registry exchange.
     pub configuration_timeout: Duration,
+    /// Open player sockets, kept current by the listener so operators can observe load.
+    pub connections: Arc<AtomicUsize>,
 }
 
 impl Default for Config {
@@ -33,6 +39,7 @@ impl Default for Config {
             connection_timeout: Duration::from_secs(10),
             compression_threshold: Some(256),
             configuration_timeout: Duration::from_secs(300),
+            connections: Arc::default(),
         }
     }
 }

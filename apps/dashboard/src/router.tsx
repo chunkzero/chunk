@@ -1,9 +1,11 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { Layout } from "@/components/layout";
-import { sections } from "@/lib/format";
-import { Deployment, Health, Section } from "@/routes/deployment";
+import { Deployment } from "@/routes/deployment";
 import { Missing, Project } from "@/routes/project";
 import { Projects } from "@/routes/projects";
+import { Health } from "@/routes/sections/health";
+import { Logs } from "@/routes/sections/logs";
+import { Assets, Functions, Players, Sessions, Settings } from "@/routes/sections/overviews";
 
 const rootRoute = createRootRoute({ component: Layout, notFoundComponent: Missing });
 
@@ -27,18 +29,19 @@ function section<const Path extends string>(path: Path, component: () => React.R
     return createRoute({ getParentRoute: () => deploymentRoute, path, component });
 }
 
-const sectionRoutes = [
-    section("/", Health),
-    ...sections
-        .filter((entry) => entry.slug !== "")
-        .map((entry) => section(entry.slug, () => <Section title={entry.title} />)),
-];
-
 export const router = createRouter({
     routeTree: rootRoute.addChildren([
         projectsRoute,
         projectRoute,
-        deploymentRoute.addChildren(sectionRoutes),
+        deploymentRoute.addChildren([
+            section("/", Health),
+            section("functions", Functions),
+            section("sessions", Sessions),
+            section("players", Players),
+            section("assets", Assets),
+            section("logs", Logs),
+            section("settings", Settings),
+        ]),
     ]),
 });
 

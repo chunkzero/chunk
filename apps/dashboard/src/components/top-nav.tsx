@@ -1,5 +1,6 @@
 import { Link, useParams } from "@tanstack/react-router";
 import { ChevronRight, LogOut } from "lucide-react";
+import { LayoutGroup, motion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import {
     DropdownMenu,
@@ -8,6 +9,7 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useProjects, useStatus } from "@/lib/api";
+import { sections } from "@/lib/format";
 import { useSession } from "@/lib/session";
 
 export function TopNav() {
@@ -71,7 +73,40 @@ export function TopNav() {
                     </DropdownMenuContent>
                 </DropdownMenu>
             </div>
+            {project && deployment && <Tabs project={project.id} deployment={deployment.id} />}
         </header>
+    );
+}
+
+function Tabs({ project, deployment }: { project: string; deployment: string }) {
+    return (
+        <LayoutGroup id="deployment-tabs">
+            <nav className="mx-auto flex max-w-6xl gap-1 px-4 text-sm">
+                {sections.map((section) => (
+                    <Link
+                        key={section.slug}
+                        to={`/p/$project/$deployment/${section.slug}` as "/p/$project/$deployment"}
+                        params={{ project, deployment }}
+                        activeOptions={{ exact: section.slug === "" }}
+                        className="relative px-2 py-2.5"
+                        inactiveProps={{ className: "text-muted-foreground hover:text-foreground" }}
+                    >
+                        {({ isActive }) => (
+                            <>
+                                {section.title}
+                                {isActive && (
+                                    <motion.span
+                                        layoutId="tab-underline"
+                                        className="absolute inset-x-0 -bottom-px h-0.5 bg-foreground"
+                                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                                    />
+                                )}
+                            </>
+                        )}
+                    </Link>
+                ))}
+            </nav>
+        </LayoutGroup>
     );
 }
 

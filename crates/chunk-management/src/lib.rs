@@ -1,10 +1,20 @@
 //! Serves dashboard assets and a separately authenticated management API.
 
-use std::{future::Future, io, net::SocketAddr, path::PathBuf, sync::Arc};
+mod logs;
+mod system;
+
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicUsize, atomic::Ordering},
+    time::Instant,
+};
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::Response,
@@ -15,6 +25,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_http::services::{ServeDir, ServeFile};
 
+pub use logs::{Entry, LogLayer, Logs};
+pub use system::{Machine, Sample};
+
 /// Configuration supplied by the backend, never exposed to the browser.
 pub struct Config {
     pub bind: SocketAddr,
@@ -22,6 +35,33 @@ pub struct Config {
     pub token: String,
     /// Applications to list until discovery through a deploy pipeline exists.
     pub projects: Vec<Project>,
+    pub projects_file: Option<PathBuf>,
+    pub backend: Backend,
+    pub logs: Arc<Logs>,
+}
+
+/// Facts about the running edge that the dashboard reports.
+pub struct Backend {
+    pub minecraft_bind: SocketAddr,
+    pub motd: String,
+    pub max_connections: usize,
+    pub connections: Arc<AtomicUsize>,
+    pub started: Instant,
+}
+
+#[derive(Clone)]
+struct AppState {
+    projects: Arc<Vec<Project>>,
+    logs: Arc<Logs>,
+    info: Arc<Info>,
+    machine: Arc<Machine>,
+}
+
+struct Info {
+    backend: Backend,
+    management_bind: SocketAddr,
+    dashboard_dir: PathBuf,
+    projects_file: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +70,14 @@ struct Status {
     functions: bool,
     reconciliation: bool,
     asset_uploads: bool,
+    uptime_seconds: u64,
+    minecraft_bind: SocketAddr,
+    management_bind: SocketAddr,
+    motd: String,
+    max_connections: usize,
+    connections: usize,
+    dashboard_dir: PathBuf,
+    projects_file: Option<PathBuf>,
 }
 
 /// An application known to this backend, with the deployments running from it.
@@ -93,13 +141,24 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
             "dashboard index.html missing; run just dashboard-build first",
         ));
     }
-    let app = router(&config)?;
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let bind = config.bind;
+    let app = router(config)?;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }
 
-fn router(config: &Config) -> io::Result<Router> {
-    let projects = Arc::new(config.projects.clone());
+fn router(config: Config) -> io::Result<Router> {
+    let state = AppState {
+        projects: Arc::new(config.projects),
+        logs: config.logs,
+        info: Arc::new(Info {
+            backend: config.backend,
+            management_bind: config.bind,
+            dashboard_dir: config.dashboard_dir.clone(),
+            projects_file: config.projects_file,
+        }),
+        machine: Arc::default(),
+    };
     if config.token.trim().is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "management token is empty"));
     }
@@ -109,9 +168,11 @@ fn router(config: &Config) -> io::Result<Router> {
     let api = Router::new()
         .route("/status", get(status))
         .route("/projects", get(list_projects))
+        .route("/logs", get(list_logs))
+        .route("/system", get(system))
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(token, authorize))
-        .with_state(projects);
+        .with_state(state);
     let assets = ServeDir::new(config.dashboard_dir.join("assets"));
     let dashboard =
         ServeDir::new(&config.dashboard_dir).fallback(ServeFile::new(config.dashboard_dir.join("index.html")));
@@ -123,17 +184,40 @@ fn router(config: &Config) -> io::Result<Router> {
         .fallback_service(dashboard))
 }
 
-async fn status() -> Json<Status> {
+async fn status(State(state): State<AppState>) -> Json<Status> {
+    let info = &state.info;
     Json(Status {
         version: env!("CARGO_PKG_VERSION"),
         functions: false,
         reconciliation: false,
         asset_uploads: false,
+        uptime_seconds: info.backend.started.elapsed().as_secs(),
+        minecraft_bind: info.backend.minecraft_bind,
+        management_bind: info.management_bind,
+        motd: info.backend.motd.clone(),
+        max_connections: info.backend.max_connections,
+        connections: info.backend.connections.load(Ordering::Relaxed),
+        dashboard_dir: info.dashboard_dir.clone(),
+        projects_file: info.projects_file.clone(),
     })
 }
 
-async fn list_projects(State(projects): State<Arc<Vec<Project>>>) -> Json<Vec<Project>> {
-    Json(projects.as_ref().clone())
+#[derive(serde::Deserialize)]
+struct After {
+    #[serde(default)]
+    after: u64,
+}
+
+async fn list_logs(State(state): State<AppState>, Query(query): Query<After>) -> Json<Vec<Entry>> {
+    Json(state.logs.since(query.after))
+}
+
+async fn system(State(state): State<AppState>) -> Json<Sample> {
+    Json(state.machine.sample())
+}
+
+async fn list_projects(State(state): State<AppState>) -> Json<Vec<Project>> {
+    Json(state.projects.as_ref().clone())
 }
 
 async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Next) -> Response {
@@ -162,16 +246,28 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
 
+    fn test_config(dir: &std::path::Path) -> Config {
+        Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            dashboard_dir: dir.into(),
+            token: "test-token".into(),
+            projects: Vec::new(),
+            projects_file: None,
+            backend: Backend {
+                minecraft_bind: "127.0.0.1:25565".parse().unwrap(),
+                motd: "test".into(),
+                max_connections: 8,
+                connections: Arc::default(),
+                started: Instant::now(),
+            },
+            logs: Arc::default(),
+        }
+    }
+
     #[tokio::test]
     async fn management_requires_credentials_and_returns_real_capabilities() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(&Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            dashboard_dir: dir.path().into(),
-            token: "test-token".into(),
-            projects: Vec::new(),
-        })
-        .unwrap();
+        let app = router(test_config(dir.path())).unwrap();
         for token in [
             None,
             Some("Bearer wrong"),
@@ -209,16 +305,12 @@ mod tests {
     async fn browser_routes_use_shell_but_missing_api_and_assets_do_not() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "dashboard shell").unwrap();
-        let app = router(&Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            dashboard_dir: dir.path().into(),
-            token: "test-token".into(),
-            projects: Vec::new(),
-        })
-        .unwrap();
+        let app = router(test_config(dir.path())).unwrap();
         for (path, expected) in [
             ("/sessions", StatusCode::OK),
             ("/api/projects", StatusCode::OK),
+            ("/api/logs?after=0", StatusCode::OK),
+            ("/api/system", StatusCode::OK),
             ("/api/missing", StatusCode::NOT_FOUND),
             ("/assets/missing.js", StatusCode::NOT_FOUND),
         ] {
@@ -241,5 +333,17 @@ mod tests {
     fn example_projects_file_parses() {
         let projects = Project::parse_list(include_str!("../../../examples/projects.json")).unwrap();
         assert_eq!(projects[0].id, "chunk");
+    }
+
+    #[test]
+    fn logs_are_bounded_and_resumable() {
+        let logs = Logs::default();
+        for index in 0..1005 {
+            logs.record("INFO", "test", format!("event {index}"));
+        }
+        let all = logs.since(0);
+        assert_eq!(all.len(), 1000);
+        assert_eq!(all[0].seq, 6);
+        assert_eq!(logs.since(1003).len(), 2);
     }
 }

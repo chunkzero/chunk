@@ -6,7 +6,13 @@ mod transport;
 
 use authentication::Authentication;
 
-use std::{future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicUsize, atomic::Ordering},
+    time::Duration,
+};
 
 use chunk_protocol::{
     McString, encode_packet,
@@ -158,7 +164,9 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
+                    let active = Active::open(&self.config.connections);
                     connections.spawn(async move {
+                        let _active = active;
                         match connection::serve(stream, &responses, &authentication, deadline, compression).await {
                             Ok(Some(authenticated)) => {
                                 tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; entering limbo");
@@ -179,5 +187,21 @@ impl Proxy {
         drop(self.listener);
         connections.shutdown().await;
         result
+    }
+}
+
+/// Counts one open socket for as long as its task lives.
+struct Active(Arc<AtomicUsize>);
+
+impl Active {
+    fn open(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }

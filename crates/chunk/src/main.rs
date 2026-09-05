@@ -1,10 +1,10 @@
 //! The `chunk` CLI, currently serving the edge player listener.
 
-use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode};
+use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
 
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(version, about = "The chunk Minecraft platform")]
@@ -40,10 +40,15 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+    let logs = Arc::new(chunk_management::Logs::default());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))),
+        )
+        .with(chunk_management::LogLayer(Arc::clone(&logs)).with_filter(tracing_subscriber::filter::LevelFilter::INFO))
         .init();
-    match run(cli).await {
+    match run(cli, logs).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(%error, "chunk stopped");
@@ -52,7 +57,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> io::Result<()> {
+async fn run(cli: Cli, logs: Arc<chunk_management::Logs>) -> io::Result<()> {
     match cli.command {
         Command::Edge {
             bind,
@@ -68,11 +73,19 @@ async fn run(cli: Cli) -> io::Result<()> {
                 max_connections,
                 ..Default::default()
             };
+            let backend = chunk_management::Backend {
+                minecraft_bind: bind,
+                motd: config.motd.clone(),
+                max_connections: max_connections.get(),
+                connections: Arc::clone(&config.connections),
+                started: Instant::now(),
+            };
             let Some(dashboard_dir) = dashboard_dir else {
                 return chunk_edge::run(bind, config, shutdown_signal()?).await;
             };
             let token = management_token.expect("Clap requires a token when dashboard_dir is set");
-            let projects = match projects {
+            let projects_file = projects;
+            let projects = match &projects_file {
                 Some(path) => chunk_management::Project::parse_list(&std::fs::read_to_string(path)?)?,
                 None => Vec::new(),
             };
@@ -91,6 +104,9 @@ async fn run(cli: Cli) -> io::Result<()> {
                             dashboard_dir,
                             token,
                             projects,
+                            projects_file,
+                            backend,
+                            logs,
                         },
                         async move {
                             management_shutdown.cancelled().await;
