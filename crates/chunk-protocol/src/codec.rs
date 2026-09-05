@@ -72,7 +72,7 @@ macro_rules! fixed_integer {
     )+};
 }
 
-fixed_integer!(u8, i8, u16, i32, i64);
+fixed_integer!(u8, i8, u16, i32, u32, i64, f32, f64);
 
 /// A UUID in network byte order, without a string or length prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

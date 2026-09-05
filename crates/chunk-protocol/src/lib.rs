@@ -29,8 +29,10 @@
 //! The selected login packets cover login start, encryption negotiation, profile
 //! properties, compression negotiation, plugin queries, and acknowledgment.
 //! Configuration packets cover client information, plugin messages, keepalives,
-//! ping/pong, known packs, feature flags, and completion. Registry/NBT and play
-//! packets are not generated yet. These are wire definitions; authentication,
+//! ping/pong, known packs, feature flags, and completion. Selected play packets
+//! cover movement, teleports, keepalives, chunk batches, and player readiness.
+//! Limbo registry frames and required tags are compiled from the pinned login snapshot; its NBT
+//! encoder handles trusted build inputs only. These are wire definitions; authentication,
 //! encryption, compression framing, and connection state handling belong to the
 //! proxy and are not implemented by this crate.
 //!

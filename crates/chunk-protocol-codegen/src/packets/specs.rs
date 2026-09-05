@@ -193,4 +193,28 @@ packets![
         "FeatureFlags",
         [bounded("features", 1024), bounded("features[]", 32767)]
     ),
+    ("play", "toClient", "keep_alive", "PlayKeepAlive", []),
+    ("play", "toServer", "keep_alive", "PlayKeepAliveResponse", []),
+    ("play", "toClient", "position", "SynchronizePosition", []),
+    ("play", "toServer", "teleport_confirm", "ConfirmTeleport", []),
+    ("play", "toServer", "position", "MovePosition", []),
+    ("play", "toServer", "position_look", "MovePositionLook", []),
+    ("play", "toServer", "look", "MoveLook", []),
+    ("play", "toServer", "flying", "MoveStatus", []),
+    ("play", "toServer", "player_loaded", "PlayerLoaded", []),
+    ("play", "toServer", "tick_end", "TickEnd", []),
+    ("play", "toClient", "abilities", "PlayerAbilities", []),
+    ("play", "toClient", "update_view_position", "SetChunkCenter", []),
+    ("play", "toClient", "chunk_batch_start", "ChunkBatchStart", []),
+    ("play", "toClient", "chunk_batch_finished", "ChunkBatchFinished", []),
+    ("play", "toServer", "chunk_batch_received", "ChunkBatchReceived", []),
+    ("play", "toServer", "ping_request", "PlayPing", []),
+    ("play", "toClient", "ping_response", "PlayPong", []),
+    (
+        "play",
+        "toServer",
+        "custom_payload",
+        "PlayPluginMessage",
+        [bounded("channel", 32767), bounded("data", 32767)]
+    ),
 ];

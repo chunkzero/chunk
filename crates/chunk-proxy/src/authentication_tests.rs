@@ -78,7 +78,7 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
             let (client, server) = tokio::io::duplex(8192);
             let mut client = Transport::new(client);
             let server = async {
-                let mut accepted = auth.login(Transport::new(server), compression).await.unwrap();
+                let mut accepted = auth.login(Transport::new(server), 775, compression).await.unwrap();
                 assert_eq!(
                     accepted.profile.uuid,
                     Uuid([
@@ -148,7 +148,7 @@ async fn rejected_session_receives_an_encrypted_disconnect() {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
         let server = async {
-            assert!(auth.login(Transport::new(server), Some(256)).await.is_err());
+            assert!(auth.login(Transport::new(server), 775, Some(256)).await.is_err());
         };
         let client = async {
             let request = begin_login(&mut client).await;

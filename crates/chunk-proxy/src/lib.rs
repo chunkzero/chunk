@@ -1,4 +1,4 @@
-//! Owns player sockets, serves Java Edition status, and authenticates online-mode login.
+//! Owns player sockets, serves status, authenticates login, and hosts a packet-simulated limbo.
 
 #[cfg(feature = "mc-26-1")]
 mod server;
@@ -12,7 +12,7 @@ pub use disabled::Proxy;
 
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Limits for login and configuration waiting, and the server-list response.
+/// Limits for login and configuration, and the server-list response.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub motd: String,
@@ -21,7 +21,7 @@ pub struct Config {
     pub connection_timeout: Duration,
     /// Uncompressed packet size at which zlib is enabled. None disables compression.
     pub compression_threshold: Option<usize>,
-    /// Maximum time to wait in configuration for a destination, even while responsive.
+    /// Deadline for configuration waiting and for the subsequent registry exchange.
     pub configuration_timeout: Duration,
 }
 

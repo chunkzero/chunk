@@ -71,7 +71,9 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
     if let Some(primitive) = schema.as_str() {
         return Ok(match primitive {
             "varint" => "VarInt".into(),
-            "u8" | "i8" | "u16" | "i32" | "i64" | "bool" => primitive.into(),
+            "u8" | "i8" | "u16" | "i32" | "u32" | "i64" | "f32" | "f64" | "bool" => primitive.into(),
+            "MovementFlags" => "u8".into(),
+            "PositionUpdateRelatives" => "u32".into(),
             "UUID" => "Uuid".into(),
             "string" => format!("McString<{}>", limit(spec, path)?),
             "restBuffer" => format!("RemainingBytes<{}>", limit(spec, path)?),

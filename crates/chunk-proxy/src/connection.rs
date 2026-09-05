@@ -62,7 +62,10 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             .iter()
             .any(|version| version.protocol == handshake.protocol_version.0) =>
         {
-            return authentication.login(transport, compression).await.map(Some);
+            return authentication
+                .login(transport, handshake.protocol_version.0, compression)
+                .await
+                .map(Some);
         }
         2 => transport.write_encoded(&responses.unsupported_version).await?,
         _ => return Err(invalid_data("unsupported handshake intention")),

@@ -76,6 +76,7 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
         "status" => "Status",
         "login" => "Login",
         "configuration" => "Configuration",
+        "play" => "Play",
         _ => return Err("unsupported packet state".into()),
     };
     let direction = match spec.direction {
@@ -83,8 +84,9 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
         "toClient" => "Clientbound",
         _ => return Err("unsupported packet direction".into()),
     };
+    let eq = if spec.state == "play" { "" } else { "Eq," };
     let mut output = format!(
-        "\n#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]\n#[packet(id = {id:#04x}, state = {state}, direction = {direction})]\npub struct {}",
+        "\n#[derive(Debug, Clone, PartialEq, {eq} Encode, Decode, Packet)]\n#[packet(id = {id:#04x}, state = {state}, direction = {direction})]\npub struct {}",
         spec.name
     );
     let mut definitions = String::new();
