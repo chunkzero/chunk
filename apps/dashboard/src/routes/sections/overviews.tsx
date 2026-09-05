@@ -1,238 +1,142 @@
-import { ArrowRight, Database, HardDrive, Users } from "lucide-react";
-import { useLogs, useStatus } from "@/lib/api";
-import { clock } from "@/lib/format";
-import { Panel, Row, Rows } from "@/routes/deployment";
-import { useSession } from "@/lib/session";
+import { useState } from "react";
+import { Folder, History, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Panel, Row, Rows } from "@/components/panel";
+import { useDeployment } from "@/routes/deployment";
+import { timeAgo } from "@/lib/format";
 
-export function Functions() {
-    return (
-        <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="Edge bundle">
-                <Rows>
-                    <Row label="Bundle">Not deployed</Row>
-                    <Row label="Schema tables">—</Row>
-                    <Row label="Queries · Mutations · Actions">—</Row>
-                    <Row label="Crons">—</Row>
-                </Rows>
-            </Panel>
-            <Panel title="Listeners">
-                <ul className="divide-y text-sm">
-                    {["ping", "login", "disconnect", "chat"].map((event) => (
-                        <li key={event} className="flex items-center justify-between px-5 py-3">
-                            <span className="font-mono text-xs">{event}</span>
-                            <span className="text-xs text-muted-foreground">
-                                Handled by the proxy default
-                            </span>
-                        </li>
-                    ))}
-                </ul>
-                <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-                    These are the four events an edge bundle can take over. Until one is deployed
-                    the proxy answers them itself: status from the MOTD, login into limbo.
-                </p>
-            </Panel>
-        </div>
-    );
-}
-
-export function Sessions() {
-    const status = useStatus();
-    const stages = [
-        { title: "Edge", count: 1, detail: status.data?.minecraft_bind ?? "…" },
-        {
-            title: "Runtimes",
-            count: 0,
-            detail: status.data?.reconciliation ? "Reconciling" : "No runtime connected",
-        },
-        { title: "Sessions", count: 0, detail: "Waiting for a runtime" },
-    ];
+export function Application() {
+    const { deployment } = useDeployment();
     return (
         <div className="space-y-6">
-            <div className="grid items-stretch gap-3 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
-                {stages.map((stage, index) => (
-                    <FlowStage key={stage.title} {...stage} last={index === stages.length - 1} />
-                ))}
+            <div className="flex items-center justify-between gap-4">
+                <h1 className="text-xl font-semibold">{deployment?.name}</h1>
+                <span className="rounded-md bg-muted px-2.5 py-1 text-xs">
+                    {deployment?.environment}
+                </span>
             </div>
-            <p className="text-sm text-muted-foreground">
-                Players connect to the edge, the controller places them on a runtime, and the
-                runtime hosts sessions in a JVM. Players who log in now are held in limbo at the
-                edge because nothing is downstream yet.
-            </p>
+            <div className="grid gap-6 md:grid-cols-2">
+                <Panel title="Deployment">
+                    <Rows>
+                        <Row label="Branch">{deployment?.git_ref ?? "—"}</Row>
+                        <Row label="Commit">{deployment?.commit?.slice(0, 12) ?? "—"}</Row>
+                        <Row label="Deployed">
+                            {deployment?.deployed_at ? timeAgo(deployment.deployed_at) : "—"}
+                        </Row>
+                        <Row label="Health">Not available</Row>
+                    </Rows>
+                </Panel>
+                <Panel title="Sessions">
+                    <Placeholder title="Sessions are not available yet" />
+                </Panel>
+            </div>
         </div>
-    );
-}
-
-function FlowStage({
-    title,
-    count,
-    detail,
-    last,
-}: {
-    title: string;
-    count: number;
-    detail: string;
-    last: boolean;
-}) {
-    return (
-        <>
-            <div className="rounded-lg border bg-card px-5 py-4">
-                <p className="text-xs text-muted-foreground">{title}</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{count}</p>
-                <p className="mt-1 truncate font-mono text-xs text-muted-foreground">{detail}</p>
-            </div>
-            {!last && (
-                <ArrowRight className="hidden size-4 self-center text-muted-foreground/60 sm:block" />
-            )}
-        </>
     );
 }
 
 export function Players() {
-    const status = useStatus();
-    const logs = useLogs();
-    const online = status.data?.connections ?? 0;
-    const max = status.data?.max_connections ?? 0;
-    const logins = (logs.data ?? [])
-        .filter((entry) => entry.message.startsWith("authenticated player"))
-        .map((entry) => ({
-            seq: entry.seq,
-            time: entry.time_ms,
-            name: /username=(\S+)/.exec(entry.message)?.[1] ?? "?",
-        }))
-        .reverse()
-        .slice(0, 25);
-
     return (
-        <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
-            <Panel title="Connections">
-                <div className="space-y-4 p-5">
-                    <p className="text-4xl font-semibold tabular-nums tracking-tight">
-                        {online}
-                        <span className="text-base font-normal text-muted-foreground">
-                            {" "}
-                            of {max}
-                        </span>
-                    </p>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                        <div
-                            className="h-full rounded-full bg-foreground transition-[width]"
-                            style={{
-                                width: `${max ? Math.max((online / max) * 100, online ? 1 : 0) : 0}%`,
-                            }}
-                        />
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                        Open sockets on the Minecraft listener, including players waiting in limbo.
-                        Placement is not enabled, so every login stays here.
-                    </p>
-                </div>
+        <div className="space-y-6">
+            <h1 className="text-xl font-semibold">Players</h1>
+            <Panel title="Current connections">
+                <EmptyTable
+                    columns={["Player", "Session", "Connected", "Status"]}
+                    message="Player connections are not available yet."
+                />
             </Panel>
-            <Panel title="Recent logins">
-                {logins.length === 0 ? (
-                    <p className="flex items-center gap-2 px-5 py-6 text-sm text-muted-foreground">
-                        <Users className="size-4" />
-                        No one has logged in since the backend started.
-                    </p>
-                ) : (
-                    <ul className="divide-y text-sm">
-                        {logins.map((login) => (
-                            <li key={login.seq} className="flex items-center gap-3 px-5 py-2.5">
-                                <img
-                                    src={`https://mc-heads.net/avatar/${encodeURIComponent(login.name)}/24`}
-                                    alt=""
-                                    width={24}
-                                    height={24}
-                                    className="rounded-[3px]"
-                                />
-                                <span className="flex-1 font-medium">{login.name}</span>
-                                <time className="font-mono text-xs text-muted-foreground">
-                                    {clock.format(login.time)}
-                                </time>
-                            </li>
-                        ))}
-                    </ul>
-                )}
+            <Panel title="Player log">
+                <EmptyTable
+                    columns={["Time", "Player", "Event", "Session"]}
+                    message="Player activity is not available yet."
+                />
             </Panel>
         </div>
     );
 }
 
 export function Assets() {
-    const backends = [
-        {
-            icon: HardDrive,
-            title: "Local filesystem",
-            detail: "Objects on this box, keyed by SHA-256. Simplest for a single machine.",
-        },
-        {
-            icon: Database,
-            title: "S3-compatible bucket",
-            detail: "Operator-supplied bucket for durability and multi-machine runtimes.",
-        },
-    ];
+    const [view, setView] = useState<"files" | "versions">("files");
     return (
-        <div className="space-y-6">
-            <div className="grid gap-4 sm:grid-cols-2">
-                {backends.map((backend) => (
-                    <div key={backend.title} className="rounded-lg border bg-card px-5 py-4">
-                        <div className="flex items-center justify-between">
-                            <backend.icon className="size-4 text-muted-foreground" />
-                            <span className="text-xs text-muted-foreground">Not configured</span>
-                        </div>
-                        <p className="mt-3 font-medium">{backend.title}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">{backend.detail}</p>
-                    </div>
-                ))}
+        <div className="space-y-5">
+            <div className="flex items-center justify-between gap-4">
+                <h1 className="text-xl font-semibold">Assets</h1>
+                <Button size="sm" disabled title="Asset uploads are not available yet">
+                    <Upload /> Upload files
+                </Button>
             </div>
-            <Panel title="Manifest">
-                <Rows>
-                    <Row label="chunk.assets.json">Not published</Row>
-                    <Row label="Pinned objects">0</Row>
-                </Rows>
-                <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-                    Deployments pin immutable objects by content hash. Bytes live in the store
-                    above; only the manifest is committed.
-                </p>
-            </Panel>
+            <div className="overflow-hidden rounded-lg border bg-card">
+                <div className="flex flex-wrap items-center gap-2 border-b p-3">
+                    <div className="flex gap-1" aria-label="Asset views">
+                        <Button
+                            size="sm"
+                            variant={view === "files" ? "secondary" : "ghost"}
+                            aria-pressed={view === "files"}
+                            onClick={() => setView("files")}
+                        >
+                            <Folder /> Files
+                        </Button>
+                        <Button
+                            size="sm"
+                            variant={view === "versions" ? "secondary" : "ghost"}
+                            aria-pressed={view === "versions"}
+                            onClick={() => setView("versions")}
+                        >
+                            <History /> Versions
+                        </Button>
+                    </div>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                        No published version
+                    </span>
+                </div>
+                {view === "files" ? (
+                    <>
+                        <div className="flex items-center gap-2 border-b px-5 py-3 text-sm">
+                            <Folder className="size-4 text-muted-foreground" /> All files
+                        </div>
+                        <EmptyTable
+                            columns={["Name", "Size", "Last changed", "Version"]}
+                            message="Asset files are not available yet."
+                        />
+                    </>
+                ) : (
+                    <EmptyTable
+                        columns={["Version", "Published", "Files", "Status"]}
+                        message="Published versions will appear here as file snapshots."
+                    />
+                )}
+            </div>
         </div>
     );
 }
 
-export function Settings() {
-    const status = useStatus();
-    const { disconnect } = useSession();
-    const data = status.data;
+function Placeholder({ title }: { title: string }) {
+    return <p className="px-5 py-10 text-center text-sm text-muted-foreground">{title}</p>;
+}
+
+function EmptyTable({ columns, message }: { columns: string[]; message: string }) {
     return (
-        <div className="space-y-6">
-            <Panel title="Listeners">
-                <Rows>
-                    <Row label="Minecraft">{data?.minecraft_bind ?? "…"}</Row>
-                    <Row label="Management">{data?.management_bind ?? "…"}</Row>
-                    <Row label="Max connections">{data?.max_connections ?? "…"}</Row>
-                    <Row label="MOTD">{data?.motd ?? "…"}</Row>
-                </Rows>
-            </Panel>
-            <Panel title="Files">
-                <Rows>
-                    <Row label="Dashboard">{data?.dashboard_dir ?? "…"}</Row>
-                    <Row label="Projects">{data?.projects_file ?? "none"}</Row>
-                </Rows>
-            </Panel>
-            <Panel title="Operator access">
-                <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 text-sm">
-                    <div>
-                        <p>Management token</p>
-                        <p className="text-xs text-muted-foreground">
-                            Set with CHUNK_MANAGEMENT_TOKEN on the backend. Held in this tab's
-                            memory only.
-                        </p>
-                    </div>
-                    <Button variant="outline" size="sm" onClick={disconnect}>
-                        Disconnect
-                    </Button>
-                </div>
-            </Panel>
+        <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+                <thead>
+                    <tr className="border-b">
+                        {columns.map((column) => (
+                            <th
+                                key={column}
+                                className="px-5 py-3 text-xs font-medium text-muted-foreground"
+                            >
+                                {column}
+                            </th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colSpan={columns.length}>
+                            <Placeholder title={message} />
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     );
 }

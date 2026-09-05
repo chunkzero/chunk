@@ -1,11 +1,14 @@
 //! Host and process resource usage sampled on demand for the dashboard.
 
-use std::sync::Mutex;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use sysinfo::{ProcessesToUpdate, System};
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct Sample {
     pub hostname: Option<String>,
     pub os: Option<String>,
@@ -25,6 +28,7 @@ pub struct Sample {
 /// Keeps one `sysinfo` state so CPU percentages are deltas between calls.
 pub struct Machine {
     system: Mutex<System>,
+    cached: Mutex<Option<(Instant, Sample)>>,
 }
 
 impl Default for Machine {
@@ -33,6 +37,7 @@ impl Default for Machine {
         Self::refresh(&mut system);
         Self {
             system: Mutex::new(system),
+            cached: Mutex::new(None),
         }
     }
 }
@@ -48,11 +53,17 @@ impl Machine {
 
     #[must_use]
     pub fn sample(&self) -> Sample {
+        let mut cached = self.cached.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, sample)) = cached.as_ref()
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return sample.clone();
+        }
         let mut system = self.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::refresh(&mut system);
         let process = sysinfo::get_current_pid().ok().and_then(|pid| system.process(pid));
         let load = System::load_average();
-        Sample {
+        let sample = Sample {
             hostname: System::host_name(),
             os: System::long_os_version(),
             cpus: system.cpus().len(),
@@ -65,6 +76,8 @@ impl Machine {
             swap_used: system.used_swap(),
             process_memory: process.map_or(0, sysinfo::Process::memory),
             process_cpu_percent: process.map_or(0.0, sysinfo::Process::cpu_usage),
-        }
+        };
+        *cached = Some((Instant::now(), sample.clone()));
+        sample
     }
 }

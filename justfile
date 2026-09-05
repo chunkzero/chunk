@@ -23,9 +23,14 @@ lint:
     buf lint proto
     pnpm lint
 
+# Generate dashboard bindings from the Rust management API.
+api-generate:
+    pnpm api:generate
+
 # Type-check the TypeScript packages.
 typecheck:
     pnpm install --frozen-lockfile
+    pnpm api:check
     pnpm typecheck
 
 # Run the test suites.

@@ -7,10 +7,14 @@
     "format": "oxfmt apps/dashboard",
     "format:check": "oxfmt --check apps/dashboard",
     "lint": "oxlint apps/dashboard/src apps/dashboard/vite.config.ts",
-    "dashboard:build": "pnpm --filter @chunk/dashboard build"
+    "dashboard:build": "pnpm --filter @chunk/dashboard build",
+    "api:generate": "node scripts/generate-api.mjs",
+    "api:check": "node scripts/generate-api.mjs --check"
   },
   "devDependencies": {
+    "openapi-typescript": "^7.13.0",
     "oxfmt": "^0.66.0",
-    "oxlint": "^1.81.0"
+    "oxlint": "^1.81.0",
+    "typescript": "~5.9.3"
   }
 }

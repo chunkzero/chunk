@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
 interface Session {
@@ -10,10 +11,18 @@ const SessionContext = createContext<Session | null>(null);
 
 /// The management token lives in memory only, so a refresh signs the operator out.
 export function SessionProvider({ children }: { children: ReactNode }) {
+    const client = useQueryClient();
     const [token, setToken] = useState<string | null>(null);
     return (
         <SessionContext.Provider
-            value={{ token, connect: setToken, disconnect: () => setToken(null) }}
+            value={{
+                token,
+                connect: setToken,
+                disconnect: () => {
+                    setToken(null);
+                    client.clear();
+                },
+            }}
         >
             {children}
         </SessionContext.Provider>

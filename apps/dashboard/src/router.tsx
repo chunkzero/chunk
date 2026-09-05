@@ -1,11 +1,11 @@
-import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
 import { Layout } from "@/components/layout";
 import { Deployment } from "@/routes/deployment";
 import { Missing, Project } from "@/routes/project";
 import { Projects } from "@/routes/projects";
-import { Health } from "@/routes/sections/health";
-import { Logs } from "@/routes/sections/logs";
-import { Assets, Functions, Players, Sessions, Settings } from "@/routes/sections/overviews";
+import { Server } from "@/routes/sections/health";
+import { Application, Assets, Players } from "@/routes/sections/overviews";
+import { Settings } from "@/routes/sections/settings";
 
 const rootRoute = createRootRoute({ component: Layout, notFoundComponent: Missing });
 
@@ -32,15 +32,29 @@ function section<const Path extends string>(path: Path, component: () => React.R
 export const router = createRouter({
     routeTree: rootRoute.addChildren([
         projectsRoute,
+        createRoute({ getParentRoute: () => rootRoute, path: "/server", component: Server }),
         projectRoute,
         deploymentRoute.addChildren([
-            section("/", Health),
-            section("functions", Functions),
-            section("sessions", Sessions),
+            section("/", Application),
             section("players", Players),
             section("assets", Assets),
-            section("logs", Logs),
             section("settings", Settings),
+            ...(["sessions", "functions"] as const).map((path) =>
+                createRoute({
+                    getParentRoute: () => deploymentRoute,
+                    path,
+                    beforeLoad: ({ params }) => {
+                        throw redirect({ to: "/p/$project/$deployment", params });
+                    },
+                }),
+            ),
+            createRoute({
+                getParentRoute: () => deploymentRoute,
+                path: "logs",
+                beforeLoad: () => {
+                    throw redirect({ to: "/server" });
+                },
+            }),
         ]),
     ]),
 });

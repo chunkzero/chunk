@@ -57,6 +57,9 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm api:check
       - run: pnpm typecheck
       - run: pnpm format:check
       - run: pnpm lint

@@ -47,12 +47,16 @@ export function repoLabel(repository: string) {
         .replace(/\.git$/, "");
 }
 
+export const environmentOrder = ["production", "development", "preview"] as const;
+export const environmentLabels: Record<(typeof environmentOrder)[number], string> = {
+    production: "Production",
+    development: "Development",
+    preview: "Preview",
+};
+
 export const sections = [
-    { slug: "", title: "Health" },
-    { slug: "functions", title: "Functions" },
-    { slug: "sessions", title: "Sessions" },
-    { slug: "players", title: "Players" },
-    { slug: "assets", title: "Assets" },
-    { slug: "logs", title: "Logs" },
-    { slug: "settings", title: "Settings" },
-];
+    { to: "/p/$project/$deployment", title: "Application" },
+    { to: "/p/$project/$deployment/players", title: "Players" },
+    { to: "/p/$project/$deployment/assets", title: "Assets" },
+    { to: "/p/$project/$deployment/settings", title: "Settings" },
+] as const;

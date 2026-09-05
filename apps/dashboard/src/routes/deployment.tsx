@@ -1,59 +1,35 @@
 import { Outlet, useParams } from "@tanstack/react-router";
-import type { ReactNode } from "react";
 import { Page } from "@/components/page";
 import { useProject } from "@/lib/api";
 import { Missing } from "@/routes/project";
 
 export function useDeployment() {
     const params = useParams({ from: "/p/$project/$deployment" });
-    const { project, data } = useProject(params.project);
+    const { project, data, error } = useProject(params.project);
     const deployment = project?.deployments.find((entry) => entry.id === params.deployment);
-    return { params, project, deployment, loaded: data !== undefined };
+    return { params, project, deployment, loaded: data !== undefined, error };
 }
 
 export function Deployment() {
-    const { deployment, loaded } = useDeployment();
+    const { deployment, loaded, error } = useDeployment();
+    if (error)
+        return (
+            <Page>
+                <p role="alert" className="text-sm text-destructive">
+                    Unable to load this deployment. Retrying…
+                </p>
+            </Page>
+        );
+    if (!loaded)
+        return (
+            <Page>
+                <p className="text-sm text-muted-foreground">Loading deployment…</p>
+            </Page>
+        );
     if (loaded && !deployment) return <Missing />;
     return (
         <Page>
             <Outlet />
         </Page>
-    );
-}
-
-export function Panel({
-    title,
-    action,
-    children,
-    className = "",
-}: {
-    title?: string;
-    action?: ReactNode;
-    children: ReactNode;
-    className?: string;
-}) {
-    return (
-        <section className={`rounded-lg border bg-card ${className}`}>
-            {title && (
-                <div className="flex items-center justify-between border-b px-5 py-3">
-                    <h2 className="text-sm font-medium">{title}</h2>
-                    {action}
-                </div>
-            )}
-            {children}
-        </section>
-    );
-}
-
-export function Rows({ children }: { children: ReactNode }) {
-    return <dl className="divide-y text-sm">{children}</dl>;
-}
-
-export function Row({ label, children }: { label: string; children: ReactNode }) {
-    return (
-        <div className="flex items-center justify-between gap-4 px-5 py-3">
-            <dt className="text-muted-foreground">{label}</dt>
-            <dd className="text-right font-mono text-xs">{children}</dd>
-        </div>
     );
 }

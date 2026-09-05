@@ -6,7 +6,7 @@ import { type LogEntry, useLogs } from "@/lib/api";
 import { clock } from "@/lib/format";
 
 const levels = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] as const;
-const levelTone: Record<LogEntry["level"], string> = {
+const levelTone: Record<string, string> = {
     ERROR: "bg-destructive",
     WARN: "bg-warning",
     INFO: "bg-link",
@@ -22,7 +22,7 @@ export function Logs() {
     const [frozen, setFrozen] = useState<LogEntry[] | null>(null);
     const list = useRef<HTMLOListElement>(null);
 
-    const source = frozen ?? logs.data ?? [];
+    const source = frozen ?? logs.data?.entries ?? [];
     const needle = filter.toLowerCase();
     const entries = source.filter(
         (entry) =>
@@ -32,10 +32,20 @@ export function Logs() {
 
     useEffect(() => {
         if (following && list.current) list.current.scrollTop = list.current.scrollHeight;
-    }, [entries.length, following]);
+    }, [entries.at(-1)?.seq, logs.data?.stream, following]);
 
     return (
         <div className="overflow-hidden rounded-lg border bg-card">
+            {logs.error && (
+                <p role="alert" className="p-4 text-sm text-destructive">
+                    Logs could not refresh. Retrying…
+                </p>
+            )}
+            {logs.data?.truncated && (
+                <p className="px-4 py-2 text-xs text-muted-foreground">
+                    Earlier log entries are no longer available.
+                </p>
+            )}
             <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
                 <Input
                     value={filter}
@@ -69,7 +79,7 @@ export function Logs() {
                 <Button
                     variant="ghost"
                     size="xs"
-                    onClick={() => setFrozen(frozen ? null : (logs.data ?? []))}
+                    onClick={() => setFrozen(frozen ? null : (logs.data?.entries ?? []))}
                     aria-pressed={frozen !== null}
                 >
                     {frozen ? <Play /> : <Pause />}
@@ -99,7 +109,11 @@ export function Logs() {
                 {entries.length === 0 && (
                     <li className="px-4 py-6 text-muted-foreground">
                         {source.length === 0
-                            ? "No log lines yet."
+                            ? logs.isPending
+                                ? "Loading logs…"
+                                : logs.error
+                                  ? "Logs unavailable."
+                                  : "No log lines yet."
                             : "Nothing matches the current filter."}
                     </li>
                 )}

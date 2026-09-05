@@ -13,7 +13,7 @@ use tracing_subscriber::{Layer, layer::Context};
 
 const CAPACITY: usize = 1000;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct Entry {
     pub seq: u64,
     pub time_ms: u64,
@@ -23,9 +23,34 @@ pub struct Entry {
 }
 
 /// The most recent log events, each numbered so clients can poll for what they missed.
-#[derive(Default)]
 pub struct Logs {
     inner: Mutex<Inner>,
+    stream: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct Batch {
+    pub stream: String,
+    pub cursor: u64,
+    pub reset: bool,
+    pub truncated: bool,
+    pub entries: Vec<Entry>,
+}
+
+impl Default for Logs {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            stream: format!(
+                "{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -35,6 +60,28 @@ struct Inner {
 }
 
 impl Logs {
+    #[must_use]
+    pub fn batch(&self, after: u64, stream: Option<&str>) -> Batch {
+        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reset = stream != Some(self.stream.as_str()) || after > inner.next;
+        let cursor = if reset { 0 } else { after };
+        Batch {
+            stream: self.stream.clone(),
+            cursor: inner.next,
+            reset,
+            truncated: inner
+                .entries
+                .front()
+                .is_some_and(|entry| entry.seq > cursor.saturating_add(1)),
+            entries: inner
+                .entries
+                .iter()
+                .filter(|entry| entry.seq > cursor)
+                .cloned()
+                .collect(),
+        }
+    }
+
     pub fn record(&self, level: &'static str, target: &str, message: String) {
         let time_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

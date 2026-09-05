@@ -22,13 +22,18 @@ export function TopNav() {
 
     return (
         <header className="border-b bg-card">
-            <div className="mx-auto flex h-13 max-w-6xl items-center justify-between px-6">
-                <nav className="flex items-center gap-2 text-sm">
+            <div className="mx-auto flex h-13 max-w-6xl items-center justify-between gap-4 px-6">
+                <nav
+                    aria-label="Breadcrumb"
+                    className="flex min-w-0 items-center gap-2 overflow-x-auto whitespace-nowrap text-sm [&>*]:shrink-0"
+                >
                     <Link to="/" className="flex items-center gap-2 font-semibold">
                         <span className="size-4 rounded-[3px] bg-foreground" />
                         chunk
                     </Link>
-                    <span className="text-muted-foreground">{window.location.hostname}</span>
+                    <span className="hidden text-muted-foreground sm:inline">
+                        {window.location.hostname}
+                    </span>
                     {project && (
                         <>
                             <Crumb />
@@ -54,24 +59,32 @@ export function TopNav() {
                         </>
                     )}
                 </nav>
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className="gap-2 font-mono text-xs text-muted-foreground"
-                        >
-                            <StatusDot ok={!status.isError} />
-                            {status.data ? `v${status.data.version}` : "…"}
-                        </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={disconnect}>
-                            <LogOut />
-                            Disconnect
-                        </DropdownMenuItem>
-                    </DropdownMenuContent>
-                </DropdownMenu>
+                <div className="flex shrink-0 items-center gap-3">
+                    <Link
+                        to="/server"
+                        className="text-sm text-muted-foreground hover:text-foreground"
+                    >
+                        Logs
+                    </Link>
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="gap-2 font-mono text-xs text-muted-foreground"
+                            >
+                                <StatusDot ok={status.isSuccess} />
+                                {status.data ? `v${status.data.version}` : "…"}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                            <DropdownMenuItem onSelect={disconnect}>
+                                <LogOut />
+                                Disconnect
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                </div>
             </div>
             {project && deployment && <Tabs project={project.id} deployment={deployment.id} />}
         </header>
@@ -81,13 +94,13 @@ export function TopNav() {
 function Tabs({ project, deployment }: { project: string; deployment: string }) {
     return (
         <LayoutGroup id="deployment-tabs">
-            <nav className="mx-auto flex max-w-6xl gap-1 px-4 text-sm">
+            <nav className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-4 text-sm">
                 {sections.map((section) => (
                     <Link
-                        key={section.slug}
-                        to={`/p/$project/$deployment/${section.slug}` as "/p/$project/$deployment"}
+                        key={section.to}
+                        to={section.to}
                         params={{ project, deployment }}
-                        activeOptions={{ exact: section.slug === "" }}
+                        activeOptions={{ exact: true }}
                         className="relative px-2 py-2.5"
                         inactiveProps={{ className: "text-muted-foreground hover:text-foreground" }}
                     >
