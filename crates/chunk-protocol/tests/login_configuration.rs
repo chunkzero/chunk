@@ -179,3 +179,44 @@ fn optional_plugin_payload_distinguishes_absent_from_empty() {
         assert_eq!(body, wire);
     }
 }
+
+#[test]
+fn generated_limbo_packets_match_wire() {
+    fn requires_eq<T: Eq>() {}
+
+    check_wire(
+        &GameEvent {
+            reason: GameEventReason::LevelChunksLoadStart,
+            value: 0.0,
+        },
+        &[0x26, 13, 0, 0, 0, 0],
+    );
+    assert!(decode_packet::<GameEvent>(&[0x26, 255, 0, 0, 0, 0]).is_err());
+    check_wire(
+        &TitleTimes {
+            fade_in: 10,
+            stay: 200,
+            fade_out: 20,
+        },
+        &[0x73, 0, 0, 0, 10, 0, 0, 0, 200, 0, 0, 0, 20],
+    );
+    check_wire(
+        &PlayClientInformation {
+            locale: McString::new("en_US").unwrap(),
+            view_distance: 8,
+            chat_flags: VarInt(0),
+            chat_colors: true,
+            skin_parts: 127,
+            main_hand: VarInt(1),
+            enable_text_filtering: false,
+            enable_server_listing: true,
+            particle_status: PlayClientInformationParticleStatus::Minimal,
+        },
+        b"\x0e\x05en_US\x08\x00\x01\x7f\x01\x00\x01\x02",
+    );
+    let mut trailing = b"\x0e\x05en_US\x08\x00\x01\x7f\x01\x00\x01\x02".to_vec();
+    trailing.push(0);
+    assert!(decode_packet::<PlayClientInformation>(&trailing).is_err());
+    requires_eq::<PlayKeepAlive>();
+    requires_eq::<TitleTimes>();
+}

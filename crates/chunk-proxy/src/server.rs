@@ -4,6 +4,8 @@ mod authentication;
 mod configuration;
 #[path = "connection.rs"]
 mod connection;
+#[path = "limbo/mod.rs"]
+mod limbo;
 #[path = "transport.rs"]
 mod transport;
 
@@ -77,6 +79,7 @@ pub struct Proxy {
     config: Config,
     responses: Arc<Responses>,
     authentication: Arc<Authentication>,
+    limbo_packets: Arc<limbo::Cache>,
 }
 
 impl Proxy {
@@ -102,6 +105,7 @@ impl Proxy {
         }
         let responses = Arc::new(Responses::new(&config)?);
         let authentication = Arc::new(Authentication::new().await?);
+        let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
         Ok(Self {
@@ -109,6 +113,7 @@ impl Proxy {
             config,
             responses,
             authentication,
+            limbo_packets,
         })
     }
 
@@ -154,18 +159,19 @@ impl Proxy {
                     }
                     let responses = Arc::clone(&self.responses);
                     let authentication = Arc::clone(&self.authentication);
+                    let limbo_packets = Arc::clone(&self.limbo_packets);
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression).await {
                             Ok(Some(authenticated)) => {
-                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; waiting for a destination");
+                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; entering limbo");
                                 // Destination selection will supply this future when sessions are available.
-                                if let Err(error) = configuration::wait_for_destination(
-                                    authenticated, std::future::pending::<io::Result<()>>(), configuration_timeout,
+                                if let Err(error) = limbo::wait_for_destination(
+                                    authenticated, std::future::pending::<io::Result<()>>(), configuration_timeout, &limbo_packets,
                                 ).await {
-                                    tracing::debug!(%peer, %error, "configuration connection closed");
+                                    tracing::debug!(%peer, %error, "limbo connection closed");
                                 }
                             }
                             Ok(None) => {}

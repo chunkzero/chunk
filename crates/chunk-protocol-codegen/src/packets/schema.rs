@@ -48,6 +48,17 @@ pub(super) fn fields(
     Ok(output)
 }
 
+pub(super) fn contains_float(schema: &Value) -> bool {
+    match schema[0].as_str() {
+        Some("option") => contains_float(&schema[1]),
+        Some("container") => schema[1]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|field| contains_float(&field["type"]))),
+        Some("array" | "mapper") => contains_float(&schema[1]["type"]),
+        _ => schema == "f32" || schema == "f64",
+    }
+}
+
 fn consumes_remainder(schema: &Value) -> bool {
     match schema[0].as_str() {
         Some("option") => consumes_remainder(&schema[1]),
@@ -71,7 +82,9 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
     if let Some(primitive) = schema.as_str() {
         return Ok(match primitive {
             "varint" => "VarInt".into(),
-            "u8" | "i8" | "u16" | "i32" | "i64" | "bool" => primitive.into(),
+            "u8" | "i8" | "u16" | "i32" | "u32" | "i64" | "f32" | "f64" | "bool" => primitive.into(),
+            "MovementFlags" => "u8".into(),
+            "PositionUpdateRelatives" => "u32".into(),
             "UUID" => "Uuid".into(),
             "string" => format!("McString<{}>", limit(spec, path)?),
             "restBuffer" => format!("RemainingBytes<{}>", limit(spec, path)?),
@@ -110,9 +123,10 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
                 name,
                 definitions,
             )?;
+            let eq = if contains_float(schema) { "" } else { "Eq," };
             writeln!(
                 definitions,
-                "#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)] pub struct {name} {{ {body} }}"
+                "#[derive(Debug, Clone, PartialEq, {eq} Encode, Decode)] pub struct {name} {{ {body} }}"
             )?;
             Ok(name.into())
         }
@@ -123,8 +137,13 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
 
 fn mapper(schema: &Value, name: &str, definitions: &mut String) -> Result<String> {
     let args = tagged(schema, "mapper")?;
-    if args["type"] != "varint" || args.as_object().is_none_or(|args| args.len() != 2) {
-        return Err("only VarInt enum mappers are supported".into());
+    let wire = match args["type"].as_str() {
+        Some("varint") => "VarInt",
+        Some("u8") => "u8",
+        _ => return Err("unsupported enum wire type".into()),
+    };
+    if args.as_object().is_none_or(|args| args.len() != 2) {
+        return Err("unsupported enum mapper".into());
     }
     let mappings = args["mappings"]
         .as_object()
@@ -137,6 +156,9 @@ fn mapper(schema: &Value, name: &str, definitions: &mut String) -> Result<String
     let mut ids = std::collections::HashSet::new();
     for (id, label) in mappings {
         let id: i32 = id.parse()?;
+        if wire == "u8" {
+            u8::try_from(id)?;
+        }
         let variant = pascal_case(&field_name(string(label)?)?);
         syn::parse_str::<syn::Ident>(&variant)?;
         if !names.insert(variant.clone()) || !ids.insert(id) {
@@ -146,18 +168,28 @@ fn mapper(schema: &Value, name: &str, definitions: &mut String) -> Result<String
         write!(encode, "Self::{variant} => {id},")?;
         write!(decode, "{id} => Ok(Self::{variant}),")?;
     }
+    let encode_value = if wire == "VarInt" {
+        format!("VarInt(match self {{ {encode} }})")
+    } else {
+        format!("(match self {{ {encode} }} as u8)")
+    };
+    let decode_value = if wire == "VarInt" {
+        "VarInt::decode(input)?.0"
+    } else {
+        "i32::from(u8::decode(input)?)"
+    };
     write!(
         definitions,
         "
         #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum {name} {{ {variants} }}
         impl Encode for {name} {{
             fn encode(&self, output: &mut Vec<u8>) -> ::chunk_protocol::Result<()> {{
-                VarInt(match self {{ {encode} }}).encode(output)
+                {encode_value}.encode(output)
             }}
         }}
         impl Decode for {name} {{
             fn decode(input: &mut &[u8]) -> ::chunk_protocol::Result<Self> {{
-                match VarInt::decode(input)?.0 {{ {decode} _ => Err(::chunk_protocol::Error::InvalidEnumValue) }}
+                match {decode_value} {{ {decode} _ => Err(::chunk_protocol::Error::InvalidEnumValue) }}
             }}
         }}
     "

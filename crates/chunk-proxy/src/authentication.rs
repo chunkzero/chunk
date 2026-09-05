@@ -33,6 +33,7 @@ pub(super) struct Authentication {
 
 /// An authenticated identity and its connection, after Login Acknowledged.
 pub(super) struct Authenticated<S> {
+    pub protocol_version: i32,
     pub profile: LoginSuccess,
     pub transport: Transport<S>,
 }
@@ -61,10 +62,15 @@ impl Authentication {
     pub(super) async fn login<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         mut transport: Transport<S>,
+        protocol_version: i32,
         compression: Option<usize>,
     ) -> io::Result<Authenticated<S>> {
         let profile = self.negotiate(&mut transport, compression).await?;
-        Ok(Authenticated { profile, transport })
+        Ok(Authenticated {
+            protocol_version,
+            profile,
+            transport,
+        })
     }
 
     async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(

@@ -14,6 +14,37 @@ pub(super) struct Transport<S> {
     compression: Option<usize>,
 }
 
+/// Framed packets compressed once for a listener's negotiated threshold.
+/// Encryption remains connection-specific and is applied only when writing.
+pub(super) struct PreparedPackets {
+    compression: Option<usize>,
+    wire: Vec<u8>,
+}
+
+impl PreparedPackets {
+    pub(super) fn new(compression: Option<usize>) -> Self {
+        Self {
+            compression,
+            wire: Vec::new(),
+        }
+    }
+
+    pub(super) fn push<P: Packet + Encode>(&mut self, packet: &P) -> io::Result<()> {
+        self.push_frame(&encode_packet(packet).map_err(invalid_data)?)
+    }
+
+    pub(super) fn push_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        if let Some(threshold) = self.compression {
+            let mut body = frame;
+            VarInt::decode(&mut body).map_err(invalid_data)?;
+            self.wire.extend(deflate(body, threshold)?);
+        } else {
+            self.wire.extend_from_slice(frame);
+        }
+        Ok(())
+    }
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     pub(super) fn new(stream: S) -> Self {
         Self {
@@ -81,17 +112,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     }
 
     pub(super) async fn write_encoded(&mut self, frame: &[u8]) -> io::Result<()> {
-        let mut output = if let Some(threshold) = self.compression {
+        let output = if let Some(threshold) = self.compression {
             let mut body = frame;
             VarInt::decode(&mut body).map_err(invalid_data)?;
             deflate(body, threshold)?
         } else {
             frame.to_vec()
         };
-        if let Some(encrypt) = &mut self.encrypt {
-            output = transform(encrypt, &output)?;
+        self.write_wire(&output).await
+    }
+
+    pub(super) async fn write_prepared(&mut self, packets: &PreparedPackets) -> io::Result<()> {
+        if packets.compression != self.compression {
+            return Err(invalid_data("prepared packets have a different compression threshold"));
         }
-        self.stream.write_all(&output).await
+        self.write_wire(&packets.wire).await
+    }
+
+    async fn write_wire(&mut self, wire: &[u8]) -> io::Result<()> {
+        if let Some(encrypt) = &mut self.encrypt {
+            self.stream.write_all(&transform(encrypt, wire)?).await
+        } else {
+            self.stream.write_all(wire).await
+        }
     }
 
     pub(super) async fn shutdown(&mut self) -> io::Result<()> {
@@ -167,6 +210,55 @@ mod tests {
         decode_packet,
         versions::v26_1::{ConfigurationKeepAliveResponse, LoginAcknowledged},
     };
+
+    #[tokio::test]
+    async fn prepared_packets_are_reusable_across_connections_and_compression_modes() {
+        use chunk_protocol::{McString, RemainingBytes, versions::v26_1::ConfigurationPluginMessage};
+
+        let large = ConfigurationPluginMessage {
+            channel: McString::new("minecraft:brand").unwrap(),
+            data: RemainingBytes::new(vec![42; 1024]).unwrap(),
+        };
+        for compression in [None, Some(0), Some(256)] {
+            let mut prepared = PreparedPackets::new(compression);
+            prepared.push(&LoginAcknowledged).unwrap();
+            prepared.push(&large).unwrap();
+            for secret in [[1; 16], [2; 16]] {
+                let (client, server) = tokio::io::duplex(4096);
+                let mut client = Transport::new(client);
+                let mut server = Transport::new(server);
+                for transport in [&mut client, &mut server] {
+                    transport.enable_encryption(&secret).unwrap();
+                    if let Some(threshold) = compression {
+                        transport.enable_compression(threshold);
+                    }
+                }
+                for _ in 0..2 {
+                    server.write_prepared(&prepared).await.unwrap();
+                    server
+                        .write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 123 })
+                        .await
+                        .unwrap();
+                    decode_packet::<LoginAcknowledged>(&client.read_frame(4096).await.unwrap()).unwrap();
+                    assert_eq!(
+                        decode_packet::<ConfigurationPluginMessage>(&client.read_frame(4096).await.unwrap()).unwrap(),
+                        large
+                    );
+                    assert_eq!(
+                        decode_packet::<ConfigurationKeepAliveResponse>(&client.read_frame(4096).await.unwrap())
+                            .unwrap()
+                            .keep_alive_id,
+                        123
+                    );
+                }
+                let mismatch = PreparedPackets::new(Some(17));
+                assert_eq!(
+                    server.write_prepared(&mismatch).await.unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
+    }
 
     #[test]
     fn compressed_frames_enforce_threshold_size_and_complete_zlib_stream() {

@@ -41,6 +41,7 @@ fn connection(capacity: usize) -> (Transport<DuplexStream>, Authenticated<Duplex
     (
         client,
         Authenticated {
+            protocol_version: 775,
             transport: server,
             profile: LoginSuccess {
                 uuid: Uuid([1; 16]),
