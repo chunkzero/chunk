@@ -262,5 +262,4 @@ fn signed_hex(mut bytes: [u8; 20]) -> String {
 }
 
 #[cfg(test)]
-#[path = "authentication_tests.rs"]
 mod tests;

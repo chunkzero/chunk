@@ -1,12 +1,7 @@
-#[path = "authentication.rs"]
 mod authentication;
-#[path = "configuration.rs"]
 mod configuration;
-#[path = "connection.rs"]
 mod connection;
-#[path = "limbo/mod.rs"]
 mod limbo;
-#[path = "transport.rs"]
 mod transport;
 
 use authentication::Authentication;
