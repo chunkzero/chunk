@@ -32,21 +32,6 @@ impl Encode for JoinLimbo {
     }
 }
 
-#[derive(Encode, Packet)]
-#[packet(id = 0x26, state = Play, direction = Clientbound)]
-pub(super) struct GameEvent {
-    pub reason: u8,
-    pub value: f32,
-}
-
-#[derive(chunk_protocol::Decode, Encode, Packet)]
-#[packet(id = 0x73, state = Play, direction = Clientbound)]
-pub(super) struct TitleTimes {
-    pub fade_in: i32,
-    pub stay: i32,
-    pub fade_out: i32,
-}
-
 #[derive(Packet)]
 #[packet(id = 0x72, state = Play, direction = Clientbound)]
 pub(super) struct PreparingTitle;

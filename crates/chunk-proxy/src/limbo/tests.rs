@@ -4,15 +4,16 @@ use chunk_protocol::{
     BoundedArray, McString, Uuid,
     versions::v26_1::{
         ChunkBatchFinished, ChunkBatchStart, ConfigurationClientInformationParticleStatus, ConfigurationKeepAlive,
-        ConfigurationKeepAliveResponse, FeatureFlags, FinishConfiguration, LIMBO_REGISTRIES, LIMBO_TAGS, LoginSuccess,
-        MovePosition, PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition, TickEnd,
+        ConfigurationKeepAliveResponse, FeatureFlags, FinishConfiguration, GameEvent, LIMBO_REGISTRIES, LIMBO_TAGS,
+        LoginSuccess, MovePosition, PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition, TickEnd,
+        TitleTimes,
     },
 };
 use tokio::{io::DuplexStream, sync::oneshot};
 
 use super::*;
 
-use super::world::{GameEvent, JoinLimbo, LimboChunk, SPAWN, TitleTimes};
+use super::world::{JoinLimbo, LimboChunk, SPAWN};
 
 fn cache() -> &'static Cache {
     static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
@@ -203,13 +204,32 @@ async fn encrypted_client_ignores_movement_and_hands_off_after_keepalive() {
         })
         .await
         .unwrap();
+    client
+        .write_packet(&PlayClientInformation {
+            locale: McString::new("fr_FR").unwrap(),
+            view_distance: 12,
+            chat_flags: VarInt(0),
+            chat_colors: true,
+            skin_parts: 127,
+            main_hand: VarInt(1),
+            enable_text_filtering: false,
+            enable_server_listing: true,
+            particle_status: PlayClientInformationParticleStatus::Minimal,
+        })
+        .await
+        .unwrap();
     ready.send("session-1").unwrap();
     tokio::task::yield_now().await;
     assert!(!server.is_finished(), "handoff must drain the keepalive response");
     answer(&mut client, id).await;
     let (mut authenticated, settings, destination) = server.await.unwrap().unwrap();
     assert_eq!(destination, "session-1");
-    assert_eq!(settings.locale.as_str(), "en_US");
+    assert_eq!(settings.locale.as_str(), "fr_FR");
+    assert_eq!(settings.view_distance, 12);
+    assert_eq!(
+        settings.particle_status,
+        ConfigurationClientInformationParticleStatus::Minimal
+    );
     assert_eq!(authenticated.profile.uuid, Uuid([1; 16]));
     client.write_packet(&TickEnd).await.unwrap();
     decode_packet::<TickEnd>(&authenticated.transport.read_frame(FRAME_LIMIT).await.unwrap()).unwrap();

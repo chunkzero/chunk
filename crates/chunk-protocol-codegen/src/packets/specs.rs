@@ -193,6 +193,21 @@ packets![
         "FeatureFlags",
         [bounded("features", 1024), bounded("features[]", 32767)]
     ),
+    (
+        "play",
+        "toServer",
+        "settings",
+        "PlayClientInformation",
+        [bounded("locale", 16)]
+    ),
+    (
+        "play",
+        "toClient",
+        "game_state_change",
+        "GameEvent",
+        [renamed("gameMode", "value", None)]
+    ),
+    ("play", "toClient", "set_title_time", "TitleTimes", []),
     ("play", "toClient", "keep_alive", "PlayKeepAlive", []),
     ("play", "toServer", "keep_alive", "PlayKeepAliveResponse", []),
     ("play", "toClient", "position", "SynchronizePosition", []),

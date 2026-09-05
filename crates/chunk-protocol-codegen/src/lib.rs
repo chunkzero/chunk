@@ -83,7 +83,10 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
     }
     let protocol_id = i32::try_from(version["version"].as_i64().ok_or("missing protocol version")?)?;
     let packets = packets::generate(&protocol)?;
-    let registries = registries::generate(inputs.get("loginPacket.json").ok_or("missing loginPacket.json")?)?;
+    let registries = registries::generate(
+        &protocol,
+        inputs.get("loginPacket.json").ok_or("missing loginPacket.json")?,
+    )?;
     let module = &invocation.module;
     let documentation = format!(
         "Java Edition {version_name}; selected handshake, status, login, configuration and play packets. Generated from `PrismarineJS/minecraft-data` @ {} (MIT). Attribution accompanies the dataset.",

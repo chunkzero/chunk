@@ -63,12 +63,21 @@ const DAMAGE_TAGS: &[(&str, &[&str])] = &[
 ];
 
 // Only encodes trusted, checksum-verified upstream data at compile time.
-pub(super) fn generate(bytes: &[u8]) -> Result<TokenStream> {
+pub(super) fn generate(protocol: &Value, bytes: &[u8]) -> Result<TokenStream> {
     let data = limbo_data(bytes)?;
     let registries = data["dimensionCodec"].as_object().ok_or("missing registries")?;
     let mut packets = Vec::new();
     for registry in registries.values() {
-        let mut body = vec![0x07]; // Configuration Registry Data, protocol 775.
+        let mut body = Vec::new();
+        varint(
+            usize::try_from(super::packets::packet_id(
+                protocol,
+                "configuration",
+                "toClient",
+                "registry_data",
+            )?)?,
+            &mut body,
+        )?;
         text(string(&registry["id"])?, &mut body)?;
         let entries = registry["entries"].as_array().ok_or("missing entries")?;
         varint(entries.len(), &mut body)?;
@@ -93,7 +102,7 @@ pub(super) fn generate(bytes: &[u8]) -> Result<TokenStream> {
             .position(|entry| entry["key"] == "minecraft:the_end")
             .ok_or("missing End biome")?,
     )?;
-    let tags = limbo_tags(registries)?;
+    let tags = limbo_tags(protocol, registries)?;
     Ok(quote! {
         /// Framed limbo registries; unused enchantments and dialogs are empty.
         pub const LIMBO_REGISTRIES: &[&[u8]] = &[#(#packets),*];
@@ -116,8 +125,17 @@ fn limbo_data(bytes: &[u8]) -> Result<Value> {
     Ok(data)
 }
 
-fn limbo_tags(registries: &serde_json::Map<String, Value>) -> Result<Vec<u8>> {
-    let mut body = vec![0x0d]; // Configuration Update Tags.
+fn limbo_tags(protocol: &Value, registries: &serde_json::Map<String, Value>) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    varint(
+        usize::try_from(super::packets::packet_id(
+            protocol,
+            "configuration",
+            "toClient",
+            "tags",
+        )?)?,
+        &mut body,
+    )?;
     varint(3, &mut body)?;
     // Vanilla 26.1 bindings required by dimensions and item component initializers.
     // Nested tags are flattened; registry IDs are resolved from the pinned snapshot.

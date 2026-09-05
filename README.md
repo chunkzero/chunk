@@ -86,8 +86,9 @@ Compression defaults to 256 bytes; library callers can set
 the listener and active connections. Set `RUST_LOG=debug` to log individual
 connection failures.
 
-Configuration waiting and the registry exchange each have a five-minute limit,
-configurable through `Config::configuration_timeout`. Clients must send their
+`Config::configuration_timeout` limits each configuration phase (default: five minutes).
+The sixty-second total limbo cap overrides longer phase limits; shorter configured
+limits still apply. Clients must send their
 settings within ten seconds. Limbo derives its registries from the pinned
 26.1 snapshot, with unused enchantments and dialogs omitted and dimension
 timeline and client component tags included, then sends a 5×5 area of empty End chunks. The client
@@ -107,7 +108,7 @@ once per protocol version at startup using its configured compression threshold.
 Connections select these buffers by their negotiated protocol version; encryption remains specific to each connection.
 
 To verify with a signed-in Java 26.1 client, join `localhost:25565`, confirm the
-End sky renders with no terrain, confirm you float in place, and remain connected for at
+End sky renders with no terrain, confirm you float in place, and remain connected for
 about a minute to verify automatic disconnection.
 
 Packet generation and codec usage are covered in the

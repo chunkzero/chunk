@@ -26,8 +26,8 @@ fn tagged<'a>(value: &'a Value, tag: &str) -> Result<&'a Value> {
     Ok(&parts[1])
 }
 
-fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
-    let types = &protocol[spec.state][spec.direction]["types"];
+pub(super) fn packet_id(protocol: &Value, state: &str, direction: &str, source: &str) -> Result<i32> {
+    let types = &protocol[state][direction]["types"];
     let dispatch = tagged(&types["packet"], "container")?
         .as_array()
         .ok_or("missing dispatch fields")?;
@@ -42,10 +42,10 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
     let mappings = mapper["mappings"].as_object().ok_or("missing packet ID mappings")?;
     let ids: Vec<_> = mappings
         .iter()
-        .filter(|(_, name)| name.as_str() == Some(spec.source))
+        .filter(|(_, name)| name.as_str() == Some(source))
         .collect();
     let [(wire_id, _)] = ids.as_slice() else {
-        return Err(format!("expected one packet ID for {}", spec.source).into());
+        return Err(format!("expected one packet ID for {source}").into());
     };
     let id = if let Some(hex) = wire_id.strip_prefix("0x") {
         i32::from_str_radix(hex, 16)?
@@ -55,6 +55,15 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
     if id < 0 {
         return Err("packet ID must be nonnegative".into());
     }
+    Ok(id)
+}
+
+fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
+    let types = &protocol[spec.state][spec.direction]["types"];
+    let dispatch = tagged(&types["packet"], "container")?
+        .as_array()
+        .ok_or("missing dispatch fields")?;
+    let id = packet_id(protocol, spec.state, spec.direction, spec.source)?;
     let params = dispatch
         .iter()
         .find(|field| field["name"] == "params")
@@ -84,7 +93,11 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
         "toClient" => "Clientbound",
         _ => return Err("unsupported packet direction".into()),
     };
-    let eq = if spec.state == "play" { "" } else { "Eq," };
+    let eq = if fields.iter().any(|field| schema::contains_float(&field["type"])) {
+        ""
+    } else {
+        "Eq,"
+    };
     let mut output = format!(
         "\n#[derive(Debug, Clone, PartialEq, {eq} Encode, Decode, Packet)]\n#[packet(id = {id:#04x}, state = {state}, direction = {direction})]\npub struct {}",
         spec.name
@@ -104,6 +117,31 @@ fn generate_packet(protocol: &Value, spec: &PacketSpec) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_generation_uses_dataset_packet_ids() {
+        let mut data: Value =
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
+        let snapshot = include_bytes!("../../chunk-protocol/data/26.1/loginPacket.json");
+        for (old, new, name) in [("0x07", "0x107", "registry_data"), ("0x0d", "0x10d", "tags")] {
+            let original = crate::registries::generate(&data, snapshot).unwrap().to_string();
+            let mappings = data["configuration"]["toClient"]["types"]["packet"][1][0]["type"][1]["mappings"]
+                .as_object_mut()
+                .unwrap();
+            let value = mappings.remove(old).unwrap();
+            assert_eq!(value, name);
+            assert!(crate::registries::generate(&data, snapshot).is_err());
+            data["configuration"]["toClient"]["types"]["packet"][1][0]["type"][1]["mappings"][new] = value;
+            assert_eq!(
+                packet_id(&data, "configuration", "toClient", name).unwrap(),
+                i32::from_str_radix(&new[2..], 16).unwrap()
+            );
+            assert_ne!(
+                crate::registries::generate(&data, snapshot).unwrap().to_string(),
+                original
+            );
+        }
+    }
 
     #[test]
     fn unsupported_fields_and_unbounded_strings_fail_generation() {

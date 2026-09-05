@@ -1,10 +1,11 @@
 use super::super::transport::{PreparedPackets, invalid_data};
-use super::world::{GameEvent, JoinLimbo, LimboChunk, PreparingTitle, SPAWN, TitleTimes};
+use super::world::{JoinLimbo, LimboChunk, PreparingTitle, SPAWN};
 use chunk_protocol::{
     BoundedArray, McString, VarInt,
     versions::v26_1::{
-        ChunkBatchFinished, ChunkBatchStart, FeatureFlags, FinishConfiguration, LIMBO_REGISTRIES, LIMBO_TAGS,
-        PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition,
+        ChunkBatchFinished, ChunkBatchStart, FeatureFlags, FinishConfiguration, GameEvent, GameEventReason,
+        LIMBO_REGISTRIES, LIMBO_TAGS, PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition,
+        TitleTimes,
     },
 };
 use std::{collections::BTreeMap, io};
@@ -64,7 +65,10 @@ impl Packets {
             chunk_x: VarInt(0),
             chunk_z: VarInt(0),
         })?;
-        spawn.push(&GameEvent { reason: 13, value: 0.0 })?;
+        spawn.push(&GameEvent {
+            reason: GameEventReason::LevelChunksLoadStart,
+            value: 0.0,
+        })?;
         spawn.push(&ChunkBatchStart)?;
         for x in -2..=2 {
             for z in -2..=2 {

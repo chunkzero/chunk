@@ -9,8 +9,10 @@ use std::{future::Future, io, time::Duration};
 use chunk_protocol::{
     Decode, Encode, Packet, VarInt, decode_packet,
     versions::v26_1::{
-        AcknowledgeConfiguration, ChunkBatchReceived, ConfigurationClientInformation, ConfigurationPluginResponse,
-        ConfirmTeleport, KnownPacks, PlayKeepAlive, PlayKeepAliveResponse, PlayPing, PlayPong, PlayerLoaded,
+        AcknowledgeConfiguration, ChunkBatchReceived, ConfigurationClientInformation,
+        ConfigurationClientInformationParticleStatus, ConfigurationPluginResponse, ConfirmTeleport, KnownPacks,
+        PlayClientInformation, PlayClientInformationParticleStatus, PlayKeepAlive, PlayKeepAliveResponse, PlayPing,
+        PlayPong, PlayerLoaded,
     },
 };
 use tokio::{
@@ -54,9 +56,7 @@ where
         )
         .await
         .map_err(|_| timed_out("limbo configuration timed out"))??;
-        timeout(ACK_TIMEOUT, send_prepared(&mut authenticated.transport, &packets.spawn))
-            .await
-            .map_err(|_| timed_out("limbo spawn write timed out"))??;
+        send_prepared(&mut authenticated.transport, &packets.spawn).await?;
         tracing::info!(
             username = authenticated.profile.username.as_str(),
             "limbo spawn sent; awaiting client acknowledgments"
@@ -181,12 +181,23 @@ where
                         let ping = decode_packet::<PlayPing>(&frame).map_err(invalid_data)?;
                         send(&mut authenticated.transport, &PlayPong { id: ping.id }).await?;
                     }
-                    0x0e => {
-                        // The settings body is shared between configuration and play.
-                        let mut body = frame.as_ref();
-                        VarInt::decode(&mut body).map_err(invalid_data)?;
-                        settings = ConfigurationClientInformation::decode(&mut body).map_err(invalid_data)?;
-                        if !body.is_empty() { return Err(invalid_data("trailing client settings")); }
+                    PlayClientInformation::ID => {
+                        let information = decode_packet::<PlayClientInformation>(&frame).map_err(invalid_data)?;
+                        settings = ConfigurationClientInformation {
+                            locale: information.locale,
+                            view_distance: information.view_distance,
+                            chat_flags: information.chat_flags,
+                            chat_colors: information.chat_colors,
+                            skin_parts: information.skin_parts,
+                            main_hand: information.main_hand,
+                            enable_text_filtering: information.enable_text_filtering,
+                            enable_server_listing: information.enable_server_listing,
+                            particle_status: match information.particle_status {
+                                PlayClientInformationParticleStatus::All => ConfigurationClientInformationParticleStatus::All,
+                                PlayClientInformationParticleStatus::Decreased => ConfigurationClientInformationParticleStatus::Decreased,
+                                PlayClientInformationParticleStatus::Minimal => ConfigurationClientInformationParticleStatus::Minimal,
+                            },
+                        };
                     }
                     id if (0..=0x44).contains(&id) && id != 0x10 => {} // Bounded chat, inventory and input packets have no effect in limbo.
                     _ => return Err(invalid_data("unknown play packet")),

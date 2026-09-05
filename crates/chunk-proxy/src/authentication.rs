@@ -65,9 +65,6 @@ impl Authentication {
         protocol_version: i32,
         compression: Option<usize>,
     ) -> io::Result<Authenticated<S>> {
-        if protocol_version != chunk_protocol::versions::v26_1::VERSION.protocol {
-            return Err(invalid_data("unsupported login protocol version"));
-        }
         let profile = self.negotiate(&mut transport, compression).await?;
         Ok(Authenticated {
             protocol_version,
