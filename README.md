@@ -58,9 +58,9 @@ cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk edge"
 Add `localhost:25565` to a Java Edition client's server list to see the MOTD
 and ping. The proxy advertises 26.1 (protocol 775) and authenticates logins
 through Mojang's session service in online mode. A successful Login Acknowledged
-produces an `authenticated player reached configuration` log entry, then closes
-the connection until configuration parking is implemented. Playable sessions
-are not available yet. Other versions receive a mismatch message; legacy
+produces an `authenticated player reached configuration; waiting for a destination`
+log entry. The client stays on its configuration/loading screen while the proxy
+exchanges keepalives. Playable sessions are not available yet. Other versions receive a mismatch message; legacy
 pre-1.7 pings and transfer handshakes are unsupported.
 
 `mc-26-1` is the only version feature and is enabled by default. Features are
@@ -83,6 +83,14 @@ Compression defaults to 256 bytes; library callers can set
 `Config::compression_threshold` to `None` to disable it. Ctrl-C or SIGTERM closes
 the listener and active connections. Set `RUST_LOG=debug` to log individual
 connection failures.
+
+Configuration waiting has a separate five-minute limit, configurable through
+`Config::configuration_timeout`. Clients must send their settings within ten
+seconds. The proxy sends one keepalive at a time, waits up to fifteen seconds for
+the matching response, and sends the next ten seconds after that response.
+Unresponsive clients and blocked writes are closed; shutdown cancels all waiting
+connections. Destination selection will plug into the waiting loop before the
+remaining configuration/registry exchange and entry into play.
 
 Packet generation and codec usage are covered in the
 [protocol crate documentation](crates/chunk-protocol/src/lib.rs).
