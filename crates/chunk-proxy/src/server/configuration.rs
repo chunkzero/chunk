@@ -101,5 +101,4 @@ fn timed_out(message: &'static str) -> io::Error {
 }
 
 #[cfg(test)]
-#[path = "configuration_tests.rs"]
 mod tests;
