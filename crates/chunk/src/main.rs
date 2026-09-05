@@ -31,6 +31,9 @@ enum Command {
         /// Operator token for the management API. Use TLS for remote access.
         #[arg(long, env = "CHUNK_MANAGEMENT_TOKEN", hide_env_values = true)]
         management_token: Option<String>,
+        /// JSON list of applications and deployments to show in the dashboard.
+        #[arg(long, requires = "dashboard_dir")]
+        projects: Option<PathBuf>,
     },
 }
 
@@ -58,6 +61,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             dashboard_dir,
             management_bind,
             management_token,
+            projects,
         } => {
             let config = chunk_edge::ProxyConfig {
                 motd,
@@ -68,6 +72,10 @@ async fn run(cli: Cli) -> io::Result<()> {
                 return chunk_edge::run(bind, config, shutdown_signal()?).await;
             };
             let token = management_token.expect("Clap requires a token when dashboard_dir is set");
+            let projects = match projects {
+                Some(path) => chunk_management::Project::parse_list(&std::fs::read_to_string(path)?)?,
+                None => Vec::new(),
+            };
             let cancellation = CancellationToken::new();
             let edge_shutdown = cancellation.clone();
             let management_shutdown = cancellation.clone();
@@ -82,6 +90,7 @@ async fn run(cli: Cli) -> io::Result<()> {
                             bind: management_bind,
                             dashboard_dir,
                             token,
+                            projects,
                         },
                         async move {
                             management_shutdown.cancelled().await;

@@ -28,7 +28,7 @@ and restarts; no app code ever opens a socket.
 | `crates/`         | Rust: the `chunk` binary and the platform and toolchain crates    |
 | `jvm/`            | Kotlin: the session-side runtime client, build API, Gradle plugin |
 | `packages/`       | TypeScript: `@chunk/edge`, the module edge code imports           |
-| `apps/dashboard/` | React CSR dashboard; static assets served by the customer backend |
+| `apps/dashboard/` | React dashboard (Vite, Tailwind, shadcn/ui); static assets served by `chunk edge` |
 | `proto/`          | the internal gRPC transport, shared by Rust and the JVM           |
 | `docs/`           | architecture notes for this repository                            |
 
@@ -63,8 +63,11 @@ production JavaScript server. `--management-bind` changes the HTTP listener;
 use a TLS reverse proxy or SSH tunnel for remote access. The token grants
 operator access and is kept only in browser memory.
 
-The dashboard currently reports backend version and capability availability.
-Functions, session allocation, and asset uploads are not implemented. For UI
+The dashboard lists applications and their deployments, then shows one
+deployment's health and capability availability. Application discovery is not
+implemented yet; pass `--projects examples/projects.json` to list a test
+application, or leave it off for an empty list. Functions, session allocation,
+and asset uploads are not implemented. For UI
 development, `just dashboard-dev` starts Vite and forwards `/api` to port 8080.
 
 ### Run the proxy

@@ -1,6 +1,6 @@
 //! Serves dashboard assets and a separately authenticated management API.
 
-use std::{future::Future, io, net::SocketAddr, path::PathBuf};
+use std::{future::Future, io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -10,7 +10,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_http::services::{ServeDir, ServeFile};
@@ -20,6 +20,8 @@ pub struct Config {
     pub bind: SocketAddr,
     pub dashboard_dir: PathBuf,
     pub token: String,
+    /// Applications to list until discovery through a deploy pipeline exists.
+    pub projects: Vec<Project>,
 }
 
 #[derive(Serialize)]
@@ -28,6 +30,56 @@ struct Status {
     functions: bool,
     reconciliation: bool,
     asset_uploads: bool,
+}
+
+/// An application known to this backend, with the deployments running from it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub source: Option<Source>,
+    #[serde(default)]
+    pub deployments: Vec<Deployment>,
+}
+
+/// Where the application's code lives.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Source {
+    pub repository: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Deployment {
+    pub id: String,
+    pub name: String,
+    pub environment: Environment,
+    #[serde(default)]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub commit: Option<String>,
+    #[serde(default)]
+    pub deployed_at: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Environment {
+    Production,
+    Development,
+    Preview,
+}
+
+impl Project {
+    /// Parse a JSON array of projects, as written by an operator or a future deploy step.
+    ///
+    /// # Errors
+    /// Returns an error when the document is not a valid project list.
+    pub fn parse_list(json: &str) -> io::Result<Vec<Self>> {
+        serde_json::from_str(json).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
 }
 
 /// Serve the dashboard until shutdown is requested.
@@ -47,6 +99,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
 }
 
 fn router(config: &Config) -> io::Result<Router> {
+    let projects = Arc::new(config.projects.clone());
     if config.token.trim().is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "management token is empty"));
     }
@@ -55,8 +108,10 @@ fn router(config: &Config) -> io::Result<Router> {
     let token: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let api = Router::new()
         .route("/status", get(status))
+        .route("/projects", get(list_projects))
         .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::from_fn_with_state(token, authorize));
+        .layer(middleware::from_fn_with_state(token, authorize))
+        .with_state(projects);
     let assets = ServeDir::new(config.dashboard_dir.join("assets"));
     let dashboard =
         ServeDir::new(&config.dashboard_dir).fallback(ServeFile::new(config.dashboard_dir.join("index.html")));
@@ -75,6 +130,10 @@ async fn status() -> Json<Status> {
         reconciliation: false,
         asset_uploads: false,
     })
+}
+
+async fn list_projects(State(projects): State<Arc<Vec<Project>>>) -> Json<Vec<Project>> {
+    Json(projects.as_ref().clone())
 }
 
 async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Next) -> Response {
@@ -110,6 +169,7 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             dashboard_dir: dir.path().into(),
             token: "test-token".into(),
+            projects: Vec::new(),
         })
         .unwrap();
         for token in [
@@ -153,10 +213,12 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             dashboard_dir: dir.path().into(),
             token: "test-token".into(),
+            projects: Vec::new(),
         })
         .unwrap();
         for (path, expected) in [
             ("/sessions", StatusCode::OK),
+            ("/api/projects", StatusCode::OK),
             ("/api/missing", StatusCode::NOT_FOUND),
             ("/assets/missing.js", StatusCode::NOT_FOUND),
         ] {
@@ -173,5 +235,11 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+    }
+
+    #[test]
+    fn example_projects_file_parses() {
+        let projects = Project::parse_list(include_str!("../../../examples/projects.json")).unwrap();
+        assert_eq!(projects[0].id, "chunk");
     }
 }

@@ -113,10 +113,15 @@ supplies only the language. The bundler (Rolldown) is embedded in
 `chunk-build`; apps never configure it.
 
 `apps/dashboard` is a React/Vite CSR application using TanStack Router and
-Query. The binary serves its built files and `/api/status` on an optional
-management listener alongside Minecraft TCP. All current management API data
-requires an operator bearer token. Only status exists; lifecycle controls,
-asset uploads, and live event subscriptions are not implemented yet.
+Query, styled with Tailwind and shadcn/ui components under
+`src/components/ui`. The binary serves its built files, `/api/status`, and
+`/api/projects` on an optional management listener alongside Minecraft TCP.
+All management API data requires an operator bearer token. The dashboard is
+organised as applications (one per repository) that own deployments
+(production, development, preview), each with its own health, functions,
+sessions, players, assets, logs, and settings views. Projects come from an
+operator-supplied JSON file until a deploy pipeline registers them; lifecycle
+controls, asset uploads, and live event subscriptions are not implemented yet.
 
 ## Transport
 

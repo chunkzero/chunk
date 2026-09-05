@@ -1,0 +1,40 @@
+[
+  {
+    "id": "chunk",
+    "name": "chunk",
+    "source": { "repository": "https://github.com/chunkzero/chunk", "branch": "main" },
+    "deployments": [
+      {
+        "id": "production",
+        "name": "production",
+        "environment": "production",
+        "git_ref": "main",
+        "commit": "384c0674c19a35902672683a39a22645498b4577",
+        "deployed_at": "2026-09-04T22:39:07-04:00"
+      },
+      {
+        "id": "dev-alex",
+        "name": "dev/alex",
+        "environment": "development",
+        "git_ref": "feat/self-hosted-dashboard-assets",
+        "commit": "a69568e566e12375147dd5f7a39fcaa1b390a625",
+        "deployed_at": "2026-09-05T11:40:37-04:00"
+      },
+      {
+        "id": "pr-17",
+        "name": "preview/self-hosted-dashboard-assets",
+        "environment": "preview",
+        "git_ref": "feat/self-hosted-dashboard-assets",
+        "commit": "a69568e566e12375147dd5f7a39fcaa1b390a625",
+        "deployed_at": "2026-09-05T11:40:37-04:00"
+      }
+    ]
+  },
+  {
+    "id": "lobby",
+    "name": "lobby",
+    "deployments": [
+      { "id": "production", "name": "production", "environment": "production" }
+    ]
+  }
+]
