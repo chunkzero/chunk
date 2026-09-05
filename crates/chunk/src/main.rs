@@ -67,8 +67,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             let Some(dashboard_dir) = dashboard_dir else {
                 return chunk_edge::run(bind, config, shutdown_signal()?).await;
             };
-            let token = management_token
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "management token required"))?;
+            let token = management_token.expect("Clap requires a token when dashboard_dir is set");
             let cancellation = CancellationToken::new();
             let edge_shutdown = cancellation.clone();
             let management_shutdown = cancellation.clone();

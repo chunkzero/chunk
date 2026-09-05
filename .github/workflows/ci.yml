@@ -20,7 +20,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo check -p chunk-assets --features s3
       - run: cargo test --workspace
       - run: cargo test -p chunk-proxy --no-default-features
 

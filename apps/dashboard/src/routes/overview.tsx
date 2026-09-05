@@ -1,18 +1,20 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { getStatus } from "../lib/api";
 
 export function Overview() {
     const [token, setToken] = useState("");
     const [credential, setCredential] = useState("");
     const [connection, setConnection] = useState(0);
-    const client = useQueryClient();
     const status = useQuery({
         queryKey: ["status", connection],
         queryFn: ({ signal }) => getStatus(credential, signal),
         enabled: credential.length > 0,
         retry: false,
-        refetchInterval: 10_000,
+        refetchInterval: (query) => (query.state.status === "error" ? false : 10_000),
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+        gcTime: 0,
     });
 
     return (
@@ -37,7 +39,6 @@ export function Overview() {
                     <form
                         onSubmit={(event) => {
                             event.preventDefault();
-                            client.clear();
                             setConnection((value) => value + 1);
                             setCredential(token.trim());
                             setToken("");
@@ -69,7 +70,7 @@ export function Overview() {
                             className="secondary"
                             onClick={() => {
                                 setCredential("");
-                                client.clear();
+                                setConnection((value) => value + 1);
                             }}
                         >
                             Disconnect

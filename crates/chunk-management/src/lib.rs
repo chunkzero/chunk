@@ -11,6 +11,8 @@ use axum::{
     routing::get,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tower_http::services::{ServeDir, ServeFile};
 
 /// Configuration supplied by the backend, never exposed to the browser.
@@ -50,6 +52,7 @@ fn router(config: &Config) -> io::Result<Router> {
     }
     let token = HeaderValue::from_str(&format!("Bearer {}", config.token))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid management token"))?;
+    let token: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let api = Router::new()
         .route("/status", get(status))
         .fallback(|| async { StatusCode::NOT_FOUND })
@@ -74,8 +77,13 @@ async fn status() -> Json<Status> {
     })
 }
 
-async fn authorize(State(expected): State<HeaderValue>, request: Request, next: Next) -> Response {
-    if request.headers().get(header::AUTHORIZATION) != Some(&expected) {
+async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Next) -> Response {
+    let supplied = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .map_or(&[][..], HeaderValue::as_bytes);
+    let supplied: [u8; 32] = Sha256::digest(supplied).into();
+    if !bool::from(supplied.ct_eq(&expected)) {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::WWW_AUTHENTICATE, "Bearer")
@@ -104,7 +112,12 @@ mod tests {
             token: "test-token".into(),
         })
         .unwrap();
-        for token in [None, Some("Bearer wrong")] {
+        for token in [
+            None,
+            Some("Bearer wrong"),
+            Some("Bearer test-tokem"),
+            Some("Bearer test-token-extra"),
+        ] {
             let mut request = Request::builder().uri("/api/status");
             if let Some(token) = token {
                 request = request.header(header::AUTHORIZATION, token);

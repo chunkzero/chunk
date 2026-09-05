@@ -5,6 +5,6 @@ connect outbound to the Rust supervisor, execute session commands, integrate
 player frame streams with Minestom, and report readiness and session state.
 Generated function clients use its internal transport implementation.
 
-This remains a build scaffold. Public developer-facing types belong in
-`jvm/api`; generated protobuf types are an implementation dependency.
-There is no separate block framework or required block runtime plugin.
+This remains a build scaffold. Generated protobuf types are an implementation
+dependency. A public API module will be introduced with the first
+developer-facing SDK types.
