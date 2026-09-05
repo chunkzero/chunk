@@ -6,7 +6,7 @@
 //! health up, player frame streams in both directions, and `EdgeCall`
 //! relayed to the edge. Restarts a process with its players held at the edge.
 //!
-//! A `Host` is the backend that provides the machine: a plain local process,
-//! a container runtime, a cloud sandbox. Hosts know how to start, pause,
-//! resume and stop; the supervisor knows what a session process is. Isolation
-//! per app is by process, container or microVM depending on the host.
+//! Supervises the JVM on its own host and reports inventory, readiness, and
+//! capacity to a reconciler. Remote host provisioning belongs to chunk-control
+//! or an external platform; this supervisor does not provision other machines.
+//! The reconciliation client and lifecycle services are not implemented yet.

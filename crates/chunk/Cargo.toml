@@ -20,8 +20,10 @@ chunk-build = { path = "../chunk-build" }
 chunk-control = { path = "../chunk-control" }
 chunk-edge = { path = "../chunk-edge", default-features = false }
 chunk-runtime = { path = "../chunk-runtime" }
-clap = { version = "4", features = ["derive"] }
+chunk-management = { path = "../chunk-management" }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

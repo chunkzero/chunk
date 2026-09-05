@@ -3,5 +3,6 @@ plugins {
 }
 
 dependencies {
-    api(project(":jvm:proto"))
+    api(project(":jvm:api"))
+    implementation(project(":jvm:proto"))
 }

@@ -12,7 +12,7 @@ One binary, `chunk`, in four roles:
 
 | role      | command         | hosts                                                       |
 | --------- | --------------- | ----------------------------------------------------------- |
-| edge      | `chunk edge`    | player connections, app runtimes and databases, `EdgeCall`  |
+| edge      | `chunk edge`    | player connections, app runtimes, databases, dashboard and management API |
 | runtime   | `chunk runtime` | session processes on a host; terminates their connection    |
 | control   | `chunk control` | directory, placement, provisioning, cookie keys             |
 | toolchain | `chunk dev` and friends | the build pipeline, codegen, dev server              |
@@ -28,7 +28,7 @@ Self-hosting runs the three as separate processes on one box or many.
              │ Players frames, EdgeCall relay   ▲
              ▼                                  │ Directory
            runtime ─── Runtime.Attach ───▶ session process (JVM)
-             │ Host: local process | container | sandbox
+             │ JVM supervision; host provisioning belongs to control
 ```
 
 ## The one connection rule
@@ -65,14 +65,16 @@ Layered bottom to top. A crate may depend only on crates in rows above it.
 | `chunk-protocol-derive` | wire codec and packet derives                            | nothing                             |
 | `chunk-protocol-codegen` | packet generation from pinned datasets                  | nothing                             |
 | `chunk-protocol` | Minecraft wire protocol, no sockets                             | protocol-derive, protocol-codegen    |
+| `chunk-assets` | immutable deployment objects; local storage and optional S3 | nothing |
+| `chunk-management` | static dashboard and authenticated management HTTP | nothing |
 | `chunk-store`    | per-app SQLite, single writer, subscriptions, durable jobs      | contract                            |
 | `chunk-js`       | QuickJS executor behind an engine-independent interface         | contract                            |
 | `chunk-proxy`    | connection ownership: login, configuration, relay, park, move   | protocol, proto                     |
 | `chunk-edge`     | app hosting: functions, events, primitives, `EdgeCall`, packs   | contract, proto, store, js, proxy   |
-| `chunk-runtime`  | session process supervision and the `Host` trait                | contract, proto                     |
-| `chunk-control`  | directory, placement, provisioning                              | contract, proto                     |
+| `chunk-runtime`  | local JVM supervision and reconciliation client                | contract, proto                     |
+| `chunk-control`  | directory, placement, reconciliation, host provisioning          | contract, proto                     |
 | `chunk-build`    | edge compiler, codegen, manifest                                | contract, js                        |
-| `chunk`          | the binary: CLI and the three long-running roles                | edge, runtime, control, build       |
+| `chunk`          | the binary: CLI and the three long-running roles                | edge, runtime, control, build, management|
 
 Rules the layering encodes:
 
@@ -84,9 +86,10 @@ Rules the layering encodes:
   store-backed capabilities on `ctx`, so the database outlives any runtime.
 - Nothing in Rust ever sees a Minestom type. The manifest and contract are the
   whole of what chunk knows about an app.
-- `chunk-runtime` knows what a session process is. A `Host` knows how to get a
-  machine and start, pause, resume and stop a process on it. Host backends
-  are modules (later feature flags) inside `chunk-runtime`, not crates.
+- `chunk-runtime` knows what a session process is. The controller owns remote
+  host provisioning. Local/container adapters belong in `chunk-control`;
+  Fly integration belongs in a separate private platform. Suspend/resume is
+  an optional backend capability.
 - `chunk-build` uses the same executor as production for the capability-free
   compiler pass, so "declarations are pure" is checked by the real engine.
 
@@ -94,16 +97,16 @@ Rules the layering encodes:
 
 | module                | artifact             | responsibility                                                     |
 | --------------------- | -------------------- | ------------------------------------------------------------------ |
+| `jvm/api` | `chunk-api` | public session SDK boundary (currently a build scaffold) |
 | `jvm/proto`           | `chunk-proto`        | Kotlin and Java bindings generated from `proto/`                   |
-| `jvm/runtime`         | `chunk-runtime`      | the process end of the one connection; what `block-core` builds on |
-| `jvm/build-api`       | `chunk-build-api`    | `BuildContext` and hooks that `block-build` and overworld implement |
+| `jvm/runtime`         | `chunk-runtime`      | session execution and Minestom integration behind the public API |
+| `jvm/build-api`       | `chunk-build-api`    | build extension contracts for chunk and overworld |
 | `jvm/gradle-plugin`   | `dev.chunkzero.chunk`| maps the layout onto Gradle; driven by the `chunk` binary          |
 
-`jvm/runtime` is the only chunk code inside a session process. It exposes
-the command stream, per-player frame streams and `EdgeCall`; block plugs the
-frame stream into Minestom and generates the `Edge` client over `EdgeCall`.
-`jvm/build-api` is separate from the plugin so block and overworld depend on
-a small API rather than on Gradle.
+The JVM SDK absorbs the essential functionality previously proposed as block.
+`jvm/api` is the public boundary; `jvm/runtime` owns implementation and keeps
+protobuf dependencies internal. Both are currently scaffolds. Overworld
+remains an optional layer; it does not own generic asset delivery.
 
 ## TypeScript
 
@@ -112,6 +115,18 @@ declarations build descriptors; they do nothing at module initialization. It
 targets ES2023 with no DOM and no Node types because the QuickJS runtime
 supplies only the language. The bundler (Rolldown) is embedded in
 `chunk-build`; apps never configure it.
+
+`apps/dashboard` is a React/Vite CSR application using TanStack Router and
+Query. The binary serves its built files and `/api/status` on an optional
+management listener alongside Minecraft TCP. All current management API data
+requires an operator bearer token. Only status exists; lifecycle controls,
+asset uploads, and live event subscriptions are not implemented yet.
+
+`chunk-assets` is an independent object-store foundation. It publishes and
+verifies immutable SHA-256 objects using local disk or an optional S3 client.
+It is not wired to the management API or CLI yet; streaming transfers,
+directory manifests, authorization, and deployment references belong to the
+next asset workflow. The initial API buffers each object in memory.
 
 ## Transport
 
@@ -127,7 +142,7 @@ length prefix, compression or encryption.
 - **R1.** One binary for toolchain and platform. Roles are subcommands.
 - **R2.** The session process is always the gRPC client. Runtime commands,
   delivery and withdrawal travel down the `Attach` stream (see above).
-- **R3.** Host backends live inside `chunk-runtime` as modules, not as
+- **R3.** Host backends live inside `chunk-control` as modules, not as
   separate crates, until one needs a dependency the others should not carry.
 - **R4.** The proxy and the app runtime are separate crates joined by
   `chunk-edge`, so connection ownership can be tested without JavaScript and
@@ -138,8 +153,8 @@ length prefix, compression or encryption.
 ## Open here
 
 Carried from the knowledgebase and still open: O4 what a session does when
-the edge is unreachable, O5 registry consistency across processes, O7 edge
-per region or per app, O8 the inward frame format, O9 transfer cookie keys.
+the edge is unreachable, O5 registry consistency across processes, O7 backend
+recovery and future distribution, O8 the inward frame format, O9 transfer cookie keys.
 New in this repository:
 
 - Type checking edge code needs a TypeScript compiler. Whether `chunk build`

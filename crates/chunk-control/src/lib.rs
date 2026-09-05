@@ -8,3 +8,8 @@
 //!
 //! Serves `Directory` over the internal transport. Runs as `chunk control`
 //! when self-hosting, or in-process for `chunk run` and `chunk dev`.
+//!
+//! Owns provider-neutral reconciliation and local/container host provisioning.
+//! Runtimes report inventories and receive assignments through a public protocol.
+//! Fly provisioning and commercial policy belong in a separate private platform.
+//! These control services and adapters are not implemented yet.

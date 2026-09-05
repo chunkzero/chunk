@@ -1,6 +1,6 @@
 # chunk
 
-**Cloudflare for Minecraft servers.** chunk is the toolchain, the edge, the
+**A self-hosted application platform for Minecraft servers.** chunk is the toolchain, the edge, the
 session runtime, and the control plane for the chunkzero platform. It owns the
 player's connection, runs an application's coordination code at the edge, and
 supervises the JVM processes where play happens.
@@ -13,7 +13,7 @@ An application has two tiers, chosen by what the code needs:
   players and packs. chunk compiles it into one module and runs it in a
   per-app QuickJS runtime with no ambient capabilities.
 - **Session** code is Kotlin or Java with Minestom fully visible, written
-  against the [block](https://github.com/chunkzero) framework and run in JVM
+  against chunk's JVM SDK (formerly planned as block) and run in JVM
   processes that chunk starts, supervises and restarts with players held.
 
 chunk sits between them the way a proxy sits between players and backends,
@@ -28,6 +28,7 @@ and restarts; no app code ever opens a socket.
 | `crates/`       | Rust: the `chunk` binary and the platform and toolchain crates   |
 | `jvm/`          | Kotlin: the session-side runtime client, build API, Gradle plugin |
 | `packages/`     | TypeScript: `@chunk/edge`, the module edge code imports          |
+| `apps/dashboard/` | React CSR dashboard; static assets served by the customer backend |
 | `proto/`        | the internal gRPC transport, shared by Rust and the JVM          |
 | `docs/`         | architecture notes for this repository                           |
 
@@ -48,6 +49,38 @@ just ready
 ```
 
 `just --list` shows the available tasks.
+
+### Dashboard scaffold
+
+Run `pnpm install --frozen-lockfile` and `just dashboard-build`. Set
+`CHUNK_MANAGEMENT_TOKEN` to an operator-selected secret, then start:
+
+```sh
+cargo run -p chunk -- edge --dashboard-dir apps/dashboard/dist
+```
+
+Open `http://127.0.0.1:8080` and enter that token. The dashboard and management
+API run alongside the Minecraft listener in the same process, with no
+production JavaScript server. `--management-bind` changes the HTTP listener;
+use a TLS reverse proxy or SSH tunnel for remote access. The token grants
+operator access and is kept only in browser memory.
+
+The dashboard currently reports backend version and capability availability.
+Functions, session allocation, and asset uploads are not implemented. For UI
+development, `just dashboard-dev` starts Vite and forwards `/api` to port 8080.
+
+### Asset storage foundation
+
+`chunk-assets` publishes immutable SHA-256 objects over an object-store
+interface. Local filesystem storage is available by default; the optional
+`s3` feature exposes an S3-compatible client builder for a future controller.
+This library is not yet wired into the CLI or HTTP API. Its initial buffered
+read/write API is intended for foundational tests, not large map transfers.
+
+The intended authoring flow keeps binary files in ignored local `assets/`
+directories and commits only `chunk.assets.json`. Both self-hosted and future
+private platforms provide object storage; push/pull, streaming transfers,
+directory manifests, and deployment pinning remain to be implemented.
 
 ### Run the proxy
 
