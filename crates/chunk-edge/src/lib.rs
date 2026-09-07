@@ -1,5 +1,6 @@
 //! Runs the edge player listener through `chunk-proxy`.
-//! Application hosting is not yet implemented.
+//! Environment backends and their embedded sync engine are not implemented.
+//! This entry point does not require proxy and backend process colocation.
 
 use std::{future::Future, io, net::SocketAddr};
 

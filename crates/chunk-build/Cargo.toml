@@ -1,6 +1,6 @@
 [package]
 name = "chunk-build"
-description = "Edge compiler, code generation and manifest writer"
+description = "Application bundling, code generation, JAR and asset build orchestration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

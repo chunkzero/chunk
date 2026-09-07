@@ -8,7 +8,7 @@ importers:
 
   .: {}
 
-  packages/edge:
+  packages/server:
     devDependencies:
       typescript:
         specifier: ^7.0.2
