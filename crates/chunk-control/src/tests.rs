@@ -32,6 +32,7 @@ struct FakeRuntime {
     bindings: Mutex<BTreeMap<String, Binding>>,
     available: AtomicBool,
     lost_reply: AtomicBool,
+    lost_withdrawal: AtomicBool,
     stopped: AtomicBool,
     withdrawals: AtomicUsize,
 }
@@ -194,6 +195,9 @@ impl Gameplay for RuntimeService {
             self.withdrawals.fetch_add(1, Ordering::AcqRel);
             binding.phase = DeliveryPhase::Closed;
         }
+        if self.lost_withdrawal.swap(false, Ordering::AcqRel) {
+            return Err(Status::deadline_exceeded("lost withdrawal reply"));
+        }
         Ok(Response::new(withdrawal))
     }
 }
@@ -248,6 +252,7 @@ impl Fixture {
             bindings: Mutex::default(),
             available: AtomicBool::new(true),
             lost_reply: AtomicBool::new(false),
+            lost_withdrawal: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             withdrawals: AtomicUsize::new(0),
         });
@@ -327,6 +332,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
             session_type: "bridge".into(),
             machine_profile: "local".into(),
         }),
+        source: None,
     }
 }
 
@@ -494,5 +500,186 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
     assert!(state.claims["active"].phase == Phase::Released);
     assert!(state.players.values().all(|p| p.current.is_none()));
     assert!(state.hosts.values().all(|h| h.retired));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activation() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let source = request("source", &uuid);
+    let first = control.claim(source.clone()).await.unwrap();
+    fixture
+        .runtime
+        .bindings
+        .lock()
+        .unwrap()
+        .get_mut("source")
+        .unwrap()
+        .phase = DeliveryPhase::Arrived;
+    control
+        .activate(ActivateClaim {
+            claim: first.claim.clone(),
+        })
+        .await
+        .unwrap();
+    let command = chunk_proto::v1::MovePlayerRequest {
+        operation_id: "move".into(),
+        player_id: uuid.clone(),
+        demand: Some(SessionDemand {
+            key: "arena".into(),
+            ..source.demand.clone().unwrap()
+        }),
+    };
+    let destination = control.move_player(command.clone()).unwrap();
+    assert_eq!(control.poll_move(&source).unwrap().claim.as_ref(), Some(&destination));
+    let second = control.claim(destination.clone()).await.unwrap();
+    let activation = ActivateClaim {
+        claim: second.claim.clone(),
+    };
+    assert!(control.activate(activation.clone()).await.is_err());
+    assert_eq!(
+        second.claim.as_ref().unwrap().membership_generation,
+        first.claim.as_ref().unwrap().membership_generation
+    );
+    assert_eq!(second.claim.as_ref().unwrap().delivery_generation, 2);
+    assert_ne!(
+        second.delivery.as_ref().unwrap().session,
+        first.delivery.as_ref().unwrap().session
+    );
+    assert_eq!(fixture.host.ids.lock().unwrap().len(), 1);
+    let owner = control.state().unwrap().players[&uuid].clone();
+    assert_eq!(owner.current.as_deref(), Some("source"));
+    assert_eq!(owner.pending.as_deref(), Some("move"));
+    assert!(
+        control
+            .move_player(chunk_proto::v1::MovePlayerRequest {
+                operation_id: "competing".into(),
+                ..command.clone()
+            })
+            .is_err()
+    );
+    fixture.runtime.available.store(false, Ordering::Release);
+    assert!(control.cancel(source.clone()).await.is_err());
+    assert!(control.activate(activation.clone()).await.is_err());
+    fixture.runtime.available.store(true, Ordering::Release);
+    assert_eq!(
+        control.inspect(source.clone()).await.unwrap().phase,
+        ClaimPhase::Withdrawing as i32
+    );
+    fixture.runtime.lost_withdrawal.store(true, Ordering::Release);
+    assert!(control.cancel(source.clone()).await.is_err());
+    assert!(control.activate(activation.clone()).await.is_err());
+    drop(control);
+    let control = fixture.control();
+    assert_eq!(
+        control.inspect(source.clone()).await.unwrap().phase,
+        ClaimPhase::Released as i32
+    );
+    assert!(control.claim(request("new-login", &uuid)).await.is_err());
+    fixture.runtime.lost_reply.store(true, Ordering::Release);
+    assert!(control.activate(activation).await.is_err());
+    fixture.runtime.bindings.lock().unwrap().get_mut("move").unwrap().phase = DeliveryPhase::Arrived;
+    assert_eq!(
+        control.inspect(destination.clone()).await.unwrap().phase,
+        ClaimPhase::Arrived as i32
+    );
+    control.cancel(source).await.unwrap();
+    let owner = control.state().unwrap().players[&uuid].clone();
+    assert_eq!(owner.current.as_deref(), Some("move"));
+    assert!(owner.pending.is_none());
+    assert_eq!(control.move_player(command).unwrap(), destination);
+    assert_eq!(fixture.runtime.bindings.lock().unwrap().len(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let source = request("source", &uuid);
+    let first = control.claim(source.clone()).await.unwrap();
+    fixture
+        .runtime
+        .bindings
+        .lock()
+        .unwrap()
+        .get_mut("source")
+        .unwrap()
+        .phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
+    for (operation, prepare) in [("queued", false), ("prepared", true)] {
+        let destination = control
+            .move_player(chunk_proto::v1::MovePlayerRequest {
+                operation_id: operation.into(),
+                player_id: uuid.clone(),
+                demand: Some(SessionDemand {
+                    key: "arena".into(),
+                    ..source.demand.clone().unwrap()
+                }),
+            })
+            .unwrap();
+        if prepare {
+            control.claim(destination.clone()).await.unwrap();
+        }
+        control.cancel(destination.clone()).await.unwrap();
+        control.cancel(destination.clone()).await.unwrap();
+        assert!(control.claim(destination).await.is_err());
+        assert!(control.poll_move(&source).unwrap().claim.is_none());
+        assert_eq!(
+            control.inspect(source.clone()).await.unwrap().phase,
+            ClaimPhase::Arrived as i32
+        );
+        assert!(control.state().unwrap().players[&uuid].pending.is_none());
+    }
+    assert_eq!(fixture.runtime.bindings.lock().unwrap().len(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let source = request("source", &uuid);
+    let first = control.claim(source.clone()).await.unwrap();
+    fixture
+        .runtime
+        .bindings
+        .lock()
+        .unwrap()
+        .get_mut("source")
+        .unwrap()
+        .phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
+    let command = chunk_proto::v1::DrainRequest {
+        operation_id: "drain".into(),
+        player_id: uuid,
+        timeout_seconds: 10,
+    };
+    let drained = control.drain(command.clone()).unwrap();
+    control.reconcile_all().await.unwrap();
+    assert!(control.poll_move(&source).unwrap().claim.is_some());
+    assert!(!fixture.runtime.stopped.load(Ordering::Acquire));
+    control
+        .claim(request("new-login", &uuid::Uuid::new_v4().to_string()))
+        .await
+        .unwrap();
+    let state = control.state().unwrap();
+    assert_ne!(state.sessions[&state.claims["new-login"].session].host, drained.host_id);
+    assert_eq!(control.drain(command.clone()).unwrap().deadline_ms, drained.deadline_ms);
+    control
+        .update(|state| {
+            state.drains.get_mut("drain").unwrap().deadline_ms = 0;
+            Ok(())
+        })
+        .unwrap();
+    drop(control);
+    let control = fixture.control();
+    control.reconcile_all().await.unwrap();
+    assert!(fixture.runtime.stopped.load(Ordering::Acquire));
+    assert!(control.drain(command).unwrap().stopped);
     fixture.close().await;
 }

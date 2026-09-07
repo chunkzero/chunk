@@ -136,7 +136,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     target: &GameplayTarget,
     deadline: Duration,
 ) -> io::Result<()> {
-    let (mut authenticated, settings, (mut destination, config)) =
+    let (mut authenticated, mut settings, (mut destination, config)) =
         configuration::wait_for_destination(authenticated, destination(target), deadline).await?;
     if config.protocol != authenticated.protocol_version {
         return Err(invalid_data("destination protocol differs from authenticated client"));
@@ -150,7 +150,11 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut internal = within(deadline, login(&authenticated, &settings, prepared)).await?;
     within(
         deadline,
-        Box::pin(configuration::relay(&mut authenticated.transport, &mut internal)),
+        Box::pin(configuration::relay(
+            &mut authenticated.transport,
+            &mut internal,
+            &mut settings,
+        )),
     )
     .await?;
     tracing::info!("authenticated player admitted to Minestom listener");

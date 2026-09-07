@@ -13,6 +13,11 @@ export function route() {
   return { key: "lobby", session_type: "lobby", machine_profile: "local" };
 }
 
+export function move(_ctx, { destination }) {
+  if (!["lobby", "arena"].includes(destination.session_type)) throw new Error("Unknown destination");
+  return destination;
+}
+
 export function balance(ctx, { uuid }) { return ctx.db.get("players", uuid)?.coins ?? 0; }
 export function visits(ctx, { uuid }) { return ctx.db.get("players", uuid)?.visits ?? 0; }
 

@@ -15,6 +15,23 @@ pub(crate) struct State {
     pub sessions: BTreeMap<String, SessionState>,
     pub players: BTreeMap<String, PlayerState>,
     pub claims: BTreeMap<String, Claim>,
+    #[serde(default)]
+    pub moves: BTreeMap<String, MoveIntent>,
+    #[serde(default)]
+    pub drains: BTreeMap<String, Drain>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Drain {
+    pub request: Vec<u8>,
+    pub host: String,
+    pub deadline_ms: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct MoveIntent {
+    pub request: Vec<u8>,
+    pub canceled: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +54,8 @@ pub(crate) struct PlayerState {
     pub membership_generation: u64,
     pub delivery_generation: u64,
     pub current: Option<String>,
+    #[serde(default)]
+    pub pending: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

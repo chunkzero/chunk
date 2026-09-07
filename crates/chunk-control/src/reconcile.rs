@@ -31,6 +31,7 @@ impl Control {
             let request = chunk_proto::v1::ClaimRequest::decode(claim.request.as_slice())?;
             let expired = !claim.activated && crate::now_ms().saturating_sub(claim.created_at_ms) > 60_000;
             let cancel = expired
+                || (claim.phase == Phase::Reserved && state.sessions[&claim.session].retired)
                 || claim.phase == Phase::Withdrawing
                 || (claim.assignment.is_none() && stopped.contains(&state.sessions[&claim.session].host));
             let control = self.clone();
@@ -50,6 +51,7 @@ impl Control {
             });
         }
         while tasks.join_next().await.is_some() {}
+        self.progress_drains().await?;
         Ok(())
     }
 }

@@ -1,7 +1,9 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
 mod delivery;
+mod drain;
 mod host;
+mod moves;
 mod placement;
 mod reconcile;
 mod rpc;

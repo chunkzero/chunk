@@ -69,8 +69,9 @@ latest teleport acknowledgment.
 Withdrawal fences output immediately, waits for pending Minestom spawn callbacks and the join stage,
 removes the old player and completes its leave hook before releasing UUID ownership.
 The proxy must acknowledge withdrawal before activating that UUID elsewhere in the
-JVM. This change supplies that primitive; client-preserving moves are integrated
-with proxy/control routing separately.
+JVM. Managed proxy moves prepare a new TCP delivery while the source plays,
+confirm withdrawal, drive both client configuration acknowledgments, and activate
+the destination on the existing public connection.
 
 The optional `scope.backend` client is bound to the process deployment and session
 identity. Control's `--backend-file` passes the private connection to supervised
