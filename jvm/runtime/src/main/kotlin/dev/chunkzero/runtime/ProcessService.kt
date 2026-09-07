@@ -3,6 +3,8 @@ package dev.chunkzero.runtime
 import chunk.v1.ProcessControlGrpc
 import chunk.v1.Supervision.ProcessIdentity
 import chunk.v1.Supervision.ProcessInventory
+import chunk.v1.Supervision.SessionCommand
+import chunk.v1.Supervision.SessionInventory
 import io.grpc.Status
 import io.grpc.stub.StreamObserver
 import java.util.concurrent.CountDownLatch
@@ -11,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal class ProcessService(
     private val identity: ProcessIdentity,
     private val gameplay: GameplayService,
+    private val sessions: SessionManager,
     private val ticks: AtomicLong,
     private val shutdown: CountDownLatch,
 ) : ProcessControlGrpc.ProcessControlImplBase() {
@@ -32,6 +35,43 @@ internal class ProcessService(
                 .build(),
         )
         response.onCompleted()
+    }
+
+    override fun createSession(
+        request: SessionCommand,
+        response: StreamObserver<SessionInventory>,
+    ) {
+        sessionReply(request, response) { sessions.create(request) }
+    }
+
+    override fun finishSession(
+        request: SessionCommand,
+        response: StreamObserver<SessionInventory>,
+    ) {
+        sessionReply(request, response) { sessions.finish(request) }
+    }
+
+    private fun sessionReply(
+        request: SessionCommand,
+        response: StreamObserver<SessionInventory>,
+        action: () -> java.util.concurrent.CompletableFuture<SessionInventory>,
+    ) {
+        if (request.identity != identity) {
+            response.onError(Status.FAILED_PRECONDITION.asRuntimeException())
+            return
+        }
+        action().whenComplete { result, error ->
+            if (error !=
+                null
+            ) {
+                response.onError(
+                    Status.FAILED_PRECONDITION.withDescription("Session operation failed").asRuntimeException(),
+                )
+            } else {
+                response.onNext(result)
+                response.onCompleted()
+            }
+        }
     }
 
     override fun stopProcess(

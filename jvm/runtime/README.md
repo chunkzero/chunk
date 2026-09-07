@@ -18,8 +18,8 @@ The runtime generates separate child and proxy-facing credentials and writes the
 private connection file only after authenticated registration and advancing ticks.
 Diagnostics go to `.chunk/runtime.log`. Ctrl-C stops the supervised JVM within a
 bounded deadline and removes the connection record. Check existing servers before
-starting the proxy on port 25565. The current fixture supplies one grass session
-named `bridge`; multiple sessions and control-plane placement follow separately.
+starting the proxy on port 25565. The default fixture supplies a grass session named `bridge`. Session commands can
+create independent session instances and safely withdraw players before disposal.
 
 Registration freezes deployment, runtime/process incarnation, machine profile,
 artifact identity, protocol version and both JVM endpoints. Inventory RPCs
@@ -42,3 +42,8 @@ The standalone bridge remains available with `CHUNK_PROCESS_TOKEN` (at least 32
 characters), `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT`; without
 `CHUNK_SUPERVISOR` it binds control on 25566 and uses a fixed fixture incarnation.
 Production local launches should use the supervisor.
+
+Sessions own their instances, event handlers and scoped resources. Session hooks
+run through the process tick executor. Withdrawal waits for pending joins and
+initialization, removes the player and runs its leave hook before releasing the
+ownership fence. Arrival is reported after spawn and teleport acknowledgment.

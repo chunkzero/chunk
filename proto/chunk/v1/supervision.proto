@@ -15,6 +15,17 @@ service Supervisor {
 service ProcessControl {
   rpc Inventory(ProcessIdentity) returns (ProcessInventory);
   rpc StopProcess(ProcessIdentity) returns (ProcessIdentity);
+  rpc CreateSession(SessionCommand) returns (SessionInventory);
+  rpc FinishSession(SessionCommand) returns (SessionInventory);
+}
+
+message SessionCommand {
+  ProcessIdentity identity = 1;
+  string operation_id = 2;
+  SessionRef session = 3;
+  uint64 generation = 4;
+  string session_type = 5;
+  uint32 capacity = 6;
 }
 
 message ProcessIdentity {
@@ -39,6 +50,7 @@ enum DeliveryPhase {
   DELIVERY_PHASE_ATTACHED = 2;
   DELIVERY_PHASE_ARRIVED = 3;
   DELIVERY_PHASE_CLOSED = 4;
+  DELIVERY_PHASE_WITHDRAWING = 5;
 }
 
 message DeliveryInventory {

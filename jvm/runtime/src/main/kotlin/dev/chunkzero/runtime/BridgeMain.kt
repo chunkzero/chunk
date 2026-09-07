@@ -26,9 +26,7 @@ fun main() {
     val minecraft = MinecraftServer.init()
     MinecraftServer.setCompressionThreshold(0)
     val process = MinecraftServer.process()
-    val instance = process.instance().createInstanceContainer()
-    instance.setChunkSupplier(::LightingChunk)
-    instance.setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
+    MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
     val supervisor = environment.supervisor
     val identity =
         ProcessIdentity
@@ -42,7 +40,9 @@ fun main() {
             .build()
     val shutdown = CountDownLatch(1)
     val ticks = AtomicLong()
-    val gameplay = GameplayService(deployment, identity.generation, instance, runtimeId = identity.runtimeId)
+    val tickExecutor = TickExecutor()
+    val sessions = SessionManager(tickExecutor, mapOf("bridge" to { FlatSession() }))
+    val gameplay = GameplayService(deployment, identity.generation, sessions, runtimeId = identity.runtimeId)
     val server =
         NettyServerBuilder
             .forAddress(InetSocketAddress("127.0.0.1", if (supervisor == null) 25566 else 0))
@@ -50,7 +50,7 @@ fun main() {
             .maxInboundMessageSize(65_536)
             .intercept(authentication)
             .addService(gameplay)
-            .addService(ProcessService(identity, gameplay, ticks, shutdown))
+            .addService(ProcessService(identity, gameplay, sessions, ticks, shutdown))
             .build()
 
     try {
@@ -66,12 +66,29 @@ fun main() {
     MinecraftServer
         .getSchedulerManager()
         .buildTask {
+            tickExecutor.flush()
             gameplay.flush()
             ticks.incrementAndGet()
         }.repeat(
             net.minestom.server.timer.TaskSchedule
                 .tick(1),
         ).schedule()
+    sessions
+        .create(
+            chunk.v1.Supervision.SessionCommand
+                .newBuilder()
+                .setIdentity(
+                    identity,
+                ).setOperationId("fixture")
+                .setSession(
+                    chunk.v1.Common.SessionRef
+                        .newBuilder()
+                        .setId("bridge"),
+                ).setGeneration(1)
+                .setSessionType("bridge")
+                .setCapacity(128)
+                .build(),
+        ).get(5, TimeUnit.SECONDS)
     val registration =
         supervisor?.let {
             Registration(
@@ -99,4 +116,14 @@ fun main() {
     println("Gameplay ready on 127.0.0.1:${server.port}; Minecraft listener at ${gameplay.endpoint}")
     shutdown.await()
     close()
+}
+
+internal class FlatSession : Session() {
+    override fun onCreate(scope: SessionScope): java.util.concurrent.CompletionStage<Unit> {
+        val instance = scope.createInstance()
+        instance.setChunkSupplier(::LightingChunk)
+        instance.setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
+        return java.util.concurrent.CompletableFuture
+            .completedFuture(Unit)
+    }
 }

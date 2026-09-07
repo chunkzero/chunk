@@ -6,9 +6,9 @@ use std::{
 };
 
 use chunk_proto::v1::{
-    ConfigurationRequest, ConfigurationResponse, PlayerDelivery, PlayerPreparation, ProcessIdentity, ProcessInventory,
-    ProcessRegistration, gameplay_client::GameplayClient, gameplay_server,
-    process_control_client::ProcessControlClient, process_control_server, supervisor_server,
+    ConfigurationRequest, ConfigurationResponse, PlayerDelivery, PlayerPreparation, PlayerWithdrawal, ProcessIdentity,
+    ProcessInventory, ProcessRegistration, SessionCommand, SessionInventory, gameplay_client::GameplayClient,
+    gameplay_server, process_control_client::ProcessControlClient, process_control_server, supervisor_server,
 };
 use prost::Message;
 use tokio::sync::watch;
@@ -173,6 +173,27 @@ impl supervisor_server::Supervisor for Service {
 
 #[tonic::async_trait]
 impl gameplay_server::Gameplay for Service {
+    async fn withdraw_player(&self, request: Request<PlayerWithdrawal>) -> Result<Response<PlayerWithdrawal>, Status> {
+        self.0.authorize(&request, false)?;
+        let withdrawal = request.into_inner();
+        let binding = self
+            .0
+            .bindings
+            .lock()
+            .map_err(|_| Status::internal("bindings poisoned"))?
+            .get(&withdrawal.operation_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("unknown delivery"))?;
+        if binding.delivery.owner_generation != withdrawal.owner_generation {
+            return Err(Status::failed_precondition("stale owner generation"));
+        }
+        let result = GameplayClient::new(binding.registered.channel.clone())
+            .withdraw_player(self.0.request(withdrawal))
+            .await?;
+        binding.closed.store(true, Ordering::Release);
+        Ok(result)
+    }
+
     async fn configuration(
         &self,
         request: Request<ConfigurationRequest>,
@@ -253,6 +274,37 @@ impl gameplay_server::Gameplay for Service {
 
 #[tonic::async_trait]
 impl process_control_server::ProcessControl for Service {
+    async fn create_session(&self, request: Request<SessionCommand>) -> Result<Response<SessionInventory>, Status> {
+        self.0.authorize(&request, false)?;
+        self.0.identity(
+            request
+                .get_ref()
+                .identity
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing identity"))?,
+        )?;
+        if self.0.status.borrow().phase != Phase::Ready || self.0.shutdown.is_cancelled() {
+            return Err(Status::unavailable("runtime not ready"));
+        }
+        ProcessControlClient::new(self.0.registered()?.channel)
+            .create_session(self.0.request(request.into_inner()))
+            .await
+    }
+
+    async fn finish_session(&self, request: Request<SessionCommand>) -> Result<Response<SessionInventory>, Status> {
+        self.0.authorize(&request, false)?;
+        self.0.identity(
+            request
+                .get_ref()
+                .identity
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing identity"))?,
+        )?;
+        ProcessControlClient::new(self.0.registered()?.channel)
+            .finish_session(self.0.request(request.into_inner()))
+            .await
+    }
+
     async fn inventory(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessInventory>, Status> {
         self.0.authorize(&request, false)?;
         self.0.identity(request.get_ref())?;
