@@ -3,22 +3,24 @@ use std::{future::Future, io, time::Duration};
 use chunk_protocol::{
     Decode, Packet, VarInt, decode_packet,
     versions::v26_1::{
-        ConfigurationClientInformation, ConfigurationKeepAlive, ConfigurationKeepAliveResponse,
-        ConfigurationPluginResponse,
+        AcknowledgeConfiguration, ConfigurationClientInformation, ConfigurationKeepAlive,
+        ConfigurationKeepAliveResponse, ConfigurationPluginResponse, KnownPacks,
     },
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    time::{Instant, sleep_until, timeout},
+    time::{Instant, sleep_until},
 };
 
-use super::{authentication::Authenticated, transport::invalid_data};
+use super::{
+    authentication::Authenticated,
+    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, within},
+};
 
-const FRAME_LIMIT: usize = 65536;
+pub(super) const FRAME_LIMIT: usize = 65536;
 const CLIENT_INFORMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Keeps the client in configuration until a destination is ready. The caller
 /// receives the authenticated transport and latest client settings, with no
@@ -66,14 +68,14 @@ where
                 let id = next_id;
                 next_id = next_id.wrapping_add(1);
                 // Never cancel a partially written encrypted packet and then reuse the stream.
-                timeout(WRITE_TIMEOUT.min(expires.saturating_duration_since(Instant::now())), authenticated.transport.write_packet(
+                within(WRITE_TIMEOUT.min(expires.saturating_duration_since(Instant::now())), authenticated.transport.write_packet(
                     &ConfigurationKeepAlive { keep_alive_id: id },
-                )).await.map_err(|_| timed_out("configuration write timed out"))??;
+                )).await?;
                 pending_keep_alive = Some((id, Instant::now() + KEEP_ALIVE_TIMEOUT));
             }
             frame = authenticated.transport.read_frame(FRAME_LIMIT) => {
                 let frame = frame?;
-                match VarInt::decode(&mut frame.as_ref()).map_err(invalid_data)?.0 {
+                match packet_id(&frame)? {
                     ConfigurationClientInformation::ID => {
                         information = Some(decode_packet::<ConfigurationClientInformation>(&frame).map_err(invalid_data)?);
                     }
@@ -98,6 +100,88 @@ where
 
 fn timed_out(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
+pub(super) async fn finish<S: AsyncRead + AsyncWrite + Unpin>(
+    transport: &mut Transport<S>,
+    settings: &mut ConfigurationClientInformation,
+    known_packs: &PreparedPackets,
+    registry_and_finish: &PreparedPackets,
+) -> io::Result<()> {
+    within(WRITE_TIMEOUT, transport.write_prepared(known_packs)).await?;
+    loop {
+        let frame = transport.read_frame(FRAME_LIMIT).await?;
+        match packet_id(&frame)? {
+            KnownPacks::ID => {
+                if !decode_packet::<KnownPacks>(&frame)
+                    .map_err(invalid_data)?
+                    .packs
+                    .as_slice()
+                    .is_empty()
+                {
+                    return Err(invalid_data("client selected an unoffered pack"));
+                }
+                break;
+            }
+            _ => configuration_message(&frame, settings)?,
+        }
+    }
+    within(WRITE_TIMEOUT, transport.write_prepared(registry_and_finish)).await?;
+    loop {
+        let frame = transport.read_frame(FRAME_LIMIT).await?;
+        if packet_id(&frame)? == AcknowledgeConfiguration::ID {
+            decode_packet::<AcknowledgeConfiguration>(&frame).map_err(invalid_data)?;
+            return Ok(());
+        }
+        configuration_message(&frame, settings)?;
+    }
+}
+
+fn configuration_message(frame: &[u8], settings: &mut ConfigurationClientInformation) -> io::Result<()> {
+    match packet_id(frame)? {
+        ConfigurationClientInformation::ID => *settings = decode_packet(frame).map_err(invalid_data)?,
+        ConfigurationPluginResponse::ID => {
+            decode_packet::<ConfigurationPluginResponse>(frame).map_err(invalid_data)?;
+        }
+        _ => return Err(invalid_data("unexpected limbo configuration packet")),
+    }
+    Ok(())
+}
+
+pub(super) fn packet_id(mut frame: &[u8]) -> io::Result<i32> {
+    Ok(VarInt::decode(&mut frame).map_err(invalid_data)?.0)
+}
+
+/// Relays the destination's configuration before allowing play traffic.
+pub(super) async fn relay<S, D>(client: &mut Transport<S>, destination: &mut Transport<D>) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    D: AsyncRead + AsyncWrite + Unpin,
+{
+    use chunk_protocol::versions::v26_1::FinishConfiguration;
+    let mut finishing = false;
+    loop {
+        tokio::select! {
+            frame = destination.read_frame(chunk_protocol::MAX_FRAME_SIZE) => {
+                let frame = frame?;
+                if packet_id(&frame)? == FinishConfiguration::ID {
+                    decode_packet::<FinishConfiguration>(&frame).map_err(invalid_data)?;
+                    finishing = true;
+                }
+                within(WRITE_TIMEOUT, client.write_body(&frame)).await?;
+            }
+            frame = client.read_frame(FRAME_LIMIT) => {
+                let frame = frame?;
+                let acknowledged = packet_id(&frame)? == AcknowledgeConfiguration::ID;
+                if acknowledged {
+                    if !finishing { return Err(invalid_data("premature configuration acknowledgment")); }
+                    decode_packet::<AcknowledgeConfiguration>(&frame).map_err(invalid_data)?;
+                }
+                within(WRITE_TIMEOUT, destination.write_body(&frame)).await?;
+                if acknowledged { return Ok(()); }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -235,9 +235,42 @@ async fn blocked_writes_are_bounded_and_never_reused() {
     advance(WRITE_TIMEOUT).await;
     let error = server.await.unwrap().err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-    assert!(error.to_string().contains("write"));
     assert_eq!(
         client.read_frame(4096).await.unwrap_err().kind(),
         io::ErrorKind::UnexpectedEof
     );
+}
+
+#[tokio::test]
+async fn destination_configuration_relays_settings_and_retains_coalesced_play() {
+    use chunk_protocol::versions::v26_1::{FinishConfiguration, PlayPing};
+    let (mut client, authenticated) = connection(8192);
+    let (internal, backend) = tokio::io::duplex(8192);
+    let mut backend = Transport::new(backend);
+    let task = tokio::spawn(async move {
+        let mut external = authenticated.transport;
+        let mut internal = Transport::new(internal);
+        relay(&mut external, &mut internal).await.unwrap();
+        decode_packet::<PlayPing>(&external.read_frame(FRAME_LIMIT).await.unwrap()).unwrap()
+    });
+    client.write_packet(&information()).await.unwrap();
+    assert_eq!(
+        decode_packet::<ConfigurationClientInformation>(&backend.read_frame(FRAME_LIMIT).await.unwrap()).unwrap(),
+        information()
+    );
+    backend.write_packet(&FinishConfiguration).await.unwrap();
+    decode_packet::<FinishConfiguration>(&client.read_frame(FRAME_LIMIT).await.unwrap()).unwrap();
+    client.write_packet(&AcknowledgeConfiguration).await.unwrap();
+    client.write_packet(&PlayPing { id: 42 }).await.unwrap();
+    decode_packet::<AcknowledgeConfiguration>(&backend.read_frame(FRAME_LIMIT).await.unwrap()).unwrap();
+    assert_eq!(task.await.unwrap().id, 42);
+}
+
+#[tokio::test]
+async fn destination_configuration_rejects_early_acknowledgment() {
+    let (mut client, mut authenticated) = connection(8192);
+    let (internal, _backend) = tokio::io::duplex(8192);
+    client.write_packet(&AcknowledgeConfiguration).await.unwrap();
+    let result = relay(&mut authenticated.transport, &mut Transport::new(internal)).await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
 }

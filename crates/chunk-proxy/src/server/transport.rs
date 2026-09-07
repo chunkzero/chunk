@@ -1,4 +1,4 @@
-use std::{io, io::Write as _};
+use std::{future::Future, io, io::Write as _, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use chunk_protocol::{Decode, Encode, MAX_FRAME_SIZE, Packet, VarInt, decode_frame, encode_packet};
@@ -54,10 +54,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
             decrypt: None,
             compression: None,
         }
-    }
-
-    pub(super) async fn read_setup_ack(&mut self) -> io::Result<u8> {
-        self.stream.read_u8().await
     }
 
     pub(super) fn enable_encryption(&mut self, secret: &[u8; 16]) -> io::Result<()> {
@@ -217,6 +213,14 @@ fn inflate(mut frame: &[u8], threshold: usize, limit: usize) -> io::Result<Bytes
 
 pub(super) fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) async fn within<T>(limit: Duration, future: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "operation timed out"))?
 }
 
 #[cfg(test)]

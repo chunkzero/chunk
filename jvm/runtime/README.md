@@ -1,10 +1,10 @@
 # chunk-runtime (JVM)
 
-The initial Minestom bridge accepts authenticated players over dedicated TCP connections. It never
-opens a Minecraft listener. The Rust proxy owns online authentication, encryption,
-compression and configuration; the bridge supplies its full registry data and
-uses a custom `PlayerConnection` for plain play packets. The pinned Minestom
-release uses protocol 775, compatible with Java Edition 26.1.
+The Minestom bridge accepts prepared players through its normal loopback Minecraft
+listener. The Rust proxy owns online authentication, encryption and compression;
+Minestom owns login admission, configuration and play. A standard `chunk:delivery`
+login plugin exchange presents the capability issued by the authenticated control
+RPC. The pinned Minestom release uses protocol 775, compatible with Java Edition 26.1.
 
 Build with `cargo build -p chunk` and `./gradlew :jvm:runtime:installDist`.
 The JVM application needs Java 25; Gradle resolves its pinned major toolchain.
@@ -27,20 +27,18 @@ Join `127.0.0.1:25565` with an authenticated official 26.1 client. The bridge
 currently provides one grass world named `bridge`. Without `--gameplay`, the
 proxy retains its bounded waiting-world behavior.
 
-Control RPCs require the process credential. Preparation issues a single-use,
-30-second TCP setup capability. Opening that socket creates no player; activation
-is a separate idempotent RPC after client configuration acknowledgment. Delivery validates deployment,
-process generation, protocol and registry digest before creating a player.
-Owner generations reject duplicate deliveries and stale cleanup; TCP streams
-are never replayed. Output is limited to 256 packets and 8 MiB per player;
-slow peers are disconnected. Proxy and JVM writes have five-second
-deadlines. Configuration has the proxy's configured deadline. TCP sockets have five seconds to present a bounded setup message.
-The acceptor is loopback-only and limits concurrent sockets to 128. Operation
-history is bounded to 4096 deliveries per fixture process.
+Control RPCs require the process credential. Preparation validates deployment,
+process generation, protocol and registry digest and issues a single-use,
+30-second capability. Minestom rejects missing, expired, mismatched or replayed
+capabilities before creating a player. The prepared identity includes profile
+properties; client settings travel through normal configuration packets.
+Owner generations fence deliveries. Terminal operation records release their live
+connection references, and history is bounded to 4096 deliveries per fixture.
+Minestom handles socket buffering and graceful kicks. Proxy writes and the login
+plugin exchange have five-second deadlines; configuration uses the proxy's
+configured deadline.
 
 Focused verification: `./gradlew :jvm:runtime:test` and `cargo test -p chunk-proxy`.
-The official 26.1 client verified login, registry exchange, lit world loading,
-movement across chunk boundaries and several minutes of sustained TCP gameplay.
 
 Session management, backend clients, supervisor registration and control-plane
 ownership follow in subsequent changes. The standalone bridge's process

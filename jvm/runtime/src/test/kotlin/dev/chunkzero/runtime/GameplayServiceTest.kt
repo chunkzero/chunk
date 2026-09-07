@@ -3,6 +3,7 @@ package dev.chunkzero.runtime
 import chunk.v1.Common.DeploymentRef
 import chunk.v1.Common.Identity
 import chunk.v1.Common.PlayerRef
+import chunk.v1.Common.Property
 import chunk.v1.Common.SessionRef
 import chunk.v1.GameplayGrpc
 import chunk.v1.GameplayOuterClass.ConfigurationRequest
@@ -15,20 +16,32 @@ import io.grpc.StatusRuntimeException
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import io.grpc.stub.MetadataUtils
+import net.kyori.adventure.text.Component
 import net.minestom.server.MinecraftServer
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.NetworkBuffer
 import net.minestom.server.network.packet.PacketVanilla
 import net.minestom.server.network.packet.client.common.ClientSettingsPacket
-import net.minestom.server.network.packet.server.common.KeepAlivePacket
+import net.minestom.server.network.packet.client.configuration.ClientFinishConfigurationPacket
+import net.minestom.server.network.packet.client.configuration.ClientSelectKnownPacksPacket
+import net.minestom.server.network.packet.client.handshake.ClientHandshakePacket
+import net.minestom.server.network.packet.client.login.ClientLoginAcknowledgedPacket
+import net.minestom.server.network.packet.client.login.ClientLoginPluginResponsePacket
+import net.minestom.server.network.packet.client.login.ClientLoginStartPacket
+import net.minestom.server.network.packet.server.ServerPacket
+import net.minestom.server.network.packet.server.common.DisconnectPacket
+import net.minestom.server.network.packet.server.configuration.FinishConfigurationPacket
+import net.minestom.server.network.packet.server.configuration.RegistryDataPacket
+import net.minestom.server.network.packet.server.configuration.SelectKnownPacksPacket
+import net.minestom.server.network.packet.server.login.LoginDisconnectPacket
+import net.minestom.server.network.packet.server.login.LoginPluginRequestPacket
+import net.minestom.server.network.packet.server.login.LoginSuccessPacket
+import net.minestom.server.network.packet.server.play.JoinGamePacket
 import net.minestom.server.network.player.ClientSettings
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
@@ -37,7 +50,8 @@ import java.util.concurrent.TimeUnit
 class GameplayServiceTest {
     @Test
     fun `authenticated configuration and delivery reject incompatible or replayed input`() {
-        MinecraftServer.init()
+        val minecraft = MinecraftServer.init()
+        MinecraftServer.setCompressionThreshold(0)
         val deployment =
             DeploymentRef
                 .newBuilder()
@@ -49,10 +63,12 @@ class GameplayServiceTest {
             java.util.concurrent.atomic
                 .AtomicLong(System.nanoTime())
         val service = GameplayService(deployment, 7, instance, clock::get)
+        minecraft.start("127.0.0.1", 0)
+        service.endpoint = "127.0.0.1:${MinecraftServer.process().server().port}"
         val server =
             NettyServerBuilder
                 .forAddress(InetSocketAddress("127.0.0.1", 0))
-                .intercept(ProcessAuthentication("test-token"))
+                .intercept(ProcessAuthentication("test-token-with-at-least-32-characters"))
                 .addService(service)
                 .build()
                 .start()
@@ -67,7 +83,10 @@ class GameplayServiceTest {
                 }.status.code,
             )
             val headers = Metadata()
-            headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer test-token")
+            headers.put(
+                Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
+                "Bearer test-token-with-at-least-32-characters",
+            )
             val interceptor = MetadataUtils.newAttachHeadersInterceptor(headers)
             val stub = unauthenticated.withInterceptors(interceptor)
             val configuration = stub.configuration(request)
@@ -93,11 +112,6 @@ class GameplayServiceTest {
                     )
                 }.status.code,
             )
-            val settings =
-                NetworkBuffer.makeArray(
-                    ClientSettingsPacket.SERIALIZER,
-                    ClientSettingsPacket(ClientSettings.DEFAULT),
-                )
             val delivery =
                 PlayerDelivery
                     .newBuilder()
@@ -107,13 +121,23 @@ class GameplayServiceTest {
                     .setOperationId("delivery-1")
                     .setSession(SessionRef.newBuilder().setId("bridge"))
                     .setPlayer(PlayerRef.newBuilder().setId("player"))
-                    .setIdentity(Identity.newBuilder().setUuid(UUID.randomUUID().toString()).setUsername("player"))
-                    .setProtocol(
+                    .setIdentity(
+                        Identity
+                            .newBuilder()
+                            .setUuid(UUID.randomUUID().toString())
+                            .setUsername("player")
+                            .addProperties(
+                                Property
+                                    .newBuilder()
+                                    .setName("textures")
+                                    .setValue("value")
+                                    .setSignature("signature"),
+                            ),
+                    ).setProtocol(
                         775,
                     ).setRegistryDigest(
                         configuration.registryDigest,
-                    ).setClientInformation(ByteString.copyFrom(settings))
-                    .build()
+                    ).build()
             for (invalid in listOf(
                 delivery.toBuilder().setProcessGeneration(6).build(),
                 delivery.toBuilder().setRegistryDigest(ByteString.EMPTY).build(),
@@ -133,66 +157,129 @@ class GameplayServiceTest {
                     stub.preparePlayer(delivery.toBuilder().setOwnerGeneration(2).build())
                 }.status.code,
             )
-            val address = InetSocketAddress("127.0.0.1", prepared.endpoint.substringAfter(':').toInt())
             val setup =
                 PlayerSetup
                     .newBuilder()
-                    .setOperationId(delivery.operationId)
-                    .setCapability(prepared.capability)
+                    .setOperationId(
+                        delivery.operationId,
+                    ).setCapability(prepared.capability)
                     .build()
-            Socket().use { bad ->
-                bad.connect(address)
-                bad.soTimeout = 3000
-                PlayerTcp.writeFrame(
-                    bad.getOutputStream(),
-                    setup
-                        .toBuilder()
-                        .setCapability(ByteString.EMPTY)
-                        .build()
-                        .toByteArray(),
+
+            fun attempt(
+                payload: PlayerSetup,
+                name: String = "player",
+            ): Socket {
+                val socket = Socket("127.0.0.1", MinecraftServer.process().server().port)
+                socket.soTimeout = 5000
+                socket.send(
+                    0,
+                    ClientHandshakePacket.SERIALIZER,
+                    ClientHandshakePacket(775, "localhost", 25565, ClientHandshakePacket.Intent.LOGIN),
                 )
-                assertEquals(-1, bad.getInputStream().read())
+                socket.send(
+                    0,
+                    ClientLoginStartPacket.SERIALIZER,
+                    ClientLoginStartPacket(name, UUID.fromString(delivery.identity.uuid)),
+                )
+                val challenge = socket.packet(ConnectionState.LOGIN) as LoginPluginRequestPacket
+                assertEquals("chunk:delivery", challenge.channel())
+                socket.send(
+                    2,
+                    ClientLoginPluginResponsePacket.SERIALIZER,
+                    ClientLoginPluginResponsePacket(challenge.messageId(), payload.toByteArray()),
+                )
+                return socket
             }
-            Socket().use { socket ->
-                socket.connect(address)
-                socket.soTimeout = 3000
-                val wire = ByteArrayOutputStream()
-                PlayerTcp.writeFrame(wire, setup.toByteArray())
-                wire.toByteArray().forEach { socket.getOutputStream().write(it.toInt()) }
-                assertEquals(0, socket.getInputStream().read())
-                assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
-                Socket().use { duplicate ->
-                    duplicate.connect(address)
-                    duplicate.soTimeout = 3000
-                    PlayerTcp.writeFrame(duplicate.getOutputStream(), setup.toByteArray())
-                    assertEquals(-1, duplicate.getInputStream().read())
+            for (invalid in listOf(
+                setup.toBuilder().setCapability(ByteString.EMPTY).build(),
+                setup.toBuilder().setOperationId("unknown").build(),
+            )) {
+                attempt(invalid).use { assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket) }
+            }
+            attempt(setup, "other").use { assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket) }
+            assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+            attempt(setup).use { socket ->
+                val success = socket.packet(ConnectionState.LOGIN) as LoginSuccessPacket
+                assertEquals(delivery.identity.uuid, success.gameProfile().uuid().toString())
+                assertEquals(
+                    "signature",
+                    success
+                        .gameProfile()
+                        .properties()
+                        .single()
+                        .signature(),
+                )
+                attempt(setup).use { assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket) }
+                socket.send(3, ClientLoginAcknowledgedPacket.SERIALIZER, ClientLoginAcknowledgedPacket())
+                socket.send(0, ClientSettingsPacket.SERIALIZER, ClientSettingsPacket(ClientSettings.DEFAULT))
+                var registries = 0
+                while (true) {
+                    when (socket.packet(ConnectionState.CONFIGURATION)) {
+                        is SelectKnownPacksPacket -> {
+                            socket.send(
+                                7,
+                                ClientSelectKnownPacksPacket.SERIALIZER,
+                                ClientSelectKnownPacksPacket(emptyList()),
+                            )
+                        }
+
+                        is RegistryDataPacket -> {
+                            registries++
+                        }
+
+                        is FinishConfigurationPacket -> {
+                            break
+                        }
+
+                        else -> {}
+                    }
                 }
-                // Gameplay before activation tears down the preparation without creating a player.
-                PlayerTcp.writeFrame(socket.getOutputStream(), byteArrayOf(0))
-                assertEquals(-1, socket.getInputStream().read())
-                assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+                assertTrue(registries > 0)
+                socket.send(3, ClientFinishConfigurationPacket.SERIALIZER, ClientFinishConfigurationPacket())
+                assertTrue(socket.packet(ConnectionState.PLAY) is JoinGamePacket)
+                val player =
+                    requireNotNull(
+                        MinecraftServer.getConnectionManager().getOnlinePlayerByUuid(
+                            UUID.fromString(delivery.identity.uuid),
+                        ),
+                    )
+                player.kick(Component.text("review kick reason"))
+                while (true) {
+                    val packet = socket.packet(ConnectionState.PLAY)
+                    if (packet is DisconnectPacket) {
+                        assertEquals(Component.text("review kick reason"), packet.message())
+                        break
+                    }
+                }
+                // Already queued world packets may follow the kick while Minestom drains its socket.
+                assertTrue(socket.getInputStream().readAllBytes().size < 8 * 1024 * 1024)
             }
-            val expiring = stub.preparePlayer(delivery.toBuilder().setOperationId("expired").build())
-            clock.addAndGet(TimeUnit.SECONDS.toNanos(31))
             service.flush()
-            Socket().use { expired ->
-                expired.connect(address)
-                expired.soTimeout = 3000
-                PlayerTcp.writeFrame(
-                    expired.getOutputStream(),
-                    setup
+            assertEquals(
+                Status.Code.FAILED_PRECONDITION,
+                assertThrows(StatusRuntimeException::class.java) {
+                    stub.preparePlayer(delivery)
+                }.status.code,
+            )
+            val expiring =
+                stub.preparePlayer(
+                    delivery
                         .toBuilder()
                         .setOperationId("expired")
-                        .setCapability(expiring.capability)
-                        .build()
-                        .toByteArray(),
+                        .setOwnerGeneration(2)
+                        .build(),
                 )
-                assertEquals(-1, expired.getInputStream().read())
+            clock.addAndGet(TimeUnit.SECONDS.toNanos(31))
+            service.flush()
+            attempt(
+                setup
+                    .toBuilder()
+                    .setOperationId("expired")
+                    .setCapability(expiring.capability)
+                    .build(),
+            ).use {
+                assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket)
             }
-            val connection = FrameConnection()
-            repeat(257) { connection.sendPacket(KeepAlivePacket(1)) }
-            assertFalse(connection.isOnline)
-            assertEquals(null, connection.poll())
         } finally {
             service.close()
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
@@ -200,17 +287,40 @@ class GameplayServiceTest {
             MinecraftServer.process().stop()
         }
     }
+}
 
-    @Test
-    fun `TCP framing retains coalesced packets and rejects truncation and oversized lengths`() {
-        val output = ByteArrayOutputStream()
-        PlayerTcp.writeFrame(output, byteArrayOf(1, 2, 3))
-        PlayerTcp.writeFrame(output, ByteArray(1024) { 7 })
-        val input = ByteArrayInputStream(output.toByteArray())
-        assertTrue(PlayerTcp.readFrame(input, 1024).contentEquals(byteArrayOf(1, 2, 3)))
-        assertEquals(1024, PlayerTcp.readFrame(input, 1024).size)
-        for (bytes in listOf(byteArrayOf(0), byteArrayOf(5, 1), byteArrayOf(-128, -128, -128), byteArrayOf(127))) {
-            assertThrows(Exception::class.java) { PlayerTcp.readFrame(ByteArrayInputStream(bytes), 16) }
+private fun <T> Socket.send(
+    id: Int,
+    serializer: NetworkBuffer.Type<T>,
+    packet: T,
+) {
+    val body =
+        NetworkBuffer.makeArray { buffer ->
+            buffer.write(NetworkBuffer.VAR_INT, id)
+            buffer.write(serializer, packet)
         }
+    getOutputStream().write(
+        NetworkBuffer.makeArray { buffer ->
+            buffer.write(NetworkBuffer.VAR_INT, body.size)
+            buffer.write(NetworkBuffer.RAW_BYTES, body)
+        },
+    )
+}
+
+private fun Socket.packet(state: ConnectionState): ServerPacket {
+    val input = getInputStream()
+    var length = 0
+    var shift = 0
+    while (true) {
+        val next = input.read()
+        check(next >= 0 && shift < 21) { "Truncated frame" }
+        length = length or ((next and 127) shl shift)
+        if (next and 128 == 0) break
+        shift += 7
     }
+    require(length in 1..2_097_151)
+    val bytes = input.readNBytes(length)
+    check(bytes.size == length)
+    val buffer = NetworkBuffer.wrap(bytes, 0, bytes.size, MinecraftServer.process())
+    return PacketVanilla.SERVER_PACKET_PARSER.parse(state, buffer.read(NetworkBuffer.VAR_INT), buffer)
 }

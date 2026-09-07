@@ -7,12 +7,11 @@ use packets::Packets;
 use std::{future::Future, io, time::Duration};
 
 use chunk_protocol::{
-    Decode, Encode, Packet, VarInt, decode_packet,
+    Encode, Packet, decode_packet,
     versions::v26_1::{
-        AcknowledgeConfiguration, ChunkBatchReceived, ConfigurationClientInformation,
-        ConfigurationClientInformationParticleStatus, ConfigurationPluginResponse, ConfirmTeleport, KnownPacks,
-        PlayClientInformation, PlayClientInformationParticleStatus, PlayKeepAlive, PlayKeepAliveResponse, PlayPing,
-        PlayPong, PlayerLoaded,
+        ChunkBatchReceived, ConfigurationClientInformation, ConfigurationClientInformationParticleStatus,
+        ConfirmTeleport, PlayClientInformation, PlayClientInformationParticleStatus, PlayKeepAlive,
+        PlayKeepAliveResponse, PlayPing, PlayPong, PlayerLoaded,
     },
 };
 use tokio::{
@@ -22,15 +21,13 @@ use tokio::{
 
 use super::{
     authentication::Authenticated,
-    configuration,
-    transport::{PreparedPackets, Transport, invalid_data},
+    configuration::{self, FRAME_LIMIT, packet_id},
+    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, within},
 };
 
 const LIMBO_TIMEOUT: Duration = Duration::from_secs(60);
 
-const FRAME_LIMIT: usize = 65536;
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Returns the same authenticated play transport once all outstanding protocol
@@ -52,7 +49,12 @@ where
                 .await?;
         timeout(
             configuration_timeout,
-            configure(&mut authenticated.transport, &mut settings, packets),
+            configuration::finish(
+                &mut authenticated.transport,
+                &mut settings,
+                &packets.known_packs,
+                &packets.configuration,
+            ),
         )
         .await
         .map_err(|_| timed_out("limbo configuration timed out"))??;
@@ -65,51 +67,6 @@ where
     })
     .await
     .map_err(|_| timed_out("limbo waiting limit reached"))?
-}
-
-async fn configure<S: AsyncRead + AsyncWrite + Unpin>(
-    transport: &mut Transport<S>,
-    settings: &mut ConfigurationClientInformation,
-    packets: &Packets,
-) -> io::Result<()> {
-    send_prepared(transport, &packets.known_packs).await?;
-    loop {
-        let frame = transport.read_frame(FRAME_LIMIT).await?;
-        match packet_id(&frame)? {
-            KnownPacks::ID => {
-                if !decode_packet::<KnownPacks>(&frame)
-                    .map_err(invalid_data)?
-                    .packs
-                    .as_slice()
-                    .is_empty()
-                {
-                    return Err(invalid_data("client selected an unoffered pack"));
-                }
-                break;
-            }
-            _ => configuration_message(&frame, settings)?,
-        }
-    }
-    send_prepared(transport, &packets.configuration).await?;
-    loop {
-        let frame = transport.read_frame(FRAME_LIMIT).await?;
-        if packet_id(&frame)? == AcknowledgeConfiguration::ID {
-            decode_packet::<AcknowledgeConfiguration>(&frame).map_err(invalid_data)?;
-            return Ok(());
-        }
-        configuration_message(&frame, settings)?;
-    }
-}
-
-fn configuration_message(frame: &[u8], settings: &mut ConfigurationClientInformation) -> io::Result<()> {
-    match packet_id(frame)? {
-        ConfigurationClientInformation::ID => *settings = decode_packet(frame).map_err(invalid_data)?,
-        ConfigurationPluginResponse::ID => {
-            decode_packet::<ConfigurationPluginResponse>(frame).map_err(invalid_data)?;
-        }
-        _ => return Err(invalid_data("unexpected limbo configuration packet")),
-    }
-    Ok(())
 }
 
 async fn play<S, T>(
@@ -211,23 +168,16 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin, P: Packet + Encode>(
     transport: &mut Transport<S>,
     packet: &P,
 ) -> io::Result<()> {
-    timeout(WRITE_TIMEOUT, transport.write_packet(packet))
-        .await
-        .map_err(|_| timed_out("limbo write timed out"))?
+    within(WRITE_TIMEOUT, transport.write_packet(packet)).await
 }
 
 async fn send_prepared<S: AsyncRead + AsyncWrite + Unpin>(
     transport: &mut Transport<S>,
     packets: &PreparedPackets,
 ) -> io::Result<()> {
-    timeout(WRITE_TIMEOUT, transport.write_prepared(packets))
-        .await
-        .map_err(|_| timed_out("limbo write timed out"))?
+    within(WRITE_TIMEOUT, transport.write_prepared(packets)).await
 }
 
-fn packet_id(mut frame: &[u8]) -> io::Result<i32> {
-    Ok(VarInt::decode(&mut frame).map_err(invalid_data)?.0)
-}
 fn timed_out(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, message)
 }

@@ -1,29 +1,24 @@
 package dev.chunkzero.runtime
 
 import chunk.v1.Common.DeploymentRef
-import io.grpc.Metadata
-import io.grpc.ServerCall
-import io.grpc.ServerCallHandler
-import io.grpc.ServerInterceptor
-import io.grpc.Status
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer
 import net.minestom.server.instance.LightingChunk
 import net.minestom.server.instance.block.Block
+import net.minestom.server.timer.TaskSchedule
 import java.net.InetSocketAddress
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 fun main() {
     val token = requireNotNull(System.getenv("CHUNK_PROCESS_TOKEN")) { "CHUNK_PROCESS_TOKEN is required" }
-    require(token.length >= 32) { "Process token must contain at least 32 characters" }
+    val authentication = ProcessAuthentication(token)
     val deployment =
         DeploymentRef
             .newBuilder()
             .setEnvironment(System.getenv("CHUNK_ENVIRONMENT") ?: "local")
             .setDeployment(System.getenv("CHUNK_DEPLOYMENT") ?: "local")
             .build()
-    MinecraftServer.init()
+    val minecraft = MinecraftServer.init()
     MinecraftServer.setCompressionThreshold(0)
     val process = MinecraftServer.process()
     val instance = process.instance().createInstanceContainer()
@@ -34,41 +29,32 @@ fun main() {
         NettyServerBuilder
             .forAddress(InetSocketAddress("127.0.0.1", 25566))
             .maxConcurrentCallsPerConnection(128)
-            .maxInboundMessageSize(FrameConnection.MAX_PACKET_BYTES + 4096)
-            .intercept(ProcessAuthentication(token))
+            .maxInboundMessageSize(65_536)
+            .intercept(authentication)
             .addService(gameplay)
             .build()
-            .start()
-    process.dispatcher().start()
-    val ticker = Executors.newSingleThreadScheduledExecutor()
-    ticker.scheduleAtFixedRate({
-        process.ticker().tick(System.nanoTime())
-        gameplay.flush()
-    }, 0, 50, TimeUnit.MILLISECONDS)
+    try {
+        minecraft.start("127.0.0.1", 0)
+        gameplay.endpoint = "127.0.0.1:${process.server().port}"
+        server.start()
+    } catch (error: Exception) {
+        server.shutdownNow()
+        process.stop()
+        gameplay.close()
+        throw error
+    }
+    MinecraftServer
+        .getSchedulerManager()
+        .buildTask { gameplay.flush() }
+        .repeat(TaskSchedule.tick(1))
+        .schedule()
     Runtime.getRuntime().addShutdownHook(
         Thread {
-            gameplay.close()
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS)
-            ticker.shutdownNow()
             process.stop()
+            gameplay.close()
         },
     )
-    println("Gameplay bridge ready on 127.0.0.1:25566; no Minecraft listener")
+    println("Gameplay bridge ready on 127.0.0.1:25566; Minecraft listener at ${gameplay.endpoint}")
     server.awaitTermination()
-}
-
-internal class ProcessAuthentication(
-    private val token: String,
-) : ServerInterceptor {
-    override fun <ReqT : Any, RespT : Any> interceptCall(
-        call: ServerCall<ReqT, RespT>,
-        headers: Metadata,
-        next: ServerCallHandler<ReqT, RespT>,
-    ): ServerCall.Listener<ReqT> {
-        if (headers.get(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)) != "Bearer $token") {
-            call.close(Status.UNAUTHENTICATED, Metadata())
-            return object : ServerCall.Listener<ReqT>() {}
-        }
-        return next.startCall(call, headers)
-    }
 }
