@@ -19,8 +19,12 @@ pub(crate) fn operation(id: &str) -> Operation {
 }
 
 pub(crate) fn write(id: &str, value: Option<serde_json::Value>) -> Write {
+    write_to("profiles", id, value)
+}
+
+pub(crate) fn write_to(table: &str, id: &str, value: Option<serde_json::Value>) -> Write {
     Write {
-        key: DocumentKey::new("profiles", id).unwrap(),
+        key: DocumentKey::new(table, id).unwrap(),
         value,
     }
 }

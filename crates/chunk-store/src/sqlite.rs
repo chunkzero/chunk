@@ -50,22 +50,24 @@ impl SqliteStore {
 
 impl Storage for SqliteStore {
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> Result<Revision> {
-        let next_schema = schema::merge(&self.schema, schema)?;
-        if next_schema == *self.schema {
+        let migration = schema::merge(&self.schema, schema)?;
+        if migration.statements.is_empty() {
             return revision::current(&self.connection);
         }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let next = revision::next(revision::current(&transaction)?)?;
-        schema::apply(&transaction, &self.schema, &next_schema)?;
+        for statement in &migration.statements {
+            transaction.execute_batch(statement)?;
+        }
         transaction.execute(
             "INSERT INTO _chunk_migrations (revision, schema) VALUES (?1, ?2)",
-            params![next, serde_json::to_string(&next_schema)?],
+            params![next, serde_json::to_string(&migration.schema)?],
         )?;
         transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
         transaction.commit()?;
-        self.schema = Arc::new(next_schema);
+        self.schema = Arc::new(migration.schema);
         Ok(next)
     }
 
@@ -93,7 +95,8 @@ impl Storage for SqliteStore {
             });
         }
         let next = revision::next(current)?;
-        prepared.apply(&transaction, &self.schema, next)?;
+        prepared.apply(&transaction, next)?;
+        transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
         transaction.execute(
             "INSERT INTO _chunk_operations VALUES (?1, ?2, ?3, ?4)",
             params![

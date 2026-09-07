@@ -48,10 +48,7 @@ fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_out
     let (_directory, mut store) = open();
     let schema = [("stats".into(), crate::tests::schema()["profiles"].clone())].into();
     store.apply_schema(&schema).unwrap();
-    let stats = crate::Write {
-        key: DocumentKey::new("stats", "a").unwrap(),
-        value: Some(json!({"coins": 2})),
-    };
+    let stats = crate::tests::write_to("stats", "a", Some(json!({"coins": 2})));
     store.connection.execute_batch("CREATE TRIGGER fail_outcome BEFORE INSERT ON _chunk_operations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
     assert!(
         store
@@ -202,10 +199,7 @@ fn capacity_totals_follow_replacements_and_deletes() {
     store.apply_schema(&schema).unwrap();
     let value = json!({"text": "x".repeat(1024 * 1024 - 32)});
     let writes = (0..33)
-        .map(|id| crate::Write {
-            key: DocumentKey::new("large", id.to_string()).unwrap(),
-            value: Some(value.clone()),
-        })
+        .map(|id| crate::tests::write_to("large", &id.to_string(), Some(value.clone())))
         .collect();
     assert!(matches!(
         store.commit(commit("too-large", 4, writes)),

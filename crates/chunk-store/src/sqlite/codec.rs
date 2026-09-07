@@ -1,7 +1,8 @@
+use chunk_contract::{Field, Schema};
 use rusqlite::types::Value as SqlValue;
 use serde_json::Value;
 
-use crate::{Error, Field, Result, Schema};
+use crate::{Error, Result};
 
 pub(super) fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -33,19 +34,19 @@ pub(super) fn encode(field: &Field, value: Option<&Value>) -> Result<SqlValue> {
             Err(Error::Invalid("missing required field"))
         };
     };
-    if !field.schema.accepts(value) {
-        return Err(Error::Invalid("field does not match schema"));
-    }
-    Ok(match &field.schema {
-        Schema::Boolean => SqlValue::Integer(i64::from(value.as_bool().ok_or(Error::Invalid("boolean"))?)),
-        Schema::Integer => SqlValue::Integer(value.as_i64().ok_or(Error::Invalid("integer"))?),
-        Schema::Number => match value.as_i64() {
-            Some(value) => SqlValue::Integer(value),
-            None => SqlValue::Real(value.as_f64().ok_or(Error::Invalid("number"))?),
-        },
-        Schema::String => SqlValue::Text(value.as_str().ok_or(Error::Invalid("string"))?.into()),
-        _ => SqlValue::Text(serde_json::to_string(value)?),
-    })
+    let encoded = match (&field.schema, value) {
+        (Schema::Boolean, Value::Bool(value)) => Some(SqlValue::Integer(i64::from(*value))),
+        (Schema::Integer | Schema::Number, Value::Number(value)) if value.is_i64() => {
+            value.as_i64().map(SqlValue::Integer)
+        }
+        (Schema::Number, Value::Number(value)) if value.is_f64() => value.as_f64().map(SqlValue::Real),
+        (Schema::String, Value::String(value)) => Some(SqlValue::Text(value.clone())),
+        (schema, value) if !schema.is_scalar() && schema.accepts(value) => {
+            Some(SqlValue::Text(serde_json::to_string(value)?))
+        }
+        _ => None,
+    };
+    encoded.ok_or(Error::Invalid("field does not match schema"))
 }
 
 pub(super) fn decode(field: &Field, value: SqlValue) -> Result<Option<Value>> {

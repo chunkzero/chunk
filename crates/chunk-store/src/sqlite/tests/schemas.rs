@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Field, Schema, TableSchema};
+use chunk_contract::{Field, Schema, TableSchema};
 
 #[test]
 fn physical_columns_round_trip_scalars_json_and_absence() {
@@ -30,10 +30,7 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
     let writes = values
         .iter()
         .enumerate()
-        .map(|(id, value)| crate::Write {
-            key: DocumentKey::new("matches", id.to_string()).unwrap(),
-            value: Some(value.clone()),
-        })
+        .map(|(id, value)| crate::tests::write_to("matches", &id.to_string(), Some(value.clone())))
         .collect();
     store.commit(commit("matches", 2, writes)).unwrap();
     let snapshot = store.snapshot().unwrap();
@@ -217,10 +214,7 @@ fn invalid_schemas_and_documents_fail_without_changing_storage() {
             .commit(commit(
                 "unknown",
                 1,
-                vec![crate::Write {
-                    key: DocumentKey::new("unknown", "a").unwrap(),
-                    value: Some(json!({}))
-                }]
+                vec![crate::tests::write_to("unknown", "a", Some(json!({})))]
             ))
             .is_err()
     );
@@ -246,4 +240,31 @@ fn legacy_format_is_rejected_without_modifying_documents() {
         .query_row("SELECT value FROM documents", [], |row| row.get(0))
         .unwrap();
     assert_eq!(value, "preserve");
+}
+
+#[test]
+fn index_can_be_added_to_a_retained_but_omitted_field() {
+    let (directory, mut store) = open();
+    store
+        .commit(commit("seed", 1, vec![write("a", Some(json!({"coins": 7})))]))
+        .unwrap();
+    let old = store.snapshot().unwrap();
+    let partial: DatabaseSchema = serde_json::from_value(json!({
+        "profiles": {"fields": {}, "indexes": {"by_retained_coins": ["coins"]}}
+    }))
+    .unwrap();
+    assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
+    let range = IndexRange {
+        index: "by_retained_coins".into(),
+        ..by_coins()
+    };
+    assert_eq!(store.snapshot().unwrap().scan_index(&range).unwrap()[0].0, "a");
+    assert!(old.scan_index(&range).is_err());
+    assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
+    drop(store);
+    let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().scan_index(&range).unwrap()[0].1.value,
+        json!({"coins": 7})
+    );
 }

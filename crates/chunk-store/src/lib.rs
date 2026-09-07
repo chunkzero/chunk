@@ -51,7 +51,7 @@ mod model;
 mod snapshot;
 mod sqlite;
 
-pub use chunk_contract::{DatabaseSchema, Field, Schema, TableSchema};
+pub use chunk_contract::DatabaseSchema;
 pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Revision, Write};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;

@@ -1,3 +1,4 @@
+use chunk_contract::{Field, TableSchema};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -7,10 +8,7 @@ use std::{
 use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue};
 use serde_json::Value;
 
-use crate::{
-    DatabaseSchema, Document, DocumentKey, Error, Field, IndexRange, KeyRange, Result, Snapshot, SnapshotReader,
-    TableSchema,
-};
+use crate::{DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Result, Snapshot, SnapshotReader};
 
 use super::{codec, revision, schema};
 
@@ -72,7 +70,7 @@ impl SnapshotReader for Reader {
         let table = self.table(&key.table)?;
         let sql = format!(
             "SELECT {} FROM {} WHERE _id = ?",
-            schema::select(table),
+            select(table),
             codec::quote(&key.table)
         );
         Ok(self
@@ -94,14 +92,10 @@ impl SnapshotReader for Reader {
             conditions.push("_id < ?");
             params.push(end.clone().into());
         }
-        let predicate = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
+        let predicate = predicate(&conditions);
         let sql = format!(
             "SELECT {} FROM {}{predicate} ORDER BY _id",
-            schema::select(table),
+            select(table),
             codec::quote(&range.table)
         );
         self.query(table, &sql, params)
@@ -109,19 +103,18 @@ impl SnapshotReader for Reader {
 
     fn scan_index(&self, range: &IndexRange) -> Result<Vec<(String, Document)>> {
         let table = self.table(&range.table)?;
+        range.validate(table)?;
+        if range.end.as_ref().is_some_and(Value::is_null) {
+            return Ok(Vec::new());
+        }
         let (sql, params) = index_query(table, range)?;
         self.query(table, &sql, params)
     }
 }
 
 pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(String, Vec<SqlValue>)> {
-    let fields = table
-        .indexes
-        .get(&range.index)
-        .ok_or(Error::Invalid("undeclared index"))?;
-    if range.prefix.len() > fields.len() || range.limit == 0 || range.limit > 100_000 {
-        return Err(Error::Invalid("invalid index range"));
-    }
+    range.validate(table)?;
+    let fields = &table.indexes[&range.index];
     let mut conditions = Vec::new();
     let mut params = Vec::new();
     for (name, value) in fields.iter().zip(&range.prefix) {
@@ -143,9 +136,7 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
         }
         if let Some(end) = &range.end {
             let value = index_value(field, end)?;
-            if value == SqlValue::Null {
-                conditions.push("0".into());
-            } else {
+            if value != SqlValue::Null {
                 conditions.push(if field.optional {
                     format!("({column} IS NULL OR {column} < ?)")
                 } else {
@@ -155,16 +146,12 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
             }
         }
     }
-    let predicate = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
+    let predicate = predicate(&conditions);
     let mut order: Vec<_> = fields.iter().map(|name| codec::quote(name)).collect();
     order.push("_id".into());
     let sql = format!(
         "SELECT {} FROM {} INDEXED BY {}{predicate} ORDER BY {} LIMIT ?",
-        schema::select(table),
+        select(table),
         codec::quote(&range.table),
         codec::quote(&schema::index_name(&range.table, &range.index)),
         order.join(", ")
@@ -179,4 +166,21 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
 
 fn index_value(field: &Field, value: &Value) -> Result<SqlValue> {
     codec::encode(field, (!value.is_null()).then_some(value))
+}
+
+fn select(table: &TableSchema) -> String {
+    let mut columns = vec!["_id".to_owned(), "_revision".to_owned()];
+    columns.extend(table.fields.keys().map(|name| codec::quote(name)));
+    columns.join(", ")
+}
+
+fn predicate(conditions: &[impl AsRef<str>]) -> String {
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " WHERE {}",
+            conditions.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(" AND ")
+        )
+    }
 }

@@ -5,4 +5,4 @@
 
 mod schema;
 
-pub use schema::{DatabaseSchema, Field, Schema, TableSchema, validate_name};
+pub use schema::{DatabaseSchema, Field, Schema, TableSchema, validate, validate_name};

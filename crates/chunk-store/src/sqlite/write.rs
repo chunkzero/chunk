@@ -1,10 +1,16 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+use chunk_contract::TableSchema;
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 
 use crate::{Commit, DatabaseSchema, DocumentKey, Error, Operation, Outcome, Result, Revision};
 
-use super::{codec, schema};
+use super::codec;
+use super::codec::quote;
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_WRITES: usize = 256;
@@ -13,6 +19,7 @@ const MAX_DOCUMENTS: usize = 100_000;
 
 struct PreparedWrite<'a> {
     key: &'a DocumentKey,
+    upsert: Arc<str>,
     values: Option<Vec<SqlValue>>,
     bytes: usize,
 }
@@ -28,6 +35,7 @@ impl<'a> Prepared<'a> {
             return Err(Error::Invalid("too many writes"));
         }
         let mut keys = BTreeSet::new();
+        let mut statements = BTreeMap::new();
         let mut writes = Vec::with_capacity(commit.writes.len());
         for write in &commit.writes {
             write.key.validate()?;
@@ -37,7 +45,10 @@ impl<'a> Prepared<'a> {
             let table = schema.get(&write.key.table).ok_or(Error::Invalid("undeclared table"))?;
             let mut bytes = 0;
             let values = if let Some(value) = &write.value {
-                if !table.accepts(value) {
+                if !value
+                    .as_object()
+                    .is_some_and(|object| object.keys().all(|name| table.fields.contains_key(name)))
+                {
                     return Err(Error::Invalid("document does not match table schema"));
                 }
                 bytes = serde_json::to_vec(value)?.len();
@@ -56,6 +67,10 @@ impl<'a> Prepared<'a> {
             };
             writes.push(PreparedWrite {
                 key: &write.key,
+                upsert: statements
+                    .entry(&write.key.table)
+                    .or_insert_with(|| Arc::<str>::from(upsert(&write.key.table, table)))
+                    .clone(),
                 values,
                 bytes,
             });
@@ -68,7 +83,7 @@ impl<'a> Prepared<'a> {
     }
 
     /// Called inside the same transaction as the revision and operation outcome.
-    pub fn apply(&self, connection: &Connection, schema: &DatabaseSchema, next: Revision) -> Result<()> {
+    pub fn apply(&self, connection: &Connection, next: Revision) -> Result<()> {
         let (mut count, mut bytes): (usize, usize) = connection.query_row(
             "SELECT document_count, document_bytes FROM _chunk_metadata WHERE singleton = 1",
             [],
@@ -92,7 +107,7 @@ impl<'a> Prepared<'a> {
                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&write.key.id, &next, &write.bytes];
                 params.extend(values.iter().map(|value| value as &dyn rusqlite::ToSql));
                 connection
-                    .prepare_cached(&schema::upsert(&write.key.table, &schema[&write.key.table]))?
+                    .prepare_cached(&write.upsert)?
                     .execute(params_from_iter(params))?;
             } else {
                 connection
@@ -104,8 +119,8 @@ impl<'a> Prepared<'a> {
             return Err(Error::Capacity);
         }
         connection.execute(
-            "UPDATE _chunk_metadata SET revision = ?1, document_count = ?2, document_bytes = ?3 WHERE singleton = 1",
-            params![next, count, bytes],
+            "UPDATE _chunk_metadata SET document_count = ?1, document_bytes = ?2 WHERE singleton = 1",
+            params![count, bytes],
         )?;
         Ok(())
     }
@@ -137,4 +152,21 @@ pub(super) fn outcome(connection: &Connection, operation: &Operation) -> Result<
             })
         })
         .transpose()
+}
+
+fn upsert(name: &str, table: &TableSchema) -> String {
+    let mut columns = vec!["_id".to_owned(), "_revision".to_owned(), "_bytes".to_owned()];
+    columns.extend(table.fields.keys().map(|name| quote(name)));
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let update: Vec<_> = columns
+        .iter()
+        .skip(1)
+        .map(|name| format!("{name} = excluded.{name}"))
+        .collect();
+    format!(
+        "INSERT INTO {} ({}) VALUES ({placeholders}) ON CONFLICT (_id) DO UPDATE SET {}",
+        quote(name),
+        columns.join(", "),
+        update.join(", ")
+    )
 }

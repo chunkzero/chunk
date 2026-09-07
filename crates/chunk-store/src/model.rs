@@ -26,7 +26,9 @@ impl DocumentKey {
         Ok(key)
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// # Errors
+    /// Rejects invalid table names and empty or oversized IDs.
+    pub fn validate(&self) -> Result<()> {
         validate_table(&self.table)?;
         validate_id(&self.id)
     }
@@ -50,6 +52,8 @@ pub struct Document {
 }
 
 /// Primary-key index interval: inclusive start, exclusive end; None is unbounded.
+/// Returns every matching document, bounded by the adapter environment capacity
+/// (100,000 documents / 32 MiB for SQLite).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyRange {
     pub table: String,
@@ -87,6 +91,83 @@ pub struct IndexRange {
     pub end: Option<Value>,
     /// Maximum rows returned, between 1 and 100,000.
     pub limit: usize,
+}
+
+impl IndexRange {
+    /// Validates against a complete table declaration.
+    /// # Errors
+    /// Rejects invalid names, limits, prefix lengths, bound types and reversed bounds.
+    pub fn validate(&self, table: &chunk_contract::TableSchema) -> Result<()> {
+        validate_table(&self.table)?;
+        chunk_contract::validate_name(&self.index).map_err(Error::Invalid)?;
+        let fields = table
+            .indexes
+            .get(&self.index)
+            .ok_or(Error::Invalid("undeclared index"))?;
+        if self.limit == 0 || self.limit > 100_000 || self.prefix.len() > fields.len() {
+            return Err(Error::Invalid("invalid index range"));
+        }
+        let validate_value = |name: &str, value: &Value| -> Result<()> {
+            let field = table.fields.get(name).ok_or(Error::Invalid("undeclared index field"))?;
+            if !field.schema.is_scalar()
+                || !(if value.is_null() {
+                    field.optional
+                } else {
+                    field.schema.accepts(value)
+                })
+            {
+                return Err(Error::Invalid("invalid index value"));
+            }
+            Ok(())
+        };
+        for (name, value) in fields.iter().zip(&self.prefix) {
+            validate_value(name, value)?;
+        }
+        if self.start.is_some() || self.end.is_some() {
+            let name = fields
+                .get(self.prefix.len())
+                .ok_or(Error::Invalid("index range has no remaining field"))?;
+            for value in self.start.iter().chain(self.end.iter()) {
+                validate_value(name, value)?;
+            }
+        }
+        if self
+            .start
+            .as_ref()
+            .zip(self.end.as_ref())
+            .is_some_and(|(start, end)| scalar_cmp(start, end).is_gt())
+        {
+            return Err(Error::Invalid("reversed index range"));
+        }
+        Ok(())
+    }
+}
+
+fn scalar_cmp(left: &Value, right: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Number(a), Value::Number(b)) => match (a.as_i64(), b.as_i64()) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(a), None) => compare_integer_float(a, b.as_f64().unwrap()),
+            (None, Some(b)) => compare_integer_float(b, a.as_f64().unwrap()).reverse(),
+            (None, None) => a.as_f64().partial_cmp(&b.as_f64()).unwrap(),
+        },
+        _ => unreachable!("validated bounds have the same scalar type"),
+    }
+}
+
+// Compare the integer parts before the fractional remainder to preserve values
+// beyond the exact integer range of f64. i128 also covers both i64 endpoints.
+#[allow(clippy::cast_possible_truncation)]
+fn compare_integer_float(integer: i64, float: f64) -> std::cmp::Ordering {
+    i128::from(integer)
+        .cmp(&(float as i128))
+        .then_with(|| 0.0_f64.partial_cmp(&float.fract()).unwrap())
 }
 
 /// The backend hashes deployment, contract, function, caller and validated arguments.

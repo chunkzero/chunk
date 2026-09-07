@@ -1,5 +1,4 @@
 use super::*;
-use crate::Write;
 
 #[test]
 fn compound_indexes_use_sql_ranges_ordering_and_limits() {
@@ -24,10 +23,7 @@ fn compound_indexes_use_sql_ranges_ordering_and_limits() {
     ];
     let writes = entries
         .iter()
-        .map(|(id, value)| Write {
-            key: DocumentKey::new("matches", *id).unwrap(),
-            value: Some(value.clone()),
-        })
+        .map(|(id, value)| crate::tests::write_to("matches", id, Some(value.clone())))
         .collect();
     store.commit(commit("scores", 2, writes)).unwrap();
     let snapshot = store.snapshot().unwrap();
