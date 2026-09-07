@@ -92,18 +92,7 @@ class GameplayServiceTest {
             val configuration = stub.configuration(request)
             assertEquals(775, configuration.protocol)
             assertEquals(7, configuration.processGeneration)
-            assertEquals(32, configuration.registryDigest.size())
-            assertTrue(configuration.packetsCount > 10)
-            configuration.packetsList.forEach {
-                val bytes = it.packet.toByteArray()
-                val buffer = NetworkBuffer.wrap(bytes, 0, bytes.size, MinecraftServer.process())
-                PacketVanilla.SERVER_PACKET_PARSER.parse(
-                    ConnectionState.CONFIGURATION,
-                    buffer.read(NetworkBuffer.VAR_INT),
-                    buffer,
-                )
-                assertEquals(0, buffer.readableBytes())
-            }
+            assertEquals(deployment, configuration.deployment)
             assertEquals(
                 Status.Code.PERMISSION_DENIED,
                 assertThrows(StatusRuntimeException::class.java) {
@@ -133,14 +122,12 @@ class GameplayServiceTest {
                                     .setValue("value")
                                     .setSignature("signature"),
                             ),
-                    ).setProtocol(
-                        775,
-                    ).setRegistryDigest(
-                        configuration.registryDigest,
-                    ).build()
+                    ).setProtocol(775)
+                    .build()
             for (invalid in listOf(
                 delivery.toBuilder().setProcessGeneration(6).build(),
-                delivery.toBuilder().setRegistryDigest(ByteString.EMPTY).build(),
+                delivery.toBuilder().setProtocol(774).build(),
+                delivery.toBuilder().setDeployment(deployment.toBuilder().setDeployment("other")).build(),
             )) {
                 assertEquals(
                     Status.Code.FAILED_PRECONDITION,

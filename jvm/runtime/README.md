@@ -28,10 +28,13 @@ currently provides one grass world named `bridge`. Without `--gameplay`, the
 proxy retains its bounded waiting-world behavior.
 
 Control RPCs require the process credential. Preparation validates deployment,
-process generation, protocol and registry digest and issues a single-use,
+process generation and protocol and issues a single-use,
 30-second capability. Minestom rejects missing, expired, mismatched or replayed
 capabilities before creating a player. The prepared identity includes profile
 properties; client settings travel through normal configuration packets.
+The configuration RPC returns destination metadata. Minestom sends registries
+and other player configuration through its normal Minecraft connection, which
+the proxy relays. Configuration reuse is tracked in [#29](https://github.com/chunkzero/chunk/issues/29).
 Owner generations fence deliveries. Terminal operation records release their live
 connection references, and history is bounded to 4096 deliveries per fixture.
 Minestom handles socket buffering and graceful kicks. Proxy writes and the login

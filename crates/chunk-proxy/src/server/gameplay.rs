@@ -61,7 +61,7 @@ async fn destination(target: &GameplayTarget) -> io::Result<(Destination, Config
         .await
         .map_err(io::Error::other)?;
     let mut destination = Destination {
-        client: GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024),
+        client: GameplayClient::new(channel).max_decoding_message_size(65_536),
         target: target.clone(),
     };
     let deployment = DeploymentRef {
@@ -80,22 +80,8 @@ async fn destination(target: &GameplayTarget) -> io::Result<(Destination, Config
             .map_err(io::Error::other)
     })
     .await?;
-    if configuration.deployment != Some(deployment)
-        || configuration.process_generation == 0
-        || configuration.registry_digest.len() != 32
-        || configuration.packets.is_empty()
-    {
+    if configuration.deployment != Some(deployment) || configuration.process_generation == 0 {
         return Err(invalid_data("invalid gameplay configuration identity"));
-    }
-    let mut digest = openssl::sha::Sha256::new();
-    for frame in &configuration.packets {
-        if frame.packet.is_empty() || frame.packet.len() > chunk_protocol::MAX_FRAME_SIZE {
-            return Err(invalid_data("invalid configuration packet size"));
-        }
-        digest.update(&frame.packet);
-    }
-    if digest.finish().as_slice() != configuration.registry_digest {
-        return Err(invalid_data("destination registry digest does not match packets"));
     }
     Ok((destination, configuration))
 }
@@ -137,7 +123,6 @@ fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse)
         .map_err(invalid_data)?,
         identity: Some(identity),
         protocol: authenticated.protocol_version,
-        registry_digest: config.registry_digest.clone(),
     })
 }
 

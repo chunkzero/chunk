@@ -7,8 +7,6 @@ import chunk.v1.GameplayOuterClass.ConfigurationResponse
 import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerPreparation
 import chunk.v1.GameplayOuterClass.PlayerSetup
-import chunk.v1.PlayersOuterClass.Frame
-import com.google.protobuf.ByteString
 import io.grpc.Status
 import io.grpc.stub.StreamObserver
 import net.kyori.adventure.text.Component
@@ -18,9 +16,6 @@ import net.minestom.server.event.EventNode
 import net.minestom.server.event.player.AsyncPlayerConfigurationEvent
 import net.minestom.server.event.player.AsyncPlayerPreLoginEvent
 import net.minestom.server.instance.InstanceContainer
-import net.minestom.server.network.packet.server.configuration.UpdateEnabledFeaturesPacket
-import net.minestom.server.registry.Registries
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -32,7 +27,13 @@ internal class GameplayService(
 ) : GameplayGrpc.GameplayImplBase() {
     private val preparations = mutableMapOf<String, PreparedDelivery>()
     private val owners = DeliveryFence()
-    private val configuration = configurationSnapshot()
+    private val configuration =
+        ConfigurationResponse
+            .newBuilder()
+            .setDeployment(deployment)
+            .setProcessGeneration(generation)
+            .setProtocol(MinecraftServer.PROTOCOL_VERSION)
+            .build()
     private val events = EventNode.all("gameplay-delivery")
     var endpoint = ""
 
@@ -108,36 +109,12 @@ internal class GameplayService(
         synchronized(preparations) { preparations.values.forEach { it.close() } }
     }
 
-    private fun configurationSnapshot(): ConfigurationResponse {
-        val packets =
-            buildList {
-                add(UpdateEnabledFeaturesPacket(listOf("minecraft:vanilla")))
-                addAll(Registries.registryDataPackets(MinecraftServer.process(), false))
-                add(Registries.tagsPacket(MinecraftServer.process()))
-            }.map { encodeConfiguration(it) }
-        val digest = MessageDigest.getInstance("SHA-256")
-        packets.forEach { digest.update(it) }
-        return ConfigurationResponse
-            .newBuilder()
-            .setDeployment(deployment)
-            .setProcessGeneration(generation)
-            .setProtocol(MinecraftServer.PROTOCOL_VERSION)
-            .setRegistryDigest(ByteString.copyFrom(digest.digest()))
-            .addAllPackets(packets.map { Frame.newBuilder().setPacket(ByteString.copyFrom(it)).build() })
-            .build()
-    }
-
     private fun validate(delivery: PlayerDelivery) {
         require(delivery.serializedSize <= 65_536) { "Delivery exceeds size limit" }
         require(
             delivery.deployment == deployment && delivery.processGeneration == generation,
         ) { "Stale process or deployment" }
-        require(
-            delivery.protocol == MinecraftServer.PROTOCOL_VERSION &&
-                delivery.registryDigest == configuration.registryDigest,
-        ) {
-            "Incompatible destination registries"
-        }
+        require(delivery.protocol == MinecraftServer.PROTOCOL_VERSION) { "Incompatible destination protocol" }
         require(
             delivery.session.id == "bridge" && delivery.operationId.length in 1..128,
         ) { "Unknown session or operation" }

@@ -3,7 +3,6 @@ syntax = "proto3";
 package chunk.v1;
 
 import "chunk/v1/common.proto";
-import "chunk/v1/players.proto";
 
 // Control calls require process credentials. Gameplay uses a dedicated TCP socket.
 service Gameplay {
@@ -15,12 +14,13 @@ message ConfigurationRequest {
   DeploymentRef deployment = 1;
 }
 
+// Destination metadata. Player configuration travels over the Minecraft connection.
 message ConfigurationResponse {
   DeploymentRef deployment = 1;
   uint64 process_generation = 2;
   int32 protocol = 3;
-  repeated Frame packets = 4;
-  bytes registry_digest = 5;
+  reserved 4, 5;
+  reserved "packets", "registry_digest";
 }
 
 message PlayerDelivery {
@@ -32,9 +32,8 @@ message PlayerDelivery {
   uint64 owner_generation = 6;
   Identity identity = 7;
   int32 protocol = 8;
-  bytes registry_digest = 9;
-  reserved 10;
-  reserved "client_information";
+  reserved 9, 10;
+  reserved "registry_digest", "client_information";
 }
 
 message PlayerPreparation {
