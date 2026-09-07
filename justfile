@@ -38,3 +38,12 @@ build:
 
 # Everything CI runs. Run before opening a PR.
 ready: fmt-check lint typecheck test build
+
+# Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
+local *args:
+    ./gradlew :jvm:example:installDist :jvm:example:writeJavaExecutable
+    cargo run -p chunk -- local --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
+
+# Operate on players connected to the local example.
+players *args:
+    cargo run -p chunk -- players --control-file .chunk/local/control.json {{args}}

@@ -105,7 +105,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 configuration::disconnect(&mut authenticated.transport, 0x20, "Server temporarily unavailable").await;
             return Err(error);
         }
-        tracing::info!(operation = %guard.claim.operation_id, "player arrived in managed session");
+        tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.identity.as_ref().map_or("", |identity| identity.uuid.as_str()), "player arrived in managed session");
         let next = relay::until(
             &mut authenticated.transport,
             &mut internal,

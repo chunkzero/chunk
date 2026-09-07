@@ -358,7 +358,10 @@ name = "chunk-build"
 version = "0.1.0"
 dependencies = [
  "chunk-contract",
- "chunk-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
