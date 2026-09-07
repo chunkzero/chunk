@@ -17,6 +17,8 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config {
     /// Authenticated local gameplay bridge, when one is available.
     pub gameplay: Option<GameplayTarget>,
+    /// Backend hooks and durable session placement for managed gameplay.
+    pub platform: Option<PlatformTarget>,
     pub motd: String,
     pub max_connections: NonZeroUsize,
     /// Deadline for the entire exchange, including writes; not reset by traffic.
@@ -31,6 +33,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             gameplay: None,
+            platform: None,
             motd: "chunk — sessions coming soon".into(),
             max_connections: NonZeroUsize::new(1024).unwrap(),
             connection_timeout: Duration::from_secs(10),
@@ -55,6 +58,22 @@ impl std::fmt::Debug for GameplayTarget {
             .field("endpoint", &self.endpoint)
             .field("environment", &self.environment)
             .field("deployment", &self.deployment)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Private local connections for JavaScript hooks and session placement.
+#[derive(Clone)]
+pub struct PlatformTarget {
+    pub backend: chunk_contract::BackendConnection,
+    pub control: chunk_contract::ControlConnection,
+}
+
+impl std::fmt::Debug for PlatformTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformTarget")
+            .field("backend", &self.backend.endpoint)
+            .field("control", &self.control.endpoint)
             .finish_non_exhaustive()
     }
 }

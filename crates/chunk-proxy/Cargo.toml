@@ -12,6 +12,7 @@ default = ["mc-26-1"]
 mc-26-1 = ["chunk-protocol/mc-26-1", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
 
 [dependencies]
+chunk-contract = { path = "../chunk-contract" }
 tonic = "0.14.6"
 prost = "0.14.4"
 uuid = { version = "1", features = ["v4"] }
@@ -28,6 +29,7 @@ tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "sync", "
 tracing = "0.1"
 
 [dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [lints]

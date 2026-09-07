@@ -26,10 +26,11 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     authentication: &Authentication,
     deadline: Duration,
     compression: Option<usize>,
+    platform: Option<&super::platform::Platform>,
 ) -> io::Result<Option<Authenticated<S>>> {
     timeout(
         deadline,
-        exchange(Transport::new(stream), responses, authentication, compression),
+        exchange(Transport::new(stream), responses, authentication, compression, platform),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "initial exchange timed out"))?
@@ -40,13 +41,20 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     responses: &Responses,
     authentication: &Authentication,
     compression: Option<usize>,
+    platform: Option<&super::platform::Platform>,
 ) -> io::Result<Option<Authenticated<S>>> {
     let handshake =
         decode_packet::<Handshake>(&transport.read_frame(INITIAL_FRAME_LIMIT).await?).map_err(invalid_data)?;
     match handshake.next_state.0 {
         1 => {
             decode_packet::<StatusRequest>(&transport.read_frame(INITIAL_FRAME_LIMIT).await?).map_err(invalid_data)?;
-            transport.write_encoded(&responses.status).await?;
+            if let Some(platform) = platform {
+                transport
+                    .write_encoded(&platform.status(handshake.server_address.as_str()).await?)
+                    .await?;
+            } else {
+                transport.write_encoded(&responses.status).await?;
+            }
             let frame = match transport.read_frame(INITIAL_FRAME_LIMIT).await {
                 Ok(frame) => frame,
                 Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && !transport.has_buffered_data() => {
@@ -105,6 +113,7 @@ mod tests {
                 &Authentication::new().await.unwrap(),
                 Duration::from_secs(10),
                 None,
+                None,
             )
             .await;
             if suffix.is_empty() {
@@ -128,6 +137,7 @@ mod tests {
             &responses,
             &Authentication::new().await.unwrap(),
             Duration::from_secs(10),
+            None,
             None,
         )
         .await

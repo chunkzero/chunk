@@ -1,5 +1,8 @@
 //! Explicit contracts for immutable bundled application deployments.
 
+mod connections;
+pub use connections::{BackendConnection, ControlConnection};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

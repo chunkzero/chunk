@@ -315,11 +315,14 @@ dependencies = [
 name = "chunk"
 version = "0.1.0"
 dependencies = [
+ "chunk-backend",
  "chunk-build",
+ "chunk-contract",
  "chunk-control",
  "chunk-edge",
  "chunk-proto",
  "chunk-runtime",
+ "chunk-store",
  "clap",
  "serde",
  "serde_json",
@@ -457,6 +460,7 @@ name = "chunk-proxy"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chunk-contract",
  "chunk-proto",
  "chunk-protocol",
  "flate2",
@@ -466,6 +470,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "uuid",

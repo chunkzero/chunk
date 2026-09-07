@@ -13,6 +13,7 @@ import chunk.v1.Supervision.SessionCommand
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer
+import net.minestom.server.entity.Player
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.packet.client.common.ClientSettingsPacket
 import net.minestom.server.network.packet.client.configuration.ClientFinishConfigurationPacket
@@ -35,6 +36,7 @@ import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 class GameplayLifecycleTest {
@@ -44,7 +46,26 @@ class GameplayLifecycleTest {
         MinecraftServer.setCompressionThreshold(0)
         MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
-        val manager = SessionManager(ticks, mapOf("flat" to { FlatSession() }))
+        val joinStarted = CompletableFuture<Unit>()
+        val joinFinished = CompletableFuture<Unit>()
+        val manager =
+            SessionManager(
+                ticks,
+                mapOf(
+                    "flat" to { FlatSession() },
+                    "gated" to {
+                        object : Session() {
+                            override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
+
+                            override fun onJoin(player: Player): CompletableFuture<Unit> {
+                                assertTrue(player.isOnline)
+                                joinStarted.complete(Unit)
+                                return joinFinished
+                            }
+                        }
+                    },
+                ),
+            )
         val deployment =
             DeploymentRef
                 .newBuilder()
@@ -235,6 +256,40 @@ class GameplayLifecycleTest {
                     .setOwnerGeneration(3)
                     .build(),
             )
+            manager.create(command("c").toBuilder().setSessionType("gated").build()).get(3, TimeUnit.SECONDS)
+            val pending = delivery("c", 4)
+            connect(pending)
+            joinStarted.get(3, TimeUnit.SECONDS)
+            assertTrue(
+                service.deliveries().none {
+                    it.delivery.operationId == pending.operationId &&
+                        it.phase == DeliveryPhase.DELIVERY_PHASE_ARRIVED
+                },
+            )
+            val pendingWithdrawal =
+                PlayerWithdrawal
+                    .newBuilder()
+                    .setOperationId(
+                        pending.operationId,
+                    ).setOwnerGeneration(4)
+                    .build()
+            val withdrawn = CompletableFuture.supplyAsync { stub().withdrawPlayer(pendingWithdrawal) }
+            val conflicting = delivery("c", 5)
+            assertThrows(IllegalStateException::class.java) { connect(conflicting) }
+            assertTrue(!withdrawn.isDone, "Withdrawal must await the old asynchronous join")
+            joinFinished.complete(Unit)
+            assertEquals(pendingWithdrawal, withdrawn.get(3, TimeUnit.SECONDS))
+            val replacement = delivery("c", 6)
+            val replacementSocket = connect(replacement)
+            arrive(replacementSocket, replacement.operationId)
+            stub().withdrawPlayer(
+                PlayerWithdrawal
+                    .newBuilder()
+                    .setOperationId(replacement.operationId)
+                    .setOwnerGeneration(6)
+                    .build(),
+            )
+            manager.finish(command("c")).get(3, TimeUnit.SECONDS)
             manager.finish(command("b")).get(3, TimeUnit.SECONDS)
         } finally {
             sockets.forEach { it.close() }

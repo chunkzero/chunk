@@ -23,3 +23,5 @@ include(":jvm:backend-client")
 include(":jvm:runtime")
 include(":jvm:build-api")
 include(":jvm:gradle-plugin")
+
+include(":jvm:example")

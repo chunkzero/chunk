@@ -3,6 +3,7 @@ package dev.chunkzero.runtime
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionInventory
 import chunk.v1.Supervision.SessionPhase
+import dev.chunkzero.backend.BackendClient
 import net.minestom.server.entity.Player
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
@@ -11,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 internal class SessionManager(
     val ticks: TickExecutor,
     private val factories: Map<String, () -> Session>,
+    private val backend: ((String, Long) -> BackendClient)? = null,
 ) {
     private val sessions = ConcurrentHashMap<String, ManagedSession>()
     var withdraw: (String) -> CompletionStage<Unit> = { CompletableFuture.completedFuture(Unit) }
@@ -18,7 +20,7 @@ internal class SessionManager(
     fun create(command: SessionCommand): CompletableFuture<SessionInventory> =
         ticks
             .submit {
-                require(command.session.id.length in 1..128 && command.generation > 0)
+                require(command.session.id.matches(Regex("[A-Za-z0-9_-]{1,128}")) && command.generation > 0)
                 require(command.operationId.length in 1..128 && command.capacity in 1..128)
                 val previous = sessions[command.session.id]
                 if (previous != null) {
@@ -59,7 +61,10 @@ internal class SessionManager(
     ) {
         @Volatile var phase = SessionPhase.SESSION_PHASE_STARTING
             private set
-        val scope = SessionScope(command.session.id, command.generation, ticks) { finish() }
+        val scope =
+            SessionScope(command.session.id, command.generation, ticks, {
+                finish()
+            }, backend?.invoke(command.session.id, command.generation))
         val ready = CompletableFuture<Unit>()
         private val ended = CompletableFuture<Unit>()
         private var finishing = false

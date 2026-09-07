@@ -9,6 +9,8 @@ internal class ManagedPlayer(
     connection: PlayerConnection,
     profile: GameProfile,
 ) : Player(connection, profile) {
+    lateinit var binding: chunk.v1.GameplayOuterClass.PlayerDelivery
+
     var initialization: CompletableFuture<Void>? = null
         private set
 

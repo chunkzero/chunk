@@ -36,24 +36,19 @@ internal class PreparedDelivery(
     private var joining = CompletableFuture.completedFuture(Unit)
     private val removed = CompletableFuture<Unit>()
     private var arrived = false
+    private var joinStarted = false
 
     @Synchronized fun owns(current: PlayerConnection) = !closed && connection === current
 
     @Synchronized fun isReleased() = removed.isDone && !removed.isCompletedExceptionally
 
+    @Synchronized
     fun configure(current: ManagedPlayer): InstanceContainer {
-        val ready =
-            synchronized(this) {
-                check(!closed && connection === current.playerConnection)
-                check(session.phase == SessionPhase.SESSION_PHASE_READY)
-                player = current
-                session.join(current).also { joining = it }
-            }
-        ready.get(5, TimeUnit.SECONDS)
-        return synchronized(this) {
-            check(!closed && session.phase == SessionPhase.SESSION_PHASE_READY)
-            session.scope.instances.first()
-        }
+        check(!closed && connection === current.playerConnection)
+        check(session.phase == SessionPhase.SESSION_PHASE_READY)
+        current.binding = delivery
+        player = current
+        return session.scope.instances.first()
     }
 
     @Synchronized
@@ -108,8 +103,15 @@ internal class PreparedDelivery(
     @Synchronized
     fun checkDeadline() {
         player?.let {
-            if (it.initialization?.let { completion -> completion.isDone && !completion.isCompletedExceptionally } ==
-                true &&
+            val spawned =
+                it.initialization?.let { completion -> completion.isDone && !completion.isCompletedExceptionally } ==
+                    true
+            if (spawned && !closed && !joinStarted) {
+                joinStarted = true
+                joining = session.join(it)
+                joining.whenComplete { _, error -> if (error != null) close() }
+            }
+            if (spawned && joinStarted && joining.isDone && !joining.isCompletedExceptionally &&
                 it.lastSentTeleportId > 0 && it.lastReceivedTeleportId == it.lastSentTeleportId
             ) {
                 arrived = true
