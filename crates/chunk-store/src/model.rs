@@ -29,17 +29,23 @@ impl DocumentKey {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.table.is_empty()
-            || self.table.len() > 64
-            || !self.table.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-            || self.id.is_empty()
-            || self.id.len() > 256
-            || self.id.contains('\0')
-        {
-            return Err(Error::Invalid("invalid document key"));
-        }
-        Ok(())
+        validate_table(&self.table)?;
+        validate_id(&self.id)
     }
+}
+
+fn validate_table(table: &str) -> Result<()> {
+    if table.is_empty() || table.len() > 64 || !table.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return Err(Error::Invalid("invalid table name"));
+    }
+    Ok(())
+}
+
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 || id.contains('\0') {
+        return Err(Error::Invalid("invalid document ID"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,7 +66,7 @@ impl KeyRange {
     /// # Errors
     /// Rejects reversed bounds and invalid table names.
     pub fn validate(&self) -> Result<()> {
-        DocumentKey::new(self.table.clone(), "_")?;
+        validate_table(&self.table)?;
         if self
             .start
             .as_ref()
@@ -78,10 +84,31 @@ impl KeyRange {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub revision: Revision,
-    pub(crate) tables: BTreeMap<String, BTreeMap<String, Document>>,
+    tables: BTreeMap<String, BTreeMap<String, Document>>,
 }
 
 impl Snapshot {
+    /// Creates a snapshot from an adapter's complete table map at the given revision.
+    /// The adapter is responsible for supplying internally consistent documents.
+    ///
+    /// ```
+    /// use chunk_store::{Document, DocumentKey, Revision, Snapshot};
+    /// use serde_json::json;
+    ///
+    /// let tables = [("profiles".into(), [("a".into(), Document {
+    ///     revision: Revision(1),
+    ///     value: json!({"coins": 4}),
+    /// })].into())].into();
+    /// let snapshot = Snapshot::new(Revision(1), tables);
+    /// assert_eq!(snapshot.get(&DocumentKey::new("profiles", "a")?).unwrap().value,
+    ///     json!({"coins": 4}));
+    /// # Ok::<(), chunk_store::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(revision: Revision, tables: BTreeMap<String, BTreeMap<String, Document>>) -> Self {
+        Self { revision, tables }
+    }
+
     #[must_use]
     pub fn get(&self, key: &DocumentKey) -> Option<&Document> {
         self.tables.get(&key.table)?.get(&key.id)

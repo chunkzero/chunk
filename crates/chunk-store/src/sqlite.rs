@@ -1,17 +1,21 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::File,
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use crate::{Commit, Document, Error, Operation, Outcome, Result, Revision, Snapshot, Storage};
+use crate::{Commit, Document, Error, Operation, Outcome, Result, Snapshot, Storage};
 
-const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_DATABASE_BYTES: i64 = 32 * 1024 * 1024;
-const MAX_DOCUMENTS: i64 = 100_000;
+mod prepare;
+mod revision;
+
+use prepare::Prepared;
+
+const MAX_DOCUMENT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_DOCUMENTS: usize = 100_000;
 
 /// Local single-writer adapter. The advisory lock lives beside the canonical
 /// database path and is held for this object's lifetime. Every writer must use
@@ -30,24 +34,7 @@ impl SqliteStore {
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("invalid environment identity"));
         }
-        File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path.as_ref())?;
-        let canonical = path.as_ref().canonicalize()?;
-        let mut lock_path = canonical.as_os_str().to_os_string();
-        lock_path.push(".writer.lock");
-        let writer_lock = File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
-        writer_lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => Error::WriterLocked,
-            std::fs::TryLockError::Error(error) => Error::Io(error),
-        })?;
+        let (canonical, writer_lock) = acquire_writer_lock(path.as_ref())?;
         let mut connection = Connection::open(canonical)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -70,6 +57,25 @@ impl SqliteStore {
             _writer_lock: writer_lock,
         })
     }
+}
+
+fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, File)> {
+    // Create a fresh database file before canonicalizing its lock identity.
+    File::options().create(true).truncate(false).write(true).open(path)?;
+    let canonical = path.canonicalize()?;
+    let mut lock_path = canonical.as_os_str().to_os_string();
+    lock_path.push(".writer.lock");
+    let writer_lock = File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    writer_lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => Error::WriterLocked,
+        std::fs::TryLockError::Error(error) => Error::Io(error),
+    })?;
+    Ok((canonical, writer_lock))
 }
 
 fn initialize(connection: &mut Connection, environment: &str) -> Result<()> {
@@ -100,19 +106,6 @@ fn initialize(connection: &mut Connection, environment: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_revision(value: i64) -> Result<Revision> {
-    Ok(Revision(
-        u64::try_from(value).map_err(|_| Error::Invalid("negative stored revision"))?,
-    ))
-}
-
-fn revision(connection: &Connection) -> Result<Revision> {
-    let value: i64 = connection.query_row("SELECT revision FROM metadata WHERE singleton = 1", [], |row| {
-        row.get(0)
-    })?;
-    decode_revision(value)
-}
-
 fn outcome(connection: &Connection, operation: &Operation) -> Result<Option<Outcome>> {
     operation.validate()?;
     let record = connection
@@ -122,7 +115,7 @@ fn outcome(connection: &Connection, operation: &Operation) -> Result<Option<Outc
             |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, crate::Revision>(1)?,
                     row.get::<_, String>(2)?,
                 ))
             },
@@ -134,7 +127,7 @@ fn outcome(connection: &Connection, operation: &Operation) -> Result<Option<Outc
                 return Err(Error::OperationMismatch);
             }
             Ok(Outcome {
-                revision: decode_revision(revision)?,
+                revision,
                 result: serde_json::from_str(&result)?,
             })
         })
@@ -144,24 +137,17 @@ fn outcome(connection: &Connection, operation: &Operation) -> Result<Option<Outc
 impl Storage for SqliteStore {
     fn snapshot(&mut self) -> Result<Snapshot> {
         let transaction = self.connection.transaction()?;
-        let revision = revision(&transaction)?;
+        let revision = revision::current(&transaction)?;
         let mut tables = BTreeMap::<_, BTreeMap<_, _>>::new();
         {
             let mut statement =
                 transaction.prepare("SELECT table_name, id, revision, value FROM documents ORDER BY table_name, id")?;
             let mut rows = statement.query([])?;
-            let mut bytes = 0;
-            let mut count = 0;
             while let Some(row) = rows.next()? {
                 let table: String = row.get(0)?;
                 let id: String = row.get(1)?;
-                let revision = decode_revision(row.get(2)?)?;
+                let revision = row.get(2)?;
                 let json: String = row.get(3)?;
-                bytes += i64::try_from(json.len()).map_err(|_| Error::Capacity)?;
-                count += 1;
-                if bytes > MAX_DATABASE_BYTES || count > MAX_DOCUMENTS {
-                    return Err(Error::Capacity);
-                }
                 tables.entry(table).or_default().insert(
                     id,
                     Document {
@@ -172,7 +158,7 @@ impl Storage for SqliteStore {
             }
         }
         transaction.commit()?;
-        Ok(Snapshot { revision, tables })
+        Ok(Snapshot::new(revision, tables))
     }
 
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
@@ -180,55 +166,27 @@ impl Storage for SqliteStore {
     }
 
     fn commit(&mut self, commit: Commit) -> Result<Outcome> {
-        commit.operation.validate()?;
-        if commit.writes.len() > 256 {
-            return Err(Error::Invalid("too many writes"));
-        }
-        let mut keys = BTreeSet::new();
-        let writes = commit
-            .writes
-            .iter()
-            .map(|write| {
-                write.key.validate()?;
-                if !keys.insert(&write.key) {
-                    return Err(Error::Invalid("duplicate document write"));
-                }
-                let json = write.value.as_ref().map(serde_json::to_string).transpose()?;
-                if json.as_ref().is_some_and(|value| value.len() > MAX_DOCUMENT_BYTES) {
-                    return Err(Error::Capacity);
-                }
-                Ok((&write.key, json))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let result = serde_json::to_string(&commit.result)?;
-        if result.len() > MAX_DOCUMENT_BYTES {
-            return Err(Error::Capacity);
-        }
+        let prepared = Prepared::new(&commit)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(outcome) = outcome(&transaction, &commit.operation)? {
             return Ok(outcome);
         }
-        let current = revision(&transaction)?;
+        let current = revision::current(&transaction)?;
         if current != commit.expected {
             return Err(Error::Conflict {
                 expected: commit.expected,
                 actual: current,
             });
         }
-        let next = current
-            .0
-            .checked_add(1)
-            .filter(|value| *value <= i64::MAX.cast_unsigned())
-            .ok_or(Error::Capacity)?;
-        let next_sql = i64::try_from(next).map_err(|_| Error::Capacity)?;
-        for (key, json) in writes {
+        let next = revision::next(current)?;
+        for (key, json) in prepared.writes {
             if let Some(json) = json {
                 transaction.execute(
                     "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)
                     ON CONFLICT (table_name, id) DO UPDATE SET revision = excluded.revision, value = excluded.value",
-                    params![key.table, key.id, next_sql, json],
+                    params![key.table, key.id, next, json],
                 )?;
             } else {
                 transaction.execute(
@@ -237,27 +195,27 @@ impl Storage for SqliteStore {
                 )?;
             }
         }
-        let (count, bytes): (i64, i64) = transaction.query_row(
+        let (count, bytes): (usize, usize) = transaction.query_row(
             "SELECT count(*), coalesce(sum(length(CAST(value AS BLOB))), 0) FROM documents",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if count > MAX_DOCUMENTS || bytes > MAX_DATABASE_BYTES {
+        if count > MAX_DOCUMENTS || bytes > MAX_DOCUMENT_TOTAL_BYTES {
             return Err(Error::Capacity);
         }
-        transaction.execute("UPDATE metadata SET revision = ?1 WHERE singleton = 1", [next_sql])?;
+        transaction.execute("UPDATE metadata SET revision = ?1 WHERE singleton = 1", [next])?;
         transaction.execute(
             "INSERT INTO outcomes VALUES (?1, ?2, ?3, ?4)",
             params![
                 commit.operation.id,
                 commit.operation.fingerprint.as_slice(),
-                next_sql,
-                result
+                next,
+                prepared.result
             ],
         )?;
         transaction.commit()?;
         Ok(Outcome {
-            revision: Revision(next),
+            revision: next,
             result: commit.result,
         })
     }

@@ -15,7 +15,7 @@ pub use sqlite::SqliteStore;
 /// Only the environment backend holds this capability.
 pub trait Storage: Send {
     /// # Errors
-    /// Returns I/O, corruption or snapshot-limit errors.
+    /// Returns I/O or corruption errors.
     fn snapshot(&mut self) -> Result<Snapshot>;
 
     /// Recovers an operation's durable result, including after backend restart.
@@ -56,3 +56,6 @@ pub enum Error {
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+#[cfg(test)]
+mod tests;

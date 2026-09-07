@@ -1,76 +1,25 @@
 use super::*;
-use crate::{DocumentKey, KeyRange, Write};
+use crate::{
+    DocumentKey, Revision,
+    tests::{commit, operation, write},
+};
 use serde_json::json;
 
-fn operation(id: &str) -> Operation {
-    Operation {
-        id: id.into(),
-        fingerprint: [7; 32],
-    }
-}
-
-fn write(id: &str, value: Option<serde_json::Value>) -> Write {
-    Write {
-        key: DocumentKey::new("profiles", id).unwrap(),
-        value,
-    }
-}
-
-fn commit(id: &str, revision: u64, writes: Vec<Write>) -> Commit {
-    Commit {
-        expected: Revision(revision),
-        operation: operation(id),
-        writes,
-        result: json!({"committed": id}),
-    }
+fn open() -> (tempfile::TempDir, SqliteStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
+    (directory, store)
 }
 
 #[test]
-fn snapshots_preserve_point_and_empty_range_reads_across_atomic_changes() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
-    let empty = store.snapshot().unwrap();
-    let range = KeyRange {
-        table: "profiles".into(),
-        start: Some("b".into()),
-        end: Some("d".into()),
-    };
-    assert!(empty.scan(&range).unwrap().is_empty());
-    store
-        .commit(commit(
-            "one",
-            0,
-            vec![write("a", Some(json!(1))), write("c", Some(json!(2)))],
-        ))
-        .unwrap();
-    let first = store.snapshot().unwrap();
-    assert_eq!(first.revision, Revision(1));
-    assert_eq!(first.scan(&range).unwrap()[0].0, "c");
-    assert!(empty.scan(&range).unwrap().is_empty());
-    store
-        .commit(commit("two", 1, vec![write("c", None), write("b", Some(json!(3)))]))
-        .unwrap();
-    let second = store.snapshot().unwrap();
-    assert_eq!(second.scan(&range).unwrap()[0].0, "b");
-    assert_eq!(first.scan(&range).unwrap()[0].0, "c");
-    assert_eq!(
-        second
-            .get(&DocumentKey::new("profiles", "a").unwrap())
-            .unwrap()
-            .revision,
-        Revision(1)
-    );
-    assert!(matches!(
-        store.commit(commit("stale", 1, vec![])),
-        Err(Error::Conflict { .. })
-    ));
-    assert!(store.outcome(&operation("stale")).unwrap().is_none());
+fn storage_contract() {
+    let (_directory, mut store) = open();
+    crate::tests::snapshots_preserve_point_and_empty_range_reads_across_atomic_changes(&mut store);
 }
 
 #[test]
 fn a_failure_after_document_writes_rolls_back_documents_revision_and_outcome() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
+    let (_directory, mut store) = open();
     store
         .connection
         .execute_batch(
@@ -102,9 +51,8 @@ fn a_failure_after_document_writes_rolls_back_documents_revision_and_outcome() {
 
 #[test]
 fn restart_recovers_unknown_outcomes_and_excludes_another_environment_writer() {
-    let directory = tempfile::tempdir().unwrap();
+    let (directory, mut store) = open();
     let path = directory.path().join("data.db");
-    let mut store = SqliteStore::open(&path, "local").unwrap();
     assert!(matches!(SqliteStore::open(&path, "local"), Err(Error::WriterLocked)));
     let outcome = store
         .commit(commit(
