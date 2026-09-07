@@ -6,3 +6,6 @@
 mod schema;
 
 pub use schema::{DatabaseSchema, Field, Schema, TableSchema, validate, validate_name};
+
+#[cfg(test)]
+mod tests;

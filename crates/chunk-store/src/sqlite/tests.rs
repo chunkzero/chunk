@@ -7,6 +7,7 @@ use serde_json::json;
 
 mod queries;
 mod schemas;
+mod transactions;
 
 fn open() -> (tempfile::TempDir, SqliteStore) {
     let directory = tempfile::tempdir().unwrap();
