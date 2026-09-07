@@ -10,13 +10,13 @@ import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 
 fun main() {
-    val token = requireNotNull(System.getenv("CHUNK_PROCESS_TOKEN")) { "CHUNK_PROCESS_TOKEN is required" }
-    val authentication = ProcessAuthentication(token)
+    val environment = RuntimeEnvironment.load()
+    val authentication = ProcessAuthentication(environment.processToken)
     val deployment =
         DeploymentRef
             .newBuilder()
-            .setEnvironment(System.getenv("CHUNK_ENVIRONMENT") ?: "local")
-            .setDeployment(System.getenv("CHUNK_DEPLOYMENT") ?: "local")
+            .setEnvironment(environment.environment)
+            .setDeployment(environment.deployment)
             .build()
     val minecraft = MinecraftServer.init()
     MinecraftServer.setCompressionThreshold(0)
