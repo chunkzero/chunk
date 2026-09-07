@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+// Loopback service authenticated by an environment credential. Only trusted
+// platform processes supply caller context; this is not a public client API.
+service Backend {
+  rpc Call(BackendCall) returns (BackendResult);
+  rpc Watch(BackendWatch) returns (stream BackendUpdate);
+}
+
+message BackendCall {
+  string environment = 1;
+  string deployment = 2;
+  string function = 3;
+  bytes arguments_json = 4;
+  bytes caller_json = 5;
+  string operation_id = 6;
+}
+
+message BackendResult {
+  uint64 revision = 1;
+  bytes result_json = 2;
+}
+
+message BackendWatch {
+  repeated BackendCall queries = 1;
+}
+
+// Every reconnect begins with a fresh full group. Clients mark retained results
+// stale on stream failure and clear stale only when they receive this snapshot.
+message BackendUpdate {
+  uint64 revision = 1;
+  repeated bytes results_json = 2;
+}
