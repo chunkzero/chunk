@@ -1,4 +1,4 @@
-use std::{io, io::Write as _};
+use std::{future::Future, io, io::Write as _, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use chunk_protocol::{Decode, Encode, MAX_FRAME_SIZE, Packet, VarInt, decode_frame, encode_packet};
@@ -107,6 +107,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
         !self.buffer.is_empty()
     }
 
+    pub(super) async fn write_body(&mut self, body: &[u8]) -> io::Result<()> {
+        if body.is_empty() || body.len() > MAX_FRAME_SIZE {
+            return Err(invalid_data("invalid player frame size"));
+        }
+        let mut framed = Vec::with_capacity(body.len() + 5);
+        VarInt(i32::try_from(body.len()).map_err(invalid_data)?)
+            .encode(&mut framed)
+            .map_err(invalid_data)?;
+        framed.extend_from_slice(body);
+        self.write_encoded(&framed).await
+    }
+
     pub(super) async fn write_packet<P: Packet + Encode>(&mut self, packet: &P) -> io::Result<()> {
         self.write_encoded(&encode_packet(packet).map_err(invalid_data)?).await
     }
@@ -201,6 +213,14 @@ fn inflate(mut frame: &[u8], threshold: usize, limit: usize) -> io::Result<Bytes
 
 pub(super) fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) async fn within<T>(limit: Duration, future: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "operation timed out"))?
 }
 
 #[cfg(test)]

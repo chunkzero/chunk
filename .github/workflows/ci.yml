@@ -46,6 +46,7 @@ jobs:
         with:
           input: proto
           push: false
+          pr_comment: false
 
   typescript:
     runs-on: ubuntu-latest

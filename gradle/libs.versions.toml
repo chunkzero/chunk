@@ -5,7 +5,17 @@ kotest = "6.2.4"
 shadow = "9.6.1"
 foojay = "1.0.0"
 
+protobuf = "4.36.1"
+grpc = "1.84.0"
+minestom = "2026.05.17c-26.1.1"
+
 [libraries]
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version = "2.0.18" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
+grpc-netty = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
+minestom = { module = "net.minestom:minestom", version.ref = "minestom" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
@@ -16,6 +26,7 @@ kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref =
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 
 [plugins]
+protobuf = { id = "com.google.protobuf", version = "0.10.0" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 foojay = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojay" }

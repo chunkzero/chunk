@@ -19,9 +19,9 @@ app-local commands. These APIs remain proposed, not implemented.
 ## Status
 
 This branch implements the Rust Minecraft protocol and proxy listener, online
-login authentication, configuration, and a bounded waiting world. Playable
-sessions, handoff, the sync engine, storage adapters, and the application SDKs
-remain scaffolds. The CLI currently runs `chunk edge`; planned roles and
+login authentication, configuration, and authenticated delivery to a Minestom bridge with prepared login admission.
+Managed sessions, handoff, the sync engine, storage adapters, and the application
+SDKs remain scaffolds. See [the bridge commands](jvm/runtime/README.md). The CLI currently runs `chunk edge`; planned roles and
 commands are not implemented.
 
 Dashboard/management scaffolding exists separately on

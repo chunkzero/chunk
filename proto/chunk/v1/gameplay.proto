@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+
+// Control calls require process credentials. Gameplay uses a dedicated TCP socket.
+service Gameplay {
+  rpc Configuration(ConfigurationRequest) returns (ConfigurationResponse);
+  rpc PreparePlayer(PlayerDelivery) returns (PlayerPreparation);
+}
+
+message ConfigurationRequest {
+  DeploymentRef deployment = 1;
+}
+
+// Destination metadata. Player configuration travels over the Minecraft connection.
+message ConfigurationResponse {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  int32 protocol = 3;
+  reserved 4, 5;
+  reserved "packets", "registry_digest";
+}
+
+message PlayerDelivery {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  string operation_id = 3;
+  SessionRef session = 4;
+  PlayerRef player = 5;
+  uint64 owner_generation = 6;
+  Identity identity = 7;
+  int32 protocol = 8;
+  reserved 9, 10;
+  reserved "registry_digest", "client_information";
+}
+
+message PlayerPreparation {
+  string operation_id = 1;
+  string endpoint = 2;
+  bytes capability = 3;
+}
+
+// Payload of the standard chunk:delivery login plugin response.
+// Minestom consumes the capability before login success and normal configuration.
+message PlayerSetup {
+  string operation_id = 1;
+  bytes capability = 2;
+}

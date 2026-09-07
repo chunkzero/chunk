@@ -20,6 +20,14 @@ enum Command {
         bind: SocketAddr,
         #[arg(long, default_value = "chunk — sessions coming soon")]
         motd: String,
+        #[arg(long, requires = "process_token")]
+        gameplay: Option<String>,
+        #[arg(long, env = "CHUNK_PROCESS_TOKEN", hide_env_values = true)]
+        process_token: Option<String>,
+        #[arg(long, env = "CHUNK_ENVIRONMENT", default_value = "local")]
+        environment: String,
+        #[arg(long, env = "CHUNK_DEPLOYMENT", default_value = "local")]
+        deployment: String,
         #[arg(long, default_value = "1024")]
         max_connections: NonZeroUsize,
     },
@@ -46,8 +54,19 @@ async fn run(cli: Cli) -> io::Result<()> {
             bind,
             motd,
             max_connections,
+            gameplay,
+            process_token,
+            environment,
+            deployment,
         } => {
+            let gameplay = gameplay.map(|endpoint| chunk_edge::GameplayTarget {
+                endpoint,
+                token: process_token.expect("clap requires a process token for gameplay"),
+                environment,
+                deployment,
+            });
             let config = chunk_edge::ProxyConfig {
+                gameplay,
                 motd,
                 max_connections,
                 ..Default::default()

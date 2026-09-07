@@ -4,7 +4,7 @@
 
 use std::{future::Future, io, net::SocketAddr};
 
-pub use chunk_proxy::Config as ProxyConfig;
+pub use chunk_proxy::{Config as ProxyConfig, GameplayTarget};
 
 /// Runs the edge's player listener.
 ///

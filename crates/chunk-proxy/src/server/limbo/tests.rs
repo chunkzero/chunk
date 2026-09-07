@@ -1,3 +1,7 @@
+use chunk_protocol::{
+    Decode, VarInt,
+    versions::v26_1::{AcknowledgeConfiguration, KnownPacks},
+};
 use std::future::pending;
 
 use chunk_protocol::{
@@ -272,7 +276,16 @@ async fn configuration_completion_and_spawn_acknowledgments_are_required() {
     let mut settings = information();
     let server = tokio::spawn(async move {
         let mut transport = authenticated.transport;
-        timeout(ACK_TIMEOUT, configure(&mut transport, &mut settings, packets())).await
+        timeout(
+            ACK_TIMEOUT,
+            configuration::finish(
+                &mut transport,
+                &mut settings,
+                &packets().known_packs,
+                &packets().configuration,
+            ),
+        )
+        .await
     });
     client.read_frame(FRAME_LIMIT).await.unwrap();
     client

@@ -1,7 +1,26 @@
+import com.google.protobuf.gradle.id
+
 plugins {
     id("chunk.kotlin-conventions")
+    alias(libs.plugins.protobuf)
 }
 
-// Kotlin and Java gRPC bindings generated from the .proto files in /proto.
-// The protobuf and grpc-kotlin plugins are added when the first service is
-// wired; the module exists now so the layering is visible.
+dependencies {
+    api(libs.protobuf.java)
+    api(libs.grpc.protobuf)
+    api(libs.grpc.stub)
+}
+
+sourceSets.main {
+    proto.srcDir(rootProject.file("proto"))
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.get()}" }
+    plugins {
+        id("grpc") { artifact = "io.grpc:protoc-gen-grpc-java:${libs.versions.grpc.get()}" }
+    }
+    generateProtoTasks {
+        all().configureEach { plugins { id("grpc") } }
+    }
+}

@@ -1,6 +1,7 @@
 mod authentication;
 mod configuration;
 mod connection;
+mod gameplay;
 mod limbo;
 mod transport;
 
@@ -158,15 +159,12 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
+                    let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression).await {
                             Ok(Some(authenticated)) => {
-                                tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; entering limbo");
-                                // Destination selection will supply this future when sessions are available.
-                                if let Err(error) = limbo::wait_for_destination(
-                                    authenticated, std::future::pending::<io::Result<()>>(), configuration_timeout, &limbo_packets,
-                                ).await {
-                                    tracing::debug!(%peer, %error, "limbo connection closed");
+                                if let Err(error) = route(authenticated, gameplay.as_ref(), &limbo_packets, configuration_timeout).await {
+                                    tracing::debug!(%peer, %error, "player connection closed");
                                 }
                             }
                             Ok(None) => {}
@@ -179,5 +177,25 @@ impl Proxy {
         drop(self.listener);
         connections.shutdown().await;
         result
+    }
+}
+
+async fn route(
+    authenticated: authentication::Authenticated<tokio::net::TcpStream>,
+    gameplay: Option<&crate::GameplayTarget>,
+    limbo_packets: &limbo::Cache,
+    deadline: Duration,
+) -> io::Result<()> {
+    if let Some(target) = gameplay {
+        gameplay::serve(authenticated, target, deadline).await
+    } else {
+        limbo::wait_for_destination(
+            authenticated,
+            std::future::pending::<io::Result<()>>(),
+            deadline,
+            limbo_packets,
+        )
+        .await
+        .map(|_| ())
     }
 }
