@@ -4,7 +4,10 @@ import chunk.v1.Common.Identity
 import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerPreparation
 import chunk.v1.GameplayOuterClass.PlayerSetup
+import chunk.v1.Supervision.DeliveryInventory
+import chunk.v1.Supervision.DeliveryPhase
 import com.google.protobuf.ByteString
+import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.player.GameProfile
 import net.minestom.server.network.player.PlayerConnection
 import java.security.MessageDigest
@@ -23,6 +26,20 @@ internal class PreparedDelivery(
     private var consumed = false
     private var closed = false
     private var connection: PlayerConnection? = null
+
+    fun inventory(): DeliveryInventory {
+        checkDeadline()
+        return DeliveryInventory
+            .newBuilder()
+            .setDelivery(delivery.toBuilder().clearIdentity())
+            .setPhase(
+                when {
+                    closed -> DeliveryPhase.DELIVERY_PHASE_CLOSED
+                    connection?.clientState == ConnectionState.PLAY -> DeliveryPhase.DELIVERY_PHASE_ATTACHED
+                    else -> DeliveryPhase.DELIVERY_PHASE_PREPARED
+                },
+            ).build()
+    }
 
     fun result(endpoint: String): PlayerPreparation {
         checkDeadline()

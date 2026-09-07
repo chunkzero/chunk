@@ -1,49 +1,44 @@
-# chunk-runtime (JVM)
+# Gameplay JVM
 
-The Minestom bridge accepts prepared players through its normal loopback Minecraft
-listener. The Rust proxy owns online authentication, encryption and compression;
-Minestom owns login admission, configuration and play. A standard `chunk:delivery`
-login plugin exchange presents the capability issued by the authenticated control
-RPC. The pinned Minestom release uses protocol 775, compatible with Java Edition 26.1.
+Minestom accepts prepared players through its normal loopback Minecraft listener.
+The proxy owns public authentication, encryption and compression and relays
+Minestom configuration and play. The Rust runtime supervises the JVM and relays
+each player's connection. Minestom uses protocol 775, compatible with Java Edition 26.1.
 
-Build with `cargo build -p chunk` and `./gradlew :jvm:runtime:installDist`.
-The JVM application needs Java 25; Gradle resolves its pinned major toolchain.
-Run these commands from the repository root, after checking that ports 25565
-and 25566 are free:
+Build `cargo build -p chunk` and `./gradlew :jvm:runtime:installDist`, then run
+these in separate terminals from the repository root:
 
 ```sh
-# Share this environment with both processes; never commit the token.
-export CHUNK_PROCESS_TOKEN="$(openssl rand -hex 32)"
-export CHUNK_ENVIRONMENT=local
-export CHUNK_DEPLOYMENT=local
-# JAVA_HOME must point to Java 25 when running the installed launcher.
-jvm/runtime/build/install/runtime/bin/runtime &
-bridge_pid=$!
-trap 'kill "$bridge_pid"; wait "$bridge_pid"' EXIT
-./target/debug/chunk edge --gameplay http://127.0.0.1:25566
+# Requires Java 25; Gradle resolves that toolchain for the gameplay module.
+./target/debug/chunk runtime --java /path/to/java25/bin/java
+./target/debug/chunk edge --runtime-file .chunk/runtime.json
 ```
 
-Join `127.0.0.1:25565` with an authenticated official 26.1 client. The bridge
-currently provides one grass world named `bridge`. Without `--gameplay`, the
-proxy retains its bounded waiting-world behavior.
+The runtime generates separate child and proxy-facing credentials and writes the
+private connection file only after authenticated registration and advancing ticks.
+Diagnostics go to `.chunk/runtime.log`. Ctrl-C stops the supervised JVM within a
+bounded deadline and removes the connection record. Check existing servers before
+starting the proxy on port 25565. The current fixture supplies one grass session
+named `bridge`; multiple sessions and control-plane placement follow separately.
 
-Control RPCs require the process credential. Preparation validates deployment,
-process generation and protocol and issues a single-use,
-30-second capability. Minestom rejects missing, expired, mismatched or replayed
-capabilities before creating a player. The prepared identity includes profile
-properties; client settings travel through normal configuration packets.
-The configuration RPC returns destination metadata. Minestom sends registries
-and other player configuration through its normal Minecraft connection, which
-the proxy relays. Configuration reuse is tracked in [#29](https://github.com/chunkzero/chunk/issues/29).
-Owner generations fence deliveries. Terminal operation records release their live
-connection references, and history is bounded to 4096 deliveries per fixture.
-Minestom handles socket buffering and graceful kicks. Proxy writes and the login
-plugin exchange have five-second deadlines; configuration uses the proxy's
-configured deadline.
+Registration freezes deployment, runtime/process incarnation, machine profile,
+artifact identity, protocol version and both JVM endpoints. Inventory RPCs
+report ticks and prepared/attached/closed delivery bindings. A lifecycle outage
+marks inventory unavailable and rejects new preparation, while existing TCP
+streams remain independent. Repeated registration reconciles the same process;
+it cannot change endpoints or configuration. A dead runtime loses its relays;
+a dead JVM loses its worlds. Neither is recovered by replaying player bytes.
 
-Focused verification: `./gradlew :jvm:runtime:test` and `cargo test -p chunk-proxy`.
+Preparation creates no player. Single-use capabilities expire after thirty seconds
+and are exchanged through standard `chunk:delivery` login plugin packets. The
+runtime replaces its upstream capability with the JVM capability on the second hop,
+then forwards normal login success and relays bounded byte buffers. Minestom owns
+configuration and player creation. Slow relay writes expire after five seconds;
+login is bounded to five seconds, sockets to 128 and history to 4096 operations.
+Native Minestom sockets handle buffering and graceful kicks.
 
-Session management, backend clients, supervisor registration and control-plane
-ownership follow in subsequent changes. The standalone bridge's process
-generation is fixed for this initial integration fixture; restart its proxy
-alongside it. The local transport uses loopback and a shared process credential.
+Focused checks: `cargo test -p chunk-runtime` and `./gradlew :jvm:runtime:test`.
+The standalone bridge remains available with `CHUNK_PROCESS_TOKEN` (at least 32
+characters), `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT`; without
+`CHUNK_SUPERVISOR` it binds control on 25566 and uses a fixed fixture incarnation.
+Production local launches should use the supervisor.

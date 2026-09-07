@@ -123,6 +123,7 @@ fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse)
         .map_err(invalid_data)?,
         identity: Some(identity),
         protocol: authenticated.protocol_version,
+        runtime_id: config.runtime_id.clone(),
     })
 }
 

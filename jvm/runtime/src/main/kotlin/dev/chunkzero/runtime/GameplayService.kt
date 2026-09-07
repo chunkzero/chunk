@@ -1,12 +1,16 @@
 package dev.chunkzero.runtime
 
 import chunk.v1.Common.DeploymentRef
+import chunk.v1.Common.SessionRef
 import chunk.v1.GameplayGrpc
 import chunk.v1.GameplayOuterClass.ConfigurationRequest
 import chunk.v1.GameplayOuterClass.ConfigurationResponse
 import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerPreparation
 import chunk.v1.GameplayOuterClass.PlayerSetup
+import chunk.v1.Supervision.DeliveryPhase
+import chunk.v1.Supervision.SessionInventory
+import chunk.v1.Supervision.SessionPhase
 import io.grpc.Status
 import io.grpc.stub.StreamObserver
 import net.kyori.adventure.text.Component
@@ -24,14 +28,16 @@ internal class GameplayService(
     private val generation: Long,
     private val instance: InstanceContainer,
     private val now: () -> Long = System::nanoTime,
+    private val runtimeId: String = "bridge",
 ) : GameplayGrpc.GameplayImplBase() {
     private val preparations = mutableMapOf<String, PreparedDelivery>()
     private val owners = DeliveryFence()
-    private val configuration =
+    val configurationArtifact =
         ConfigurationResponse
             .newBuilder()
             .setDeployment(deployment)
             .setProcessGeneration(generation)
+            .setRuntimeId(runtimeId)
             .setProtocol(MinecraftServer.PROTOCOL_VERSION)
             .build()
     private val events = EventNode.all("gameplay-delivery")
@@ -72,7 +78,7 @@ internal class GameplayService(
             response.onError(Status.PERMISSION_DENIED.withDescription("Deployment mismatch").asRuntimeException())
             return
         }
-        response.onNext(configuration)
+        response.onNext(configurationArtifact)
         response.onCompleted()
     }
 
@@ -104,6 +110,24 @@ internal class GameplayService(
 
     fun flush() = synchronized(preparations) { preparations.values.forEach { it.checkDeadline() } }
 
+    fun deliveries() = synchronized(preparations) { preparations.values.map { it.inventory() } }
+
+    fun sessions(): List<SessionInventory> {
+        val deliveries = deliveries()
+        return listOf(
+            SessionInventory
+                .newBuilder()
+                .setSession(SessionRef.newBuilder().setId("bridge"))
+                .setGeneration(1)
+                .setSessionType("bridge")
+                .setPhase(SessionPhase.SESSION_PHASE_READY)
+                .setCapacity(128)
+                .setPrepared(deliveries.count { it.phase == DeliveryPhase.DELIVERY_PHASE_PREPARED })
+                .setAttached(deliveries.count { it.phase == DeliveryPhase.DELIVERY_PHASE_ATTACHED })
+                .build(),
+        )
+    }
+
     fun close() {
         MinecraftServer.getGlobalEventHandler().removeChild(events)
         synchronized(preparations) { preparations.values.forEach { it.close() } }
@@ -112,7 +136,8 @@ internal class GameplayService(
     private fun validate(delivery: PlayerDelivery) {
         require(delivery.serializedSize <= 65_536) { "Delivery exceeds size limit" }
         require(
-            delivery.deployment == deployment && delivery.processGeneration == generation,
+            delivery.deployment == deployment && delivery.processGeneration == generation &&
+                delivery.runtimeId == runtimeId,
         ) { "Stale process or deployment" }
         require(delivery.protocol == MinecraftServer.PROTOCOL_VERSION) { "Incompatible destination protocol" }
         require(
