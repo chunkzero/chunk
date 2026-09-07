@@ -1,13 +1,13 @@
 package dev.chunkzero.runtime
 
+import chunk.v1.Common.DeploymentRef
+import chunk.v1.GameplayGrpc
+import chunk.v1.GameplayOuterClass.ConfigurationRequest
+import chunk.v1.GameplayOuterClass.ConfigurationResponse
+import chunk.v1.GameplayOuterClass.PlayerDelivery
+import chunk.v1.GameplayOuterClass.PlayerInput
+import chunk.v1.PlayersOuterClass.Frame
 import com.google.protobuf.ByteString
-import dev.chunkzero.proto.ConfigurationRequest
-import dev.chunkzero.proto.ConfigurationResponse
-import dev.chunkzero.proto.DeploymentRef
-import dev.chunkzero.proto.Frame
-import dev.chunkzero.proto.GameplayGrpc
-import dev.chunkzero.proto.PlayerDelivery
-import dev.chunkzero.proto.PlayerInput
 import io.grpc.Status
 import io.grpc.stub.ServerCallStreamObserver
 import io.grpc.stub.StreamObserver

@@ -1,6 +1,6 @@
 package dev.chunkzero.runtime
 
-import dev.chunkzero.proto.DeploymentRef
+import chunk.v1.Common.DeploymentRef
 import io.grpc.Metadata
 import io.grpc.ServerCall
 import io.grpc.ServerCallHandler

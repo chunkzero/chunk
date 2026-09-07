@@ -6,9 +6,6 @@ package chunk.v1;
 
 import "chunk/v1/common.proto";
 
-option java_multiple_files = true;
-option java_package = "dev.chunkzero.proto";
-
 service Directory {
   rpc ResolveSession(ResolveSessionRequest) returns (ResolveSessionResponse);
   rpc ResolveDatabase(ResolveDatabaseRequest) returns (ResolveDatabaseResponse);

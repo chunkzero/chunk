@@ -7,9 +7,6 @@ package chunk.v1;
 
 import "chunk/v1/common.proto";
 
-option java_multiple_files = true;
-option java_package = "dev.chunkzero.proto";
-
 service Runtime {
   // Proposed process control stream; reconnect and ownership fencing are open.
   rpc Attach(stream ProcessMessage) returns (stream RuntimeCommand);
