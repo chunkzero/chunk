@@ -1,12 +1,19 @@
-// Types shared by every internal service. Proposed; versioned with the manifest.
+// Incomplete internal transport proposal; see docs/architecture.md.
 syntax = "proto3";
 
 package chunk.v1;
 
-// A stable player identity. Never a raw UUID: the edge issues it at login and
-// it survives moves, restarts and edge-to-edge transfers.
+// A stable player identity. Never a raw UUID: the proxy issues it at login and
+// it survives moves, restarts and proxy transfers.
 message PlayerRef {
   string id = 1;
+}
+
+// An immutable release within an environment. Authentication must authorize
+// this scope; caller-supplied identifiers alone are not authority.
+message DeploymentRef {
+  string environment = 1;
+  string deployment = 2;
 }
 
 // A running session, wherever its process is.
@@ -14,7 +21,7 @@ message SessionRef {
   string id = 1;
 }
 
-// What the edge verified at login and forwards on delivery.
+// What the proxy verified at login and forwards on delivery.
 message Identity {
   string uuid = 1;
   string username = 2;

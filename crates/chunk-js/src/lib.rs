@@ -1,15 +1,10 @@
-//! Runs an app's compiled edge bundle.
+//! Minimal JavaScript execution for the environment sync engine. Scaffold only.
 //!
-//! One `QuickJS` runtime and heap per loaded app, reused between calls and
-//! replaced as a unit on deployment. Invocation is `invoke(function ref,
-//! args, context, deadline)`: no HTTP, no request objects. The runtime has
-//! no ambient filesystem, network, environment or process API; everything
-//! useful arrives as host capabilities installed on `ctx`, and which
-//! capabilities exist depends on the function kind (query, mutation, action,
-//! listener).
+//! Start with `deno_core`/V8. V1 supports language APIs and pure-JS packages;
+//! filesystem, network, process and Node APIs are not ambient capabilities.
+//! The sync engine supplies capabilities appropriate to queries, mutations and
+//! actions. Transactional execution must support safe validation and retries.
 //!
-//! The same executor runs the capability-free compiler pass that evaluates
-//! `edge/` declarations into the contract IR. The executor interface is
-//! engine-independent; `QuickJS` via rquickjs is the implementation. Heap,
-//! stack and deadline limits contain application mistakes and are not the
-//! security boundary for untrusted code; that is the hosting process.
+//! One environment backend retains code for multiple immutable deployments.
+//! Calls identify a deployment and function path; nested calls retain that
+//! version. Runtime lifetime, isolation, limits and cancellation are open.

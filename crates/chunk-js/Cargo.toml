@@ -1,6 +1,6 @@
 [package]
 name = "chunk-js"
-description = "QuickJS executor for edge bundles behind an engine-independent interface"
+description = "Minimal embedded JavaScript execution for the environment sync engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,152 +1,156 @@
-# Architecture
+# Repository architecture
 
-How this repository is cut. The platform design (what the edge API looks
-like, what a session is, why there are two tiers) is in the
-[chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase); this
-page is about processes, crates, modules, and the lines between them.
-Everything here is scaffolded and **proposed** until a crate says otherwise.
+This page maps the v1 direction to this repository. The
+[knowledgebase](https://github.com/chunkzero/knowledgebase) owns the platform
+design and unresolved decisions. Except for the protocol and proxy path,
+the components below are scaffolds, not functioning services or public APIs.
 
-## Processes
+## Ownership
 
-One binary, `chunk`, in four roles:
+A project contains apps and has environments such as `prod` and `beta`. Each environment
+owns its database and one authoritative backend with an embedded JS runtime.
+An immutable deployment identifies functions, schema, server JAR and asset
+references. The backend retains multiple deployment versions while sessions,
+subscriptions and scheduled jobs still reference them. Nested function calls
+retain the originating deployment. There is no separate function-runner pool.
 
-| role      | command         | hosts                                                       |
-| --------- | --------------- | ----------------------------------------------------------- |
-| edge      | `chunk edge`    | player connections, app runtimes and databases, `EdgeCall`  |
-| runtime   | `chunk runtime` | session processes on a host; terminates their connection    |
-| control   | `chunk control` | directory, placement, provisioning, cookie keys             |
-| toolchain | `chunk dev` and friends | the build pipeline, codegen, dev server              |
+Chunk automatically provisions sessions from server-owned routing/demand policies.
+App metadata supplies optional machine-profile requirements; queues/matchmaking are
+optional server libraries, not built into the app or Gradle model. A gameplay JVM belongs to one environment, deployment
+and profile, and hosts multiple sessions. Session lifecycles must scope worlds,
+players, tasks and cleanup independently. Application code does not provision
+machines or manually create platform sessions. Exact demand and admission
+policies remain open.
 
-`chunk run` and `chunk dev` host edge, runtime and control in one process.
-Self-hosting runs the three as separate processes on one box or many.
+The control plane owns placement, machine provisioning and rollouts. A local
+runtime supervises gameplay JVMs and reports health. New capacity can be loaded
+and optionally suspended before use. Retirement requests graceful completion;
+maximum machine age initiates draining followed by a configurable shutdown
+deadline. New admissions prefer the promoted deployment; eligible reconnects may
+return to old sessions. Detailed grace and forced-deadline behavior remain open.
 
-```
- players ──▶ edge ─────────────────────────────┐
-             │ proxy · js · store · primitives  │ Directory
-             │ EdgeCall (served)                ▼
-             │                               control
-             │ Players frames, EdgeCall relay   ▲
-             ▼                                  │ Directory
-           runtime ─── Runtime.Attach ───▶ session process (JVM)
-             │ Host: local process | container | sandbox
-```
-
-## The one connection rule
-
-A session process **dials out once** and never listens. chunk starts it with
-an address and a token; it opens `Runtime.Attach` and keeps it for life.
-Everything else flows over that HTTP/2 connection:
-
-- commands down the control stream, each answered by id: create session, end
-  session, call an `@Expose` method, deliver a player, withdraw a player,
-  prepare for restart, stop
-- events up: register with session types and registry data, session ended,
-  player left, health, diagnostics
-- one `Players.Stream` per delivered player, opened by the process when it
-  receives `Deliver`, carrying plain Minecraft frames both ways
-- `EdgeCall.Invoke` and `Subscribe`, which the generated `Edge` client uses
-
-Whoever answers that address implements all three services. In `chunk run`
-that is the single process; in production it is `chunk runtime`, which relays
-player frames and edge calls to the edge. This works behind any host boundary
-with outbound connectivity only, and it means the JVM never has a listening
-socket of any kind. The knowledgebase's transport page lists `Runtime`,
-`Report` and `Players.Deliver`/`Withdraw` as separate services; here they
-collapse into the control stream because the process cannot be a server.
+The proxy owns Minecraft connections, authentication and routing. Backend
+execution is distinct from the global proxy fleet. The current CLI's `edge`
+name does not require these services to share a process. Planned proxy updates
+and application rollouts are separate drain operations; crash recovery does
+not promise preservation of a lost JVM's live simulation.
 
 ## Crates
 
-Layered bottom to top. A crate may depend only on crates in rows above it.
+Existing crate names are retained until implementation gives us reason to
+change their boundaries. This is a responsibility map, not a dependency policy.
 
-| crate            | responsibility                                                  | depends on                          |
-| ---------------- | --------------------------------------------------------------- | ----------------------------------- |
-| `chunk-contract` | contract IR and manifest as data                                | nothing                             |
-| `chunk-proto`    | Rust bindings for `proto/`                                      | nothing                             |
-| `chunk-protocol-derive` | wire codec and packet derives                            | nothing                             |
-| `chunk-protocol-codegen` | packet generation from pinned datasets                  | nothing                             |
-| `chunk-protocol` | Minecraft wire protocol, no sockets                             | protocol-derive, protocol-codegen    |
-| `chunk-store`    | per-app SQLite, single writer, subscriptions, durable jobs      | contract                            |
-| `chunk-js`       | QuickJS executor behind an engine-independent interface         | contract                            |
-| `chunk-proxy`    | connection ownership: login, configuration, relay, park, move   | protocol, proto                     |
-| `chunk-edge`     | app hosting: functions, events, primitives, `EdgeCall`, packs   | contract, proto, store, js, proxy   |
-| `chunk-runtime`  | session process supervision and the `Host` trait                | contract, proto                     |
-| `chunk-control`  | directory, placement, provisioning                              | contract, proto                     |
-| `chunk-build`    | edge compiler, codegen, manifest                                | contract, js                        |
-| `chunk`          | the binary: CLI and the three long-running roles                | edge, runtime, control, build       |
+| Crate | Current or intended responsibility |
+| --- | --- |
+| `chunk-protocol-derive`, `chunk-protocol-codegen`, `chunk-protocol` | Implemented Minecraft codecs and packet generation; no sockets |
+| `chunk-proxy` | Implemented login, configuration and waiting world; future routing and player moves |
+| `chunk-edge` | Currently a proxy entry point; proposed home for sync-engine orchestration in the environment backend |
+| `chunk-js` | Initial `deno_core`/V8 embedding; capability interface and implementation open |
+| `chunk-store` | Separate persistence abstraction; SQLite first, then hosted Turso and self-hosted Postgres/MySQL |
+| `chunk-contract` | Deployment manifests, function/schema descriptions and declarative session requirements |
+| `chunk-control` | Automatic placement, host provisioning, rollout reconciliation and directory |
+| `chunk-runtime` | Local JVM supervision and reporting |
+| `chunk-build` | Toolchain orchestration, bundling, generated clients, JAR builds and asset publication |
+| `chunk-proto` | Intended Rust transport bindings; generation not implemented |
+| `chunk` | CLI; currently only the proxy `edge` command is functional |
 
-Rules the layering encodes:
+The sync engine controls JS execution, tracks reads and writes, validates and
+retries transactions, and maintains reactive subscriptions. Storage must support
+consistent reads, atomic durable commits and recovery. The exact split for
+snapshots, conflict validation, revisions and change records is open; do not
+reduce the adapter contract to CRUD. An ambiguous commit needs a recoverable
+outcome, not a blind retry. One authoritative backend avoids coordinating
+independent writers, but does not by itself supply these guarantees.
 
-- `chunk-protocol` decodes bytes and has no opinion. `chunk-proxy` has the
-  connection policy. The edge currently supplies MOTD and login rejection text
-  through `chunk_proxy::Config`; app-driven decisions are not implemented.
-  Neither crate knows JavaScript exists.
-- `chunk-js` and `chunk-store` never meet directly. `chunk-edge` installs
-  store-backed capabilities on `ctx`, so the database outlives any runtime.
-- Nothing in Rust ever sees a Minestom type. The manifest and contract are the
-  whole of what chunk knows about an app.
-- `chunk-runtime` knows what a session process is. A `Host` knows how to get a
-  machine and start, pause, resume and stop a process on it. Host backends
-  are modules (later feature flags) inside `chunk-runtime`, not crates.
-- `chunk-build` uses the same executor as production for the capability-free
-  compiler pass, so "declarations are pure" is checked by the real engine.
+Schema evolution is intended to use additive changes and backfills compatible
+with retained deployments. Versioned assets and framework world templates are
+immutable. Gameplay may modify worlds in memory. There are no framework-managed
+mutable world saves; general object storage may support application-managed
+exports later.
 
-## JVM modules
+## JVM and JavaScript
 
-| module                | artifact             | responsibility                                                     |
-| --------------------- | -------------------- | ------------------------------------------------------------------ |
-| `jvm/proto`           | `chunk-proto`        | Kotlin and Java bindings generated from `proto/`                   |
-| `jvm/runtime`         | `chunk-runtime`      | the process end of the one connection; what `block-core` builds on |
-| `jvm/build-api`       | `chunk-build-api`    | `BuildContext` and hooks that `block-build` and overworld implement |
-| `jvm/gradle-plugin`   | `dev.chunkzero.chunk`| maps the layout onto Gradle; driven by the `chunk` binary          |
+`jvm/runtime` is the current runtime scaffold. Chunk owns both the public JVM
+SDK and Minestom integration, including multiple sessions per process and
+generated backend clients. The module split between public API and runtime
+implementation remains open; no separate API module exists yet.
+`jvm/proto` is the shared transport binding scaffold. `jvm/build-api` isolates
+build integration from Gradle, and `jvm/gradle-plugin` is currently a no-op plugin.
 
-`jvm/runtime` is the only chunk code inside a session process. It exposes
-the command stream, per-player frame streams and `EdgeCall`; block plugs the
-frame stream into Minestom and generates the `Edge` client over `EdgeCall`.
-`jvm/build-api` is separate from the plugin so block and overworld depend on
-a small API rather than on Gradle.
+`packages/server` is the empty `@chunk/server` SDK scaffold; it has no exported API.
+V1 targets minimal JavaScript plus explicit engine capabilities and pure-JS
+libraries, without ambient Node or browser globals. Start with `deno_core`/V8. Bundling
+will likely use Rolldown; type checking, contract extraction and exact client
+APIs remain open. Runtime restrictions do not dictate which tools may be used
+during builds.
 
-## TypeScript
+## Developer layout and execution contracts
 
-`packages/edge` is `@chunk/edge`, the one module edge code imports. Its
-declarations build descriptors; they do nothing at module initialization. It
-targets ES2023 with no DOM and no Node types because the QuickJS runtime
-supplies only the language. The bundler (Rolldown) is embedded in
-`chunk-build`; apps never configure it.
+Each `apps/<id>/` owns `app.toml`, `build.gradle.kts`, JVM source, assets, and optional
+backend source. Root settings registers Gradle modules; a root build may apply shared
+plugins. The app ID comes from its directory. TOML selects a command domain and optional
+runtime profile. Gradle handles build dependencies/conventions, not gameplay policy.
+Typed gameplay config lives beside owning source. No `app.ts` is required.
 
-## Transport
+`chunk gen` (proposed) generates backend/config types before JVM compilation. The build
+then validates annotated session implementations; annotation names and parameter-contract
+extraction remain open. Schemas compose explicitly at `server/schema/index.ts`, keeping
+table identity independent of file paths. Project deployments include all app modules.
 
-`proto/chunk/v1/` is the source of truth for the internal transport, shared
-by `crates/chunk-proto` and `jvm/proto` and linted with buf. Function
-arguments, results, session params and attachments cross as `bytes` in the
-contract's wire encoding, so the encoders are generated from the same
-validators as the types. Player frames are one packet per message with no
-length prefix, compression or encryption.
+Static `server/domains/` folders define inherited proxy command/hook scopes. Domain
+commands execute in the backend via gRPC, with per-player command manifests pinned to
+their deployment. JVMs supply app-local commands. Named `createHook` exports select typed
+event contracts: some await admission/routing results, others notify after transitions.
+Proxy loops remain nonblocking. Root/ancestor scopes persist when a player moves between
+sibling domains; network connect/disconnect differs from domain enter/leave.
 
-## Decisions made in this repository
+Async commands receive acceptance before completion and can issue typed proxy effects,
+host-managed delays, or calls/notifications to captured session references. Following a
+player across moves is explicit opt-in, retains original code/version, and requires
+current authority. Ephemeral work is distinct from durable jobs; retry, cancellation,
+permissions, and bounded delivery remain implementation work.
 
-- **R1.** One binary for toolchain and platform. Roles are subcommands.
-- **R2.** The session process is always the gRPC client. Runtime commands,
-  delivery and withdrawal travel down the `Attach` stream (see above).
-- **R3.** Host backends live inside `chunk-runtime` as modules, not as
-  separate crates, until one needs a dependency the others should not carry.
-- **R4.** The proxy and the app runtime are separate crates joined by
-  `chunk-edge`, so connection ownership can be tested without JavaScript and
-  the runtime without sockets.
-- **R5.** buf's service-suffix and request/response naming rules are off.
-  Services are named for what they are, matching the knowledgebase.
+The distributed proxy directory tracks project/environment membership separately from
+command domains and gameplay data. Proposed control-plane gRPC snapshots/watches share
+ownership, presence, health, and transfer state. Redis/Upstash is a possible cache or
+distribution layer, not a selected exclusive-ownership authority. The knowledgebase owns
+the detailed consistency/fencing requirements.
 
-## Open here
+## Hosted and self-hosted
 
-Carried from the knowledgebase and still open: O4 what a session does when
-the edge is unreachable, O5 registry consistency across processes, O7 edge
-per region or per app, O8 the inward frame format, O9 transfer cookie keys.
-New in this repository:
+Shared code owns sync, session and rollout logic, assets, SDKs and the toolchain.
+Hosted adapters target Fly.io, a global Rust proxy fleet and one Turso database
+per environment, with billing, usage accounting and hosted UI.
 
-- Type checking edge code needs a TypeScript compiler. Whether `chunk build`
-  shells out to a Node install, embeds `tsgo`, or skips checking in `run` is
-  undecided; the executor only bundles.
-- Whether `chunk-runtime` relays `EdgeCall` to the edge or the process dials
-  the edge directly for it. The one connection rule says relay; latency may
-  argue otherwise.
-- Where the directory's state lives when `chunk control` is one process, and
-  what happens to placement when it is not reachable.
+Hosted backends wake on server-list pings and must be ready before gameplay
+admission. Wake coalescing, scanner filtering and idle rules need implementation;
+scheduling and external work also need an explicit idle policy. Configuration-
+screen waiting is preferred for startup, but current code uses a waiting world.
+
+App TOML can override the default named machine profile. The initial hosted `small`
+proposal is 2 shared vCPUs / 512 MiB; larger sizes and admission limits are open.
+Machine memory and session capacity are distinct. Owners choose requirements;
+chunk selects compatible capacity and provisions it automatically.
+
+Self-hosting targets always-on services with Docker, Podman or Apple containers,
+SQLite/Postgres/MySQL adapters, the bundled proxy and a basic dashboard. BYO
+proxy is outside v1. Dashboard/management scaffolding exists on the separate
+`feat/self-hosted-dashboard-assets` branch; this checkout does not include it.
+Asset publication remains proposed.
+
+## Transport status
+
+`proto/chunk/v1` is an incomplete proposal, not a supported or generated
+transport. It sketches control commands, calls and packet streams. Internal
+create/end commands are control-plane instructions, not application APIs.
+
+Environment and deployment scope must accompany version-sensitive operations.
+Transport authentication must bind these identities rather than trusting a
+caller-supplied identifier. The scaffold does not yet specify ownership fencing,
+reconnect/resumption, deadlines, commit-outcome recovery or atomic subscription
+updates. Those must be resolved before implementation.
+
+Player frames are proposed as packet ID plus payload, without outer framing,
+compression or encryption; the proxy handles client transport. Connection count,
+dial direction and relay topology are not fixed. Separate connections may carry
+control, function calls and player traffic.

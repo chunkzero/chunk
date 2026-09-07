@@ -1,12 +1,13 @@
-//! Rust-owned state for one app.
+//! Persistence abstraction for environment databases. Scaffold only.
 //!
-//! One SQLite database per app holding its tables, the durable scheduler and
-//! cron jobs, and queue membership. Mutations pass through a single writer so
-//! they are serializable without application-level retries. Subscription
-//! invalidation is tracked beside the data and reported on commit so the edge
-//! can push updated query results to sessions.
+//! Planned adapters are Turso for hosted environments and SQLite, Postgres and
+//! MySQL for self-hosting. Storage is independent of the embedded JS engine.
 //!
-//! The store outlives and is independent of the JavaScript runtime: an edge
-//! reload swaps the runtime while the database stays open. Table shapes come
-//! from the contract; this crate installs and migrates them but never
-//! interprets edge code.
+//! The contract must support consistent reads, atomic durable commits and
+//! recovery, including ambiguous commit outcomes. The split between storage
+//! and the sync engine for snapshots, validation and change tracking remains
+//! open. The sync engine owns transactional execution and reactive behavior.
+//!
+//! Old and new deployment code share an environment database under one
+//! authoritative backend. Schema evolution uses additive changes and backfills
+//! that preserve compatibility while old deployments remain referenced.

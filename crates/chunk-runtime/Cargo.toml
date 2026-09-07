@@ -1,6 +1,6 @@
 [package]
 name = "chunk-runtime"
-description = "Supervises session processes and the hosts that run them"
+description = "Local supervision of gameplay JVMs hosting multiple sessions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

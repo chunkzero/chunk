@@ -1,14 +1,10 @@
-//! The application contract and manifest, as data.
+//! Application declarations and immutable deployment manifests. Scaffold only.
 //!
-//! The contract IR is what the edge compiler produces from `edge/`: tables and
-//! their validators, functions with their kind, visibility and argument shapes,
-//! listeners, commands, queues, crons, and session names with creation
-//! parameters. The manifest is what `chunk build` writes into `dist/` and what
-//! the platform reads to run an app.
+//! Intended data includes environment/deployment identity, schemas, versioned
+//! functions, server JAR and asset references, app metadata, session contracts,
+//! domain trees, command/hook descriptors and optional machine requirements.
+//! Server code owns routing policies; app metadata does not require matchmaking.
 //!
-//! Everything downstream consumes this crate instead of the TypeScript source:
-//! runtime argument validation, schema installation, Kotlin, Java and
-//! TypeScript code generation, wire serialization, and test fakes.
-//!
-//! This crate is pure data and serialization. It has no I/O, no JavaScript,
-//! and no dependency on any other chunk crate.
+//! Downstream consumers will use this contract for validation, generated
+//! clients and deployment orchestration. Its exact representation remains
+//! open. This crate has no I/O or JavaScript execution.

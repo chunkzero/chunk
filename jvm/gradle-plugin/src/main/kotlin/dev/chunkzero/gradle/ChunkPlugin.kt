@@ -4,13 +4,10 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 
 /**
- * `dev.chunkzero.chunk`: the one plugin line in an application's build file.
+ * Registered scaffold for chunk's Gradle integration.
  *
- * Maps the platform layout (`edge/`, `src/`, `tests/`, `maps/`, `packs/`)
- * onto Gradle source sets, wires generated sources from `.chunk/generated/`,
- * runs build plugins through `chunk-build-api`, and exposes `block()` and
- * `overworld()` dependency helpers. The `chunk` binary drives this plugin;
- * developers run `chunk build`, not Gradle.
+ * Will wire generated clients, framework dependencies, server JAR and asset
+ * builds into the chunk toolchain. No application build wiring exists yet.
  */
 class ChunkPlugin : Plugin<Project> {
     override fun apply(target: Project) {

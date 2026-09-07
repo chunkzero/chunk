@@ -1,5 +1,6 @@
-// Session processes calling edge functions. The generated Edge client is the
-// only thing that uses this. Proposed.
+// Incomplete proposal for JVM calls into an environment backend.
+// Legacy EdgeCall naming does not imply execution at the global proxy.
+// Atomic subscription revisions and commit-outcome recovery are not defined.
 syntax = "proto3";
 
 package chunk.v1;
@@ -19,6 +20,7 @@ message InvokeRequest {
   bytes args = 2;
   // Set when the call is made on behalf of a player; becomes ctx.player.
   optional PlayerRef player = 3;
+  DeploymentRef deployment = 4;
 }
 
 message InvokeResponse {
@@ -31,6 +33,7 @@ message InvokeResponse {
 message SubscribeRequest {
   string query = 1;
   bytes args = 2;
+  DeploymentRef deployment = 3;
 }
 
 message SubscriptionUpdate {

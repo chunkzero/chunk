@@ -1,5 +1,5 @@
-// The control plane's directory and placement. Clients are edges and runtime
-// supervisors. Proposed.
+// Incomplete control-plane directory and automatic placement proposal.
+// Used internally by chunk, not application-managed session provisioning.
 syntax = "proto3";
 
 package chunk.v1;
@@ -18,22 +18,23 @@ message ResolveSessionRequest {
 
 message ResolveSessionResponse {
   string process = 1;
-  string edge = 2;
+  string proxy = 2;
 }
 
 message ResolveDatabaseRequest {
-  string app = 1;
+  string environment = 1;
 }
 
 message ResolveDatabaseResponse {
-  string edge = 1;
+  string backend = 1;
 }
 
-// Choose a process for a new session of this type.
+// Chunk chooses compatible JVM capacity for a declared session type.
 message PlaceRequest {
-  string app = 1;
+  DeploymentRef deployment = 1;
   string session_type = 2;
   optional string region = 3;
+  string machine_profile = 4;
 }
 
 message PlaceResponse {

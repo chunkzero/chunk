@@ -1,7 +1,8 @@
 # chunk-build-api
 
-The build plugin API that `block-build` and overworld implement: `configure`,
-`build` and `dev` hooks over a `BuildContext` that exposes the application
-layout, compiled classes, the contract, the manifest under construction, and
-diagnostics. Kept separate from the Gradle plugin so implementors depend on a
-small, stable API rather than on Gradle.
+Scaffold for chunk's build integration API, separate from Gradle itself.
+It will provide the context needed to build the application JAR, generated
+clients, immutable assets and deployment manifest. Hook names and the exact
+API remain open; no build API is implemented yet. App metadata, file-based
+domains, command/hook manifests, and app Gradle module outputs contribute to
+one project deployment. Generation must bootstrap before JVM compilation.

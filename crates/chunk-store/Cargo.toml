@@ -1,6 +1,6 @@
 [package]
 name = "chunk-store"
-description = "Per-app SQLite database, serialized writer, subscriptions and durable jobs"
+description = "Environment persistence abstraction and database adapters"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,5 @@
 # chunk-proto (JVM)
 
-Kotlin and Java bindings for the internal transport defined in `/proto`. The
-`.proto` files are the source of truth and are shared with the Rust crate of
-the same name. No behavior lives here.
+Scaffold for Kotlin and Java bindings to the shared internal transport in
+`proto/`. The protobuf files are incomplete proposals; generation is not yet
+implemented. Application SDKs will hide internal control and transport types.

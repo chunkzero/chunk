@@ -1,10 +1,13 @@
-//! The control plane.
+//! Common control-plane logic. Scaffold only.
 //!
-//! Directory: which process hosts which session and which edge hosts an app's
-//! database, looked up by ref. Placement: how many session processes an app
-//! gets and which session types each hosts, one process for everything by
-//! default. Provisioning: the bindings a manifest declares, such as pack
-//! hosting and secrets. Also the natural issuer of transfer cookie keys.
+//! Owns the environment directory, automatic session placement, host
+//! provisioning and deployment rollouts. Applications declare session types,
+//! profiles and policies; chunk creates sessions and selects capacity.
 //!
-//! Serves `Directory` over the internal transport. Runs as `chunk control`
-//! when self-hosting, or in-process for `chunk run` and `chunk dev`.
+//! Gameplay JVMs can host multiple sessions of one environment, deployment
+//! and machine profile. Host adapters target Fly and self-hosted containers.
+//! Prewarmed capacity may suspend after loading. Machine age begins draining,
+//! with graceful completion and a configurable shutdown deadline.
+//!
+//! Admission, failure and reconnect policies remain open. Proxy updates and
+//! application rollouts have distinct drain lifecycles.

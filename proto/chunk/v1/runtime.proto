@@ -1,7 +1,6 @@
-// The session runtime SPI: one control stream between a session process and
-// the chunk supervisor that started it. The process dials out and never
-// listens; commands toward it travel down this stream and are answered by
-// id. Proposed.
+// Incomplete gameplay JVM supervision proposal. Internal commands are issued
+// by chunk; applications declare session requirements rather than create them.
+// Control, backend calls and player traffic may use separate connections.
 syntax = "proto3";
 
 package chunk.v1;
@@ -9,7 +8,7 @@ package chunk.v1;
 import "chunk/v1/common.proto";
 
 service Runtime {
-  // Opened once per process, immediately after start, and kept for its life.
+  // Proposed process control stream; reconnect and ownership fencing are open.
   rpc Attach(stream ProcessMessage) returns (stream RuntimeCommand);
 }
 
@@ -26,13 +25,14 @@ message ProcessMessage {
 }
 
 // First message. Names the session types this process hosts and carries the
-// registry data a Minestom server would send in configuration, so the edge
+// registry data a Minestom server would send in configuration, so the proxy
 // can send it instead.
 message Register {
   string token = 1;
-  string app = 2;
+  DeploymentRef deployment = 2;
   repeated string session_types = 3;
   bytes registry = 4;
+  string machine_profile = 5;
 }
 
 // Answers the command with the same id.
@@ -97,7 +97,7 @@ message EndSession {
   SessionRef session = 1;
 }
 
-// Invoke an @Expose method on the session's tick thread.
+// Proposed application method invocation; SDK and threading contract are open.
 message Call {
   SessionRef session = 1;
   string method = 2;
@@ -122,7 +122,8 @@ message Withdraw {
   PlayerRef player = 1;
 }
 
-// Save and stop accepting; a restart follows.
+// Begin draining: stop accepting new sessions and request graceful completion.
+// Deadline fields and acknowledgement semantics remain to be specified.
 message Prepare {}
 
 // End every session and exit.
