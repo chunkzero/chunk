@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "gameplay",
         "supervision",
         "control",
+        "backend",
     ]
     .map(|name| format!("{root}/chunk/v1/{name}.proto"));
     println!("cargo:rerun-if-changed={root}");
