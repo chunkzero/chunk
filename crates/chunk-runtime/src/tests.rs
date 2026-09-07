@@ -344,6 +344,7 @@ async fn startup_deadline_and_exited_child_leave_no_owned_process() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("child.log");
     let launch = |arguments| Launch {
+        bootstrap_session: false,
         program: "/bin/sh".into(),
         arguments,
         deployment: DeploymentRef {

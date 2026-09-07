@@ -125,6 +125,9 @@ fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse)
         protocol: authenticated.protocol_version,
         runtime_id: config.runtime_id.clone(),
         session_generation: 1,
+        membership_generation: 1,
+        proxy_id: "bridge-fixture".into(),
+        connection_id: uuid::Uuid::new_v4().to_string(),
     })
 }
 

@@ -12,7 +12,7 @@ mod sqlite;
 pub use model::{Commit, Document, DocumentKey, KeyRange, Operation, Outcome, Revision, Snapshot, Write};
 pub use sqlite::SqliteStore;
 
-/// Only the environment backend holds this capability.
+/// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
     /// # Errors
     /// Returns I/O, corruption or snapshot-limit errors.
