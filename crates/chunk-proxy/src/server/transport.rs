@@ -107,6 +107,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
         !self.buffer.is_empty()
     }
 
+    pub(super) async fn write_body(&mut self, body: &[u8]) -> io::Result<()> {
+        if body.is_empty() || body.len() > MAX_FRAME_SIZE {
+            return Err(invalid_data("invalid player frame size"));
+        }
+        let mut framed = Vec::with_capacity(body.len() + 5);
+        VarInt(i32::try_from(body.len()).map_err(invalid_data)?)
+            .encode(&mut framed)
+            .map_err(invalid_data)?;
+        framed.extend_from_slice(body);
+        self.write_encoded(&framed).await
+    }
+
     pub(super) async fn write_packet<P: Packet + Encode>(&mut self, packet: &P) -> io::Result<()> {
         self.write_encoded(&encode_packet(packet).map_err(invalid_data)?).await
     }

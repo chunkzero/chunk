@@ -3,6 +3,9 @@ syntax = "proto3";
 
 package chunk.v1;
 
+option java_multiple_files = true;
+option java_package = "dev.chunkzero.proto";
+
 // A stable player identity. Never a raw UUID: the proxy issues it at login and
 // it survives moves, restarts and proxy transfers.
 message PlayerRef {

@@ -20,6 +20,8 @@ enum Command {
         bind: SocketAddr,
         #[arg(long, default_value = "chunk — sessions coming soon")]
         motd: String,
+        #[arg(long)]
+        gameplay: Option<String>,
         #[arg(long, default_value = "1024")]
         max_connections: NonZeroUsize,
     },
@@ -46,8 +48,20 @@ async fn run(cli: Cli) -> io::Result<()> {
             bind,
             motd,
             max_connections,
+            gameplay,
         } => {
+            let gameplay = gameplay
+                .map(|endpoint| -> io::Result<_> {
+                    Ok(chunk_edge::GameplayTarget {
+                        endpoint,
+                        token: std::env::var("CHUNK_PROCESS_TOKEN").map_err(io::Error::other)?,
+                        environment: std::env::var("CHUNK_ENVIRONMENT").unwrap_or_else(|_| "local".into()),
+                        deployment: std::env::var("CHUNK_DEPLOYMENT").unwrap_or_else(|_| "local".into()),
+                    })
+                })
+                .transpose()?;
             let config = chunk_edge::ProxyConfig {
+                gameplay,
                 motd,
                 max_connections,
                 ..Default::default()

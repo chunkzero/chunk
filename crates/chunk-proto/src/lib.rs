@@ -1,5 +1,6 @@
-//! Placeholder for Rust bindings to the internal transport in `proto/`.
-//!
-//! The shared protobuf files are incomplete proposals. Binding generation and
-//! services are not implemented. Applications should use generated SDK clients,
-//! not these internal provisioning and transport messages.
+//! Internal service bindings. Application code uses deployment-bound clients.
+
+#[allow(clippy::all, clippy::pedantic)]
+pub mod v1 {
+    tonic::include_proto!("chunk.v1");
+}

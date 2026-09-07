@@ -1,6 +1,7 @@
 mod authentication;
 mod configuration;
 mod connection;
+mod gameplay;
 mod limbo;
 mod transport;
 
@@ -158,9 +159,16 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
+                    let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression).await {
                             Ok(Some(authenticated)) => {
+                                if let Some(target) = gameplay {
+                                    if let Err(error) = gameplay::serve(authenticated, &target, configuration_timeout).await {
+                                        tracing::debug!(%peer, %error, "gameplay connection closed");
+                                    }
+                                    return;
+                                }
                                 tracing::info!(username = authenticated.profile.username.as_str(), "authenticated player reached configuration; entering limbo");
                                 // Destination selection will supply this future when sessions are available.
                                 if let Err(error) = limbo::wait_for_destination(

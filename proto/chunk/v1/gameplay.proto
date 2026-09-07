@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+import "chunk/v1/players.proto";
+
+option java_multiple_files = true;
+option java_package = "dev.chunkzero.proto";
+
+// Independent of lifecycle attachment. All calls require process credentials.
+service Gameplay {
+  rpc Configuration(ConfigurationRequest) returns (ConfigurationResponse);
+  // First request must be a delivery; subsequent requests are plain play frames.
+  rpc OpenPlayer(stream PlayerInput) returns (stream Frame);
+}
+
+message ConfigurationRequest {
+  DeploymentRef deployment = 1;
+}
+
+message ConfigurationResponse {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  int32 protocol = 3;
+  // Full registry data (no known-pack omissions), tags and enabled features.
+  repeated Frame packets = 4;
+  bytes registry_digest = 5;
+}
+
+message PlayerDelivery {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  string operation_id = 3;
+  SessionRef session = 4;
+  PlayerRef player = 5;
+  uint64 owner_generation = 6;
+  Identity identity = 7;
+  int32 protocol = 8;
+  bytes registry_digest = 9;
+  bytes client_information = 10;
+}
+
+message PlayerInput {
+  oneof body {
+    PlayerDelivery delivery = 1;
+    Frame frame = 2;
+  }
+}

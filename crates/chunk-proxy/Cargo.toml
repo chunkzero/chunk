@@ -12,6 +12,9 @@ default = ["mc-26-1"]
 mc-26-1 = ["chunk-protocol/mc-26-1", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
 
 [dependencies]
+tonic = "0.14.6"
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
 chunk-protocol = { path = "../chunk-protocol", default-features = false }
 chunk-proto = { path = "../chunk-proto" }
 bytes = "1"
