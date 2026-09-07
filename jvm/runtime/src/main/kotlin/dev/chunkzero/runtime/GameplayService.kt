@@ -4,12 +4,13 @@ import chunk.v1.Common.DeploymentRef
 import chunk.v1.GameplayGrpc
 import chunk.v1.GameplayOuterClass.ConfigurationRequest
 import chunk.v1.GameplayOuterClass.ConfigurationResponse
+import chunk.v1.GameplayOuterClass.PlayerActivation
 import chunk.v1.GameplayOuterClass.PlayerDelivery
-import chunk.v1.GameplayOuterClass.PlayerInput
+import chunk.v1.GameplayOuterClass.PlayerPreparation
+import chunk.v1.GameplayOuterClass.PlayerSetup
 import chunk.v1.PlayersOuterClass.Frame
 import com.google.protobuf.ByteString
 import io.grpc.Status
-import io.grpc.stub.ServerCallStreamObserver
 import io.grpc.stub.StreamObserver
 import net.minestom.server.MinecraftServer
 import net.minestom.server.coordinate.Pos
@@ -20,16 +21,25 @@ import net.minestom.server.network.packet.client.common.ClientSettingsPacket
 import net.minestom.server.network.packet.server.configuration.UpdateEnabledFeaturesPacket
 import net.minestom.server.network.player.GameProfile
 import net.minestom.server.registry.Registries
+import java.net.Socket
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 internal class GameplayService(
     private val deployment: DeploymentRef,
     private val generation: Long,
     private val instance: InstanceContainer,
+    private val now: () -> Long = System::nanoTime,
 ) : GameplayGrpc.GameplayImplBase() {
-    private val connections = ConcurrentHashMap.newKeySet<DeliveryStream>()
+    private val preparations = ConcurrentHashMap<String, DeliveryStream>()
+    private val tcp =
+        PlayerTcp { setup, socket ->
+            requireNotNull(preparations[setup.operationId]) { "Unknown operation" }.serve(setup, socket)
+        }
     private val owners = DeliveryFence()
     private val configuration = configurationSnapshot()
 
@@ -45,20 +55,54 @@ internal class GameplayService(
         response.onCompleted()
     }
 
-    override fun openPlayer(responseObserver: StreamObserver<Frame>): StreamObserver<PlayerInput> {
-        val output = responseObserver as ServerCallStreamObserver<Frame>
-        val stream = DeliveryStream(output)
-        output.disableAutoRequest()
-        output.setOnCancelHandler { stream.close() }
-        output.setOnReadyHandler { stream.flush() }
-        output.request(1)
-        connections.add(stream)
-        return stream
+    override fun preparePlayer(
+        request: PlayerDelivery,
+        response: StreamObserver<PlayerPreparation>,
+    ) {
+        reply(response) {
+            synchronized(preparations) {
+                validate(request)
+                val previous = preparations[request.operationId]
+                if (previous != null) {
+                    require(previous.delivery == request) { "Operation reused with different delivery" }
+                    previous.result()
+                } else {
+                    check(preparations.size < 4096) { "Process preparation history capacity reached" }
+                    DeliveryStream(request).also { preparations[request.operationId] = it }.result()
+                }
+            }
+        }
     }
 
-    fun flush() = connections.forEach { it.flush() }
+    override fun activatePlayer(
+        request: PlayerActivation,
+        response: StreamObserver<PlayerPreparation>,
+    ) {
+        Thread.startVirtualThread {
+            reply(response) {
+                requireNotNull(preparations[request.operationId]) { "Unknown operation" }.activate(request)
+            }
+        }
+    }
 
-    fun close() = connections.toList().forEach { it.close() }
+    private fun reply(
+        response: StreamObserver<PlayerPreparation>,
+        block: () -> PlayerPreparation,
+    ) {
+        try {
+            response.onNext(block())
+            response.onCompleted()
+        } catch (_: Exception) {
+            response.onError(Status.FAILED_PRECONDITION.withDescription("Delivery rejected").asRuntimeException())
+        }
+    }
+
+    fun flush() = preparations.values.forEach { it.checkDeadline() }
+
+    fun close() {
+        tcp.close()
+        preparations.values.forEach { it.close() }
+    }
 
     private fun configurationSnapshot(): ConfigurationResponse {
         val packets =
@@ -80,6 +124,7 @@ internal class GameplayService(
     }
 
     private fun validate(delivery: PlayerDelivery) {
+        require(delivery.serializedSize <= 65_536) { "Delivery exceeds size limit" }
         require(
             delivery.deployment == deployment && delivery.processGeneration == generation,
         ) { "Stale process or deployment" }
@@ -89,54 +134,122 @@ internal class GameplayService(
         ) {
             "Incompatible destination registries"
         }
-        require(delivery.session.id == "bridge" && delivery.operationId.isNotBlank()) { "Unknown session or operation" }
+        require(
+            delivery.session.id == "bridge" && delivery.operationId.length in 1..128,
+        ) { "Unknown session or operation" }
         require(delivery.player.id.isNotBlank() && delivery.ownerGeneration > 0)
         require(delivery.identity.username.matches(Regex("[A-Za-z0-9_]{1,16}")))
         UUID.fromString(delivery.identity.uuid)
     }
 
     private inner class DeliveryStream(
-        private val output: ServerCallStreamObserver<Frame>,
-    ) : StreamObserver<PlayerInput> {
+        val delivery: PlayerDelivery,
+    ) {
+        private val capability = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        private val openedAt = now()
+        private var socket: Socket? = null
+        private var consumed = false
+        private var activation: PlayerActivation? = null
+        private val initialized = CompletableFuture<Unit>()
         private var connection: FrameConnection? = null
-        private var delivery: PlayerDelivery? = null
+        private var claimed = false
         private var closed = false
-        private val openedAt = System.nanoTime()
+
+        @Volatile private var writingAt = 0L
 
         @Synchronized
-        override fun onNext(value: PlayerInput) {
-            if (closed) return
+        fun result(): PlayerPreparation {
+            check(!closed) { "Delivery closed" }
+            return PlayerPreparation
+                .newBuilder()
+                .setOperationId(delivery.operationId)
+                .setEndpoint(tcp.endpoint)
+                .setCapability(ByteString.copyFrom(capability))
+                .build()
+        }
+
+        fun serve(
+            setup: PlayerSetup,
+            accepted: Socket,
+        ) {
+            synchronized(this) {
+                check(!closed && !consumed && now() - openedAt < TimeUnit.SECONDS.toNanos(30))
+                require(MessageDigest.isEqual(capability, setup.capability.toByteArray()))
+                consumed = true
+                socket = accepted
+                accepted.getOutputStream().write(0)
+                accepted.soTimeout = 0
+            }
             try {
-                val current = connection
-                if (current == null) {
-                    require(value.hasDelivery()) { "First message must authenticate a delivery" }
-                    validate(value.delivery)
-                    owners.claim(value.delivery.player.id, value.delivery.ownerGeneration)
-                    delivery = value.delivery
-                    val fresh = FrameConnection()
-                    connection = fresh
-                    // Player creation may invoke a provider that needs a virtual thread.
-                    Thread.startVirtualThread {
-                        try {
-                            initialize(fresh, value.delivery)
-                            synchronized(this) { if (!closed) output.request(1) }
-                        } catch (error: Exception) {
-                            fail(error)
-                        }
+                while (true) {
+                    val frame = PlayerTcp.readFrame(accepted.getInputStream(), 65_536)
+                    synchronized(this) {
+                        check(!closed && initialized.isDone && !initialized.isCompletedExceptionally)
+                        requireNotNull(connection).receive(frame)
                     }
-                } else {
-                    require(value.hasFrame()) { "Delivery cannot be replayed on a player stream" }
-                    current.receive(value.frame.packet.toByteArray())
-                    output.request(1)
                 }
-            } catch (error: Exception) {
-                fail(error)
+            } finally {
+                close()
+            }
+        }
+
+        fun activate(request: PlayerActivation): PlayerPreparation {
+            val fresh: FrameConnection?
+            synchronized(this) {
+                check(!closed && consumed && (activation != null || now() - openedAt < TimeUnit.SECONDS.toNanos(30)))
+                require(request.clientInformation.size() <= 8192)
+                val previous = activation
+                if (previous != null) {
+                    require(previous == request) { "Activation arguments changed" }
+                    fresh = null
+                } else {
+                    check(requireNotNull(socket).getInputStream().available() == 0) { "Premature play bytes" }
+                    owners.claim(delivery.identity.uuid, delivery.ownerGeneration)
+                    claimed = true
+                    activation = request
+                    fresh = FrameConnection()
+                    connection = fresh
+                }
+            }
+            if (fresh != null) {
+                try {
+                    initialize(fresh, delivery, request.clientInformation.toByteArray())
+                    initialized.complete(Unit)
+                    Thread.startVirtualThread { writePackets(fresh) }
+                } catch (error: Exception) {
+                    initialized.completeExceptionally(error)
+                    close()
+                    throw error
+                }
+            }
+            initialized.get(5, TimeUnit.SECONDS)
+            return result()
+        }
+
+        private fun writePackets(current: FrameConnection) {
+            try {
+                val output = requireNotNull(socket).getOutputStream()
+                while (current.isOnline) {
+                    val bytes = current.poll()
+                    if (bytes == null) {
+                        Thread.sleep(5)
+                    } else {
+                        writingAt = now()
+                        PlayerTcp.writeFrame(output, bytes)
+                        writingAt = 0
+                    }
+                }
+            } catch (_: Exception) {
+                // Closing the socket also interrupts a blocked reader or writer.
+            } finally {
+                close()
             }
         }
 
         private fun initialize(
             fresh: FrameConnection,
             delivery: PlayerDelivery,
+            settingsBytes: ByteArray,
         ) {
             val identity = delivery.identity
             val profile =
@@ -152,7 +265,6 @@ internal class GameplayService(
                     },
                 )
             val player = MinecraftServer.getConnectionManager().createPlayer(fresh, profile)
-            val settingsBytes = delivery.clientInformation.toByteArray()
             val buffer = NetworkBuffer.wrap(settingsBytes, 0, settingsBytes.size, MinecraftServer.process())
             val settings = ClientSettingsPacket.SERIALIZER.read(buffer)
             require(buffer.readableBytes() == 0L)
@@ -171,47 +283,24 @@ internal class GameplayService(
         }
 
         @Synchronized
-        fun flush() {
-            if (closed) return
-            val current = connection
-            if (current == null) {
-                if (System.nanoTime() - openedAt >
-                    java.util.concurrent.TimeUnit.SECONDS
-                        .toNanos(10)
-                ) {
-                    close(Status.DEADLINE_EXCEEDED.withDescription("Delivery deadline expired"))
-                }
-                return
-            }
-            if (!current.isOnline) {
+        fun checkDeadline() {
+            val timestamp = now()
+            if ((activation == null && timestamp - openedAt > TimeUnit.SECONDS.toNanos(30)) ||
+                (writingAt != 0L && timestamp - writingAt > TimeUnit.SECONDS.toNanos(5)) ||
+                connection?.isOnline == false
+            ) {
                 close()
-                return
-            }
-            while (output.isReady && !output.isCancelled) {
-                val bytes = current.poll() ?: break
-                output.onNext(Frame.newBuilder().setPacket(ByteString.copyFrom(bytes)).build())
             }
         }
 
         @Synchronized
-        private fun fail(error: Exception) {
-            close(Status.INVALID_ARGUMENT.withDescription(error.message))
-        }
-
-        @Synchronized
-        fun close(error: Status? = null) {
+        fun close() {
             if (closed) return
             closed = true
+            socket?.close()
             connection?.disconnect()
-            delivery?.let { owners.release(it.player.id, it.ownerGeneration) }
-            connections.remove(this)
-            if (!output.isCancelled) {
-                if (error == null) output.onCompleted() else output.onError(error.asRuntimeException())
-            }
+            if (claimed) owners.release(delivery.identity.uuid, delivery.ownerGeneration)
+            initialized.completeExceptionally(IllegalStateException("Delivery closed"))
         }
-
-        override fun onError(error: Throwable) = close()
-
-        override fun onCompleted() = close()
     }
 }

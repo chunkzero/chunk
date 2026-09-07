@@ -1,8 +1,8 @@
 use std::{io, time::Duration};
 
 use chunk_proto::v1::{
-    ConfigurationRequest, ConfigurationResponse, DeploymentRef, Frame, Identity, PlayerDelivery, PlayerInput,
-    PlayerRef, Property, SessionRef, gameplay_client::GameplayClient, player_input,
+    ConfigurationRequest, ConfigurationResponse, DeploymentRef, Identity, PlayerActivation, PlayerDelivery, PlayerRef,
+    PlayerSetup, Property, SessionRef, gameplay_client::GameplayClient,
 };
 use chunk_protocol::{
     BoundedArray, Decode, Encode, Packet, VarInt, decode_packet,
@@ -11,12 +11,12 @@ use chunk_protocol::{
         KnownPacks, SelectKnownPacks,
     },
 };
+use prost::Message;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::mpsc,
+    net::TcpStream,
     time::timeout,
 };
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, transport::Channel};
 
 use super::{
@@ -90,18 +90,12 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     if config.protocol != authenticated.protocol_version {
         return Err(invalid_data("destination protocol differs from authenticated client"));
     }
-    timeout(
-        deadline,
-        configure(&mut authenticated.transport, &mut settings, &config),
-    )
-    .await
-    .map_err(io::Error::other)??;
     let mut client_information = Vec::new();
     settings.encode(&mut client_information).map_err(invalid_data)?;
     let identity = &authenticated.profile;
     let uuid = uuid::Uuid::from_bytes(identity.uuid.0).to_string();
     let delivery = PlayerDelivery {
-        deployment: config.deployment,
+        deployment: config.deployment.clone(),
         process_generation: config.process_generation,
         operation_id: uuid::Uuid::new_v4().to_string(),
         session: Some(SessionRef { id: "bridge".into() }),
@@ -128,37 +122,84 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 .collect(),
         }),
         protocol: authenticated.protocol_version,
-        registry_digest: config.registry_digest,
+        registry_digest: config.registry_digest.clone(),
         client_information,
     };
-    let (sender, receiver) = mpsc::channel(32);
-    sender
-        .send(PlayerInput {
-            body: Some(player_input::Body::Delivery(delivery)),
-        })
-        .await
-        .map_err(io::Error::other)?;
-    let mut stream = timeout(
+    let operation_id = delivery.operation_id.clone();
+    let mut internal = prepare(&mut client, delivery, target).await?;
+    timeout(
+        deadline,
+        configure(&mut authenticated.transport, &mut settings, &config),
+    )
+    .await
+    .map_err(io::Error::other)??;
+    let mut client_information = Vec::new();
+    settings.encode(&mut client_information).map_err(invalid_data)?;
+    timeout(
         WRITE_TIMEOUT,
-        client.open_player(request(ReceiverStream::new(receiver), target)?),
+        client.activate_player(request(
+            PlayerActivation {
+                operation_id,
+                client_information,
+            },
+            target,
+        )?),
     )
     .await
     .map_err(io::Error::other)?
-    .map_err(io::Error::other)?
-    .into_inner();
-    tracing::info!("authenticated player delivered to Minestom bridge");
+    .map_err(io::Error::other)?;
+    tracing::info!("authenticated player delivered over TCP");
     loop {
         tokio::select! {
             frame = authenticated.transport.read_frame(INPUT_LIMIT) => {
-                let input = PlayerInput { body: Some(player_input::Body::Frame(Frame { packet: frame?.to_vec() })) };
-                timeout(WRITE_TIMEOUT, sender.send(input)).await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                timeout(WRITE_TIMEOUT, internal.write_body(&frame?)).await.map_err(io::Error::other)??;
             }
-            frame = stream.message() => {
-                let Some(frame) = frame.map_err(io::Error::other)? else { return Ok(()); };
-                timeout(WRITE_TIMEOUT, authenticated.transport.write_body(&frame.packet)).await.map_err(io::Error::other)??;
+            frame = internal.read_frame(chunk_protocol::MAX_FRAME_SIZE) => {
+                timeout(WRITE_TIMEOUT, authenticated.transport.write_body(&frame?)).await.map_err(io::Error::other)??;
             }
         }
     }
+}
+
+async fn prepare(
+    client: &mut GameplayClient<Channel>,
+    delivery: PlayerDelivery,
+    target: &GameplayTarget,
+) -> io::Result<Transport<TcpStream>> {
+    let delivery_operation = delivery.operation_id.clone();
+    let prepared = timeout(WRITE_TIMEOUT, client.prepare_player(request(delivery, target)?))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?
+        .into_inner();
+    if prepared.operation_id != delivery_operation || prepared.capability.len() != 32 {
+        return Err(invalid_data("invalid player preparation"));
+    }
+    let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
+    if !address.ip().is_loopback() {
+        return Err(invalid_data("local gameplay endpoint must be loopback"));
+    }
+    let socket = timeout(WRITE_TIMEOUT, TcpStream::connect(address))
+        .await
+        .map_err(io::Error::other)??;
+    socket.set_nodelay(true)?;
+    let mut internal = Transport::new(socket);
+    let setup = PlayerSetup {
+        operation_id: delivery_operation.clone(),
+        capability: prepared.capability,
+    };
+    timeout(WRITE_TIMEOUT, internal.write_body(&setup.encode_to_vec()))
+        .await
+        .map_err(io::Error::other)??;
+    // The setup reply is a single byte, before framed gameplay begins.
+    if timeout(WRITE_TIMEOUT, internal.read_setup_ack())
+        .await
+        .map_err(io::Error::other)??
+        != 0
+    {
+        return Err(invalid_data("player preparation rejected"));
+    }
+    Ok(internal)
 }
 
 async fn configure<S: AsyncRead + AsyncWrite + Unpin>(

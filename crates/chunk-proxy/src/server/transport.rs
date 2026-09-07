@@ -56,6 +56,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
         }
     }
 
+    pub(super) async fn read_setup_ack(&mut self) -> io::Result<u8> {
+        self.stream.read_u8().await
+    }
+
     pub(super) fn enable_encryption(&mut self, secret: &[u8; 16]) -> io::Result<()> {
         self.encrypt = Some(Crypter::new(
             Cipher::aes_128_cfb8(),

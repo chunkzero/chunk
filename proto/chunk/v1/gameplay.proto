@@ -5,11 +5,11 @@ package chunk.v1;
 import "chunk/v1/common.proto";
 import "chunk/v1/players.proto";
 
-// Independent of lifecycle attachment. All calls require process credentials.
+// Control calls require process credentials. Gameplay uses a dedicated TCP socket.
 service Gameplay {
   rpc Configuration(ConfigurationRequest) returns (ConfigurationResponse);
-  // First request must be a delivery; subsequent requests are plain play frames.
-  rpc OpenPlayer(stream PlayerInput) returns (stream Frame);
+  rpc PreparePlayer(PlayerDelivery) returns (PlayerPreparation);
+  rpc ActivatePlayer(PlayerActivation) returns (PlayerPreparation);
 }
 
 message ConfigurationRequest {
@@ -20,7 +20,6 @@ message ConfigurationResponse {
   DeploymentRef deployment = 1;
   uint64 process_generation = 2;
   int32 protocol = 3;
-  // Full registry data (no known-pack omissions), tags and enabled features.
   repeated Frame packets = 4;
   bytes registry_digest = 5;
 }
@@ -38,9 +37,21 @@ message PlayerDelivery {
   bytes client_information = 10;
 }
 
-message PlayerInput {
-  oneof body {
-    PlayerDelivery delivery = 1;
-    Frame frame = 2;
-  }
+message PlayerPreparation {
+  string operation_id = 1;
+  string endpoint = 2;
+  bytes capability = 3;
+}
+
+// TCP begins with a VarInt length and this message (at most 4096 bytes).
+// Server replies with byte 0 after consuming the single-use capability.
+// After activation, both directions carry ordinary length-prefixed play packets.
+message PlayerSetup {
+  string operation_id = 1;
+  bytes capability = 2;
+}
+
+message PlayerActivation {
+  string operation_id = 1;
+  bytes client_information = 2;
 }

@@ -7,8 +7,7 @@ import chunk.v1.Common.SessionRef
 import chunk.v1.GameplayGrpc
 import chunk.v1.GameplayOuterClass.ConfigurationRequest
 import chunk.v1.GameplayOuterClass.PlayerDelivery
-import chunk.v1.GameplayOuterClass.PlayerInput
-import chunk.v1.PlayersOuterClass.Frame
+import chunk.v1.GameplayOuterClass.PlayerSetup
 import com.google.protobuf.ByteString
 import io.grpc.Metadata
 import io.grpc.Status
@@ -16,7 +15,6 @@ import io.grpc.StatusRuntimeException
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import io.grpc.stub.MetadataUtils
-import io.grpc.stub.StreamObserver
 import net.minestom.server.MinecraftServer
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.NetworkBuffer
@@ -29,9 +27,11 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.UUID
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 class GameplayServiceTest {
@@ -45,7 +45,10 @@ class GameplayServiceTest {
                 .setDeployment("build-a")
                 .build()
         val instance = MinecraftServer.getInstanceManager().createInstanceContainer()
-        val service = GameplayService(deployment, 7, instance)
+        val clock =
+            java.util.concurrent.atomic
+                .AtomicLong(System.nanoTime())
+        val service = GameplayService(deployment, 7, instance, clock::get)
         val server =
             NettyServerBuilder
                 .forAddress(InetSocketAddress("127.0.0.1", 0))
@@ -111,32 +114,80 @@ class GameplayServiceTest {
                         configuration.registryDigest,
                     ).setClientInformation(ByteString.copyFrom(settings))
                     .build()
-            for (input in listOf(
-                PlayerInput.newBuilder().setFrame(Frame.getDefaultInstance()).build(),
-                PlayerInput.newBuilder().setDelivery(delivery.toBuilder().setProcessGeneration(6)).build(),
-                PlayerInput.newBuilder().setDelivery(delivery.toBuilder().setRegistryDigest(ByteString.EMPTY)).build(),
+            for (invalid in listOf(
+                delivery.toBuilder().setProcessGeneration(6).build(),
+                delivery.toBuilder().setRegistryDigest(ByteString.EMPTY).build(),
             )) {
-                val completed = CompletableFuture<Status.Code>()
-                val stream =
-                    GameplayGrpc
-                        .newStub(channel)
-                        .withInterceptors(interceptor)
-                        .withDeadlineAfter(3, TimeUnit.SECONDS)
-                        .openPlayer(
-                            object : StreamObserver<Frame> {
-                                override fun onNext(value: Frame) = Unit
-
-                                override fun onError(error: Throwable) {
-                                    completed.complete(Status.fromThrowable(error).code)
-                                }
-
-                                override fun onCompleted() {
-                                    completed.complete(Status.Code.OK)
-                                }
-                            },
-                        )
-                stream.onNext(input)
-                assertEquals(Status.Code.INVALID_ARGUMENT, completed.get(3, TimeUnit.SECONDS))
+                assertEquals(
+                    Status.Code.FAILED_PRECONDITION,
+                    assertThrows(StatusRuntimeException::class.java) {
+                        stub.preparePlayer(invalid)
+                    }.status.code,
+                )
+            }
+            val prepared = stub.preparePlayer(delivery)
+            assertEquals(prepared, stub.preparePlayer(delivery))
+            assertEquals(
+                Status.Code.FAILED_PRECONDITION,
+                assertThrows(StatusRuntimeException::class.java) {
+                    stub.preparePlayer(delivery.toBuilder().setOwnerGeneration(2).build())
+                }.status.code,
+            )
+            val address = InetSocketAddress("127.0.0.1", prepared.endpoint.substringAfter(':').toInt())
+            val setup =
+                PlayerSetup
+                    .newBuilder()
+                    .setOperationId(delivery.operationId)
+                    .setCapability(prepared.capability)
+                    .build()
+            Socket().use { bad ->
+                bad.connect(address)
+                bad.soTimeout = 3000
+                PlayerTcp.writeFrame(
+                    bad.getOutputStream(),
+                    setup
+                        .toBuilder()
+                        .setCapability(ByteString.EMPTY)
+                        .build()
+                        .toByteArray(),
+                )
+                assertEquals(-1, bad.getInputStream().read())
+            }
+            Socket().use { socket ->
+                socket.connect(address)
+                socket.soTimeout = 3000
+                val wire = ByteArrayOutputStream()
+                PlayerTcp.writeFrame(wire, setup.toByteArray())
+                wire.toByteArray().forEach { socket.getOutputStream().write(it.toInt()) }
+                assertEquals(0, socket.getInputStream().read())
+                assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+                Socket().use { duplicate ->
+                    duplicate.connect(address)
+                    duplicate.soTimeout = 3000
+                    PlayerTcp.writeFrame(duplicate.getOutputStream(), setup.toByteArray())
+                    assertEquals(-1, duplicate.getInputStream().read())
+                }
+                // Gameplay before activation tears down the preparation without creating a player.
+                PlayerTcp.writeFrame(socket.getOutputStream(), byteArrayOf(0))
+                assertEquals(-1, socket.getInputStream().read())
+                assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+            }
+            val expiring = stub.preparePlayer(delivery.toBuilder().setOperationId("expired").build())
+            clock.addAndGet(TimeUnit.SECONDS.toNanos(31))
+            service.flush()
+            Socket().use { expired ->
+                expired.connect(address)
+                expired.soTimeout = 3000
+                PlayerTcp.writeFrame(
+                    expired.getOutputStream(),
+                    setup
+                        .toBuilder()
+                        .setOperationId("expired")
+                        .setCapability(expiring.capability)
+                        .build()
+                        .toByteArray(),
+                )
+                assertEquals(-1, expired.getInputStream().read())
             }
             val connection = FrameConnection()
             repeat(257) { connection.sendPacket(KeepAlivePacket(1)) }
@@ -147,6 +198,19 @@ class GameplayServiceTest {
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
             MinecraftServer.process().stop()
+        }
+    }
+
+    @Test
+    fun `TCP framing retains coalesced packets and rejects truncation and oversized lengths`() {
+        val output = ByteArrayOutputStream()
+        PlayerTcp.writeFrame(output, byteArrayOf(1, 2, 3))
+        PlayerTcp.writeFrame(output, ByteArray(1024) { 7 })
+        val input = ByteArrayInputStream(output.toByteArray())
+        assertTrue(PlayerTcp.readFrame(input, 1024).contentEquals(byteArrayOf(1, 2, 3)))
+        assertEquals(1024, PlayerTcp.readFrame(input, 1024).size)
+        for (bytes in listOf(byteArrayOf(0), byteArrayOf(5, 1), byteArrayOf(-128, -128, -128), byteArrayOf(127))) {
+            assertThrows(Exception::class.java) { PlayerTcp.readFrame(ByteArrayInputStream(bytes), 16) }
         }
     }
 }

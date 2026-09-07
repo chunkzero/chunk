@@ -1,6 +1,6 @@
 # chunk-runtime (JVM)
 
-The initial Minestom bridge accepts authenticated players over gRPC. It never
+The initial Minestom bridge accepts authenticated players over dedicated TCP connections. It never
 opens a Minecraft listener. The Rust proxy owns online authentication, encryption,
 compression and configuration; the bridge supplies its full registry data and
 uses a custom `PlayerConnection` for plain play packets. The pinned Minestom
@@ -27,17 +27,20 @@ Join `127.0.0.1:25565` with an authenticated official 26.1 client. The bridge
 currently provides one grass world named `bridge`. Without `--gameplay`, the
 proxy retains its bounded waiting-world behavior.
 
-Both RPCs require the process credential. Delivery validates deployment,
+Control RPCs require the process credential. Preparation issues a single-use,
+30-second TCP setup capability. Opening that socket creates no player; activation
+is a separate idempotent RPC after client configuration acknowledgment. Delivery validates deployment,
 process generation, protocol and registry digest before creating a player.
-Owner generations reject duplicate deliveries and stale cleanup; frame streams
+Owner generations reject duplicate deliveries and stale cleanup; TCP streams
 are never replayed. Output is limited to 256 packets and 8 MiB per player;
-slow peers are disconnected. Proxy writes and gRPC queue waits have five-second
-deadlines. Configuration has the proxy's configured deadline. Empty streams
-have ten seconds to present a delivery.
+slow peers are disconnected. Proxy and JVM writes have five-second
+deadlines. Configuration has the proxy's configured deadline. TCP sockets have five seconds to present a bounded setup message.
+The acceptor is loopback-only and limits concurrent sockets to 128. Operation
+history is bounded to 4096 deliveries per fixture process.
 
 Focused verification: `./gradlew :jvm:runtime:test` and `cargo test -p chunk-proxy`.
-The official client has been used to verify fresh-build login, registry exchange,
-world loading, movement and sustained connection through the bridge.
+The official 26.1 client verified login, registry exchange, lit world loading,
+movement across chunk boundaries and several minutes of sustained TCP gameplay.
 
 Session management, backend clients, supervisor registration and control-plane
 ownership follow in subsequent changes. The standalone bridge's process
