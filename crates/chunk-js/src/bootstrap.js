@@ -15,13 +15,13 @@
       if (name in prototype) Object.defineProperty(prototype, name, { value: unavailable, writable: false, configurable: false });
     }
   }
-  return (caller) => freeze({
+  return (caller, generation) => freeze({
     caller,
     db: freeze({
-      get: (table, id) => parse(read(stringify({kind: "get", table, id}))),
-      scan: (table, start = null, end = null) => parse(read(stringify({kind: "scan", table, start, end}))),
-      put: (table, id, value) => write(stringify({kind: "put", key: {table, id}, value})),
-      delete: (table, id) => write(stringify({kind: "delete", key: {table, id}})),
+      get: (table, id) => parse(read(generation, stringify({kind: "get", table, id}))),
+      scan: (table, start = null, end = null) => parse(read(generation, stringify({kind: "scan", table, start, end}))),
+      put: (table, id, value) => write(generation, stringify({kind: "put", key: {table, id}, value})),
+      delete: (table, id) => write(generation, stringify({kind: "delete", key: {table, id}})),
     }),
   });
 })()

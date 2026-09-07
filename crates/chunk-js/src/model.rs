@@ -50,11 +50,8 @@ pub trait ReadHost: Send + 'static {
     fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value, String>;
 }
 
-/// One bundled ES module exporting the selected function. Imports require bundling;
-/// the runtime has no filesystem, network or package loader.
+/// One call into an already registered deployment.
 pub struct Invocation {
-    pub deployment: String,
-    pub source: String,
     pub export: String,
     pub arguments: Value,
     pub caller: Value,
@@ -108,6 +105,8 @@ pub enum Error {
     Heap,
     #[error("JavaScript: {0}")]
     JavaScript(String),
+    #[error("deployment worker stopped")]
+    WorkerStopped,
     #[error("runtime I/O: {0}")]
     Io(#[from] std::io::Error),
 }

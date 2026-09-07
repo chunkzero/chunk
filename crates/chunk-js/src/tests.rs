@@ -16,43 +16,95 @@ impl ReadHost for Snapshot {
     }
 }
 
-fn invocation(body: &str) -> Invocation {
+fn invocation() -> Invocation {
     Invocation {
-        deployment: "build-a".into(),
-        source: format!("export default async (ctx, args) => {{ {body} }}"),
         export: "default".into(),
         arguments: json!({"id":"player"}),
         caller: json!({"player":"player"}),
         mode: Mode::Mutation,
     }
 }
-fn run(body: &str) -> Result<Execution, Error> {
-    execute(
-        invocation(body),
-        Box::new(Snapshot),
-        Limits::default(),
-        &Cancellation::default(),
+fn deployment(body: &str, limits: Limits) -> Deployment {
+    Deployment::new(
+        "build-a".into(),
+        format!("export default async (ctx, args) => {{ {body} }}"),
+        limits,
     )
+    .unwrap()
+}
+fn call(deployment: &mut Deployment) -> Result<Execution, Error> {
+    deployment.execute(invocation(), Box::new(Snapshot), &Cancellation::default())
+}
+fn run(body: &str) -> Result<Execution, Error> {
+    call(&mut deployment(body, Limits::default()))
 }
 
 #[test]
-fn real_engine_reads_and_buffers_writes_with_fresh_globals_each_invocation() {
-    let body = "globalThis.counter = (globalThis.counter || 0) + 1; const p = await ctx.db.get('profiles',args.id); ctx.db.put('profiles',args.id,{coins:p.coins+1}); return {counter, p:ctx.db.get('profiles',args.id),caller:ctx.caller.player};";
-    for _ in 0..2 {
-        let result = run(body).unwrap();
-        assert_eq!(result.value, json!({"counter":1,"p":{"coins":4},"caller":"player"}));
+fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments() {
+    let source = "let counter = 0; export default async (ctx, args) => { counter++; const p = ctx.db.get('profiles',args.id); ctx.db.put('profiles',args.id,{coins:p.coins+1}); return {counter, p:ctx.db.get('profiles',args.id),caller:ctx.caller.player}; }";
+    let mut first = Deployment::new("build-a".into(), source.into(), Limits::default()).unwrap();
+    assert_eq!(first.id(), "build-a");
+    for counter in 1..=2 {
+        let result = call(&mut first).unwrap();
+        assert_eq!(
+            result.value,
+            json!({"counter":counter,"p":{"coins":4},"caller":"player"})
+        );
         assert_eq!(result.writes.len(), 1);
         assert_eq!(result.writes[0].value, Some(json!({"coins":4})));
     }
-    let mut other = invocation("return typeof counter;");
-    other.deployment = "build-b".into();
-    assert_eq!(
-        execute(other, Box::new(Snapshot), Limits::default(), &Cancellation::default())
-            .unwrap()
-            .value,
-        json!("undefined")
+    // Separate owners also isolate environments that happen to use the same deployment ID.
+    for id in ["build-b", "build-a"] {
+        let mut other = Deployment::new(id.into(), source.into(), Limits::default()).unwrap();
+        assert_eq!(call(&mut other).unwrap().value["counter"], json!(1));
+        assert!(call(&mut first).unwrap().value["counter"].as_u64().unwrap() > 2);
+    }
+}
+
+#[test]
+fn retained_capabilities_cannot_access_later_transactions_or_callers() {
+    let mut engine = deployment(
+        r"
+        if (!globalThis.old) { globalThis.old = ctx; return null; }
+        let denied = 0;
+        for (const op of [() => old.db.get('profiles','p'), () => old.db.scan('profiles'),
+            () => old.db.put('profiles','p',{}), () => old.db.delete('profiles','p')]) {
+            try { op(); } catch { denied++; }
+        }
+        return {denied, old:old.caller.player, current:ctx.caller.player, p:ctx.db.get('profiles','p')};
+    ",
+        Limits::default(),
     );
-    assert!(run("ctx.db.put('profiles','p',{}); throw Error('rollback');").is_err());
+    call(&mut engine).unwrap();
+    let mut next = invocation();
+    next.caller = json!({"player":"other"});
+    let result = engine
+        .execute(next, Box::new(Snapshot), &Cancellation::default())
+        .unwrap();
+    assert_eq!(
+        result.value,
+        json!({"denied":4,"old":"player","current":"other","p":{"coins":3}})
+    );
+    assert!(result.writes.is_empty());
+}
+
+#[test]
+fn failed_call_discards_writes_and_reloads_the_same_bundle() {
+    let mut engine = deployment(
+        "globalThis.count = (globalThis.count || 0) + 1; if (args.fail) { ctx.db.put('profiles','p',{}); throw Error('rollback'); } return count;",
+        Limits::default(),
+    );
+    assert_eq!(call(&mut engine).unwrap().value, json!(1));
+    let mut fail = invocation();
+    fail.arguments = json!({"fail":true});
+    assert!(
+        engine
+            .execute(fail, Box::new(Snapshot), &Cancellation::default())
+            .is_err()
+    );
+    let result = call(&mut engine).unwrap();
+    assert_eq!(result.value, json!(1));
+    assert!(result.writes.is_empty());
 }
 
 #[test]
@@ -63,56 +115,85 @@ fn ambient_apis_and_query_writes_are_denied() {
     assert!(run("return await import('ext:core/mod.js');").is_err());
     assert!(run("return await import('file:///etc/passwd');").is_err());
     assert!(run("return NaN;").is_err());
-    let mut query = invocation("ctx.db.put('profiles','p',{}); return null;");
+    assert!(run("Promise.reject(Error('unhandled')); return 42;").is_err());
+    let mut engine = deployment("ctx.db.put('profiles','p',{}); return null;", Limits::default());
+    assert_eq!(call(&mut engine).unwrap().writes.len(), 1);
+    let mut query = invocation();
     query.mode = Mode::Query;
-    assert!(execute(query, Box::new(Snapshot), Limits::default(), &Cancellation::default()).is_err());
+    assert!(
+        engine
+            .execute(query, Box::new(Snapshot), &Cancellation::default())
+            .is_err()
+    );
 }
 
 #[test]
-fn synchronous_loops_pending_promises_and_heap_exhaustion_are_bounded() {
+fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
     for body in [
         "while(true) {}",
         "await new Promise(() => {});",
         "while(true) { await Promise.resolve(); }",
     ] {
-        let result = execute(
-            invocation(body),
-            Box::new(Snapshot),
+        let mut engine = deployment(
+            &format!("if(args.fail) {{ {body} }} return 42;"),
             Limits {
                 execution: Duration::from_millis(100),
                 ..Limits::default()
             },
-            &Cancellation::default(),
         );
-        assert!(result.is_err(), "{body}");
+        let mut fail = invocation();
+        fail.arguments = json!({"fail":true});
+        assert!(
+            engine
+                .execute(fail, Box::new(Snapshot), &Cancellation::default())
+                .is_err(),
+            "{body}"
+        );
+        assert_eq!(call(&mut engine).unwrap().value, json!(42));
     }
-    let result = execute(
-        invocation("const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx'))"),
-        Box::new(Snapshot),
+    let mut engine = deployment(
+        "if(args.fail) { const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx')); } return 42;",
         Limits {
             execution: Duration::from_secs(5),
             heap_bytes: 8 * 1024 * 1024,
         },
-        &Cancellation::default(),
     );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail":true});
+    let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
-    assert_eq!(run("return 42;").unwrap().value, json!(42));
+    assert_eq!(call(&mut engine).unwrap().value, json!(42));
+    assert!(
+        Deployment::new(
+            "bad".into(),
+            "while(true) {}".into(),
+            Limits {
+                execution: Duration::from_millis(100),
+                ..Limits::default()
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn cancellation_interrupts_execution_and_discards_speculative_writes() {
+    let mut engine = deployment(
+        "if(args.fail) { ctx.db.put('profiles','p',{}); while(true) {} } return 42;",
+        Limits::default(),
+    );
     let cancellation = Cancellation::default();
     let trigger = cancellation.clone();
     let thread = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         trigger.cancel();
     });
-    let result = execute(
-        invocation("ctx.db.put('profiles','p',{}); while(true) {}"),
-        Box::new(Snapshot),
-        Limits::default(),
-        &cancellation,
-    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail":true});
+    let result = engine.execute(fail, Box::new(Snapshot), &cancellation);
     thread.join().unwrap();
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    let result = call(&mut engine).unwrap();
+    assert_eq!(result.value, json!(42));
+    assert!(result.writes.is_empty());
 }

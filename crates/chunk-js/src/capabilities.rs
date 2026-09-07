@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::{Cancellation, Key, Mode, Read, ReadHost};
 
 pub(crate) struct Capabilities {
+    pub generation: u32,
     pub host: Box<dyn ReadHost>,
     pub mode: Mode,
     pub cancellation: Cancellation,
@@ -28,8 +29,12 @@ impl Capabilities {
 
 #[op2]
 #[string]
-fn op_chunk_read(state: &mut OpState, #[string] request: &str) -> Result<String, JsErrorBox> {
-    let capabilities = state.borrow_mut::<Capabilities>();
+fn op_chunk_read(state: &mut OpState, generation: u32, #[string] request: &str) -> Result<String, JsErrorBox> {
+    let capabilities = state
+        .borrow_mut::<Option<Capabilities>>()
+        .as_mut()
+        .filter(|capabilities| capabilities.generation == generation)
+        .ok_or_else(|| JsErrorBox::generic("Invocation capability expired"))?;
     capabilities.charge()?;
     if request.len() > 4096 {
         return Err(JsErrorBox::generic("Read request exceeds size limit"));
@@ -54,8 +59,12 @@ enum WriteRequest {
 }
 
 #[op2(fast)]
-fn op_chunk_write(state: &mut OpState, #[string] request: &str) -> Result<(), JsErrorBox> {
-    let capabilities = state.borrow_mut::<Capabilities>();
+fn op_chunk_write(state: &mut OpState, generation: u32, #[string] request: &str) -> Result<(), JsErrorBox> {
+    let capabilities = state
+        .borrow_mut::<Option<Capabilities>>()
+        .as_mut()
+        .filter(|capabilities| capabilities.generation == generation)
+        .ok_or_else(|| JsErrorBox::generic("Invocation capability expired"))?;
     capabilities.charge()?;
     if capabilities.mode != Mode::Mutation {
         return Err(JsErrorBox::generic("Query cannot write"));
