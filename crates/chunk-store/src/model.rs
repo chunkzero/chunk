@@ -1,5 +1,3 @@
-use std::{collections::BTreeMap, ops::Bound};
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -35,10 +33,7 @@ impl DocumentKey {
 }
 
 fn validate_table(table: &str) -> Result<()> {
-    if table.is_empty() || table.len() > 64 || !table.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
-        return Err(Error::Invalid("invalid table name"));
-    }
-    Ok(())
+    chunk_contract::validate_name(table).map_err(Error::Invalid)
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -79,56 +74,19 @@ impl KeyRange {
     }
 }
 
-/// Materialized snapshots keep execution independent of SQLite transaction lifetimes.
-/// The local adapter caps total documents/bytes; old snapshots remain valid until dropped.
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    pub revision: Revision,
-    tables: BTreeMap<String, BTreeMap<String, Document>>,
-}
-
-impl Snapshot {
-    /// Creates a snapshot from an adapter's complete table map at the given revision.
-    /// The adapter is responsible for supplying internally consistent documents.
-    ///
-    /// ```
-    /// use chunk_store::{Document, DocumentKey, Revision, Snapshot};
-    /// use serde_json::json;
-    ///
-    /// let tables = [("profiles".into(), [("a".into(), Document {
-    ///     revision: Revision(1),
-    ///     value: json!({"coins": 4}),
-    /// })].into())].into();
-    /// let snapshot = Snapshot::new(Revision(1), tables);
-    /// assert_eq!(snapshot.get(&DocumentKey::new("profiles", "a")?).unwrap().value,
-    ///     json!({"coins": 4}));
-    /// # Ok::<(), chunk_store::Error>(())
-    /// ```
-    #[must_use]
-    pub fn new(revision: Revision, tables: BTreeMap<String, BTreeMap<String, Document>>) -> Self {
-        Self { revision, tables }
-    }
-
-    #[must_use]
-    pub fn get(&self, key: &DocumentKey) -> Option<&Document> {
-        self.tables.get(&key.table)?.get(&key.id)
-    }
-
-    /// Reads the ordered primary-key index, including empty intervals.
-    /// # Errors
-    /// Rejects invalid ranges.
-    pub fn scan<'a>(&'a self, range: &KeyRange) -> Result<Vec<(&'a str, &'a Document)>> {
-        range.validate()?;
-        let Some(table) = self.tables.get(&range.table) else {
-            return Ok(Vec::new());
-        };
-        let start = range.start.as_deref().map_or(Bound::Unbounded, Bound::Included);
-        let end = range.end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
-        Ok(table
-            .range::<str, _>((start, end))
-            .map(|(id, doc)| (id.as_str(), doc))
-            .collect())
-    }
+/// An equality prefix followed by an optional half-open range on the next field.
+/// Fields follow the declared index order; document ID breaks ties. Null denotes
+/// an absent optional scalar and sorts before present values. Complex fields
+/// (including nullable unions) cannot be indexed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexRange {
+    pub table: String,
+    pub index: String,
+    pub prefix: Vec<Value>,
+    pub start: Option<Value>,
+    pub end: Option<Value>,
+    /// Maximum rows returned, between 1 and 100,000.
+    pub limit: usize,
 }
 
 /// The backend hashes deployment, contract, function, caller and validated arguments.
@@ -157,7 +115,9 @@ pub struct Outcome {
 #[derive(Debug, Clone)]
 pub struct Write {
     pub key: DocumentKey,
-    /// None deletes the document.
+    /// A complete document replacement; None deletes it. Callers implementing
+    /// patches must preserve fields they are not changing, including fields
+    /// introduced by other retained deployment versions.
     pub value: Option<Value>,
 }
 

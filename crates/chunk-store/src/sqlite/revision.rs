@@ -22,7 +22,7 @@ impl ToSql for Revision {
 
 pub(super) fn current(connection: &Connection) -> Result<Revision> {
     Ok(
-        connection.query_row("SELECT revision FROM metadata WHERE singleton = 1", [], |row| {
+        connection.query_row("SELECT revision FROM _chunk_metadata WHERE singleton = 1", [], |row| {
             row.get(0)
         })?,
     )

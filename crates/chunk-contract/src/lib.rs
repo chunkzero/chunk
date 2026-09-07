@@ -1,10 +1,8 @@
-//! Application declarations and immutable deployment manifests. Scaffold only.
+//! Language-independent application schema declarations.
 //!
-//! Intended data includes environment/deployment identity, schemas, versioned
-//! functions, server JAR and asset references, app metadata, session contracts,
-//! domain trees, command/hook descriptors and optional machine requirements.
-//! Server code owns routing policies; app metadata does not require matchmaking.
-//!
-//! Downstream consumers will use this contract for validation, generated
-//! clients and deployment orchestration. Its exact representation remains
-//! open. This crate has no I/O or JavaScript execution.
+//! Build tooling resolves declarations into this contract; storage adapters map
+//! it to physical tables and indexes. This crate has no I/O or JavaScript execution.
+
+mod schema;
+
+pub use schema::{DatabaseSchema, Field, Schema, TableSchema, validate_name};
