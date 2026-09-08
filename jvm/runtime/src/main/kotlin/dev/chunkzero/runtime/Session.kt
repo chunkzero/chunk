@@ -1,6 +1,6 @@
 package dev.chunkzero.runtime
 
-import dev.chunkzero.backend.BackendClient
+import dev.chunkzero.backend.client.BackendSession
 import net.minestom.server.MinecraftServer
 import net.minestom.server.entity.Player
 import net.minestom.server.event.EventFilter
@@ -30,7 +30,7 @@ class SessionScope internal constructor(
     val generation: Long,
     private val ticks: TickExecutor,
     private val requestFinish: () -> CompletionStage<Unit>,
-    val backend: BackendClient?,
+    val backend: BackendSession?,
 ) {
     private val ownedInstances = CopyOnWriteArrayList<InstanceContainer>()
     private val resources = mutableListOf<AutoCloseable>()
@@ -45,6 +45,7 @@ class SessionScope internal constructor(
 
     init {
         MinecraftServer.getGlobalEventHandler().addChild(events)
+        backend?.let { resources.add(it) }
     }
 
     fun createInstance(): InstanceContainer {

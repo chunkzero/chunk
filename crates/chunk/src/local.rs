@@ -27,9 +27,8 @@ pub(crate) struct Options {
 #[serde(deny_unknown_fields)]
 struct Project {
     environment: String,
-    backend_source: PathBuf,
-    backend_contract: PathBuf,
     gameplay_distribution: PathBuf,
+    gameplay_module: String,
     profiles: BTreeMap<String, MachineProfile>,
     session_types: BTreeMap<String, SessionType>,
     max_processes: u16,
@@ -82,10 +81,21 @@ fn build(options: &Options) -> io::Result<(Project, Artifact)> {
     let directory = file
         .parent()
         .ok_or_else(|| io::Error::other("project directory missing"))?;
+    let distribution = directory.join(&project.gameplay_distribution);
+    let module = fs::read_to_string(distribution.join("backend/gameplay-module.txt"))?;
+    if module != project.gameplay_module {
+        return Err(io::Error::other(
+            "gameplay module does not match the generated distribution",
+        ));
+    }
     let artifact = chunk_build::publish(
         &Inputs {
-            source: directory.join(&project.backend_source),
-            contract: directory.join(&project.backend_contract),
+            source: directory
+                .join(&project.gameplay_distribution)
+                .join("backend/source.mjs"),
+            contract: directory
+                .join(&project.gameplay_distribution)
+                .join("backend/contract.json"),
             distribution: directory.join(&project.gameplay_distribution),
         },
         &options.state.join("artifacts"),

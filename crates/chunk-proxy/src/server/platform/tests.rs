@@ -28,20 +28,20 @@ impl Backend for Hooks {
         assert_eq!(caller["kind"], "proxy");
         assert!(caller["proxyId"].as_str().is_some_and(|value| !value.is_empty()));
         let result = match call.function.as_str() {
-            "proxy/status" => {
+            "shared/proxy/status" => {
                 self.status.fetch_add(1, Ordering::SeqCst);
                 if self.mode.load(Ordering::SeqCst) == 1 {
                     return Err(Status::unavailable("offline"));
                 }
                 json!({"motd": "Live backend", "online": 2, "max": 16})
             }
-            "proxy/admit" => {
+            "shared/proxy/admit" => {
                 if self.mode.load(Ordering::SeqCst) == 2 {
                     return Err(Status::deadline_exceeded("hook deadline"));
                 }
                 json!({"allow": self.mode.load(Ordering::SeqCst) == 0, "reason": "Closed"})
             }
-            "proxy/route" => {
+            "shared/proxy/route" => {
                 self.routes.fetch_add(1, Ordering::SeqCst);
                 json!({"key": "lobby", "session_type": "lobby", "machine_profile": "local"})
             }

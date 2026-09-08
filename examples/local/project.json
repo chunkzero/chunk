@@ -1,14 +1,22 @@
 {
   "environment": "local",
-  "backend_source": "backend.mjs",
-  "backend_contract": "contract.json",
   "gameplay_distribution": "../../jvm/example/build/install/example",
   "profiles": {
-    "local": { "memory_mib": 512, "max_sessions": 2 }
+    "local": {
+      "memory_mib": 512,
+      "max_sessions": 2
+    }
   },
   "session_types": {
-    "lobby": { "machine_profile": "local", "capacity": 16 },
-    "arena": { "machine_profile": "local", "capacity": 16 }
+    "lobby": {
+      "machine_profile": "local",
+      "capacity": 16
+    },
+    "arena": {
+      "machine_profile": "local",
+      "capacity": 16
+    }
   },
-  "max_processes": 4
+  "max_processes": 4,
+  "gameplay_module": ":jvm:example"
 }

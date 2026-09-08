@@ -40,9 +40,9 @@ It is not included in this branch; asset publication remains proposed.
 | --- | --- |
 | `crates/` | Rust proxy, protocol, platform and toolchain crates |
 | `jvm/` | Managed Minestom sessions, backend client, generated transport and example |
-| `packages/server` | Scaffolded `@chunk/server` JavaScript package |
+| `packages/server` | Typed `@chunk/server` declarations and document API |
 | `proto/` | Generated lifecycle/backend/control contracts and remaining transport proposals |
-| `examples/local/` | Runnable backend contract, source and local project configuration |
+| `examples/local/` | TypeScript backend source and local project configuration |
 | `docs/architecture.md` | Broader platform design proposals |
 
 The intended platform design lives in the

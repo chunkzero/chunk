@@ -41,6 +41,7 @@ ready: fmt-check lint typecheck test build
 
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
 local *args:
+    pnpm install --frozen-lockfile
     ./gradlew :jvm:example:installDist :jvm:example:writeJavaExecutable
     cargo run -p chunk -- local --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
 

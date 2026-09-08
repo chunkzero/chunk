@@ -6,7 +6,8 @@ From the repository root, install the pinned tools with `mise install`, then:
 just local
 ```
 
-This builds the example JVM distribution, resolves Java 25 through Gradle, packages
+This installs pinned JS dependencies, compiles TypeScript declarations and handlers,
+generates Java records/references before Kotlin compilation, resolves Java 25, packages
 an immutable deployment, and starts the backend, control and proxy. Join
 `localhost:25565` with a signed-in official Minecraft Java Edition 26.1 client.
 Status runs JavaScript without starting gameplay. Login runs admission/routing and
@@ -60,10 +61,21 @@ are unaffected.
 
 ## Files and configuration
 
-`project.json` selects the environment, backend source/typed contract, built gameplay
-distribution, session types and machine profiles. Paths are relative to that file.
-The backend accepts a bundled ES module; TypeScript compilation, package bundling,
-annotation extraction and generated application SDKs remain separate future work.
+`project.json` selects the environment, built gameplay distribution, session types
+and machine profiles. `gameplay_module` must match the module recorded by Gradle
+in the generated distribution; mismatches fail before launching services. Paths are relative to that file. `server/schema/index.ts`
+composes the physical schema; `server/*.ts` exports validated function descriptors.
+`jvm:example:generateBackend` emits the bundle, contract, source map and Java/TS
+clients under the module's build directory. The `chunk.backend-generation`
+convention plugin wires generation before Java/Kotlin compilation and includes
+the matching backend in `installDist`. The runner publishes that distribution's
+backend and JARs together; no contract JSON or gRPC configuration is handwritten.
+
+Apply that convention to another JVM application and configure its
+`GenerateBackend` task with `backendProject` and `packageName`. Shared descriptors
+use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`.
+The initial managed caller's `app` identifies its registered session type.
+Standalone app manifests and annotation-driven module discovery remain deferred.
 
 Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
 bundle and project metadata. Content changes produce a new deployment; existing

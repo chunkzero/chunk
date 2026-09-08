@@ -61,6 +61,10 @@ pub fn publish(inputs: &Inputs, directory: &Path, project: &[u8]) -> io::Result<
         ));
     }
     files.insert("source.mjs".into(), source.as_bytes().to_vec());
+    let source_map = inputs.source.with_extension("mjs.map");
+    if source_map.exists() {
+        files.insert("source.mjs.map".into(), read_limited(&source_map, 8 * 1024 * 1024)?);
+    }
     files.insert(
         "contract.json".into(),
         serde_json::to_vec(&contract).map_err(io::Error::other)?,

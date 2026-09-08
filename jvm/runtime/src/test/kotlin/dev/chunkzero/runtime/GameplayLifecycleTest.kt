@@ -57,8 +57,10 @@ class GameplayLifecycleTest {
                     "flat" to {
                         object : Session() {
                             lateinit var scope: SessionScope
+
                             override fun onCreate(scope: SessionScope) =
                                 FlatSession().onCreate(scope).also { this.scope = scope }
+
                             override fun onJoin(player: Player): CompletableFuture<Unit> {
                                 scope.own(player, AutoCloseable { closedPlayers.add(player) })
                                 return CompletableFuture.completedFuture(Unit)

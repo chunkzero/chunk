@@ -77,8 +77,8 @@ The optional `scope.backend` client is bound to the process deployment and sessi
 identity. Control's `--backend-file` passes the private connection to supervised
 JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once
 per player delivery; retry an uncertain result with the same ID and arguments.
-Register subscriptions with the scope or close them in `onLeave` when owned by a
-player. The `jvm/example` application demonstrates persistent coins, visits and
+Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client
+whose calls and watches close on departure. Session clients close on disposal. The `jvm/example` application demonstrates persistent coins, visits and
 subscription updates, including stale state during backend disconnection.
 Sessions own their instances, event handlers and scoped resources. Session hooks
 run through the process tick executor. Withdrawal waits for pending joins and

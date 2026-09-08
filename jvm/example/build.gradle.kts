@@ -1,5 +1,6 @@
 plugins {
     id("chunk.kotlin-conventions")
+    id("chunk.backend-generation")
     application
 }
 
@@ -30,4 +31,9 @@ abstract class WriteJavaExecutable : DefaultTask() {
 tasks.register<WriteJavaExecutable>("writeJavaExecutable") {
     executable.set(localJava.map { it.executablePath.asFile.absolutePath })
     outputFile.set(layout.buildDirectory.file("java-executable.txt"))
+}
+
+tasks.named<GenerateBackend>("generateBackend") {
+    backendProject.set(rootProject.layout.projectDirectory.dir("examples/local"))
+    packageName.set("dev.chunkzero.example.generated")
 }
