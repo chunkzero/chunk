@@ -12,6 +12,10 @@ use crate::{
 };
 
 pub(crate) enum Job {
+    Prepare {
+        operation: Operation,
+        context: chunk_store::RetryContext,
+    },
     Retain {
         deployment: Arc<chunk_contract::Deployment>,
     },
@@ -43,6 +47,18 @@ impl Committer {
             let mut failed = false;
             while let Ok(job) = incoming.recv() {
                 let event = match job {
+                    Job::Prepare { operation, context } => {
+                        let result = if failed {
+                            Err(Error::CommitFailed)
+                        } else {
+                            store.prepare_operation(&operation, context).map_err(Error::from)
+                        };
+                        failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                        Event::Prepared {
+                            operation: operation.id,
+                            result,
+                        }
+                    }
                     Job::Retain { deployment } => {
                         let result = if failed {
                             Err(Error::CommitFailed)

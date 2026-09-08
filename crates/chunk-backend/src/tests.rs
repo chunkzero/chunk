@@ -76,19 +76,34 @@ async fn pending<F: Future>(mut future: Pin<&mut F>) {
 
 #[derive(Debug, PartialEq)]
 enum Notice {
+    Preparing,
     Commit(usize),
 }
 
 struct ControlledStore {
     inner: SqliteStore,
+    prepare: Option<mpsc::Receiver<()>>,
     commits: Vec<mpsc::Receiver<()>>,
     committed: usize,
     notices: signals::UnboundedSender<Notice>,
     ambiguous: bool,
     rejected: bool,
+    attempts: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
 }
 
 impl Storage for ControlledStore {
+    fn prepare_operation(
+        &mut self,
+        operation: &Operation,
+        context: chunk_store::RetryContext,
+    ) -> chunk_store::Result<chunk_store::RetryContext> {
+        if let Some(gate) = self.prepare.take() {
+            let _ = self.notices.send(Notice::Preparing);
+            let _ = gate.recv();
+        }
+        self.inner.prepare_operation(operation, context)
+    }
+
     fn deployments(&self) -> chunk_store::Result<Vec<chunk_contract::Deployment>> {
         self.inner.deployments()
     }
@@ -106,6 +121,9 @@ impl Storage for ControlledStore {
         self.inner.outcome(operation)
     }
     fn commit(&mut self, commit: Commit) -> chunk_store::Result<Outcome> {
+        if let Some(attempts) = &self.attempts {
+            attempts.lock().unwrap().push(commit.result.clone());
+        }
         let index = self.committed;
         self.committed += 1;
         let _ = self.notices.send(Notice::Commit(index));
@@ -124,6 +142,7 @@ impl Storage for ControlledStore {
 }
 
 struct Controls {
+    prepare: Option<mpsc::Sender<()>>,
     commits: Vec<mpsc::Sender<()>>,
     notices: signals::UnboundedReceiver<Notice>,
 }
@@ -142,23 +161,36 @@ impl Harness {
     }
 
     async fn with_failure(ambiguous: bool, rejected: bool) -> Self {
+        Self::with_options(ambiguous, rejected, rejected).await
+    }
+
+    async fn with_options(ambiguous: bool, rejected: bool, gate_prepare: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut store = open(&directory);
         let base = store.snapshot().unwrap().revision;
         let (commits, receivers): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
         let (notices, receiver) = signals::unbounded_channel();
+        let (prepare, prepare_receiver) = if gate_prepare {
+            let (sender, receiver) = mpsc::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
         let store = ControlledStore {
             inner: store,
+            prepare: prepare_receiver,
             commits: receivers,
             committed: 0,
             notices,
             ambiguous,
             rejected,
+            attempts: None,
         };
         let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
         Self {
             controls: Controls {
+                prepare,
                 commits,
                 notices: receiver,
             },
@@ -203,6 +235,10 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
     assert_eq!(published.revision, first.revision);
     assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
     pending(second.as_mut()).await;
+    let query = query.await.unwrap();
+    assert_eq!(query.revision, first.revision);
+    assert_eq!(value(&query), json!(1));
+    let mut query = Box::pin(backend.query(call("get", json!({"id":"p"}))));
     pending(query.as_mut()).await;
     harness.controls.commits[1].send(()).unwrap();
     let second = second.await.unwrap();
@@ -359,9 +395,12 @@ async fn rejected_commit_drains_suffix_before_reusing_revisions() {
     watch.next().await.unwrap();
     let mut first = Box::pin(backend.mutate("a".into(), call("bump", json!({"id":"p"}))));
     pending(first.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Preparing);
     let mut second = Box::pin(backend.mutate("b".into(), call("bump", json!({"id":"p"}))));
     pending(second.as_mut()).await;
+    backend.query(call("get", json!({"id":"other"}))).await.unwrap();
+    harness.controls.prepare.take().unwrap().send(()).unwrap();
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     backend.query(call("get", json!({"id":"other"}))).await.unwrap();
     harness.controls.commits[0].send(()).unwrap();
     assert!(matches!(first.await, Err(Error::Retry)));
@@ -460,15 +499,18 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
 
 #[tokio::test]
 async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
-    let mut harness = Harness::new(false).await;
+    let mut harness = Harness::with_options(false, false, true).await;
     let backend = &harness.backend;
     let mut watch = backend.subscribe(call("indexed", json!({}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
     let mut seed = Box::pin(backend.mutate("seed-index".into(), call("seedIndex", json!({}))));
     pending(seed.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Preparing);
     let mut shift = Box::pin(backend.mutate("shift-index".into(), call("shiftIndex", json!({}))));
     pending(shift.as_mut()).await;
+    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
+    harness.controls.prepare.take().unwrap().send(()).unwrap();
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     let mut query = Box::pin(backend.query(call("indexed", json!({}))));
     pending(query.as_mut()).await;
     backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
@@ -497,4 +539,54 @@ async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
         .await
         .unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([["z", {"coins":2}]]));
+}
+
+#[tokio::test]
+async fn rejected_operation_preserves_time_seed_and_deployment_across_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (notices, _) = signals::unbounded_channel();
+    let store = ControlledStore {
+        inner: open(&directory),
+        prepare: None,
+        commits: Vec::new(),
+        committed: 0,
+        notices,
+        ambiguous: false,
+        rejected: true,
+        attempts: Some(attempts.clone()),
+    };
+    let source = "export function attempt(ctx) { ctx.db.put('profiles','p',{coins:1}); return {time:Date.now(), random:Math.random(), id:crypto.randomUUID()}; }";
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.register(id(), source.into(), Limits::default()).await.unwrap();
+    assert!(matches!(
+        backend.mutate("stable".into(), call("attempt", Value::Null)).await,
+        Err(Error::Retry)
+    ));
+    drop(backend);
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
+    backend.register(id(), source.into(), Limits::default()).await.unwrap();
+    let other = DeploymentId::new("different").unwrap();
+    backend
+        .register(other.clone(), source.into(), Limits::default())
+        .await
+        .unwrap();
+    let mut changed = call("attempt", Value::Null);
+    changed.deployment = other;
+    assert!(
+        matches!(backend.mutate("stable".into(), changed).await, Err(Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
+    );
+    let recovered = backend
+        .mutate("stable".into(), call("attempt", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(value(&recovered), attempts.lock().unwrap()[0]);
+    assert_eq!(
+        backend
+            .mutate("stable".into(), call("attempt", Value::Null))
+            .await
+            .unwrap()
+            .revision,
+        recovered.revision
+    );
 }

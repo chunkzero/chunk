@@ -15,7 +15,7 @@ mod termination;
 
 pub use engine::{DeploymentId, Engine};
 pub use model::{
-    Cancellation, Error, Execution, IndexRows, Invocation, Json, Key, Limits, Mode, Read, ReadHost, Write,
+    Cancellation, Error, Execution, IndexRows, Invocation, Json, Key, Limits, Log, Mode, Read, ReadHost, Write,
 };
 
 #[cfg(test)]

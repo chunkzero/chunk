@@ -119,7 +119,7 @@ pub(crate) mod bounds {
     pub const DOCUMENT_ID_BYTES: usize = 256;
     pub const WRITES: usize = 256;
     pub const WRITE_BYTES: usize = 8 * 1024 * 1024;
-    pub const MIN_HEAP_BYTES: usize = 8 * 1024 * 1024;
+    pub const MIN_HEAP_BYTES: usize = 16 * 1024 * 1024;
     pub const MAX_HEAP_BYTES: usize = 128 * 1024 * 1024;
     pub const EMERGENCY_HEAP_BYTES: usize = 8 * 1024 * 1024;
     pub const MAX_EXECUTION: Duration = Duration::from_secs(30);
@@ -156,6 +156,7 @@ impl Cancellation {
 
 #[derive(Debug)]
 pub struct Execution {
+    pub logs: Vec<Log>,
     /// Strict JSON text, ready to forward without decoding on the host.
     pub value: String,
     /// Published only on success; the backend still validates and commits these.
@@ -178,4 +179,10 @@ pub enum Error {
     UnknownDeployment,
     #[error("runtime I/O: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug)]
+pub struct Log {
+    pub level: String,
+    pub message: String,
 }

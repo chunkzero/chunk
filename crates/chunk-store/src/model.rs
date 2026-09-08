@@ -211,3 +211,12 @@ pub struct Commit {
     pub writes: Vec<Write>,
     pub result: Value,
 }
+
+/// Durable invocation inputs fixed before the first evaluation of an operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetryContext {
+    pub deployment: String,
+    pub timestamp: i64,
+    pub seed: u64,
+}

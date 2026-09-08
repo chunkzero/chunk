@@ -6,11 +6,12 @@ use std::{
 
 use rusqlite::{Connection, TransactionBehavior, params};
 
-use crate::{Commit, DatabaseSchema, Error, Operation, Outcome, Result, Revision, Snapshot, Storage};
+use crate::{Commit, DatabaseSchema, Error, Operation, Outcome, Result, RetryContext, Revision, Snapshot, Storage};
 
 mod bootstrap;
 mod codec;
 mod deployments;
+mod operations;
 mod read;
 mod revision;
 mod schema;
@@ -50,6 +51,10 @@ impl SqliteStore {
 }
 
 impl Storage for SqliteStore {
+    fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext> {
+        operations::prepare(&mut self.connection, operation, context)
+    }
+
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {
         deployments::load(&self.connection)
     }
