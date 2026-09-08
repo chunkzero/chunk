@@ -47,6 +47,7 @@
       db: freeze({
         get: (table, id) => parse(read(generation, stringify({kind: "get", table, id}))),
         scan: (table, start = null, end = null) => parse(read(generation, stringify({kind: "scan", table, start, end}))),
+        scanIndex: query => parse(read(generation, stringify({kind: "index", query}))),
         put: (table, id, value) => write(generation, stringify({kind: "put", key: {table, id}, value})),
         delete: (table, id) => write(generation, stringify({kind: "delete", key: {table, id}})),
       }),

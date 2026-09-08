@@ -144,7 +144,16 @@ impl Actor {
                 }
             }
         }
-        let bytes = snapshot.validate(&writes)? + execution.value.len();
+        let changes = snapshot.changes(&writes)?;
+        let old_bytes = changes
+            .iter()
+            .filter_map(|c| c.before.as_ref())
+            .map(serde_json::to_vec)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        let bytes = snapshot.validate(&writes)? + execution.value.len() + old_bytes;
         if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
             return Err(Error::Busy);
         }
@@ -172,6 +181,7 @@ impl Actor {
             operation: mutation.operation.id.clone(),
             revision,
             writes,
+            changes,
             bytes,
         });
         self.pending_bytes += bytes;
@@ -228,6 +238,6 @@ impl Actor {
             let (query, reply) = self.deferred.pop_front().expect("ready query");
             reply.finish(Ok(query));
         }
-        self.publish(&pending.writes);
+        self.publish(&pending.changes);
     }
 }

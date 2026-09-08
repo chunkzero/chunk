@@ -14,7 +14,9 @@ mod runtime;
 mod termination;
 
 pub use engine::{DeploymentId, Engine};
-pub use model::{Cancellation, Error, Execution, Invocation, Json, Key, Limits, Mode, Read, ReadHost, Write};
+pub use model::{
+    Cancellation, Error, Execution, IndexRows, Invocation, Json, Key, Limits, Mode, Read, ReadHost, Write,
+};
 
 #[cfg(test)]
 mod tests;

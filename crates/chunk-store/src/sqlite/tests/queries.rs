@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn read_budgets_stop_before_decoding_and_accumulate_across_calls() {
+    let (_directory, mut store) = open();
+    store
+        .commit(commit(
+            "rows",
+            1,
+            vec![
+                write("a", Some(json!({"coins": 1}))),
+                write("b", Some(json!({"coins": 2}))),
+            ],
+        ))
+        .unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut budget = crate::ReadBudget::new(1, 1024);
+    assert!(
+        snapshot
+            .get_bounded(&DocumentKey::new("profiles", "a").unwrap(), &mut budget)
+            .unwrap()
+            .is_some()
+    );
+    assert!(matches!(
+        snapshot.get_bounded(&DocumentKey::new("profiles", "b").unwrap(), &mut budget),
+        Err(Error::ReadLimit)
+    ));
+    assert!(matches!(
+        snapshot.scan_bounded(
+            &crate::KeyRange {
+                table: "profiles".into(),
+                start: None,
+                end: None
+            },
+            &mut crate::ReadBudget::new(1, 1024)
+        ),
+        Err(Error::ReadLimit)
+    ));
+    assert_eq!(
+        snapshot
+            .scan_index_bounded(
+                &IndexRange { limit: 1, ..by_coins() },
+                &mut crate::ReadBudget::new(1, 1024)
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(snapshot);
+    let schema = serde_json::from_value(
+        json!({"payloads": {"fields": {"items": {"schema": {"type":"array", "items":{"type":"integer"}}}}}}),
+    )
+    .unwrap();
+    store.apply_schema(&schema).unwrap();
+    store
+        .connection
+        .execute("INSERT INTO payloads VALUES ('broken', 2, 2, '{}')", [])
+        .unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let key = DocumentKey::new("payloads", "broken").unwrap();
+    assert!(matches!(
+        snapshot.get_bounded(&key, &mut crate::ReadBudget::new(1, 0)),
+        Err(Error::ReadLimit)
+    ));
+    assert!(matches!(snapshot.get(&key), Err(Error::Corrupt(_))));
+}
+
+#[test]
 fn compound_indexes_use_sql_ranges_ordering_and_limits() {
     let (_directory, mut store) = open();
     let schema: DatabaseSchema = serde_json::from_value(json!({
