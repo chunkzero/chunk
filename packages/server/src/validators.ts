@@ -42,7 +42,7 @@ export function freeze<T>(value: T): T {
   return value
 }
 
-function validator<T>(schema: Schema): Validator<T> {
+export function validator<T>(schema: Schema): Validator<T> {
   return freeze({ schema, optional: false as const, parse(value: unknown): T {
     if (!accepts(schema, value, 0)) throw new Error(`Value does not match ${schema.type}`)
     return value as T
@@ -87,6 +87,10 @@ export function fields(shape: Shape): Record<string, { schema: Schema; optional:
 }
 
 export const v = Object.freeze({
+  document: <const T extends string, const S extends Shape>(table: T, shape: S): Validator<InferObject<S> & { readonly _id: Id<T> }> => {
+    identifier(table)
+    return validator({ type: "object", fields: { ...fields(shape), _id: { schema: { type: "id", table }, optional: false } } })
+  },
   null: () => validator<null>({ type: "null" }),
   boolean: () => validator<boolean>({ type: "boolean" }),
   number: () => validator<number>({ type: "number" }),

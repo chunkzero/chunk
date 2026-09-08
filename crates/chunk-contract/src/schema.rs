@@ -113,7 +113,7 @@ impl Schema {
         match self {
             Self::Id { table } => validate_name(table)?,
             Self::Array { items } => items.validate(depth + 1)?,
-            Self::Object { fields } => validate_fields(fields, depth + 1)?,
+            Self::Object { fields } => validate_fields(fields, depth + 1, true)?,
             Self::Union { variants } => {
                 if variants.is_empty() || variants.len() > MAX_UNION_VARIANTS {
                     return Err("invalid union size");
@@ -143,7 +143,7 @@ impl TableSchema {
     /// # Errors
     /// Rejects invalid names, excessive declarations and non-scalar index fields.
     pub fn validate(&self) -> Result<(), &'static str> {
-        validate_fields(&self.fields, 0)?;
+        validate_fields(&self.fields, 0, false)?;
         if self.indexes.len() > MAX_INDEXES {
             return Err("too many indexes");
         }
@@ -180,13 +180,15 @@ fn accepts_object(fields: &BTreeMap<String, Field>, value: &Value, depth: usize)
     })
 }
 
-fn validate_fields(fields: &BTreeMap<String, Field>, depth: usize) -> Result<(), &'static str> {
-    if fields.len() > MAX_FIELDS {
+fn validate_fields(fields: &BTreeMap<String, Field>, depth: usize, metadata: bool) -> Result<(), &'static str> {
+    if fields.len() > MAX_FIELDS + usize::from(metadata && fields.contains_key("_id")) {
         return Err("too many fields");
     }
     let mut names = BTreeSet::new();
     for (name, field) in fields {
-        validate_name(name)?;
+        if !(metadata && name == "_id" && matches!(field.schema, Schema::Id { .. }) && !field.optional) {
+            validate_name(name)?;
+        }
         if !names.insert(name.to_ascii_lowercase()) {
             return Err("field names differ only by case");
         }

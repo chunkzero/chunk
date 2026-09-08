@@ -1,7 +1,11 @@
+import { documents } from "./documents.ts"
+import type { Reader, Writer, Tables } from "./documents.ts"
+import type { SchemaDefinition } from "./schema.ts"
 import { freeze, v } from "./validators.ts"
 import type { InferObject, JsonValue, Schema, Shape, Validator } from "./validators.ts"
 
 export interface RawReader {
+  scanIndex(query: { table: string; index: string; prefix: JsonValue[]; start: JsonValue; end: JsonValue; limit: number }): [string, JsonValue][]
   get(table: string, id: string): JsonValue
   scan(table: string, start?: string | null, end?: string | null): [string, JsonValue][]
 }
@@ -47,4 +51,18 @@ export const internalMutation = builder("mutation", "internal")
 
 export function isFunction(value: unknown): value is FunctionDefinition {
   return value !== null && typeof value === "object" && definition in value && value[definition] === true
+}
+
+export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
+  function typed<K extends FunctionKind>(kind: K, visibility: Visibility) {
+    return <const S extends Shape, R>(options: {
+      args: S
+      returns: Validator<R>
+      handler: (ctx: { readonly caller: JsonValue; readonly db: K extends "query" ? Reader<T> : Writer<T> }, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
+    }): FunctionDefinition<K, InferObject<S>, R> => builder(kind, visibility)({
+      args: options.args, returns: options.returns,
+      handler: (ctx, args) => options.handler({ caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") as K extends "query" ? Reader<T> : Writer<T> }, args),
+    })
+  }
+  return freeze({ query: typed("query", "public"), mutation: typed("mutation", "public"), internalQuery: typed("query", "internal"), internalMutation: typed("mutation", "internal") })
 }
