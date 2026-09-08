@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use chunk_js::{Key, Read, ReadHost};
+use chunk_js::{Key, ReadHost};
 use chunk_store::{Document, DocumentKey, KeyRange, Revision, Snapshot, Write};
 use serde_json::Value;
 
@@ -105,47 +105,35 @@ pub(crate) struct Host {
     pub trace: Rc<RefCell<Dependencies>>,
 }
 
-impl Host {
-    fn read_value(&self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value> {
-        match request {
-            Read::Get { table, id } => {
-                let key = DocumentKey::new(&table, &id)?;
-                if !self.view.base.schema().contains_key(&table) {
-                    return Err(Error::Invalid("undeclared table"));
-                }
-                self.trace.borrow_mut().points.insert(key.clone());
-                let value = match overlay.get(&Key { table, id }) {
-                    Some(value) => value.clone(),
-                    None => self.view.get(&key)?.map(|doc| doc.value),
-                };
-                Ok(value.unwrap_or(Value::Null))
-            }
-            Read::Scan { table, start, end } => {
-                let range = KeyRange { table, start, end };
-                range.validate()?;
-                let mut rows = self.view.scan(&range)?;
-                for (key, value) in overlay {
-                    if key.table == range.table && in_range(&range, &key.id) {
-                        match value {
-                            Some(value) => {
-                                rows.insert(key.id.clone(), value.clone());
-                            }
-                            None => {
-                                rows.remove(&key.id);
-                            }
-                        }
-                    }
-                }
-                self.trace.borrow_mut().ranges.push(range);
-                Ok(serde_json::to_value(rows.into_iter().collect::<Vec<_>>())?)
-            }
-        }
-    }
-}
-
 impl ReadHost for Host {
-    fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> std::result::Result<Value, String> {
-        self.read_value(request, overlay).map_err(|error| error.to_string())
+    fn get(&mut self, key: &Key) -> std::result::Result<Option<Value>, String> {
+        let key = DocumentKey::new(&key.table, &key.id).map_err(|error| error.to_string())?;
+        if !self.view.base.schema().contains_key(&key.table) {
+            return Err("undeclared table".into());
+        }
+        self.trace.borrow_mut().points.insert(key.clone());
+        self.view
+            .get(&key)
+            .map(|document| document.map(|doc| doc.value))
+            .map_err(|error| error.to_string())
+    }
+    fn scan(
+        &mut self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> std::result::Result<Vec<(String, Value)>, String> {
+        let range = KeyRange {
+            table: table.into(),
+            start: start.map(str::to_owned),
+            end: end.map(str::to_owned),
+        };
+        range.validate().map_err(|error| error.to_string())?;
+        self.trace.borrow_mut().ranges.push(range.clone());
+        self.view
+            .scan(&range)
+            .map(|rows| rows.into_iter().collect())
+            .map_err(|error| error.to_string())
     }
 }
 

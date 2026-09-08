@@ -14,6 +14,7 @@ impl Runtime {
     pub(crate) fn load(
         executor: &tokio::runtime::Runtime,
         deadline: &Deadline,
+        specifier: &str,
         source: &str,
         limits: Limits,
         cancellation: &Cancellation,
@@ -24,7 +25,7 @@ impl Runtime {
         // exiting balances creation and restores the previously current isolate.
         unsafe { state.runtime.v8_isolate().exit() };
         let mut runtime = Self(Some(state));
-        runtime.with(|state| state.initialize_on(executor, deadline, source, limits, cancellation))?;
+        runtime.with(|state| state.initialize_on(executor, deadline, specifier, source, limits, cancellation))?;
         Ok(runtime)
     }
 
@@ -83,15 +84,13 @@ mod tests {
     #[test]
     fn unwind_exits_the_isolate_before_another_runtime_is_entered() {
         crate::Engine::init_platform();
-        let executor = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
+        let executor = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let deadline = Deadline::new().unwrap();
         let load = || {
             Runtime::load(
                 &executor,
                 &deadline,
+                "chunk:deployment/test",
                 "export default () => 42;",
                 Limits::default(),
                 &Cancellation::default(),

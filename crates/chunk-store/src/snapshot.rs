@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Result, Revision};
 
@@ -31,6 +34,8 @@ pub trait SnapshotReader: Send + Sync {
 #[derive(Clone)]
 pub struct Snapshot {
     pub revision: Revision,
+    /// Milliseconds since Unix epoch when this snapshot was acquired.
+    pub timestamp: i64,
     reader: Arc<dyn SnapshotReader>,
 }
 
@@ -51,6 +56,13 @@ impl Snapshot {
     pub fn new(revision: Revision, reader: impl SnapshotReader + 'static) -> Self {
         Self {
             revision,
+            timestamp: i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX),
             reader: Arc::new(reader),
         }
     }

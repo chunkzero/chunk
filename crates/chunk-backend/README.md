@@ -74,3 +74,9 @@ described in `chunk-js`.
 
 Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
 `cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
+
+Snapshot acquisition captures a timestamp; mutation seeds derive from the operation
+ID. The active execution keeps both fixed. Durable retries recover the outcome
+without running JS. A new request after a definite rejection acquires a fresh
+snapshot/time. No internal conflict-retry loop or persisted failed-attempt context
+is implemented; any future internal retry must retain its original time and seed.

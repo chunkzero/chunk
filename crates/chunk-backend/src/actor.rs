@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     sync::{
         Arc,
@@ -60,7 +60,7 @@ pub(crate) struct Actor {
     next_subscription: u64,
     reevaluations: VecDeque<Reevaluation>,
     js: Engine,
-    versions: BTreeMap<DeploymentId, [u8; 32]>,
+    versions: BTreeSet<DeploymentId>,
     view: Rc<View>,
     committer: Committer,
     outstanding: usize,
@@ -80,7 +80,7 @@ impl Actor {
             next_subscription: 0,
             reevaluations: VecDeque::new(),
             js: Engine::new()?,
-            versions: BTreeMap::new(),
+            versions: BTreeSet::new(),
             view: Rc::new(View::new(snapshot)),
             committer,
             outstanding: 0,
@@ -157,12 +157,11 @@ impl Actor {
                 } else if self.versions.len() >= MAX_DEPLOYMENTS {
                     Err(Error::Busy)
                 } else {
-                    let digest = Sha256::digest(source.as_bytes()).into();
                     self.js
                         .register(id.clone(), source, limits)
                         .map_err(Error::from)
                         .map(|()| {
-                            self.versions.insert(id, digest);
+                            self.versions.insert(id);
                         })
                 };
                 reply.finish(result);
@@ -241,7 +240,7 @@ impl Actor {
         view: Rc<View>,
         cancellation: &Cancellation,
     ) -> Result<(Execution, Dependencies)> {
-        let (execution, dependencies) = self.evaluate_traced(call, mode, view, cancellation);
+        let (execution, dependencies) = self.evaluate_traced(call, mode, view, cancellation, None);
         execution.map(|execution| (execution, dependencies))
     }
 
@@ -251,8 +250,17 @@ impl Actor {
         mode: Mode,
         view: Rc<View>,
         cancellation: &Cancellation,
+        seed: Option<u64>,
     ) -> (Result<Execution>, Dependencies) {
         let trace = Rc::new(RefCell::new(Dependencies::default()));
+        let timestamp = view.base.timestamp;
+        let seed = seed.unwrap_or_else(|| {
+            u64::from_be_bytes(
+                Sha256::digest(call.function.as_bytes())[..8]
+                    .try_into()
+                    .expect("digest prefix"),
+            )
+        });
         let host = Host {
             view,
             trace: trace.clone(),
@@ -266,6 +274,8 @@ impl Actor {
                     arguments: call.arguments.clone(),
                     caller: call.caller.clone(),
                     mode,
+                    timestamp,
+                    seed,
                 },
                 Box::new(host),
                 cancellation,
@@ -320,8 +330,13 @@ impl Actor {
         if subscription.sender.is_closed() {
             return;
         }
-        let (result, dependencies) =
-            self.evaluate_traced(&subscription.call, Mode::Query, view.clone(), &Cancellation::default());
+        let (result, dependencies) = self.evaluate_traced(
+            &subscription.call,
+            Mode::Query,
+            view.clone(),
+            &Cancellation::default(),
+            None,
+        );
         subscription.dependencies = dependencies;
         match result {
             Ok(execution) => {

@@ -1,23 +1,19 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
-};
-
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::{
     Cancellation, Error, Execution, Json, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
+    model::bounds,
+    termination::{Reason, Termination},
 };
 
 pub(crate) struct Prepared {
     pub export: String,
     pub caller: Json,
     pub arguments: Json,
+    pub timestamp: i64,
+    pub seed: u64,
     pub capabilities: Capabilities,
 }
 
@@ -26,7 +22,7 @@ pub(crate) struct State {
     run: Option<v8::Global<v8::Function>>,
     namespace: Option<v8::Global<v8::Object>>,
     pub runtime: JsRuntime,
-    heap_exhausted: Arc<AtomicBool>,
+    termination: Termination,
     pub calls: u32,
 }
 
@@ -45,14 +41,17 @@ impl State {
             caller,
             arguments,
             capabilities,
+            timestamp,
+            seed,
         } = prepared;
+        crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let result =
-                executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), limits.execution));
-            executor.block_on(engine.drain(limits.execution))?;
+            let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str()));
+            executor.block_on(engine.drain())?;
             result
         });
+        crate::profile::end(&mut self.runtime);
         let capabilities = self
             .runtime
             .op_state()
@@ -64,31 +63,39 @@ impl State {
         let writes = capabilities
             .writes
             .into_iter()
-            .map(|(key, value)| Write { key, value })
+            .map(|(key, write)| Write {
+                key,
+                value: write.value,
+            })
             .collect();
         Ok(Execution { value, writes })
     }
 
     pub(crate) fn new(limits: Limits) -> Self {
+        let termination = Termination::default();
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![chunk_capabilities::init()],
-            create_params: Some(v8::Isolate::create_params().heap_limits(0, limits.heap_bytes)),
+            extensions: vec![chunk_capabilities::init(), crate::profile::chunk_profile::init()],
+            create_params: Some(
+                v8::Isolate::create_params()
+                    .heap_limits(0, limits.heap_bytes)
+                    .array_buffer_allocator(crate::allocator::bounded(limits.heap_bytes, termination.clone())),
+            ),
             ..Default::default()
         });
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
-        let heap_exhausted = Arc::new(AtomicBool::new(false));
-        let heap_signal = Arc::clone(&heap_exhausted);
+        crate::profile::initialize(&mut runtime);
+        let heap_signal = termination.clone();
         let handle = runtime.v8_isolate().thread_safe_handle();
         runtime.add_near_heap_limit_callback(move |limit, _| {
-            heap_signal.store(true, Ordering::Release);
+            heap_signal.record(Reason::Heap);
             handle.terminate_execution();
-            limit + 8 * 1024 * 1024
+            limit + bounds::EMERGENCY_HEAP_BYTES
         });
         Self {
             run: None,
             namespace: None,
             runtime,
-            heap_exhausted,
+            termination,
             calls: 0,
         }
     }
@@ -97,12 +104,13 @@ impl State {
         &mut self,
         executor: &tokio::runtime::Runtime,
         deadline: &Deadline,
+        specifier: &str,
         source: &str,
         limits: Limits,
         cancellation: &Cancellation,
     ) -> Result<(), Error> {
         self.guarded(deadline, limits, cancellation, |state| {
-            executor.block_on(state.initialize(source, limits.execution))
+            executor.block_on(state.initialize(specifier, source))
         })
     }
 
@@ -114,23 +122,13 @@ impl State {
         run: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let handle = self.runtime.v8_isolate().thread_safe_handle();
-        let started = Instant::now();
-        let guard = deadline.arm(handle, cancellation.clone(), limits.execution);
+        let guard = deadline.arm(handle, cancellation.clone(), limits.execution, self.termination.clone());
         let result = run(self);
         drop(guard);
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        if self.heap_exhausted.load(Ordering::Acquire) {
-            return Err(Error::Heap);
-        }
-        if started.elapsed() >= limits.execution {
-            return Err(Error::Deadline);
-        }
-        result
+        self.termination.take().map_or(result, Err)
     }
 
-    async fn initialize(&mut self, source: &str, duration: std::time::Duration) -> Result<(), Error> {
+    async fn initialize(&mut self, specifier: &str, source: &str) -> Result<(), Error> {
         let run = self
             .runtime
             .execute_script("chunk:bootstrap", include_str!("bootstrap.js"))
@@ -145,40 +143,27 @@ impl State {
         }
         let module = self
             .runtime
-            .load_main_es_module_from_code(
-                &ModuleSpecifier::parse("chunk:deployment").map_err(js_error)?,
-                source.to_owned(),
-            )
+            .load_main_es_module_from_code(&ModuleSpecifier::parse(specifier).map_err(js_error)?, source.to_owned())
             .await
             .map_err(js_error)?;
         let evaluation = self.runtime.mod_evaluate(module);
-        tokio::time::timeout(
-            duration,
-            self.runtime
-                .with_event_loop_promise(evaluation, PollEventLoopOptions::default()),
-        )
-        .await
-        .map_err(|_| Error::Deadline)?
-        .map_err(js_error)?;
-        self.drain(duration).await?;
+        self.runtime
+            .with_event_loop_promise(evaluation, PollEventLoopOptions::default())
+            .await
+            .map_err(js_error)?;
+        self.drain().await?;
         self.namespace = Some(self.runtime.get_module_namespace(module).map_err(js_error)?);
         Ok(())
     }
 
-    async fn drain(&mut self, duration: std::time::Duration) -> Result<(), Error> {
-        tokio::time::timeout(duration, self.runtime.run_event_loop(PollEventLoopOptions::default()))
+    async fn drain(&mut self) -> Result<(), Error> {
+        self.runtime
+            .run_event_loop(PollEventLoopOptions::default())
             .await
-            .map_err(|_| Error::Deadline)?
             .map_err(js_error)
     }
 
-    async fn invoke(
-        &mut self,
-        export: &str,
-        caller: &str,
-        arguments: &str,
-        duration: std::time::Duration,
-    ) -> Result<String, Error> {
+    async fn invoke(&mut self, export: &str, caller: &str, arguments: &str) -> Result<String, Error> {
         let args = {
             deno_core::scope!(scope, &mut self.runtime);
             let namespace = v8::Local::new(scope, self.namespace.as_ref().expect("initialized"));
@@ -186,6 +171,9 @@ impl State {
             let function = namespace
                 .get(scope, key.into())
                 .ok_or(Error::Invalid("missing export"))?;
+            if !function.is_function() {
+                return Err(Error::Invalid("missing export"));
+            }
             let function = v8::Local::<v8::Function>::try_from(function).map_err(js_error)?;
             let caller = v8::String::new(scope, caller).ok_or(Error::Heap)?;
             let arguments = v8::String::new(scope, arguments).ok_or(Error::Heap)?;
@@ -200,19 +188,16 @@ impl State {
         let call = self
             .runtime
             .call_with_args(self.run.as_ref().expect("initialized"), &args);
-        let output = tokio::time::timeout(
-            duration,
-            self.runtime
-                .with_event_loop_promise(call, PollEventLoopOptions::default()),
-        )
-        .await
-        .map_err(|_| Error::Deadline)?
-        .map_err(js_error)?;
+        let output = self
+            .runtime
+            .with_event_loop_promise(call, PollEventLoopOptions::default())
+            .await
+            .map_err(js_error)?;
         deno_core::scope!(scope, &mut self.runtime);
         let output = v8::Local::new(scope, output);
         let output = v8::Local::<v8::String>::try_from(output).map_err(js_error)?;
         let encoded = output.to_rust_string_lossy(scope);
-        if encoded.len() > 1024 * 1024 {
+        if encoded.len() > bounds::JSON_BYTES {
             return Err(Error::Invalid("result exceeds size limit"));
         }
         // Durable outcomes use serde_json too; reject unsupported depth and Unicode

@@ -77,7 +77,7 @@ impl Actor {
         if id.is_empty() || id.len() > 256 {
             return Err(Error::Invalid("operation identity"));
         }
-        if !self.versions.contains_key(&call.deployment) {
+        if !self.versions.contains(&call.deployment) {
             return Err(Error::Invalid("unknown deployment"));
         }
         // Identity describes the business request; a durable result survives redeployment.
@@ -96,7 +96,19 @@ impl Actor {
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
-        let (execution, _) = self.evaluate(&mutation.call, Mode::Mutation, snapshot.clone(), cancellation)?;
+        let seed = u64::from_be_bytes(
+            Sha256::digest(mutation.operation.id.as_bytes())[..8]
+                .try_into()
+                .expect("digest prefix"),
+        );
+        let (execution, _) = self.evaluate_traced(
+            &mutation.call,
+            Mode::Mutation,
+            snapshot.clone(),
+            cancellation,
+            Some(seed),
+        );
+        let execution = execution?;
         let writes = execution
             .writes
             .into_iter()

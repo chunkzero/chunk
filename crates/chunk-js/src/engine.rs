@@ -2,10 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     Cancellation, Error, Execution, Invocation, Limits, ReadHost, capabilities::Capabilities, deadline::Deadline,
-    isolate::Runtime, runtime::Prepared,
+    isolate::Runtime, model::bounds, runtime::Prepared,
 };
-
-const MAX_CALLS: u32 = 10_000;
 
 /// An immutable deployment identity within one environment.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -16,7 +14,7 @@ impl DeploymentId {
     /// Rejects an empty identity or more than 128 bytes.
     pub fn new(id: impl Into<String>) -> Result<Self, Error> {
         let id = id.into();
-        if id.is_empty() || id.len() > 128 {
+        if id.is_empty() || id.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid deployment"));
         }
         Ok(Self(id))
@@ -62,7 +60,7 @@ impl Engine {
         Self::init_platform();
         Ok(Self {
             deployments: BTreeMap::new(),
-            executor: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
+            executor: tokio::runtime::Builder::new_current_thread().build()?,
             deadline: Deadline::new()?,
         })
     }
@@ -74,18 +72,19 @@ impl Engine {
         if self.deployments.contains_key(&id) {
             return Err(Error::Invalid("deployment already registered"));
         }
-        if source.len() > 4 * 1024 * 1024 {
+        if source.len() > bounds::SOURCE_BYTES {
             return Err(Error::Invalid("invalid source"));
         }
-        if !(8 * 1024 * 1024..=128 * 1024 * 1024).contains(&limits.heap_bytes)
+        if !(bounds::MIN_HEAP_BYTES..=bounds::MAX_HEAP_BYTES).contains(&limits.heap_bytes)
             || limits.execution.is_zero()
-            || limits.execution.as_secs() > 30
+            || limits.execution > bounds::MAX_EXECUTION
         {
             return Err(Error::Invalid("limits outside local execution budget"));
         }
         let runtime = Runtime::load(
             &self.executor,
             &self.deadline,
+            &format!("chunk:deployment/{}", id.as_str()),
             &source,
             limits,
             &Cancellation::default(),
@@ -117,18 +116,18 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        if invocation.export.is_empty() || invocation.export.len() > 128 {
+        if invocation.export.is_empty() || invocation.export.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid export"));
         }
         let caller = invocation.caller;
         let arguments = invocation.arguments;
-        if caller.as_str().len() > 1024 * 1024 || arguments.as_str().len() > 1024 * 1024 {
+        if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > bounds::JSON_BYTES {
             return Err(Error::Invalid("input exceeds size limit"));
         }
         if resident
             .runtime
             .as_ref()
-            .is_some_and(|runtime| runtime.calls() >= MAX_CALLS)
+            .is_some_and(|runtime| runtime.calls() >= bounds::RUNTIME_CALLS)
         {
             resident.runtime = None;
         }
@@ -137,6 +136,7 @@ impl Engine {
             None => Runtime::load(
                 &self.executor,
                 &self.deadline,
+                &format!("chunk:deployment/{}", id.as_str()),
                 &resident.source,
                 resident.limits,
                 cancellation,
@@ -146,6 +146,8 @@ impl Engine {
             export: invocation.export,
             caller,
             arguments,
+            timestamp: invocation.timestamp,
+            seed: invocation.seed,
             capabilities: Capabilities {
                 generation: runtime.calls() + 1,
                 host,
@@ -153,7 +155,7 @@ impl Engine {
                 cancellation: cancellation.clone(),
                 writes: BTreeMap::new(),
                 calls: 0,
-                write_bytes: BTreeMap::new(),
+                write_bytes: 0,
             },
         };
         let result = runtime.execute(&self.executor, &self.deadline, prepared, resident.limits, cancellation);

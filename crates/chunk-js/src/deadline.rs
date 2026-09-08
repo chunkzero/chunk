@@ -9,11 +9,15 @@ use std::{
 
 use deno_core::v8;
 
-use crate::Cancellation;
+use crate::{
+    Cancellation,
+    termination::{Reason, Termination},
+};
 
 struct Active {
     handle: v8::IsolateHandle,
     cancellation: Cancellation,
+    termination: Termination,
 }
 
 struct Shared {
@@ -57,6 +61,11 @@ impl Deadline {
                 if let Some(active) = active.as_ref()
                     && (active.cancellation.is_cancelled() || watch.now() >= watch.at.load(Ordering::Acquire))
                 {
+                    active.termination.record(if active.cancellation.is_cancelled() {
+                        Reason::Cancelled
+                    } else {
+                        Reason::Deadline
+                    });
                     active.handle.terminate_execution();
                     watch.at.store(0, Ordering::Release);
                 }
@@ -68,10 +77,20 @@ impl Deadline {
         })
     }
 
-    pub(crate) fn arm(&self, handle: v8::IsolateHandle, cancellation: Cancellation, budget: Duration) -> Guard<'_> {
+    pub(crate) fn arm(
+        &self,
+        handle: v8::IsolateHandle,
+        cancellation: Cancellation,
+        budget: Duration,
+        termination: Termination,
+    ) -> Guard<'_> {
         let mut active = self.shared.active.lock().unwrap();
         assert!(active.is_none(), "only one invocation can run at a time");
-        *active = Some(Active { handle, cancellation });
+        *active = Some(Active {
+            handle,
+            cancellation,
+            termination,
+        });
         let micros = u64::try_from(budget.as_micros()).unwrap_or(u64::MAX).max(1);
         self.shared
             .at
