@@ -26,8 +26,20 @@ impl Drop for ClaimGuard {
         let platform = self.platform.clone();
         let claim = self.claim.clone();
         tokio::spawn(async move {
-            if let Ok(request) = request(claim, &platform.target.control.token) {
-                let _ = platform.control.clone().cancel(request).await;
+            for attempt in 0..2 {
+                let Ok(message) = request(claim.clone(), &platform.target.control.token) else {
+                    return;
+                };
+                match platform.control.clone().cancel(message).await {
+                    Err(error)
+                        if attempt == 0
+                            && error.code() == tonic::Code::FailedPrecondition
+                            && error.message() == "unknown claim" =>
+                    {
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => return,
+                }
             }
         });
     }
@@ -65,7 +77,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             .clone()
             .claim(message)
             .await
-            .map_err(io::Error::other)?
+            .map_err(claim_error)?
             .into_inner();
         validate(&assignment, &guard)?;
         Ok((guard, assignment))
@@ -137,6 +149,14 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+fn claim_error(error: tonic::Status) -> io::Error {
+    if error.code() == tonic::Code::FailedPrecondition && error.message() == "player already owned" {
+        io::Error::new(io::ErrorKind::PermissionDenied, "You are already connected.")
+    } else {
+        io::Error::other(error)
+    }
+}
+
 fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
     let claim = assignment.claim.as_ref().ok_or_else(|| invalid_data("missing claim"))?;
     let delivery = assignment
@@ -188,7 +208,7 @@ async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
     let activation = ActivateClaim {
         claim: Some(identity.clone()),
     };
-    let mut activated = false;
+    let mut activated = true;
     while Instant::now() < deadline {
         let mut client = guard.platform.control.clone();
         let result = if activated {

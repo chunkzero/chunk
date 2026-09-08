@@ -78,20 +78,23 @@ private class ExampleSession(
                     }
                 }
             }
-        return backend.call(query("players/balance", player), "").thenCompose { balance ->
-            backend.call(query("players/join", player), scope.operationId(player, "join")).thenCompose {
-                scope.onTick {
-                    if (players[player] === data && player.isOnline) {
-                        player.sendMessage(
-                            Component.text(
-                                "Welcome to $label. Saved coins: ${balance.resultJson.toStringUtf8()}. " +
-                                    "Use /coin to earn one.",
-                            ),
-                        )
+        backend
+            .call(query("players/balance", player), "")
+            .thenCompose { balance ->
+                backend.call(query("players/join", player), scope.operationId(player, "join")).thenCompose {
+                    scope.onTick {
+                        if (players[player] === data && player.isOnline) {
+                            player.sendMessage(
+                                Component.text(
+                                    "Welcome to $label. Saved coins: ${balance.resultJson.toStringUtf8()}. " +
+                                        "Use /coin to earn one.",
+                                ),
+                            )
+                        }
                     }
                 }
-            }
-        }
+            }.exceptionally { }
+        return CompletableFuture.completedFuture(Unit)
     }
 
     private fun increment(
