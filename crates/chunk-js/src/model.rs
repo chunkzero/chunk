@@ -56,6 +56,10 @@ pub struct Invocation {
     pub arguments: Value,
     pub caller: Value,
     pub mode: Mode,
+    /// Milliseconds since the Unix epoch at snapshot acquisition, fixed for retries.
+    pub timestamp: i64,
+    /// Backend-supplied deterministic seed, fixed for the operation and its retries.
+    pub seed: u64,
 }
 
 #[derive(Clone, Copy)]

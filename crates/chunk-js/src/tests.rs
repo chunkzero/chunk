@@ -22,6 +22,8 @@ fn invocation() -> Invocation {
         arguments: json!({"id":"player"}),
         caller: json!({"player":"player"}),
         mode: Mode::Mutation,
+        timestamp: 1_700_000_000_000,
+        seed: 7,
     }
 }
 fn deployment(body: &str, limits: Limits) -> Deployment {
@@ -109,9 +111,8 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
 
 #[test]
 fn ambient_apis_and_query_writes_are_denied() {
-    let result = run("return [typeof Deno, typeof __bootstrap, typeof __infra, typeof fetch, typeof process, typeof Date, typeof Intl, typeof ArrayBuffer, typeof Uint8Array, typeof WebAssembly];").unwrap();
-    assert_eq!(result.value, json!(vec!["undefined"; 10]));
-    assert!(run("return Math.random();").is_err());
+    let result = run("return [typeof Deno, typeof __bootstrap, typeof __infra, typeof fetch, typeof process, typeof Intl, typeof SharedArrayBuffer, typeof WebAssembly];").unwrap();
+    assert_eq!(result.value, json!(vec!["undefined"; 8]));
     assert!(run("return await import('ext:core/mod.js');").is_err());
     assert!(run("return await import('file:///etc/passwd');").is_err());
     assert!(run("return NaN;").is_err());
@@ -174,6 +175,106 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn invocation_time_and_randomness_are_deterministic_without_removing_date_behavior() {
+    let mut engine = Deployment::new(
+        "clock".into(),
+        r"
+        const epoch = new Date(0);
+        const bytes = new Uint8Array([1, 2, 3]);
+        class GameDate extends Date {}
+        export default () => ({
+          now: Date.now(), constructed: +new Date(), called: Date(),
+          inherited: +new GameDate(), epoch: +epoch,
+          parsed: Date.parse('1970-01-01T00:00:00.000Z'),
+          utc: Date.UTC(1970, 0, 1), instance: epoch instanceof Date,
+          subclass: new GameDate() instanceof GameDate,
+          restored: +new (epoch.constructor)(),
+          bytes: Array.from(bytes), random: [Math.random(), Math.random()]
+        });
+        "
+        .into(),
+        Limits::default(),
+    )
+    .unwrap();
+    let first = call(&mut engine).unwrap().value;
+    assert_eq!(call(&mut engine).unwrap().value, first);
+    for key in ["now", "constructed", "inherited", "restored"] {
+        assert_eq!(first[key], json!(invocation().timestamp));
+    }
+    assert_eq!(first["epoch"], json!(0));
+    assert_eq!(first["parsed"], json!(0));
+    assert_eq!(first["utc"], json!(0));
+    assert_eq!(first["instance"], json!(true));
+    assert_eq!(first["subclass"], json!(true));
+    assert_eq!(first["bytes"], json!([1, 2, 3]));
+    let mut next = invocation();
+    next.timestamp += 1;
+    next.seed += 1;
+    let second = engine
+        .execute(next, Box::new(Snapshot), &Cancellation::default())
+        .unwrap();
+    assert_ne!(first["now"], second.value["now"]);
+    assert_ne!(first["random"], second.value["random"]);
+    for value in second.value["random"].as_array().unwrap() {
+        assert!((0.0..1.0).contains(&value.as_f64().unwrap()));
+    }
+}
+
+#[test]
+fn initialization_cannot_observe_invocation_time_or_randomness() {
+    for expression in [
+        "Date.now()",
+        "new Date()",
+        "Date()",
+        "Math.random()",
+        "new Date(0).constructor.now()",
+    ] {
+        assert!(
+            Deployment::new(
+                "clock".into(),
+                format!("const value = {expression}; export default () => value;"),
+                Limits::default(),
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+    let mut engine = deployment("return Date.now();", Limits::default());
+    let mut invalid = invocation();
+    invalid.timestamp = i64::MAX;
+    assert!(matches!(
+        engine.execute(invalid, Box::new(Snapshot), &Cancellation::default()),
+        Err(Error::Invalid(_))
+    ));
+}
+
+#[test]
+fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion() {
+    let mut engine = deployment(
+        "if (args.fail) { globalThis.buffers = []; for(let i=0; i<8; i++) buffers.push(new Uint8Array(2 * 1024 * 1024)); } return 42;",
+        Limits {
+            execution: Duration::from_secs(5),
+            heap_bytes: 8 * 1024 * 1024,
+        },
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true});
+    let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
+    assert!(matches!(result, Err(Error::Heap)), "{result:?}");
+    assert_eq!(call(&mut engine).unwrap().value, json!(42));
+    assert!(run("return new ArrayBuffer(1, {maxByteLength: 1024}).resizable;").is_err());
+    // Reading options once and omitting them from native construction prevents
+    // a getter from sneaking a resizable allocation past the wrapper's check.
+    assert_eq!(
+        run("let reads=0; return new ArrayBuffer(1, {get maxByteLength() { return reads++ ? 1024 : undefined; }}).resizable;")
+            .unwrap()
+            .value,
+        json!(false)
+    );
+    assert!(run("return new (new Uint8Array(1).buffer.constructor)(1, {maxByteLength: 1024}).resizable;").is_err());
 }
 
 #[test]

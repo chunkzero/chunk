@@ -3,7 +3,8 @@
 `Deployment::new(id, source, limits)` loads a bundled ES module into one persistent
 `deno_core`/V8 runtime. `deployment.execute(invocation, host, cancellation)` selects
 an exported function and calls it with `(ctx, arguments)`. Source and identity are
-fixed at registration; calls supply only export, arguments, caller and mode. Imports
+fixed at registration; calls supply export, arguments, caller, mode, snapshot timestamp
+and seed. Imports
 must be bundled before registration. Module initialization has no host capabilities.
 
 The environment backend owns one `Deployment` per resident version. Each handle
@@ -29,7 +30,10 @@ It is disposable, never authoritative: handlers must not cache documents or call
 state, or use mutable counters to determine transactional results. Purity and complete
 dependency tracking are application requirements, not enforced by context reuse.
 
-The default budget is one second and 32 MiB of V8 heap. A separate watchdog
+The default budget is one second and 32 MiB of V8 heap, with a separate aggregate
+live ArrayBuffer backing-store cap of the same size. Only `allocator.rs` allows
+unsafe code for V8's allocator callbacks; the rest of the crate denies it.
+A separate watchdog
 interrupts synchronous loops and cancellation; the near-heap callback terminates
 execution with 8 MiB of emergency headroom. Initialization and each invocation have
 separate execution budgets. Any execution error drops the engine; the next call
@@ -44,15 +48,25 @@ references drain. Retaining a bundle for a future job need not keep its engine a
 admission, reference tracking and reload policy belong to the environment backend.
 
 No filesystem, network, process, Node/Deno globals or runtime imports are exposed.
-Wall-clock time, random numbers, locale APIs, weak references/finalizers and
-WebAssembly are unavailable. ArrayBuffer and typed-array constructors are also
-unavailable in this initial profile so backing stores cannot bypass the heap budget.
+The backend supplies `Invocation::timestamp` in epoch milliseconds from its snapshot
+and a `seed`, fixed for the operation and its retries. `Date.now()`, zero-argument
+`new Date()` and `Date()` use that timestamp; explicit Date construction, parsing,
+arithmetic and `instanceof` remain available. `Math.random()` uses a per-invocation
+seeded SplitMix64 generator. Invocation time and randomness are unavailable during
+module initialization. Locale APIs, weak references/finalizers and WebAssembly
+remain unavailable.
+
+ArrayBuffer, DataView and typed-array constructors remain available. Their live
+backing stores share the isolate's bounded allocator, including retained globals.
+Resizable buffers are rejected because V8 allocates their pages outside that
+allocator; SharedArrayBuffer remains unavailable. Allocation budget failure rejects
+the invocation and recycles the runtime, even if JS catches the allocation error.
 Language objects, collections and Promises are supported. A returned Promise with
 no possible completion fails; infinite microtask chains are interrupted. The event
 loop drains before capabilities expire, and unhandled rejections fail the call.
 
 The backend must propagate cancellation when request/session scope ends. Typed
-contracts, deterministic time/random APIs, the broader web API subset, conflict
+contracts, the broader web API subset, conflict
 retries and subscription scheduling remain outside this PR.
 
 Focused verification: `cargo test -p chunk-js` and

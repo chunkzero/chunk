@@ -2,9 +2,11 @@
 //! Each deployment retains a V8 isolate; invocation snapshot capabilities expire.
 //! Writes remain speculative; only the environment backend can validate/commit.
 
+mod allocator;
 mod capabilities;
 mod deployment;
 mod model;
+mod profile;
 mod runtime;
 
 pub use deployment::Deployment;

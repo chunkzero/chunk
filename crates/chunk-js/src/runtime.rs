@@ -99,6 +99,7 @@ impl Engine {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
+        crate::profile::begin(&mut self.runtime, invocation.timestamp, invocation.seed)?;
         self.runtime.op_state().borrow_mut().put(Some(Capabilities {
             generation: self.calls,
             host,
@@ -111,6 +112,7 @@ impl Engine {
         let result = self.guarded(limits, cancellation, |engine| {
             executor.block_on(engine.invoke(invocation, limits.execution))
         });
+        crate::profile::end(&mut self.runtime);
         let capabilities = self
             .runtime
             .op_state()
@@ -134,13 +136,18 @@ impl Engine {
         cancellation: &Cancellation,
     ) -> Result<Self, Error> {
         let _entered = executor.enter();
+        let heap_exhausted = Arc::new(AtomicBool::new(false));
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![chunk_capabilities::init()],
-            create_params: Some(v8::Isolate::create_params().heap_limits(0, limits.heap_bytes)),
+            extensions: vec![chunk_capabilities::init(), crate::profile::chunk_profile::init()],
+            create_params: Some(
+                v8::Isolate::create_params()
+                    .heap_limits(0, limits.heap_bytes)
+                    .array_buffer_allocator(crate::allocator::bounded(limits.heap_bytes, heap_exhausted.clone())),
+            ),
             ..Default::default()
         });
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
-        let heap_exhausted = Arc::new(AtomicBool::new(false));
+        crate::profile::initialize(&mut runtime);
         let heap_signal = Arc::clone(&heap_exhausted);
         let handle = runtime.v8_isolate().thread_safe_handle();
         runtime.add_near_heap_limit_callback(move |limit, _| {
