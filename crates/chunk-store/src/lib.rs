@@ -5,17 +5,79 @@
 //! SQLite serializes the final compare-and-commit and durably records the result
 //! in the same transaction as document changes. Retry an unknown outcome using
 //! the same operation identity, never a newly generated ID.
+//!
+//! Declare physical tables before writing. Scalar fields become native SQL
+//! columns; objects, arrays, literals and unions use JSON text. SQL NULL encodes
+//! absence, while JSON `null` remains a present value. Indexes cover declared
+//! scalar fields with document ID as the final ordering tiebreaker.
+//!
+//! ```
+//! use chunk_store::{Commit, DatabaseSchema, DocumentKey, IndexRange, Operation,
+//!     SqliteStore, Storage, Write};
+//! use serde_json::json;
+//!
+//! # let directory = tempfile::tempdir()?;
+//! let mut store = SqliteStore::open(directory.path().join("data.db"), "local")?;
+//! let schema: DatabaseSchema = serde_json::from_value(json!({
+//!     "profiles": {
+//!         "fields": {
+//!             "player": {"schema": {"type": "string"}},
+//!             "wins": {"schema": {"type": "integer"}}
+//!         },
+//!         "indexes": {"by_player": ["player"]}
+//!     }
+//! }))?;
+//! let revision = store.apply_schema(&schema)?;
+//! store.commit(Commit {
+//!     expected: revision,
+//!     // The backend supplies a stable operation ID and request fingerprint.
+//!     operation: Operation { id: "create-profile".into(), fingerprint: [7; 32] },
+//!     writes: vec![Write {
+//!         key: DocumentKey::new("profiles", "profile-1")?,
+//!         value: Some(json!({"player": "alex", "wins": 0})),
+//!     }],
+//!     result: json!("profile-1"),
+//! })?;
+//! let snapshot = store.snapshot()?;
+//! let rows = snapshot.scan_index(&IndexRange {
+//!     table: "profiles".into(), index: "by_player".into(),
+//!     prefix: vec![json!("alex")], start: None, end: None, limit: 1,
+//! })?;
+//! assert_eq!(rows[0].0, "profile-1");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 mod model;
+mod snapshot;
 mod sqlite;
 
-pub use model::{Commit, Document, DocumentKey, KeyRange, Operation, Outcome, Revision, Snapshot, Write};
+pub use chunk_contract::DatabaseSchema;
+pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Revision, Write};
+pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
 /// Only the environment backend holds this capability.
 pub trait Storage: Send {
+    /// Loads retained immutable deployment metadata and bundles.
     /// # Errors
-    /// Returns I/O, corruption or snapshot-limit errors.
+    /// Reports I/O, corruption or unsupported metadata.
+    fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>>;
+
+    /// Durably retains an immutable deployment without changing document revisions.
+    /// The backend must establish schema readiness before exposing its functions.
+    /// # Errors
+    /// Rejects changed identities, invalid declarations and excessive retention.
+    fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<()>;
+
+    /// Atomically installs new tables, optional fields and indexes, advancing the
+    /// environment revision. Reapplying declarations is a no-op. Omitted tables,
+    /// fields and indexes are retained; existing definitions cannot be changed.
+    /// # Errors
+    /// Rejects incompatible or invalid schemas and reports storage failures.
+    fn apply_schema(&mut self, schema: &DatabaseSchema) -> Result<Revision>;
+
+    /// # Errors
+    /// Returns I/O or corruption errors.
     fn snapshot(&mut self) -> Result<Snapshot>;
 
     /// Recovers an operation's durable result, including after backend restart.
@@ -49,6 +111,10 @@ pub enum Error {
     Invalid(&'static str),
     #[error("local database size limit reached")]
     Capacity,
+    #[error("corrupt storage: {0}")]
+    Corrupt(&'static str),
+    #[error("snapshot connection was poisoned")]
+    Poisoned,
     #[error("storage I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("SQLite: {0}")]
@@ -56,3 +122,6 @@ pub enum Error {
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+#[cfg(test)]
+mod tests;

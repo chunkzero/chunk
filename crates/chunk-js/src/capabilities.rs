@@ -5,21 +5,28 @@ use deno_error::JsErrorBox;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::model::bounds;
 use crate::{Cancellation, Key, Mode, Read, ReadHost};
 
+pub(crate) struct Buffered {
+    pub value: Option<Value>,
+    bytes: usize,
+}
+
 pub(crate) struct Capabilities {
+    pub generation: u32,
     pub host: Box<dyn ReadHost>,
     pub mode: Mode,
     pub cancellation: Cancellation,
-    pub writes: BTreeMap<Key, Option<Value>>,
+    pub writes: BTreeMap<Key, Buffered>,
     pub calls: usize,
-    pub write_bytes: BTreeMap<Key, usize>,
+    pub write_bytes: usize,
 }
 
 impl Capabilities {
     fn charge(&mut self) -> Result<(), JsErrorBox> {
         self.calls += 1;
-        if self.cancellation.is_cancelled() || self.calls > 4096 {
+        if self.cancellation.is_cancelled() || self.calls > bounds::CAPABILITY_CALLS {
             return Err(JsErrorBox::generic("Capability budget exhausted"));
         }
         Ok(())
@@ -28,19 +35,51 @@ impl Capabilities {
 
 #[op2]
 #[string]
-fn op_chunk_read(state: &mut OpState, #[string] request: &str) -> Result<String, JsErrorBox> {
-    let capabilities = state.borrow_mut::<Capabilities>();
+fn op_chunk_read(state: &mut OpState, generation: u32, #[string] request: &str) -> Result<String, JsErrorBox> {
+    let capabilities = state
+        .borrow_mut::<Option<Capabilities>>()
+        .as_mut()
+        .filter(|capabilities| capabilities.generation == generation)
+        .ok_or_else(|| JsErrorBox::generic("Invocation capability expired"))?;
     capabilities.charge()?;
-    if request.len() > 4096 {
+    if request.len() > bounds::READ_REQUEST_BYTES {
         return Err(JsErrorBox::generic("Read request exceeds size limit"));
     }
     let request: Read = serde_json::from_str(request).map_err(JsErrorBox::from_err)?;
-    let value = capabilities
-        .host
-        .read(request, &capabilities.writes)
-        .map_err(JsErrorBox::generic)?;
+    let value = match request {
+        Read::Get { table, id } => {
+            let key = Key { table, id };
+            let base = capabilities.host.get(&key).map_err(JsErrorBox::generic)?;
+            capabilities
+                .writes
+                .get(&key)
+                .map_or(base, |write| write.value.clone())
+                .unwrap_or(Value::Null)
+        }
+        Read::Scan { table, start, end } => {
+            let mut rows: BTreeMap<_, _> = capabilities
+                .host
+                .scan(&table, start.as_deref(), end.as_deref())
+                .map_err(JsErrorBox::generic)?
+                .into_iter()
+                .collect();
+            for (key, write) in &capabilities.writes {
+                if key.table == table
+                    && start.as_deref().is_none_or(|start| key.id.as_str() >= start)
+                    && end.as_deref().is_none_or(|end| key.id.as_str() < end)
+                {
+                    if let Some(value) = &write.value {
+                        rows.insert(key.id.clone(), value.clone());
+                    } else {
+                        rows.remove(&key.id);
+                    }
+                }
+            }
+            serde_json::to_value(rows.into_iter().collect::<Vec<_>>()).map_err(JsErrorBox::from_err)?
+        }
+    };
     let encoded = serde_json::to_string(&value).map_err(JsErrorBox::from_err)?;
-    if encoded.len() > 1024 * 1024 {
+    if encoded.len() > bounds::JSON_BYTES {
         return Err(JsErrorBox::generic("Read result exceeds size limit"));
     }
     Ok(encoded)
@@ -54,13 +93,17 @@ enum WriteRequest {
 }
 
 #[op2(fast)]
-fn op_chunk_write(state: &mut OpState, #[string] request: &str) -> Result<(), JsErrorBox> {
-    let capabilities = state.borrow_mut::<Capabilities>();
+fn op_chunk_write(state: &mut OpState, generation: u32, #[string] request: &str) -> Result<(), JsErrorBox> {
+    let capabilities = state
+        .borrow_mut::<Option<Capabilities>>()
+        .as_mut()
+        .filter(|capabilities| capabilities.generation == generation)
+        .ok_or_else(|| JsErrorBox::generic("Invocation capability expired"))?;
     capabilities.charge()?;
     if capabilities.mode != Mode::Mutation {
         return Err(JsErrorBox::generic("Query cannot write"));
     }
-    if request.len() > 1024 * 1024 {
+    if request.len() > bounds::JSON_BYTES {
         return Err(JsErrorBox::generic("Document size limit exceeded"));
     }
     let bytes = request.len();
@@ -70,24 +113,22 @@ fn op_chunk_write(state: &mut OpState, #[string] request: &str) -> Result<(), Js
         WriteRequest::Delete { key } => (key, None),
     };
     if key.table.is_empty()
-        || key.table.len() > 64
-        || !key.table.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        || key.table.len() > bounds::TABLE_BYTES
         || key.id.is_empty()
-        || key.id.len() > 256
-        || key.id.contains('\0')
+        || key.id.len() > bounds::DOCUMENT_ID_BYTES
     {
         return Err(JsErrorBox::generic("Invalid document key"));
     }
-    if capabilities.writes.len() >= 256 && !capabilities.writes.contains_key(&key) {
+    if capabilities.writes.len() >= bounds::WRITES && !capabilities.writes.contains_key(&key) {
         return Err(JsErrorBox::generic("Write count limit exceeded"));
     }
-    let total: usize = capabilities.write_bytes.values().sum();
-    let previous = capabilities.write_bytes.get(&key).copied().unwrap_or(0);
-    if total - previous + bytes > 8 * 1024 * 1024 {
+    let total = capabilities.write_bytes;
+    let previous = capabilities.writes.get(&key).map_or(0, |write| write.bytes);
+    if total - previous + bytes > bounds::WRITE_BYTES {
         return Err(JsErrorBox::generic("Write byte limit exceeded"));
     }
-    capabilities.write_bytes.insert(key.clone(), bytes);
-    capabilities.writes.insert(key, value);
+    capabilities.write_bytes = total - previous + bytes;
+    capabilities.writes.insert(key, Buffered { value, bytes });
     Ok(())
 }
 

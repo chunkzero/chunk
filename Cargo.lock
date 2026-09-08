@@ -333,7 +333,6 @@ dependencies = [
  "chunk-js",
  "chunk-proto",
  "chunk-store",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -463,6 +462,7 @@ dependencies = [
 name = "chunk-store"
 version = "0.1.0"
 dependencies = [
+ "chunk-contract",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2188,7 +2188,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -1,115 +1,106 @@
 use super::*;
-use crate::{DocumentKey, KeyRange, Write};
+use crate::{
+    DocumentKey, IndexRange,
+    tests::{commit, operation, write},
+};
 use serde_json::json;
 
-fn operation(id: &str) -> Operation {
-    Operation {
-        id: id.into(),
-        fingerprint: [7; 32],
-    }
-}
+mod queries;
+mod schemas;
+mod transactions;
 
-fn write(id: &str, value: Option<serde_json::Value>) -> Write {
-    Write {
-        key: DocumentKey::new("profiles", id).unwrap(),
-        value,
-    }
-}
-
-fn commit(id: &str, revision: u64, writes: Vec<Write>) -> Commit {
-    Commit {
-        expected: Revision(revision),
-        operation: operation(id),
-        writes,
-        result: json!({"committed": id}),
-    }
-}
-
-#[test]
-fn snapshots_preserve_point_and_empty_range_reads_across_atomic_changes() {
+fn open() -> (tempfile::TempDir, SqliteStore) {
     let directory = tempfile::tempdir().unwrap();
     let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
-    let empty = store.snapshot().unwrap();
-    let range = KeyRange {
-        table: "profiles".into(),
-        start: Some("b".into()),
-        end: Some("d".into()),
-    };
-    assert!(empty.scan(&range).unwrap().is_empty());
-    store
-        .commit(commit(
-            "one",
-            0,
-            vec![write("a", Some(json!(1))), write("c", Some(json!(2)))],
-        ))
-        .unwrap();
-    let first = store.snapshot().unwrap();
-    assert_eq!(first.revision, Revision(1));
-    assert_eq!(first.scan(&range).unwrap()[0].0, "c");
-    assert!(empty.scan(&range).unwrap().is_empty());
-    store
-        .commit(commit("two", 1, vec![write("c", None), write("b", Some(json!(3)))]))
-        .unwrap();
-    let second = store.snapshot().unwrap();
-    assert_eq!(second.scan(&range).unwrap()[0].0, "b");
-    assert_eq!(first.scan(&range).unwrap()[0].0, "c");
-    assert_eq!(
-        second
-            .get(&DocumentKey::new("profiles", "a").unwrap())
-            .unwrap()
-            .revision,
-        Revision(1)
-    );
-    assert!(matches!(
-        store.commit(commit("stale", 1, vec![])),
-        Err(Error::Conflict { .. })
-    ));
-    assert!(store.outcome(&operation("stale")).unwrap().is_none());
+    store.apply_schema(&crate::tests::schema()).unwrap();
+    (directory, store)
 }
 
-#[test]
-fn a_failure_after_document_writes_rolls_back_documents_revision_and_outcome() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
+fn totals(store: &SqliteStore) -> (usize, usize) {
     store
         .connection
-        .execute_batch(
-            "CREATE TRIGGER fail_outcome BEFORE INSERT ON outcomes BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        .query_row(
+            "SELECT document_count, document_bytes FROM _chunk_metadata",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .unwrap();
+        .unwrap()
+}
+
+fn by_coins() -> IndexRange {
+    IndexRange {
+        table: "profiles".into(),
+        index: "by_coins".into(),
+        prefix: vec![],
+        start: None,
+        end: None,
+        limit: 100,
+    }
+}
+
+#[test]
+fn storage_contract() {
+    let (_directory, mut store) = open();
+    crate::tests::snapshots_preserve_point_and_empty_range_reads_across_atomic_changes(&mut store);
+}
+
+#[test]
+fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_outcome() {
+    let (_directory, mut store) = open();
+    let schema = [("stats".into(), crate::tests::schema()["profiles"].clone())].into();
+    store.apply_schema(&schema).unwrap();
+    let stats = crate::tests::write_to("stats", "a", Some(json!({"coins": 2})));
+    store.connection.execute_batch("CREATE TRIGGER fail_outcome BEFORE INSERT ON _chunk_operations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
     assert!(
         store
             .commit(commit(
                 "failed",
-                0,
-                vec![write("a", Some(json!(1))), write("b", Some(json!(2)))]
+                2,
+                vec![write("a", Some(json!({"coins": 1}))), stats.clone()]
             ))
             .is_err()
     );
     let snapshot = store.snapshot().unwrap();
-    assert_eq!(snapshot.revision, Revision(0));
-    assert!(snapshot.get(&DocumentKey::new("profiles", "a").unwrap()).is_none());
+    assert_eq!(snapshot.revision, Revision(2));
+    assert!(snapshot.scan_index(&by_coins()).unwrap().is_empty());
+    assert!(
+        snapshot
+            .get(&DocumentKey::new("profiles", "a").unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(totals(&store), (0, 0));
+    assert!(snapshot.get(&stats.key).unwrap().is_none());
+    assert!(
+        snapshot
+            .scan_index(&IndexRange {
+                table: "stats".into(),
+                ..by_coins()
+            })
+            .unwrap()
+            .is_empty()
+    );
     assert!(store.outcome(&operation("failed")).unwrap().is_none());
     store.connection.execute_batch("DROP TRIGGER fail_outcome;").unwrap();
     assert_eq!(
         store
-            .commit(commit("failed", 0, vec![write("a", Some(json!(1)))]))
+            .commit(commit("failed", 2, vec![write("a", Some(json!({"coins": 1}))), stats]))
             .unwrap()
             .revision,
-        Revision(1)
+        Revision(3)
     );
+    assert_eq!(totals(&store), (2, 22));
 }
 
 #[test]
 fn restart_recovers_unknown_outcomes_and_excludes_another_environment_writer() {
-    let directory = tempfile::tempdir().unwrap();
+    let (directory, mut store) = open();
     let path = directory.path().join("data.db");
-    let mut store = SqliteStore::open(&path, "local").unwrap();
     assert!(matches!(SqliteStore::open(&path, "local"), Err(Error::WriterLocked)));
     let outcome = store
         .commit(commit(
             "lost-reply",
-            0,
+            1,
             vec![write("player", Some(json!({"coins": 4})))],
         ))
         .unwrap();
@@ -121,13 +112,17 @@ fn restart_recovers_unknown_outcomes_and_excludes_another_environment_writer() {
     let mut store = SqliteStore::open(&path, "local").unwrap();
     assert_eq!(store.outcome(&operation("lost-reply")).unwrap(), Some(outcome.clone()));
     assert_eq!(store.commit(commit("lost-reply", 0, vec![])).unwrap(), outcome);
-    assert_eq!(store.snapshot().unwrap().revision, Revision(1));
+    assert_eq!(store.snapshot().unwrap().revision, Revision(2));
+    assert_eq!(
+        store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].0,
+        "player"
+    );
     let mismatched = Operation {
         fingerprint: [8; 32],
         ..operation("lost-reply")
     };
     assert!(matches!(store.outcome(&mismatched), Err(Error::OperationMismatch)));
-    assert_eq!(store.commit(commit("next", 1, vec![])).unwrap().revision, Revision(2));
+    assert_eq!(store.commit(commit("next", 2, vec![])).unwrap().revision, Revision(3));
 }
 
 #[test]
@@ -135,10 +130,11 @@ fn committed_wal_survives_exit_without_destructors() {
     const CHILD_PATH: &str = "CHUNK_STORE_CRASH_TEST_PATH";
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let mut store = SqliteStore::open(path, "local").unwrap();
+        store.apply_schema(&crate::tests::schema()).unwrap();
         store
             .commit(commit(
                 "crash-reply",
-                0,
+                1,
                 vec![write("player", Some(json!({"coins": 9})))],
             ))
             .unwrap();
@@ -158,7 +154,7 @@ fn committed_wal_survives_exit_without_destructors() {
     assert!(status.success());
     let mut store = SqliteStore::open(path, "local").unwrap();
     let recovered = store.outcome(&operation("crash-reply")).unwrap().unwrap();
-    assert_eq!(recovered.revision, Revision(1));
+    assert_eq!(recovered.revision, Revision(2));
     assert_eq!(store.commit(commit("crash-reply", 0, vec![])).unwrap(), recovered);
     assert_eq!(
         store
@@ -166,7 +162,51 @@ fn committed_wal_survives_exit_without_destructors() {
             .unwrap()
             .get(&DocumentKey::new("profiles", "player").unwrap())
             .unwrap()
+            .unwrap()
             .value,
         json!({"coins": 9})
     );
+    assert_eq!(totals(&store), (1, 11));
+}
+
+#[test]
+fn capacity_totals_follow_replacements_and_deletes() {
+    let (_directory, mut store) = open();
+    store
+        .commit(commit(
+            "one",
+            1,
+            vec![
+                write("a", Some(json!({"coins": 1}))),
+                write("b", Some(json!({"coins": 20}))),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(totals(&store), (2, 23));
+    store
+        .commit(commit(
+            "two",
+            2,
+            vec![
+                write("a", Some(json!({"coins": 100}))),
+                write("b", None),
+                write("missing", None),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(totals(&store), (1, 13));
+    let schema =
+        serde_json::from_value(json!({"large": {"fields": {"text": {"schema": {"type": "string"}}}}})).unwrap();
+    store.apply_schema(&schema).unwrap();
+    let value = json!({"text": "x".repeat(1024 * 1024 - 32)});
+    let writes = (0..33)
+        .map(|id| crate::tests::write_to("large", &id.to_string(), Some(value.clone())))
+        .collect();
+    assert!(matches!(
+        store.commit(commit("too-large", 4, writes)),
+        Err(Error::Capacity)
+    ));
+    assert_eq!(totals(&store), (1, 13));
+    assert_eq!(store.snapshot().unwrap().revision, Revision(4));
+    assert!(store.outcome(&operation("too-large")).unwrap().is_none());
 }

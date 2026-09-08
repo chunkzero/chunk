@@ -1,34 +1,94 @@
 # Environment backend
 
-`Backend` exclusively owns an environment `Storage`, loads immutable
-`chunk_contract::Deployment` bundles, and runs their explicit query/mutation
-exports through `chunk-js`. `Service::into_server()` exposes the generated gRPC
-service. Bind it to loopback; credentials and caller context belong to trusted
-platform processes, not Minecraft clients.
+`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread and one
+commit thread. Supply a store with its schema installed and exclusive writer
+authority. `deploy` validates and durably retains a versioned `chunk_contract::Deployment`,
+then enables its public functions. Bundles and contracts reload after restart.
+Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport tasks.
+`Service` exposes authenticated gRPC; only trusted platform processes may supply
+caller identity. Internal functions are inaccessible through this ingress.
+Schema installation must precede deployment; coordinated activation is follow-up work.
 
-Handlers receive `(ctx, arguments)`. `ctx.db.get(table, id)` returns a document
-or null; `scan(table, start, end)` returns ordered `{id, value}` rows over the
-inclusive-start, exclusive-end primary-key index. Mutations additionally have
-`put(table, id, value)` and `delete(table, id)`. Undeclared tables are rejected.
-Argument, result and document validators preserve optional versus nullable
-object fields and reject unknown fields. Secondary field indexes and external
-actions are outside this local implementation.
+The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending
+writes and subscription dependencies. Each mutation executes against the latest
+view, validates its writes against the snapshot's schema, and applies them to a
+bounded overlay. Execution and validation are serialized, so another mutation
+cannot change the read revision between them. The commit thread persists batches
+in order while the engine can continue evaluating requests.
 
-Mutations validate point/range dependencies and all retained document contracts
-before one durable commit. Reuse the identical request and operation ID after
-a timeout or lost response. Reserved `__chunk` identities belong to backend
-metadata. Deployment hashes and table contracts persist in that metadata;
-the runner must reload matching source artifacts after restart. Persisted
-contracts remain enforced even before their source is reloaded.
+Mutation responses wait for durable commits. Queries may read staged writes,
+and responses that depend on those writes wait for durability. Queries whose
+dependencies do not intersect pending writes return immediately at the base revision. Subscriptions read
+only acknowledged snapshots, track point misses and empty ranges, and reevaluate
+after relevant commits. Dependencies refresh even when the JSON result is
+unchanged. Result changes use JSON text equality; object key order can cause an
+extra update. Application errors remain reactive results, retaining reads collected
+before failure; an error-to-success transition always publishes. Reevaluations run
+one group (at most 16 queries) per actor scheduling boundary, with at most two retained durable snapshots.
+Queued revisions may coalesce conservatively to the latest snapshot. Slow subscribers coalesce updates through a watch channel, so they
+receive the latest durable result rather than every intermediate revision.
+Each group evaluates all queries against one snapshot. Per-query failures occupy
+their original result positions, retain dependencies, and recover reactively.
+Transport errors close the stream; clients mark retained results stale until a
+fresh full group arrives on reconnect.
 
-Subscriptions publish complete groups from a single snapshot and coalesce
-commits for slow consumers. A reconnect starts a fresh group. The JVM
-`backend-client` pins its deployment and signals stale retained values until a
-fresh snapshot arrives; close subscriptions with their session scope.
+Give every mutation a stable operation ID. Its fingerprint includes the function,
+canonical arguments and caller, independent of bundle and deployment identity.
+Duplicate requests recover the stored outcome without executing again, including
+after redeployment; reuse with a different request fails. Outcome lookups use the
+engine's pinned base snapshot and pending operations, so execution need not wait
+behind earlier commits. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
+to encode and canonicalize once before crossing the engine boundary.
+Argument/result contracts and wire numbers are validated before publication.
+Deployment-specific reads project declared fields; writes must satisfy the
+physical schema and all resident contracts. Storage's signed 64-bit support does
+not make arbitrary integers safe JavaScript values.
 
-Local limits are four executing isolates, eight subscriptions, sixteen queries
-per group, sixteen retained deployments, eight mutation attempts, and 1 MiB per
-request/group result. Each isolate keeps the execution/heap limits of `chunk-js`;
-SQLite retains its bounded materialized-snapshot capacity. These limits bound
-components, not total process RSS. No deployment retirement or outcome expiry is
-implemented yet.
+Dropping a request cancels queued work and executing queries. Once a mutation
+starts, an independent execution token prevents one caller from interrupting a
+shared business operation. If every waiter has gone before staging, the mutation
+is discarded; once staged, it commits. Retry the same ID after a lost reply.
+A durable outcome is recovered across deployments, but a request without a stored
+outcome executes the explicitly supplied deployment: transport must retain the
+original deployment binding when retrying unresolved operations.
+
+A deterministic commit rejection (`Conflict`, `Invalid`, `Capacity`, or
+`OperationMismatch`) discards the speculative suffix and fails its waiters with
+`Error::Retry`. Queries and subscriptions continue against the durable base;
+new mutations return `Busy` until all old suffix acknowledgments drain, preventing
+revision reuse from admitting an old dependent batch. Ambiguous commit or
+acknowledgment failures stop the pipeline and close subscriptions. Restart with
+the same store and recover outcomes by operation ID; a failed acknowledgment may
+follow a durable commit. The backend never automatically retries a speculative suffix.
+
+Admission allows 64 outstanding requests, including replies waiting for
+durability. Limits are 16 resident deployments, 64 subscriptions, 16 outstanding
+mutations and 32 MiB of serialized pending writes/results. Excess work returns
+`Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own
+source, heap, capability and payload budgets. Release a deployment after its
+mutations and subscriptions drain.
+Release currently unloads the runtime; durable deployment retirement and schema
+activation barriers are handled by the retained-deployment follow-up.
+
+The current storage API decodes documents into `serde_json::Value`; snapshot
+reads run synchronously on the engine thread. Range scans can materialize an
+entire interval before the JS payload budget rejects it. They need a bounded
+storage read API before accepting arbitrary large-database scans. Commit results
+are parsed on the commit thread because `chunk_store::Commit` currently takes
+`Value`; query/subscription responses remain JSON text. Durable retries preserve
+the JSON value but may normalize its formatting and object key order.
+
+Construction waits for initialization. Dropping the last backend handle drains
+accepted commits and joins both threads; use a blocking task for construction
+and final drop from async code. Persistent module state is disposable: handlers
+must derive transactional results from arguments, caller and tracked reads, as
+described in `chunk-js`.
+
+Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
+`cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
+
+Snapshot acquisition captures a timestamp; mutation seeds derive from the operation
+ID. The active execution keeps both fixed. Durable retries recover the outcome
+without running JS. A new request after a definite rejection acquires a fresh
+snapshot/time. No internal conflict-retry loop or persisted failed-attempt context
+is implemented; any future internal retry must retain its original time and seed.
