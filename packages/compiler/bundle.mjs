@@ -89,7 +89,8 @@ async function compile(root, output) {
       metadata.push(`...(isFunction(${value}) ? [[${JSON.stringify(name)}, {...${value}.contract, export:${JSON.stringify(binding)}}]] : [])`)
     }
   }
-  const entry = `${imports.join("\n")}\n${bindings.join("\n")}\nexport function __chunk_contract() { return {contract_version:1,runtime_profile:"transactional_v1",tables:schema.contract,functions:Object.fromEntries([${metadata.join(",")}])}; }`
+  const schemaCheck = `if (schema === null || typeof schema !== "object" || schema.contract === null || typeof schema.contract !== "object" || Array.isArray(schema.contract)) throw new Error("server/schema/index.ts must default-export a schema created with defineSchema()");`
+  const entry = `${imports.join("\n")}\n${schemaCheck}\n${bindings.join("\n")}\nexport function __chunk_contract() { return {contract_version:1,runtime_profile:"transactional_v1",tables:schema.contract,functions:Object.fromEntries([${metadata.join(",")}])}; }`
   const bundle = await rolldown({
     input: virtual, cwd: root, platform: "neutral",
     plugins: [boundary, { name: "chunk-entry", load(id) { if (id === virtual) return entry } }],
