@@ -202,6 +202,18 @@ async fn verify_contracts(client: &mut BackendClient<Channel>) {
         client.call(request("get", "")).await.unwrap_err().code(),
         Code::Unauthenticated
     );
+    for credential in [
+        format!("Bearer {CREDENTIAL}extra"),
+        format!("Bearer {}", &CREDENTIAL[1..]),
+        format!("Bearer X{}", &CREDENTIAL[1..]),
+        format!("Bearer {}X", &CREDENTIAL[..CREDENTIAL.len() - 1]),
+    ] {
+        let mut request = Request::new(request("get", ""));
+        request
+            .metadata_mut()
+            .insert("authorization", credential.parse().unwrap());
+        assert_eq!(client.call(request).await.unwrap_err().code(), Code::Unauthenticated);
+    }
     let mut wrong_environment = request("get", "");
     wrong_environment.environment = "other".into();
     assert_eq!(
