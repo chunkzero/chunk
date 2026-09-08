@@ -3,6 +3,7 @@
 //! Writes remain speculative; only the environment backend can validate/commit.
 
 mod capabilities;
+mod deadline;
 mod deployment;
 mod model;
 mod runtime;

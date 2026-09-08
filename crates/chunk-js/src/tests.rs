@@ -47,7 +47,7 @@ fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments()
     for counter in 1..=2 {
         let result = call(&mut first).unwrap();
         assert_eq!(
-            result.value,
+            value(&result),
             json!({"counter":counter,"p":{"coins":4},"caller":"player"})
         );
         assert_eq!(result.writes.len(), 1);
@@ -56,8 +56,8 @@ fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments()
     // Separate owners also isolate environments that happen to use the same deployment ID.
     for id in ["build-b", "build-a"] {
         let mut other = Deployment::new(id.into(), source.into(), Limits::default()).unwrap();
-        assert_eq!(call(&mut other).unwrap().value["counter"], json!(1));
-        assert!(call(&mut first).unwrap().value["counter"].as_u64().unwrap() > 2);
+        assert_eq!(value(&call(&mut other).unwrap())["counter"], json!(1));
+        assert!(value(&call(&mut first).unwrap())["counter"].as_u64().unwrap() > 2);
     }
 }
 
@@ -82,7 +82,7 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
         .execute(next, Box::new(Snapshot), &Cancellation::default())
         .unwrap();
     assert_eq!(
-        result.value,
+        value(&result),
         json!({"denied":4,"old":"player","current":"other","p":{"coins":3}})
     );
     assert!(result.writes.is_empty());
@@ -94,7 +94,7 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
         "globalThis.count = (globalThis.count || 0) + 1; if (args.fail) { ctx.db.put('profiles','p',{}); throw Error('rollback'); } return count;",
         Limits::default(),
     );
-    assert_eq!(call(&mut engine).unwrap().value, json!(1));
+    assert_eq!(value(&call(&mut engine).unwrap()), json!(1));
     let mut fail = invocation();
     fail.arguments = json!({"fail":true});
     assert!(
@@ -103,14 +103,14 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
             .is_err()
     );
     let result = call(&mut engine).unwrap();
-    assert_eq!(result.value, json!(1));
+    assert_eq!(value(&result), json!(1));
     assert!(result.writes.is_empty());
 }
 
 #[test]
 fn ambient_apis_and_query_writes_are_denied() {
     let result = run("return [typeof Deno, typeof __bootstrap, typeof __infra, typeof fetch, typeof process, typeof Date, typeof Intl, typeof ArrayBuffer, typeof Uint8Array, typeof WebAssembly];").unwrap();
-    assert_eq!(result.value, json!(vec!["undefined"; 10]));
+    assert_eq!(value(&result), json!(vec!["undefined"; 10]));
     assert!(run("return Math.random();").is_err());
     assert!(run("return await import('ext:core/mod.js');").is_err());
     assert!(run("return await import('file:///etc/passwd');").is_err());
@@ -149,7 +149,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
                 .is_err(),
             "{body}"
         );
-        assert_eq!(call(&mut engine).unwrap().value, json!(42));
+        assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
     let mut engine = deployment(
         "if(args.fail) { const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx')); } return 42;",
@@ -162,7 +162,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
     fail.arguments = json!({"fail":true});
     let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
-    assert_eq!(call(&mut engine).unwrap().value, json!(42));
+    assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     assert!(
         Deployment::new(
             "bad".into(),
@@ -194,6 +194,27 @@ fn cancellation_interrupts_execution_and_discards_speculative_writes() {
     thread.join().unwrap();
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
     let result = call(&mut engine).unwrap();
-    assert_eq!(result.value, json!(42));
+    assert_eq!(value(&result), json!(42));
     assert!(result.writes.is_empty());
+}
+
+fn value(execution: &Execution) -> Value {
+    serde_json::from_str(&execution.value).unwrap()
+}
+
+#[test]
+fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
+    let mut engine = deployment("return {caller: ctx.caller, args};", Limits::default());
+    let mut input = invocation();
+    input.caller = json!({"name": "Alex 🦊"});
+    input.arguments = json!({"雪": [null, true, "\\\"\n"]});
+    let expected = json!({"caller": input.caller, "args": input.arguments});
+    let result = engine
+        .execute(input, Box::new(Snapshot), &Cancellation::default())
+        .unwrap();
+    assert_eq!(value(&result), expected);
+    for expression in ["undefined", "Infinity", "1n", "({bad: undefined})", "[Symbol()]"] {
+        assert!(run(&format!("return {expression};")).is_err(), "{expression}");
+    }
+    assert!(run("return 'x'.repeat(1024 * 1024);").is_err());
 }

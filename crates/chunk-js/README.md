@@ -29,15 +29,22 @@ It is disposable, never authoritative: handlers must not cache documents or call
 state, or use mutable counters to determine transactional results. Purity and complete
 dependency tracking are application requirements, not enforced by context reuse.
 
-The default budget is one second and 32 MiB of V8 heap. A separate watchdog
-interrupts synchronous loops and cancellation; the near-heap callback terminates
+The default budget is one second and 32 MiB of V8 heap. One persistent watchdog
+per worker polls deadlines and cancellation every two milliseconds and shuts down
+with the worker. It interrupts synchronous loops and cancellation; the near-heap
+callback terminates
 execution with 8 MiB of emergency headroom. Initialization and each invocation have
 separate execution budgets. Any execution error drops the engine; the next call
 reloads the same bundle under the initialization budget. Engines also recycle after
 10,000 calls. Dropping a deployment releases its engine and retained source.
 
 Input/result/document JSON is limited to 1 MiB, source to 4 MiB, capability calls to
-4096 and writes to 256/8 MiB. JSON parsing enforces a nesting limit. The backend must
+4096 and writes to 256/8 MiB. Host document JSON parsing enforces a nesting limit.
+Results remain strict JSON
+text in `Execution::value`; consumers can forward them without parsing. Caller and
+arguments are encoded once and parsed in JS. A single bootstrap entry constructs
+the context, awaits the handler and serializes its result, followed by an event-loop
+drain. The backend must
 bound resident deployments, concurrent work, queued requests and snapshot memory;
 the isolate heap budget is not a whole-process RSS limit. Release versions after
 references drain. Retaining a bundle for a future job need not keep its engine alive;
