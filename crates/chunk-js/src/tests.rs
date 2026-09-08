@@ -197,3 +197,16 @@ fn cancellation_interrupts_execution_and_discards_speculative_writes() {
     assert_eq!(result.value, json!(42));
     assert!(result.writes.is_empty());
 }
+
+#[test]
+fn absent_return_is_null_and_missing_exports_are_invalid() {
+    assert_eq!(run("").unwrap().value, Value::Null);
+    assert!(run("return { nested: undefined };").is_err());
+    let mut engine = deployment("return 42;", Limits::default());
+    let mut input = invocation();
+    input.export = "missing".into();
+    assert!(matches!(
+        engine.execute(input, Box::new(Snapshot), &Cancellation::default()),
+        Err(Error::Invalid("missing export"))
+    ));
+}

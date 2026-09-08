@@ -207,7 +207,7 @@ impl Engine {
             .runtime
             .execute_script(
                 "chunk:result",
-                r"((stringify, finite) => value => stringify(value, (_, item) => {
+                r"((stringify, finite) => value => stringify(value === undefined ? null : value, (_, item) => {
             if (typeof item === 'undefined' || typeof item === 'function' || typeof item === 'symbol' ||
                 (typeof item === 'number' && !finite(item))) throw new Error('Result must be JSON');
             return item;
@@ -281,6 +281,9 @@ impl Engine {
             let function = namespace
                 .get(scope, key.into())
                 .ok_or(Error::Invalid("missing export"))?;
+            if !function.is_function() {
+                return Err(Error::Invalid("missing export"));
+            }
             let function = v8::Local::<v8::Function>::try_from(function).map_err(js_error)?;
             let arguments = deno_core::serde_v8::to_v8(scope, invocation.arguments).map_err(js_error)?;
             (v8::Global::new(scope, function), v8::Global::new(scope, arguments))
