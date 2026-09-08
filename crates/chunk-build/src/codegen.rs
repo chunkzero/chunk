@@ -36,6 +36,7 @@ pub fn generate(contract: &Path, output: &Path, package: &str) -> io::Result<()>
         ids: BTreeSet::new(),
     };
     let mut references = Vec::new();
+    let mut clients = Vec::new();
     let mut api = json!({});
     let mut documents = Vec::new();
     for (name, table) in &contract.tables {
@@ -79,6 +80,7 @@ pub fn generate(contract: &Path, output: &Path, package: &str) -> io::Result<()>
             args.codec,
             result.codec
         ));
+        clients.push(java::client_method(&name, &args.ty, &result.ty, function.kind));
         let entry = format!(
             "{{ path: {}, kind: {}, arguments: {}, result: {} }}",
             quote(path),
@@ -108,6 +110,7 @@ pub fn generate(contract: &Path, output: &Path, package: &str) -> io::Result<()>
     fs::create_dir_all(&java_directory)?;
     fs::write(java_directory.join("BackendTypes.java"), source)?;
     fs::write(output.join("api.ts"), typescript)?;
+    java::write_client(output, package, &clients)?;
     Ok(())
 }
 

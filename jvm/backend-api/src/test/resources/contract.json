@@ -123,6 +123,25 @@
       "result": {
         "type": "null"
       }
+    },
+    "shared/profile/read": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "read",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "player": {
+            "schema": {
+              "type": "player"
+            },
+            "optional": false
+          }
+        }
+      },
+      "result": {
+        "type": "integer"
+      }
     }
   }
 }
