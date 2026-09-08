@@ -17,8 +17,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class BackendClientTest {
@@ -62,7 +62,15 @@ class BackendClientTest {
                 ).build()
                 .start()
         val channel = NettyChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
-        val scheduler = Executors.newSingleThreadScheduledExecutor()
+        val delays = LinkedBlockingQueue<Long>()
+        val scheduler =
+            object : ScheduledThreadPoolExecutor(1) {
+                override fun schedule(
+                    command: Runnable,
+                    delay: Long,
+                    unit: TimeUnit,
+                ) = super.schedule(command, 0, TimeUnit.MILLISECONDS).also { delays.add(unit.toMillis(delay)) }
+            }
         try {
             val client =
                 BackendClient(channel, "test-credential", "local", "pinned", ByteString.copyFromUtf8("{}"), scheduler)
@@ -80,10 +88,22 @@ class BackendClientTest {
                 val stale = states.poll(3, TimeUnit.SECONDS)
                 assertTrue(stale.stale)
                 assertEquals(fresh.snapshot, stale.snapshot)
-                watches.poll(3, TimeUnit.SECONDS).onNext(snapshot(9, "5"))
+                assertEquals(500L, delays.poll(3, TimeUnit.SECONDS))
+                for (delay in listOf(1000L, 2000L, 4000L, 5000L, 5000L)) {
+                    watches.poll(3, TimeUnit.SECONDS).onError(Status.UNAVAILABLE.asRuntimeException())
+                    assertTrue(states.poll(3, TimeUnit.SECONDS).stale)
+                    assertEquals(delay, delays.poll(3, TimeUnit.SECONDS))
+                }
+                val reconnected = watches.poll(3, TimeUnit.SECONDS)
+                reconnected.onNext(snapshot(9, "5"))
                 val resumed = states.poll(3, TimeUnit.SECONDS)
                 assertFalse(resumed.stale)
                 assertEquals(snapshot(9, "5"), resumed.snapshot)
+                reconnected.onError(Status.UNAVAILABLE.asRuntimeException())
+                assertTrue(states.poll(3, TimeUnit.SECONDS).stale)
+                assertEquals(500L, delays.poll(3, TimeUnit.SECONDS))
+                watches.poll(3, TimeUnit.SECONDS).onNext(snapshot(10, "6"))
+                assertFalse(states.poll(3, TimeUnit.SECONDS).stale)
             }
             assertTrue(cancelled.await(3, TimeUnit.SECONDS))
         } finally {

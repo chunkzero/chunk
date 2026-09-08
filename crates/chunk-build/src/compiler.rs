@@ -29,6 +29,7 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let staging = tempfile::Builder::new().prefix(".compile-").tempdir_in(&output)?;
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/compiler/bundle.mjs");
     let result = Command::new("node")
+        .env("NO_COLOR", "1")
         .arg(script)
         .arg(&project)
         .arg(staging.path())
@@ -41,7 +42,8 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
         4 * 1024 * 1024,
     )?)
     .map_err(io::Error::other)?;
-    let contract = extract(&source)?;
+    let contract = extract(&source)
+        .map_err(|error| io::Error::other(format!("Backend deployment at {}: {error}", project.display())))?;
     fs::write(
         staging.path().join("contract.json"),
         serde_json::to_vec(&contract).map_err(io::Error::other)?,
@@ -92,6 +94,41 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn compilation_diagnostics_identify_invalid_schema_and_deployment() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        let schema = project.path().join("server/schema/index.ts");
+        fs::write(
+            &schema,
+            "import {defineTable,v} from '@chunk/server'; export default defineTable({name:v.string()});",
+        )
+        .unwrap();
+        let error = compile(project.path(), output.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("server/schema/index.ts must default-export a schema created with defineSchema()"),
+            "{error}"
+        );
+        fs::write(
+            &schema,
+            "import {defineSchema} from '@chunk/server'; export default defineSchema({});",
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("server/invalid-name.ts"),
+            "import {query,v} from '@chunk/server'; export const value=query({args:{},returns:v.null(),handler:()=>null});",
+        )
+        .unwrap();
+        let error = compile(project.path(), output.path()).unwrap_err().to_string();
+        assert!(error.contains("invalid function path"), "{error}");
+        assert!(
+            error.contains(&project.path().canonicalize().unwrap().display().to_string()),
+            "{error}"
+        );
+        assert!(!error.contains('\u{1b}'), "{error}");
+    }
 
     #[test]
     fn clean_typescript_compilation_produces_deterministic_executable_contracts() {
