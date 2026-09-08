@@ -6,8 +6,11 @@ clients. Its public runtime dependency is Gson; it has no Kotlin dependency.
 Run `cargo run -p chunk-build --bin chunk-codegen -- CONTRACT OUTPUT JAVA_PACKAGE`
 to generate `api.ts` and `java/<package>/BackendTypes.java` from the compiler's
 contract. Generation needs no JVM compilation. Only public functions receive
-references. Java fields use `$` between path segments; reserved record component
-names receive a `$` suffix. TypeScript references preserve nested namespaces.
+references. Java fields use `$` between path segments; reserved names and helper
+class names receive a `$` suffix. Generation rejects reference names that collide
+with generated codecs, unsafe literals and literals exceeding Java's string
+constant limit. TypeScript references preserve nested namespaces and editable
+document fields with readonly `_id`.
 
 Objects become records, arrays become lists, and unions become sealed interfaces
 with numbered record variants in declaration order. `FieldValue.Absent` means a
