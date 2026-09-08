@@ -9,6 +9,7 @@ use serde_json::Value;
 pub struct IndexQuery {
     pub table: String,
     pub index: String,
+    #[serde(default)]
     pub prefix: Vec<Value>,
     pub start: Option<Value>,
     pub end: Option<Value>,

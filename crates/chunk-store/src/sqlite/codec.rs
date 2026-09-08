@@ -40,10 +40,10 @@ pub(super) fn encode(field: &Field, value: Option<&Value>) -> Result<SqlValue> {
             value.as_i64().map(SqlValue::Integer)
         }
         (Schema::Number, Value::Number(value)) if value.is_f64() => value.as_f64().map(SqlValue::Real),
-        (schema @ (Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session), Value::String(value))
-            if schema.accepts(&Value::String(value.clone())) =>
+        (schema @ (Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session), Value::String(text))
+            if schema.accepts(value) =>
         {
-            Some(SqlValue::Text(value.clone()))
+            Some(SqlValue::Text(text.clone()))
         }
         (schema, value) if !schema.is_scalar() && schema.accepts(value) => {
             Some(SqlValue::Text(serde_json::to_string(value)?))
