@@ -292,6 +292,9 @@ impl Engine {
         if encoded.len() > 1024 * 1024 {
             return Err(Error::Invalid("result exceeds size limit"));
         }
+        // Durable outcomes use serde_json too; reject unsupported depth and Unicode
+        // before speculative writes can enter the commit pipeline.
+        serde_json::from_str::<serde_json::Value>(&encoded).map_err(js_error)?;
         Ok(encoded)
     }
 }

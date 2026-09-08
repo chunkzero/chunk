@@ -218,3 +218,23 @@ fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
     }
     assert!(run("return 'x'.repeat(1024 * 1024);").is_err());
 }
+
+#[test]
+fn storage_incompatible_results_fail_only_the_invocation() {
+    for expression in ["Array.from({length:130}).reduce(v => [v], null)", r"'\ud800'"] {
+        let mut engine = deployment(
+            &format!("if(args.fail) {{ ctx.db.put('profiles','p',{{}}); return {expression}; }} return 42;"),
+            Limits::default(),
+        );
+        let mut fail = invocation();
+        fail.arguments = json!({"fail":true});
+        assert!(
+            engine
+                .execute(fail, Box::new(Snapshot), &Cancellation::default())
+                .is_err()
+        );
+        let result = call(&mut engine).unwrap();
+        assert_eq!(value(&result), json!(42));
+        assert!(result.writes.is_empty());
+    }
+}
