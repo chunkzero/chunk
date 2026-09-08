@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+import "chunk/v1/gameplay.proto";
+
+// Registration authenticates the launched child. Repeating the exact frozen
+// registration reconciles a channel outage without replacing any player socket.
+service Supervisor {
+  rpc RegisterProcess(ProcessRegistration) returns (ProcessIdentity);
+}
+
+// Exposed by the JVM and its runtime facade with different scoped credentials.
+service ProcessControl {
+  rpc Inventory(ProcessIdentity) returns (ProcessInventory);
+  rpc StopProcess(ProcessIdentity) returns (ProcessIdentity);
+  rpc CreateSession(SessionCommand) returns (SessionInventory);
+  rpc FinishSession(SessionCommand) returns (SessionInventory);
+}
+
+message SessionCommand {
+  ProcessIdentity identity = 1;
+  string operation_id = 2;
+  SessionRef session = 3;
+  uint64 generation = 4;
+  string session_type = 5;
+  uint32 capacity = 6;
+}
+
+message ProcessIdentity {
+  DeploymentRef deployment = 1;
+  string runtime_id = 2;
+  string process_id = 3;
+  uint64 generation = 4;
+  string machine_profile = 5;
+  string artifact_digest = 6;
+}
+
+message ProcessRegistration {
+  ProcessIdentity identity = 1;
+  string control_endpoint = 2;
+  string player_endpoint = 3;
+  ConfigurationResponse configuration = 4;
+}
+
+enum DeliveryPhase {
+  DELIVERY_PHASE_UNSPECIFIED = 0;
+  DELIVERY_PHASE_PREPARED = 1;
+  DELIVERY_PHASE_ATTACHED = 2;
+  DELIVERY_PHASE_ARRIVED = 3;
+  DELIVERY_PHASE_CLOSED = 4;
+  DELIVERY_PHASE_WITHDRAWING = 5;
+}
+
+message DeliveryInventory {
+  PlayerDelivery delivery = 1;
+  DeliveryPhase phase = 2;
+}
+
+enum SessionPhase {
+  SESSION_PHASE_UNSPECIFIED = 0;
+  SESSION_PHASE_STARTING = 1;
+  SESSION_PHASE_READY = 2;
+  SESSION_PHASE_ENDING = 3;
+  SESSION_PHASE_ENDED = 4;
+  SESSION_PHASE_FAILED = 5;
+}
+
+message SessionInventory {
+  SessionRef session = 1;
+  uint64 generation = 2;
+  string session_type = 3;
+  SessionPhase phase = 4;
+  uint32 capacity = 5;
+  uint32 prepared = 6;
+  uint32 attached = 7;
+}
+
+message ProcessInventory {
+  ProcessIdentity identity = 1;
+  uint64 tick_count = 2;
+  repeated SessionInventory sessions = 3;
+  repeated DeliveryInventory deliveries = 4;
+  bool draining = 5;
+}

@@ -58,11 +58,34 @@ class GameplayServiceTest {
                 .setEnvironment("local")
                 .setDeployment("build-a")
                 .build()
-        val instance = MinecraftServer.getInstanceManager().createInstanceContainer()
+        MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
+        val ticks = TickExecutor()
+        val manager = SessionManager(ticks, mapOf("bridge" to { FlatSession() }))
+        manager.create(
+            chunk.v1.Supervision.SessionCommand
+                .newBuilder()
+                .setOperationId(
+                    "fixture",
+                ).setSession(
+                    SessionRef.newBuilder().setId("bridge"),
+                ).setGeneration(1)
+                .setSessionType("bridge")
+                .setCapacity(128)
+                .build(),
+        )
+        repeat(3) { ticks.flush() }
         val clock =
             java.util.concurrent.atomic
                 .AtomicLong(System.nanoTime())
-        val service = GameplayService(deployment, 7, instance, clock::get)
+        val service = GameplayService(deployment, 7, manager, clock::get)
+        MinecraftServer
+            .getSchedulerManager()
+            .buildTask {
+                ticks.flush()
+            }.repeat(
+                net.minestom.server.timer.TaskSchedule
+                    .tick(1),
+            ).schedule()
         minecraft.start("127.0.0.1", 0)
         service.endpoint = "127.0.0.1:${MinecraftServer.process().server().port}"
         val server =
@@ -106,7 +129,9 @@ class GameplayServiceTest {
                     .newBuilder()
                     .setDeployment(deployment)
                     .setProcessGeneration(7)
+                    .setRuntimeId("bridge")
                     .setOwnerGeneration(1)
+                    .setSessionGeneration(1)
                     .setOperationId("delivery-1")
                     .setSession(SessionRef.newBuilder().setId("bridge"))
                     .setPlayer(PlayerRef.newBuilder().setId("player"))
@@ -276,7 +301,7 @@ class GameplayServiceTest {
     }
 }
 
-private fun <T> Socket.send(
+internal fun <T> Socket.send(
     id: Int,
     serializer: NetworkBuffer.Type<T>,
     packet: T,
@@ -294,7 +319,7 @@ private fun <T> Socket.send(
     )
 }
 
-private fun Socket.packet(state: ConnectionState): ServerPacket {
+internal fun Socket.packet(state: ConnectionState): ServerPacket {
     val input = getInputStream()
     var length = 0
     var shift = 0

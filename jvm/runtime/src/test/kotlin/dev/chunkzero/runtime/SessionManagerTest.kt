@@ -1,0 +1,93 @@
+package dev.chunkzero.runtime
+
+import chunk.v1.Common.SessionRef
+import chunk.v1.Supervision.SessionCommand
+import chunk.v1.Supervision.SessionPhase
+import net.minestom.server.MinecraftServer
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import java.util.concurrent.CompletableFuture
+
+class SessionManagerTest {
+    @Test
+    fun `readiness and ending await hooks and dispose only the owning session`() {
+        MinecraftServer.init()
+        val ticks = TickExecutor()
+        val created = CompletableFuture<Unit>()
+        val finished = CompletableFuture<Unit>()
+        var disposed = 0
+        lateinit var ownedScope: SessionScope
+        val manager =
+            SessionManager(
+                ticks,
+                mapOf(
+                    "delayed" to {
+                        object : Session() {
+                            override fun onCreate(scope: SessionScope): CompletableFuture<Unit> {
+                                ownedScope = scope
+                                scope.createInstance()
+                                scope.createInstance()
+                                scope.own(AutoCloseable { disposed++ })
+                                return created
+                            }
+
+                            override fun onFinish() = finished
+                        }
+                    },
+                    "flat" to { FlatSession() },
+                ),
+            )
+
+        fun command(
+            id: String,
+            type: String,
+        ) = SessionCommand
+            .newBuilder()
+            .setOperationId(id)
+            .setSession(SessionRef.newBuilder().setId(id))
+            .setGeneration(1)
+            .setSessionType(type)
+            .setCapacity(2)
+            .build()
+        try {
+            val first = command("first", "delayed")
+            val second = command("second", "flat")
+            val pending = manager.create(first)
+            val independent = manager.create(second)
+            repeat(4) { ticks.flush() }
+            assertFalse(pending.isDone)
+            assertEquals(SessionPhase.SESSION_PHASE_READY, independent.join().phase)
+            assertEquals(3, MinecraftServer.getInstanceManager().instances.size)
+            created.complete(Unit)
+            repeat(4) { ticks.flush() }
+            assertEquals(SessionPhase.SESSION_PHASE_READY, pending.join().phase)
+            val duplicate = manager.create(first)
+            repeat(2) { ticks.flush() }
+            assertEquals(pending.join(), duplicate.join())
+            val changed = manager.create(first.toBuilder().setCapacity(3).build())
+            ticks.flush()
+            assertTrue(changed.isCompletedExceptionally)
+            val ending = manager.finish(first)
+            repeat(5) { ticks.flush() }
+            assertFalse(ending.isDone)
+            assertEquals(0, disposed)
+            finished.complete(Unit)
+            repeat(5) { ticks.flush() }
+            assertEquals(SessionPhase.SESSION_PHASE_ENDED, ending.join().phase)
+            assertEquals(1, disposed)
+            assertEquals(1, MinecraftServer.getInstanceManager().instances.size)
+            assertFalse(MinecraftServer.getGlobalEventHandler().children.any { it.name == ownedScope.events.name })
+            assertEquals(SessionPhase.SESSION_PHASE_READY, manager.get("second", 1).phase)
+            val staleTask = ownedScope.onTick { error("Disposed task ran") }
+            ticks.flush()
+            assertTrue(staleTask.isCompletedExceptionally)
+            val stopSecond = manager.finish(second)
+            repeat(8) { ticks.flush() }
+            assertTrue(stopSecond.isDone)
+        } finally {
+            MinecraftServer.process().stop()
+        }
+    }
+}

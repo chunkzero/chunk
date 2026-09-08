@@ -21,6 +21,8 @@ chunk-control = { path = "../chunk-control" }
 chunk-edge = { path = "../chunk-edge", default-features = false }
 chunk-runtime = { path = "../chunk-runtime" }
 clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
