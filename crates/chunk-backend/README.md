@@ -1,13 +1,16 @@
 # Environment backend
 
 `Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread and one
-commit thread. Supply a store with its schema installed and exclusive writer
-authority. `deploy` validates and durably retains a versioned `chunk_contract::Deployment`,
-then enables its public functions. Bundles and contracts reload after restart.
+commit thread. Supply a store with exclusive writer authority. `deploy` validates
+and initializes a versioned `chunk_contract::Deployment`, then atomically installs
+its additive schema/indexes and retains the bundle before enabling public functions.
+Bundles and contracts reload after restart.
 Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport tasks.
 `Service` exposes authenticated gRPC; only trusted platform processes may supply
 caller identity. Internal functions are inaccessible through this ingress.
-Schema installation must precede deployment; coordinated activation is follow-up work.
+Activation waits for the commit pipeline to drain; it returns `Busy` while work is
+outstanding. Queries can use existing deployments during activation. A successful
+activation advances the schema revision and reevaluates existing subscriptions.
 
 The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending
 writes and subscription dependencies. Each mutation executes against the latest
@@ -36,8 +39,8 @@ Give every mutation a stable operation ID. Its fingerprint includes the function
 canonical arguments and caller, independent of bundle and deployment identity.
 Duplicate requests recover the stored outcome without executing again, including
 after redeployment; reuse with a different request fails. Outcome lookups use the
-engine's pinned base snapshot and pending operations, so execution need not wait
-behind earlier commits. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
+engine's pinned base snapshot and pending operations. New operations prepare their
+retry context on the commit thread before execution. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
 to encode and canonicalize once before crossing the engine boundary.
 Argument/result contracts and wire numbers are validated before publication.
 Deployment-specific reads project declared fields; writes must satisfy the
@@ -67,8 +70,9 @@ mutations and 32 MiB of serialized pending writes/results. Excess work returns
 `Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own
 source, heap, capability and payload budgets. Release a deployment after its
 mutations and subscriptions drain.
-Release currently unloads the runtime; durable deployment retirement and schema
-activation barriers are handled by the retained-deployment follow-up.
+Release durably removes the bundle and permanently retires its identity before
+unloading the runtime. It cannot be reactivated under the same ID. Data and schema
+remain shared; release never drops application tables or operation outcomes.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run
 synchronously on the engine thread. A cumulative allowance limits each invocation
@@ -90,12 +94,6 @@ described in `chunk-js`.
 
 Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
 `cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
-
-Snapshot acquisition captures a timestamp; mutation seeds derive from the operation
-ID. The active execution keeps both fixed. Durable retries recover the outcome
-without running JS. A new request after a definite rejection acquires a fresh
-snapshot/time. No internal conflict-retry loop or persisted failed-attempt context
-is implemented; any future internal retry must retain its original time and seed.
 
 Mutation admission durably fixes the original snapshot timestamp, seed and
 uncommitted deployment binding before evaluation. Definite rejection and restart

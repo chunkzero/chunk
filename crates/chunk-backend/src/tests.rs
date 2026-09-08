@@ -92,6 +92,13 @@ struct ControlledStore {
 }
 
 impl Storage for ControlledStore {
+    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
+        self.inner.activate_deployment(deployment)
+    }
+    fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
+        self.inner.release_deployment(id)
+    }
+
     fn prepare_operation(
         &mut self,
         operation: &Operation,

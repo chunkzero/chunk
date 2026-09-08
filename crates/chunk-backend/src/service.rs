@@ -120,8 +120,11 @@ pub(crate) enum Event {
         operation: String,
         result: Result<(Update, Snapshot)>,
     },
-    Retained {
-        result: Result<()>,
+    Activated {
+        result: Result<chunk_store::Snapshot>,
+    },
+    Released {
+        result: Result<bool>,
     },
     Wake,
 }

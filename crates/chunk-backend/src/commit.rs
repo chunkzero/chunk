@@ -16,7 +16,10 @@ pub(crate) enum Job {
         operation: Operation,
         context: chunk_store::RetryContext,
     },
-    Retain {
+    Release {
+        id: String,
+    },
+    Activate {
         deployment: Arc<chunk_contract::Deployment>,
     },
     Commit {
@@ -59,14 +62,32 @@ impl Committer {
                             result,
                         }
                     }
-                    Job::Retain { deployment } => {
+                    Job::Release { id } => {
                         let result = if failed {
                             Err(Error::CommitFailed)
                         } else {
-                            store.retain_deployment(&deployment).map_err(Error::from)
+                            store.release_deployment(&id).map_err(Error::from)
                         };
                         failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-                        Event::Retained { result }
+                        Event::Released { result }
+                    }
+                    Job::Activate { deployment } => {
+                        let result = if failed {
+                            Err(Error::CommitFailed)
+                        } else {
+                            store
+                                .activate_deployment(&deployment)
+                                .map_err(Error::from)
+                                .and_then(|revision| {
+                                    let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
+                                    if snapshot.revision != revision {
+                                        return Err(Error::CommitFailed);
+                                    }
+                                    Ok(snapshot)
+                                })
+                        };
+                        failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                        Event::Activated { result }
                     }
                     Job::Commit {
                         expected,

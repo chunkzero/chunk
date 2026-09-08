@@ -126,7 +126,7 @@ fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
 }
 
 #[test]
-fn failed_migration_rolls_back_ddl_catalog_and_revision() {
+fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     let (_directory, mut store) = open();
     let mut expanded = crate::tests::schema();
     expanded.get_mut("profiles").unwrap().fields.insert(
@@ -137,8 +137,27 @@ fn failed_migration_rolls_back_ddl_catalog_and_revision() {
         },
     );
     expanded.insert("matches".into(), TableSchema::default());
+    let deployment = chunk_contract::Deployment {
+        contract_version: 1,
+        runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+        id: "new".into(),
+        source: "export function get() { return null; }".into(),
+        tables: expanded.clone(),
+        functions: [(
+            "get".into(),
+            chunk_contract::Function {
+                kind: chunk_contract::FunctionKind::Query,
+                visibility: chunk_contract::Visibility::Public,
+                export: "get".into(),
+                arguments: Schema::Null,
+                result: Schema::Null,
+            },
+        )]
+        .into(),
+    };
     store.connection.execute_batch("CREATE TRIGGER fail_migration BEFORE INSERT ON _chunk_migrations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
-    assert!(store.apply_schema(&expanded).is_err());
+    assert!(store.activate_deployment(&deployment).is_err());
+    assert!(store.deployments().unwrap().is_empty());
     assert_eq!(store.snapshot().unwrap().revision, Revision(1));
     assert_eq!(*store.schema, crate::tests::schema());
     let count: usize = store
@@ -158,7 +177,7 @@ fn failed_migration_rolls_back_ddl_catalog_and_revision() {
         .unwrap();
     assert_eq!(fields, 0);
     store.connection.execute_batch("DROP TRIGGER fail_migration").unwrap();
-    assert_eq!(store.apply_schema(&expanded).unwrap(), Revision(2));
+    assert_eq!(store.activate_deployment(&deployment).unwrap(), Revision(2));
 }
 
 #[test]
