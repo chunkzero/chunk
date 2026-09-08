@@ -96,6 +96,7 @@ internal class SessionManager(
                             player,
                         )
                     ) {
+                        scope.releasePlayer(player)
                         invoke { behavior.onLeave(player) }
                     } else {
                         CompletableFuture.completedFuture(Unit)
