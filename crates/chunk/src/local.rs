@@ -87,7 +87,7 @@ fn build(options: &Options) -> io::Result<(Project, Artifact)> {
         .ok_or_else(|| io::Error::other("project directory missing"))?;
     let distribution = directory.join(&project.gameplay_distribution);
     let module = fs::read_to_string(distribution.join("backend/gameplay-module.txt"))?;
-    if module != project.gameplay_module {
+    if module.trim() != project.gameplay_module {
         return Err(io::Error::other(
             "gameplay module does not match the generated distribution",
         ));

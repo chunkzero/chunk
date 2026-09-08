@@ -35,7 +35,10 @@ impl Process {
         }
         let log = log.open(directory.join(format!("{name}.log")))?;
         let started = SystemTime::now();
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
@@ -83,7 +86,11 @@ impl Process {
         #[cfg(unix)]
         {
             if let Some(pid) = self.child.id() {
-                Command::new("kill").args(["-TERM", &pid.to_string()]).status().await?;
+                match Command::new("kill").args(["-TERM", &pid.to_string()]).status().await {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => tracing::warn!(service = self.name, %status, "failed to send SIGTERM"),
+                    Err(error) => tracing::warn!(service = self.name, %error, "failed to send SIGTERM"),
+                }
             }
         }
         #[cfg(not(unix))]
