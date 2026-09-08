@@ -35,7 +35,7 @@ fn copy_and_hash(path: &Path, output: &mut impl Write) -> io::Result<String> {
     }
     let mut source = fs::File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0; 65_536];
+    let mut buffer = vec![0; 65_536];
     let mut total = 0;
     loop {
         let count = source.read(&mut buffer)?;
