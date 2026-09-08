@@ -19,7 +19,7 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Host, MachineProfile, ProcessHost};
+pub use host::{Host, MachineProfile, ProcessHost, terminate_runtime};
 pub use rpc::Service;
 use state::{Authority, State};
 

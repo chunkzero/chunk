@@ -206,6 +206,7 @@ struct FakeHost {
     runtime: Arc<FakeRuntime>,
     endpoint: String,
     ids: Mutex<BTreeSet<String>>,
+    terminated: Mutex<BTreeSet<String>>,
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
@@ -220,8 +221,13 @@ impl Host for FakeHost {
             identity: self.runtime.identity.clone(),
         })
     }
-    fn stopped(&self, _: &str) -> bool {
-        self.runtime.stopped.load(Ordering::Acquire)
+    async fn terminate(&self, id: &str) -> Result<()> {
+        assert!(self.ids.lock().unwrap().contains(id));
+        self.terminated.lock().unwrap().insert(id.into());
+        Ok(())
+    }
+    fn stopped(&self, id: &str) -> bool {
+        self.runtime.stopped.load(Ordering::Acquire) || self.terminated.lock().unwrap().contains(id)
     }
 }
 
@@ -274,6 +280,7 @@ impl Fixture {
             runtime: runtime.clone(),
             endpoint,
             ids: Mutex::default(),
+            terminated: Mutex::default(),
         });
         let config = Config {
             deployment,
@@ -640,57 +647,83 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
 
 #[tokio::test]
 async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline() {
-    let fixture = Fixture::new().await;
-    let control = fixture.control();
-    let uuid = uuid::Uuid::new_v4().to_string();
-    let source = request("source", &uuid);
-    let first = control.claim(source.clone()).await.unwrap();
-    fixture
-        .runtime
-        .bindings
-        .lock()
-        .unwrap()
-        .get_mut("source")
-        .unwrap()
-        .phase = DeliveryPhase::Arrived;
-    control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
-    let command = chunk_proto::v1::DrainRequest {
-        operation_id: "drain".into(),
-        player_id: uuid,
-        timeout_seconds: 10,
-    };
-    let drained = control.drain(command.clone()).unwrap();
-    control.reconcile_all().await.unwrap();
-    assert!(control.poll_move(&source).unwrap().claim.is_some());
-    assert!(!fixture.runtime.stopped.load(Ordering::Acquire));
-    control
-        .claim(request("new-login", &uuid::Uuid::new_v4().to_string()))
-        .await
-        .unwrap();
-    let state = control.state().unwrap();
-    assert_ne!(state.sessions[&state.claims["new-login"].session].host, drained.host_id);
-    assert_eq!(control.drain(command.clone()).unwrap().deadline_ms, drained.deadline_ms);
-    control
-        .update(|state| {
-            state.drains.get_mut("drain").unwrap().deadline_ms = 0;
-            Ok(())
+    for available in [true, false] {
+        let fixture = Fixture::new().await;
+        let control = fixture.control();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let source = request("source", &uuid);
+        let first = control.claim(source.clone()).await.unwrap();
+        fixture
+            .runtime
+            .bindings
+            .lock()
+            .unwrap()
+            .get_mut("source")
+            .unwrap()
+            .phase = DeliveryPhase::Arrived;
+        control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
+        let command = chunk_proto::v1::DrainRequest {
+            operation_id: "drain".into(),
+            player_id: uuid.clone(),
+            timeout_seconds: 10,
+        };
+        let drained = control.drain(command.clone()).unwrap();
+        control.reconcile_all().await.unwrap();
+        assert!(control.poll_move(&source).unwrap().claim.is_some());
+        assert!(!fixture.runtime.stopped.load(Ordering::Acquire));
+        control
+            .claim(request("new-login", &uuid::Uuid::new_v4().to_string()))
+            .await
+            .unwrap();
+        let state = control.state().unwrap();
+        assert_ne!(state.sessions[&state.claims["new-login"].session].host, drained.host_id);
+        assert_eq!(control.drain(command.clone()).unwrap().deadline_ms, drained.deadline_ms);
+        fixture.runtime.available.store(available, Ordering::Release);
+        control.reconcile_all().await.unwrap();
+        assert!(!fixture.host.stopped(&drained.host_id));
+        assert_eq!(
+            control.state().unwrap().players[&uuid].current.as_deref(),
+            Some("source")
+        );
+        assert_eq!(
+            fixture.runtime.bindings.lock().unwrap()["source"].phase,
+            DeliveryPhase::Arrived
+        );
+        control
+            .update(|state| {
+                state.drains.get_mut("drain").unwrap().deadline_ms = 0;
+                Ok(())
+            })
+            .unwrap();
+        drop(control);
+        let control = fixture.control();
+        let operation = control.operation("source").unwrap();
+        let guard = operation.lock().await;
+        let reconciler = control.clone();
+        let reconciliation = tokio::spawn(async move { reconciler.reconcile_all().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !fixture.host.stopped(&drained.host_id) {
+                tokio::task::yield_now().await;
+            }
         })
-        .unwrap();
-    drop(control);
-    let control = fixture.control();
-    let operation = control.operation("source").unwrap();
-    let guard = operation.lock().await;
-    let reconciler = control.clone();
-    let reconciliation = tokio::spawn(async move { reconciler.reconcile_all().await });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !fixture.runtime.stopped.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+        .await
+        .expect("drain shutdown must not wait for a busy claim");
+        drop(guard);
+        reconciliation.await.unwrap().unwrap();
+        control.reconcile_all().await.unwrap();
+        let status = control.drain(command).unwrap();
+        assert!(status.stopped);
+        assert_eq!(status.remaining_claims, 0);
+        assert!(control.state().unwrap().players[&uuid].current.is_none());
+        if !available {
+            assert_eq!(
+                *fixture.host.terminated.lock().unwrap(),
+                BTreeSet::from([drained.host_id.clone()])
+            );
+            let other_host = &state.sessions[&state.claims["new-login"].session].host;
+            assert!(!fixture.host.stopped(other_host));
+            fixture.host.terminate(&drained.host_id).await.unwrap();
         }
-    })
-    .await
-    .expect("drain shutdown must not wait for a busy claim");
-    drop(guard);
-    reconciliation.await.unwrap().unwrap();
-    assert!(control.drain(command).unwrap().stopped);
-    fixture.close().await;
+        fixture.close().await;
+    }
 }
