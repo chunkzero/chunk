@@ -80,6 +80,7 @@ async function compile(root, output) {
     const module = `m${index}`
     imports.push(`import * as ${module} from ${JSON.stringify(entry.file)};`)
     for (const exported of exports.get(entry.file)) {
+      if (exported === "*") throw new Error(`Star re-exports are unsupported: ${entry.file}`)
       if (exported === "default") continue
       const name = `${entry.namespace}/${exported}`.replaceAll(path.sep, "/")
       const binding = `f${bindings.length}`
@@ -96,9 +97,15 @@ async function compile(root, output) {
   })
   try {
     const result = await bundle.generate({
-      format: "esm", codeSplitting: false, sourcemap: true, minify: { whitespace: true },
-      entryFileNames: "source.mjs", sourcemapPathTransform: source => source.includes("packages/server/src/")
-        ? `@chunk/server/${source.split("packages/server/src/")[1]}` : source,
+      format: "esm", codeSplitting: false, sourcemap: true, dir: output, entryFileNames: "source.mjs",
+      minify: { mangle: false, compress: false, codegen: { removeWhitespace: true } },
+      sourcemapPathTransform: source => {
+        const absolute = path.resolve(output, source)
+        for (const [base, prefix] of [[path.dirname(sdk), "@chunk/server"], [root, ""]]) {
+          if (absolute.startsWith(base + path.sep)) return path.posix.join(prefix, ...path.relative(base, absolute).split(path.sep))
+        }
+        return source
+      },
     })
     const chunks = result.output.filter(output => output.type === "chunk")
     if (chunks.length !== 1 || chunks[0].imports.length) throw new Error("Backend must be one self-contained module")

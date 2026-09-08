@@ -142,6 +142,113 @@
       "result": {
         "type": "integer"
       }
+    },
+    "__proto__/read": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "readNames",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "Objects": {
+            "schema": {
+              "type": "string"
+            },
+            "optional": false
+          },
+          "List": {
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "null"
+              }
+            },
+            "optional": false
+          },
+          "class": {
+            "schema": {
+              "type": "literal",
+              "value": "line\n\u0000🌍"
+            },
+            "optional": false
+          },
+          "ratio": {
+            "schema": {
+              "type": "number"
+            },
+            "optional": false
+          },
+          "flag": {
+            "schema": {
+              "type": "literal",
+              "value": true
+            },
+            "optional": false
+          },
+          "exact": {
+            "schema": {
+              "type": "literal",
+              "value": 42
+            },
+            "optional": false
+          },
+          "fraction": {
+            "schema": {
+              "type": "literal",
+              "value": 0.125
+            },
+            "optional": false
+          },
+          "nothing": {
+            "schema": {
+              "type": "literal",
+              "value": null
+            },
+            "optional": false
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "_id": {
+            "schema": {
+              "type": "id",
+              "table": "profiles"
+            },
+            "optional": false
+          },
+          "wins": {
+            "schema": {
+              "type": "integer"
+            },
+            "optional": false
+          }
+        }
+      }
+    },
+    "BackendTypes": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "backendTypes",
+      "arguments": { "type": "null" },
+      "result": { "type": "integer" }
+    },
+    "Codecs": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "codecs",
+      "arguments": {
+        "type": "null"
+      },
+      "result": {
+        "type": "union",
+        "variants": [
+          {
+            "type": "boolean"
+          }
+        ]
+      }
     }
   }
 }
