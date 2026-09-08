@@ -17,7 +17,8 @@ deployment registry. Idle deployment workers sleep waiting for requests.
 
 `ctx.db.get(table, id)` and `ctx.db.scan(table, start, end)` read a fresh memory-only
 `ReadHost` snapshot on each call, recording dependencies and including speculative
-writes. Mutations can `put(table, id, value)` and `delete(table, id)`. Queries cannot
+writes. `ReadHost::get` and `scan` return raw snapshot data; the engine owns
+invocation overlay merging and the `[id, value]` scan encoding. Mutations can `put(table, id, value)` and `delete(table, id)`. Queries cannot
 write. Only successful execution returns writes; backend validation and atomic
 storage commit are separate. No host method may publish external effects or block
 on I/O. The watchdog cannot interrupt Rust host code.
@@ -71,3 +72,8 @@ retries and subscription scheduling remain outside this PR.
 
 Focused verification: `cargo test -p chunk-js` and
 `cargo clippy -p chunk-js --all-targets -- -D warnings`.
+
+Termination records the first actual cancellation, deadline or heap signal. Teardown
+time cannot turn a completed invocation into a deadline failure. Execution is bounded
+by the watchdog without redundant Tokio timers. Static execution and capability
+bounds live beside `Limits` in `model::bounds`. Stack traces identify the deployment.

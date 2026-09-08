@@ -4,22 +4,20 @@ use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     ffi::c_void,
     ptr,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crate::termination::{Reason, Termination};
 use deno_core::v8;
 
 struct Budget {
     limit: usize,
     used: AtomicUsize,
-    exhausted: Arc<AtomicBool>,
+    exhausted: Termination,
 }
 
 /// V8 retains the allocator with its backing stores, including stores freed by GC.
-pub(crate) fn bounded(limit: usize, exhausted: Arc<AtomicBool>) -> v8::UniqueRef<v8::Allocator> {
+pub(crate) fn bounded(limit: usize, exhausted: Termination) -> v8::UniqueRef<v8::Allocator> {
     const VTABLE: v8::RustAllocatorVtable<Budget> = v8::RustAllocatorVtable {
         allocate,
         allocate_uninitialized: allocate,
@@ -39,7 +37,7 @@ pub(crate) fn bounded(limit: usize, exhausted: Arc<AtomicBool>) -> v8::UniqueRef
 unsafe extern "C" fn allocate(budget: &Budget, len: usize) -> *mut c_void {
     let bytes = len.max(1);
     let Ok(layout) = Layout::from_size_align(bytes, 8) else {
-        budget.exhausted.store(true, Ordering::Release);
+        budget.exhausted.record(Reason::Heap);
         return ptr::null_mut();
     };
     if budget
@@ -49,7 +47,7 @@ unsafe extern "C" fn allocate(budget: &Budget, len: usize) -> *mut c_void {
         })
         .is_err()
     {
-        budget.exhausted.store(true, Ordering::Release);
+        budget.exhausted.record(Reason::Heap);
         return ptr::null_mut();
     }
     // SAFETY: Layout is valid and nonempty. Eight-byte alignment covers every
@@ -57,7 +55,7 @@ unsafe extern "C" fn allocate(budget: &Budget, len: usize) -> *mut c_void {
     let data = unsafe { alloc_zeroed(layout) };
     if data.is_null() {
         budget.used.fetch_sub(bytes, Ordering::AcqRel);
-        budget.exhausted.store(true, Ordering::Release);
+        budget.exhausted.record(Reason::Heap);
     }
     data.cast()
 }

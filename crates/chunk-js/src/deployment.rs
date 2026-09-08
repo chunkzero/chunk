@@ -1,6 +1,6 @@
 use std::{sync::mpsc, thread::JoinHandle};
 
-use crate::{Cancellation, Error, Execution, Invocation, Limits, ReadHost, runtime::Worker};
+use crate::{Cancellation, Error, Execution, Invocation, Limits, ReadHost, model::bounds, runtime::Worker};
 
 /// One immutable deployment in an environment, with a persistent runtime on its own
 /// thread. The backend owns one handle per resident version; dropping it joins the
@@ -24,14 +24,15 @@ impl Deployment {
     /// # Errors
     /// Rejects invalid identity, source or limits, initialization failures and budgets.
     pub fn new(id: String, source: String, limits: Limits) -> Result<Self, Error> {
-        if id.is_empty() || id.len() > 128 {
+        if id.is_empty() || id.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid deployment"));
         }
         deno_core::JsRuntime::init_platform(None);
         let (requests, incoming) = mpsc::sync_channel::<Request>(1);
         let (ready, initialized) = mpsc::sync_channel(1);
+        let worker_id = id.clone();
         let thread = std::thread::Builder::new().name("chunk-js".into()).spawn(move || {
-            let mut worker = match Worker::new(source, limits) {
+            let mut worker = match Worker::new(&worker_id, source, limits) {
                 Ok(worker) => worker,
                 Err(error) => {
                     let _ = ready.send(Err(error));

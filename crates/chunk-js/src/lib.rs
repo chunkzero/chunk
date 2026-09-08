@@ -8,6 +8,7 @@ mod deployment;
 mod model;
 mod profile;
 mod runtime;
+mod termination;
 
 pub use deployment::Deployment;
 pub use model::{Cancellation, Error, Execution, Invocation, Key, Limits, Mode, Read, ReadHost, Write};

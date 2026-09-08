@@ -1,18 +1,14 @@
 use super::*;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 struct Snapshot;
 impl ReadHost for Snapshot {
-    fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value, String> {
-        match request {
-            Read::Get { table, id } => Ok(overlay
-                .get(&Key { table, id })
-                .cloned()
-                .unwrap_or(Some(json!({"coins": 3})))
-                .unwrap_or(Value::Null)),
-            Read::Scan { .. } => Ok(json!([])),
-        }
+    fn get(&mut self, _: &Key) -> Result<Option<Value>, String> {
+        Ok(Some(json!({"coins": 3})))
+    }
+    fn scan(&mut self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<Vec<(String, Value)>, String> {
+        Ok(vec![])
     }
 }
 
@@ -310,4 +306,25 @@ fn absent_return_is_null_and_missing_exports_are_invalid() {
         engine.execute(input, Box::new(Snapshot), &Cancellation::default()),
         Err(Error::Invalid("missing export"))
     ));
+}
+
+#[test]
+fn engine_merges_puts_and_deletes_into_raw_snapshot_ranges() {
+    struct Rows;
+    impl ReadHost for Rows {
+        fn get(&mut self, _: &Key) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn scan(&mut self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<Vec<(String, Value)>, String> {
+            Ok(vec![("a".into(), json!(1)), ("b".into(), json!(2))])
+        }
+    }
+    let mut engine = deployment(
+        "ctx.db.delete('p','a'); ctx.db.put('p','b',3); ctx.db.put('p','c',4); ctx.db.put('p','z',5); return ctx.db.scan('p','a','d');",
+        Limits::default(),
+    );
+    let result = engine
+        .execute(invocation(), Box::new(Rows), &Cancellation::default())
+        .unwrap();
+    assert_eq!(result.value, json!([["b", 3], ["c", 4]]));
 }
