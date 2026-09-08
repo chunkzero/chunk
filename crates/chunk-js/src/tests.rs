@@ -1,4 +1,6 @@
+mod deployment;
 use super::*;
+use deployment::Deployment;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 
@@ -89,7 +91,7 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
 }
 
 #[test]
-fn failed_call_discards_writes_and_reloads_the_same_bundle() {
+fn failed_call_discards_writes_and_retains_module_state() {
     let mut engine = deployment(
         "globalThis.count = (globalThis.count || 0) + 1; if (args.fail) { ctx.db.put('profiles','p',{}); throw Error('rollback'); } return count;",
         Limits::default(),
@@ -103,7 +105,7 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
             .is_err()
     );
     let result = call(&mut engine).unwrap();
-    assert_eq!(value(&result), json!(1));
+    assert_eq!(value(&result), json!(3));
     assert!(result.writes.is_empty());
 }
 
@@ -255,9 +257,9 @@ fn engine_switches_releases_and_recycles_independent_deployments() {
     let mut fail = invocation();
     fail.arguments = json!({"fail": true});
     assert!(execute(&mut engine, &ids[1], fail).is_err());
-    assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(1));
+    assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(3));
     assert_eq!(value(&execute(&mut engine, &ids[2], invocation()).unwrap()), json!(3));
-    for _ in 1..10_000 {
+    for _ in 4..10_000 {
         execute(&mut engine, &ids[1], invocation()).unwrap();
     }
     assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(1));
@@ -298,4 +300,24 @@ fn host_runs_on_the_callers_thread_without_send_or_locks() {
         .unwrap();
     assert_eq!(value(&result), json!(42));
     assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn storage_incompatible_results_fail_only_the_invocation() {
+    for expression in ["Array.from({length:130}).reduce(v => [v], null)", r"'\ud800'"] {
+        let mut engine = deployment(
+            &format!("if(args.fail) {{ ctx.db.put('profiles','p',{{}}); return {expression}; }} return 42;"),
+            Limits::default(),
+        );
+        let mut fail = invocation();
+        fail.arguments = json!({"fail":true});
+        assert!(
+            engine
+                .execute(fail, Box::new(Snapshot), &Cancellation::default())
+                .is_err()
+        );
+        let result = call(&mut engine).unwrap();
+        assert_eq!(value(&result), json!(42));
+        assert!(result.writes.is_empty());
+    }
 }

@@ -17,7 +17,6 @@ impl Deployment {
         Ok(Self { id, engine })
     }
 
-    #[must_use]
     pub fn id(&self) -> &str {
         self.id.as_str()
     }
