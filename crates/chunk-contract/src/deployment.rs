@@ -58,10 +58,10 @@ impl Deployment {
         if self.contract_version != CONTRACT_VERSION {
             return Err("unsupported contract version");
         }
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || self.id.contains('\0')
-            || self.source.len() > 4 * 1024 * 1024
+        if self.id.is_empty() || self.id.len() > 128 || self.id.contains('\0') {
+            return Err("invalid deployment id");
+        }
+        if self.source.len() > 4 * 1024 * 1024
             || self.functions.len() > 256
             || serde_json::to_vec(self).map_err(|_| "invalid deployment")?.len() > 5 * 1024 * 1024
         {
