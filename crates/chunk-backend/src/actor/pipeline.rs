@@ -129,17 +129,7 @@ impl Actor {
         if id.is_empty() || id.len() > 256 {
             return Err(Error::Invalid("operation identity"));
         }
-        if !self.versions.contains_key(&call.deployment) {
-            return Err(Error::Invalid("unknown deployment"));
-        }
-        if let Some(Some(deployment)) = self.versions.get(&call.deployment) {
-            let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?;
-            if function.visibility != chunk_contract::Visibility::Public
-                || function.kind != chunk_contract::FunctionKind::Mutation
-            {
-                return Err(Error::Unknown);
-            }
-        }
+        self.resolve(call, Mode::Mutation)?;
         // Identity describes the business request; a durable result survives redeployment.
         let request = serde_json::to_vec(&(
             "mutation-v2",
