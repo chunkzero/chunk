@@ -285,19 +285,40 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
         .get_mut("value")
         .unwrap()
         .schema = Schema::String;
-    assert!(backend.deploy(bad).await.is_err());
+    assert!(matches!(backend.deploy(bad).await, Err(crate::Error::Contract)));
     assert!(backend.query(call("bad", "get")).await.is_err());
     assert_eq!(&*backend.query(call("old", "get")).await.unwrap().json, "2");
+    assert!(matches!(
+        backend.mutate("failed-old".into(), call("old", "badResult")).await,
+        Err(crate::Error::Contract)
+    ));
     drop(group);
     assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
-    assert!(backend.deploy(deployment("old")).await.is_err());
+    assert!(matches!(
+        backend.deploy(deployment("old")).await,
+        Err(crate::Error::Contract)
+    ));
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
     drop(backend);
     let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
     assert!(backend.query(call("old", "get")).await.is_err());
     assert!(backend.query(call("bad", "get")).await.is_err());
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
-    assert!(backend.deploy(deployment("old")).await.is_err());
+    let mut changed = deployment("old");
+    changed.source.push_str("\n// changed");
+    assert!(matches!(backend.deploy(changed).await, Err(crate::Error::Contract)));
+    assert_eq!(
+        backend
+            .mutate("first".into(), call("new", "increment"))
+            .await
+            .unwrap()
+            .revision,
+        first.revision
+    );
+    assert!(
+        matches!(backend.mutate("failed-old".into(), call("new", "badResult")).await,
+            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
+    );
     assert!(
         backend
             .mutate("bad-result".into(), call("new", "badResult"))

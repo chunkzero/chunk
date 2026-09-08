@@ -9,8 +9,8 @@ Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport ta
 `Service` exposes authenticated gRPC; only trusted platform processes may supply
 caller identity. Internal functions are inaccessible through this ingress.
 Activation waits for the commit pipeline to drain; it returns `Busy` while work is
-outstanding. Queries can use existing deployments during activation. A successful
-activation advances the schema revision and reevaluates existing subscriptions.
+outstanding. Queries can use existing deployments during activation. Schema changes
+advance the revision; every successful activation reevaluates existing subscriptions.
 
 The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending
 writes and subscription dependencies. Each mutation executes against the latest
@@ -73,6 +73,13 @@ mutations and subscriptions drain.
 Release durably removes the bundle and permanently retires its identity before
 unloading the runtime. It cannot be reactivated under the same ID. Data and schema
 remain shared; release never drops application tables or operation outcomes.
+Uncommitted operation IDs remain bound to the retired deployment and return
+`OperationMismatch` if retried against another deployment. Clients must use new
+operation IDs for those requests. Committed outcomes remain recoverable through
+a retained deployment exposing the same mutation.
+If a retained bundle prevents startup, open the store with exclusive writer
+authority and call `Storage::release_deployment` with its ID before constructing
+the backend again.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run
 synchronously on the engine thread. A cumulative allowance limits each invocation
@@ -81,10 +88,10 @@ the read instead of returning a silently truncated result. `scanIndex` supports
 declared ascending indexes, equality prefixes and a half-open range on the next
 field, with 1–1,024 results. Both pending and invocation-local writes participate
 in ordering and limiting. Dependencies include old/new index keys and empty ranges.
-Commit results
-are parsed on the commit thread because `chunk_store::Commit` currently takes
-`Value`; query/subscription responses remain JSON text. Durable retries preserve
-the JSON value but may normalize its formatting and object key order.
+Commit results are parsed on the commit thread because `chunk_store::Commit`
+currently takes `Value`; query/subscription responses remain JSON text. Durable
+retries preserve the JSON value but may normalize its formatting and object key
+order.
 
 Construction waits for initialization. Dropping the last backend handle drains
 accepted commits and joins both threads; use a blocking task for construction

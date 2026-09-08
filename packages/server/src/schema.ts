@@ -16,7 +16,7 @@ function table<S extends Shape, I extends Record<string, readonly (keyof S & str
       const field = shape[key]
       if (!field || !["boolean", "number", "integer", "string", "id", "player", "session"].includes(field.schema.type)) throw new Error(`Index requires a scalar field: ${key}`)
     }
-    return table(shape, { ...indexes, [name]: keys } as I & Record<N, K>)
+    return table(shape, { ...indexes, [name]: [...keys] as K } as I & Record<N, K>)
   } })
 }
 
