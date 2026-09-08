@@ -2,11 +2,14 @@
 //! Each deployment retains a V8 isolate; invocation snapshot capabilities expire.
 //! Writes remain speculative; only the environment backend can validate/commit.
 
+mod allocator;
 mod capabilities;
 mod deadline;
 mod deployment;
 mod model;
+mod profile;
 mod runtime;
+mod termination;
 
 pub use deployment::Deployment;
 pub use model::{Cancellation, Error, Execution, Invocation, Key, Limits, Mode, Read, ReadHost, Write};
