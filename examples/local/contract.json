@@ -1,7 +1,6 @@
 {
   "tables": {
     "players": {
-      "type": "object",
       "fields": {
         "coins": {
           "schema": {
@@ -16,7 +15,6 @@
       }
     },
     "settings": {
-      "type": "object",
       "fields": {
         "motd": {
           "schema": {
@@ -78,7 +76,8 @@
             }
           }
         }
-      }
+      },
+      "visibility": "public"
     },
     "proxy/admit": {
       "kind": "query",
@@ -112,7 +111,8 @@
             }
           }
         }
-      }
+      },
+      "visibility": "public"
     },
     "proxy/route": {
       "kind": "query",
@@ -151,7 +151,8 @@
             }
           }
         }
-      }
+      },
+      "visibility": "public"
     },
     "players/balance": {
       "kind": "query",
@@ -168,7 +169,8 @@
       },
       "result": {
         "type": "integer"
-      }
+      },
+      "visibility": "public"
     },
     "players/visits": {
       "kind": "query",
@@ -185,7 +187,8 @@
       },
       "result": {
         "type": "integer"
-      }
+      },
+      "visibility": "public"
     },
     "players/join": {
       "kind": "mutation",
@@ -202,7 +205,8 @@
       },
       "result": {
         "type": "integer"
-      }
+      },
+      "visibility": "public"
     },
     "players/coin": {
       "kind": "mutation",
@@ -219,7 +223,8 @@
       },
       "result": {
         "type": "integer"
-      }
+      },
+      "visibility": "public"
     },
     "admin/settings": {
       "kind": "mutation",
@@ -255,7 +260,10 @@
       },
       "result": {
         "type": "null"
-      }
+      },
+      "visibility": "public"
     }
-  }
+  },
+  "contract_version": 1,
+  "runtime_profile": "transactional_v1"
 }
