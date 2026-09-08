@@ -56,21 +56,25 @@ pub(crate) async fn run(mut options: Options) -> io::Result<()> {
     {
         return Err(io::Error::other("local service addresses must differ"));
     }
-    java_version(&options.java).await?;
+    tokio::select! {
+        result = &mut shutdown => return result,
+        result = java_version(&options.java) => result?,
+    }
     let program = chunk_build::pin_program(&std::env::current_exe()?, &options.state.join("platform"))?;
     let (project, artifact) = build(&options)?;
     tracing::info!(deployment = %artifact.id, artifact = %artifact.directory.display(), "local project packaged");
     let mut processes = processes::Services::new(&options, &project, &artifact, program);
-    let result = async {
-        processes.start().await?;
-        tracing::info!(address = %options.bind, state = %options.state.display(), "local project ready; Ctrl-C stops all services");
-        loop {
-            tokio::select! {
-                result = &mut shutdown => return result,
-                () = tokio::time::sleep(Duration::from_millis(250)) => processes.poll().await?,
+    let result = tokio::select! {
+        result = &mut shutdown => result,
+        result = async {
+            processes.start().await?;
+            tracing::info!(address = %options.bind, state = %options.state.display(), "local project ready; Ctrl-C stops all services");
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                processes.poll().await?;
             }
-        }
-    }.await;
+        } => result,
+    };
     let stopped = processes.stop().await;
     result.and(stopped)
 }
@@ -135,7 +139,10 @@ fn runner_lock(path: &std::path::Path) -> io::Result<fs::File> {
 async fn java_version(java: &std::path::Path) -> io::Result<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(java).arg("-version").output(),
+        tokio::process::Command::new(java)
+            .arg("-version")
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(io::Error::other)??;

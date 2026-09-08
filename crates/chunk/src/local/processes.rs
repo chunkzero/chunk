@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -10,6 +10,7 @@ use std::{
 use serde::de::DeserializeOwned;
 use tokio::{
     process::{Child, Command},
+    task::JoinSet,
     time::{Instant, sleep, timeout},
 };
 
@@ -281,11 +282,7 @@ impl Services {
             }
         }
         // Control can fail before its own cleanup runs. Its durable runtime records still authorize shutdown.
-        if let Err(error) = timeout(Duration::from_secs(20), stop_runtimes(&self.runtimes))
-            .await
-            .map_err(io::Error::other)
-            .and_then(|r| r)
-        {
+        if let Err(error) = stop_runtimes(&self.runtimes).await {
             result = Err(error);
         }
         if let Some(backend) = &mut self.backend
@@ -306,15 +303,31 @@ async fn stop_runtimes(directory: &Path) -> io::Result<()> {
     if !directory.exists() {
         return Ok(());
     }
-    let mut result = Ok(());
+    let mut records = BTreeSet::new();
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
-        if path.extension().is_none_or(|e| e != "json") || path.with_extension("exit").exists() {
+        if path.extension().is_none_or(|e| e != "json" && e != "launch") || path.with_extension("exit").exists() {
             continue;
         }
-        if let Err(error) = stop_runtime(&path).await
-            && !path.with_extension("exit").exists()
-        {
+        records.insert(path.with_extension("json"));
+    }
+    let mut tasks = JoinSet::new();
+    for path in records {
+        tasks.spawn(async move {
+            let result = timeout(Duration::from_secs(75), stop_runtime(&path))
+                .await
+                .map_err(io::Error::other)
+                .and_then(|r| r);
+            if path.with_extension("exit").exists() {
+                Ok(())
+            } else {
+                result.map_err(|error| io::Error::other(format!("{}: {error}", path.display())))
+            }
+        });
+    }
+    let mut result = Ok(());
+    while let Some(stopped) = tasks.join_next().await {
+        if let Err(error) = stopped.map_err(io::Error::other).and_then(|r| r) {
             result = Err(error);
         }
     }
@@ -322,8 +335,21 @@ async fn stop_runtimes(directory: &Path) -> io::Result<()> {
 }
 
 async fn stop_runtime(path: &Path) -> io::Result<()> {
-    let runtime: chunk_runtime::RuntimeConnection =
-        serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+    let deadline = Instant::now() + Duration::from_secs(35);
+    let runtime: chunk_runtime::RuntimeConnection = loop {
+        if path.with_extension("exit").exists() {
+            return Ok(());
+        }
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(record) = serde_json::from_slice(&bytes)
+        {
+            break record;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("runtime launch is unresolved"));
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
     let address: std::net::SocketAddr = runtime
         .endpoint
         .strip_prefix("http://")
@@ -348,7 +374,7 @@ async fn stop_runtime(path: &Path) -> io::Result<()> {
     let _ = chunk_proto::v1::process_control_client::ProcessControlClient::new(channel)
         .stop_process(request)
         .await;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while !path.with_extension("exit").exists() {
         if Instant::now() >= deadline {
             return Err(io::Error::other("runtime shutdown is unresolved"));
@@ -357,3 +383,6 @@ async fn stop_runtime(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
