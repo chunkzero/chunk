@@ -101,8 +101,8 @@ impl Engine {
         Ok(())
     }
 
-    /// Runs against fresh host capabilities, retaining globals only after success.
-    /// Recycles a failed runtime or one that has completed 10,000 calls; other
+    /// Runs against fresh host capabilities, retaining globals across ordinary application errors.
+    /// Recycles a terminated runtime or one that has completed 10,000 calls; other
     /// deployments remain resident and retain their own state.
     /// # Errors
     /// Reports unknown deployments, invalid input, execution errors and budgets.
@@ -157,7 +157,7 @@ impl Engine {
             },
         };
         let result = runtime.execute(&self.executor, &self.deadline, prepared, resident.limits, cancellation);
-        if result.is_ok() {
+        if !matches!(result, Err(Error::Cancelled | Error::Deadline | Error::Heap)) {
             resident.runtime = Some(runtime);
         }
         result

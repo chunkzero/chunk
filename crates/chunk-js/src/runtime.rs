@@ -48,7 +48,9 @@ impl State {
         } = prepared;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            executor.block_on(engine.invoke(&export, &caller, &arguments, limits.execution))
+            let result = executor.block_on(engine.invoke(&export, &caller, &arguments, limits.execution));
+            executor.block_on(engine.drain(limits.execution))?;
+            result
         });
         let capabilities = self
             .runtime
@@ -205,7 +207,6 @@ impl State {
         .await
         .map_err(|_| Error::Deadline)?
         .map_err(js_error)?;
-        self.drain(duration).await?;
         deno_core::scope!(scope, &mut self.runtime);
         let output = v8::Local::new(scope, output);
         let output = v8::Local::<v8::String>::try_from(output).map_err(js_error)?;
