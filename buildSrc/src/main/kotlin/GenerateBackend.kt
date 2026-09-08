@@ -5,6 +5,8 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 import javax.inject.Inject
@@ -15,6 +17,7 @@ abstract class GenerateBackend
         private val exec: ExecOperations,
     ) : DefaultTask() {
         @get:InputDirectory
+        @get:PathSensitive(PathSensitivity.RELATIVE)
         abstract val backendProject: DirectoryProperty
 
         @get:Input

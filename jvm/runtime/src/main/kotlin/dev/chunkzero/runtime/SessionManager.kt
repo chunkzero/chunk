@@ -101,8 +101,21 @@ internal class SessionManager(
                             player,
                         )
                     ) {
-                        scope.releasePlayer(player)
-                        invoke { behavior.onLeave(player) }
+                        val disposalFailure =
+                            try {
+                                scope.releasePlayer(player)
+                                null
+                            } catch (error: Exception) {
+                                error
+                            }
+                        invoke { behavior.onLeave(player) }.handle { _, error ->
+                            if (disposalFailure != null) {
+                                if (error != null) disposalFailure.addSuppressed(error)
+                                throw disposalFailure
+                            }
+                            if (error != null) throw error
+                            Unit
+                        }
                     } else {
                         CompletableFuture.completedFuture(Unit)
                     }

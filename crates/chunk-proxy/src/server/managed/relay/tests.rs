@@ -50,8 +50,10 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
                 .unwrap();
             stopped.send(()).unwrap();
             late.await.unwrap();
-            // The immutable source stream is no longer part of the public packet pump.
-            start_configuration(&mut public, &mut settings).await.unwrap();
+            start_configuration(&mut public, &mut internal, &mut settings)
+                .await
+                .unwrap();
+            drop(internal);
             let (destination, backend) = tokio::io::duplex(8192);
             let mut destination = Transport::new(destination);
             let mut backend = Transport::new(backend);
@@ -88,6 +90,7 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
         decode_packet::<StartConfiguration>(&client.read_frame(4096).await.unwrap()).unwrap();
         // This remains a source PLAY packet, not a configuration packet.
         client.write_body(&[0x05, 0x01]).await.unwrap();
+        assert_eq!(jvm.read_frame(4096).await.unwrap().as_ref(), &[0x05, 0x01]);
         if final_settings {
             let mut settings = information();
             settings.view_distance = 7;
@@ -95,8 +98,13 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
             VarInt(PlayClientInformation::ID).encode(&mut body).unwrap();
             settings.encode(&mut body).unwrap();
             client.write_body(&body).await.unwrap();
+            assert_eq!(jvm.read_frame(4096).await.unwrap().as_ref(), body);
         }
         client.write_packet(&ConfigurationAcknowledged).await.unwrap();
+        assert_eq!(
+            jvm.read_frame(4096).await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
         decode_packet::<SelectKnownPacks>(&client.read_frame(4096).await.unwrap()).unwrap();
         client
             .write_packet(&KnownPacks {

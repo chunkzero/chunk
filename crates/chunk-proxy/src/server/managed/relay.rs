@@ -61,10 +61,15 @@ where
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn start_configuration<S: AsyncRead + AsyncWrite + Unpin>(
+pub(super) async fn start_configuration<S, I>(
     public: &mut Transport<S>,
+    internal: &mut Transport<I>,
     settings: &mut ConfigurationClientInformation,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncRead + AsyncWrite + Unpin,
+{
     public.write_packet(&StartConfiguration).await?;
     loop {
         let frame = public.read_frame(INPUT_LIMIT).await?;
@@ -74,6 +79,7 @@ pub(super) async fn start_configuration<S: AsyncRead + AsyncWrite + Unpin>(
         }
         // Final source play acknowledgments can precede the configuration boundary.
         retain_settings(&frame, settings)?;
+        internal.write_body(&frame).await?;
     }
 }
 

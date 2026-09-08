@@ -70,6 +70,20 @@ class BackendSessionTest {
         assertTrue(fixture.deadlineObserved);
         assertEquals(3L, client.call$shared$profile$read(new BackendTypes.Fn$shared$profile$read$Args(new PlayerId("spoof"))).get(2, TimeUnit.SECONDS));
     }
+    @Test void unaryResultWaitsForFinalStatusAndRemainsSessionOwned() throws Exception {
+        var reference = new QueryRef<NullValue, Long>("shared/partial", Codecs.NULL, Codecs.INTEGER);
+        var result = session.query(reference, NullValue.INSTANCE);
+        var response = fixture.partial.poll(2, TimeUnit.SECONDS);
+        assertNotNull(response);
+        response.onError(Status.UNAVAILABLE.asRuntimeException());
+        var error = assertThrows(ExecutionException.class, () -> result.get(2, TimeUnit.SECONDS));
+        assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(error.getCause()).getCode());
+
+        var pending = session.query(reference, NullValue.INSTANCE);
+        assertNotNull(fixture.partial.poll(2, TimeUnit.SECONDS));
+        session.close();
+        assertTrue(pending.isCancelled());
+    }
     @Test void groupedWatchSignalsStaleThenReplacesOneConsistentSnapshot() throws Exception {
         var reference = new QueryRef<Long, Long>("shared/read", Codecs.INTEGER, Codecs.INTEGER);
         var first = session.bind(reference, 1L); var second = session.bind(reference, 2L);
@@ -111,10 +125,15 @@ class BackendSessionTest {
         final AtomicInteger watches = new AtomicInteger();
         final CountDownLatch hanging = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
+        final LinkedBlockingQueue<StreamObserver<BackendResult>> partial = new LinkedBlockingQueue<>();
         volatile StreamObserver<BackendUpdate> watch;
         volatile boolean deadlineObserved;
         @Override public void call(BackendCall request, StreamObserver<BackendResult> response) {
             deadlineObserved = Context.current().getDeadline() != null;
+            if (request.getFunction().equals("shared/partial")) {
+                response.onNext(BackendResult.newBuilder().setRevision(1).setResultJson(ByteString.copyFromUtf8("3")).build());
+                partial.add(response); return;
+            }
             if (request.getFunction().equals("shared/hang")) {
                 ((ServerCallStreamObserver<BackendResult>) response).setOnCancelHandler(cancelled::countDown);
                 hanging.countDown(); return;
