@@ -208,6 +208,7 @@ impl Actor {
                 }
             }
         }
+        let written = snapshot.validate(&writes)?;
         let changes = snapshot.changes(&writes)?;
         let old_bytes = changes
             .iter()
@@ -217,7 +218,7 @@ impl Actor {
             .iter()
             .map(Vec::len)
             .sum::<usize>();
-        let bytes = snapshot.validate(&writes)? + execution.value.len() + old_bytes;
+        let bytes = written + execution.value.len() + old_bytes;
         if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
             return Err(Error::Busy);
         }

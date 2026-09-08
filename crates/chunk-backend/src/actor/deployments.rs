@@ -77,6 +77,12 @@ impl Actor {
                 if !error.is_rejected_commit() {
                     self.fail(&Error::CommitFailed);
                 }
+                let error = match error {
+                    Error::Storage(ref inner) if matches!(inner.as_ref(), chunk_store::Error::Invalid(_)) => {
+                        Error::Contract
+                    }
+                    error => error,
+                };
                 reply.finish(Err(error));
             }
         }

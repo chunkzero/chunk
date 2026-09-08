@@ -181,6 +181,74 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
 }
 
 #[test]
+fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
+    for version in [3, 4] {
+        let (directory, mut store) = open();
+        let path = directory.path().join("data.db");
+        let deployment = chunk_contract::Deployment {
+            contract_version: 1,
+            runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+            id: "old".into(),
+            source: "export {};".into(),
+            tables: crate::tests::schema(),
+            functions: std::collections::BTreeMap::new(),
+        };
+        store.retain_deployment(&deployment).unwrap();
+        let outcome = store
+            .commit(commit("committed", 1, vec![write("a", Some(json!({"coins": 7})))]))
+            .unwrap();
+        let context = RetryContext {
+            deployment: "old".into(),
+            timestamp: 123,
+            seed: 456,
+        };
+        store.prepare_operation(&operation("failed"), context.clone()).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE _chunk_retired_deployments;")
+            .unwrap();
+        if version == 3 {
+            store
+                .connection
+                .execute_batch("DROP TABLE _chunk_retry_contexts;")
+                .unwrap();
+        }
+        store.connection.pragma_update(None, "user_version", version).unwrap();
+        drop(store);
+
+        let mut store = SqliteStore::open(&path, "local").unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
+        assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
+        assert_eq!(
+            store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value,
+            json!({"coins": 7})
+        );
+        assert_eq!(
+            store.prepare_operation(&operation("failed"), context.clone()).unwrap(),
+            context
+        );
+        assert!(store.release_deployment("old").unwrap());
+        drop(store);
+
+        let mut store = SqliteStore::open(&path, "local").unwrap();
+        assert!(store.deployments().unwrap().is_empty());
+        assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
+        assert_eq!(store.snapshot().unwrap().revision, outcome.revision);
+        assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome));
+        assert!(matches!(
+            store.prepare_operation(
+                &operation("failed"),
+                RetryContext {
+                    deployment: "new".into(),
+                    ..context
+                }
+            ),
+            Err(Error::OperationMismatch)
+        ));
+    }
+}
+
+#[test]
 fn invalid_schemas_and_documents_fail_without_changing_storage() {
     let (_directory, mut store) = open();
     for name in ["_chunk_metadata", "sqlite_sequence", "bad\"name", "Profiles"] {
