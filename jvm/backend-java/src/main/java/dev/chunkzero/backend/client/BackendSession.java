@@ -103,18 +103,22 @@ public final class BackendSession implements AutoCloseable {
         try {
             var request = request(reference, arguments, operation);
             stub.withDeadlineAfter(deadline.toNanos(), TimeUnit.NANOSECONDS).call(request, new ClientResponseObserver<BackendCall, BackendResult>() {
+                private BackendResult response;
                 public void beforeStart(ClientCallStreamObserver<BackendCall> stream) {
                     result.whenComplete((value, error) -> { if (result.isCancelled()) stream.cancel("session scope closed", null); });
                 }
-                public void onNext(BackendResult value) {
+                public void onNext(BackendResult value) { response = value; }
+                public void onError(Throwable error) { result.completeExceptionally(error); }
+                public void onCompleted() {
+                    if (result.isDone()) return;
                     try {
-                        if (!value.getResultJson().isValidUtf8() || value.getResultJson().size() > 1024 * 1024) throw new IllegalArgumentException("Invalid backend JSON");
-                        result.complete(reference.result().decode(Codecs.parse(value.getResultJson().toStringUtf8())));
+                        if (response == null) throw new IllegalStateException("Missing backend result");
+                        var encoded = response.getResultJson();
+                        if (!encoded.isValidUtf8() || encoded.size() > 1024 * 1024) throw new IllegalArgumentException("Invalid backend JSON");
+                        result.complete(reference.result().decode(Codecs.parse(encoded.toStringUtf8())));
                     }
                     catch (RuntimeException error) { result.completeExceptionally(error); }
                 }
-                public void onError(Throwable error) { result.completeExceptionally(error); }
-                public void onCompleted() { if (!result.isDone()) result.completeExceptionally(new IllegalStateException("Missing backend result")); }
             });
         } catch (RuntimeException error) { result.completeExceptionally(error); }
         return result;

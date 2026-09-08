@@ -227,6 +227,13 @@
         }
       }
     },
+    "BackendTypes": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "backendTypes",
+      "arguments": { "type": "null" },
+      "result": { "type": "integer" }
+    },
     "Codecs": {
       "kind": "query",
       "visibility": "public",

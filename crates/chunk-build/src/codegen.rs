@@ -12,13 +12,7 @@ mod typescript;
 /// # Errors
 /// Rejects invalid contracts, unsupported literals, Java name collisions and filesystem failures.
 pub fn generate(contract: &Path, output: &Path, package: &str) -> io::Result<()> {
-    if package.is_empty()
-        || package
-            .split('.')
-            .any(|part| java::identifier(part) != part || part.is_empty())
-    {
-        return Err(io::Error::other("invalid Java package"));
-    }
+    validate_package(package)?;
     let contract = read_contract(contract)?;
     let mut generator = java::Generator {
         declarations: Vec::new(),
@@ -113,6 +107,17 @@ pub fn generate(contract: &Path, output: &Path, package: &str) -> io::Result<()>
     fs::write(java_directory.join("BackendTypes.java"), source)?;
     fs::write(output.join("api.ts"), typescript)?;
     java::write_client(output, package, &clients)?;
+    Ok(())
+}
+
+fn validate_package(package: &str) -> io::Result<()> {
+    if package.is_empty()
+        || package
+            .split('.')
+            .any(|part| java::identifier(part) != part || part.is_empty())
+    {
+        return Err(io::Error::other("invalid Java package"));
+    }
     Ok(())
 }
 
