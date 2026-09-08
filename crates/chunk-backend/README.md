@@ -36,8 +36,8 @@ Give every mutation a stable operation ID. Its fingerprint includes the function
 canonical arguments and caller, independent of bundle and deployment identity.
 Duplicate requests recover the stored outcome without executing again, including
 after redeployment; reuse with a different request fails. Outcome lookups use the
-engine's pinned base snapshot and pending operations, so execution need not wait
-behind earlier commits. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
+engine's pinned base snapshot and pending operations. New operations prepare their
+retry context on the commit thread before execution. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
 to encode and canonicalize once before crossing the engine boundary.
 Argument/result contracts and wire numbers are validated before publication.
 Deployment-specific reads project declared fields; writes must satisfy the
@@ -86,12 +86,6 @@ described in `chunk-js`.
 
 Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
 `cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
-
-Snapshot acquisition captures a timestamp; mutation seeds derive from the operation
-ID. The active execution keeps both fixed. Durable retries recover the outcome
-without running JS. A new request after a definite rejection acquires a fresh
-snapshot/time. No internal conflict-retry loop or persisted failed-attempt context
-is implemented; any future internal retry must retain its original time and seed.
 
 Mutation admission durably fixes the original snapshot timestamp, seed and
 uncommitted deployment binding before evaluation. Definite rejection and restart
