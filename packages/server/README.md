@@ -50,7 +50,8 @@ export const record = mutation({
 ```
 
 Documents include a readonly `_id`; `v.document(table, fields)` validates returned
-documents. IDs contain their table and 128 pseudorandom bits from the invocation's
+documents. Returned values are local copies; use `patch` to persist edits.
+IDs contain their table and 128 pseudorandom bits from the invocation's
 seeded stream. Repeating the same mutation operation and control flow allocates
 the same IDs; a committed retry returns the original outcome. IDs are identifiers,
 not secrets. Collisions reject the transaction.

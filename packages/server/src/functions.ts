@@ -5,7 +5,7 @@ import { freeze, v } from "./validators.ts"
 import type { InferObject, JsonValue, Schema, Shape, Validator } from "./validators.ts"
 
 export interface RawReader {
-  scanIndex(query: { table: string; index: string; prefix: JsonValue[]; start: JsonValue; end: JsonValue; limit: number }): [string, JsonValue][]
+  scanIndex(query: { table: string; index: string; prefix: JsonValue[]; start?: JsonValue; end?: JsonValue; limit: number }): [string, JsonValue][]
   get(table: string, id: string): JsonValue
   scan(table: string, start?: string | null, end?: string | null): [string, JsonValue][]
 }
@@ -19,7 +19,7 @@ export type FunctionKind = "query" | "mutation"
 export type Visibility = "public" | "internal"
 const definition = Symbol.for("@chunk/function")
 
-export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = unknown, R = unknown> {
+export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = never, R = unknown> {
   readonly [definition]: true
   readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema }
   readonly handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: A) => R | Promise<R>
