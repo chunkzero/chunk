@@ -1,18 +1,25 @@
 # Embedded transactional JavaScript
 
-`Deployment::new(id, source, limits)` loads a bundled ES module into one persistent
-`deno_core`/V8 runtime. `deployment.execute(invocation, host, cancellation)` selects
-an exported function and calls it with `(ctx, arguments)`. Source and identity are
-fixed at registration; calls supply only export, arguments, caller and mode. Imports
-must be bundled before registration. Module initialization has no host capabilities.
+`Engine::new()` owns one current-thread executor, one deadline watchdog, and a
+registry of persistent `deno_core`/V8 runtimes. `register(DeploymentId, source,
+limits)` loads a bundled ES module; `execute(&id, invocation, host, cancellation)`
+calls an export with `(ctx, arguments)`. `release(&id)` immediately drops its
+runtime and retained source, independent of registration order. Duplicate
+registration fails. Imports must be bundled; initialization has no capabilities.
 
-The environment backend owns one `Deployment` per resident version. Each handle
-starts a dedicated worker thread that creates, uses and drops its V8 runtime.
-Calls require exclusive mutable access to the handle, allowing one outstanding
-invocation with no growing internal queue. Construction and execution block; callers
-should use their bounded blocking executor. Dropping the handle joins its worker.
-The shared V8 platform is initialized before workers start. There is no global
-deployment registry. Idle deployment workers sleep waiting for requests.
+The backend constructs, uses and drops `Engine` on exactly one environment engine
+thread and serializes calls there. `Engine` is neither `Send` nor `Sync`. Call
+`Engine::init_platform()` on the common parent before spawning environment threads.
+Network tasks use the backend's bounded request channel; JavaScript and sync
+orchestration share the engine thread without a channel hop between evaluations.
+Do not execute inside another Tokio runtime; these methods synchronously drive
+the engine's own executor. `Deployment` is a convenience wrapper over an `Engine`
+with one registered version, with the same caller-thread contract.
+
+The private `isolate.rs` wrapper exits idle isolates and enters them only for use
+or destruction. Its scoped guard restores the previous isolate on return and
+unwind. Only that module allows unsafe entry/exit calls; the rest of this crate
+denies unsafe code and other workspace crates retain their `forbid` lint.
 
 `ctx.db.get(table, id)` and `ctx.db.scan(table, start, end)` read a fresh memory-only
 `ReadHost` snapshot on each call, recording dependencies and including speculative
@@ -30,22 +37,20 @@ state, or use mutable counters to determine transactional results. Purity and co
 dependency tracking are application requirements, not enforced by context reuse.
 
 The default budget is one second and 32 MiB of V8 heap. One persistent watchdog
-per worker polls deadlines and cancellation every two milliseconds and shuts down
-with the worker. It interrupts synchronous loops and cancellation; the near-heap
-callback terminates
-execution with 8 MiB of emergency headroom. Initialization and each invocation have
-separate execution budgets. Any execution error drops the engine; the next call
-reloads the same bundle under the initialization budget. Engines also recycle after
-10,000 calls. Dropping a deployment releases its engine and retained source.
+per engine polls deadlines and cancellation every two milliseconds and shuts down
+with the engine. It interrupts synchronous loops and cancellation; the near-heap
+callback terminates execution with 8 MiB of emergency headroom. Initialization and each invocation have
+separate execution budgets. Any execution error drops that deployment runtime; the next call
+reloads the same bundle under the initialization budget. Each deployment runtime also recycles after
+10,000 calls, without disturbing other versions. Dropping the engine releases all
+runtimes and joins its watchdog.
 
 Input/result/document JSON is limited to 1 MiB, source to 4 MiB, capability calls to
 4096 and writes to 256/8 MiB. Host document JSON parsing enforces a nesting limit.
-Results remain strict JSON
-text in `Execution::value`; consumers can forward them without parsing. Caller and
+Results remain strict JSON text in `Execution::value`; consumers can forward them without parsing. Caller and
 arguments are encoded once and parsed in JS. A single bootstrap entry constructs
 the context, awaits the handler and serializes its result, followed by an event-loop
-drain. The backend must
-bound resident deployments, concurrent work, queued requests and snapshot memory;
+drain. The backend must bound resident deployments, concurrent work, queued requests and snapshot memory;
 the isolate heap budget is not a whole-process RSS limit. Release versions after
 references drain. Retaining a bundle for a future job need not keep its engine alive;
 admission, reference tracking and reload policy belong to the environment backend.

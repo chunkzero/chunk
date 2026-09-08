@@ -44,7 +44,7 @@ pub struct Write {
 
 /// A memory-only snapshot capability. Implementations must record read dependencies,
 /// include the supplied speculative overlay, and perform no external effects.
-pub trait ReadHost: Send + 'static {
+pub trait ReadHost: 'static {
     /// # Errors
     /// Reports invalid reads or snapshot limits without publishing effects.
     fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value, String>;
@@ -106,8 +106,8 @@ pub enum Error {
     Heap,
     #[error("JavaScript: {0}")]
     JavaScript(String),
-    #[error("deployment worker stopped")]
-    WorkerStopped,
+    #[error("deployment is not registered")]
+    UnknownDeployment,
     #[error("runtime I/O: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -218,3 +218,84 @@ fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
     }
     assert!(run("return 'x'.repeat(1024 * 1024);").is_err());
 }
+
+#[test]
+fn engine_switches_releases_and_recycles_independent_deployments() {
+    let mut engine = Engine::new().unwrap();
+    let ids = ["z", "a", "m"].map(|id| DeploymentId::new(id).unwrap());
+    let source = "let n=0; export default (_, args) => { if(args.fail) throw Error('fail'); return ++n; };";
+    for id in &ids {
+        engine.register(id.clone(), source.into(), Limits::default()).unwrap();
+    }
+    assert!(
+        engine
+            .register(ids[0].clone(), source.into(), Limits::default())
+            .is_err()
+    );
+    let execute = |engine: &mut Engine, id: &DeploymentId, input| {
+        engine.execute(id, input, Box::new(Snapshot), &Cancellation::default())
+    };
+    for expected in 1..=2 {
+        for id in &ids {
+            assert_eq!(value(&execute(&mut engine, id, invocation()).unwrap()), json!(expected));
+        }
+    }
+    assert!(engine.release(&ids[0]));
+    assert!(!engine.release(&ids[0]));
+    assert!(matches!(
+        execute(&mut engine, &ids[0], invocation()),
+        Err(Error::UnknownDeployment)
+    ));
+    let bad = DeploymentId::new("bad").unwrap();
+    assert!(
+        engine
+            .register(bad, "throw Error('init');".into(), Limits::default())
+            .is_err()
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true});
+    assert!(execute(&mut engine, &ids[1], fail).is_err());
+    assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(1));
+    assert_eq!(value(&execute(&mut engine, &ids[2], invocation()).unwrap()), json!(3));
+    for _ in 1..10_000 {
+        execute(&mut engine, &ids[1], invocation()).unwrap();
+    }
+    assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(1));
+    assert_eq!(value(&execute(&mut engine, &ids[2], invocation()).unwrap()), json!(4));
+    // Remaining runtimes drop in map order, not reverse creation order.
+}
+
+#[test]
+fn host_runs_on_the_callers_thread_without_send_or_locks() {
+    use std::{cell::Cell, rc::Rc, thread};
+    struct LocalHost {
+        calls: Rc<Cell<usize>>,
+        owner: thread::ThreadId,
+    }
+    impl ReadHost for LocalHost {
+        fn read(&mut self, _: Read, _: &BTreeMap<Key, Option<Value>>) -> Result<Value, String> {
+            assert_eq!(thread::current().id(), self.owner);
+            self.calls.set(self.calls.get() + 1);
+            Ok(json!(42))
+        }
+    }
+    let mut engine = Engine::new().unwrap();
+    let id = DeploymentId::new("local").unwrap();
+    engine
+        .register(
+            id.clone(),
+            "export default ctx => ctx.db.get('p','1');".into(),
+            Limits::default(),
+        )
+        .unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let host = LocalHost {
+        calls: calls.clone(),
+        owner: thread::current().id(),
+    };
+    let result = engine
+        .execute(&id, invocation(), Box::new(host), &Cancellation::default())
+        .unwrap();
+    assert_eq!(value(&result), json!(42));
+    assert_eq!(calls.get(), 1);
+}

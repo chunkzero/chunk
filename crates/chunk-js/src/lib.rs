@@ -5,10 +5,13 @@
 mod capabilities;
 mod deadline;
 mod deployment;
+mod engine;
+mod isolate;
 mod model;
 mod runtime;
 
 pub use deployment::Deployment;
+pub use engine::{DeploymentId, Engine};
 pub use model::{Cancellation, Error, Execution, Invocation, Key, Limits, Mode, Read, ReadHost, Write};
 
 #[cfg(test)]

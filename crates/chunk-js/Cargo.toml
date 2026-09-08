@@ -15,5 +15,11 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 
-[lints]
-workspace = true
+# Only isolate.rs can opt into unsafe isolate entry/exit. Other crates retain forbid.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

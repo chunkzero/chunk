@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -10,109 +9,29 @@ use std::{
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::{
-    Cancellation, Error, Execution, Invocation, Limits, ReadHost, Write,
+    Cancellation, Error, Execution, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
 };
 
-const MAX_CALLS: u32 = 10_000;
-
-pub(crate) struct Worker {
-    source: String,
-    limits: Limits,
-    engine: Option<Engine>,
-    executor: tokio::runtime::Runtime,
-    deadline: Deadline,
+pub(crate) struct Prepared {
+    pub export: String,
+    pub caller: String,
+    pub arguments: String,
+    pub capabilities: Capabilities,
 }
 
-impl Worker {
-    pub(crate) fn new(source: String, limits: Limits) -> Result<Self, Error> {
-        if source.len() > 4 * 1024 * 1024 {
-            return Err(Error::Invalid("invalid source"));
-        }
-        if !(8 * 1024 * 1024..=128 * 1024 * 1024).contains(&limits.heap_bytes)
-            || limits.execution.is_zero()
-            || limits.execution.as_secs() > 30
-        {
-            return Err(Error::Invalid("limits outside local execution budget"));
-        }
-        let executor = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
-        let deadline = Deadline::new()?;
-        let engine = Engine::load(&executor, &deadline, &source, limits, &Cancellation::default())?;
-        Ok(Self {
-            source,
-            limits,
-            engine: Some(engine),
-            executor,
-            deadline,
-        })
-    }
-
-    pub(crate) fn execute(
-        &mut self,
-        invocation: Invocation,
-        host: Box<dyn ReadHost>,
-        cancellation: &Cancellation,
-    ) -> Result<Execution, Error> {
-        if invocation.export.is_empty() || invocation.export.len() > 128 {
-            return Err(Error::Invalid("invalid export"));
-        }
-        let caller = serde_json::to_string(&invocation.caller).map_err(js_error)?;
-        let arguments = serde_json::to_string(&invocation.arguments).map_err(js_error)?;
-        if caller.len() > 1024 * 1024 || arguments.len() > 1024 * 1024 {
-            return Err(Error::Invalid("input exceeds size limit"));
-        }
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        if self.engine.as_ref().is_some_and(|engine| engine.calls >= MAX_CALLS) {
-            self.engine = None;
-        }
-        let mut engine = match self.engine.take() {
-            Some(engine) => engine,
-            None => Engine::load(&self.executor, &self.deadline, &self.source, self.limits, cancellation)?,
-        };
-        let _entered = self.executor.enter();
-        let prepared = Prepared {
-            export: invocation.export,
-            caller,
-            arguments,
-            capabilities: Capabilities {
-                generation: engine.calls + 1,
-                host,
-                mode: invocation.mode,
-                cancellation: cancellation.clone(),
-                writes: BTreeMap::new(),
-                calls: 0,
-                write_bytes: BTreeMap::new(),
-            },
-        };
-        let result = engine.execute(&self.executor, &self.deadline, prepared, self.limits, cancellation);
-        if result.is_ok() {
-            self.engine = Some(engine);
-        }
-        result
-    }
-}
-
-struct Prepared {
-    export: String,
-    caller: String,
-    arguments: String,
-    capabilities: Capabilities,
-}
-
-struct Engine {
+pub(crate) struct State {
     // Persistent handles must drop before their isolate.
     run: Option<v8::Global<v8::Function>>,
     namespace: Option<v8::Global<v8::Object>>,
-    runtime: JsRuntime,
+    pub runtime: JsRuntime,
     heap_exhausted: Arc<AtomicBool>,
-    calls: u32,
+    pub calls: u32,
 }
 
-impl Engine {
-    fn execute(
+impl State {
+    pub(crate) fn execute(
         &mut self,
         executor: &tokio::runtime::Runtime,
         deadline: &Deadline,
@@ -147,14 +66,7 @@ impl Engine {
         Ok(Execution { value, writes })
     }
 
-    fn load(
-        executor: &tokio::runtime::Runtime,
-        deadline: &Deadline,
-        source: &str,
-        limits: Limits,
-        cancellation: &Cancellation,
-    ) -> Result<Self, Error> {
-        let _entered = executor.enter();
+    pub(crate) fn new(limits: Limits) -> Self {
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![chunk_capabilities::init()],
             create_params: Some(v8::Isolate::create_params().heap_limits(0, limits.heap_bytes)),
@@ -169,17 +81,26 @@ impl Engine {
             handle.terminate_execution();
             limit + 8 * 1024 * 1024
         });
-        let mut engine = Self {
+        Self {
             run: None,
             namespace: None,
             runtime,
             heap_exhausted,
             calls: 0,
-        };
-        engine.guarded(deadline, limits, cancellation, |engine| {
-            executor.block_on(engine.initialize(source, limits.execution))
-        })?;
-        Ok(engine)
+        }
+    }
+
+    pub(crate) fn initialize_on(
+        &mut self,
+        executor: &tokio::runtime::Runtime,
+        deadline: &Deadline,
+        source: &str,
+        limits: Limits,
+        cancellation: &Cancellation,
+    ) -> Result<(), Error> {
+        self.guarded(deadline, limits, cancellation, |state| {
+            executor.block_on(state.initialize(source, limits.execution))
+        })
     }
 
     fn guarded<T>(
