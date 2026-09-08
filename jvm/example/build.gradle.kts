@@ -41,14 +41,21 @@ tasks.named<GenerateBackend>("generateBackend") {
 val buildBackendExecutable =
     tasks.register<Exec>("buildBackendExecutable") {
         workingDir(rootProject.projectDir)
-        inputs.files(rootProject.fileTree("crates") { include("**/src/**", "**/Cargo.toml") })
-        inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
+        inputs.files(rootProject.fileTree("crates") { include("**/src/**", "**/Cargo.toml", "**/build.rs") })
+        inputs.files(
+            rootProject.file("Cargo.toml"),
+            rootProject.file("Cargo.lock"),
+            rootProject.file("rust-toolchain.toml"),
+            rootProject.file("mise.toml"),
+        )
         inputs.dir(rootProject.file("proto"))
         outputs.file(rootProject.file("target/debug/chunk"))
         commandLine("cargo", "build", "-q", "-p", "chunk")
     }
 tasks.test {
     dependsOn(buildBackendExecutable)
+    inputs.files(buildBackendExecutable)
+    inputs.dir(tasks.named<GenerateBackend>("generateBackend").flatMap { it.outputDirectory.dir("backend") })
     systemProperty("chunk.executable", rootProject.file("target/debug/chunk").absolutePath)
     systemProperty(
         "chunk.backend",
