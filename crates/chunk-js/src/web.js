@@ -35,7 +35,11 @@
   delete url.URL.revokeObjectURL;
   const levels = ["debug", "log", "info", "warn", "error"];
   globalThis.console = Object.freeze(Object.fromEntries(levels.map(level => [level, (...values) => {
-    const line = values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" ");
+    const line = values.map(value => {
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value); }
+      catch { return String(value); }
+    }).join(" ");
     log(level, line);
   }])));
   const integerArrays = new Set([Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, BigInt64Array, BigUint64Array]);
