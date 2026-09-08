@@ -19,7 +19,7 @@ export type FunctionKind = "query" | "mutation"
 export type Visibility = "public" | "internal"
 const definition = Symbol.for("@chunk/function")
 
-export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = unknown, R = unknown> {
+export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = never, R = unknown> {
   readonly [definition]: true
   readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema }
   readonly handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: A) => R | Promise<R>

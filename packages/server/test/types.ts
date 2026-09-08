@@ -1,5 +1,5 @@
 import { defineSchema, defineTable, mutation, query, v } from "../src/index.ts"
-import type { Id, Infer, PlayerId } from "../src/index.ts"
+import type { FunctionDefinition, Id, Infer, PlayerId } from "../src/index.ts"
 
 const profiles = defineTable({ player: v.player(), wins: v.integer() }).index("by_player", ["player"])
 defineSchema({ profiles })
@@ -19,6 +19,7 @@ query({ args: {}, returns: v.integer(),
   // @ts-expect-error explicit result validator constrains the handler
   handler: () => "wrong",
 })
+const registered: FunctionDefinition[] = [read]
 // @ts-expect-error inferred count must be a number
 read.handler({ caller: null, db: { get: () => null, scan: () => [] } }, { count: "wrong" })
 const optional = v.object({ value: v.optional(v.string()) })
@@ -30,7 +31,7 @@ const undefinedValue: Infer<typeof optional> = { value: undefined }
 const profile: Id<"profiles"> = v.id("profiles").parse("profiles:p1")
 // @ts-expect-error table IDs remain distinct
 const match: Id<"matches"> = profile
-void [absent, nullable, undefinedValue, match]
+void [registered, absent, nullable, undefinedValue, match]
 
 const schema = defineSchema({ profiles, matches: defineTable({ score: v.integer() }).index("by_score", ["score"]) })
 const { defineFunctions, unset } = await import("../src/index.ts")
