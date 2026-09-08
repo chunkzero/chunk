@@ -113,6 +113,7 @@ class BackendClient(
         private var snapshot: BackendUpdate? = null
         private var stream: ClientCallStreamObserver<BackendWatch>? = null
         private var retry: ScheduledFuture<*>? = null
+        private var retryDelayMillis = 500L
 
         @Synchronized
         fun start() {
@@ -137,6 +138,7 @@ class BackendClient(
                         synchronized(this@Subscription) {
                             if (closed || attempt != generation) return
                             snapshot = value
+                            retryDelayMillis = 500L
                             observer.accept(SubscriptionState(stale = false, snapshot = value))
                         }
                     }
@@ -164,7 +166,8 @@ class BackendClient(
             if (status.code in
                 setOf(Status.Code.UNAVAILABLE, Status.Code.RESOURCE_EXHAUSTED, Status.Code.DEADLINE_EXCEEDED)
             ) {
-                retry = scheduler.schedule(::connect, 500, TimeUnit.MILLISECONDS)
+                retry = scheduler.schedule(::connect, retryDelayMillis, TimeUnit.MILLISECONDS)
+                retryDelayMillis = (retryDelayMillis * 2).coerceAtMost(5000L)
             }
         }
 
