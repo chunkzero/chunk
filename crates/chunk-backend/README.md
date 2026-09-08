@@ -81,10 +81,10 @@ the read instead of returning a silently truncated result. `scanIndex` supports
 declared ascending indexes, equality prefixes and a half-open range on the next
 field, with 1–1,024 results. Both pending and invocation-local writes participate
 in ordering and limiting. Dependencies include old/new index keys and empty ranges.
-Commit results
-are parsed on the commit thread because `chunk_store::Commit` currently takes
-`Value`; query/subscription responses remain JSON text. Durable retries preserve
-the JSON value but may normalize its formatting and object key order.
+Commit results are parsed on the commit thread because `chunk_store::Commit`
+currently takes `Value`; query/subscription responses remain JSON text. Durable
+retries preserve the JSON value but may normalize its formatting and object key
+order.
 
 Construction waits for initialization. Dropping the last backend handle drains
 accepted commits and joins both threads; use a blocking task for construction
