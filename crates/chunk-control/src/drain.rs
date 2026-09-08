@@ -93,7 +93,14 @@ impl Control {
                 }
                 .await;
                 if let Err(error) = stop {
-                    tracing::warn!(%error, "drain shutdown unresolved; retaining ownership");
+                    if crate::now_ms() >= drain.deadline_ms {
+                        tracing::warn!(%error, host = %drain.host, "drain deadline reached; terminating host");
+                        if let Err(error) = self.host.terminate(&drain.host).await {
+                            tracing::warn!(%error, host = %drain.host, "drain termination unresolved; retaining ownership");
+                        }
+                    } else {
+                        tracing::warn!(%error, "drain shutdown unresolved; retaining ownership");
+                    }
                 }
             } else {
                 for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {

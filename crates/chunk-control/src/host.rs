@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -27,6 +27,9 @@ pub struct MachineProfile {
 #[tonic::async_trait]
 pub trait Host: Send + Sync {
     async fn ensure(&self, id: &str, profile: &str) -> Result<RuntimeConnection>;
+    /// Idempotently kills only this runtime and its descendants, independently of runtime control.
+    /// Success guarantees `stopped(id)`.
+    async fn terminate(&self, id: &str) -> Result<()>;
     /// True requires affirmative evidence of complete runtime/JVM shutdown.
     fn stopped(&self, id: &str) -> bool;
 }
@@ -67,7 +70,10 @@ impl Host for ProcessHost {
         match marker {
             Ok(_) => {
                 let log = private_file(&self.path(id, "supervisor.log")?)?;
+                let mut pid_file = private_file(&self.path(id, "pid")?)?;
                 let mut command = Command::new(&self.program);
+                #[cfg(unix)]
+                command.process_group(0);
                 if let Some(backend) = &self.backend {
                     command
                         .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
@@ -98,6 +104,13 @@ impl Host for ProcessHost {
                     .spawn();
                 match child {
                     Ok(mut child) => {
+                        let pid = child.id().ok_or(Error::Unresolved("supervisor has no PID"))?;
+                        if let Err(error) = pid_file.write_all(pid.to_string().as_bytes()) {
+                            #[cfg(unix)]
+                            signal_group(pid, "-KILL").await;
+                            let _ = child.kill().await;
+                            return Err(error.into());
+                        }
                         tokio::spawn(async move {
                             let _ = child.wait().await;
                         });
@@ -134,9 +147,58 @@ impl Host for ProcessHost {
         }
     }
 
+    async fn terminate(&self, id: &str) -> Result<()> {
+        let exit = self.path(id, "exit")?;
+        if self.stopped(id) {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            let pid = std::fs::read_to_string(self.path(id, "pid")?)?
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| (2..=i32::MAX as u32).contains(pid))
+                .ok_or(Error::Invalid("invalid supervisor PID"))?;
+            signal_group(pid, "-TERM").await;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if self.stopped(id) {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+            signal_group(pid, "-KILL").await;
+            match private_file(&exit) {
+                Ok(mut file) => file.write_all(b"terminated")?,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = exit;
+            Err(Error::Unresolved("host termination requires Unix process groups"))
+        }
+    }
+
     fn stopped(&self, id: &str) -> bool {
         self.path(id, "exit").is_ok_and(|path| path.is_file())
     }
+}
+
+#[cfg(unix)]
+async fn signal_group(pid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .args([signal, "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 }
 
 pub(crate) fn private_file(path: &Path) -> io::Result<std::fs::File> {
