@@ -51,3 +51,52 @@ fn child_executable_remains_runnable_after_the_original_is_replaced() {
     assert_ne!(pinned, next);
     assert_eq!(std::process::Command::new(next).status().unwrap().code(), Some(8));
 }
+
+#[test]
+fn generated_typescript_references_validate_the_cross_language_fixtures() {
+    let output = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let fixtures = root.join("jvm/backend-api/src/test/resources");
+    super::generate(
+        &fixtures.join("contract.json"),
+        output.path(),
+        "dev.chunkzero.generated",
+    )
+    .unwrap();
+    let api = fs::read_to_string(output.path().join("api.ts")).unwrap();
+    assert!(!api.contains("hidden"));
+    let sdk = root.join("packages/server/src/index.ts");
+    fs::write(
+        output.path().join("api.ts"),
+        api.replace(
+            "'@chunk/server'",
+            &serde_json::to_string(sdk.to_str().unwrap()).unwrap(),
+        ),
+    )
+    .unwrap();
+    let fixtures_json = fs::read_to_string(fixtures.join("values.json")).unwrap();
+    let script = format!(
+        "import assert from 'node:assert/strict'; import {{api}} from './api.ts'; const fixtures={fixtures_json}; for(const value of fixtures) assert.deepEqual(api.shared.profile.record.arguments.parse(value),value); assert.throws(()=>api.shared.profile.record.arguments.parse({{...fixtures[0],count:9007199254740992}}));"
+    );
+    fs::write(output.path().join("check.mjs"), script).unwrap();
+    assert!(
+        std::process::Command::new("node")
+            .arg(output.path().join("check.mjs"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(output.path().join("tsconfig.json"), serde_json::to_vec(&serde_json::json!({"compilerOptions":{"strict":true,"noEmit":true,"target":"ES2023","module":"ESNext","moduleResolution":"Bundler","allowImportingTsExtensions":true,"exactOptionalPropertyTypes":true,"lib":["ES2023"],"types":[]},"files":["api.ts"]})).unwrap()).unwrap();
+    assert!(
+        std::process::Command::new("node")
+            .arg(root.join("packages/compiler/node_modules/typescript/bin/tsc"))
+            .arg("--project")
+            .arg(output.path().join("tsconfig.json"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
