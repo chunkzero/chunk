@@ -7,6 +7,7 @@ import net.minestom.server.event.EventFilter
 import net.minestom.server.event.EventNode
 import net.minestom.server.instance.InstanceContainer
 import java.time.Duration
+import java.util.IdentityHashMap
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
@@ -33,6 +34,8 @@ class SessionScope internal constructor(
 ) {
     private val ownedInstances = CopyOnWriteArrayList<InstanceContainer>()
     private val resources = mutableListOf<AutoCloseable>()
+    private val playerResources = IdentityHashMap<Player, MutableList<AutoCloseable>>()
+    val coroutines by lazy { own(SessionCoroutines(this, ticks)) }
     internal val players =
         ConcurrentHashMap
             .newKeySet<Player>()
@@ -58,12 +61,39 @@ class SessionScope internal constructor(
             resource.close()
             error("Session disposed")
         }
-        if (resources.size >= 1024) {
+        if (resources.size + playerResources.values.sumOf { it.size } >= 1024) {
             resource.close()
             error("Session resource limit reached")
         }
         resources.add(resource)
         return resource
+    }
+
+    /** Player resources are keyed by the admitted object, keeping replacements independent. */
+    fun <T : AutoCloseable> own(
+        player: Player,
+        resource: T,
+    ): T {
+        ticks.checkThread()
+        if (disposed || player !in players || resources.size + playerResources.values.sumOf { it.size } >= 1024) {
+            resource.close()
+            error("Player scope unavailable")
+        }
+        playerResources.getOrPut(player) { mutableListOf() }.add(resource)
+        return resource
+    }
+
+    internal fun releasePlayer(player: Player) {
+        ticks.checkThread()
+        var failure: Exception? = null
+        playerResources.remove(player)?.asReversed()?.forEach {
+            try {
+                it.close()
+            } catch (error: Exception) {
+                failure = error
+            }
+        }
+        failure?.let { throw it }
     }
 
     fun <T> onTick(action: () -> T): CompletableFuture<T> =
@@ -124,7 +154,9 @@ internal class TickExecutor {
     private val pending = ConcurrentLinkedQueue<() -> Unit>()
     private var thread: Thread? = null
 
-    fun checkThread() = check(Thread.currentThread() === thread) { "Use SessionScope.onTick for world changes" }
+    fun isCurrentThread() = Thread.currentThread() === thread
+
+    fun checkThread() = check(isCurrentThread()) { "Use SessionScope.onTick for world changes" }
 
     fun <T> submit(action: () -> T): CompletableFuture<T> {
         val result = CompletableFuture<T>()

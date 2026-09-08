@@ -1,0 +1,29 @@
+[
+  {
+    "player": "alex",
+    "id": "profiles:p1",
+    "count": 9007199254740991,
+    "labels": [
+      "héllo 🌍"
+    ],
+    "state": "ready"
+  },
+  {
+    "player": "alex",
+    "id": "profiles:p1",
+    "count": -9007199254740991,
+    "labels": [],
+    "state": {
+      "reason": "waiting"
+    },
+    "note": null
+  },
+  {
+    "player": "alex",
+    "id": "profiles:p1",
+    "count": 1,
+    "labels": [],
+    "state": "ready",
+    "note": "present"
+  }
+]

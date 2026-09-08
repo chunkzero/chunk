@@ -37,6 +37,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class GameplayLifecycleTest {
@@ -46,13 +47,24 @@ class GameplayLifecycleTest {
         MinecraftServer.setCompressionThreshold(0)
         MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
+        val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
         val joinStarted = CompletableFuture<Unit>()
         val joinFinished = CompletableFuture<Unit>()
         val manager =
             SessionManager(
                 ticks,
                 mapOf(
-                    "flat" to { FlatSession() },
+                    "flat" to {
+                        object : Session() {
+                            lateinit var scope: SessionScope
+                            override fun onCreate(scope: SessionScope) =
+                                FlatSession().onCreate(scope).also { this.scope = scope }
+                            override fun onJoin(player: Player): CompletableFuture<Unit> {
+                                scope.own(player, AutoCloseable { closedPlayers.add(player) })
+                                return CompletableFuture.completedFuture(Unit)
+                            }
+                        }
+                    },
                     "gated" to {
                         object : Session() {
                             override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
@@ -235,6 +247,7 @@ class GameplayLifecycleTest {
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertTrue(oldPlayer.isRemoved)
+            assertTrue(oldPlayer in closedPlayers)
             assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
             val next = delivery("b", 3)
             val nextSocket = connect(next)
@@ -249,6 +262,7 @@ class GameplayLifecycleTest {
                     .contains(current.instance),
             )
             assertTrue(current.isOnline)
+            assertEquals(setOf(oldPlayer), closedPlayers)
             stub().withdrawPlayer(
                 PlayerWithdrawal
                     .newBuilder()

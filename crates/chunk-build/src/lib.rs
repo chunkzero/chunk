@@ -2,6 +2,8 @@
 
 mod program;
 pub use program::pin_program;
+mod codegen;
+pub use codegen::generate;
 mod compiler;
 pub use compiler::compile;
 
