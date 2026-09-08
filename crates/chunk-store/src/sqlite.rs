@@ -120,6 +120,10 @@ impl Storage for SqliteStore {
                 prepared.result
             ],
         )?;
+        transaction.execute(
+            "DELETE FROM _chunk_retry_contexts WHERE operation_id = ?1",
+            [&commit.operation.id],
+        )?;
         transaction.commit()?;
         Ok(Outcome {
             revision: next,
