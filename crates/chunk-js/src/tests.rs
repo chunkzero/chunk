@@ -455,6 +455,14 @@ fn storage_incompatible_results_fail_only_the_invocation() {
 }
 
 #[test]
+fn console_falls_back_to_strings_for_bigints_and_cycles() {
+    let execution = run("const cycle = {}; cycle.self = cycle; console.log(10n, cycle); return 42;").unwrap();
+    assert_eq!(value(&execution), json!(42));
+    assert_eq!(execution.logs.len(), 1);
+    assert_eq!(execution.logs[0].message, "10 [object Object]");
+}
+
+#[test]
 fn fixed_web_apis_preserve_data_and_use_bounded_deterministic_capabilities() {
     let source = r"
         const encoded = new TextEncoder().encode('héllo 🌍');
