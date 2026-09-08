@@ -219,6 +219,7 @@ impl Actor {
                     .iter()
                     .any(|s| s.calls.iter().any(|c| c.deployment == id))
                     || self.mutations.values().any(|m| m.call.deployment == id)
+                    || self.deploying.as_ref().is_some_and(|(d, _)| d.id == id.as_str())
                 {
                     Err(Error::Busy)
                 } else {
