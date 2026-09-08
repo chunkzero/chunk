@@ -21,12 +21,14 @@ or destruction. Its scoped guard restores the previous isolate on return and
 unwind. Only that module allows unsafe entry/exit calls; the rest of this crate
 denies unsafe code and other workspace crates retain their `forbid` lint.
 
-`ctx.db.get(table, id)` and `ctx.db.scan(table, start, end)` read a fresh memory-only
+`ctx.db.get(table, id)` and `ctx.db.scan(table, start, end)` read a fresh
 `ReadHost` snapshot on each call, recording dependencies and including speculative
 writes. Mutations can `put(table, id, value)` and `delete(table, id)`. Queries cannot
 write. Only successful execution returns writes; backend validation and atomic
-storage commit are separate. No host method may publish external effects or block
-on I/O. The watchdog cannot interrupt Rust host code.
+storage commit are separate. No host method may publish external effects. Hosts
+must bound their read costs: the watchdog cannot interrupt Rust host code.
+`chunk-backend` currently reads pinned SQLite snapshots synchronously; database
+reads and decoding can therefore extend the invocation's wall-clock budget.
 
 Each invocation gets fresh caller data, capability budgets and speculative writes.
 Host capabilities carry a generation checked by Rust; retaining an old `ctx.db`

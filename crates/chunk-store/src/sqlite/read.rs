@@ -65,6 +65,10 @@ impl Reader {
 }
 
 impl SnapshotReader for Reader {
+    fn schema(&self) -> &DatabaseSchema {
+        &self.schema
+    }
+
     fn get(&self, key: &DocumentKey) -> Result<Option<Document>> {
         key.validate()?;
         let table = self.table(&key.table)?;

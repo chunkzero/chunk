@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use crate::{Document, DocumentKey, IndexRange, KeyRange, Result, Revision};
+use crate::{DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Result, Revision};
 
 /// Adapter-owned reads pinned to one database revision, including schema and indexes.
 /// Implementations must keep empty ranges and point misses consistent too.
 pub trait SnapshotReader: Send + Sync {
+    /// Schema declarations pinned to the same revision as document reads.
+    fn schema(&self) -> &DatabaseSchema;
+
     /// # Errors
     /// Rejects undeclared tables or invalid keys and reports storage failures.
     fn get(&self, key: &DocumentKey) -> Result<Option<Document>>;
@@ -27,6 +30,11 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    #[must_use]
+    pub fn schema(&self) -> &DatabaseSchema {
+        self.reader.schema()
+    }
+
     /// Wraps an adapter's reader already pinned to the supplied revision.
     #[must_use]
     pub fn new(revision: Revision, reader: impl SnapshotReader + 'static) -> Self {
