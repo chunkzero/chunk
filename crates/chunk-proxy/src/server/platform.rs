@@ -24,6 +24,7 @@ pub(super) struct Platform {
     pub control: LocalControlClient<Channel>,
     backend: BackendClient<Channel>,
     hooks: Arc<Semaphore>,
+    status_hooks: Arc<Semaphore>,
 }
 
 impl Platform {
@@ -35,12 +36,17 @@ impl Platform {
             target,
             proxy_id: uuid::Uuid::new_v4().to_string(),
             hooks: Arc::new(Semaphore::new(64)),
+            status_hooks: Arc::new(Semaphore::new(64)),
         })
     }
 
     async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: Value) -> io::Result<T> {
-        let _permit = self
-            .hooks
+        let hooks = if phase == "status" {
+            &self.status_hooks
+        } else {
+            &self.hooks
+        };
+        let _permit = hooks
             .try_acquire()
             .map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
         let result = self

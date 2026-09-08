@@ -84,6 +84,11 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let good = platform.status("localhost").await.unwrap();
     assert!(String::from_utf8_lossy(&good).contains("Live backend"));
     assert_eq!(platform.route("uuid", "Alex").await.unwrap().key, "lobby");
+    let status_permits = platform.status_hooks.acquire_many(64).await.unwrap();
+    let saturated = platform.status("localhost").await.unwrap();
+    assert!(String::from_utf8_lossy(&saturated).contains("temporarily unavailable"));
+    assert_eq!(platform.route("uuid", "Alex").await.unwrap().key, "lobby");
+    drop(status_permits);
     hooks.mode.store(1, Ordering::SeqCst);
     let bad = platform.status("localhost").await.unwrap();
     assert!(String::from_utf8_lossy(&bad).contains("temporarily unavailable"));
@@ -93,7 +98,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
     hooks.mode.store(2, Ordering::SeqCst);
     assert!(platform.route("uuid", "Alex").await.is_err());
     assert_eq!(hooks.status.load(Ordering::SeqCst), 2);
-    assert_eq!(hooks.routes.load(Ordering::SeqCst), 1);
+    assert_eq!(hooks.routes.load(Ordering::SeqCst), 2);
     server.abort();
     let _ = server.await;
 }
