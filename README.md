@@ -20,7 +20,10 @@ app-local commands. These APIs remain proposed, not implemented.
 
 This branch implements the Rust Minecraft protocol and proxy listener, online
 login authentication, configuration, and authenticated delivery to a Minestom bridge with prepared login admission.
-Managed sessions, handoff, the sync engine, storage adapters, and the application
+SQLite storage implements schema-defined tables and indexes, consistent snapshot
+reads, and atomic commits with recoverable outcomes. See the
+[storage API and example](crates/chunk-store/src/lib.rs).
+Managed sessions, handoff, the sync engine, other storage adapters, and the application
 SDKs remain scaffolds. See [the bridge commands](jvm/runtime/README.md). The CLI currently runs `chunk edge`; planned roles and
 commands are not implemented.
 

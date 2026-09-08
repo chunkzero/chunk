@@ -32,4 +32,8 @@ message BackendWatch {
 message BackendUpdate {
   uint64 revision = 1;
   repeated bytes results_json = 2;
+  // Same order and length as results_json. An error has empty JSON and a
+  // nonempty message; successful JSON null is the bytes "null". Query errors
+  // remain reactive and do not close the group or mark transport state stale.
+  repeated string errors = 3;
 }
