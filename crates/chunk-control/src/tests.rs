@@ -678,8 +678,19 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         .unwrap();
     drop(control);
     let control = fixture.control();
-    control.reconcile_all().await.unwrap();
-    assert!(fixture.runtime.stopped.load(Ordering::Acquire));
+    let operation = control.operation("source").unwrap();
+    let guard = operation.lock().await;
+    let reconciler = control.clone();
+    let reconciliation = tokio::spawn(async move { reconciler.reconcile_all().await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !fixture.runtime.stopped.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drain shutdown must not wait for a busy claim");
+    drop(guard);
+    reconciliation.await.unwrap().unwrap();
     assert!(control.drain(command).unwrap().stopped);
     fixture.close().await;
 }

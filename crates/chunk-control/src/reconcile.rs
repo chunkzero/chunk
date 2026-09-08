@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use prost::Message;
 use tokio::{sync::Semaphore, task::JoinSet};
@@ -50,7 +50,13 @@ impl Control {
                 }
             });
         }
-        while tasks.join_next().await.is_some() {}
+        let mut drains = tokio::time::interval(Duration::from_secs(1));
+        while !tasks.is_empty() {
+            tokio::select! {
+                _ = tasks.join_next() => {}
+                _ = drains.tick() => self.progress_drains().await?,
+            }
+        }
         self.progress_drains().await?;
         Ok(())
     }

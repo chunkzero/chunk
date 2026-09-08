@@ -114,19 +114,19 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             true,
         )
         .await??;
-        // No source packet writer/read is polled after this complete-frame boundary.
+        timeout(
+            Duration::from_secs(10),
+            relay::start_configuration(&mut authenticated.transport, &mut internal, &mut settings),
+        )
+        .await
+        .map_err(io::Error::other)??;
+        // The client's acknowledgment fences all remaining source PLAY input.
         if let Err(error) = withdraw(&guard, &identity).await {
-            let _ = configuration::disconnect(&mut authenticated.transport, 0x20, "Session move unavailable").await;
+            let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
             return Err(error);
         }
         guard.armed = false;
         drop(internal);
-        timeout(
-            Duration::from_secs(10),
-            relay::start_configuration(&mut authenticated.transport, &mut settings),
-        )
-        .await
-        .map_err(io::Error::other)??;
         (guard, assignment) = next;
     }
 }
