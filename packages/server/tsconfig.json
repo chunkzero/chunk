@@ -5,10 +5,12 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2023"],
     "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "types": []
   },
-  "include": ["src"]
+  "include": ["src", "test/types.ts"]
 }

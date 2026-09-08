@@ -2,6 +2,8 @@
 
 mod program;
 pub use program::pin_program;
+mod compiler;
+pub use compiler::compile;
 
 use std::{
     collections::BTreeMap,
@@ -10,14 +12,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chunk_contract::{Deployment, Function, Schema};
+use chunk_contract::{DatabaseSchema, Deployment, Function, RuntimeProfile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Contract {
-    tables: BTreeMap<String, Schema>,
+struct BackendMetadata {
+    contract_version: u32,
+    runtime_profile: RuntimeProfile,
+    tables: DatabaseSchema,
     functions: BTreeMap<String, Function>,
 }
 
@@ -37,10 +41,10 @@ pub struct Artifact {
 /// # Errors
 /// Rejects invalid contracts, symlinks, oversized inputs, or a changed published artifact.
 pub fn publish(inputs: &Inputs, directory: &Path, project: &[u8]) -> io::Result<Artifact> {
-    let source = String::from_utf8(read_limited(&inputs.source, 2 * 1024 * 1024)?).map_err(io::Error::other)?;
-    let contract: Contract =
+    let source = String::from_utf8(read_limited(&inputs.source, 4 * 1024 * 1024)?).map_err(io::Error::other)?;
+    let contract: BackendMetadata =
         serde_json::from_slice(&read_limited(&inputs.contract, 2 * 1024 * 1024)?).map_err(io::Error::other)?;
-    if source.len() > 2 * 1024 * 1024 || contract.functions.is_empty() || project.len() > 65_536 {
+    if contract.functions.is_empty() || project.len() > 65_536 {
         return Err(io::Error::other("invalid backend bundle inputs"));
     }
     let mut files = BTreeMap::new();
@@ -62,11 +66,14 @@ pub fn publish(inputs: &Inputs, directory: &Path, project: &[u8]) -> io::Result<
     files.insert("project.json".into(), project.to_vec());
     let id = digest(&files);
     let bundle = Deployment {
+        contract_version: contract.contract_version,
+        runtime_profile: contract.runtime_profile,
         id: id.clone(),
         source,
         tables: contract.tables,
         functions: contract.functions,
     };
+    bundle.validate().map_err(io::Error::other)?;
     files.insert(
         "backend.json".into(),
         serde_json::to_vec(&bundle).map_err(io::Error::other)?,

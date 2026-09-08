@@ -1,11 +1,9 @@
-/**
- * `@chunk/server`: scaffold for backend functions, commands and hooks.
- *
- * The initial runtime is deno_core/V8 with explicit chunk capabilities, not
- * ambient Node or browser APIs. No public SDK API is implemented yet.
- *
- * App TOML carries metadata; Gradle builds JVM gameplay. Server code owns
- * routing and optional queue/matching policies. File-based command domains
- * scope named commands and createHook exports. Chunk provisions sessions.
- */
-export {}
+/// <reference path="./web.d.ts" />
+export { v } from "./validators.ts"
+export type { Validator, OptionalValidator, Shape, Infer, InferObject, Id, PlayerId, SessionId, JsonValue } from "./validators.ts"
+export { defineTable, defineSchema } from "./schema.ts"
+export type { TableDefinition, SchemaDefinition } from "./schema.ts"
+export { query, mutation, internalQuery, internalMutation, isFunction, defineFunctions } from "./functions.ts"
+export type { FunctionDefinition, QueryContext, MutationContext, FunctionReference } from "./functions.ts"
+export { unset } from "./documents.ts"
+export type { Document, Reader, Writer, Selection } from "./documents.ts"

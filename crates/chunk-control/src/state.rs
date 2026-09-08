@@ -109,7 +109,10 @@ impl Authority {
         if !path.exists() {
             super::host::private_file(path)?;
         }
-        let store = SqliteStore::open(path, &format!("control:{}", config.deployment.environment))?;
+        let mut store = SqliteStore::open(path, &format!("control:{}", config.deployment.environment))?;
+        store.apply_schema(&serde_json::from_value(serde_json::json!({
+            "control": {"fields": {"state": {"schema": {"type": "string"}}}}
+        }))?)?;
         let mut authority = Self { store };
         let fingerprint = Sha256::digest(serde_json::to_vec(config)?).to_vec();
         authority.update(|state| {
@@ -126,10 +129,9 @@ impl Authority {
 
     pub fn read(&mut self) -> Result<State> {
         let snapshot = self.store.snapshot()?;
-        snapshot.get(&DocumentKey::new("control", "state")?).map_or_else(
-            || Ok(State::default()),
-            |doc| Ok(serde_json::from_value(doc.value.clone())?),
-        )
+        snapshot
+            .get(&DocumentKey::new("control", "state")?)?
+            .map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))
     }
 
     pub fn update<T>(&mut self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -137,10 +139,10 @@ impl Authority {
         let snapshot = self.store.snapshot()?;
         let key = DocumentKey::new("control", "state")?;
         let mut state = snapshot
-            .get(&key)
-            .map_or_else(|| Ok(State::default()), |doc| serde_json::from_value(doc.value.clone()))?;
+            .get(&key)?
+            .map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))?;
         let result = change(&mut state)?;
-        let value = serde_json::to_value(state)?;
+        let value = serde_json::json!({"state": serde_json::to_string(&state)?});
         let fingerprint = Sha256::digest(serde_json::to_vec(&value)?).into();
         self.store.commit(Commit {
             expected: snapshot.revision,
@@ -156,4 +158,9 @@ impl Authority {
         })?;
         Ok(result)
     }
+}
+
+fn decode_state(value: &serde_json::Value) -> Result<State> {
+    let json = value["state"].as_str().ok_or(Error::Invalid("corrupt control state"))?;
+    Ok(serde_json::from_str(json)?)
 }

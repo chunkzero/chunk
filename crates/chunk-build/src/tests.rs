@@ -9,7 +9,7 @@ fn publication_is_reproducible_and_new_inputs_cannot_change_a_running_artifact()
     let source = root.path().join("backend.mjs");
     fs::write(&source, "export function status() { return 1; }").unwrap();
     let contract = root.path().join("contract.json");
-    fs::write(&contract, br#"{"tables":{},"functions":{"status":{"kind":"query","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
+    fs::write(&contract, br#"{"contract_version":1,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
     let inputs = Inputs {
         source,
         contract,

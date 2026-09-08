@@ -38,7 +38,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     let backend =
         chunk_backend::Backend::new(options.environment.clone(), Box::new(store)).map_err(io::Error::other)?;
     let deployment = bundle.id.clone();
-    backend.register(bundle).map_err(io::Error::other)?;
+    backend.deploy(bundle).await.map_err(io::Error::other)?;
     let token = super::control::secret(&options.state.join("token"))?;
     let listener = TcpListener::bind(options.bind).await?;
     let connection = BackendConnection {
