@@ -102,7 +102,7 @@ impl View {
     }
 
     pub fn changes(&self, writes: &[Write]) -> Result<Vec<Change>> {
-        let mut budget = read_budget();
+        let mut budget = ReadBudget::default();
         writes
             .iter()
             .map(|write| {
