@@ -11,6 +11,36 @@ fn field(schema: Schema) -> Field {
     }
 }
 
+#[test]
+fn typed_ids_preserve_table_identity_and_platform_namespaces() {
+    let id = Schema::Id {
+        table: "profiles".into(),
+    };
+    assert!(id.accepts(&json!("profiles:p1")));
+    for invalid in [
+        json!("matches:p1"),
+        json!("profiles:"),
+        json!("profiles:bad id"),
+        json!(null),
+    ] {
+        assert!(!id.accepts(&invalid));
+    }
+    assert!(Schema::Player.accepts(&json!("player-1")));
+    assert!(Schema::Session.accepts(&json!("session-1")));
+    assert!(!Schema::Player.accepts(&json!("profiles:p1")));
+    assert_eq!(
+        serde_json::to_value(&id).unwrap(),
+        json!({"type":"id", "table":"profiles"})
+    );
+    assert!(
+        validate(&database(TableSchema {
+            fields: [("ref".into(), field(id))].into(),
+            indexes: [("by_ref".into(), vec!["ref".into()])].into()
+        }))
+        .is_ok()
+    );
+}
+
 fn database(table: TableSchema) -> DatabaseSchema {
     [("profiles".into(), table)].into()
 }

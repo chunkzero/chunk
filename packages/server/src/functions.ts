@@ -1,0 +1,50 @@
+import { freeze, v } from "./validators.ts"
+import type { InferObject, JsonValue, Schema, Shape, Validator } from "./validators.ts"
+
+export interface RawReader {
+  get(table: string, id: string): JsonValue
+  scan(table: string, start?: string | null, end?: string | null): [string, JsonValue][]
+}
+export interface RawWriter extends RawReader {
+  put(table: string, id: string, value: JsonValue): void
+  delete(table: string, id: string): void
+}
+export interface QueryContext { readonly caller: JsonValue; readonly db: RawReader }
+export interface MutationContext { readonly caller: JsonValue; readonly db: RawWriter }
+export type FunctionKind = "query" | "mutation"
+export type Visibility = "public" | "internal"
+const definition = Symbol.for("@chunk/function")
+
+export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = unknown, R = unknown> {
+  readonly [definition]: true
+  readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema }
+  readonly handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: A) => R | Promise<R>
+}
+
+export interface FunctionReference<K extends FunctionKind, A, R> {
+  readonly path: string
+  readonly kind: K
+  readonly arguments: Validator<A>
+  readonly result: Validator<R>
+}
+
+function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
+  return <const S extends Shape, R>(options: {
+    args: S
+    returns: Validator<R>
+    handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
+  }): FunctionDefinition<K, InferObject<S>, R> => freeze({
+    [definition]: true as const,
+    contract: { kind, visibility, arguments: v.object(options.args).schema, result: options.returns.schema },
+    handler: options.handler,
+  })
+}
+
+export const query = builder("query", "public")
+export const mutation = builder("mutation", "public")
+export const internalQuery = builder("query", "internal")
+export const internalMutation = builder("mutation", "internal")
+
+export function isFunction(value: unknown): value is FunctionDefinition {
+  return value !== null && typeof value === "object" && definition in value && value[definition] === true
+}
