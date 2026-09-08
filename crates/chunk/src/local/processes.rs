@@ -342,6 +342,23 @@ async fn stop_runtimes(directory: &Path) -> io::Result<()> {
 }
 
 async fn stop_runtime(path: &Path) -> io::Result<()> {
+    if let Err(error) = stop_runtime_gracefully(path).await {
+        tracing::warn!(runtime = %path.display(), %error, "graceful shutdown failed; terminating runtime");
+        let directory = path
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime directory missing"))?;
+        let id = path
+            .file_stem()
+            .and_then(|id| id.to_str())
+            .ok_or_else(|| io::Error::other("runtime ID missing"))?;
+        chunk_control::terminate_runtime(directory, id)
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+async fn stop_runtime_gracefully(path: &Path) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(35);
     let runtime: chunk_runtime::RuntimeConnection = loop {
         if path.with_extension("exit").exists() {
