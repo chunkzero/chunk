@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -34,6 +33,9 @@ pub enum Read {
         start: Option<String>,
         end: Option<String>,
     },
+    Index {
+        query: chunk_contract::IndexQuery,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,23 +44,86 @@ pub struct Write {
     pub value: Option<Value>,
 }
 
-/// A memory-only snapshot capability. Implementations must record read dependencies,
-/// include the supplied speculative overlay, and perform no external effects.
-pub trait ReadHost: Send + 'static {
+/// A snapshot capability that records dependencies and performs no external effects.
+/// The engine merges this invocation's writes into returned snapshot data.
+pub trait ReadHost: 'static {
     /// # Errors
-    /// Reports invalid reads or snapshot limits without publishing effects.
-    fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value, String>;
+    /// Reports invalid keys or snapshot limits without publishing effects.
+    fn get(&mut self, key: &Key) -> Result<Option<Value>, String>;
+    /// Reads a half-open primary-key interval in ascending ID order.
+    /// # Errors
+    /// Reports invalid ranges or snapshot limits without publishing effects.
+    fn scan(&mut self, table: &str, start: Option<&str>, end: Option<&str>) -> Result<Vec<(String, Value)>, String>;
+    /// Returns snapshot candidates and the declaration's index fields. The engine
+    /// merges invocation writes and applies the requested order/limit afterward.
+    /// # Errors
+    /// Rejects undeclared indexes, unsupported bounds or exhausted read budgets.
+    fn scan_index(&mut self, _query: &chunk_contract::IndexQuery) -> Result<IndexRows, String> {
+        Err("Indexed reads are not supported by this host".into())
+    }
 }
 
-/// One bundled ES module exporting the selected function. Imports require bundling;
-/// the runtime has no filesystem, network or package loader.
+pub struct IndexRows {
+    pub fields: Vec<String>,
+    pub rows: Vec<(String, Value)>,
+}
+
+/// Canonical JSON text shared without cloning or re-encoding its value tree.
+#[derive(Debug, Clone)]
+pub struct Json(Arc<str>);
+
+impl Json {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Parses and canonicalizes incoming wire JSON before admission.
+    /// # Errors
+    /// Rejects invalid JSON, unsupported Unicode and excessive nesting.
+    pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<Value>(text).map(Self::from)
+    }
+}
+
+impl From<Value> for Json {
+    fn from(value: Value) -> Self {
+        Self(
+            serde_json::to_string(&value)
+                .expect("JSON value is serializable")
+                .into(),
+        )
+    }
+}
+
+/// One call into an already registered deployment.
 pub struct Invocation {
-    pub deployment: String,
-    pub source: String,
     pub export: String,
-    pub arguments: Value,
-    pub caller: Value,
+    pub arguments: Json,
+    pub caller: Json,
     pub mode: Mode,
+    /// Milliseconds since the Unix epoch at snapshot acquisition, fixed for retries.
+    pub timestamp: i64,
+    /// Backend-supplied deterministic seed, fixed for the operation and its retries.
+    pub seed: u64,
+}
+
+pub(crate) mod bounds {
+    use std::time::Duration;
+    pub const NAME_BYTES: usize = 128;
+    pub const SOURCE_BYTES: usize = 4 * 1024 * 1024;
+    pub const JSON_BYTES: usize = 1024 * 1024;
+    pub const READ_REQUEST_BYTES: usize = 4096;
+    pub const CAPABILITY_CALLS: usize = 4096;
+    pub const TABLE_BYTES: usize = 64;
+    pub const DOCUMENT_ID_BYTES: usize = 256;
+    pub const WRITES: usize = 256;
+    pub const WRITE_BYTES: usize = 8 * 1024 * 1024;
+    pub const MIN_HEAP_BYTES: usize = 16 * 1024 * 1024;
+    pub const MAX_HEAP_BYTES: usize = 128 * 1024 * 1024;
+    pub const EMERGENCY_HEAP_BYTES: usize = 8 * 1024 * 1024;
+    pub const MAX_EXECUTION: Duration = Duration::from_secs(30);
+    pub const RUNTIME_CALLS: u32 = 10_000;
 }
 
 #[derive(Clone, Copy)]
@@ -91,7 +156,9 @@ impl Cancellation {
 
 #[derive(Debug)]
 pub struct Execution {
-    pub value: Value,
+    pub logs: Vec<Log>,
+    /// Strict JSON text, ready to forward without decoding on the host.
+    pub value: String,
     /// Published only on success; the backend still validates and commits these.
     pub writes: Vec<Write>,
 }
@@ -108,6 +175,14 @@ pub enum Error {
     Heap,
     #[error("JavaScript: {0}")]
     JavaScript(String),
+    #[error("deployment is not registered")]
+    UnknownDeployment,
     #[error("runtime I/O: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug)]
+pub struct Log {
+    pub level: String,
+    pub message: String,
 }

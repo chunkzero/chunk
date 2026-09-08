@@ -1,13 +1,22 @@
 //! Isolated transactional JavaScript execution, with no ambient runtime I/O.
-//! Every invocation gets a fresh V8 isolate and scoped snapshot capabilities.
+//! Each deployment retains a V8 isolate; invocation snapshot capabilities expire.
 //! Writes remain speculative; only the environment backend can validate/commit.
 
+mod allocator;
 mod capabilities;
-mod model;
-mod runtime;
+mod deadline;
 
-pub use model::{Cancellation, Error, Execution, Invocation, Key, Limits, Mode, Read, ReadHost, Write};
-pub use runtime::execute;
+mod engine;
+mod isolate;
+mod model;
+mod profile;
+mod runtime;
+mod termination;
+
+pub use engine::{DeploymentId, Engine};
+pub use model::{
+    Cancellation, Error, Execution, IndexRows, Invocation, Json, Key, Limits, Log, Mode, Read, ReadHost, Write,
+};
 
 #[cfg(test)]
 mod tests;
