@@ -33,7 +33,7 @@
   });
   Object.defineProperty(ArrayBuffer.prototype, "constructor", { value: boundedBuffer, writable: false, configurable: false });
   globalThis.ArrayBuffer = boundedBuffer;
-  for (const name of ["Deno", "__bootstrap", "__infra", "console", "Temporal", "Intl", "performance", "WeakRef", "FinalizationRegistry", "WebAssembly", "SharedArrayBuffer"]) {
+  for (const name of ["Deno", "__bootstrap", "__infra", "Temporal", "Intl", "performance", "WeakRef", "FinalizationRegistry", "WebAssembly", "SharedArrayBuffer"]) {
     delete globalThis[name];
   }
   for (const prototype of [String.prototype, Number.prototype, BigInt.prototype, Array.prototype]) {

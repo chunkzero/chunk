@@ -1,3 +1,4 @@
+/// <reference path="./web.d.ts" />
 /**
  * `@chunk/server`: scaffold for backend functions, commands and hooks.
  *

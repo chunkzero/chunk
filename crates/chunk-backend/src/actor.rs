@@ -31,6 +31,7 @@ const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 struct Mutation {
     operation: Operation,
+    context: Option<chunk_store::RetryContext>,
     call: Call,
     waiters: Vec<Request<Update>>,
 }
@@ -136,6 +137,10 @@ impl Actor {
                     } else {
                         self.request(*command);
                     }
+                }
+                Event::Prepared { operation, result } => {
+                    self.outstanding -= 1;
+                    self.prepared(&operation, result);
                 }
                 Event::Committed { operation, result } => {
                     self.outstanding -= 1;
@@ -338,20 +343,21 @@ impl Actor {
         mode: Mode,
         view: Rc<View>,
         cancellation: &Cancellation,
-        seed: Option<u64>,
+        context: Option<(i64, u64)>,
     ) -> (Result<Execution>, Dependencies) {
         let function = match self.resolve(call, mode) {
             Ok(function) => function,
             Err(error) => return (Err(error), Dependencies::default()),
         };
         let trace = Rc::new(RefCell::new(Dependencies::default()));
-        let timestamp = view.base.timestamp;
-        let seed = seed.unwrap_or_else(|| {
-            u64::from_be_bytes(
-                Sha256::digest(call.function.as_bytes())[..8]
-                    .try_into()
-                    .expect("digest prefix"),
-            )
+        let (timestamp, seed) = context.unwrap_or_else(|| {
+            (view.base.timestamp, {
+                u64::from_be_bytes(
+                    Sha256::digest(call.function.as_bytes())[..8]
+                        .try_into()
+                        .expect("digest prefix"),
+                )
+            })
         });
         let host = Host {
             view,
@@ -377,6 +383,9 @@ impl Actor {
             )
             .map_err(Error::from)
             .and_then(|execution| {
+                for log in &execution.logs {
+                    tracing::info!(target: "chunk_backend::console", deployment = call.deployment.as_str(), function = call.function, level = log.level, message = log.message);
+                }
                 let value = serde_json::from_str(&execution.value)?;
                 validate_wire_value(&value).map_err(Error::Invalid)?;
                 if function.as_ref().is_some_and(|f| !f.result.accepts(&value)) {

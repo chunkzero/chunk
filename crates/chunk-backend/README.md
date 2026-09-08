@@ -92,3 +92,11 @@ ID. The active execution keeps both fixed. Durable retries recover the outcome
 without running JS. A new request after a definite rejection acquires a fresh
 snapshot/time. No internal conflict-retry loop or persisted failed-attempt context
 is implemented; any future internal retry must retain its original time and seed.
+
+Mutation admission durably fixes the original snapshot timestamp, seed and
+uncommitted deployment binding before evaluation. Definite rejection and restart
+preserve these inputs; committed retries still recover the original outcome before
+execution and can cross deployment versions. New operations add a metadata durability
+step on the commit thread, which can queue behind a pending commit. Concurrent
+prepared operations still use the ordered speculative pipeline. Retry contexts are
+retained with operation history; automatic expiry is not implemented.

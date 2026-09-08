@@ -52,12 +52,19 @@ mod snapshot;
 mod sqlite;
 
 pub use chunk_contract::DatabaseSchema;
-pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Revision, Write};
+pub use model::{
+    Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, RetryContext, Revision, Write,
+};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
 /// Only the environment backend holds this capability.
 pub trait Storage: Send {
+    /// Durably fixes invocation time, seed and deployment before evaluation.
+    /// # Errors
+    /// Rejects reused identities, changed deployment bindings or storage failures.
+    fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
+
     /// Loads retained immutable deployment metadata and bundles.
     /// # Errors
     /// Reports I/O, corruption or unsupported metadata.
