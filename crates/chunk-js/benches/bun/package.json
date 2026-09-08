@@ -1,0 +1,5 @@
+{
+  "name": "chunk-js-bun-bench",
+  "private": true,
+  "type": "module"
+}

@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-07",
+  "baseline_commit": "a124f1a6b4efb58738ffba7e1aa6ed9aa04e9e61",
+  "rust": "1.98.1",
+  "deno_core": "0.411.0",
+  "v8_crate": "150.4.0",
+  "v8_engine": "15.0.245.2-rusty",
+  "release": {
+    "lto": "fat",
+    "codegen_units": 1
+  },
+  "local": {
+    "cpu": "AMD Ryzen 7 7840HS",
+    "host_logical_cpus": 16,
+    "benchmark_affinity": [
+      0,
+      1
+    ],
+    "memory_limit_mib": 512,
+    "kernel": "6.12.0-211.49.1.el10_2.x86_64"
+  },
+  "fly": {
+    "region": "iad",
+    "cpu": "AMD EPYC (family 25, model 1)",
+    "guest_reported_mhz": 2000,
+    "cpus": 2,
+    "cpu_kind": "shared",
+    "memory_mib": 512,
+    "image": "debian:trixie-slim",
+    "image_digest": "sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1",
+    "guest_cgroup_cpu_quota_us": 10000,
+    "guest_cgroup_cpu_period_us": 80000
+  },
+  "samples_per_cell": 10000,
+  "warmup_per_cell": 1000
+}
