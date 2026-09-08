@@ -29,7 +29,7 @@ impl Shared {
     }
 }
 
-/// One watchdog survives calls and isolate recycling. It never wakes per call.
+/// One watchdog survives calls and isolate recycling. It sleeps indefinitely while idle.
 pub(crate) struct Deadline {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -46,10 +46,11 @@ impl Deadline {
         let watch = Arc::clone(&shared);
         let thread = thread::Builder::new().name("chunk-js-deadline".into()).spawn(move || {
             while !watch.stopped.load(Ordering::Acquire) {
-                thread::park_timeout(Duration::from_millis(2));
                 if watch.at.load(Ordering::Acquire) == 0 {
+                    thread::park();
                     continue;
                 }
+                thread::park_timeout(Duration::from_millis(2));
                 // Hold the lock through termination so disarming cannot race with
                 // a stale timeout that interrupts the next call or recycled isolate.
                 let active = watch.active.lock().unwrap();
@@ -75,6 +76,7 @@ impl Deadline {
         self.shared
             .at
             .store(self.shared.now().saturating_add(micros), Ordering::Release);
+        self.thread.as_ref().expect("watchdog thread").thread().unpark();
         Guard(self)
     }
 }

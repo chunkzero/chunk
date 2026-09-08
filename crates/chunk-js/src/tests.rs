@@ -299,3 +299,23 @@ fn host_runs_on_the_callers_thread_without_send_or_locks() {
     assert_eq!(value(&result), json!(42));
     assert_eq!(calls.get(), 1);
 }
+
+#[test]
+fn storage_incompatible_results_fail_only_the_invocation() {
+    for expression in ["Array.from({length:130}).reduce(v => [v], null)", r"'\ud800'"] {
+        let mut engine = deployment(
+            &format!("if(args.fail) {{ ctx.db.put('profiles','p',{{}}); return {expression}; }} return 42;"),
+            Limits::default(),
+        );
+        let mut fail = invocation();
+        fail.arguments = json!({"fail":true});
+        assert!(
+            engine
+                .execute(fail, Box::new(Snapshot), &Cancellation::default())
+                .is_err()
+        );
+        let result = call(&mut engine).unwrap();
+        assert_eq!(value(&result), json!(42));
+        assert!(result.writes.is_empty());
+    }
+}
