@@ -1,11 +1,7 @@
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::mpsc,
     task::Poll,
 };
 
@@ -39,8 +35,8 @@ fn call(function: &str, arguments: Value) -> Call {
     Call {
         deployment: id(),
         function: function.into(),
-        arguments,
-        caller: json!({"player": "alex"}),
+        arguments: arguments.into(),
+        caller: json!({"player": "alex"}).into(),
     }
 }
 fn value(update: &Update) -> Value {
@@ -71,18 +67,16 @@ async fn pending<F: Future>(mut future: Pin<&mut F>) {
 
 #[derive(Debug, PartialEq)]
 enum Notice {
-    Lookup,
     Commit(usize),
 }
 
 struct ControlledStore {
     inner: SqliteStore,
-    first_lookup: AtomicBool,
-    lookup: Mutex<mpsc::Receiver<()>>,
     commits: Vec<mpsc::Receiver<()>>,
     committed: usize,
     notices: signals::UnboundedSender<Notice>,
     ambiguous: bool,
+    rejected: bool,
 }
 
 impl Storage for ControlledStore {
@@ -93,10 +87,6 @@ impl Storage for ControlledStore {
         self.inner.snapshot()
     }
     fn outcome(&self, operation: &Operation) -> chunk_store::Result<Option<Outcome>> {
-        if self.first_lookup.swap(false, Ordering::SeqCst) {
-            let _ = self.notices.send(Notice::Lookup);
-            let _ = self.lookup.lock().unwrap().recv();
-        }
         self.inner.outcome(operation)
     }
     fn commit(&mut self, commit: Commit) -> chunk_store::Result<Outcome> {
@@ -105,6 +95,9 @@ impl Storage for ControlledStore {
         let _ = self.notices.send(Notice::Commit(index));
         if let Some(gate) = self.commits.get(index) {
             let _ = gate.recv();
+        }
+        if self.rejected && index == 0 {
+            return Err(chunk_store::Error::Capacity);
         }
         let outcome = self.inner.commit(commit)?;
         if self.ambiguous && index == 0 {
@@ -115,7 +108,6 @@ impl Storage for ControlledStore {
 }
 
 struct Controls {
-    lookup: mpsc::Sender<()>,
     commits: Vec<mpsc::Sender<()>>,
     notices: signals::UnboundedReceiver<Notice>,
 }
@@ -130,26 +122,27 @@ struct Harness {
 
 impl Harness {
     async fn new(ambiguous: bool) -> Self {
+        Self::with_failure(ambiguous, false).await
+    }
+
+    async fn with_failure(ambiguous: bool, rejected: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut store = open(&directory);
         let base = store.snapshot().unwrap().revision;
-        let (lookup, lookup_rx) = mpsc::channel();
         let (commits, receivers): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
         let (notices, receiver) = signals::unbounded_channel();
         let store = ControlledStore {
             inner: store,
-            first_lookup: AtomicBool::new(true),
-            lookup: Mutex::new(lookup_rx),
             commits: receivers,
             committed: 0,
             notices,
             ambiguous,
+            rejected,
         };
         let backend = Backend::new(Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
         Self {
             controls: Controls {
-                lookup,
                 commits,
                 notices: receiver,
             },
@@ -168,16 +161,12 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
     assert_eq!(value(&subscription.next().await.unwrap()), json!(0));
     let mut first = Box::pin(backend.mutate("first".into(), call("bump", json!({"id": "p"}))));
     pending(first.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Lookup);
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     let mut second = Box::pin(backend.mutate("second".into(), call("bump", json!({"id": "p"}))));
     pending(second.as_mut()).await;
-    // The query reply proves both lookup jobs were enqueued before opening the gate.
-    assert_eq!(
-        value(&backend.query(call("get", json!({"id": "p"}))).await.unwrap()),
-        json!(0)
-    );
-    harness.controls.lookup.send(()).unwrap();
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    let independent = backend.query(call("get", json!({"id": "unrelated"}))).await.unwrap();
+    assert_eq!(independent.revision, harness.base);
+    assert_eq!(value(&independent), json!(0));
     let mut query = Box::pin(backend.query(call("get", json!({"id": "p"}))));
     pending(query.as_mut()).await;
     backend
@@ -218,14 +207,12 @@ async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_
         pending(request.as_mut()).await;
         requests.push(request);
     }
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Lookup);
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     assert!(matches!(
         harness.backend.query(call("get", json!({"id": "p"}))).await,
         Err(Error::Busy)
     ));
     drop(requests.remove(0));
-    harness.controls.lookup.send(()).unwrap();
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     harness.controls.commits[0].send(()).unwrap();
     for request in requests {
         let result = request.await.unwrap();
@@ -241,16 +228,13 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
     let mut harness = Harness::new(true).await;
     let mut first = Box::pin(harness.backend.mutate("first".into(), call("bump", json!({"id": "p"}))));
     pending(first.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Lookup);
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     let mut second = Box::pin(
         harness
             .backend
             .mutate("second".into(), call("bump", json!({"id": "p"}))),
     );
     pending(second.as_mut()).await;
-    harness.backend.query(call("get", json!({"id": "p"}))).await.unwrap();
-    harness.controls.lookup.send(()).unwrap();
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     harness
         .backend
         .register(DeploymentId::new("barrier").unwrap(), SOURCE.into(), Limits::default())
@@ -289,7 +273,7 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
         .unwrap();
     assert_eq!(value(&recovered), json!(1));
     let mut changed = call("bump", json!({"id": "p"}));
-    changed.caller = json!({"player": "someone else"});
+    changed.caller = json!({"player": "someone else"}).into();
     assert!(
         matches!(backend.mutate("first".into(), changed).await, Err(Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
     );
@@ -349,4 +333,111 @@ async fn subscriptions_track_empty_ranges_and_update_dependencies_when_results_m
     drop(selected);
     drop(range);
     assert!(backend.release(id()).await.unwrap());
+}
+
+#[tokio::test]
+async fn rejected_commit_drains_suffix_before_reusing_revisions() {
+    let mut harness = Harness::with_failure(false, true).await;
+    let backend = &harness.backend;
+    let mut watch = backend.subscribe(call("get", json!({"id":"p"}))).await.unwrap();
+    watch.next().await.unwrap();
+    let mut first = Box::pin(backend.mutate("a".into(), call("bump", json!({"id":"p"}))));
+    pending(first.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    let mut second = Box::pin(backend.mutate("b".into(), call("bump", json!({"id":"p"}))));
+    pending(second.as_mut()).await;
+    backend.query(call("get", json!({"id":"other"}))).await.unwrap();
+    harness.controls.commits[0].send(()).unwrap();
+    assert!(matches!(first.await, Err(Error::Retry)));
+    assert!(matches!(second.await, Err(Error::Retry)));
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    assert_eq!(
+        value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()),
+        json!(0)
+    );
+    assert!(matches!(
+        backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await,
+        Err(Error::Busy)
+    ));
+    harness.controls.commits[1].send(()).unwrap();
+    let result = loop {
+        match backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await {
+            Err(Error::Busy) => tokio::task::yield_now().await,
+            result => break result.unwrap(),
+        }
+    };
+    assert_eq!(value(&result), json!(1));
+    assert_eq!(result.revision, Revision(harness.base.0 + 1));
+    assert_eq!(value(&watch.next().await.unwrap()), json!(1));
+}
+
+#[tokio::test]
+async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let source = format!(
+        "{SOURCE} export function strict(ctx) {{ return ctx.db.get('profiles','p').coins; }} export function invalid(ctx,args) {{ ctx.db.put('profiles','p',{{coins:99}}); return args.deep ? Array.from({{length:130}}).reduce(v=>[v],null) : '\\ud800'; }}"
+    );
+    backend.register(id(), source, Limits::default()).await.unwrap();
+    for deep in [true, false] {
+        assert!(
+            backend
+                .mutate(format!("bad-{deep}"), call("invalid", json!({"deep":deep})))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()),
+            json!(0)
+        );
+    }
+    backend
+        .mutate("put".into(), call("put", json!({"id":"p","value":{"coins":3}})))
+        .await
+        .unwrap();
+    let mut watch = backend.subscribe(call("strict", json!({}))).await.unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!(3));
+    backend
+        .mutate("delete".into(), call("remove", json!({"id":"p"})))
+        .await
+        .unwrap();
+    assert!(matches!(watch.next().await, Err(Error::JavaScript(_))));
+    backend
+        .mutate("restore".into(), call("put", json!({"id":"p","value":{"coins":3}})))
+        .await
+        .unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!(3));
+    let next = DeploymentId::new("next").unwrap();
+    backend
+        .register(
+            next.clone(),
+            format!("{SOURCE} export function unused() {{ return 99; }}"),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+    let mut retry = call("put", json!({"id":"p","value":{"coins":3}}));
+    retry.deployment = next;
+    let outcome = backend.mutate("put".into(), retry).await.unwrap();
+    assert!(outcome.revision < backend.query(call("get", json!({"id":"p"}))).await.unwrap().revision);
+}
+
+#[tokio::test]
+async fn foreground_queries_run_between_subscription_reevaluations() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=0; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
+    let mut watches = Vec::new();
+    for _ in 0..16 {
+        watches.push(backend.subscribe(call("slow", json!({}))).await.unwrap());
+    }
+    backend
+        .mutate("start".into(), call("bump", json!({"id":"p"})))
+        .await
+        .unwrap();
+    let count = value(&backend.query(call("count", json!({}))).await.unwrap());
+    assert!(
+        count.as_u64().unwrap() < 16,
+        "foreground query ran after every subscriber: {count}"
+    );
 }

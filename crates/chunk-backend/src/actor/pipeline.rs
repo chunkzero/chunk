@@ -1,4 +1,4 @@
-use chunk_js::Mode;
+use chunk_js::{Cancellation, Mode};
 use chunk_store::{DocumentKey, Operation, Revision, Snapshot, Write};
 use sha2::{Digest, Sha256};
 
@@ -36,59 +36,32 @@ impl Actor {
             reply.finish(Err(Error::Busy));
             return;
         }
-        if let Err(error) = self.send(Job::Lookup(operation.clone())) {
-            reply.finish(Err(error));
-            return;
-        }
-        self.mutations.insert(
-            operation.id.clone(),
-            Mutation {
-                operation,
-                call,
-                waiters: vec![reply],
-            },
-        );
-    }
-
-    fn operation(&self, id: String, call: &Call) -> Result<Operation> {
-        if id.is_empty() || id.len() > 256 {
-            return Err(Error::Invalid("operation identity"));
-        }
-        let source = self
-            .versions
-            .get(&call.deployment)
-            .ok_or(Error::Invalid("unknown deployment"))?;
-        let request = serde_json::to_vec(&(
-            "mutation-v1",
-            source,
-            call.deployment.as_str(),
-            &call.function,
-            &call.arguments,
-            &call.caller,
-        ))?;
-        if request.len() > 2 * 1024 * 1024 + 1024 {
-            return Err(Error::Invalid("input limit"));
-        }
-        Ok(Operation {
-            id,
-            fingerprint: Sha256::digest(request).into(),
-        })
-    }
-
-    pub(super) fn looked_up(&mut self, id: &str, result: Result<Option<Update>>, stopped: bool) {
-        let Some(mut mutation) = self.mutations.remove(id) else {
-            return;
-        };
-        let result = if stopped { Err(Error::Closed) } else { result };
-        match result {
+        let outcome = self.view.base.outcome(&operation).map_err(Error::from);
+        match outcome {
+            Ok(Some(outcome)) => {
+                reply.finish(
+                    serde_json::to_string(&outcome.result)
+                        .map(|json| Update {
+                            revision: outcome.revision,
+                            json: json.into(),
+                        })
+                        .map_err(Error::from),
+                );
+            }
+            Err(error) => reply.finish(Err(error)),
             Ok(None) => {
-                mutation.waiters.retain(|reply| !reply.cancellation.is_cancelled());
-                if mutation.waiters.is_empty() {
+                if self.recovering {
+                    reply.finish(Err(Error::Busy));
                     return;
                 }
+                let mutation = Mutation {
+                    operation,
+                    call,
+                    waiters: vec![reply],
+                };
                 match self.stage(&mutation) {
                     Ok(()) => {
-                        self.mutations.insert(id.to_owned(), mutation);
+                        self.mutations.insert(mutation.operation.id.clone(), mutation);
                     }
                     Err(error) => {
                         for reply in mutation.waiters {
@@ -97,17 +70,31 @@ impl Actor {
                     }
                 }
             }
-            result => {
-                let result = result.map(|outcome| outcome.expect("existing outcome"));
-                for reply in mutation.waiters {
-                    reply.finish(result.clone());
-                }
-            }
         }
     }
 
+    fn operation(&self, id: String, call: &Call) -> Result<Operation> {
+        if id.is_empty() || id.len() > 256 {
+            return Err(Error::Invalid("operation identity"));
+        }
+        if !self.versions.contains_key(&call.deployment) {
+            return Err(Error::Invalid("unknown deployment"));
+        }
+        // Identity describes the business request; a durable result survives redeployment.
+        let request = serde_json::to_vec(&(
+            "mutation-v2",
+            &call.function,
+            call.arguments.as_str(),
+            call.caller.as_str(),
+        ))?;
+        Ok(Operation {
+            id,
+            fingerprint: Sha256::digest(request).into(),
+        })
+    }
+
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
-        let cancellation = &mutation.waiters[0].cancellation;
+        let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
         let (execution, _) = self.evaluate(&mutation.call, Mode::Mutation, snapshot.clone(), cancellation)?;
         let writes = execution
@@ -124,7 +111,7 @@ impl Actor {
         if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
             return Err(Error::Busy);
         }
-        if cancellation.is_cancelled() {
+        if mutation.waiters.iter().all(|reply| reply.cancellation.is_cancelled()) {
             return Err(Error::Cancelled);
         }
         // Execution and validation are serialized on this thread, so no mutation
@@ -158,9 +145,24 @@ impl Actor {
         if self.failure.is_some() {
             return;
         }
-        let Ok((update, snapshot)) = result else {
-            self.fail(&Error::CommitFailed);
+        if self.recovering {
+            if result.as_ref().is_err_and(|error| !error.is_rejected_commit()) {
+                self.fail(&Error::CommitFailed);
+            }
+            self.recovering = self.outstanding != 0;
             return;
+        }
+        let (update, snapshot) = match result {
+            Ok(value) => value,
+            Err(error) if error.is_rejected_commit() => {
+                self.reset_pending(&Error::Retry);
+                self.recovering = self.outstanding != 0;
+                return;
+            }
+            Err(_) => {
+                self.fail(&Error::CommitFailed);
+                return;
+            }
         };
         let Some(pending) = self.pending.pop_front() else {
             self.fail(&Error::CommitFailed);

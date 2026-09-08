@@ -120,9 +120,9 @@ impl Engine {
         if invocation.export.is_empty() || invocation.export.len() > 128 {
             return Err(Error::Invalid("invalid export"));
         }
-        let caller = serde_json::to_string(&invocation.caller).map_err(|e| Error::JavaScript(e.to_string()))?;
-        let arguments = serde_json::to_string(&invocation.arguments).map_err(|e| Error::JavaScript(e.to_string()))?;
-        if caller.len() > 1024 * 1024 || arguments.len() > 1024 * 1024 {
+        let caller = invocation.caller;
+        let arguments = invocation.arguments;
+        if caller.as_str().len() > 1024 * 1024 || arguments.as_str().len() > 1024 * 1024 {
             return Err(Error::Invalid("input exceeds size limit"));
         }
         if resident

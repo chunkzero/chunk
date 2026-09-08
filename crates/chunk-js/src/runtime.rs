@@ -9,15 +9,15 @@ use std::{
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::{
-    Cancellation, Error, Execution, Limits, Write,
+    Cancellation, Error, Execution, Json, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
 };
 
 pub(crate) struct Prepared {
     pub export: String,
-    pub caller: String,
-    pub arguments: String,
+    pub caller: Json,
+    pub arguments: Json,
     pub capabilities: Capabilities,
 }
 
@@ -48,7 +48,8 @@ impl State {
         } = prepared;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let result = executor.block_on(engine.invoke(&export, &caller, &arguments, limits.execution));
+            let result =
+                executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), limits.execution));
             executor.block_on(engine.drain(limits.execution))?;
             result
         });

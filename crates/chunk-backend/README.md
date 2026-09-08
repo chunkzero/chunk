@@ -15,25 +15,41 @@ cannot change the read revision between them. The commit thread persists batches
 in order while the engine can continue evaluating requests.
 
 Mutation responses wait for durable commits. Queries may read staged writes,
-but their responses wait until that revision is durable too. Subscriptions read
+and responses that depend on those writes wait for durability. Queries whose
+dependencies do not intersect pending writes return immediately at the base revision. Subscriptions read
 only acknowledged snapshots, track point misses and empty ranges, and reevaluate
 after relevant commits. Dependencies refresh even when the JSON result is
 unchanged. Result changes use JSON text equality; object key order can cause an
-extra update. Slow subscribers coalesce updates through a watch channel, so they
+extra update. Application errors remain reactive results, retaining reads collected
+before failure; an error-to-success transition always publishes. Reevaluations run
+one per actor scheduling boundary, with at most two retained durable snapshots.
+Queued revisions may coalesce conservatively to the latest snapshot. Slow subscribers coalesce updates through a watch channel, so they
 receive the latest durable result rather than every intermediate revision.
 
-Give every mutation a stable operation ID. Its fingerprint includes the bundle,
-function, arguments and caller. Duplicate requests recover the stored outcome
-without executing again; reuse with a different request fails. Dropping a request
-future cancels queued/executing work, but a staged mutation still commits. Retry
-with the same ID after a lost reply. Cancellation during a shared execution may
-cancel duplicate waiters too; they can retry the same ID.
+Give every mutation a stable operation ID. Its fingerprint includes the function,
+canonical arguments and caller, independent of bundle and deployment identity.
+Duplicate requests recover the stored outcome without executing again, including
+after redeployment; reuse with a different request fails. Outcome lookups use the
+engine's pinned base snapshot and pending operations, so execution need not wait
+behind earlier commits. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
+to encode and canonicalize once before crossing the engine boundary.
 
-A commit or acknowledgment failure stops the pipeline, rejects further requests
-and closes subscriptions. Later speculative batches are never persisted after a
-failed batch. Restart with the same store and recover outcomes by operation ID;
-the failed commit may already be durable. The backend does not automatically
-retry an ambiguous speculative suffix.
+Dropping a request cancels queued work and executing queries. Once a mutation
+starts, an independent execution token prevents one caller from interrupting a
+shared business operation. If every waiter has gone before staging, the mutation
+is discarded; once staged, it commits. Retry the same ID after a lost reply.
+A durable outcome is recovered across deployments, but a request without a stored
+outcome executes the explicitly supplied deployment: transport must retain the
+original deployment binding when retrying unresolved operations.
+
+A deterministic commit rejection (`Conflict`, `Invalid`, `Capacity`, or
+`OperationMismatch`) discards the speculative suffix and fails its waiters with
+`Error::Retry`. Queries and subscriptions continue against the durable base;
+new mutations return `Busy` until all old suffix acknowledgments drain, preventing
+revision reuse from admitting an old dependent batch. Ambiguous commit or
+acknowledgment failures stop the pipeline and close subscriptions. Restart with
+the same store and recover outcomes by operation ID; a failed acknowledgment may
+follow a durable commit. The backend never automatically retries a speculative suffix.
 
 Admission allows 64 outstanding requests, including replies waiting for
 durability. Limits are 16 resident deployments, 64 subscriptions, 16 outstanding

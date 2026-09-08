@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
-use crate::{DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Result, Revision};
+use crate::{DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Result, Revision};
 
 /// Adapter-owned reads pinned to one database revision, including schema and indexes.
 /// Implementations must keep empty ranges and point misses consistent too.
 pub trait SnapshotReader: Send + Sync {
+    /// Recovers an outcome visible at this snapshot.
+    /// # Errors
+    /// Reports mismatched request identities or storage failures.
+    fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>>;
+
     /// Schema declarations pinned to the same revision as document reads.
     fn schema(&self) -> &DatabaseSchema;
 
@@ -30,6 +35,12 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// # Errors
+    /// Reports mismatched request identities or storage failures.
+    pub fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
+        self.reader.outcome(operation)
+    }
+
     #[must_use]
     pub fn schema(&self) -> &DatabaseSchema {
         self.reader.schema()

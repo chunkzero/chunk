@@ -50,11 +50,39 @@ pub trait ReadHost: 'static {
     fn read(&mut self, request: Read, overlay: &BTreeMap<Key, Option<Value>>) -> Result<Value, String>;
 }
 
+/// Canonical JSON text shared without cloning or re-encoding its value tree.
+#[derive(Debug, Clone)]
+pub struct Json(Arc<str>);
+
+impl Json {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Parses and canonicalizes incoming wire JSON before admission.
+    /// # Errors
+    /// Rejects invalid JSON, unsupported Unicode and excessive nesting.
+    pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<Value>(text).map(Self::from)
+    }
+}
+
+impl From<Value> for Json {
+    fn from(value: Value) -> Self {
+        Self(
+            serde_json::to_string(&value)
+                .expect("JSON value is serializable")
+                .into(),
+        )
+    }
+}
+
 /// One call into an already registered deployment.
 pub struct Invocation {
     pub export: String,
-    pub arguments: Value,
-    pub caller: Value,
+    pub arguments: Json,
+    pub caller: Json,
     pub mode: Mode,
 }
 

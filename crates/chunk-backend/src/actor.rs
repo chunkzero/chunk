@@ -41,13 +41,24 @@ struct Pending {
 }
 
 struct Subscribed {
+    id: u64,
+    errored: bool,
     call: Call,
     dependencies: Dependencies,
     json: Arc<str>,
     sender: watch::Sender<Result<Update>>,
 }
 
+struct Reevaluation {
+    view: Rc<View>,
+    writes: Option<Vec<Write>>,
+    ids: VecDeque<u64>,
+}
+
 pub(crate) struct Actor {
+    recovering: bool,
+    next_subscription: u64,
+    reevaluations: VecDeque<Reevaluation>,
     js: Engine,
     versions: BTreeMap<DeploymentId, [u8; 32]>,
     view: Rc<View>,
@@ -65,6 +76,9 @@ impl Actor {
     pub fn new(store: Box<dyn Storage>, events: mpsc::Sender<Event>) -> Result<Self> {
         let (committer, snapshot) = Committer::new(store, events)?;
         Ok(Self {
+            recovering: false,
+            next_subscription: 0,
+            reevaluations: VecDeque::new(),
             js: Engine::new()?,
             versions: BTreeMap::new(),
             view: Rc::new(View::new(snapshot)),
@@ -84,7 +98,19 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let Some(event) = incoming.blocking_recv() else {
+            let event = if self.reevaluations.is_empty() {
+                incoming.blocking_recv()
+            } else {
+                match incoming.try_recv() {
+                    Ok(event) => Some(event),
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        self.reevaluate_one();
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => None,
+                }
+            };
+            let Some(event) = event else {
                 break;
             };
             self.subscriptions
@@ -99,16 +125,13 @@ impl Actor {
                         self.request(*command);
                     }
                 }
-                Event::Lookup { operation, result } => {
-                    self.outstanding -= 1;
-                    self.looked_up(&operation, result, stopped.load(Ordering::Acquire));
-                }
                 Event::Committed { operation, result } => {
                     self.outstanding -= 1;
                     self.committed(&operation, result);
                 }
                 Event::Wake => {}
             }
+            self.reevaluate_one();
         }
         incoming.close();
         while let Ok(event) = incoming.try_recv() {
@@ -158,9 +181,17 @@ impl Actor {
             Command::Query { call, reply } => {
                 let result = self.evaluate(&call, Mode::Query, self.view.clone(), &reply.cancellation);
                 match result {
-                    Ok((execution, _)) => {
+                    Ok((execution, dependencies)) => {
+                        let independent = self
+                            .pending
+                            .iter()
+                            .all(|pending| !dependencies.affected(&pending.writes));
                         let update = Update {
-                            revision: self.view.revision,
+                            revision: if independent {
+                                self.view.base.revision
+                            } else {
+                                self.view.revision
+                            },
                             json: execution.value.into(),
                         };
                         if update.revision <= self.view.base.revision {
@@ -186,7 +217,10 @@ impl Actor {
                             revision: self.view.base.revision,
                             json: json.clone(),
                         }));
+                        self.next_subscription += 1;
                         self.subscriptions.push(Subscribed {
+                            id: self.next_subscription,
+                            errored: false,
                             call,
                             dependencies,
                             json,
@@ -207,24 +241,38 @@ impl Actor {
         view: Rc<View>,
         cancellation: &Cancellation,
     ) -> Result<(Execution, Dependencies)> {
+        let (execution, dependencies) = self.evaluate_traced(call, mode, view, cancellation);
+        execution.map(|execution| (execution, dependencies))
+    }
+
+    fn evaluate_traced(
+        &mut self,
+        call: &Call,
+        mode: Mode,
+        view: Rc<View>,
+        cancellation: &Cancellation,
+    ) -> (Result<Execution>, Dependencies) {
         let trace = Rc::new(RefCell::new(Dependencies::default()));
         let host = Host {
             view,
             trace: trace.clone(),
         };
-        let execution = self.js.execute(
-            &call.deployment,
-            Invocation {
-                export: call.function.clone(),
-                arguments: call.arguments.clone(),
-                caller: call.caller.clone(),
-                mode,
-            },
-            Box::new(host),
-            cancellation,
-        )?;
+        let execution = self
+            .js
+            .execute(
+                &call.deployment,
+                Invocation {
+                    export: call.function.clone(),
+                    arguments: call.arguments.clone(),
+                    caller: call.caller.clone(),
+                    mode,
+                },
+                Box::new(host),
+                cancellation,
+            )
+            .map_err(Error::from);
         let dependencies = std::mem::take(&mut *trace.borrow_mut());
-        Ok((execution, dependencies))
+        (execution, dependencies)
     }
 
     fn send(&mut self, job: Job) -> Result<()> {
@@ -234,35 +282,67 @@ impl Actor {
     }
 
     fn publish(&mut self, writes: &[Write]) {
-        let view = Rc::new(View::new(self.view.base.clone()));
-        for mut subscription in std::mem::take(&mut self.subscriptions) {
-            if subscription.sender.is_closed() {
-                continue;
-            }
-            if subscription.dependencies.affected(writes) {
-                match self.evaluate(&subscription.call, Mode::Query, view.clone(), &Cancellation::default()) {
-                    Ok((execution, dependencies)) => {
-                        subscription.dependencies = dependencies;
-                        if execution.value != subscription.json.as_ref() {
-                            subscription.json = execution.value.into();
-                            let _ = subscription.sender.send_replace(Ok(Update {
-                                revision: view.revision,
-                                json: subscription.json.clone(),
-                            }));
-                        }
-                    }
-                    Err(error) => {
-                        let _ = subscription.sender.send_replace(Err(error));
-                        continue;
-                    }
-                }
-            }
-            self.subscriptions.push(subscription);
+        let batch = Reevaluation {
+            view: Rc::new(View::new(self.view.base.clone())),
+            writes: Some(writes.to_vec()),
+            ids: self.subscriptions.iter().map(|subscription| subscription.id).collect(),
+        };
+        if self.reevaluations.len() == 2 {
+            // Slow watches coalesce to the latest durable snapshot. Reevaluating all
+            // watches avoids retaining an unbounded history of invalidating writes.
+            let next = self.reevaluations.back_mut().expect("queued batch");
+            *next = Reevaluation { writes: None, ..batch };
+        } else {
+            self.reevaluations.push_back(batch);
         }
     }
 
-    fn fail(&mut self, error: &Error) {
-        self.failure = Some(error.clone());
+    fn reevaluate_one(&mut self) {
+        let Some(batch) = self.reevaluations.front_mut() else {
+            return;
+        };
+        let Some(id) = batch.ids.pop_front() else {
+            self.reevaluations.pop_front();
+            return;
+        };
+        let Some(index) = self.subscriptions.iter().position(|subscription| subscription.id == id) else {
+            return;
+        };
+        if batch
+            .writes
+            .as_ref()
+            .is_some_and(|writes| !self.subscriptions[index].dependencies.affected(writes))
+        {
+            return;
+        }
+        let view = batch.view.clone();
+        let mut subscription = self.subscriptions.remove(index);
+        if subscription.sender.is_closed() {
+            return;
+        }
+        let (result, dependencies) =
+            self.evaluate_traced(&subscription.call, Mode::Query, view.clone(), &Cancellation::default());
+        subscription.dependencies = dependencies;
+        match result {
+            Ok(execution) => {
+                if subscription.errored || execution.value != subscription.json.as_ref() {
+                    subscription.json = execution.value.into();
+                    let _ = subscription.sender.send_replace(Ok(Update {
+                        revision: view.revision,
+                        json: subscription.json.clone(),
+                    }));
+                }
+                subscription.errored = false;
+            }
+            Err(error) => {
+                subscription.errored = true;
+                let _ = subscription.sender.send_replace(Err(error));
+            }
+        }
+        self.subscriptions.push(subscription);
+    }
+
+    fn reset_pending(&mut self, error: &Error) {
         for (_, mutation) in std::mem::take(&mut self.mutations) {
             for reply in mutation.waiters {
                 reply.finish(Err(error.clone()));
@@ -271,6 +351,15 @@ impl Actor {
         for (_, reply) in self.deferred.drain(..) {
             reply.finish(Err(error.clone()));
         }
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.view = Rc::new(View::new(self.view.base.clone()));
+    }
+
+    fn fail(&mut self, error: &Error) {
+        self.failure = Some(error.clone());
+        self.reset_pending(error);
+        self.reevaluations.clear();
         for subscription in self.subscriptions.drain(..) {
             let _ = subscription.sender.send_replace(Err(error.clone()));
         }

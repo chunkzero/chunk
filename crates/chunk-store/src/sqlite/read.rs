@@ -8,7 +8,10 @@ use std::{
 use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue};
 use serde_json::Value;
 
-use crate::{DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Result, Snapshot, SnapshotReader};
+use crate::{
+    DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Operation, Outcome, Result, Snapshot,
+    SnapshotReader,
+};
 
 use super::{codec, revision, schema};
 
@@ -65,6 +68,11 @@ impl Reader {
 }
 
 impl SnapshotReader for Reader {
+    fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
+        let connection = self.connection.lock().map_err(|_| Error::Poisoned)?;
+        super::write::outcome(&connection, operation)
+    }
+
     fn schema(&self) -> &DatabaseSchema {
         &self.schema
     }

@@ -12,7 +12,6 @@ use crate::{
 };
 
 pub(crate) enum Job {
-    Lookup(Operation),
     Commit {
         expected: Revision,
         operation: Operation,
@@ -37,26 +36,6 @@ impl Committer {
             let mut failed = false;
             while let Ok(job) = incoming.recv() {
                 let event = match job {
-                    Job::Lookup(operation) => {
-                        let result = if failed {
-                            Err(Error::CommitFailed)
-                        } else {
-                            store.outcome(&operation).map_err(Error::from).and_then(|outcome| {
-                                outcome
-                                    .map(|outcome| {
-                                        Ok(Update {
-                                            revision: outcome.revision,
-                                            json: serde_json::to_string(&outcome.result)?.into(),
-                                        })
-                                    })
-                                    .transpose()
-                            })
-                        };
-                        Event::Lookup {
-                            operation: operation.id,
-                            result,
-                        }
-                    }
                     Job::Commit {
                         expected,
                         operation,
@@ -71,7 +50,7 @@ impl Committer {
                         };
                         // A later batch may depend on the failed batch's speculative
                         // writes. Never persist that suffix after an ambiguous failure.
-                        failed |= result.is_err();
+                        failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
                         Event::Committed { operation: id, result }
                     }
                 };
@@ -117,7 +96,7 @@ fn commit(
     if expected.0.checked_add(1) != Some(outcome.revision.0) {
         return Err(Error::CommitFailed);
     }
-    let snapshot = store.snapshot()?;
+    let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
     if snapshot.revision != outcome.revision {
         return Err(Error::CommitFailed);
     }

@@ -7,9 +7,8 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_js::{Cancellation, DeploymentId, Limits};
+use chunk_js::{Cancellation, DeploymentId, Json, Limits};
 use chunk_store::{Revision, Snapshot, Storage};
-use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
 use crate::{Error, Result, actor::Actor};
@@ -20,8 +19,8 @@ const REQUESTS: usize = 64;
 pub struct Call {
     pub deployment: DeploymentId,
     pub function: String,
-    pub arguments: Value,
-    pub caller: Value,
+    pub arguments: Json,
+    pub caller: Json,
 }
 
 impl Call {
@@ -30,7 +29,7 @@ impl Call {
             return Err(Error::Invalid("function name"));
         }
         for value in [&self.arguments, &self.caller] {
-            if serde_json::to_vec(value)?.len() > 1024 * 1024 {
+            if value.as_str().len() > 1024 * 1024 {
                 return Err(Error::Invalid("input limit"));
             }
         }
@@ -96,10 +95,6 @@ impl Command {
 
 pub(crate) enum Event {
     Request(Box<Command>),
-    Lookup {
-        operation: String,
-        result: Result<Option<Update>>,
-    },
     Committed {
         operation: String,
         result: Result<(Update, Snapshot)>,
