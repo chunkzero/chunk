@@ -5,14 +5,17 @@ import dev.chunkzero.backend.api.QueryRef
 import dev.chunkzero.backend.client.BackendSession
 import dev.chunkzero.backend.client.OperationId
 import dev.chunkzero.backend.client.WatchState
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.future.await
 
 /** Suspensions resume in their caller's coroutine context; managed sessions supply a tick dispatcher. */
@@ -48,19 +51,25 @@ class CoroutineBackend(
         reference: QueryRef<A, R>,
         arguments: A,
     ): Flow<WatchState<R>> =
-        callbackFlow {
-            val stopped = job.invokeOnCompletion { close(CancellationException("Backend scope closed")) }
-            try {
-                if (!job.isActive) return@callbackFlow
-                val subscription =
-                    client.watch(reference, arguments) {
-                        if (trySend(it).isFailure) close(IllegalStateException("Backend watch buffer exhausted"))
-                    }
-                awaitClose { subscription.close() }
-            } finally {
-                stopped.dispose()
+        flow {
+            coroutineScope {
+                val stopped = job.invokeOnCompletion { cancel("Backend scope closed") }
+                try {
+                    callbackFlow {
+                        job.ensureActive()
+                        val subscription =
+                            client.watch(reference, arguments) {
+                                if (trySend(it).isFailure) {
+                                    close(IllegalStateException("Backend watch buffer exhausted"))
+                                }
+                            }
+                        awaitClose { subscription.close() }
+                    }.buffer(64).collect { emit(it) }
+                } finally {
+                    stopped.dispose()
+                }
             }
-        }.buffer(64)
+        }
 
     override fun close() {
         job.cancel()

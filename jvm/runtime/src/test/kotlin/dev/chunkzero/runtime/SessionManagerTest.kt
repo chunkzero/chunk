@@ -4,13 +4,83 @@ import chunk.v1.Common.SessionRef
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionPhase
 import net.minestom.server.MinecraftServer
+import net.minestom.server.entity.Player
+import net.minestom.server.network.packet.server.SendablePacket
+import net.minestom.server.network.player.GameProfile
+import net.minestom.server.network.player.PlayerConnection
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.net.InetSocketAddress
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class SessionManagerTest {
+    @Test
+    fun `resource disposal failure still awaits the leave hook`() {
+        MinecraftServer.init()
+        val ticks = TickExecutor()
+        val left = CompletableFuture<Unit>()
+        var leaving = false
+        val manager =
+            SessionManager(
+                ticks,
+                mapOf(
+                    "game" to {
+                        object : Session() {
+                            override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
+
+                            override fun onLeave(player: Player): CompletableFuture<Unit> {
+                                leaving = true
+                                return left
+                            }
+                        }
+                    },
+                ),
+            )
+        val command =
+            SessionCommand
+                .newBuilder()
+                .setOperationId("game")
+                .setSession(SessionRef.newBuilder().setId("game"))
+                .setGeneration(1)
+                .setSessionType("game")
+                .setCapacity(2)
+                .build()
+        try {
+            val created = manager.create(command)
+            repeat(4) { ticks.flush() }
+            created.join()
+            val session = manager.get("game", 1)
+            val player =
+                Player(
+                    object : PlayerConnection() {
+                        override fun sendPacket(packet: SendablePacket) {}
+
+                        override fun getRemoteAddress() = InetSocketAddress("127.0.0.1", 0)
+                    },
+                    GameProfile(UUID.randomUUID(), "test"),
+                )
+            val joined = session.join(player)
+            ticks.flush()
+            joined.join()
+            session.scope.own(player, AutoCloseable { error("Disposal failed") })
+            val leavingResult = session.leave(player)
+            ticks.flush()
+            assertTrue(leaving)
+            assertFalse(leavingResult.isDone)
+            left.complete(Unit)
+            assertTrue(leavingResult.isCompletedExceptionally)
+            val ended = manager.finish(command)
+            repeat(8) { ticks.flush() }
+            ended.join()
+        } finally {
+            left.complete(Unit)
+            MinecraftServer.process().stop()
+        }
+    }
+
     @Test
     fun `readiness and ending await hooks and dispose only the owning session`() {
         MinecraftServer.init()
