@@ -77,6 +77,36 @@ fn op_chunk_read(state: &mut OpState, generation: u32, #[string] request: &str) 
             }
             serde_json::to_value(rows.into_iter().collect::<Vec<_>>()).map_err(JsErrorBox::from_err)?
         }
+        Read::Index { query } => {
+            if query.limit == 0 || query.limit > 1024 {
+                return Err(JsErrorBox::generic("Index result limit must be 1..1024"));
+            }
+            let extra = capabilities
+                .writes
+                .keys()
+                .filter(|key| key.table == query.table)
+                .count();
+            let candidates = chunk_contract::IndexQuery {
+                limit: query.limit + extra,
+                ..query.clone()
+            };
+            let indexed = capabilities.host.scan_index(&candidates).map_err(JsErrorBox::generic)?;
+            let mut rows: BTreeMap<_, _> = indexed.rows.into_iter().collect();
+            for (key, write) in &capabilities.writes {
+                if key.table == query.table {
+                    rows.remove(&key.id);
+                    if let Some(value) = &write.value
+                        && query.matches(&indexed.fields, value)
+                    {
+                        rows.insert(key.id.clone(), value.clone());
+                    }
+                }
+            }
+            let mut rows: Vec<_> = rows.into_iter().collect();
+            rows.sort_by(|a, b| chunk_contract::IndexQuery::compare(&indexed.fields, a, b));
+            rows.truncate(query.limit);
+            serde_json::to_value(rows).map_err(JsErrorBox::from_err)?
+        }
     };
     let encoded = serde_json::to_string(&value).map_err(JsErrorBox::from_err)?;
     if encoded.len() > bounds::JSON_BYTES {

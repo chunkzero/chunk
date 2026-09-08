@@ -7,7 +7,10 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_js::{Cancellation, DeploymentId, Json, Limits};
+use chunk_contract::{Deployment, validate_wire_value};
+#[cfg(test)]
+use chunk_js::Limits;
+use chunk_js::{Cancellation, DeploymentId, Json};
 use chunk_store::{Revision, Snapshot, Storage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
@@ -25,13 +28,14 @@ pub struct Call {
 
 impl Call {
     fn validate(&self) -> Result<()> {
-        if self.function.is_empty() || self.function.len() > 128 {
+        if self.function.is_empty() || self.function.len() > 256 {
             return Err(Error::Invalid("function name"));
         }
         for value in [&self.arguments, &self.caller] {
             if value.as_str().len() > 1024 * 1024 {
                 return Err(Error::Invalid("input limit"));
             }
+            validate_wire_value(&serde_json::from_str(value.as_str())?).map_err(Error::Invalid)?;
         }
         Ok(())
     }
@@ -42,6 +46,12 @@ impl Call {
 pub struct Update {
     pub revision: Revision,
     pub json: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupUpdate {
+    pub revision: Revision,
+    pub results: Vec<Result<Arc<str>>>,
 }
 
 pub(crate) struct Request<T> {
@@ -57,6 +67,11 @@ impl<T> Request<T> {
 }
 
 pub(crate) enum Command {
+    Deploy {
+        deployment: Arc<Deployment>,
+        reply: Request<()>,
+    },
+    #[cfg(test)]
     Register {
         id: DeploymentId,
         source: String,
@@ -77,14 +92,16 @@ pub(crate) enum Command {
         reply: Request<Update>,
     },
     Subscribe {
-        call: Call,
-        reply: Request<Subscription>,
+        calls: Vec<Call>,
+        reply: Request<GroupSubscription>,
     },
 }
 
 impl Command {
     pub fn reject(self, error: Error) {
         match self {
+            Self::Deploy { reply, .. } => reply.finish(Err(error)),
+            #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
             Self::Query { reply, .. } | Self::Mutate { reply, .. } => reply.finish(Err(error)),
@@ -99,10 +116,14 @@ pub(crate) enum Event {
         operation: String,
         result: Result<(Update, Snapshot)>,
     },
+    Retained {
+        result: Result<()>,
+    },
     Wake,
 }
 
 struct Owner {
+    environment: String,
     events: queue::Sender<Event>,
     slots: Arc<Semaphore>,
     stopped: Arc<AtomicBool>,
@@ -131,7 +152,10 @@ impl Backend {
     /// schema installed. Construction waits for the initial snapshot and engine.
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
-    pub fn new(store: Box<dyn Storage>) -> Result<Self> {
+    pub fn new(environment: String, store: Box<dyn Storage>) -> Result<Self> {
+        if environment.is_empty() || environment.len() > 128 {
+            return Err(Error::Invalid("environment identity"));
+        }
         chunk_js::Engine::init_platform();
         let (events, incoming) = queue::channel(REQUESTS);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -151,6 +175,7 @@ impl Backend {
                 }
             })?;
         let backend = Self(Arc::new(Owner {
+            environment,
             events,
             slots: Arc::new(Semaphore::new(REQUESTS)),
             stopped,
@@ -158,6 +183,24 @@ impl Backend {
         }));
         initialized.recv().map_err(|_| Error::Closed)??;
         Ok(backend)
+    }
+
+    #[must_use]
+    pub fn environment(&self) -> &str {
+        &self.0.environment
+    }
+
+    /// Validates and durably retains a deployment before enabling its functions.
+    /// Its tables/indexes must already be installed. Restart reloads retained bundles.
+    /// # Errors
+    /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
+    pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
+        deployment.validate().map_err(Error::Invalid)?;
+        self.submit(|reply| Command::Deploy {
+            deployment: Arc::new(deployment),
+            reply,
+        })
+        .await
     }
 
     async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
@@ -185,6 +228,7 @@ impl Backend {
 
     /// # Errors
     /// Rejects duplicates, invalid bundles, execution budgets and excess resident versions.
+    #[cfg(test)]
     pub async fn register(&self, id: DeploymentId, source: String, limits: Limits) -> Result<()> {
         if source.len() > 4 * 1024 * 1024 {
             return Err(Error::Invalid("source limit"));
@@ -226,8 +270,26 @@ impl Backend {
     /// # Errors
     /// Reports invalid queries, execution failures or the subscription capacity limit.
     pub async fn subscribe(&self, call: Call) -> Result<Subscription> {
-        call.validate()?;
-        self.submit(|reply| Command::Subscribe { call, reply }).await
+        Ok(Subscription(self.subscribe_group(vec![call]).await?))
+    }
+
+    /// Publishes all queries against one durable snapshot. Query errors retain
+    /// dependencies and may recover on later updates without closing the group.
+    /// # Errors
+    /// Rejects invalid calls, non-query functions and oversized groups.
+    pub async fn subscribe_group(&self, calls: Vec<Call>) -> Result<GroupSubscription> {
+        if calls.is_empty() || calls.len() > 16 {
+            return Err(Error::Invalid("query group limit"));
+        }
+        let mut bytes = 0;
+        for call in &calls {
+            call.validate()?;
+            bytes += call.arguments.as_str().len() + call.caller.as_str().len();
+        }
+        if bytes > 1024 * 1024 {
+            return Err(Error::Invalid("query group input limit"));
+        }
+        self.submit(|reply| Command::Subscribe { calls, reply }).await
     }
 }
 
@@ -238,13 +300,13 @@ impl Drop for CancelOnDrop {
     }
 }
 
-pub struct Subscription {
-    receiver: watch::Receiver<Result<Update>>,
+pub struct GroupSubscription {
+    receiver: watch::Receiver<Result<GroupUpdate>>,
     initial: bool,
 }
 
-impl Subscription {
-    pub(crate) fn new(receiver: watch::Receiver<Result<Update>>) -> Self {
+impl GroupSubscription {
+    pub(crate) fn new(receiver: watch::Receiver<Result<GroupUpdate>>) -> Self {
         Self {
             receiver,
             initial: true,
@@ -254,10 +316,26 @@ impl Subscription {
     /// Returns the initial result, then waits for changed results or an error.
     /// # Errors
     /// Reports execution, commit failure or backend shutdown.
-    pub async fn next(&mut self) -> Result<Update> {
+    pub async fn next(&mut self) -> Result<GroupUpdate> {
         if !std::mem::take(&mut self.initial) {
             self.receiver.changed().await.map_err(|_| Error::Closed)?;
         }
         self.receiver.borrow_and_update().clone()
+    }
+}
+
+pub struct Subscription(GroupSubscription);
+
+impl Subscription {
+    /// Returns the first result and subsequent changes. Data-dependent errors may
+    /// recover on the next call; storage failure and shutdown close the subscription.
+    /// # Errors
+    /// Reports execution, storage failure or shutdown.
+    pub async fn next(&mut self) -> Result<Update> {
+        let mut group = self.0.next().await?;
+        Ok(Update {
+            revision: group.revision,
+            json: group.results.remove(0)?,
+        })
     }
 }

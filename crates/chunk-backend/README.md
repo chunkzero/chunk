@@ -1,11 +1,13 @@
 # Environment backend
 
-`Backend::new(Box<dyn Storage>)` starts one environment engine thread and one
+`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread and one
 commit thread. Supply a store with its schema installed and exclusive writer
-authority. Register immutable bundles by `DeploymentId`, then use the async
-`query`, `mutate`, and `subscribe` methods from transport tasks. Caller identity
-must already be authenticated. This crate does not install schemas or provide
-a network protocol.
+authority. `deploy` validates and durably retains a versioned `chunk_contract::Deployment`,
+then enables its public functions. Bundles and contracts reload after restart.
+Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport tasks.
+`Service` exposes authenticated gRPC; only trusted platform processes may supply
+caller identity. Internal functions are inaccessible through this ingress.
+Schema installation must precede deployment; coordinated activation is follow-up work.
 
 The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending
 writes and subscription dependencies. Each mutation executes against the latest
@@ -22,9 +24,13 @@ after relevant commits. Dependencies refresh even when the JSON result is
 unchanged. Result changes use JSON text equality; object key order can cause an
 extra update. Application errors remain reactive results, retaining reads collected
 before failure; an error-to-success transition always publishes. Reevaluations run
-one per actor scheduling boundary, with at most two retained durable snapshots.
+one group (at most 16 queries) per actor scheduling boundary, with at most two retained durable snapshots.
 Queued revisions may coalesce conservatively to the latest snapshot. Slow subscribers coalesce updates through a watch channel, so they
 receive the latest durable result rather than every intermediate revision.
+Each group evaluates all queries against one snapshot. Per-query failures occupy
+their original result positions, retain dependencies, and recover reactively.
+Transport errors close the stream; clients mark retained results stale until a
+fresh full group arrives on reconnect.
 
 Give every mutation a stable operation ID. Its fingerprint includes the function,
 canonical arguments and caller, independent of bundle and deployment identity.
@@ -33,6 +39,10 @@ after redeployment; reuse with a different request fails. Outcome lookups use th
 engine's pinned base snapshot and pending operations, so execution need not wait
 behind earlier commits. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`)
 to encode and canonicalize once before crossing the engine boundary.
+Argument/result contracts and wire numbers are validated before publication.
+Deployment-specific reads project declared fields; writes must satisfy the
+physical schema and all resident contracts. Storage's signed 64-bit support does
+not make arbitrary integers safe JavaScript values.
 
 Dropping a request cancels queued work and executing queries. Once a mutation
 starts, an independent execution token prevents one caller from interrupting a
@@ -57,11 +67,17 @@ mutations and 32 MiB of serialized pending writes/results. Excess work returns
 `Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own
 source, heap, capability and payload budgets. Release a deployment after its
 mutations and subscriptions drain.
+Release currently unloads the runtime; durable deployment retirement and schema
+activation barriers are handled by the retained-deployment follow-up.
 
-The current storage API decodes documents into `serde_json::Value`; snapshot
-reads run synchronously on the engine thread. Range scans can materialize an
-entire interval before the JS payload budget rejects it. They need a bounded
-storage read API before accepting arbitrary large-database scans. Commit results
+The storage API decodes documents into `serde_json::Value`; snapshot reads run
+synchronously on the engine thread. A cumulative allowance limits each invocation
+to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it fails
+the read instead of returning a silently truncated result. `scanIndex` supports
+declared ascending indexes, equality prefixes and a half-open range on the next
+field, with 1–1,024 results. Both pending and invocation-local writes participate
+in ordering and limiting. Dependencies include old/new index keys and empty ranges.
+Commit results
 are parsed on the commit thread because `chunk_store::Commit` currently takes
 `Value`; query/subscription responses remain JSON text. Durable retries preserve
 the JSON value but may normalize its formatting and object key order.

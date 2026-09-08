@@ -19,6 +19,7 @@ dependencyResolutionManagement {
 rootProject.name = "chunk"
 
 include(":jvm:proto")
+include(":jvm:backend-client")
 include(":jvm:runtime")
 include(":jvm:build-api")
 include(":jvm:gradle-plugin")

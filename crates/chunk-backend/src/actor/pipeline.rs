@@ -77,8 +77,16 @@ impl Actor {
         if id.is_empty() || id.len() > 256 {
             return Err(Error::Invalid("operation identity"));
         }
-        if !self.versions.contains(&call.deployment) {
+        if !self.versions.contains_key(&call.deployment) {
             return Err(Error::Invalid("unknown deployment"));
+        }
+        if let Some(Some(deployment)) = self.versions.get(&call.deployment) {
+            let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?;
+            if function.visibility != chunk_contract::Visibility::Public
+                || function.kind != chunk_contract::FunctionKind::Mutation
+            {
+                return Err(Error::Unknown);
+            }
         }
         // Identity describes the business request; a durable result survives redeployment.
         let request = serde_json::to_vec(&(
@@ -94,6 +102,9 @@ impl Actor {
     }
 
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
+        if self.deploying.is_some() {
+            return Err(Error::Busy);
+        }
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
         let seed = u64::from_be_bytes(
@@ -119,7 +130,30 @@ impl Actor {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let bytes = snapshot.validate(&writes)? + execution.value.len();
+        if let Some(Some(contract)) = self.versions.get(&mutation.call.deployment) {
+            for write in &writes {
+                if !contract.tables.contains_key(&write.key.table) {
+                    return Err(Error::Contract);
+                }
+                if let Some(value) = &write.value {
+                    for retained in self.versions.values().flatten() {
+                        if let Some(table) = retained.tables.get(&write.key.table) {
+                            crate::reads::project(table, value)?;
+                        }
+                    }
+                }
+            }
+        }
+        let changes = snapshot.changes(&writes)?;
+        let old_bytes = changes
+            .iter()
+            .filter_map(|c| c.before.as_ref())
+            .map(serde_json::to_vec)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        let bytes = snapshot.validate(&writes)? + execution.value.len() + old_bytes;
         if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
             return Err(Error::Busy);
         }
@@ -147,6 +181,7 @@ impl Actor {
             operation: mutation.operation.id.clone(),
             revision,
             writes,
+            changes,
             bytes,
         });
         self.pending_bytes += bytes;
@@ -203,6 +238,6 @@ impl Actor {
             let (query, reply) = self.deferred.pop_front().expect("ready query");
             reply.finish(Ok(query));
         }
-        self.publish(&pending.writes);
+        self.publish(&pending.changes);
     }
 }

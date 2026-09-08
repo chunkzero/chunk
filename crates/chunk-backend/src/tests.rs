@@ -26,6 +26,15 @@ export function selected(ctx) {
   const id = ctx.db.get('profiles', 'selector').selected;
   return ctx.db.get('profiles', id).coins;
 }
+export function indexed(ctx) { return ctx.db.scanIndex({table:'profiles',index:'by_coins',prefix:[],start:1,end:4,limit:1}); }
+export function seedIndex(ctx) {
+  for(const [id,coins] of [['a',1],['b',2],['c',3]]) ctx.db.put('profiles',id,{coins});
+  return null;
+}
+export function shiftIndex(ctx) {
+  ctx.db.delete('profiles','a'); ctx.db.put('profiles','b',{coins:4});
+  return indexed(ctx);
+}
 ";
 
 fn id() -> DeploymentId {
@@ -48,7 +57,7 @@ fn open(directory: &tempfile::TempDir) -> SqliteStore {
     let schema: DatabaseSchema = serde_json::from_value(json!({"profiles": {"fields": {
         "coins": {"schema": {"type": "integer"}, "optional": true},
         "selected": {"schema": {"type": "string"}, "optional": true}
-    }}}))
+    }, "indexes": {"by_coins": ["coins"]}}}))
     .unwrap();
     store.apply_schema(&schema).unwrap();
     store
@@ -80,6 +89,13 @@ struct ControlledStore {
 }
 
 impl Storage for ControlledStore {
+    fn deployments(&self) -> chunk_store::Result<Vec<chunk_contract::Deployment>> {
+        self.inner.deployments()
+    }
+    fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<()> {
+        self.inner.retain_deployment(deployment)
+    }
+
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> chunk_store::Result<Revision> {
         self.inner.apply_schema(schema)
     }
@@ -139,7 +155,7 @@ impl Harness {
             ambiguous,
             rejected,
         };
-        let backend = Backend::new(Box::new(store)).unwrap();
+        let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
         Self {
             controls: Controls {
@@ -265,7 +281,7 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
             .value,
         json!({"coins": 1})
     );
-    let backend = Backend::new(Box::new(store)).unwrap();
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
     let recovered = backend
         .mutate("first".into(), call("bump", json!({"id": "p"})))
@@ -291,7 +307,7 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
 #[tokio::test]
 async fn subscriptions_track_empty_ranges_and_update_dependencies_when_results_match() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
     for (key, document) in [
         ("a", json!({"coins": 1})),
@@ -374,7 +390,7 @@ async fn rejected_commit_drains_suffix_before_reusing_revisions() {
 #[tokio::test]
 async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_errors() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     let source = format!(
         "{SOURCE} export function strict(ctx) {{ return ctx.db.get('profiles','p').coins; }} export function invalid(ctx,args) {{ ctx.db.put('profiles','p',{{coins:99}}); return args.deep ? Array.from({{length:130}}).reduce(v=>[v],null) : '\\ud800'; }}"
     );
@@ -425,7 +441,7 @@ async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_erro
 #[tokio::test]
 async fn foreground_queries_run_between_subscription_reevaluations() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=0; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
     let mut watches = Vec::new();
     for _ in 0..16 {
@@ -440,4 +456,45 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
         count.as_u64().unwrap() < 16,
         "foreground query ran after every subscriber: {count}"
     );
+}
+
+#[tokio::test]
+async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
+    let mut harness = Harness::new(false).await;
+    let backend = &harness.backend;
+    let mut watch = backend.subscribe(call("indexed", json!({}))).await.unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    let mut seed = Box::pin(backend.mutate("seed-index".into(), call("seedIndex", json!({}))));
+    pending(seed.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    let mut shift = Box::pin(backend.mutate("shift-index".into(), call("shiftIndex", json!({}))));
+    pending(shift.as_mut()).await;
+    let mut query = Box::pin(backend.query(call("indexed", json!({}))));
+    pending(query.as_mut()).await;
+    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
+    harness.controls.commits[0].send(()).unwrap();
+    seed.await.unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["a", {"coins":1}]]));
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    pending(query.as_mut()).await;
+    harness.controls.commits[1].send(()).unwrap();
+    assert_eq!(value(&shift.await.unwrap()), json!([["c", {"coins":3}]]));
+    assert_eq!(value(&query.await.unwrap()), json!([["c", {"coins":3}]]));
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["c", {"coins":3}]]));
+    backend
+        .mutate(
+            "leave-range".into(),
+            call("put", json!({"id":"c", "value":{"coins":9}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    backend
+        .mutate(
+            "enter-range".into(),
+            call("put", json!({"id":"z", "value":{"coins":2}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["z", {"coins":2}]]));
 }

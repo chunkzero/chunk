@@ -52,12 +52,23 @@ mod snapshot;
 mod sqlite;
 
 pub use chunk_contract::DatabaseSchema;
-pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Revision, Write};
+pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Revision, Write};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
 /// Only the environment backend holds this capability.
 pub trait Storage: Send {
+    /// Loads retained immutable deployment metadata and bundles.
+    /// # Errors
+    /// Reports I/O, corruption or unsupported metadata.
+    fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>>;
+
+    /// Durably retains an immutable deployment without changing document revisions.
+    /// The backend must establish schema readiness before exposing its functions.
+    /// # Errors
+    /// Rejects changed identities, invalid declarations and excessive retention.
+    fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<()>;
+
     /// Atomically installs new tables, optional fields and indexes, advancing the
     /// environment revision. Reapplying declarations is a no-op. Omitted tables,
     /// fields and indexes are retained; existing definitions cannot be changed.
@@ -100,6 +111,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("local database size limit reached")]
     Capacity,
+    #[error("snapshot read budget exceeded")]
+    ReadLimit,
     #[error("corrupt storage: {0}")]
     Corrupt(&'static str),
     #[error("snapshot connection was poisoned")]

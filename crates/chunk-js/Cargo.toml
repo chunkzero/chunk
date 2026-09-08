@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+chunk-contract = { path = "../chunk-contract" }
 deno_core = "0.411.0"
 deno_error = "0.7.1"
 serde = { version = "1", features = ["derive"] }

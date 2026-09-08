@@ -9,8 +9,8 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue
 use serde_json::Value;
 
 use crate::{
-    DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Operation, Outcome, Result, Snapshot,
-    SnapshotReader,
+    DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Result,
+    Snapshot, SnapshotReader,
 };
 
 use super::{codec, revision, schema};
@@ -41,17 +41,39 @@ impl Reader {
         self.schema.get(name).ok_or(Error::Invalid("undeclared table"))
     }
 
-    fn query(&self, table: &TableSchema, sql: &str, params: Vec<SqlValue>) -> Result<Vec<(String, Document)>> {
+    fn query(
+        &self,
+        table: &TableSchema,
+        sql: &str,
+        params: Vec<SqlValue>,
+        budget: &mut ReadBudget,
+    ) -> Result<Vec<(String, Document)>> {
         let connection = self.connection.lock().map_err(|_| Error::Poisoned)?;
         let mut statement = connection.prepare_cached(sql)?;
         let mut rows = statement.query(params_from_iter(params))?;
         let mut documents = Vec::new();
         while let Some(row) = rows.next()? {
+            let mut bytes = row.get::<_, usize>(2)?;
+            let raw_bytes = (3..table.fields.len() + 3).try_fold(0, |total, index| -> Result<usize> {
+                let value = row.get_ref(index)?;
+                let length = match value {
+                    rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => bytes.len(),
+                    _ => 8,
+                };
+                Ok(total + length)
+            })?;
+            bytes = bytes.max(raw_bytes)
+                + row
+                    .get_ref(0)?
+                    .as_bytes()
+                    .map_err(|_| Error::Corrupt("invalid document ID"))?
+                    .len();
+            budget.charge(bytes)?;
             let id = row.get(0)?;
             let revision = row.get(1)?;
             let mut fields = serde_json::Map::new();
             for (index, (name, field)) in table.fields.iter().enumerate() {
-                if let Some(value) = codec::decode(field, row.get(index + 2)?)? {
+                if let Some(value) = codec::decode(field, row.get(index + 3)?)? {
                     fields.insert(name.clone(), value);
                 }
             }
@@ -77,7 +99,7 @@ impl SnapshotReader for Reader {
         &self.schema
     }
 
-    fn get(&self, key: &DocumentKey) -> Result<Option<Document>> {
+    fn get(&self, key: &DocumentKey, budget: &mut ReadBudget) -> Result<Option<Document>> {
         key.validate()?;
         let table = self.table(&key.table)?;
         let sql = format!(
@@ -86,12 +108,12 @@ impl SnapshotReader for Reader {
             codec::quote(&key.table)
         );
         Ok(self
-            .query(table, &sql, vec![key.id.clone().into()])?
+            .query(table, &sql, vec![key.id.clone().into()], budget)?
             .pop()
             .map(|(_, document)| document))
     }
 
-    fn scan(&self, range: &KeyRange) -> Result<Vec<(String, Document)>> {
+    fn scan(&self, range: &KeyRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>> {
         range.validate()?;
         let table = self.table(&range.table)?;
         let mut conditions = Vec::new();
@@ -110,17 +132,17 @@ impl SnapshotReader for Reader {
             select(table),
             codec::quote(&range.table)
         );
-        self.query(table, &sql, params)
+        self.query(table, &sql, params, budget)
     }
 
-    fn scan_index(&self, range: &IndexRange) -> Result<Vec<(String, Document)>> {
+    fn scan_index(&self, range: &IndexRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>> {
         let table = self.table(&range.table)?;
         range.validate(table)?;
         if range.end.as_ref().is_some_and(Value::is_null) {
             return Ok(Vec::new());
         }
         let (sql, params) = index_query(table, range)?;
-        self.query(table, &sql, params)
+        self.query(table, &sql, params, budget)
     }
 }
 
@@ -181,7 +203,7 @@ fn index_value(field: &Field, value: &Value) -> Result<SqlValue> {
 }
 
 fn select(table: &TableSchema) -> String {
-    let mut columns = vec!["_id".to_owned(), "_revision".to_owned()];
+    let mut columns = vec!["_id".to_owned(), "_revision".to_owned(), "_bytes".to_owned()];
     columns.extend(table.fields.keys().map(|name| codec::quote(name)));
     columns.join(", ")
 }
