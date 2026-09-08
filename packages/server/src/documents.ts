@@ -41,7 +41,9 @@ export function documents<T extends Tables>(schema: SchemaDefinition<T>, raw: Ra
     return name
   }
   function document<N extends keyof T & string>(name: N, id: string, value: JsonValue): Document<T, N> | null {
-    return value === null ? null : freeze({ ...v.object(table(name).fields).parse(value), _id: v.id(name).parse(id) }) as Document<T, N>
+    return value === null ? null : Object.defineProperty({ ...v.object(table(name).fields).parse(value) }, "_id", {
+      value: v.id(name).parse(id), enumerable: true,
+    }) as Document<T, N>
   }
   const reader: Reader<T> = {
     get<N extends keyof T & string>(id: Id<N>) { const name = key(id) as N; return document(name, id, raw.get(name, id)) },
@@ -75,7 +77,7 @@ export function documents<T extends Tables>(schema: SchemaDefinition<T>, raw: Ra
         configure?.(range as unknown as Parameters<NonNullable<typeof configure>>[0])
         function collect(limit: number) {
           if (!Number.isInteger(limit) || limit < 1 || limit > 1024) throw new Error("Collection limit must be 1..1024")
-          return raw.scanIndex({ table: name, index, prefix, start, end, limit }).map(([id, value]) => document(name, id, value)!)
+          return raw.scanIndex({ table: name, index, prefix, ...(hasStart ? { start } : {}), ...(hasEnd ? { end } : {}), limit }).map(([id, value]) => document(name, id, value)!)
         }
         return freeze({ collect, first: () => collect(1)[0] ?? null, unique() {
           const rows = collect(2)
