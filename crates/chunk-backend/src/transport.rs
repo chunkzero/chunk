@@ -38,7 +38,19 @@ impl Service {
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        if request.metadata().get("authorization").and_then(|v| v.to_str().ok()) != Some(&self.credential) {
+        let valid = request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| {
+                value.len() == self.credential.len()
+                    && value
+                        .bytes()
+                        .zip(self.credential.bytes())
+                        .fold(0, |difference, (a, b)| difference | std::hint::black_box(a ^ b))
+                        == 0
+            });
+        if !valid {
             return Err(Status::unauthenticated("invalid backend credential"));
         }
         Ok(())
