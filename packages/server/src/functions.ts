@@ -5,7 +5,7 @@ import { freeze, v } from "./validators.ts"
 import type { InferObject, JsonValue, Schema, Shape, Validator } from "./validators.ts"
 
 export interface RawReader {
-  scanIndex(query: { table: string; index: string; prefix: JsonValue[]; start: JsonValue; end: JsonValue; limit: number }): [string, JsonValue][]
+  scanIndex(query: { table: string; index: string; prefix: JsonValue[]; start?: JsonValue; end?: JsonValue; limit: number }): [string, JsonValue][]
   get(table: string, id: string): JsonValue
   scan(table: string, start?: string | null, end?: string | null): [string, JsonValue][]
 }

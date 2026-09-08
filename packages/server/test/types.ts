@@ -33,7 +33,7 @@ const profile: Id<"profiles"> = v.id("profiles").parse("profiles:p1")
 const match: Id<"matches"> = profile
 void [registered, absent, nullable, undefinedValue, match]
 
-const schema = defineSchema({ profiles, matches: defineTable({ score: v.integer() }).index("by_score", ["score"]) })
+const schema = defineSchema({ profiles, matches: defineTable({ score: v.integer(), tags: v.array(v.string()) }).index("by_score", ["score"]) })
 const { defineFunctions, unset } = await import("../src/index.ts")
 const typed = defineFunctions(schema)
 typed.mutation({ args: { id: v.id("profiles") }, returns: v.null(), handler: ({ db }, args) => {
@@ -52,6 +52,11 @@ typed.mutation({ args: { id: v.id("profiles") }, returns: v.null(), handler: ({ 
 } })
 typed.query({ args: { id: v.id("matches") }, returns: v.integer(), handler: ({ db }, args) => {
   const doc = db.get(args.id)
+  if (doc) {
+    doc.tags.push("local")
+    // @ts-expect-error document metadata is readonly
+    doc._id = args.id
+  }
   // @ts-expect-error queries cannot write
   db.delete(args.id)
   return doc?.score ?? 0
