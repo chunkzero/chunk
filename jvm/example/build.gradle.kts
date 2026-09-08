@@ -37,3 +37,24 @@ tasks.named<GenerateBackend>("generateBackend") {
     backendProject.set(rootProject.layout.projectDirectory.dir("examples/local"))
     packageName.set("dev.chunkzero.example.generated")
 }
+
+val buildBackendExecutable =
+    tasks.register<Exec>("buildBackendExecutable") {
+        workingDir(rootProject.projectDir)
+        inputs.files(rootProject.fileTree("crates") { include("**/src/**", "**/Cargo.toml") })
+        inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
+        inputs.dir(rootProject.file("proto"))
+        outputs.file(rootProject.file("target/debug/chunk"))
+        commandLine("cargo", "build", "-q", "-p", "chunk")
+    }
+tasks.test {
+    dependsOn(buildBackendExecutable)
+    systemProperty("chunk.executable", rootProject.file("target/debug/chunk").absolutePath)
+    systemProperty(
+        "chunk.backend",
+        layout.buildDirectory
+            .dir("generated/chunk/backend")
+            .get()
+            .asFile.absolutePath,
+    )
+}

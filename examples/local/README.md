@@ -91,3 +91,13 @@ private credentials and must not be shared. Backend/control use loopback ports
 second owner of its state directory. `just local --state <directory> --bind <address>
 --backend-bind <address> --control-bind <address>` selects another local environment;
 all addresses must remain loopback.
+
+## Automated backend boundary check
+
+`./gradlew :jvm:example:test --tests '*BackendIntegrationTest'` builds the Rust
+backend and generated Java client, then calls the actual TypeScript coin/stat
+handlers over authenticated loopback gRPC. It verifies durable operation recovery,
+stale/fresh watch transitions across backend restart, shared data between retained
+deployments and independent player identities. Its processes, channels and executors
+are closed on completion. This complements the official-client scenario above;
+it does not simulate Minecraft login or player movement.
