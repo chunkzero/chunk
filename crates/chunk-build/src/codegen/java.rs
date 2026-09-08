@@ -13,6 +13,7 @@ pub(super) struct Type {
 pub(super) struct Generator {
     pub declarations: Vec<String>,
     pub ids: BTreeSet<String>,
+    pub codecs: BTreeSet<String>,
 }
 
 impl Generator {
@@ -59,6 +60,7 @@ impl Generator {
     }
 
     fn object(&mut self, name: &str, fields: &BTreeMap<String, Field>) -> Type {
+        self.codecs.insert(format!("{name}$Codec"));
         let mut components = Vec::new();
         let mut reads = Vec::new();
         let mut writes = Vec::new();
@@ -96,6 +98,7 @@ impl Generator {
     }
 
     fn union(&mut self, name: &str, variants: &[Schema]) -> Type {
+        self.codecs.insert(format!("{name}$Codec"));
         let mut types = Vec::new();
         let mut reads = Vec::new();
         let mut writes = Vec::new();
@@ -121,6 +124,10 @@ impl Generator {
 
 pub(super) fn identifier(name: &str) -> String {
     const RESERVED: &[&str] = &[
+        "Codecs",
+        "Objects",
+        "List",
+        "Set",
         "abstract",
         "assert",
         "boolean",

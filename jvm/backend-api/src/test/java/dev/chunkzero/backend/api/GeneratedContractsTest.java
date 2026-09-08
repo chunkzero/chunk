@@ -9,6 +9,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class GeneratedContractsTest {
     @Test
+    void generatedNamesAndScalarCodecsRoundTrip() {
+        var value = Codecs.parse("{\"Objects\":\"text\",\"List\":[null],\"class\":\"line\\n\\u0000🌍\",\"ratio\":0.5,\"flag\":true,\"exact\":42,\"fraction\":0.125,\"nothing\":null}");
+        var codec = BackendTypes.__proto__$read.arguments();
+        assertEquals(value, codec.encode(codec.decode(value)));
+        var result = Codecs.parse("{\"_id\":\"profiles:p1\",\"wins\":3}");
+        assertEquals(result, BackendTypes.__proto__$read.result().encode(BackendTypes.__proto__$read.result().decode(result)));
+        assertEquals(Codecs.parse("true"), BackendTypes.Codecs$.result().encode(BackendTypes.Codecs$.result().decode(Codecs.parse("true"))));
+    }
+
+    @Test
     void generatedCodecsPreserveAbsentNullUnionsIdsAndSafeIntegers() throws IOException {
         String input;
         try (var stream = getClass().getResourceAsStream("/values.json")) {

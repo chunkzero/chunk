@@ -7,7 +7,7 @@ use super::quote;
 
 pub(super) fn fields(fields: &BTreeMap<String, Field>) -> String {
     format!(
-        "{{{}}}",
+        "shape({{{}}})",
         fields
             .iter()
             .map(|(name, field)| {
@@ -63,7 +63,7 @@ pub(super) fn tree(node: &Value) -> String {
             "{{{}}}",
             fields
                 .iter()
-                .map(|(name, value)| format!("{}:{}", quote(name), tree(value)))
+                .map(|(name, value)| format!("[{}]:{}", quote(name), tree(value)))
                 .collect::<Vec<_>>()
                 .join(",\n")
         ),
