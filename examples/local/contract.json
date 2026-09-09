@@ -262,6 +262,68 @@
         "type": "null"
       },
       "visibility": "public"
+    },
+    "proxy/move": {
+      "kind": "query",
+      "export": "move",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "username": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "destination": {
+            "schema": {
+              "type": "object",
+              "fields": {
+                "key": {
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                "session_type": {
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                "machine_profile": {
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "key": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "session_type": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "machine_profile": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "visibility": "public"
     }
   },
   "contract_version": 1,

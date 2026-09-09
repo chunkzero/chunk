@@ -1,3 +1,5 @@
+mod relay;
+
 use std::{io, time::Duration};
 
 use chunk_proto::v1::{ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest};
@@ -9,20 +11,23 @@ use tokio::{
 use super::{
     authentication::Authenticated,
     configuration, gameplay,
-    platform::{Platform, RPC_TIMEOUT, request},
-    transport::invalid_data,
+    platform::{Platform, request},
+    transport::{Transport, invalid_data},
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
-const INPUT_LIMIT: usize = 65_536;
 
 struct ClaimGuard {
     platform: Platform,
     claim: ClaimRequest,
+    armed: bool,
 }
 
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let platform = self.platform.clone();
         let claim = self.claim.clone();
         tokio::spawn(async move {
@@ -50,14 +55,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     platform: &Platform,
     deadline: Duration,
 ) -> io::Result<()> {
-    let profile = &authenticated.profile;
-    let claim = ClaimRequest {
-        operation_id: uuid::Uuid::new_v4().to_string(),
-        proxy_id: platform.proxy_id.clone(),
-        connection_id: uuid::Uuid::new_v4().to_string(),
-        identity: Some(gameplay::identity(profile)),
-        demand: None,
-    };
+    let claim = login_claim(&authenticated.profile, platform);
     let destination = async {
         let mut claim = claim;
         let identity = claim
@@ -69,6 +67,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let guard = ClaimGuard {
             platform: platform.clone(),
             claim,
+            armed: true,
         };
         let mut message = request(guard.claim.clone(), &platform.target.control.token)?;
         message.set_timeout(WAIT_TIMEOUT);
@@ -82,71 +81,192 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         validate(&assignment, &guard)?;
         Ok((guard, assignment))
     };
-    let (mut authenticated, settings, (guard, assignment)) =
+    let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
-    let config = assignment
+    loop {
+        let mut internal = timeout(
+            deadline.min(WAIT_TIMEOUT),
+            open(&assignment, &guard, &authenticated, &settings),
+        )
+        .await
+        .map_err(io::Error::other)??;
+        timeout(
+            deadline.min(WAIT_TIMEOUT),
+            Box::pin(configuration::relay(
+                &mut authenticated.transport,
+                &mut internal,
+                &mut settings,
+            )),
+        )
+        .await
+        .map_err(io::Error::other)??;
+        let identity = assignment
+            .claim
+            .clone()
+            .ok_or_else(|| invalid_data("missing claim identity"))?;
+        let arrival = relay::until(
+            &mut authenticated.transport,
+            &mut internal,
+            &mut settings,
+            Box::pin(arrive(&guard, identity.clone())),
+            true,
+        )
+        .await?;
+        if let Err(error) = arrival {
+            let _ =
+                configuration::disconnect(&mut authenticated.transport, 0x20, "Server temporarily unavailable").await;
+            return Err(error);
+        }
+        tracing::info!(operation = %guard.claim.operation_id, "player arrived in managed session");
+        let next = relay::until(
+            &mut authenticated.transport,
+            &mut internal,
+            &mut settings,
+            Box::pin(next_move(&guard, &identity, authenticated.protocol_version)),
+            true,
+        )
+        .await??;
+        timeout(
+            Duration::from_secs(10),
+            relay::start_configuration(&mut authenticated.transport, &mut internal, &mut settings),
+        )
+        .await
+        .map_err(io::Error::other)??;
+        // The client's acknowledgment fences all remaining source PLAY input.
+        if let Err(error) = withdraw(&guard, &identity).await {
+            let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
+            return Err(error);
+        }
+        guard.armed = false;
+        drop(internal);
+        (guard, assignment) = next;
+    }
+}
+
+fn login_claim(profile: &chunk_protocol::versions::v26_1::LoginSuccess, platform: &Platform) -> ClaimRequest {
+    ClaimRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        proxy_id: platform.proxy_id.clone(),
+        connection_id: uuid::Uuid::new_v4().to_string(),
+        identity: Some(gameplay::identity(profile)),
+        demand: None,
+        source: None,
+    }
+}
+
+async fn open<S>(
+    assignment: &Assignment,
+    guard: &ClaimGuard,
+    authenticated: &Authenticated<S>,
+    settings: &chunk_protocol::versions::v26_1::ConfigurationClientInformation,
+) -> io::Result<Transport<tokio::net::TcpStream>> {
+    validate(assignment, guard)?;
+    if assignment
         .configuration
         .as_ref()
-        .ok_or_else(|| invalid_data("missing configuration"))?;
-    if config.protocol != authenticated.protocol_version {
+        .is_none_or(|c| c.protocol != authenticated.protocol_version)
+    {
         return Err(invalid_data("destination protocol differs from client"));
     }
-    let preparation = assignment
-        .preparation
-        .as_ref()
-        .ok_or_else(|| invalid_data("missing preparation"))?;
-    if preparation.operation_id != guard.claim.operation_id {
-        return Err(invalid_data("preparation operation mismatch"));
-    }
-    let claim_identity = assignment
-        .claim
-        .clone()
-        .ok_or_else(|| invalid_data("missing claim identity"))?;
     guard
         .platform
         .control
         .clone()
         .activate(request(
             ActivateClaim {
-                claim: Some(claim_identity.clone()),
+                claim: assignment.claim.clone(),
             },
             &guard.platform.target.control.token,
         )?)
         .await
         .map_err(io::Error::other)?;
-    let mut internal = timeout(
-        deadline.min(WAIT_TIMEOUT),
-        gameplay::login(&authenticated, &settings, preparation.clone()),
-    )
-    .await
-    .map_err(io::Error::other)??;
-    timeout(
-        deadline.min(WAIT_TIMEOUT),
-        Box::pin(configuration::relay(&mut authenticated.transport, &mut internal)),
-    )
-    .await
-    .map_err(io::Error::other)??;
-    let arrival = arrive(&guard, claim_identity);
-    tokio::pin!(arrival);
-    let mut arrived = false;
+    let preparation = assignment
+        .preparation
+        .clone()
+        .ok_or_else(|| invalid_data("missing preparation"))?;
+    gameplay::login(authenticated, settings, preparation).await
+}
+
+async fn next_move(
+    source: &ClaimGuard,
+    identity: &ClaimIdentity,
+    protocol: i32,
+) -> io::Result<(ClaimGuard, Assignment)> {
     loop {
-        tokio::select! {
-            result = &mut arrival, if !arrived => {
-                if let Err(error) = result {
-                    let _ = configuration::disconnect(&mut authenticated.transport, 0x20, "Server temporarily unavailable").await;
-                    return Err(error);
-                }
-                arrived = true;
-                tracing::info!("player arrived in managed session");
+        sleep(Duration::from_millis(500)).await;
+        let polled = source
+            .platform
+            .control
+            .clone()
+            .poll_move(request(source.claim.clone(), &source.platform.target.control.token)?)
+            .await;
+        let Ok(response) = polled else {
+            continue;
+        };
+        let Some(claim) = response.into_inner().claim else {
+            continue;
+        };
+        if claim.source.as_ref() != Some(identity)
+            || claim.proxy_id != source.claim.proxy_id
+            || claim.connection_id != source.claim.connection_id
+            || claim.identity != source.claim.identity
+        {
+            return Err(invalid_data("move identity mismatch"));
+        }
+        let guard = ClaimGuard {
+            platform: source.platform.clone(),
+            claim,
+            armed: true,
+        };
+        let prepare = async {
+            guard.platform.approve_move(&guard.claim).await?;
+            let mut message = request(guard.claim.clone(), &guard.platform.target.control.token)?;
+            message.set_timeout(WAIT_TIMEOUT);
+            let assignment = guard
+                .platform
+                .control
+                .clone()
+                .claim(message)
+                .await
+                .map_err(io::Error::other)?
+                .into_inner();
+            validate(&assignment, &guard)?;
+            if assignment.configuration.as_ref().is_none_or(|c| c.protocol != protocol) {
+                return Err(invalid_data("destination protocol differs from client"));
             }
-            frame = authenticated.transport.read_frame(INPUT_LIMIT) => {
-                timeout(RPC_TIMEOUT, internal.write_body(&frame?)).await.map_err(io::Error::other)??;
-            }
-            frame = internal.read_frame(chunk_protocol::MAX_FRAME_SIZE) => {
-                timeout(RPC_TIMEOUT, authenticated.transport.write_body(&frame?)).await.map_err(io::Error::other)??;
-            }
+            Ok::<_, io::Error>(assignment)
+        };
+        match timeout(WAIT_TIMEOUT, prepare).await {
+            Ok(Ok(assignment)) => return Ok((guard, assignment)),
+            Ok(Err(error)) => tracing::warn!(%error, "move preparation failed; source remains active"),
+            Err(_) => tracing::warn!("move preparation timed out; source remains active"),
         }
     }
+}
+
+async fn withdraw(source: &ClaimGuard, identity: &ClaimIdentity) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let result = source
+            .platform
+            .control
+            .clone()
+            .cancel(request(source.claim.clone(), &source.platform.target.control.token)?)
+            .await;
+        match result {
+            Ok(response) if response.get_ref() == identity => return Ok(()),
+            Ok(_) => return Err(invalid_data("withdrawal identity mismatch")),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown
+                ) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+        // Repeating cancellation uses the same durable operation and exact source generation.
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
 }
 
 fn claim_error(error: tonic::Status) -> io::Error {
@@ -199,6 +319,18 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || config.process_generation == 0
     {
         return Err(invalid_data("control assignment identity mismatch"));
+    }
+    let prepared = assignment
+        .preparation
+        .as_ref()
+        .ok_or_else(|| invalid_data("missing preparation"))?;
+    let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
+    if prepared.operation_id != claim.operation_id
+        || prepared.capability.len() != 32
+        || !address.ip().is_loopback()
+        || address.port() == 0
+    {
+        return Err(invalid_data("invalid player preparation"));
     }
     Ok(())
 }

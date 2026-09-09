@@ -4,6 +4,7 @@ use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCo
 
 mod backend;
 mod control;
+mod players;
 mod runtime;
 
 use clap::{Parser, Subcommand};
@@ -22,6 +23,8 @@ enum Command {
     Backend(backend::Options),
     /// Serve durable local session placement and player ownership.
     Control(control::Options),
+    /// Move a connected player or drain their current runtime.
+    Players(players::Options),
     /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime distribution.
     Runtime(runtime::Options),
     /// Serve Minecraft status and online-mode login (sessions are not yet available).
@@ -68,6 +71,7 @@ async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
         Command::Backend(options) => backend::run(options).await,
         Command::Control(options) => control::run(options).await,
+        Command::Players(options) => players::run(options).await,
         Command::Runtime(options) => runtime::run(options).await,
         Command::Edge {
             bind,

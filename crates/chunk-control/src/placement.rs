@@ -211,6 +211,11 @@ fn validate(request: &ClaimRequest) -> Result<()> {
 }
 
 fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result<()> {
+    if let Some(intent) = state.moves.get(&request.operation_id)
+        && (intent.canceled || intent.request != request.encode_to_vec())
+    {
+        return Err(Error::Invalid("move canceled or changed"));
+    }
     if let Some(claim) = state.claims.get(&request.operation_id) {
         return claim.matches(request);
     }
@@ -218,14 +223,39 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
         return Err(Error::Capacity);
     }
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
-    if state.players.get(player).is_some_and(|p| p.current.is_some()) {
+    if let Some(source) = &request.source {
+        let owner = state.players.get(player).ok_or(Error::Invalid("missing move owner"))?;
+        let previous = state
+            .claims
+            .get(&source.operation_id)
+            .ok_or(Error::Invalid("missing move source"))?;
+        let original = ClaimRequest::decode(previous.request.as_slice())?;
+        if owner.current.as_ref() != Some(&source.operation_id)
+            || owner.pending.is_some()
+            || previous.identity(&source.operation_id) != *source
+            || previous.phase != Phase::Arrived
+            || request.identity != original.identity
+            || request.proxy_id != original.proxy_id
+            || request.connection_id != original.connection_id
+        {
+            return Err(Error::Invalid("stale or competing move"));
+        }
+    } else if state
+        .players
+        .get(player)
+        .is_some_and(|p| p.current.is_some() || p.pending.is_some())
+    {
         return Err(Error::Invalid("player already owned"));
     }
     let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?)?;
     let owner = state.players.entry(player.clone()).or_default();
-    owner.membership_generation = owner.membership_generation.checked_add(1).ok_or(Error::Capacity)?;
+    if request.source.is_none() {
+        owner.membership_generation = owner.membership_generation.checked_add(1).ok_or(Error::Capacity)?;
+        owner.current = Some(request.operation_id.clone());
+    } else {
+        owner.pending = Some(request.operation_id.clone());
+    }
     owner.delivery_generation = owner.delivery_generation.checked_add(1).ok_or(Error::Capacity)?;
-    owner.current = Some(request.operation_id.clone());
     state.claims.insert(
         request.operation_id.clone(),
         Claim {
