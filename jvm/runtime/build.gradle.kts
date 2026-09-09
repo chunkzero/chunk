@@ -10,6 +10,7 @@ kotlin {
 
 dependencies {
     api(project(":jvm:proto"))
+    api(project(":jvm:backend-client"))
     implementation(libs.minestom)
     implementation(libs.grpc.netty)
     runtimeOnly(libs.slf4j.simple)

@@ -13,6 +13,7 @@ import chunk.v1.Supervision.SessionCommand
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer
+import net.minestom.server.entity.Player
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.packet.client.common.ClientSettingsPacket
 import net.minestom.server.network.packet.client.configuration.ClientFinishConfigurationPacket
@@ -35,6 +36,8 @@ import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class GameplayLifecycleTest {
@@ -44,7 +47,29 @@ class GameplayLifecycleTest {
         MinecraftServer.setCompressionThreshold(0)
         MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
-        val manager = SessionManager(ticks, mapOf("flat" to { FlatSession() }))
+        val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
+        val manager =
+            SessionManager(
+                ticks,
+                mapOf(
+                    "flat" to {
+                        object : Session() {
+                            lateinit var scope: SessionScope
+
+                            override fun onCreate(scope: SessionScope) =
+                                FlatSession().onCreate(scope).also {
+                                    this.scope =
+                                        scope
+                                }
+
+                            override fun onJoin(player: Player): CompletableFuture<Unit> {
+                                scope.own(player, AutoCloseable { closedPlayers.add(player) })
+                                return CompletableFuture.completedFuture(Unit)
+                            }
+                        }
+                    },
+                ),
+            )
         val deployment =
             DeploymentRef
                 .newBuilder()
@@ -214,6 +239,7 @@ class GameplayLifecycleTest {
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertTrue(oldPlayer.isRemoved)
+            assertTrue(oldPlayer in closedPlayers)
             assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
             val next = delivery("b", 3)
             val nextSocket = connect(next)
@@ -228,6 +254,7 @@ class GameplayLifecycleTest {
                     .contains(current.instance),
             )
             assertTrue(current.isOnline)
+            assertEquals(setOf(oldPlayer), closedPlayers)
             stub().withdrawPlayer(
                 PlayerWithdrawal
                     .newBuilder()
@@ -236,6 +263,7 @@ class GameplayLifecycleTest {
                     .build(),
             )
             manager.finish(command("b")).get(3, TimeUnit.SECONDS)
+            assertEquals(setOf(oldPlayer, current), closedPlayers)
         } finally {
             sockets.forEach { it.close() }
             service.close()

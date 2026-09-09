@@ -10,6 +10,7 @@ grpc = "1.84.0"
 minestom = "2026.05.17c-26.1.1"
 
 [libraries]
+kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version = "1.11.0" }
 gson = { module = "com.google.code.gson:gson", version = "2.14.0" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version = "2.0.18" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
