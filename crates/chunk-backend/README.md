@@ -1,13 +1,16 @@
 # Environment backend
 
 `Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread and one
-commit thread. Supply a store with its schema installed and exclusive writer
-authority. `deploy` validates and durably retains a versioned `chunk_contract::Deployment`,
-then enables its public functions. Bundles and contracts reload after restart.
+commit thread. Supply a store with exclusive writer authority. `deploy` validates
+and initializes a versioned `chunk_contract::Deployment`, then atomically installs
+its additive schema/indexes and retains the bundle before enabling public functions.
+Bundles and contracts reload after restart.
 Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport tasks.
 `Service` exposes authenticated gRPC; only trusted platform processes may supply
 caller identity. Internal functions are inaccessible through this ingress.
-Schema installation must precede deployment; coordinated activation is follow-up work.
+Activation waits for the commit pipeline to drain; it returns `Busy` while work is
+outstanding. Queries can use existing deployments during activation. Schema changes
+advance the revision; every successful activation reevaluates existing subscriptions.
 
 The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending
 writes and subscription dependencies. Each mutation executes against the latest
@@ -67,8 +70,16 @@ mutations and 32 MiB of serialized pending writes/results. Excess work returns
 `Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own
 source, heap, capability and payload budgets. Release a deployment after its
 mutations and subscriptions drain.
-Release currently unloads the runtime; durable deployment retirement and schema
-activation barriers are handled by the retained-deployment follow-up.
+Release durably removes the bundle and permanently retires its identity before
+unloading the runtime. It cannot be reactivated under the same ID. Data and schema
+remain shared; release never drops application tables or operation outcomes.
+Uncommitted operation IDs remain bound to the retired deployment and return
+`OperationMismatch` if retried against another deployment. Clients must use new
+operation IDs for those requests. Committed outcomes remain recoverable through
+a retained deployment exposing the same mutation.
+If a retained bundle prevents startup, open the store with exclusive writer
+authority and call `Storage::release_deployment` with its ID before constructing
+the backend again.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run
 synchronously on the engine thread. A cumulative allowance limits each invocation

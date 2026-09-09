@@ -55,6 +55,22 @@ impl Storage for SqliteStore {
         operations::prepare(&mut self.connection, operation, context)
     }
 
+    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
+        let migration = schema::merge(&self.schema, &deployment.tables)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        deployments::insert(&transaction, deployment)?;
+        let revision = schema::install(&transaction, &migration)?;
+        transaction.commit()?;
+        self.schema = Arc::new(migration.schema);
+        Ok(revision)
+    }
+
+    fn release_deployment(&mut self, id: &str) -> Result<bool> {
+        deployments::release(&mut self.connection, id)
+    }
+
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {
         deployments::load(&self.connection)
     }
@@ -71,15 +87,7 @@ impl Storage for SqliteStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let next = revision::next(revision::current(&transaction)?)?;
-        for statement in &migration.statements {
-            transaction.execute_batch(statement)?;
-        }
-        transaction.execute(
-            "INSERT INTO _chunk_migrations (revision, schema) VALUES (?1, ?2)",
-            params![next, serde_json::to_string(&migration.schema)?],
-        )?;
-        transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
+        let next = schema::install(&transaction, &migration)?;
         transaction.commit()?;
         self.schema = Arc::new(migration.schema);
         Ok(next)

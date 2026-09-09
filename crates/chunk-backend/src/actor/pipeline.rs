@@ -50,7 +50,7 @@ impl Actor {
             }
             Err(error) => reply.finish(Err(error)),
             Ok(None) => {
-                if self.recovering || self.deploying.is_some() {
+                if self.recovering || self.deploying.is_some() || self.releasing.is_some() {
                     reply.finish(Err(Error::Busy));
                     return;
                 }
@@ -144,7 +144,7 @@ impl Actor {
     }
 
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
-        if self.deploying.is_some() {
+        if self.deploying.is_some() || self.releasing.is_some() {
             return Err(Error::Busy);
         }
         let cancellation = &Cancellation::default();

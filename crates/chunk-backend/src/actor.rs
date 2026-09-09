@@ -21,6 +21,7 @@ use crate::{
     service::{Call, Command, Event, GroupUpdate, Request, Update},
 };
 
+mod deployments;
 mod pipeline;
 mod subscriptions;
 
@@ -65,6 +66,7 @@ pub(crate) struct Actor {
     js: Engine,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
     deploying: Option<(Arc<Deployment>, Request<()>)>,
+    releasing: Option<(DeploymentId, Request<bool>)>,
     view: Rc<View>,
     committer: Committer,
     outstanding: usize,
@@ -95,6 +97,7 @@ impl Actor {
             js,
             versions,
             deploying: None,
+            releasing: None,
             view: Rc::new(View::new(snapshot)),
             committer,
             outstanding: 0,
@@ -147,24 +150,13 @@ impl Actor {
                     self.outstanding -= 1;
                     self.committed(&operation, result);
                 }
-                Event::Retained { result } => {
+                Event::Activated { result } => {
                     self.outstanding -= 1;
-                    if let Some((deployment, reply)) = self.deploying.take() {
-                        let id = DeploymentId::new(&deployment.id).expect("validated deployment");
-                        match result {
-                            Ok(()) => {
-                                self.versions.insert(id, Some(deployment));
-                                reply.finish(Ok(()));
-                            }
-                            Err(error) => {
-                                self.js.release(&id);
-                                if !error.is_rejected_commit() {
-                                    self.fail(&Error::CommitFailed);
-                                }
-                                reply.finish(Err(error));
-                            }
-                        }
-                    }
+                    self.activated(result);
+                }
+                Event::Released { result } => {
+                    self.outstanding -= 1;
+                    self.released(result);
                 }
                 Event::Wake => {}
             }
@@ -218,21 +210,7 @@ impl Actor {
                 };
                 reply.finish(result);
             }
-            Command::Release { id, reply } => {
-                let result = if self
-                    .subscriptions
-                    .iter()
-                    .any(|s| s.calls.iter().any(|c| c.deployment == id))
-                    || self.mutations.values().any(|m| m.call.deployment == id)
-                    || self.deploying.as_ref().is_some_and(|(d, _)| d.id == id.as_str())
-                {
-                    Err(Error::Busy)
-                } else {
-                    self.versions.remove(&id);
-                    Ok(self.js.release(&id))
-                };
-                reply.finish(result);
-            }
+            Command::Release { id, reply } => self.start_release(id, reply),
             Command::Query { call, reply } => {
                 let result = self.evaluate(&call, Mode::Query, self.view.clone(), &reply.cancellation);
                 match result {
@@ -263,49 +241,10 @@ impl Actor {
         }
     }
 
-    fn schema_ready(deployment: &Deployment, installed: &chunk_contract::DatabaseSchema) -> Result<()> {
-        for (name, table) in &deployment.tables {
-            let current = installed.get(name).ok_or(Error::Contract)?;
-            if table
-                .fields
-                .iter()
-                .any(|(name, field)| current.fields.get(name) != Some(field))
-                || table
-                    .indexes
-                    .iter()
-                    .any(|(name, fields)| current.indexes.get(name) != Some(fields))
-            {
-                return Err(Error::Contract);
-            }
-        }
-        Ok(())
-    }
-
-    fn start_deployment(&mut self, deployment: &Arc<Deployment>) -> Result<bool> {
-        let id = DeploymentId::new(&deployment.id)?;
-        if let Some(existing) = self.versions.get(&id) {
-            return if existing.as_deref() == Some(deployment.as_ref()) {
-                Ok(false)
-            } else {
-                Err(Error::Contract)
-            };
-        }
-        if self.outstanding != 0 || self.deploying.is_some() || self.versions.len() >= MAX_DEPLOYMENTS {
+    fn resolve(&self, call: &Call, mode: Mode) -> Result<Option<Function>> {
+        if self.releasing.as_ref().is_some_and(|(id, _)| id == &call.deployment) {
             return Err(Error::Busy);
         }
-        Self::schema_ready(deployment, self.view.base.schema())?;
-        self.js
-            .register(id.clone(), deployment.source.clone(), Limits::default())?;
-        if let Err(error) = self.send(Job::Retain {
-            deployment: deployment.clone(),
-        }) {
-            self.js.release(&id);
-            return Err(error);
-        }
-        Ok(true)
-    }
-
-    fn resolve(&self, call: &Call, mode: Mode) -> Result<Option<Function>> {
         let version = self.versions.get(&call.deployment).ok_or(Error::Unknown)?;
         let Some(deployment) = version else {
             return Ok(None);
