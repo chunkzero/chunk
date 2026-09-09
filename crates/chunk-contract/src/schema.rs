@@ -86,7 +86,7 @@ impl Schema {
         }
     }
 
-    fn validate(&self, depth: usize) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self, depth: usize) -> Result<(), &'static str> {
         if depth > MAX_DEPTH {
             return Err("schema nesting limit");
         }
