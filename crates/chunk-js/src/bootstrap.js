@@ -7,6 +7,12 @@
   const freeze = Object.freeze;
   const parse = JSON.parse;
   const stringify = JSON.stringify;
+  const finite = Number.isFinite;
+  const serialize = value => stringify(value === undefined ? null : value, (_, item) => {
+    if (typeof item === "undefined" || typeof item === "function" || typeof item === "symbol" ||
+        (typeof item === "number" && !finite(item))) throw new Error("Result must be JSON");
+    return item;
+  });
   const unavailable = () => { throw new Error("API unavailable in transactional execution"); };
   const construct = Reflect.construct;
   const NativeDate = Date;
@@ -35,13 +41,16 @@
       if (name in prototype) Object.defineProperty(prototype, name, { value: unavailable, writable: false, configurable: false });
     }
   }
-  return (caller, generation) => freeze({
-    caller,
-    db: freeze({
-      get: (table, id) => parse(read(generation, stringify({kind: "get", table, id}))),
-      scan: (table, start = null, end = null) => parse(read(generation, stringify({kind: "scan", table, start, end}))),
-      put: (table, id, value) => write(generation, stringify({kind: "put", key: {table, id}, value})),
-      delete: (table, id) => write(generation, stringify({kind: "delete", key: {table, id}})),
-    }),
-  });
+  return async (handler, callerJson, generation, argsJson) => {
+    const context = freeze({
+      caller: parse(callerJson),
+      db: freeze({
+        get: (table, id) => parse(read(generation, stringify({kind: "get", table, id}))),
+        scan: (table, start = null, end = null) => parse(read(generation, stringify({kind: "scan", table, start, end}))),
+        put: (table, id, value) => write(generation, stringify({kind: "put", key: {table, id}, value})),
+        delete: (table, id) => write(generation, stringify({kind: "delete", key: {table, id}})),
+      }),
+    });
+    return serialize(await handler(context, parse(argsJson)));
+  };
 })()
