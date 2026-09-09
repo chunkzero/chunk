@@ -1,0 +1,23 @@
+[package]
+name = "chunk-backend"
+description = "Environment engine thread and ordered durable commit pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-js = { path = "../chunk-js" }
+chunk-store = { path = "../chunk-store" }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

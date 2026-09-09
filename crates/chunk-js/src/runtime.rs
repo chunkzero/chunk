@@ -1,7 +1,7 @@
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::{
-    Cancellation, Error, Execution, Limits, Write,
+    Cancellation, Error, Execution, Json, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
     model::bounds,
@@ -10,8 +10,8 @@ use crate::{
 
 pub(crate) struct Prepared {
     pub export: String,
-    pub caller: String,
-    pub arguments: String,
+    pub caller: Json,
+    pub arguments: Json,
     pub timestamp: i64,
     pub seed: u64,
     pub capabilities: Capabilities,
@@ -47,7 +47,7 @@ impl State {
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let result = executor.block_on(engine.invoke(&export, &caller, &arguments));
+            let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str()));
             executor.block_on(engine.drain())?;
             result
         });

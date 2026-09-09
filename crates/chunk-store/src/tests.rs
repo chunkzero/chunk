@@ -41,6 +41,7 @@ pub(crate) fn commit(id: &str, revision: u64, writes: Vec<Write>) -> Commit {
 pub(crate) fn snapshots_preserve_point_and_empty_range_reads_across_atomic_changes(store: &mut impl Storage) {
     let base = store.apply_schema(&schema()).unwrap().0;
     let empty = store.snapshot().unwrap();
+    assert_eq!(empty.schema(), &schema());
     let range = KeyRange {
         table: "profiles".into(),
         start: Some("b".into()),

@@ -119,9 +119,9 @@ impl Engine {
         if invocation.export.is_empty() || invocation.export.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid export"));
         }
-        let caller = serde_json::to_string(&invocation.caller).map_err(|e| Error::JavaScript(e.to_string()))?;
-        let arguments = serde_json::to_string(&invocation.arguments).map_err(|e| Error::JavaScript(e.to_string()))?;
-        if caller.len() > bounds::JSON_BYTES || arguments.len() > bounds::JSON_BYTES {
+        let caller = invocation.caller;
+        let arguments = invocation.arguments;
+        if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > bounds::JSON_BYTES {
             return Err(Error::Invalid("input exceeds size limit"));
         }
         if resident
