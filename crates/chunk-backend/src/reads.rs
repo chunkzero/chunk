@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
+    sync::Arc,
 };
 
 use chunk_js::{Key, ReadHost};
@@ -93,6 +94,10 @@ pub(crate) struct Dependencies {
 }
 
 impl Dependencies {
+    pub fn extend(&mut self, other: Self) {
+        self.points.extend(other.points);
+        self.ranges.extend(other.ranges);
+    }
     pub fn affected(&self, writes: &[Write]) -> bool {
         writes
             .iter()
@@ -103,18 +108,52 @@ impl Dependencies {
 pub(crate) struct Host {
     pub view: Rc<View>,
     pub trace: Rc<RefCell<Dependencies>>,
+    pub contract: Option<Arc<chunk_contract::Deployment>>,
+}
+
+pub(crate) fn project(table: &chunk_contract::TableSchema, value: &Value) -> Result<Value> {
+    let object = value.as_object().ok_or(Error::Contract)?;
+    let projected = Value::Object(
+        object
+            .iter()
+            .filter(|(key, _)| table.fields.contains_key(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    if !table.accepts(&projected) {
+        return Err(Error::Contract);
+    }
+    chunk_contract::validate_wire_value(&projected).map_err(Error::Invalid)?;
+    Ok(projected)
+}
+
+impl Host {
+    fn value(&self, table: &str, value: Value) -> Result<Value> {
+        if let Some(contract) = &self.contract {
+            project(contract.tables.get(table).ok_or(Error::Contract)?, &value)
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn table(&self, table: &str) -> std::result::Result<(), String> {
+        if self.contract.as_ref().is_some_and(|c| !c.tables.contains_key(table))
+            || !self.view.base.schema().contains_key(table)
+        {
+            return Err("undeclared table".into());
+        }
+        Ok(())
+    }
 }
 
 impl ReadHost for Host {
     fn get(&mut self, key: &Key) -> std::result::Result<Option<Value>, String> {
         let key = DocumentKey::new(&key.table, &key.id).map_err(|error| error.to_string())?;
-        if !self.view.base.schema().contains_key(&key.table) {
-            return Err("undeclared table".into());
-        }
+        self.table(&key.table)?;
         self.trace.borrow_mut().points.insert(key.clone());
         self.view
             .get(&key)
-            .map(|document| document.map(|doc| doc.value))
+            .and_then(|document| document.map(|doc| self.value(&key.table, doc.value)).transpose())
             .map_err(|error| error.to_string())
     }
     fn scan(
@@ -123,6 +162,7 @@ impl ReadHost for Host {
         start: Option<&str>,
         end: Option<&str>,
     ) -> std::result::Result<Vec<(String, Value)>, String> {
+        self.table(table)?;
         let range = KeyRange {
             table: table.into(),
             start: start.map(str::to_owned),
@@ -132,7 +172,11 @@ impl ReadHost for Host {
         self.trace.borrow_mut().ranges.push(range.clone());
         self.view
             .scan(&range)
-            .map(|rows| rows.into_iter().collect())
+            .and_then(|rows| {
+                rows.into_iter()
+                    .map(|(id, value)| Ok((id, self.value(table, value)?)))
+                    .collect()
+            })
             .map_err(|error| error.to_string())
     }
 }
