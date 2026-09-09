@@ -207,6 +207,7 @@ async fn client_disconnect_destination_failure_and_task_cancellation_release_con
     challenge(&mut client).await;
     drop(ready);
     assert!(server.await.unwrap().is_err());
+    assert_eq!(client.read_frame(4096).await.unwrap()[0], 0x02);
     assert_eq!(
         client.read_frame(4096).await.unwrap_err().kind(),
         io::ErrorKind::UnexpectedEof
@@ -273,4 +274,25 @@ async fn destination_configuration_rejects_early_acknowledgment() {
     client.write_packet(&AcknowledgeConfiguration).await.unwrap();
     let result = relay(&mut authenticated.transport, &mut Transport::new(internal)).await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn admission_denial_is_a_configuration_disconnect_with_unicode_reason() {
+    let (mut client, authenticated) = connection(8192);
+    let server = tokio::spawn(wait_for_destination(
+        authenticated,
+        ready(Err::<(), _>(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Closed 🛠",
+        ))),
+        Duration::from_secs(30),
+    ));
+    let frame = client.read_frame(4096).await.unwrap();
+    assert_eq!(&frame[..4], &[0x02, 8, 0, 13]);
+    assert_eq!(&frame[4..11], b"Closed ");
+    assert_eq!(&frame[11..], &[0xed, 0xa0, 0xbd, 0xed, 0xbb, 0xa0]);
+    assert_eq!(
+        server.await.unwrap().err().unwrap().kind(),
+        io::ErrorKind::PermissionDenied
+    );
 }

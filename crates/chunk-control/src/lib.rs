@@ -21,12 +21,7 @@ pub use host::{Host, MachineProfile, ProcessHost};
 pub use rpc::Service;
 use state::{Authority, State};
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControlConnection {
-    pub endpoint: String,
-    pub token: String,
-}
+pub use chunk_contract::ControlConnection;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

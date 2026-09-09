@@ -18,8 +18,9 @@ The runtime generates separate child and proxy-facing credentials and writes the
 private connection file only after authenticated registration and advancing ticks.
 Diagnostics go to `.chunk/runtime.log`. Ctrl-C stops the supervised JVM within a
 bounded deadline and removes the connection record. Check existing servers before
-starting the proxy on port 25565. The default fixture supplies a grass session named `bridge`. Session commands can
-create independent session instances and safely withdraw players before disposal.
+starting the proxy on port 25565. The fixture initially supplies a grass session named `bridge`. Authenticated
+`CreateSession` and `FinishSession` RPCs manage additional sessions in the same JVM;
+automatic placement is supplied by the local control plane.
 
 Registration freezes deployment, runtime/process incarnation, machine profile,
 artifact identity, protocol version and both JVM endpoints. Inventory RPCs
@@ -43,6 +44,42 @@ characters), `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT`; without
 `CHUNK_SUPERVISOR` it binds control on 25566 and uses a fixed fixture incarnation.
 Production local launches should use the supervisor.
 
+Session implementations extend `Session` and are registered by type in the process
+factory map or a `SessionProvider` loaded from `META-INF/services`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return completion stages
+and begin on the process tick thread. Do not block that thread. Resume asynchronous
+world changes with `scope.onTick { ... }`. Creation becomes ready only after its
+stage completes and at least one instance exists. `scope.finish()` requests ending;
+do not await it from a lifecycle hook whose own completion ending must await.
+
+`SessionScope` owns up to 16 instances, player-filtered events, repeating tasks and
+registered `AutoCloseable` resources such as subscriptions. Instance event nodes
+remain available for instance-local events. Direct global registrations require
+explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then
+removes only that scope's listeners, tasks, resources and instances. A process
+retains at most 256 session identities and 4096 delivery operations; exhausting
+history requires a replacement process. Stuck customer futures retain ownership
+until a supervisor deadline terminates the process; they never produce a false
+withdrawal acknowledgment.
+
+Delivery pins session generation as well as process/deployment and player ownership.
+A prepared delivery reserves capacity. Native Minecraft login attaches the
+player. `onJoin` begins after Minestom spawn completes, so it can send player UI
+and start asynchronous backend work. Arrival requires the join stage and the
+latest teleport acknowledgment.
+Withdrawal fences output immediately, waits for pending Minestom spawn callbacks and the join stage,
+removes the old player and completes its leave hook before releasing UUID ownership.
+The proxy must acknowledge withdrawal before activating that UUID elsewhere in the
+JVM. Managed proxy moves prepare a new TCP delivery while the source plays,
+confirm withdrawal, drive both client configuration acknowledgments, and activate
+the destination on the existing public connection.
+
+The optional `scope.backend` client is bound to the process deployment and session
+identity. Control's `--backend-file` passes the private connection to supervised
+JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once
+per player delivery; retry an uncertain result with the same ID and arguments.
+Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client
+whose calls and watches close on departure. Session clients close on disposal. The `jvm/example` application demonstrates persistent coins, visits and
+subscription updates, including stale state during backend disconnection.
 Sessions own their instances, event handlers and scoped resources. Session hooks
 run through the process tick executor. Withdrawal waits for pending joins and
 initialization, removes the player and runs its leave hook before releasing the

@@ -8,12 +8,6 @@ kotlin {
     compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25 }
 }
 
-dependencies {
-    api(project(":jvm:proto"))
-    api(libs.minestom)
-    api(project(":jvm:backend-client"))
-    implementation(libs.grpc.netty)
-    runtimeOnly(libs.slf4j.simple)
-}
+dependencies { implementation(project(":jvm:runtime")) }
 
 application { mainClass = "dev.chunkzero.runtime.BridgeMainKt" }

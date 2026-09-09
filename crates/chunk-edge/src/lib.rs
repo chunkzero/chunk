@@ -1,10 +1,9 @@
 //! Runs the edge player listener through `chunk-proxy`.
-//! Environment backends and their embedded sync engine are not implemented.
 //! This entry point does not require proxy and backend process colocation.
 
 use std::{future::Future, io, net::SocketAddr};
 
-pub use chunk_proxy::{Config as ProxyConfig, GameplayTarget};
+pub use chunk_proxy::{Config as ProxyConfig, GameplayTarget, PlatformTarget};
 
 /// Runs the edge's player listener.
 ///

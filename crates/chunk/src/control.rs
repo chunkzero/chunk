@@ -31,6 +31,11 @@ pub(crate) struct Options {
     deployment: String,
     #[arg(long, default_value = "local-bridge-fixture")]
     artifact_digest: String,
+    #[arg(long)]
+    backend_file: Option<PathBuf>,
+    /// Explicit session/profile/deployment configuration from the project bundle.
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
@@ -139,20 +144,38 @@ fn open_control(options: &Options) -> io::Result<Arc<Control>> {
         )]),
         max_processes: 4,
     };
+    let config = if let Some(path) = &options.config {
+        serde_json::from_slice::<Config>(&std::fs::read(path)?).map_err(io::Error::other)?
+    } else {
+        config
+    };
+    let backend = options
+        .backend_file
+        .as_ref()
+        .map(|path| -> io::Result<chunk_contract::BackendConnection> {
+            serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
+        })
+        .transpose()?;
+    if let Some(backend) = &backend
+        && (backend.environment != config.deployment.environment || backend.deployment != config.deployment.deployment)
+    {
+        return Err(io::Error::other("gameplay backend scope mismatch"));
+    }
     let host = Arc::new(ProcessHost {
         program: std::env::current_exe()?,
         distribution: options.distribution.canonicalize()?,
         java: options.java.clone(),
         directory: options.state.join("runtimes"),
-        deployment,
-        artifact_digest: options.artifact_digest.clone(),
-        profiles,
+        deployment: config.deployment.clone(),
+        artifact_digest: config.artifact_digest.clone(),
+        profiles: config.profiles.clone(),
+        backend,
     });
     let control = Control::open(&options.state.join("directory.sqlite"), config, host).map_err(io::Error::other)?;
     Ok(control)
 }
 
-fn secret(path: &Path) -> io::Result<String> {
+pub(super) fn secret(path: &Path) -> io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(token) => Ok(token),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -164,7 +187,7 @@ fn secret(path: &Path) -> io::Result<String> {
     }
 }
 
-fn private_file(path: &Path) -> io::Result<std::fs::File> {
+pub(super) fn private_file(path: &Path) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
