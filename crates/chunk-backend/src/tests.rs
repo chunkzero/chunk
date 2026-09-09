@@ -261,12 +261,15 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
 async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_twice() {
     let mut harness = Harness::new(false).await;
     let mut requests = Vec::new();
-    for _ in 0..64 {
+    for index in 0..64 {
         let mut request = Box::pin(harness.backend.mutate("same".into(), call("bump", json!({"id": "p"}))));
         pending(request.as_mut()).await;
+        if index == 0 {
+            // Let preparation finish before filling the shared event queue.
+            assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+        }
         requests.push(request);
     }
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
     assert!(matches!(
         harness.backend.query(call("get", json!({"id": "p"}))).await,
         Err(Error::Busy)
