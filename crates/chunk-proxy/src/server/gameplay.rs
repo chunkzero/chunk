@@ -124,6 +124,7 @@ fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse)
         identity: Some(identity),
         protocol: authenticated.protocol_version,
         runtime_id: config.runtime_id.clone(),
+        session_generation: 1,
     })
 }
 
