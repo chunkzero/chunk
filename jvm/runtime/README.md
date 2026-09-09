@@ -47,3 +47,17 @@ Sessions own their instances, event handlers and scoped resources. Session hooks
 run through the process tick executor. Withdrawal waits for pending joins and
 initialization, removes the player and runs its leave hook before releasing the
 ownership fence. Arrival is reported after spawn and teleport acknowledgment.
+
+Kotlin applications can extend `CoroutineSession` and implement suspend
+`create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` owns their jobs
+and resumes continuations on the process tick thread. Wrap a Java `BackendSession`
+with `scope.coroutines.backend(client)` for suspend calls and bounded `Flow`
+watches; the overload accepting an admitted `Player` creates a child identity and
+closes its calls/watches on departure. Player resources use object identity so
+cleanup cannot affect a later admission of the same UUID.
+
+Put final result mutations in `finish()`: the manager awaits that hook before
+closing session resources. Request termination with `scope.finish()` without
+awaiting it from work that the same termination will cancel. Slow Flow collectors
+fail at 64 queued updates instead of dropping stale transitions. Java-only backend
+consumers can continue using `jvm:backend-java` without these Kotlin adapters.
