@@ -126,7 +126,7 @@ fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
 }
 
 #[test]
-fn failed_migration_rolls_back_ddl_catalog_and_revision() {
+fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     let (_directory, mut store) = open();
     let mut expanded = crate::tests::schema();
     expanded.get_mut("profiles").unwrap().fields.insert(
@@ -137,8 +137,27 @@ fn failed_migration_rolls_back_ddl_catalog_and_revision() {
         },
     );
     expanded.insert("matches".into(), TableSchema::default());
+    let deployment = chunk_contract::Deployment {
+        contract_version: 1,
+        runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+        id: "new".into(),
+        source: "export function get() { return null; }".into(),
+        tables: expanded.clone(),
+        functions: [(
+            "get".into(),
+            chunk_contract::Function {
+                kind: chunk_contract::FunctionKind::Query,
+                visibility: chunk_contract::Visibility::Public,
+                export: "get".into(),
+                arguments: Schema::Null,
+                result: Schema::Null,
+            },
+        )]
+        .into(),
+    };
     store.connection.execute_batch("CREATE TRIGGER fail_migration BEFORE INSERT ON _chunk_migrations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
-    assert!(store.apply_schema(&expanded).is_err());
+    assert!(store.activate_deployment(&deployment).is_err());
+    assert!(store.deployments().unwrap().is_empty());
     assert_eq!(store.snapshot().unwrap().revision, Revision(1));
     assert_eq!(*store.schema, crate::tests::schema());
     let count: usize = store
@@ -158,7 +177,75 @@ fn failed_migration_rolls_back_ddl_catalog_and_revision() {
         .unwrap();
     assert_eq!(fields, 0);
     store.connection.execute_batch("DROP TRIGGER fail_migration").unwrap();
-    assert_eq!(store.apply_schema(&expanded).unwrap(), Revision(2));
+    assert_eq!(store.activate_deployment(&deployment).unwrap(), Revision(2));
+}
+
+#[test]
+fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
+    for version in [3, 4] {
+        let (directory, mut store) = open();
+        let path = directory.path().join("data.db");
+        let deployment = chunk_contract::Deployment {
+            contract_version: 1,
+            runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+            id: "old".into(),
+            source: "export {};".into(),
+            tables: crate::tests::schema(),
+            functions: std::collections::BTreeMap::new(),
+        };
+        store.retain_deployment(&deployment).unwrap();
+        let outcome = store
+            .commit(commit("committed", 1, vec![write("a", Some(json!({"coins": 7})))]))
+            .unwrap();
+        let context = RetryContext {
+            deployment: "old".into(),
+            timestamp: 123,
+            seed: 456,
+        };
+        store.prepare_operation(&operation("failed"), context.clone()).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE _chunk_retired_deployments;")
+            .unwrap();
+        if version == 3 {
+            store
+                .connection
+                .execute_batch("DROP TABLE _chunk_retry_contexts;")
+                .unwrap();
+        }
+        store.connection.pragma_update(None, "user_version", version).unwrap();
+        drop(store);
+
+        let mut store = SqliteStore::open(&path, "local").unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
+        assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
+        assert_eq!(
+            store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value,
+            json!({"coins": 7})
+        );
+        assert_eq!(
+            store.prepare_operation(&operation("failed"), context.clone()).unwrap(),
+            context
+        );
+        assert!(store.release_deployment("old").unwrap());
+        drop(store);
+
+        let mut store = SqliteStore::open(&path, "local").unwrap();
+        assert!(store.deployments().unwrap().is_empty());
+        assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
+        assert_eq!(store.snapshot().unwrap().revision, outcome.revision);
+        assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome));
+        assert!(matches!(
+            store.prepare_operation(
+                &operation("failed"),
+                RetryContext {
+                    deployment: "new".into(),
+                    ..context
+                }
+            ),
+            Err(Error::OperationMismatch)
+        ));
+    }
 }
 
 #[test]

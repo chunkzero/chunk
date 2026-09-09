@@ -65,6 +65,16 @@ pub trait Storage: Send {
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
 
+    /// Installs an additive schema and retains its deployment in one transaction.
+    /// # Errors
+    /// Rejects incompatible schemas, retired identities and storage failures.
+    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
+
+    /// Removes an inactive deployment, permanently retiring its identity.
+    /// # Errors
+    /// Reports storage failures; the caller must first drain references.
+    fn release_deployment(&mut self, id: &str) -> Result<bool>;
+
     /// Loads retained immutable deployment metadata and bundles.
     /// # Errors
     /// Reports I/O, corruption or unsupported metadata.

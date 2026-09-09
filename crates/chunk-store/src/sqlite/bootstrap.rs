@@ -31,7 +31,7 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 0 | 2 | 3 | 4) {
+    if !matches!(version, 0 | 2 | 3 | 4 | 5) {
         return Err(Error::SchemaVersion(version));
     }
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -88,6 +88,9 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
              PRAGMA user_version = 4;
              COMMIT;",
         )?;
+    }
+    if version < 5 {
+        connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE _chunk_retired_deployments (id TEXT PRIMARY KEY) STRICT; PRAGMA user_version = 5; COMMIT;")?;
     }
     Ok(connection)
 }

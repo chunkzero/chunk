@@ -100,3 +100,20 @@ fn create_index(table: &str, index: &str, fields: &[String]) -> String {
 pub(super) fn index_name(table: &str, index: &str) -> String {
     format!("_chunk_index_{}_{table}_{index}", table.len())
 }
+
+pub(super) fn install(transaction: &rusqlite::Transaction<'_>, migration: &Migration) -> Result<crate::Revision> {
+    let current = super::revision::current(transaction)?;
+    if migration.statements.is_empty() {
+        return Ok(current);
+    }
+    let next = super::revision::next(current)?;
+    for statement in &migration.statements {
+        transaction.execute_batch(statement)?;
+    }
+    transaction.execute(
+        "INSERT INTO _chunk_migrations (revision, schema) VALUES (?1, ?2)",
+        rusqlite::params![next, serde_json::to_string(&migration.schema)?],
+    )?;
+    transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
+    Ok(next)
+}

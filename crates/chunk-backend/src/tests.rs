@@ -92,6 +92,13 @@ struct ControlledStore {
 }
 
 impl Storage for ControlledStore {
+    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
+        self.inner.activate_deployment(deployment)
+    }
+    fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
+        self.inner.release_deployment(id)
+    }
+
     fn prepare_operation(
         &mut self,
         operation: &Operation,
@@ -161,12 +168,16 @@ impl Harness {
     }
 
     async fn with_failure(ambiguous: bool, rejected: bool) -> Self {
+        Self::with_options(ambiguous, rejected, rejected).await
+    }
+
+    async fn with_options(ambiguous: bool, rejected: bool, gate_prepare: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut store = open(&directory);
         let base = store.snapshot().unwrap().revision;
         let (commits, receivers): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
         let (notices, receiver) = signals::unbounded_channel();
-        let (prepare, prepare_receiver) = if rejected {
+        let (prepare, prepare_receiver) = if gate_prepare {
             let (sender, receiver) = mpsc::channel();
             (Some(sender), Some(receiver))
         } else {

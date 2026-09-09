@@ -120,8 +120,11 @@ pub(crate) enum Event {
         operation: String,
         result: Result<(Update, Snapshot)>,
     },
-    Retained {
-        result: Result<()>,
+    Activated {
+        result: Result<chunk_store::Snapshot>,
+    },
+    Released {
+        result: Result<bool>,
     },
     Wake,
 }
@@ -152,8 +155,7 @@ impl Drop for Owner {
 pub struct Backend(Arc<Owner>);
 
 impl Backend {
-    /// Storage must hold the environment's exclusive writer authority and have its
-    /// schema installed. Construction waits for the initial snapshot and engine.
+    /// Storage must hold the environment's exclusive writer authority. Construction waits for the initial snapshot and engine.
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
     pub fn new(environment: String, store: Box<dyn Storage>) -> Result<Self> {
@@ -195,7 +197,7 @@ impl Backend {
     }
 
     /// Validates and durably retains a deployment before enabling its functions.
-    /// Its tables/indexes must already be installed. Restart reloads retained bundles.
+    /// Activation installs additive tables/indexes at a commit barrier. Restart reloads retained bundles.
     /// # Errors
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
     pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
