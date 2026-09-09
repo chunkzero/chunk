@@ -58,7 +58,7 @@ pub use model::{
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
-/// Only the environment backend holds this capability.
+/// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
     /// Durably fixes invocation time, seed and deployment before evaluation.
     /// # Errors

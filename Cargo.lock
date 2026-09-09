@@ -354,13 +354,18 @@ dependencies = [
  "chunk-build",
  "chunk-control",
  "chunk-edge",
+ "chunk-proto",
  "chunk-runtime",
  "clap",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -408,6 +413,19 @@ version = "0.1.0"
 dependencies = [
  "chunk-contract",
  "chunk-proto",
+ "chunk-runtime",
+ "chunk-store",
+ "prost",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -444,6 +462,7 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
+ "serde",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -507,6 +526,7 @@ dependencies = [
  "chunk-proto",
  "chunk-protocol",
  "prost",
+ "serde",
  "sha2",
  "tempfile",
  "tokio",

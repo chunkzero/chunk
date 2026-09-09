@@ -10,6 +10,7 @@ internal data class RuntimeEnvironment(
     val processGeneration: Long,
     val machineProfile: String,
     val artifactDigest: String,
+    val bootstrapSession: Boolean,
 ) {
     companion object {
         fun load() =
@@ -26,6 +27,7 @@ internal data class RuntimeEnvironment(
                 processGeneration = System.getenv("CHUNK_PROCESS_GENERATION")?.toLong() ?: 1,
                 machineProfile = System.getenv("CHUNK_MACHINE_PROFILE") ?: "local",
                 artifactDigest = System.getenv("CHUNK_ARTIFACT_DIGEST") ?: "fixture",
+                bootstrapSession = System.getenv("CHUNK_BOOTSTRAP_SESSION") != "",
             )
     }
 }

@@ -36,6 +36,9 @@ message PlayerDelivery {
   int32 protocol = 8;
   string runtime_id = 11;
   uint64 session_generation = 12;
+  uint64 membership_generation = 13;
+  string proxy_id = 14;
+  string connection_id = 15;
   reserved 9, 10;
   reserved "registry_digest", "client_information";
 }

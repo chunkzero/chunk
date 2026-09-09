@@ -2,6 +2,7 @@
 
 use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode};
 
+mod control;
 mod runtime;
 
 use clap::{Parser, Subcommand};
@@ -16,19 +17,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime installDist artifact.
-    Runtime {
-        #[arg(long, default_value = "jvm/runtime/build/install/runtime")]
-        distribution: PathBuf,
-        #[arg(long, default_value = "java")]
-        java: PathBuf,
-        #[arg(long, default_value = ".chunk/runtime.json")]
-        connection: PathBuf,
-        #[arg(long, default_value = "local")]
-        environment: String,
-        #[arg(long, default_value = "local")]
-        deployment: String,
-    },
+    /// Serve durable local session placement and player ownership.
+    Control(control::Options),
+    /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime distribution.
+    Runtime(runtime::Options),
     /// Serve Minecraft status and online-mode login (sessions are not yet available).
     Edge {
         #[arg(long, default_value = "127.0.0.1:25565")]
@@ -67,13 +59,8 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
-        Command::Runtime {
-            distribution,
-            java,
-            connection,
-            environment,
-            deployment,
-        } => runtime::run(distribution, java, connection, environment, deployment).await,
+        Command::Control(options) => control::run(options).await,
+        Command::Runtime(options) => runtime::run(options).await,
         Command::Edge {
             bind,
             motd,

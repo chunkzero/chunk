@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 prost = "0.14.3"
+serde = { version = "1", features = ["derive"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 

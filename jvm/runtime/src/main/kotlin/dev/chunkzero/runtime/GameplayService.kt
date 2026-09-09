@@ -184,8 +184,9 @@ internal class GameplayService(
         require(
             delivery.session.id.isNotBlank() && delivery.operationId.length in 1..128,
         ) { "Unknown session or operation" }
-        require(delivery.player.id.isNotBlank() && delivery.ownerGeneration > 0)
+        require(delivery.player.id.isNotBlank() && delivery.ownerGeneration > 0 && delivery.membershipGeneration > 0)
+        require(delivery.proxyId.isNotBlank() && delivery.connectionId.isNotBlank())
         require(delivery.identity.username.matches(Regex("[A-Za-z0-9_]{1,16}")))
-        UUID.fromString(delivery.identity.uuid)
+        require(UUID.fromString(delivery.identity.uuid).toString() == delivery.identity.uuid)
     }
 }
