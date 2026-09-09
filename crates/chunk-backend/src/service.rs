@@ -111,6 +111,10 @@ impl Command {
 }
 
 pub(crate) enum Event {
+    Prepared {
+        operation: String,
+        result: Result<chunk_store::RetryContext>,
+    },
     Request(Box<Command>),
     Committed {
         operation: String,

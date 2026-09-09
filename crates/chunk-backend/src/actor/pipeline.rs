@@ -25,7 +25,7 @@ impl Actor {
             }
         };
         if let Some(active) = self.mutations.get_mut(&operation.id) {
-            if active.operation.fingerprint == operation.fingerprint {
+            if active.operation.fingerprint == operation.fingerprint && active.call.deployment == call.deployment {
                 active.waiters.push(reply);
             } else {
                 reply.finish(Err(Error::OperationMismatch));
@@ -50,16 +50,29 @@ impl Actor {
             }
             Err(error) => reply.finish(Err(error)),
             Ok(None) => {
-                if self.recovering {
+                if self.recovering || self.deploying.is_some() {
                     reply.finish(Err(Error::Busy));
                     return;
                 }
                 let mutation = Mutation {
                     operation,
+                    context: None,
                     call,
                     waiters: vec![reply],
                 };
-                match self.stage(&mutation) {
+                let context = chunk_store::RetryContext {
+                    deployment: mutation.call.deployment.as_str().into(),
+                    timestamp: self.view.base.timestamp,
+                    seed: u64::from_be_bytes(
+                        Sha256::digest(mutation.operation.id.as_bytes())[..8]
+                            .try_into()
+                            .expect("digest prefix"),
+                    ),
+                };
+                match self.send(Job::Prepare {
+                    operation: mutation.operation.clone(),
+                    context,
+                }) {
                     Ok(()) => {
                         self.mutations.insert(mutation.operation.id.clone(), mutation);
                     }
@@ -68,6 +81,45 @@ impl Actor {
                             reply.finish(Err(error.clone()));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    pub(super) fn prepared(&mut self, id: &str, result: Result<chunk_store::RetryContext>) {
+        if self.failure.is_some() {
+            return;
+        }
+        if self.recovering {
+            if result.as_ref().is_err_and(|error| !error.is_rejected_commit()) {
+                self.fail(&Error::CommitFailed);
+            }
+            self.recovering = self.outstanding != 0;
+            return;
+        }
+        let Some(mut mutation) = self.mutations.remove(id) else {
+            return;
+        };
+        let context = match result {
+            Ok(context) => context,
+            Err(error) => {
+                if !error.is_rejected_commit() {
+                    self.fail(&Error::CommitFailed);
+                }
+                for reply in mutation.waiters {
+                    reply.finish(Err(error.clone()));
+                }
+                return;
+            }
+        };
+        mutation.context = Some(context);
+        match self.stage(&mutation) {
+            Ok(()) => {
+                self.mutations.insert(id.into(), mutation);
+            }
+            Err(error) => {
+                for reply in mutation.waiters {
+                    reply.finish(Err(error.clone()));
                 }
             }
         }
@@ -97,17 +149,16 @@ impl Actor {
         }
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
-        let seed = u64::from_be_bytes(
-            Sha256::digest(mutation.operation.id.as_bytes())[..8]
-                .try_into()
-                .expect("digest prefix"),
-        );
+        let context = mutation
+            .context
+            .as_ref()
+            .ok_or(Error::Invalid("operation not prepared"))?;
         let (execution, _) = self.evaluate_traced(
             &mutation.call,
             Mode::Mutation,
             snapshot.clone(),
             cancellation,
-            Some(seed),
+            Some((context.timestamp, context.seed)),
         );
         let execution = execution?;
         let mut writes = execution

@@ -50,6 +50,12 @@ fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_out
     let schema = [("stats".into(), crate::tests::schema()["profiles"].clone())].into();
     store.apply_schema(&schema).unwrap();
     let stats = crate::tests::write_to("stats", "a", Some(json!({"coins": 2})));
+    let context = RetryContext {
+        deployment: "v1".into(),
+        timestamp: 123,
+        seed: 42,
+    };
+    store.prepare_operation(&operation("failed"), context.clone()).unwrap();
     store.connection.execute_batch("CREATE TRIGGER fail_outcome BEFORE INSERT ON _chunk_operations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
     assert!(
         store
@@ -81,6 +87,18 @@ fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_out
             .is_empty()
     );
     assert!(store.outcome(&operation("failed")).unwrap().is_none());
+    assert_eq!(
+        store
+            .prepare_operation(
+                &operation("failed"),
+                RetryContext {
+                    seed: 99,
+                    ..context.clone()
+                }
+            )
+            .unwrap(),
+        context
+    );
     store.connection.execute_batch("DROP TRIGGER fail_outcome;").unwrap();
     assert_eq!(
         store
@@ -90,6 +108,16 @@ fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_out
         Revision(3)
     );
     assert_eq!(totals(&store), (2, 22));
+    assert!(
+        !store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _chunk_retry_contexts WHERE operation_id = ?1)",
+                ["failed"],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
 }
 
 #[test]

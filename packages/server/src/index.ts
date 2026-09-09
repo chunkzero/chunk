@@ -1,3 +1,4 @@
+/// <reference path="./web.d.ts" />
 export { v } from "./validators.ts"
 export type { Validator, OptionalValidator, Shape, Infer, InferObject, Id, PlayerId, SessionId, JsonValue } from "./validators.ts"
 export { defineTable, defineSchema } from "./schema.ts"

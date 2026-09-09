@@ -154,7 +154,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
         "if(args.fail) { const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx')); } return 42;",
         Limits {
             execution: Duration::from_secs(5),
-            heap_bytes: 8 * 1024 * 1024,
+            heap_bytes: 16 * 1024 * 1024,
         },
     );
     let mut fail = invocation();
@@ -252,10 +252,10 @@ fn initialization_cannot_observe_invocation_time_or_randomness() {
 #[test]
 fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion() {
     let mut engine = deployment(
-        "if (args.fail) { globalThis.buffers = []; for(let i=0; i<8; i++) buffers.push(new Uint8Array(2 * 1024 * 1024)); } return 42;",
+        "if (args.fail) { globalThis.buffers = []; for(let i=0; i<16; i++) buffers.push(new Uint8Array(2 * 1024 * 1024)); } return 42;",
         Limits {
             execution: Duration::from_secs(5),
-            heap_bytes: 8 * 1024 * 1024,
+            heap_bytes: 16 * 1024 * 1024,
         },
     );
     let mut fail = invocation();
@@ -451,5 +451,93 @@ fn storage_incompatible_results_fail_only_the_invocation() {
         let result = call(&mut engine).unwrap();
         assert_eq!(value(&result), json!(42));
         assert!(result.writes.is_empty());
+    }
+}
+
+#[test]
+fn console_falls_back_to_strings_for_bigints_and_cycles() {
+    let execution = run("const cycle = {}; cycle.self = cycle; console.log(10n, cycle); return 42;").unwrap();
+    assert_eq!(value(&execution), json!(42));
+    assert_eq!(execution.logs.len(), 1);
+    assert_eq!(execution.logs[0].message, "10 [object Object]");
+}
+
+#[test]
+fn fixed_web_apis_preserve_data_and_use_bounded_deterministic_capabilities() {
+    let source = r"
+        const encoded = new TextEncoder().encode('héllo 🌍');
+        const url = new URL('../room?q=a+b&q=c', 'https://example.com/game/start');
+        url.searchParams.append('x', 'a&b');
+        const original = { map: new Map([['a', new Set([1,2])]]), bytes: encoded, date:new Date(123) };
+        original.self = original;
+        const copy = structuredClone(original);
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'));
+        console.info('hello', {value:42});
+        return {
+          text:new TextDecoder().decode(encoded), url:url.href,
+          params:Array.from(url.searchParams), base64:btoa(atob('YWJj')),
+          cycle:copy.self===copy, set:Array.from(copy.map.get('a')), date:+copy.date,
+          independent:copy.bytes !== encoded && copy.bytes.buffer !== encoded.buffer,
+          hash:Array.from(new Uint8Array(digest), b=>b.toString(16).padStart(2,'0')).join(''),
+          uuid:crypto.randomUUID(), random:Array.from(crypto.getRandomValues(new Uint16Array(4)))
+        };
+    ";
+    let first = run(source).unwrap();
+    let second = run(source).unwrap();
+    let value = value(&first);
+    assert_eq!(first.value, second.value);
+    assert_eq!(value["text"], "héllo 🌍");
+    assert_eq!(value["url"], "https://example.com/room?q=a+b&q=c&x=a%26b");
+    assert_eq!(value["base64"], "YWJj");
+    assert_eq!(value["cycle"], true);
+    assert_eq!(value["independent"], true);
+    assert_eq!(value["set"], json!([1, 2]));
+    assert_eq!(value["date"], 123);
+    assert_eq!(
+        value["hash"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(first.logs.len(), 1);
+    assert_eq!(first.logs[0].message, "hello {\"value\":42}");
+    assert!(run("for(let i=0;i<33;i++) console.log('x'); return 1;").is_err());
+    assert!(run("return crypto.getRandomValues(new Float32Array(1));").is_err());
+    assert!(run("return import('ext:core/mod.js');").is_err());
+    assert!(run("return import('ext:deno_web/02_timers.js');").is_err());
+    assert!(run("return structuredClone({f(){}});").is_err());
+    for expression in [
+        "crypto.randomUUID()",
+        "crypto.getRandomValues(new Uint8Array(0))",
+        "console.log('x')",
+    ] {
+        assert!(
+            Deployment::new(
+                "web-init".into(),
+                format!("const x={expression}; export default () => 1;"),
+                Limits::default()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
+    for allocation in [
+        "new TextEncoder().encode('x'.repeat(1024*1024))",
+        "structuredClone(new Uint8Array(2*1024*1024))",
+    ] {
+        let mut engine = deployment(
+            &format!(
+                "if(args.fail) {{ globalThis.buffers=[]; for(let i=0;i<32;i++) buffers.push({allocation}); }} return 42;"
+            ),
+            Limits::default(),
+        );
+        let mut input = invocation();
+        input.arguments = json!({"fail":true}).into();
+        assert!(matches!(
+            engine.execute(input, Box::new(Snapshot), &Cancellation::default()),
+            Err(Error::Heap)
+        ));
+        assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
 }
