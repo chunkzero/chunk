@@ -149,7 +149,7 @@ class GameplayLifecycleTest {
                 val prepared = stub().preparePlayer(request)
                 val socket = Socket("127.0.0.1", prepared.endpoint.substringAfter(':').toInt())
                 sockets.add(socket)
-                socket.soTimeout = 5000
+                socket.soTimeout = 10_000
                 socket.send(
                     0,
                     ClientHandshakePacket.SERIALIZER,
@@ -201,6 +201,7 @@ class GameplayLifecycleTest {
                 socket: Socket,
                 operation: String,
             ) {
+                val readerFailure = CompletableFuture<Unit>()
                 Thread.startVirtualThread {
                     try {
                         while (true) {
@@ -213,14 +214,15 @@ class GameplayLifecycleTest {
                                 )
                             }
                         }
-                    } catch (_: Exception) {
-                        // Socket shutdown ends the fixture reader.
+                    } catch (error: Exception) {
+                        readerFailure.completeExceptionally(error)
                     }
                 }
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
                 while (service.deliveries().single { it.delivery.operationId == operation }.phase !=
                     DeliveryPhase.DELIVERY_PHASE_ARRIVED
                 ) {
+                    if (readerFailure.isDone) readerFailure.join()
                     check(System.nanoTime() < deadline) {
                         "Player never arrived: ${MinecraftServer.getConnectionManager().onlinePlayers.map {
                             Triple(

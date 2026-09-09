@@ -51,6 +51,13 @@ jobs:
           ktlint_version: 1.8.0
       - run: ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
       - run: ./gradlew build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: jvm-test-results
+          path: jvm/**/build/test-results/test/*.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   proto:
     runs-on: ubuntu-latest
