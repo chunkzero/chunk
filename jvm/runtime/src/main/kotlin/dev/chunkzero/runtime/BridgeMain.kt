@@ -73,22 +73,24 @@ fun main() {
             net.minestom.server.timer.TaskSchedule
                 .tick(1),
         ).schedule()
-    sessions
-        .create(
-            chunk.v1.Supervision.SessionCommand
-                .newBuilder()
-                .setIdentity(
-                    identity,
-                ).setOperationId("fixture")
-                .setSession(
-                    chunk.v1.Common.SessionRef
-                        .newBuilder()
-                        .setId("bridge"),
-                ).setGeneration(1)
-                .setSessionType("bridge")
-                .setCapacity(128)
-                .build(),
-        ).get(5, TimeUnit.SECONDS)
+    if (environment.bootstrapSession) {
+        sessions
+            .create(
+                chunk.v1.Supervision.SessionCommand
+                    .newBuilder()
+                    .setIdentity(
+                        identity,
+                    ).setOperationId("fixture")
+                    .setSession(
+                        chunk.v1.Common.SessionRef
+                            .newBuilder()
+                            .setId("bridge"),
+                    ).setGeneration(1)
+                    .setSessionType("bridge")
+                    .setCapacity(128)
+                    .build(),
+            ).get(5, TimeUnit.SECONDS)
+    }
     val registration =
         supervisor?.let {
             Registration(

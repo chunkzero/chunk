@@ -37,6 +37,7 @@ pub struct Launch {
     pub artifact_digest: String,
     pub log_path: PathBuf,
     pub startup_timeout: Duration,
+    pub bootstrap_session: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,10 @@ impl ManagedJvm {
             .env("CHUNK_PROCESS_GENERATION", shared.identity.generation.to_string())
             .env("CHUNK_MACHINE_PROFILE", &shared.identity.machine_profile)
             .env("CHUNK_ARTIFACT_DIGEST", &shared.identity.artifact_digest)
+            .env(
+                "CHUNK_BOOTSTRAP_SESSION",
+                if launch.bootstrap_session { "bridge" } else { "" },
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log))

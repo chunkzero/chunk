@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+import "chunk/v1/gameplay.proto";
+
+// One authenticated local proxy group and one durable ownership authority.
+service LocalControl {
+  rpc Claim(ClaimRequest) returns (Assignment);
+  rpc Inspect(ClaimRequest) returns (Assignment);
+  rpc Activate(ActivateClaim) returns (Assignment);
+  rpc Cancel(ClaimRequest) returns (ClaimIdentity);
+}
+
+message SessionDemand {
+  string key = 1;
+  string session_type = 2;
+  string machine_profile = 3;
+}
+
+message ClaimRequest {
+  string operation_id = 1;
+  string proxy_id = 2;
+  string connection_id = 3;
+  Identity identity = 4;
+  SessionDemand demand = 5;
+}
+
+message ClaimIdentity {
+  string operation_id = 1;
+  string proxy_id = 2;
+  uint64 membership_generation = 3;
+  uint64 delivery_generation = 4;
+}
+
+enum ClaimPhase {
+  CLAIM_PHASE_UNSPECIFIED = 0;
+  CLAIM_PHASE_RESERVED = 1;
+  CLAIM_PHASE_ACTIVATING = 2;
+  CLAIM_PHASE_ATTACHED = 3;
+  CLAIM_PHASE_ARRIVED = 4;
+  CLAIM_PHASE_WITHDRAWING = 5;
+  CLAIM_PHASE_RELEASED = 6;
+}
+
+message Assignment {
+  ClaimIdentity claim = 1;
+  ClaimPhase phase = 2;
+  PlayerDelivery delivery = 3;
+  ConfigurationResponse configuration = 4;
+  PlayerPreparation preparation = 5;
+}
+
+message ActivateClaim {
+  ClaimIdentity claim = 1;
+  reserved 2;
+  reserved "client_information";
+}
