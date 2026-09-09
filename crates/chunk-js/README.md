@@ -18,7 +18,10 @@ restoring the prior isolate on return or unwind. Only that wrapper and `allocato
 allow unsafe code; the rest of the crate denies it. The allocator implements V8's
 backing-store callbacks, with aggregate accounting across concurrent GC frees.
 
-`ReadHost::get` and `scan` return raw snapshot data and record dependencies.
+`ReadHost::get`, `scan`, and optional `scan_index` return snapshot data and record dependencies.
+Indexed reads also return declared index fields; the engine merges invocation
+writes before applying the index order and result limit. Hosts must enforce a
+cumulative decoding budget before allocating documents.
 The engine merges invocation-local puts/deletes and encodes scans as `[id, value]`
 pairs. Queries cannot write. Only successful calls return speculative writes; the
 backend validates and commits them. Hosts must publish no external effects and

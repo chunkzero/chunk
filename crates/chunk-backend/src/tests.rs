@@ -26,6 +26,15 @@ export function selected(ctx) {
   const id = ctx.db.get('profiles', 'selector').selected;
   return ctx.db.get('profiles', id).coins;
 }
+export function indexed(ctx) { return ctx.db.scanIndex({table:'profiles',index:'by_coins',prefix:[],start:1,end:4,limit:1}); }
+export function seedIndex(ctx) {
+  for(const [id,coins] of [['a',1],['b',2],['c',3]]) ctx.db.put('profiles',id,{coins});
+  return null;
+}
+export function shiftIndex(ctx) {
+  ctx.db.delete('profiles','a'); ctx.db.put('profiles','b',{coins:4});
+  return indexed(ctx);
+}
 ";
 
 fn id() -> DeploymentId {
@@ -48,7 +57,7 @@ fn open(directory: &tempfile::TempDir) -> SqliteStore {
     let schema: DatabaseSchema = serde_json::from_value(json!({"profiles": {"fields": {
         "coins": {"schema": {"type": "integer"}, "optional": true},
         "selected": {"schema": {"type": "string"}, "optional": true}
-    }}}))
+    }, "indexes": {"by_coins": ["coins"]}}}))
     .unwrap();
     store.apply_schema(&schema).unwrap();
     store
@@ -447,4 +456,45 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
         count.as_u64().unwrap() < 16,
         "foreground query ran after every subscriber: {count}"
     );
+}
+
+#[tokio::test]
+async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
+    let mut harness = Harness::new(false).await;
+    let backend = &harness.backend;
+    let mut watch = backend.subscribe(call("indexed", json!({}))).await.unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    let mut seed = Box::pin(backend.mutate("seed-index".into(), call("seedIndex", json!({}))));
+    pending(seed.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    let mut shift = Box::pin(backend.mutate("shift-index".into(), call("shiftIndex", json!({}))));
+    pending(shift.as_mut()).await;
+    let mut query = Box::pin(backend.query(call("indexed", json!({}))));
+    pending(query.as_mut()).await;
+    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
+    harness.controls.commits[0].send(()).unwrap();
+    seed.await.unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["a", {"coins":1}]]));
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    pending(query.as_mut()).await;
+    harness.controls.commits[1].send(()).unwrap();
+    assert_eq!(value(&shift.await.unwrap()), json!([["c", {"coins":3}]]));
+    assert_eq!(value(&query.await.unwrap()), json!([["c", {"coins":3}]]));
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["c", {"coins":3}]]));
+    backend
+        .mutate(
+            "leave-range".into(),
+            call("put", json!({"id":"c", "value":{"coins":9}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    backend
+        .mutate(
+            "enter-range".into(),
+            call("put", json!({"id":"z", "value":{"coins":2}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value(&watch.next().await.unwrap()), json!([["z", {"coins":2}]]));
 }

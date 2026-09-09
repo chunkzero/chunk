@@ -70,13 +70,17 @@ mutations and subscriptions drain.
 Release currently unloads the runtime; durable deployment retirement and schema
 activation barriers are handled by the retained-deployment follow-up.
 
-The current storage API decodes documents into `serde_json::Value`; snapshot
-reads run synchronously on the engine thread. Range scans can materialize an
-entire interval before the JS payload budget rejects it. They need a bounded
-storage read API before accepting arbitrary large-database scans. Commit results
-are parsed on the commit thread because `chunk_store::Commit` currently takes
-`Value`; query/subscription responses remain JSON text. Durable retries preserve
-the JSON value but may normalize its formatting and object key order.
+The storage API decodes documents into `serde_json::Value`; snapshot reads run
+synchronously on the engine thread. A cumulative allowance limits each invocation
+to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it fails
+the read instead of returning a silently truncated result. `scanIndex` supports
+declared ascending indexes, equality prefixes and a half-open range on the next
+field, with 1–1,024 results. Both pending and invocation-local writes participate
+in ordering and limiting. Dependencies include old/new index keys and empty ranges.
+Commit results are parsed on the commit thread because `chunk_store::Commit`
+currently takes `Value`; query/subscription responses remain JSON text. Durable
+retries preserve the JSON value but may normalize its formatting and object key
+order.
 
 Construction waits for initialization. Dropping the last backend handle drains
 accepted commits and joins both threads; use a blocking task for construction
