@@ -18,14 +18,17 @@ app-local commands. These APIs remain proposed, not implemented.
 
 ## Status
 
-This branch implements the Rust Minecraft protocol and proxy listener, online
-login authentication, configuration, and authenticated delivery to a Minestom bridge with prepared login admission.
-SQLite storage implements schema-defined tables and indexes, consistent snapshot
-reads, and atomic commits with recoverable outcomes. See the
-[storage API and example](crates/chunk-store/src/lib.rs).
-Managed sessions, handoff, the sync engine, other storage adapters, and the application
-SDKs remain scaffolds. See [the bridge commands](jvm/runtime/README.md). The CLI currently runs `chunk edge`; planned roles and
-commands are not implemented.
+The local implementation includes online authentication, live JavaScript
+admission/routing, automatic session placement, supervised Minestom JVMs,
+SQLite transactions and reactive subscriptions. Players move between sessions
+and JVMs on the same public connection. The backend and control authority can
+restart independently of surviving gameplay streams.
+
+Run the [local example](examples/local/README.md) with `just local`. It packages
+an immutable deployment, starts all services, and demonstrates persistent coins,
+subscriptions, session moves and drain. Ctrl-C stops its services and gameplay JVMs.
+The broader app/domain SDK, hosted adapters, cross-proxy transfers, world persistence
+and overlapping deployment rollouts remain deferred.
 
 Dashboard/management scaffolding exists separately on
 `feat/self-hosted-dashboard-assets` (at `5584cab` when this cleanup was prepared).
@@ -36,14 +39,15 @@ It is not included in this branch; asset publication remains proposed.
 | Path | Contents |
 | --- | --- |
 | `crates/` | Rust proxy, protocol, platform and toolchain crates |
-| `jvm/` | Scaffolded chunk JVM framework, transport and build integration |
-| `packages/server` | Scaffolded `@chunk/server` JavaScript package |
-| `proto/` | Incomplete internal transport proposals |
-| `docs/architecture.md` | Current repository boundaries and implementation gaps |
+| `jvm/` | Managed Minestom sessions, backend client, generated transport and example |
+| `packages/server` | Typed `@chunk/server` declarations and document API |
+| `proto/` | Generated lifecycle/backend/control contracts and remaining transport proposals |
+| `examples/local/` | TypeScript backend source and local project configuration |
+| `docs/architecture.md` | Broader platform design proposals |
 
 The intended platform design lives in the
 [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase).
-The [repository architecture](docs/architecture.md) maps that design to code.
+The [repository architecture](docs/architecture.md) records the broader proposed design.
 
 ## Development
 
@@ -53,12 +57,12 @@ run `mise install`. Use `just --list` to find tasks and run the narrowest checks
 for a change; `just ready` runs the full CI checks before a PR.
 
 ```sh
-cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk server"
+just local
 ```
 
 The proxy supports Java Edition 26.1 (protocol 775). See the
-[proxy documentation](crates/chunk-proxy/README.md) for current waiting-world
-behavior, timeouts, feature selection and manual verification.
+[proxy documentation](crates/chunk-proxy/README.md) for managed delivery, timeouts,
+feature selection and the standalone waiting-world fixture.
 
 ## License
 

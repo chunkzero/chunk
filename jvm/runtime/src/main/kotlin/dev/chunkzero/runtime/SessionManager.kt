@@ -3,7 +3,7 @@ package dev.chunkzero.runtime
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionInventory
 import chunk.v1.Supervision.SessionPhase
-import dev.chunkzero.backend.BackendClient
+import dev.chunkzero.backend.client.BackendSession
 import net.minestom.server.entity.Player
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 internal class SessionManager(
     val ticks: TickExecutor,
     private val factories: Map<String, () -> Session>,
-    private val backend: ((String, Long) -> BackendClient)? = null,
+    private val backend: ((String, String) -> BackendSession)? = null,
 ) {
     private val sessions = ConcurrentHashMap<String, ManagedSession>()
     var withdraw: (String) -> CompletionStage<Unit> = { CompletableFuture.completedFuture(Unit) }
@@ -64,7 +64,7 @@ internal class SessionManager(
         val scope =
             SessionScope(command.session.id, command.generation, ticks, {
                 finish()
-            }, backend?.invoke(command.session.id, command.generation))
+            }, backend?.invoke(command.session.id, command.sessionType))
         val ready = CompletableFuture<Unit>()
         private val ended = CompletableFuture<Unit>()
         private var finishing = false

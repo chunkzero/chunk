@@ -1,9 +1,10 @@
-//! The `chunk` CLI, currently serving the edge player listener.
+//! The `chunk` CLI and local platform processes.
 
 use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode};
 
 mod backend;
 mod control;
+mod local;
 mod players;
 mod runtime;
 
@@ -19,6 +20,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Package and run a local project, supervising its backend, control and proxy.
+    Local(local::Options),
     /// Run the environment backend with an immutable JavaScript deployment bundle.
     Backend(backend::Options),
     /// Serve durable local session placement and player ownership.
@@ -27,7 +30,7 @@ enum Command {
     Players(players::Options),
     /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime distribution.
     Runtime(runtime::Options),
-    /// Serve Minecraft status and online-mode login (sessions are not yet available).
+    /// Serve the Minecraft proxy, optionally connected to managed gameplay.
     Edge {
         #[arg(long, default_value = "127.0.0.1:25565")]
         bind: SocketAddr,
@@ -69,6 +72,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
+        Command::Local(options) => local::run(options).await,
         Command::Backend(options) => backend::run(options).await,
         Command::Control(options) => control::run(options).await,
         Command::Players(options) => players::run(options).await,
