@@ -44,6 +44,19 @@ struct FakeJvm {
 
 #[tonic::async_trait]
 impl ProcessControl for FakeJvm {
+    async fn create_session(
+        &self,
+        _: Request<chunk_proto::v1::SessionCommand>,
+    ) -> Result<Response<chunk_proto::v1::SessionInventory>, Status> {
+        Err(Status::unimplemented("fixture"))
+    }
+    async fn finish_session(
+        &self,
+        _: Request<chunk_proto::v1::SessionCommand>,
+    ) -> Result<Response<chunk_proto::v1::SessionInventory>, Status> {
+        Err(Status::unimplemented("fixture"))
+    }
+
     async fn inventory(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessInventory>, Status> {
         assert_eq!(request.get_ref(), &self.identity);
         assert_eq!(
@@ -66,6 +79,13 @@ impl ProcessControl for FakeJvm {
 
 #[tonic::async_trait]
 impl Gameplay for FakeJvm {
+    async fn withdraw_player(
+        &self,
+        _: Request<chunk_proto::v1::PlayerWithdrawal>,
+    ) -> Result<Response<chunk_proto::v1::PlayerWithdrawal>, Status> {
+        Err(Status::unimplemented("fixture"))
+    }
+
     async fn configuration(&self, _: Request<ConfigurationRequest>) -> Result<Response<ConfigurationResponse>, Status> {
         unreachable!()
     }
