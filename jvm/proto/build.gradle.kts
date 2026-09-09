@@ -1,7 +1,7 @@
 import com.google.protobuf.gradle.id
 
 plugins {
-    id("chunk.kotlin-conventions")
+    id("chunk.java-conventions")
     alias(libs.plugins.protobuf)
 }
 
