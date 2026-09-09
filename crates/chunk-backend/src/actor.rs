@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, watch};
 use crate::{
     Error, Result,
     commit::{Committer, Job},
-    reads::{Dependencies, Host, View},
+    reads::{Change, Dependencies, Host, View},
     service::{Call, Command, Event, GroupUpdate, Request, Update},
 };
 
@@ -39,6 +39,7 @@ struct Pending {
     operation: String,
     revision: Revision,
     writes: Vec<Write>,
+    changes: Vec<Change>,
     bytes: usize,
 }
 
@@ -52,7 +53,7 @@ struct Subscribed {
 
 struct Reevaluation {
     view: Rc<View>,
-    writes: Option<Vec<Write>>,
+    changes: Option<Vec<Change>>,
     ids: VecDeque<u64>,
 }
 
@@ -234,7 +235,7 @@ impl Actor {
                         let independent = self
                             .pending
                             .iter()
-                            .all(|pending| !dependencies.affected(&pending.writes));
+                            .all(|pending| !dependencies.affected(&pending.changes));
                         let update = Update {
                             revision: if independent {
                                 self.view.base.revision
@@ -358,6 +359,7 @@ impl Actor {
             view,
             trace: trace.clone(),
             contract: self.versions.get(&call.deployment).cloned().flatten(),
+            budget: crate::reads::read_budget(),
         };
         let execution = self
             .js

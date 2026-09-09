@@ -1,11 +1,11 @@
 use super::{Actor, MAX_SUBSCRIPTIONS, Reevaluation, Subscribed};
+use crate::reads::Change;
 use crate::{
     Error, Result,
     reads::{Dependencies, View},
     service::{Call, GroupSubscription, GroupUpdate, Request},
 };
 use chunk_js::{Cancellation, Mode};
-use chunk_store::Write;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::watch;
 
@@ -63,17 +63,17 @@ impl Actor {
         (results, dependencies)
     }
 
-    pub(super) fn publish(&mut self, writes: &[Write]) {
+    pub(super) fn publish(&mut self, changes: &[Change]) {
         let batch = Reevaluation {
             view: Rc::new(View::new(self.view.base.clone())),
-            writes: Some(writes.to_vec()),
+            changes: Some(changes.to_vec()),
             ids: self.subscriptions.iter().map(|subscription| subscription.id).collect(),
         };
         if self.reevaluations.len() == 2 {
             // Slow watches coalesce to the latest durable snapshot. Reevaluating all
             // watches avoids retaining an unbounded history of invalidating writes.
             let next = self.reevaluations.back_mut().expect("queued batch");
-            *next = Reevaluation { writes: None, ..batch };
+            *next = Reevaluation { changes: None, ..batch };
         } else {
             self.reevaluations.push_back(batch);
         }
@@ -91,9 +91,9 @@ impl Actor {
             return;
         };
         if batch
-            .writes
+            .changes
             .as_ref()
-            .is_some_and(|writes| !self.subscriptions[index].dependencies.affected(writes))
+            .is_some_and(|changes| !self.subscriptions[index].dependencies.affected(changes))
         {
             return;
         }

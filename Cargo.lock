@@ -381,6 +381,7 @@ dependencies = [
 name = "chunk-js"
 version = "0.1.0"
 dependencies = [
+ "chunk-contract",
  "deno_core",
  "deno_error",
  "serde",

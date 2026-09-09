@@ -52,7 +52,7 @@ mod snapshot;
 mod sqlite;
 
 pub use chunk_contract::DatabaseSchema;
-pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Revision, Write};
+pub use model::{Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Revision, Write};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
@@ -111,6 +111,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("local database size limit reached")]
     Capacity,
+    #[error("snapshot read budget exceeded")]
+    ReadLimit,
     #[error("corrupt storage: {0}")]
     Corrupt(&'static str),
     #[error("snapshot connection was poisoned")]

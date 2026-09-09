@@ -3,6 +3,36 @@ use serde_json::Value;
 
 use crate::{Error, Result};
 
+/// Cumulative decoded-read allowance. Adapters charge before allocating documents.
+pub struct ReadBudget {
+    rows: usize,
+    bytes: usize,
+}
+
+impl ReadBudget {
+    #[must_use]
+    pub fn new(rows: usize, bytes: usize) -> Self {
+        Self { rows, bytes }
+    }
+
+    /// # Errors
+    /// Rejects a row before decoding when either allowance would be exceeded.
+    pub fn charge(&mut self, bytes: usize) -> Result<()> {
+        if self.rows == 0 || bytes > self.bytes {
+            return Err(Error::ReadLimit);
+        }
+        self.rows -= 1;
+        self.bytes -= bytes;
+        Ok(())
+    }
+}
+
+impl Default for ReadBudget {
+    fn default() -> Self {
+        Self::new(100_000, 32 * 1024 * 1024)
+    }
+}
+
 /// Monotonic environment commit order, including commits with no document writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -135,39 +165,12 @@ impl IndexRange {
             .start
             .as_ref()
             .zip(self.end.as_ref())
-            .is_some_and(|(start, end)| scalar_cmp(start, end).is_gt())
+            .is_some_and(|(start, end)| chunk_contract::compare_index_values(start, end).is_gt())
         {
             return Err(Error::Invalid("reversed index range"));
         }
         Ok(())
     }
-}
-
-fn scalar_cmp(left: &Value, right: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Number(a), Value::Number(b)) => match (a.as_i64(), b.as_i64()) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            (Some(a), None) => compare_integer_float(a, b.as_f64().unwrap()),
-            (None, Some(b)) => compare_integer_float(b, a.as_f64().unwrap()).reverse(),
-            (None, None) => a.as_f64().partial_cmp(&b.as_f64()).unwrap(),
-        },
-        _ => unreachable!("validated bounds have the same scalar type"),
-    }
-}
-
-// Compare the integer parts before the fractional remainder to preserve values
-// beyond the exact integer range of f64. i128 also covers both i64 endpoints.
-#[allow(clippy::cast_possible_truncation)]
-fn compare_integer_float(integer: i64, float: f64) -> std::cmp::Ordering {
-    i128::from(integer)
-        .cmp(&(float as i128))
-        .then_with(|| 0.0_f64.partial_cmp(&float.fract()).unwrap())
 }
 
 /// The backend hashes deployment, contract, function, caller and validated arguments.

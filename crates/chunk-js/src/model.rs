@@ -33,6 +33,9 @@ pub enum Read {
         start: Option<String>,
         end: Option<String>,
     },
+    Index {
+        query: chunk_contract::IndexQuery,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +54,18 @@ pub trait ReadHost: 'static {
     /// # Errors
     /// Reports invalid ranges or snapshot limits without publishing effects.
     fn scan(&mut self, table: &str, start: Option<&str>, end: Option<&str>) -> Result<Vec<(String, Value)>, String>;
+    /// Returns snapshot candidates and the declaration's index fields. The engine
+    /// merges invocation writes and applies the requested order/limit afterward.
+    /// # Errors
+    /// Rejects undeclared indexes, unsupported bounds or exhausted read budgets.
+    fn scan_index(&mut self, _query: &chunk_contract::IndexQuery) -> Result<IndexRows, String> {
+        Err("Indexed reads are not supported by this host".into())
+    }
+}
+
+pub struct IndexRows {
+    pub fields: Vec<String>,
+    pub rows: Vec<(String, Value)>,
 }
 
 /// Canonical JSON text shared without cloning or re-encoding its value tree.
