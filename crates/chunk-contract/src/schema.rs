@@ -41,6 +41,11 @@ pub enum Schema {
     Number,
     Integer,
     String,
+    Id {
+        table: String,
+    },
+    Player,
+    Session,
     Literal {
         value: Value,
     },
@@ -58,7 +63,16 @@ pub enum Schema {
 impl Schema {
     #[must_use]
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Self::Boolean | Self::Number | Self::Integer | Self::String)
+        matches!(
+            self,
+            Self::Boolean
+                | Self::Number
+                | Self::Integer
+                | Self::String
+                | Self::Id { .. }
+                | Self::Player
+                | Self::Session
+        )
     }
 
     /// Checks the value without coercion; object properties must be declared.
@@ -77,6 +91,12 @@ impl Schema {
             Self::Number => value.is_i64() || value.is_f64(),
             Self::Integer => value.is_i64(),
             Self::String => value.is_string(),
+            Self::Id { table } => value.as_str().is_some_and(|id| {
+                id.strip_prefix(table)
+                    .and_then(|suffix| suffix.strip_prefix(':'))
+                    .is_some_and(valid_id)
+            }),
+            Self::Player | Self::Session => value.as_str().is_some_and(valid_id),
             Self::Literal { value: expected } => value == expected,
             Self::Array { items } => value
                 .as_array()
@@ -91,6 +111,7 @@ impl Schema {
             return Err("schema nesting limit");
         }
         match self {
+            Self::Id { table } => validate_name(table)?,
             Self::Array { items } => items.validate(depth + 1)?,
             Self::Object { fields } => validate_fields(fields, depth + 1)?,
             Self::Union { variants } => {
@@ -108,6 +129,14 @@ impl Schema {
         }
         Ok(())
     }
+}
+
+fn valid_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 impl TableSchema {

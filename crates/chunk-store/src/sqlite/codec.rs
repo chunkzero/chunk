@@ -19,7 +19,7 @@ pub(super) fn column(name: &str, field: &Field) -> String {
             "ANY",
             format!(" CHECK ({name} IS NULL OR typeof({name}) IN ('integer', 'real'))"),
         ),
-        Schema::String => ("TEXT", String::new()),
+        Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session => ("TEXT", String::new()),
         _ => ("TEXT", format!(" CHECK (json_valid({name}))")),
     };
     let required = if field.optional { "" } else { " NOT NULL" };
@@ -40,7 +40,11 @@ pub(super) fn encode(field: &Field, value: Option<&Value>) -> Result<SqlValue> {
             value.as_i64().map(SqlValue::Integer)
         }
         (Schema::Number, Value::Number(value)) if value.is_f64() => value.as_f64().map(SqlValue::Real),
-        (Schema::String, Value::String(value)) => Some(SqlValue::Text(value.clone())),
+        (schema @ (Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session), Value::String(text))
+            if schema.accepts(value) =>
+        {
+            Some(SqlValue::Text(text.clone()))
+        }
         (schema, value) if !schema.is_scalar() && schema.accepts(value) => {
             Some(SqlValue::Text(serde_json::to_string(value)?))
         }
@@ -59,7 +63,9 @@ pub(super) fn decode(field: &Field, value: SqlValue) -> Result<Option<Value>> {
         (Schema::Number, SqlValue::Real(value)) => serde_json::Number::from_f64(value)
             .map(Value::Number)
             .ok_or(Error::Corrupt("non-finite number"))?,
-        (Schema::String, SqlValue::Text(value)) => Value::String(value),
+        (Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session, SqlValue::Text(value)) => {
+            Value::String(value)
+        }
         (schema, SqlValue::Text(value)) if !schema.is_scalar() => serde_json::from_str(&value)?,
         _ => return Err(Error::Corrupt("field has an unexpected storage type")),
     };

@@ -7,7 +7,9 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
     let schema: DatabaseSchema = serde_json::from_value(json!({
         "matches": {
             "fields": {
-                "session": {"schema": {"type": "string"}},
+                "session": {"schema": {"type": "session"}},
+                "player": {"schema": {"type": "player"}, "optional": true},
+                "profile": {"schema": {"type": "id", "table": "profiles"}, "optional": true},
                 "active": {"schema": {"type": "boolean"}},
                 "score": {"schema": {"type": "integer"}},
                 "rating": {"schema": {"type": "number"}},
@@ -23,7 +25,7 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
     .unwrap();
     store.apply_schema(&schema).unwrap();
     let values = [
-        json!({"session": "s", "active": true, "score": i64::MAX, "rating": 9_007_199_254_740_993_i64, "rounds": [1, 2]}),
+        json!({"session": "s", "player": "alex", "profile": "profiles:p1", "active": true, "score": i64::MAX, "rating": 9_007_199_254_740_993_i64, "rounds": [1, 2]}),
         json!({"session": "s", "active": false, "score": i64::MIN, "rating": 1.5, "rounds": [], "result": null}),
         json!({"session": "s", "active": false, "score": 0, "rating": 1.0, "rounds": [3], "result": {"winner": "a"}}),
     ];
