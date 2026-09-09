@@ -77,9 +77,7 @@ impl Actor {
         if id.is_empty() || id.len() > 256 {
             return Err(Error::Invalid("operation identity"));
         }
-        if !self.versions.contains(&call.deployment) {
-            return Err(Error::Invalid("unknown deployment"));
-        }
+        self.resolve(call, Mode::Mutation)?;
         // Identity describes the business request; a durable result survives redeployment.
         let request = serde_json::to_vec(&(
             "mutation-v2",
@@ -94,6 +92,9 @@ impl Actor {
     }
 
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
+        if self.deploying.is_some() {
+            return Err(Error::Busy);
+        }
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
         let seed = u64::from_be_bytes(
@@ -119,6 +120,20 @@ impl Actor {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Some(Some(contract)) = self.versions.get(&mutation.call.deployment) {
+            for write in &writes {
+                if !contract.tables.contains_key(&write.key.table) {
+                    return Err(Error::Contract);
+                }
+                if let Some(value) = &write.value {
+                    for retained in self.versions.values().flatten() {
+                        if let Some(table) = retained.tables.get(&write.key.table) {
+                            crate::reads::project(table, value)?;
+                        }
+                    }
+                }
+            }
+        }
         let bytes = snapshot.validate(&writes)? + execution.value.len();
         if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
             return Err(Error::Busy);

@@ -12,6 +12,9 @@ use crate::{
 };
 
 pub(crate) enum Job {
+    Retain {
+        deployment: Arc<chunk_contract::Deployment>,
+    },
     Commit {
         expected: Revision,
         operation: Operation,
@@ -26,16 +29,29 @@ pub(crate) struct Committer {
 }
 
 impl Committer {
-    pub fn new(mut store: Box<dyn Storage>, events: Sender<Event>) -> Result<(Self, Snapshot)> {
+    pub fn new(
+        mut store: Box<dyn Storage>,
+        events: Sender<Event>,
+    ) -> Result<(Self, Snapshot, Vec<chunk_contract::Deployment>)> {
         let (jobs, incoming) = mpsc::sync_channel::<Job>(64);
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-commit".into()).spawn(move || {
-            if ready.send(store.snapshot()).is_err() {
+            let initial = (|| -> Result<_> { Ok((store.snapshot()?, store.deployments()?)) })();
+            if ready.send(initial).is_err() {
                 return;
             }
             let mut failed = false;
             while let Ok(job) = incoming.recv() {
                 let event = match job {
+                    Job::Retain { deployment } => {
+                        let result = if failed {
+                            Err(Error::CommitFailed)
+                        } else {
+                            store.retain_deployment(&deployment).map_err(Error::from)
+                        };
+                        failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                        Event::Retained { result }
+                    }
                     Job::Commit {
                         expected,
                         operation,
@@ -63,8 +79,8 @@ impl Committer {
             jobs: Some(jobs),
             thread: Some(thread),
         };
-        let snapshot = initialized.recv().map_err(|_| Error::Closed)??;
-        Ok((committer, snapshot))
+        let (snapshot, deployments) = initialized.recv().map_err(|_| Error::Closed)??;
+        Ok((committer, snapshot, deployments))
     }
 
     pub fn send(&self, job: Job) -> Result<()> {

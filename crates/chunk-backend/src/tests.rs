@@ -80,6 +80,13 @@ struct ControlledStore {
 }
 
 impl Storage for ControlledStore {
+    fn deployments(&self) -> chunk_store::Result<Vec<chunk_contract::Deployment>> {
+        self.inner.deployments()
+    }
+    fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<()> {
+        self.inner.retain_deployment(deployment)
+    }
+
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> chunk_store::Result<Revision> {
         self.inner.apply_schema(schema)
     }
@@ -139,7 +146,7 @@ impl Harness {
             ambiguous,
             rejected,
         };
-        let backend = Backend::new(Box::new(store)).unwrap();
+        let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
         Self {
             controls: Controls {
@@ -265,7 +272,7 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
             .value,
         json!({"coins": 1})
     );
-    let backend = Backend::new(Box::new(store)).unwrap();
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
     let recovered = backend
         .mutate("first".into(), call("bump", json!({"id": "p"})))
@@ -291,7 +298,7 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
 #[tokio::test]
 async fn subscriptions_track_empty_ranges_and_update_dependencies_when_results_match() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
     for (key, document) in [
         ("a", json!({"coins": 1})),
@@ -374,7 +381,7 @@ async fn rejected_commit_drains_suffix_before_reusing_revisions() {
 #[tokio::test]
 async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_errors() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     let source = format!(
         "{SOURCE} export function strict(ctx) {{ return ctx.db.get('profiles','p').coins; }} export function invalid(ctx,args) {{ ctx.db.put('profiles','p',{{coins:99}}); return args.deep ? Array.from({{length:130}}).reduce(v=>[v],null) : '\\ud800'; }}"
     );
@@ -425,7 +432,7 @@ async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_erro
 #[tokio::test]
 async fn foreground_queries_run_between_subscription_reevaluations() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new(Box::new(open(&directory))).unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=0; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
     let mut watches = Vec::new();
     for _ in 0..16 {

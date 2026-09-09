@@ -10,6 +10,7 @@ use crate::{Commit, DatabaseSchema, Error, Operation, Outcome, Result, Revision,
 
 mod bootstrap;
 mod codec;
+mod deployments;
 mod read;
 mod revision;
 mod schema;
@@ -49,6 +50,14 @@ impl SqliteStore {
 }
 
 impl Storage for SqliteStore {
+    fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {
+        deployments::load(&self.connection)
+    }
+
+    fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<()> {
+        deployments::retain(&mut self.connection, deployment)
+    }
+
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> Result<Revision> {
         let migration = schema::merge(&self.schema, schema)?;
         if migration.statements.is_empty() {

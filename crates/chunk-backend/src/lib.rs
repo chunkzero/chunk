@@ -5,8 +5,10 @@ mod actor;
 mod commit;
 mod reads;
 mod service;
+mod transport;
 
-pub use service::{Backend, Call, Subscription, Update};
+pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
+pub use transport::Service;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -22,6 +24,10 @@ pub enum Error {
     Cancelled,
     #[error("invalid backend request: {0}")]
     Invalid(&'static str),
+    #[error("function or document contract mismatch")]
+    Contract,
+    #[error("unknown or inaccessible function")]
+    Unknown,
     #[error("operation ID was reused for a different request")]
     OperationMismatch,
     #[error("commit pipeline failed; recover the operation outcome after restarting the backend")]
@@ -57,6 +63,8 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+#[cfg(test)]
+mod integration_tests;
 #[cfg(test)]
 mod tests;
 
