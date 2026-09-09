@@ -6,13 +6,13 @@ default:
 # Format Rust, Kotlin and protobuf sources.
 fmt:
     cargo fmt --all
-    ktlint --format "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
+    ktlint --format "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
     buf format --write proto
 
 # Verify formatting without modifying files.
 fmt-check:
     cargo fmt --all --check
-    ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
+    ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
     buf format --diff --exit-code proto
 
 # Run linters.

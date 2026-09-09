@@ -7,7 +7,7 @@ use std::{
 
 use chunk_contract::{BackendConnection, Deployment};
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tokio_util::sync::CancellationToken;
 
 #[derive(clap::Args)]
@@ -56,10 +56,15 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     let shutdown = CancellationToken::new();
     let stop_server = shutdown.clone();
     let service = chunk_backend::Service::new(backend, &token).map_err(io::Error::other)?;
+    let incoming = TcpListenerStream::new(listener).map(|stream| {
+        let stream = stream?;
+        stream.set_nodelay(true)?;
+        Ok::<_, io::Error>(stream)
+    });
     let mut server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(service.into_server())
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop_server.cancelled_owned())
+            .serve_with_incoming_shutdown(incoming, stop_server.cancelled_owned())
             .await
     });
     let bytes = serde_json::to_vec(&connection).map_err(io::Error::other)?;

@@ -8,6 +8,7 @@ import dev.chunkzero.runtime.CoroutineSession
 import dev.chunkzero.runtime.Session
 import dev.chunkzero.runtime.SessionProvider
 import dev.chunkzero.runtime.SessionScope
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
 import net.minestom.server.MinecraftServer
@@ -61,7 +62,8 @@ private class ExampleSession(
                 .watch(
                     BackendTypes.`shared$players$stats`,
                     BackendTypes.`Fn$shared$players$stats$Args`(),
-                ).collect { state ->
+                ).distinctUntilChangedBy { it.stale() to it.snapshot() }
+                .collect { state ->
                     if (players[player] === data && player.isOnline) {
                         val result = state.snapshot().orElse(null)?.result()
                         val stats = if (result is QueryResult.Value) result.value() else null
