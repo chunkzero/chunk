@@ -110,7 +110,7 @@ impl Actor {
             Some(seed),
         );
         let execution = execution?;
-        let writes = execution
+        let mut writes = execution
             .writes
             .into_iter()
             .map(|write| {
@@ -121,9 +121,22 @@ impl Actor {
             })
             .collect::<Result<Vec<_>>>()?;
         if let Some(Some(contract)) = self.versions.get(&mutation.call.deployment) {
-            for write in &writes {
-                if !contract.tables.contains_key(&write.key.table) {
-                    return Err(Error::Contract);
+            let mut budget = crate::reads::read_budget();
+            for write in &mut writes {
+                let table = contract.tables.get(&write.key.table).ok_or(Error::Contract)?;
+                if let Some(value) = &mut write.value {
+                    if !table.accepts(value) {
+                        return Err(Error::Contract);
+                    }
+                    // Writes replace this deployment's fields, preserving fields owned by newer declarations.
+                    if let Some(previous) = snapshot.get(&write.key, &mut budget)? {
+                        let object = value.as_object_mut().ok_or(Error::Contract)?;
+                        for (name, value) in previous.value.as_object().ok_or(Error::Contract)? {
+                            if !table.fields.contains_key(name) {
+                                object.insert(name.clone(), value.clone());
+                            }
+                        }
+                    }
                 }
                 if let Some(value) = &write.value {
                     for retained in self.versions.values().flatten() {
