@@ -51,7 +51,7 @@ impl State {
             executor.block_on(engine.drain())?;
             result
         });
-        crate::profile::end(&mut self.runtime);
+        let logs = crate::profile::end(&mut self.runtime);
         let capabilities = self
             .runtime
             .op_state()
@@ -68,13 +68,23 @@ impl State {
                 value: write.value,
             })
             .collect();
-        Ok(Execution { value, writes })
+        Ok(Execution { logs, value, writes })
     }
 
     pub(crate) fn new(limits: Limits) -> Self {
         let termination = Termination::default();
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![chunk_capabilities::init(), crate::profile::chunk_profile::init()],
+            extensions: vec![
+                deno_webidl::deno_webidl::init(),
+                deno_web::deno_web::init(
+                    deno_web::BlobStore::default_arc(),
+                    None,
+                    false,
+                    deno_web::InMemoryBroadcastChannel::default(),
+                ),
+                chunk_capabilities::init(),
+                crate::profile::chunk_profile::init(),
+            ],
             create_params: Some(
                 v8::Isolate::create_params()
                     .heap_limits(0, limits.heap_bytes)
@@ -129,6 +139,9 @@ impl State {
     }
 
     async fn initialize(&mut self, specifier: &str, source: &str) -> Result<(), Error> {
+        self.runtime
+            .execute_script("chunk:web", include_str!("web.js"))
+            .map_err(js_error)?;
         let run = self
             .runtime
             .execute_script("chunk:bootstrap", include_str!("bootstrap.js"))

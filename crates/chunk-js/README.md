@@ -67,3 +67,21 @@ are interrupted, and unhandled rejections fail the invocation.
 
 Focused checks: `cargo test -p chunk-js` and
 `cargo clippy -p chunk-js --all-targets -- -D warnings`.
+
+The fixed web subset uses the pinned Deno web implementations for URL/search
+parameters, text decoding and base64. Text encoding allocates through the bounded
+isolate allocator. `structuredClone` supports ordinary structured data, including
+cycles, maps, sets, dates and typed arrays; transfer lists are rejected. Streams,
+networking, timers, object URLs and extension imports remain unavailable.
+
+`crypto.randomUUID` and integer-array `getRandomValues` use the invocation seed;
+these deterministic values are not suitable for secrets. `subtle.digest` supports
+SHA-1/256/384/512 with at most 1 MiB per input. Console debug/log/info/warn/error
+collect at most 32 messages and 16 KiB per successful invocation, returned as
+`Execution.logs`. Exceeding the limit fails the invocation. Initialization cannot
+log or obtain randomness. The backend emits successful evaluation logs through
+its tracing subscriber; logs are diagnostics, not transactional effects.
+
+The expanded profile requires at least 16 MiB of managed heap (32 MiB by default).
+Managed heap and aggregate buffer limits remain separate. Encoder and clone
+allocation exhaustion is tested together with runtime recycling.

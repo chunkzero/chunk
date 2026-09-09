@@ -11,6 +11,10 @@ publish = false
 chunk-contract = { path = "../chunk-contract" }
 deno_core = "0.411.0"
 deno_error = "0.7.1"
+deno_web = "0.289.0"
+deno_webidl = "0.258.0"
+sha2 = "0.10"
+sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
