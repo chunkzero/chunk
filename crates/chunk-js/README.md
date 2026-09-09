@@ -77,3 +77,7 @@ Termination records the first actual cancellation, deadline or heap signal. Tear
 time cannot turn a completed invocation into a deadline failure. Execution is bounded
 by the watchdog without redundant Tokio timers. Static execution and capability
 bounds live beside `Limits` in `model::bounds`. Stack traces identify the deployment.
+
+Caller and arguments cross as JSON text. One bootstrap invocation constructs context,
+awaits the handler and serializes the result, followed by event-loop drain. The persistent
+watchdog sleeps indefinitely while idle and polls every two milliseconds while armed.

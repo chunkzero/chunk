@@ -45,7 +45,7 @@ fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments()
     for counter in 1..=2 {
         let result = call(&mut first).unwrap();
         assert_eq!(
-            result.value,
+            value(&result),
             json!({"counter":counter,"p":{"coins":4},"caller":"player"})
         );
         assert_eq!(result.writes.len(), 1);
@@ -54,8 +54,8 @@ fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments()
     // Separate owners also isolate environments that happen to use the same deployment ID.
     for id in ["build-b", "build-a"] {
         let mut other = Deployment::new(id.into(), source.into(), Limits::default()).unwrap();
-        assert_eq!(call(&mut other).unwrap().value["counter"], json!(1));
-        assert!(call(&mut first).unwrap().value["counter"].as_u64().unwrap() > 2);
+        assert_eq!(value(&call(&mut other).unwrap())["counter"], json!(1));
+        assert!(value(&call(&mut first).unwrap())["counter"].as_u64().unwrap() > 2);
     }
 }
 
@@ -80,7 +80,7 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
         .execute(next, Box::new(Snapshot), &Cancellation::default())
         .unwrap();
     assert_eq!(
-        result.value,
+        value(&result),
         json!({"denied":4,"old":"player","current":"other","p":{"coins":3}})
     );
     assert!(result.writes.is_empty());
@@ -92,7 +92,7 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
         "globalThis.count = (globalThis.count || 0) + 1; if (args.fail) { ctx.db.put('profiles','p',{}); throw Error('rollback'); } return count;",
         Limits::default(),
     );
-    assert_eq!(call(&mut engine).unwrap().value, json!(1));
+    assert_eq!(value(&call(&mut engine).unwrap()), json!(1));
     let mut fail = invocation();
     fail.arguments = json!({"fail":true});
     assert!(
@@ -101,14 +101,14 @@ fn failed_call_discards_writes_and_reloads_the_same_bundle() {
             .is_err()
     );
     let result = call(&mut engine).unwrap();
-    assert_eq!(result.value, json!(1));
+    assert_eq!(value(&result), json!(1));
     assert!(result.writes.is_empty());
 }
 
 #[test]
 fn ambient_apis_and_query_writes_are_denied() {
     let result = run("return [typeof Deno, typeof __bootstrap, typeof __infra, typeof fetch, typeof process, typeof Intl, typeof SharedArrayBuffer, typeof WebAssembly];").unwrap();
-    assert_eq!(result.value, json!(vec!["undefined"; 8]));
+    assert_eq!(value(&result), json!(vec!["undefined"; 8]));
     assert!(run("return await import('ext:core/mod.js');").is_err());
     assert!(run("return await import('file:///etc/passwd');").is_err());
     assert!(run("return NaN;").is_err());
@@ -146,7 +146,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
                 .is_err(),
             "{body}"
         );
-        assert_eq!(call(&mut engine).unwrap().value, json!(42));
+        assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
     let mut engine = deployment(
         "if(args.fail) { const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx')); } return 42;",
@@ -159,7 +159,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
     fail.arguments = json!({"fail":true});
     let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
-    assert_eq!(call(&mut engine).unwrap().value, json!(42));
+    assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     assert!(
         Deployment::new(
             "bad".into(),
@@ -195,8 +195,8 @@ fn invocation_time_and_randomness_are_deterministic_without_removing_date_behavi
         Limits::default(),
     )
     .unwrap();
-    let first = call(&mut engine).unwrap().value;
-    assert_eq!(call(&mut engine).unwrap().value, first);
+    let first = value(&call(&mut engine).unwrap());
+    assert_eq!(value(&call(&mut engine).unwrap()), first);
     for key in ["now", "constructed", "inherited", "restored"] {
         assert_eq!(first[key], json!(invocation().timestamp));
     }
@@ -212,9 +212,9 @@ fn invocation_time_and_randomness_are_deterministic_without_removing_date_behavi
     let second = engine
         .execute(next, Box::new(Snapshot), &Cancellation::default())
         .unwrap();
-    assert_ne!(first["now"], second.value["now"]);
-    assert_ne!(first["random"], second.value["random"]);
-    for value in second.value["random"].as_array().unwrap() {
+    assert_ne!(first["now"], value(&second)["now"]);
+    assert_ne!(first["random"], value(&second)["random"]);
+    for value in value(&second)["random"].as_array().unwrap() {
         assert!((0.0..1.0).contains(&value.as_f64().unwrap()));
     }
 }
@@ -260,14 +260,12 @@ fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion
     fail.arguments = json!({"fail": true});
     let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
-    assert_eq!(call(&mut engine).unwrap().value, json!(42));
+    assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     assert!(run("return new ArrayBuffer(1, {maxByteLength: 1024}).resizable;").is_err());
     // Reading options once and omitting them from native construction prevents
     // a getter from sneaking a resizable allocation past the wrapper's check.
     assert_eq!(
-        run("let reads=0; return new ArrayBuffer(1, {get maxByteLength() { return reads++ ? 1024 : undefined; }}).resizable;")
-            .unwrap()
-            .value,
+        value(&run("let reads=0; return new ArrayBuffer(1, {get maxByteLength() { return reads++ ? 1024 : undefined; }}).resizable;").unwrap()),
         json!(false)
     );
     assert!(run("return new (new Uint8Array(1).buffer.constructor)(1, {maxByteLength: 1024}).resizable;").is_err());
@@ -291,13 +289,13 @@ fn cancellation_interrupts_execution_and_discards_speculative_writes() {
     thread.join().unwrap();
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
     let result = call(&mut engine).unwrap();
-    assert_eq!(result.value, json!(42));
+    assert_eq!(value(&result), json!(42));
     assert!(result.writes.is_empty());
 }
 
 #[test]
 fn absent_return_is_null_and_missing_exports_are_invalid() {
-    assert_eq!(run("").unwrap().value, Value::Null);
+    assert_eq!(value(&run("").unwrap()), Value::Null);
     assert!(run("return { nested: undefined };").is_err());
     let mut engine = deployment("return 42;", Limits::default());
     let mut input = invocation();
@@ -326,5 +324,46 @@ fn engine_merges_puts_and_deletes_into_raw_snapshot_ranges() {
     let result = engine
         .execute(invocation(), Box::new(Rows), &Cancellation::default())
         .unwrap();
-    assert_eq!(result.value, json!([["b", 3], ["c", 4]]));
+    assert_eq!(value(&result), json!([["b", 3], ["c", 4]]));
+}
+
+fn value(execution: &Execution) -> Value {
+    serde_json::from_str(&execution.value).unwrap()
+}
+
+#[test]
+fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
+    let mut engine = deployment("return {caller: ctx.caller, args};", Limits::default());
+    let mut input = invocation();
+    input.caller = json!({"name": "Alex 🦊"});
+    input.arguments = json!({"雪": [null, true, "\\\"\n"]});
+    let expected = json!({"caller": input.caller, "args": input.arguments});
+    let result = engine
+        .execute(input, Box::new(Snapshot), &Cancellation::default())
+        .unwrap();
+    assert_eq!(value(&result), expected);
+    for expression in ["Infinity", "1n", "({bad: undefined})", "[Symbol()]"] {
+        assert!(run(&format!("return {expression};")).is_err(), "{expression}");
+    }
+    assert!(run("return 'x'.repeat(1024 * 1024);").is_err());
+}
+
+#[test]
+fn storage_incompatible_results_fail_only_the_invocation() {
+    for expression in ["Array.from({length:130}).reduce(v => [v], null)", r"'\ud800'"] {
+        let mut engine = deployment(
+            &format!("if(args.fail) {{ ctx.db.put('profiles','p',{{}}); return {expression}; }} return 42;"),
+            Limits::default(),
+        );
+        let mut fail = invocation();
+        fail.arguments = json!({"fail":true});
+        assert!(
+            engine
+                .execute(fail, Box::new(Snapshot), &Cancellation::default())
+                .is_err()
+        );
+        let result = call(&mut engine).unwrap();
+        assert_eq!(value(&result), json!(42));
+        assert!(result.writes.is_empty());
+    }
 }

@@ -113,7 +113,8 @@ impl Cancellation {
 
 #[derive(Debug)]
 pub struct Execution {
-    pub value: Value,
+    /// Strict JSON text, ready to forward without decoding on the host.
+    pub value: String,
     /// Published only on success; the backend still validates and commits these.
     pub writes: Vec<Write>,
 }

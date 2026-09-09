@@ -4,6 +4,7 @@
 
 mod allocator;
 mod capabilities;
+mod deadline;
 mod deployment;
 mod model;
 mod profile;
