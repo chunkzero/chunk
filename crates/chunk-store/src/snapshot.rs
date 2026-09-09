@@ -1,10 +1,21 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use crate::{Document, DocumentKey, IndexRange, KeyRange, Result, Revision};
+use crate::{DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, Result, Revision};
 
 /// Adapter-owned reads pinned to one database revision, including schema and indexes.
 /// Implementations must keep empty ranges and point misses consistent too.
 pub trait SnapshotReader: Send + Sync {
+    /// Recovers an outcome visible at this snapshot.
+    /// # Errors
+    /// Reports mismatched request identities or storage failures.
+    fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>>;
+
+    /// Schema declarations pinned to the same revision as document reads.
+    fn schema(&self) -> &DatabaseSchema;
+
     /// # Errors
     /// Rejects undeclared tables or invalid keys and reports storage failures.
     fn get(&self, key: &DocumentKey) -> Result<Option<Document>>;
@@ -23,15 +34,35 @@ pub trait SnapshotReader: Send + Sync {
 #[derive(Clone)]
 pub struct Snapshot {
     pub revision: Revision,
+    /// Milliseconds since Unix epoch when this snapshot was acquired.
+    pub timestamp: i64,
     reader: Arc<dyn SnapshotReader>,
 }
 
 impl Snapshot {
+    /// # Errors
+    /// Reports mismatched request identities or storage failures.
+    pub fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
+        self.reader.outcome(operation)
+    }
+
+    #[must_use]
+    pub fn schema(&self) -> &DatabaseSchema {
+        self.reader.schema()
+    }
+
     /// Wraps an adapter's reader already pinned to the supplied revision.
     #[must_use]
     pub fn new(revision: Revision, reader: impl SnapshotReader + 'static) -> Self {
         Self {
             revision,
+            timestamp: i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX),
             reader: Arc::new(reader),
         }
     }

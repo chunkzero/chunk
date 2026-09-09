@@ -326,6 +326,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunk-backend"
+version = "0.1.0"
+dependencies = [
+ "chunk-js",
+ "chunk-store",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "chunk-build"
 version = "0.1.0"
 dependencies = [

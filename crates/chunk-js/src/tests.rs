@@ -17,8 +17,8 @@ impl ReadHost for Snapshot {
 fn invocation() -> Invocation {
     Invocation {
         export: "default".into(),
-        arguments: json!({"id":"player"}),
-        caller: json!({"player":"player"}),
+        arguments: json!({"id":"player"}).into(),
+        caller: json!({"player":"player"}).into(),
         mode: Mode::Mutation,
         timestamp: 1_700_000_000_000,
         seed: 7,
@@ -77,7 +77,7 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
     );
     call(&mut engine).unwrap();
     let mut next = invocation();
-    next.caller = json!({"player":"other"});
+    next.caller = json!({"player":"other"}).into();
     let result = engine
         .execute(next, Box::new(Snapshot), &Cancellation::default())
         .unwrap();
@@ -96,7 +96,7 @@ fn failed_call_discards_writes_and_retains_module_state() {
     );
     assert_eq!(value(&call(&mut engine).unwrap()), json!(1));
     let mut fail = invocation();
-    fail.arguments = json!({"fail":true});
+    fail.arguments = json!({"fail":true}).into();
     assert!(
         engine
             .execute(fail, Box::new(Snapshot), &Cancellation::default())
@@ -141,7 +141,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
             },
         );
         let mut fail = invocation();
-        fail.arguments = json!({"fail":true});
+        fail.arguments = json!({"fail":true}).into();
         assert!(
             engine
                 .execute(fail, Box::new(Snapshot), &Cancellation::default())
@@ -158,7 +158,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
         },
     );
     let mut fail = invocation();
-    fail.arguments = json!({"fail":true});
+    fail.arguments = json!({"fail":true}).into();
     let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
     assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
@@ -259,7 +259,7 @@ fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion
         },
     );
     let mut fail = invocation();
-    fail.arguments = json!({"fail": true});
+    fail.arguments = json!({"fail": true}).into();
     let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
     assert!(matches!(result, Err(Error::Heap)), "{result:?}");
     assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
@@ -286,7 +286,7 @@ fn cancellation_interrupts_execution_and_discards_speculative_writes() {
         trigger.cancel();
     });
     let mut fail = invocation();
-    fail.arguments = json!({"fail":true});
+    fail.arguments = json!({"fail":true}).into();
     let result = engine.execute(fail, Box::new(Snapshot), &cancellation);
     thread.join().unwrap();
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
@@ -337,9 +337,9 @@ fn value(execution: &Execution) -> Value {
 fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
     let mut engine = deployment("return {caller: ctx.caller, args};", Limits::default());
     let mut input = invocation();
-    input.caller = json!({"name": "Alex 🦊"});
-    input.arguments = json!({"雪": [null, true, "\\\"\n"]});
-    let expected = json!({"caller": input.caller, "args": input.arguments});
+    input.caller = json!({"name": "Alex 🦊"}).into();
+    input.arguments = json!({"雪": [null, true, "\\\"\n"]}).into();
+    let expected = json!({"caller": serde_json::from_str::<Value>(input.caller.as_str()).unwrap(), "args": serde_json::from_str::<Value>(input.arguments.as_str()).unwrap()});
     let result = engine
         .execute(input, Box::new(Snapshot), &Cancellation::default())
         .unwrap();
@@ -384,7 +384,7 @@ fn engine_switches_releases_and_recycles_independent_deployments() {
             .is_err()
     );
     let mut fail = invocation();
-    fail.arguments = json!({"fail": true});
+    fail.arguments = json!({"fail": true}).into();
     assert!(execute(&mut engine, &ids[1], fail).is_err());
     assert_eq!(value(&execute(&mut engine, &ids[1], invocation()).unwrap()), json!(3));
     assert_eq!(value(&execute(&mut engine, &ids[2], invocation()).unwrap()), json!(3));
@@ -442,7 +442,7 @@ fn storage_incompatible_results_fail_only_the_invocation() {
             Limits::default(),
         );
         let mut fail = invocation();
-        fail.arguments = json!({"fail":true});
+        fail.arguments = json!({"fail":true}).into();
         assert!(
             engine
                 .execute(fail, Box::new(Snapshot), &Cancellation::default())
