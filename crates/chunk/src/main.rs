@@ -1,6 +1,8 @@
 //! The `chunk` CLI, currently serving the edge player listener.
 
-use std::{io, net::SocketAddr, num::NonZeroUsize, process::ExitCode};
+use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode};
+
+mod runtime;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -14,6 +16,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime installDist artifact.
+    Runtime {
+        #[arg(long, default_value = "jvm/runtime/build/install/runtime")]
+        distribution: PathBuf,
+        #[arg(long, default_value = "java")]
+        java: PathBuf,
+        #[arg(long, default_value = ".chunk/runtime.json")]
+        connection: PathBuf,
+        #[arg(long, default_value = "local")]
+        environment: String,
+        #[arg(long, default_value = "local")]
+        deployment: String,
+    },
     /// Serve Minecraft status and online-mode login (sessions are not yet available).
     Edge {
         #[arg(long, default_value = "127.0.0.1:25565")]
@@ -28,6 +43,8 @@ enum Command {
         environment: String,
         #[arg(long, env = "CHUNK_DEPLOYMENT", default_value = "local")]
         deployment: String,
+        #[arg(long, conflicts_with = "gameplay")]
+        runtime_file: Option<PathBuf>,
         #[arg(long, default_value = "1024")]
         max_connections: NonZeroUsize,
     },
@@ -50,21 +67,34 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
+        Command::Runtime {
+            distribution,
+            java,
+            connection,
+            environment,
+            deployment,
+        } => runtime::run(distribution, java, connection, environment, deployment).await,
         Command::Edge {
             bind,
             motd,
             max_connections,
             gameplay,
+            runtime_file,
             process_token,
             environment,
             deployment,
         } => {
-            let gameplay = gameplay.map(|endpoint| chunk_edge::GameplayTarget {
-                endpoint,
-                token: process_token.expect("clap requires a process token for gameplay"),
-                environment,
-                deployment,
-            });
+            let gameplay = if let Some(path) = runtime_file {
+                Some(runtime::read_target(&path)?)
+            } else {
+                gameplay.map(|endpoint| chunk_edge::GameplayTarget {
+                    endpoint,
+                    token: process_token.expect("clap requires a process token for gameplay"),
+                    environment,
+                    deployment,
+                })
+            };
+
             let config = chunk_edge::ProxyConfig {
                 gameplay,
                 motd,

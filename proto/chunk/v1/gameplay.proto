@@ -19,6 +19,7 @@ message ConfigurationResponse {
   DeploymentRef deployment = 1;
   uint64 process_generation = 2;
   int32 protocol = 3;
+  string runtime_id = 6;
   reserved 4, 5;
   reserved "packets", "registry_digest";
 }
@@ -32,6 +33,7 @@ message PlayerDelivery {
   uint64 owner_generation = 6;
   Identity identity = 7;
   int32 protocol = 8;
+  string runtime_id = 11;
   reserved 9, 10;
   reserved "registry_digest", "client_information";
 }

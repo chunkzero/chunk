@@ -356,6 +356,8 @@ dependencies = [
  "chunk-edge",
  "chunk-runtime",
  "clap",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -503,6 +505,16 @@ version = "0.1.0"
 dependencies = [
  "chunk-contract",
  "chunk-proto",
+ "chunk-protocol",
+ "prost",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
