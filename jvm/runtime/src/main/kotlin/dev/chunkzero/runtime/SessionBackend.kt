@@ -1,12 +1,15 @@
 package dev.chunkzero.runtime
 
 import chunk.v1.Common.DeploymentRef
-import com.google.protobuf.ByteString
-import dev.chunkzero.backend.BackendClient
+import dev.chunkzero.backend.api.SessionId
+import dev.chunkzero.backend.client.BackendSession
+import dev.chunkzero.backend.client.SessionIdentity
 import io.grpc.ManagedChannel
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import java.net.InetAddress
 import java.net.URI
+import java.time.Duration
+import java.util.Optional
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -19,14 +22,15 @@ internal class SessionBackend(
 
     fun client(
         id: String,
-        generation: Long,
-    ) = BackendClient(
-        channel = channel,
-        credential = credential,
-        environment = deployment.environment,
-        deployment = deployment.deployment,
-        caller = ByteString.copyFromUtf8("""{"kind":"session","session":"$id","generation":$generation}"""),
-        scheduler = scheduler,
+        app: String,
+    ) = BackendSession(
+        channel,
+        credential,
+        deployment.environment,
+        deployment.deployment,
+        SessionIdentity(SessionId(id), app, Optional.empty()),
+        scheduler,
+        Duration.ofSeconds(5),
     )
 
     override fun close() {

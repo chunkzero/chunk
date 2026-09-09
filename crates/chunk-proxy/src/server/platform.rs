@@ -56,7 +56,7 @@ impl Platform {
                 BackendCall {
                     environment: self.target.backend.environment.clone(),
                     deployment: self.target.backend.deployment.clone(),
-                    function: format!("proxy/{phase}"),
+                    function: format!("shared/proxy/{phase}"),
                     arguments_json: serde_json::to_vec(&arguments).map_err(invalid_data)?,
                     caller_json: serde_json::to_vec(
                         &json!({"kind": "proxy", "phase": phase, "proxyId": self.proxy_id}),

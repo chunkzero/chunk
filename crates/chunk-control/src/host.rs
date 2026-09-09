@@ -148,45 +148,53 @@ impl Host for ProcessHost {
     }
 
     async fn terminate(&self, id: &str) -> Result<()> {
-        let exit = self.path(id, "exit")?;
-        if self.stopped(id) {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        {
-            let pid = std::fs::read_to_string(self.path(id, "pid")?)?
-                .parse::<u32>()
-                .ok()
-                .filter(|pid| (2..=i32::MAX as u32).contains(pid))
-                .ok_or(Error::Invalid("invalid supervisor PID"))?;
-            signal_group(pid, "-TERM").await;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if self.stopped(id) {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                sleep(Duration::from_millis(25)).await;
-            }
-            signal_group(pid, "-KILL").await;
-            match private_file(&exit) {
-                Ok(mut file) => file.write_all(b"terminated")?,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = exit;
-            Err(Error::Unresolved("host termination requires Unix process groups"))
-        }
+        terminate_runtime(&self.directory, id).await
     }
 
     fn stopped(&self, id: &str) -> bool {
         self.path(id, "exit").is_ok_and(|path| path.is_file())
+    }
+}
+
+/// Terminates a runtime and its descendants using its persisted supervisor PID.
+/// # Errors
+/// Returns an error for invalid IDs or PIDs, filesystem failures, or unsupported platforms.
+pub async fn terminate_runtime(directory: &Path, id: &str) -> Result<()> {
+    uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("invalid host ID"))?;
+    let exit = directory.join(id).with_extension("exit");
+    if exit.is_file() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let pid = std::fs::read_to_string(directory.join(id).with_extension("pid"))?
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| (2..=i32::MAX as u32).contains(pid))
+            .ok_or(Error::Invalid("invalid supervisor PID"))?;
+        signal_group(pid, "-TERM").await;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if exit.is_file() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        signal_group(pid, "-KILL").await;
+        match private_file(&exit) {
+            Ok(mut file) => file.write_all(b"terminated")?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = exit;
+        Err(Error::Unresolved("host termination requires Unix process groups"))
     }
 }
 
