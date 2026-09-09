@@ -256,7 +256,7 @@ async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
     let (client, server) = tokio::io::duplex(8192);
     let mut client = Transport::new(client);
     let server = async {
-        let result = connection::serve(server, &responses, &auth, Duration::from_secs(10), None).await;
+        let result = connection::serve(server, &responses, &auth, Duration::from_secs(10), None, None).await;
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
     };
     let client = async {

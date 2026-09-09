@@ -16,6 +16,9 @@ name = "chunk"
 path = "src/main.rs"
 
 [dependencies]
+chunk-backend = { path = "../chunk-backend" }
+chunk-contract = { path = "../chunk-contract" }
+chunk-store = { path = "../chunk-store" }
 chunk-build = { path = "../chunk-build" }
 chunk-control = { path = "../chunk-control" }
 chunk-edge = { path = "../chunk-edge", default-features = false }

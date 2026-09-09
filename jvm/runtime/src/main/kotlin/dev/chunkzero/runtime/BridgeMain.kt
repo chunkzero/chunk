@@ -1,13 +1,18 @@
 package dev.chunkzero.runtime
 
 import chunk.v1.Common.DeploymentRef
+import chunk.v1.Common.SessionRef
 import chunk.v1.Supervision.ProcessIdentity
 import chunk.v1.Supervision.ProcessRegistration
+import chunk.v1.Supervision.SessionCommand
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer
 import net.minestom.server.instance.LightingChunk
 import net.minestom.server.instance.block.Block
 import java.net.InetSocketAddress
+import java.util.ServiceLoader
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -41,7 +46,14 @@ fun main() {
     val shutdown = CountDownLatch(1)
     val ticks = AtomicLong()
     val tickExecutor = TickExecutor()
-    val sessions = SessionManager(tickExecutor, mapOf("bridge" to { FlatSession() }))
+    val backend = SessionBackend.fromEnvironment(deployment, environment)
+    val factories = mutableMapOf<String, () -> Session>("bridge" to { FlatSession() })
+    ServiceLoader.load(SessionProvider::class.java).forEach { provider ->
+        provider.sessions().forEach { (name, factory) ->
+            require(factories.putIfAbsent(name, factory) == null) { "Duplicate session type: $name" }
+        }
+    }
+    val sessions = SessionManager(tickExecutor, factories, backend?.let { it::client })
     val gameplay = GameplayService(deployment, identity.generation, sessions, runtimeId = identity.runtimeId)
     val server =
         NettyServerBuilder
@@ -76,13 +88,13 @@ fun main() {
     if (environment.bootstrapSession) {
         sessions
             .create(
-                chunk.v1.Supervision.SessionCommand
+                SessionCommand
                     .newBuilder()
                     .setIdentity(
                         identity,
                     ).setOperationId("fixture")
                     .setSession(
-                        chunk.v1.Common.SessionRef
+                        SessionRef
                             .newBuilder()
                             .setId("bridge"),
                     ).setGeneration(1)
@@ -110,6 +122,7 @@ fun main() {
     fun close() {
         if (!stopped.compareAndSet(false, true)) return
         registration?.close()
+        backend?.close()
         server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS)
         process.stop()
         gameplay.close()
@@ -121,11 +134,11 @@ fun main() {
 }
 
 internal class FlatSession : Session() {
-    override fun onCreate(scope: SessionScope): java.util.concurrent.CompletionStage<Unit> {
+    override fun onCreate(scope: SessionScope): CompletionStage<Unit> {
         val instance = scope.createInstance()
         instance.setChunkSupplier(::LightingChunk)
         instance.setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
-        return java.util.concurrent.CompletableFuture
+        return CompletableFuture
             .completedFuture(Unit)
     }
 }

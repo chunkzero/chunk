@@ -2,6 +2,7 @@
 
 use std::{io, net::SocketAddr, num::NonZeroUsize, path::PathBuf, process::ExitCode};
 
+mod backend;
 mod control;
 mod runtime;
 
@@ -17,6 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the environment backend with an immutable JavaScript deployment bundle.
+    Backend(backend::Options),
     /// Serve durable local session placement and player ownership.
     Control(control::Options),
     /// Launch a supervised gameplay JVM. Requires Java 25 and the runtime distribution.
@@ -37,6 +40,10 @@ enum Command {
         deployment: String,
         #[arg(long, conflicts_with = "gameplay")]
         runtime_file: Option<PathBuf>,
+        #[arg(long, requires = "control_file", conflicts_with_all = ["gameplay", "runtime_file"])]
+        backend_file: Option<PathBuf>,
+        #[arg(long, requires = "backend_file")]
+        control_file: Option<PathBuf>,
         #[arg(long, default_value = "1024")]
         max_connections: NonZeroUsize,
     },
@@ -59,6 +66,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
+        Command::Backend(options) => backend::run(options).await,
         Command::Control(options) => control::run(options).await,
         Command::Runtime(options) => runtime::run(options).await,
         Command::Edge {
@@ -70,6 +78,8 @@ async fn run(cli: Cli) -> io::Result<()> {
             process_token,
             environment,
             deployment,
+            backend_file,
+            control_file,
         } => {
             let gameplay = if let Some(path) = runtime_file {
                 Some(runtime::read_target(&path)?)
@@ -82,7 +92,17 @@ async fn run(cli: Cli) -> io::Result<()> {
                 })
             };
 
+            let platform = backend_file
+                .zip(control_file)
+                .map(|(backend, control)| -> io::Result<_> {
+                    Ok(chunk_edge::PlatformTarget {
+                        backend: serde_json::from_slice(&std::fs::read(backend)?).map_err(io::Error::other)?,
+                        control: serde_json::from_slice(&std::fs::read(control)?).map_err(io::Error::other)?,
+                    })
+                })
+                .transpose()?;
             let config = chunk_edge::ProxyConfig {
+                platform,
                 gameplay,
                 motd,
                 max_connections,

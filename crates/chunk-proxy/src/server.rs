@@ -3,6 +3,8 @@ mod configuration;
 mod connection;
 mod gameplay;
 mod limbo;
+mod managed;
+mod platform;
 mod transport;
 
 use authentication::Authentication;
@@ -76,6 +78,7 @@ pub struct Proxy {
     responses: Arc<Responses>,
     authentication: Arc<Authentication>,
     limbo_packets: Arc<limbo::Cache>,
+    platform: Option<platform::Platform>,
 }
 
 impl Proxy {
@@ -99,6 +102,13 @@ impl Proxy {
                 "compression threshold exceeds frame limit",
             ));
         }
+        if config.platform.is_some() && config.gameplay.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "choose managed platform or fixture gameplay",
+            ));
+        }
+        let platform = config.platform.clone().map(platform::Platform::new).transpose()?;
         let responses = Arc::new(Responses::new(&config)?);
         let authentication = Arc::new(Authentication::new().await?);
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
@@ -110,6 +120,7 @@ impl Proxy {
             responses,
             authentication,
             limbo_packets,
+            platform,
         })
     }
 
@@ -159,10 +170,17 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
+                    let platform = self.platform.clone();
                     let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
-                        match connection::serve(stream, &responses, &authentication, deadline, compression).await {
+                        match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
                             Ok(Some(authenticated)) => {
+                                if let Some(platform) = platform {
+                                    if let Err(error) = Box::pin(managed::serve(authenticated, &platform, configuration_timeout)).await {
+                                        tracing::debug!(%peer, %error, "managed connection closed");
+                                    }
+                                    return;
+                                }
                                 if let Err(error) = route(authenticated, gameplay.as_ref(), &limbo_packets, configuration_timeout).await {
                                     tracing::debug!(%peer, %error, "player connection closed");
                                 }

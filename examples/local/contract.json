@@ -1,0 +1,269 @@
+{
+  "tables": {
+    "players": {
+      "fields": {
+        "coins": {
+          "schema": {
+            "type": "integer"
+          }
+        },
+        "visits": {
+          "schema": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "settings": {
+      "fields": {
+        "motd": {
+          "schema": {
+            "type": "string"
+          }
+        },
+        "admission": {
+          "schema": {
+            "type": "union",
+            "variants": [
+              {
+                "type": "literal",
+                "value": "allow"
+              },
+              {
+                "type": "literal",
+                "value": "deny"
+              },
+              {
+                "type": "literal",
+                "value": "hang"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "functions": {
+    "proxy/status": {
+      "kind": "query",
+      "export": "status",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "host": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "motd": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "online": {
+            "schema": {
+              "type": "integer"
+            }
+          },
+          "max": {
+            "schema": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "visibility": "public"
+    },
+    "proxy/admit": {
+      "kind": "query",
+      "export": "admit",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "username": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "allow": {
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          "reason": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "visibility": "public"
+    },
+    "proxy/route": {
+      "kind": "query",
+      "export": "route",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "username": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "key": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "session_type": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "machine_profile": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "visibility": "public"
+    },
+    "players/balance": {
+      "kind": "query",
+      "export": "balance",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "integer"
+      },
+      "visibility": "public"
+    },
+    "players/visits": {
+      "kind": "query",
+      "export": "visits",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "integer"
+      },
+      "visibility": "public"
+    },
+    "players/join": {
+      "kind": "mutation",
+      "export": "join",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "integer"
+      },
+      "visibility": "public"
+    },
+    "players/coin": {
+      "kind": "mutation",
+      "export": "coin",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "uuid": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "integer"
+      },
+      "visibility": "public"
+    },
+    "admin/settings": {
+      "kind": "mutation",
+      "export": "settings",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "motd": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "admission": {
+            "schema": {
+              "type": "union",
+              "variants": [
+                {
+                  "type": "literal",
+                  "value": "allow"
+                },
+                {
+                  "type": "literal",
+                  "value": "deny"
+                },
+                {
+                  "type": "literal",
+                  "value": "hang"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "null"
+      },
+      "visibility": "public"
+    }
+  },
+  "contract_version": 1,
+  "runtime_profile": "transactional_v1"
+}

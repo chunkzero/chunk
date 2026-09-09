@@ -1,5 +1,6 @@
 package dev.chunkzero.runtime
 
+import dev.chunkzero.backend.BackendClient
 import net.minestom.server.MinecraftServer
 import net.minestom.server.entity.Player
 import net.minestom.server.event.EventFilter
@@ -9,7 +10,9 @@ import java.time.Duration
 import java.util.IdentityHashMap
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArrayList
 
 /** Hooks run on the process tick thread; asynchronous continuations use [SessionScope.onTick]. */
 abstract class Session {
@@ -27,13 +30,14 @@ class SessionScope internal constructor(
     val generation: Long,
     private val ticks: TickExecutor,
     private val requestFinish: () -> CompletionStage<Unit>,
+    val backend: BackendClient?,
 ) {
-    private val ownedInstances = mutableListOf<InstanceContainer>()
+    private val ownedInstances = CopyOnWriteArrayList<InstanceContainer>()
     private val resources = mutableListOf<AutoCloseable>()
     private val playerResources = IdentityHashMap<Player, MutableList<AutoCloseable>>()
     val coroutines by lazy { own(SessionCoroutines(this, ticks)) }
     internal val players =
-        java.util.concurrent.ConcurrentHashMap
+        ConcurrentHashMap
             .newKeySet<Player>()
     private var disposed = false
     val events = EventNode.value("session-$id-$generation", EventFilter.PLAYER) { players.contains(it) }
@@ -97,6 +101,17 @@ class SessionScope internal constructor(
             check(!disposed)
             action()
         }
+
+    /** Stable mutation identity for one action on this exact player delivery. */
+    fun operationId(
+        player: Player,
+        action: String,
+    ): String {
+        require(action.matches(Regex("[A-Za-z0-9_-]{1,32}")))
+        require(players.contains(player))
+        val binding = (player as ManagedPlayer).binding
+        return "$id/${player.uuid}/${binding.ownerGeneration}/$action"
+    }
 
     fun finish(): CompletionStage<Unit> = requestFinish()
 

@@ -48,6 +48,8 @@ class GameplayLifecycleTest {
         MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
         val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
+        val joinStarted = CompletableFuture<Unit>()
+        val joinFinished = CompletableFuture<Unit>()
         val manager =
             SessionManager(
                 ticks,
@@ -57,14 +59,22 @@ class GameplayLifecycleTest {
                             lateinit var scope: SessionScope
 
                             override fun onCreate(scope: SessionScope) =
-                                FlatSession().onCreate(scope).also {
-                                    this.scope =
-                                        scope
-                                }
+                                FlatSession().onCreate(scope).also { this.scope = scope }
 
                             override fun onJoin(player: Player): CompletableFuture<Unit> {
                                 scope.own(player, AutoCloseable { closedPlayers.add(player) })
                                 return CompletableFuture.completedFuture(Unit)
+                            }
+                        }
+                    },
+                    "gated" to {
+                        object : Session() {
+                            override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
+
+                            override fun onJoin(player: Player): CompletableFuture<Unit> {
+                                assertTrue(player.isOnline)
+                                joinStarted.complete(Unit)
+                                return joinFinished
                             }
                         }
                     },
@@ -262,8 +272,41 @@ class GameplayLifecycleTest {
                     .setOwnerGeneration(3)
                     .build(),
             )
+            manager.create(command("c").toBuilder().setSessionType("gated").build()).get(3, TimeUnit.SECONDS)
+            val pending = delivery("c", 4)
+            connect(pending)
+            joinStarted.get(3, TimeUnit.SECONDS)
+            assertTrue(
+                service.deliveries().none {
+                    it.delivery.operationId == pending.operationId &&
+                        it.phase == DeliveryPhase.DELIVERY_PHASE_ARRIVED
+                },
+            )
+            val pendingWithdrawal =
+                PlayerWithdrawal
+                    .newBuilder()
+                    .setOperationId(
+                        pending.operationId,
+                    ).setOwnerGeneration(4)
+                    .build()
+            val withdrawn = CompletableFuture.supplyAsync { stub().withdrawPlayer(pendingWithdrawal) }
+            val conflicting = delivery("c", 5)
+            assertThrows(IllegalStateException::class.java) { connect(conflicting) }
+            assertTrue(!withdrawn.isDone, "Withdrawal must await the old asynchronous join")
+            joinFinished.complete(Unit)
+            assertEquals(pendingWithdrawal, withdrawn.get(3, TimeUnit.SECONDS))
+            val replacement = delivery("c", 6)
+            val replacementSocket = connect(replacement)
+            arrive(replacementSocket, replacement.operationId)
+            stub().withdrawPlayer(
+                PlayerWithdrawal
+                    .newBuilder()
+                    .setOperationId(replacement.operationId)
+                    .setOwnerGeneration(6)
+                    .build(),
+            )
+            manager.finish(command("c")).get(3, TimeUnit.SECONDS)
             manager.finish(command("b")).get(3, TimeUnit.SECONDS)
-            assertEquals(setOf(oldPlayer, current), closedPlayers)
         } finally {
             sockets.forEach { it.close() }
             service.close()

@@ -11,6 +11,8 @@ internal data class RuntimeEnvironment(
     val machineProfile: String,
     val artifactDigest: String,
     val bootstrapSession: Boolean,
+    val backendEndpoint: String?,
+    val backendToken: String?,
 ) {
     companion object {
         fun load() =
@@ -28,6 +30,8 @@ internal data class RuntimeEnvironment(
                 machineProfile = System.getenv("CHUNK_MACHINE_PROFILE") ?: "local",
                 artifactDigest = System.getenv("CHUNK_ARTIFACT_DIGEST") ?: "fixture",
                 bootstrapSession = System.getenv("CHUNK_BOOTSTRAP_SESSION") != "",
+                backendEndpoint = System.getenv("CHUNK_BACKEND_ENDPOINT"),
+                backendToken = System.getenv("CHUNK_BACKEND_TOKEN"),
             )
     }
 }

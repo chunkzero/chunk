@@ -39,6 +39,7 @@ pub struct ProcessHost {
     pub deployment: chunk_proto::v1::DeploymentRef,
     pub artifact_digest: String,
     pub profiles: BTreeMap<String, MachineProfile>,
+    pub backend: Option<chunk_contract::BackendConnection>,
 }
 
 impl ProcessHost {
@@ -55,13 +56,24 @@ impl Host for ProcessHost {
             .profiles
             .get(profile)
             .ok_or(Error::Invalid("unknown machine profile"))?;
+        if let Some(backend) = &self.backend
+            && (backend.environment != self.deployment.environment || backend.deployment != self.deployment.deployment)
+        {
+            return Err(Error::Invalid("gameplay backend scope mismatch"));
+        }
         let record = self.path(id, "json")?;
         std::fs::create_dir_all(&self.directory)?;
         let marker = private_file(&self.path(id, "launch")?);
         match marker {
             Ok(_) => {
                 let log = private_file(&self.path(id, "supervisor.log")?)?;
-                let child = Command::new(&self.program)
+                let mut command = Command::new(&self.program);
+                if let Some(backend) = &self.backend {
+                    command
+                        .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
+                        .env("CHUNK_BACKEND_TOKEN", &backend.token);
+                }
+                let child = command
                     .arg("runtime")
                     .arg("--managed")
                     .arg("--connection")

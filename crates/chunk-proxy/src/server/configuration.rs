@@ -1,7 +1,7 @@
 use std::{future::Future, io, time::Duration};
 
 use chunk_protocol::{
-    Decode, Packet, VarInt, decode_packet,
+    Decode, Encode, Packet, VarInt, decode_packet,
     versions::v26_1::{
         AcknowledgeConfiguration, ConfigurationClientInformation, ConfigurationKeepAlive,
         ConfigurationKeepAliveResponse, ConfigurationPluginResponse, KnownPacks,
@@ -56,11 +56,21 @@ where
         let heartbeat_deadline = pending_keep_alive.map_or(next_keep_alive, |(_, deadline)| deadline);
         tokio::select! {
             biased;
-            () = sleep_until(expires) => return Err(timed_out("configuration wait expired")),
+            () = sleep_until(expires) => {
+                let _ = disconnect(&mut authenticated.transport, 0x02, "Server temporarily unavailable").await;
+                return Err(timed_out("configuration wait expired"));
+            },
             () = sleep_until(information_deadline), if information.is_none() => {
                 return Err(timed_out("client information timed out"));
             }
-            result = &mut destination, if ready.is_none() => ready = Some(result?),
+            result = &mut destination, if ready.is_none() => match result {
+                Ok(value) => ready = Some(value),
+                Err(error) => {
+                    let reason = if error.kind() == io::ErrorKind::PermissionDenied { error.to_string() } else { "Server temporarily unavailable".into() };
+                    let _ = disconnect(&mut authenticated.transport, 0x02, &reason).await;
+                    return Err(error);
+                }
+            },
             () = sleep_until(heartbeat_deadline) => {
                 if pending_keep_alive.is_some() {
                     return Err(timed_out("configuration keepalive timed out"));
@@ -96,6 +106,35 @@ where
             }
         }
     }
+}
+
+pub(super) async fn disconnect<S: AsyncRead + AsyncWrite + Unpin>(
+    transport: &mut Transport<S>,
+    packet: i32,
+    reason: &str,
+) -> io::Result<()> {
+    // Anonymous NBT string uses Java modified UTF-8, including surrogate pairs.
+    let mut text = Vec::new();
+    for unit in reason.chars().take(256).collect::<String>().encode_utf16() {
+        match unit {
+            1..=127 => text.push(u8::try_from(unit).map_err(invalid_data)?),
+            0..=2047 => {
+                text.push(0xc0 | u8::try_from(unit >> 6).map_err(invalid_data)?);
+                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
+            }
+            _ => {
+                text.push(0xe0 | u8::try_from(unit >> 12).map_err(invalid_data)?);
+                text.push(0x80 | u8::try_from((unit >> 6) & 63).map_err(invalid_data)?);
+                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
+            }
+        }
+    }
+    let mut body = Vec::new();
+    VarInt(packet).encode(&mut body).map_err(invalid_data)?;
+    body.push(8);
+    body.extend(u16::try_from(text.len()).map_err(invalid_data)?.to_be_bytes());
+    body.extend(text);
+    within(WRITE_TIMEOUT, transport.write_body(&body)).await
 }
 
 fn timed_out(message: &'static str) -> io::Error {

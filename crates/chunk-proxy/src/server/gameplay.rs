@@ -86,7 +86,7 @@ async fn destination(target: &GameplayTarget) -> io::Result<(Destination, Config
     Ok((destination, configuration))
 }
 
-fn identity(profile: &LoginSuccess) -> Identity {
+pub(super) fn identity(profile: &LoginSuccess) -> Identity {
     Identity {
         uuid: uuid::Uuid::from_bytes(profile.uuid.0).to_string(),
         username: profile.username.as_str().into(),
@@ -167,11 +167,14 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-async fn login<S>(
+pub(super) async fn login<S>(
     authenticated: &Authenticated<S>,
     settings: &ConfigurationClientInformation,
     prepared: PlayerPreparation,
 ) -> io::Result<Transport<TcpStream>> {
+    if prepared.capability.len() != 32 {
+        return Err(invalid_data("invalid player preparation"));
+    }
     let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
     if !address.ip().is_loopback() {
         return Err(invalid_data("local gameplay endpoint must be loopback"));

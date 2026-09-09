@@ -3,9 +3,12 @@
 //! Build tooling resolves declarations into this contract; storage adapters map
 //! it to physical tables and indexes. This crate has no I/O or JavaScript execution.
 
+mod connections;
 mod deployment;
 mod index;
 mod schema;
+
+pub use connections::{BackendConnection, ControlConnection};
 
 pub use deployment::{
     CONTRACT_VERSION, Deployment, Function, FunctionKind, RuntimeProfile, Visibility, validate_wire_value,
