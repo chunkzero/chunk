@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "players",
         "runtime",
         "gameplay",
+        "supervision",
         "backend",
     ]
     .map(|name| format!("{root}/chunk/v1/{name}.proto"));

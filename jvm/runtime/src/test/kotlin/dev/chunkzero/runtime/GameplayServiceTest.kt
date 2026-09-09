@@ -106,6 +106,7 @@ class GameplayServiceTest {
                     .newBuilder()
                     .setDeployment(deployment)
                     .setProcessGeneration(7)
+                    .setRuntimeId("bridge")
                     .setOwnerGeneration(1)
                     .setOperationId("delivery-1")
                     .setSession(SessionRef.newBuilder().setId("bridge"))

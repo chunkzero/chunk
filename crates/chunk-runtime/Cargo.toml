@@ -9,7 +9,19 @@ publish = false
 
 [dependencies]
 chunk-contract = { path = "../chunk-contract" }
+chunk-protocol = { path = "../chunk-protocol" }
 chunk-proto = { path = "../chunk-proto" }
+prost = "0.14.4"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "net", "process", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = "0.7"
+tonic = "0.14.6"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
