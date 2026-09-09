@@ -4,9 +4,9 @@ use chunk_build::{Artifact, Inputs};
 use chunk_control::{MachineProfile, SessionType};
 use serde::{Deserialize, Serialize};
 
-mod processes;
+mod services;
 
-#[derive(clap::Args)]
+#[derive(Clone, clap::Args)]
 pub(crate) struct Options {
     #[arg(long, default_value = "examples/local/project.json")]
     project: PathBuf,
@@ -60,23 +60,18 @@ pub(crate) async fn run(mut options: Options) -> io::Result<()> {
         result = &mut shutdown => return result,
         result = java_version(&options.java) => result?,
     }
-    let program = chunk_build::pin_program(&std::env::current_exe()?, &options.state.join("platform"))?;
-    let (project, artifact) = build(&options)?;
-    tracing::info!(deployment = %artifact.id, artifact = %artifact.directory.display(), "local project packaged");
-    let mut processes = processes::Services::new(&options, &project, &artifact, program);
-    let result = tokio::select! {
-        result = &mut shutdown => result,
-        result = async {
-            processes.start().await?;
-            tracing::info!(address = %options.bind, state = %options.state.display(), "local project ready; Ctrl-C stops all services");
-            loop {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                processes.poll().await?;
-            }
-        } => result,
-    };
-    let stopped = processes.stop().await;
-    result.and(stopped)
+    let build_options = options.clone();
+    let (project, artifact) = tokio::task::spawn_blocking(move || build(&build_options))
+        .await
+        .map_err(io::Error::other)??;
+    tracing::info!(deployment = %artifact.id, "local project packaged");
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = services::run(&options, &project, &artifact, stop.clone());
+    tokio::pin!(running);
+    tokio::select! {
+        result = &mut running => result,
+        result = &mut shutdown => { stop.cancel(); let stopped = running.await; result.and(stopped) }
+    }
 }
 
 fn build(options: &Options) -> io::Result<(Project, Artifact)> {

@@ -38,6 +38,10 @@ abstract class GenerateBackend
             val output = outputDirectory.get().asFile
             exec.exec {
                 workingDir(platformDirectory.get().asFile)
+                commandLine("node", "packages/compiler/install-toolchain.mjs")
+            }
+            exec.exec {
+                workingDir(platformDirectory.get().asFile)
                 commandLine(
                     "cargo",
                     "run",

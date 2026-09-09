@@ -11,7 +11,7 @@ val generateBackend =
         inputs
             .files(
                 listOf(
-                    "packages/compiler/bundle.mjs",
+                    "packages/compiler/install-toolchain.mjs",
                     "packages/compiler/package.json",
                     "packages/server/package.json",
                     "package.json",

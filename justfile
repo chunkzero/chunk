@@ -26,7 +26,7 @@ typecheck:
     pnpm typecheck
 
 # Run the test suites.
-test:
+test: toolchain
     cargo test --workspace
     cargo test -p chunk-proxy --no-default-features
     ./gradlew test
@@ -42,9 +42,23 @@ ready: fmt-check lint typecheck test build
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
 local *args:
     pnpm install --frozen-lockfile
+    node packages/compiler/install-toolchain.mjs
     ./gradlew :jvm:example:installDist :jvm:example:writeJavaExecutable
-    cargo run -p chunk -- local --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
+    cargo run -p chunk-cli -- local --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
 
 # Operate on players connected to the local example.
 players *args:
-    cargo run -p chunk -- players --control-file .chunk/local/control.json {{args}}
+    cargo run -p chunk-cli -- players --control-file .chunk/local/control.json {{args}}
+
+# Install the pinned native TypeScript toolchain beside development executables.
+toolchain:
+    pnpm install --frozen-lockfile
+    node packages/compiler/install-toolchain.mjs
+
+# Assemble a host-platform CLI distribution, including its native type checker.
+package-cli:
+    pnpm install --frozen-lockfile
+    cargo build --release -p chunk-cli
+    mkdir -p target/dist
+    cp target/release/chunk target/dist/chunk
+    node packages/compiler/install-toolchain.mjs target/dist

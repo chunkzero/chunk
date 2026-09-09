@@ -76,3 +76,5 @@ impl Error {
 
 #[cfg(test)]
 mod document_tests;
+
+pub mod server;

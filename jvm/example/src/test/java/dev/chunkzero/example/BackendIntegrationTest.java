@@ -96,10 +96,13 @@ class BackendIntegrationTest {
             Files.writeString(bundlePath, bundle.toString());
             var connection = directory.resolve("connection.json");
             Files.deleteIfExists(connection);
-            process = new ProcessBuilder(System.getProperty("chunk.executable"), "backend", "--bundle", bundlePath.toString(),
-                    "--environment", "test", "--state", directory.resolve("state").toString(),
-                    "--connection", connection.toString(), "--bind", address)
-                    .redirectErrorStream(true).redirectOutput(directory.resolve("backend.log").toFile()).start();
+            var builder = new ProcessBuilder(System.getProperty("chunk.executable"));
+            builder.environment().putAll(java.util.Map.of(
+                    "CHUNK_BUNDLE", bundlePath.toString(), "CHUNK_ENVIRONMENT", "test",
+                    "CHUNK_STATE", directory.resolve("state").toString(),
+                    "CHUNK_CONNECTION", connection.toString(), "CHUNK_BIND", address));
+            process = builder.redirectErrorStream(true)
+                    .redirectOutput(directory.resolve("backend.log").toFile()).start();
             var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (!Files.exists(connection)) {
                 assertTrue(process.isAlive(), "Backend process exited before readiness");

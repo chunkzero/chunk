@@ -21,8 +21,8 @@ app-local commands. These APIs remain proposed, not implemented.
 The local implementation includes online authentication, live JavaScript
 admission/routing, automatic session placement, supervised Minestom JVMs,
 SQLite transactions and reactive subscriptions. Players move between sessions
-and JVMs on the same public connection. The backend and control authority can
-restart independently of surviving gameplay streams.
+and JVMs on the same public connection. Standalone backend and control services can restart independently. The development
+runner embeds services and stops the stack if one fails.
 
 Run the [local example](examples/local/README.md) with `just local`. It packages
 an immutable deployment, starts all services, and demonstrates persistent coins,
@@ -62,7 +62,27 @@ just local
 
 The proxy supports Java Edition 26.1 (protocol 775). See the
 [proxy documentation](crates/chunk-proxy/README.md) for managed delivery, timeouts,
-feature selection and the standalone waiting-world fixture.
+feature selection and standalone hosting.
+
+## CLI and services
+
+`chunk` is the developer CLI (`crates/chunk-cli`):
+
+- `chunk build PROJECT --output OUTPUT` checks TypeScript and builds backend artifacts.
+- `chunk local` runs the development stack with embedded services and child JVMs.
+- `chunk players` operates on local players.
+- `chunk login` and `chunk upload ARTIFACT` are explicit, non-successful stubs.
+
+Run `just toolchain` before using the build command from a checkout. `just package-cli`
+assembles the CLI and pinned native TypeScript compiler under `target/dist`.
+
+Standalone `chunk-backend`, `chunk-control`, `chunk-edge` and `chunk-runtime` binaries
+read environment variables and call the same libraries. They have no CLI argument
+parser. The proxy remains the reusable listener implementation hosted by edge.
+Backend requires `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT`, `CHUNK_STATE`,
+`CHUNK_CONNECTION`, and optional `CHUNK_BIND` (default `127.0.0.1:25568`). See the
+[control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and
+[runtime](jvm/runtime/README.md) docs for the other service environments.
 
 ## License
 

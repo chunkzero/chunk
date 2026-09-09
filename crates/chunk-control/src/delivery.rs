@@ -204,23 +204,15 @@ impl Control {
     pub async fn shutdown(&self) -> Result<()> {
         self.draining.store(true, std::sync::atomic::Ordering::Release);
         let state = self.state()?;
+        let mut result = Ok(());
         for id in state.hosts.keys() {
-            if self.host.stopped(id) {
-                continue;
-            }
-            let runtime = self.runtime(&state, id).await?;
-            let _ = ProcessControlClient::new(channel(&runtime).await?)
-                .stop_process(auth(&runtime, runtime.identity.clone(), 15)?)
-                .await;
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !self.host.stopped(id) {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(Error::Unresolved("runtime stop not confirmed"));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if !self.host.stopped(id)
+                && let Err(error) = self.host.terminate(id).await
+            {
+                result = Err(error);
             }
         }
-        Ok(())
+        result
     }
 }
 

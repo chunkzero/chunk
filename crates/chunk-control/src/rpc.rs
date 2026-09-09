@@ -9,6 +9,7 @@ use crate::{Control, Error};
 pub struct Service {
     control: Arc<Control>,
     token: String,
+    operations: tokio_util::task::TaskTracker,
 }
 
 impl Service {
@@ -18,7 +19,15 @@ impl Service {
         if token.len() < 32 {
             return Err(Error::Invalid("control credential too short"));
         }
-        Ok(Self { control, token })
+        Ok(Self {
+            control,
+            token,
+            operations: tokio_util::task::TaskTracker::new(),
+        })
+    }
+
+    pub(crate) fn operations(&self) -> tokio_util::task::TaskTracker {
+        self.operations.clone()
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
@@ -83,7 +92,8 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         let control = self.control.clone();
         // A canceled RPC does not abandon an already durably reserved operation.
-        tokio::spawn(async move { control.claim(request.into_inner()).await })
+        self.operations
+            .spawn(async move { control.claim(request.into_inner()).await })
             .await
             .map_err(|_| Status::internal("claim task failed"))?
             .map(Response::new)
@@ -102,7 +112,8 @@ impl LocalControl for Service {
     async fn activate(&self, request: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
         self.authorize(&request)?;
         let control = self.control.clone();
-        tokio::spawn(async move { control.activate(request.into_inner()).await })
+        self.operations
+            .spawn(async move { control.activate(request.into_inner()).await })
             .await
             .map_err(|_| Status::internal("activation task failed"))?
             .map(Response::new)
@@ -112,7 +123,8 @@ impl LocalControl for Service {
     async fn cancel(&self, request: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
         self.authorize(&request)?;
         let control = self.control.clone();
-        tokio::spawn(async move { control.cancel(request.into_inner()).await })
+        self.operations
+            .spawn(async move { control.cancel(request.into_inner()).await })
             .await
             .map_err(|_| Status::internal("cancellation task failed"))?
             .map(Response::new)

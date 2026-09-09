@@ -339,3 +339,50 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     );
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_shutdown_closes_watchers_and_releases_durable_state() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let directory = tempfile::tempdir().unwrap();
+    let bundle = directory.path().join("bundle.json");
+    std::fs::write(&bundle, serde_json::to_vec(&deployment("a")).unwrap()).unwrap();
+    let path = directory.path().join("connection.json");
+    // Reopening the same database proves the service joined its worker owners.
+    for _ in 0..2 {
+        let stop = CancellationToken::new();
+        let (ready, started) = oneshot::channel();
+        let task = tokio::spawn(crate::server::run(
+            crate::server::Config {
+                bundle: bundle.clone(),
+                environment: "local".into(),
+                state: directory.path().join("state"),
+                connection: path.clone(),
+                bind: "127.0.0.1:0".parse().unwrap(),
+            },
+            ready,
+            stop.clone(),
+        ));
+        let connection = tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut client = BackendClient::connect(connection.endpoint).await.unwrap();
+        let mut request = Request::new(BackendWatch {
+            queries: vec![request("get", "")],
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());
+        let mut stream = client.watch(request).await.unwrap().into_inner();
+        assert!(stream.message().await.unwrap().is_some());
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!path.exists());
+        assert!(stream.message().await.unwrap().is_none());
+    }
+}

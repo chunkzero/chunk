@@ -5,7 +5,6 @@
   "type": "module",
   "license": "FSL-1.1-MIT",
   "dependencies": {
-    "rolldown": "1.2.7",
     "typescript": "7.0.2"
   }
 }

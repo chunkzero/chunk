@@ -12,10 +12,9 @@ default = ["mc-26-1"]
 mc-26-1 = ["chunk-proxy/mc-26-1"]
 
 [dependencies]
-chunk-contract = { path = "../chunk-contract" }
-chunk-proto = { path = "../chunk-proto" }
-chunk-store = { path = "../chunk-store" }
-chunk-js = { path = "../chunk-js" }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+chunk-service = { path = "../chunk-service" }
 chunk-proxy = { path = "../chunk-proxy", default-features = false }
 
 [lints]

@@ -29,6 +29,7 @@ use crate::{
 };
 
 pub struct Launch {
+    pub backend: Option<chunk_contract::BackendConnection>,
     /// The generated JVM distribution launcher or a Java executable with classpath arguments.
     pub program: PathBuf,
     pub arguments: Vec<String>,
@@ -61,7 +62,7 @@ pub struct Status {
 pub struct ManagedJvm {
     shared: Arc<Shared>,
     endpoint: String,
-    task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl ManagedJvm {
@@ -86,8 +87,8 @@ impl ManagedJvm {
             runtime_id: uuid::Uuid::new_v4().to_string(),
             process_id: uuid::Uuid::new_v4().to_string(),
             generation: 1,
-            machine_profile: launch.machine_profile,
-            artifact_digest: launch.artifact_digest,
+            machine_profile: launch.machine_profile.clone(),
+            artifact_digest: launch.artifact_digest.clone(),
         };
         let (status, mut receiver) = watch::channel(Status {
             phase: Phase::Starting,
@@ -104,35 +105,7 @@ impl ManagedJvm {
             shutdown: CancellationToken::new(),
             status,
         });
-        let mut log = OpenOptions::new();
-        log.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            log.mode(0o600);
-        }
-        let log = log.open(&launch.log_path)?;
-        let deployment = &launch.deployment;
-        let child = Command::new(&launch.program)
-            .args(&launch.arguments)
-            .env("CHUNK_SUPERVISOR", &endpoint)
-            .env("CHUNK_PROCESS_TOKEN", &shared.child_credential)
-            .env("CHUNK_ENVIRONMENT", &deployment.environment)
-            .env("CHUNK_DEPLOYMENT", &deployment.deployment)
-            .env("CHUNK_RUNTIME_ID", &shared.identity.runtime_id)
-            .env("CHUNK_PROCESS_ID", &shared.identity.process_id)
-            .env("CHUNK_PROCESS_GENERATION", shared.identity.generation.to_string())
-            .env("CHUNK_MACHINE_PROFILE", &shared.identity.machine_profile)
-            .env("CHUNK_ARTIFACT_DIGEST", &shared.identity.artifact_digest)
-            .env(
-                "CHUNK_BOOTSTRAP_SESSION",
-                if launch.bootstrap_session { "bridge" } else { "" },
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .kill_on_drop(true)
-            .spawn()?;
+        let child = spawn_jvm(&launch, &shared, &endpoint)?;
         tracing::info!(runtime_id = %shared.identity.runtime_id, pid = child.id(), "launched gameplay JVM");
         let task = tokio::spawn(monitor(shared.clone(), child, listener, ingress));
         let process = Self {
@@ -140,28 +113,26 @@ impl ManagedJvm {
             endpoint,
             task: Some(task),
         };
-        let ready = timeout(
-            launch.startup_timeout,
-            receiver.wait_for(|status| matches!(status.phase, Phase::Ready | Phase::Failed | Phase::Stopped)),
-        )
-        .await;
-        match ready {
-            Ok(Ok(status)) if status.phase == Phase::Ready => {
-                drop(status);
-                Ok(process)
-            }
-            other => {
-                let diagnostic = process
-                    .status()
-                    .diagnostic
-                    .unwrap_or_else(|| "JVM registration/readiness deadline".into());
-                drop(other);
-                process.stop().await;
-                Err(io::Error::other(format!(
-                    "{diagnostic}; diagnostics: {}",
-                    launch.log_path.display()
-                )))
-            }
+        let ready = timeout(launch.startup_timeout, async {
+            receiver
+                .wait_for(|status| matches!(status.phase, Phase::Ready | Phase::Failed | Phase::Stopped))
+                .await
+                .is_ok_and(|status| status.phase == Phase::Ready)
+        })
+        .await
+        .unwrap_or(false);
+        if ready {
+            Ok(process)
+        } else {
+            let diagnostic = process
+                .status()
+                .diagnostic
+                .unwrap_or_else(|| "JVM registration/readiness deadline".into());
+            process.stop().await?;
+            Err(io::Error::other(format!(
+                "{diagnostic}; diagnostics: {}",
+                launch.log_path.display()
+            )))
         }
     }
 
@@ -193,11 +164,14 @@ impl ManagedJvm {
         self.shared.inventory().await
     }
 
-    pub async fn stop(mut self) {
+    /// # Errors
+    /// Reports monitor failure or an unconfirmed JVM exit.
+    pub async fn stop(mut self) -> io::Result<()> {
         self.shared.shutdown.cancel();
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            task.await.map_err(io::Error::other)??;
         }
+        Ok(())
     }
 }
 
@@ -211,7 +185,12 @@ fn credential() -> String {
     format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
 }
 
-pub(crate) async fn monitor(shared: Arc<Shared>, mut child: Child, listener: TcpListener, ingress: TcpListener) {
+pub(crate) async fn monitor(
+    shared: Arc<Shared>,
+    mut child: Child,
+    listener: TcpListener,
+    ingress: TcpListener,
+) -> io::Result<()> {
     let service = Service(shared.clone());
     let stop_server = shared.shutdown.clone();
     let mut server = tokio::spawn(async move {
@@ -259,8 +238,8 @@ pub(crate) async fn monitor(shared: Arc<Shared>, mut child: Child, listener: Tcp
         }
     };
     shared.shutdown.cancel();
-    stop_child(&shared, &mut child).await;
-    let phase = if failure.is_some() {
+    let stopped = stop_child(&shared, &mut child).await;
+    let phase = if failure.is_some() || stopped.is_err() {
         Phase::Failed
     } else {
         Phase::Stopped
@@ -278,16 +257,65 @@ pub(crate) async fn monitor(shared: Arc<Shared>, mut child: Child, listener: Tcp
         relay.abort();
         let _ = relay.await;
     }
+    stopped
 }
 
-async fn stop_child(shared: &Shared, child: &mut Child) {
+async fn stop_child(shared: &Shared, child: &mut Child) -> io::Result<()> {
     if let Ok(registered) = shared.registered() {
         let _ = ProcessControlClient::new(registered.channel)
             .stop_process(shared.request(shared.identity.clone()))
             .await;
     }
-    if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
-        let _ = child.start_kill();
-        let _ = timeout(Duration::from_secs(3), child.wait()).await;
+    if let Ok(result) = timeout(Duration::from_secs(5), child.wait()).await {
+        result?;
+    } else {
+        child.start_kill()?;
+        child.wait().await?;
     }
+
+    Ok(())
+}
+
+fn spawn_jvm(launch: &Launch, shared: &Shared, endpoint: &str) -> io::Result<Child> {
+    let mut log = OpenOptions::new();
+    log.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        log.mode(0o600);
+    }
+    let log = log.open(&launch.log_path)?;
+    let deployment = &launch.deployment;
+    let mut command = Command::new(&launch.program);
+    command
+        .env_remove("CHUNK_BACKEND_ENDPOINT")
+        .env_remove("CHUNK_BACKEND_TOKEN");
+    if let Some(backend) = &launch.backend {
+        if backend.environment != launch.deployment.environment || backend.deployment != launch.deployment.deployment {
+            return Err(io::Error::other("backend deployment mismatch"));
+        }
+        command
+            .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
+            .env("CHUNK_BACKEND_TOKEN", &backend.token);
+    }
+    command
+        .args(&launch.arguments)
+        .env("CHUNK_SUPERVISOR", endpoint)
+        .env("CHUNK_PROCESS_TOKEN", &shared.child_credential)
+        .env("CHUNK_ENVIRONMENT", &deployment.environment)
+        .env("CHUNK_DEPLOYMENT", &deployment.deployment)
+        .env("CHUNK_RUNTIME_ID", &shared.identity.runtime_id)
+        .env("CHUNK_PROCESS_ID", &shared.identity.process_id)
+        .env("CHUNK_PROCESS_GENERATION", shared.identity.generation.to_string())
+        .env("CHUNK_MACHINE_PROFILE", &shared.identity.machine_profile)
+        .env("CHUNK_ARTIFACT_DIGEST", &shared.identity.artifact_digest)
+        .env(
+            "CHUNK_BOOTSTRAP_SESSION",
+            if launch.bootstrap_session { "bridge" } else { "" },
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .kill_on_drop(true)
+        .spawn()
 }

@@ -49,14 +49,14 @@ val buildBackendExecutable =
             rootProject.file("mise.toml"),
         )
         inputs.dir(rootProject.file("proto"))
-        outputs.file(rootProject.file("target/debug/chunk"))
-        commandLine("cargo", "build", "-q", "-p", "chunk")
+        outputs.file(rootProject.file("target/debug/chunk-backend"))
+        commandLine("cargo", "build", "-q", "-p", "chunk-backend")
     }
 tasks.test {
     dependsOn(buildBackendExecutable)
     inputs.files(buildBackendExecutable)
     inputs.dir(tasks.named<GenerateBackend>("generateBackend").flatMap { it.outputDirectory.dir("backend") })
-    systemProperty("chunk.executable", rootProject.file("target/debug/chunk").absolutePath)
+    systemProperty("chunk.executable", rootProject.file("target/debug/chunk-backend").absolutePath)
     systemProperty(
         "chunk.backend",
         layout.buildDirectory

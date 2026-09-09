@@ -5,22 +5,21 @@ The proxy owns public authentication, encryption and compression and relays
 Minestom configuration and play. The Rust runtime supervises the JVM and relays
 each player's connection. Minestom uses protocol 775, compatible with Java Edition 26.1.
 
-Build `cargo build -p chunk` and `./gradlew :jvm:runtime:installDist`, then run
-these in separate terminals from the repository root:
+Use `just local` to run the complete example, or build `cargo build -p chunk-runtime`
+and `./gradlew :jvm:runtime:installDist` for independent hosting. `chunk-runtime`
+reads configuration exclusively from the environment:
 
-```sh
-# Requires Java 25; Gradle resolves that toolchain for the gameplay module.
-./target/debug/chunk runtime --java /path/to/java25/bin/java
-./target/debug/chunk edge --runtime-file .chunk/runtime.json
-```
+- `CHUNK_DISTRIBUTION`, `CHUNK_JAVA`, `CHUNK_CONNECTION`
+- `CHUNK_ENVIRONMENT`, `CHUNK_DEPLOYMENT`, `CHUNK_MACHINE_PROFILE`
+- `CHUNK_ARTIFACT_DIGEST`, `CHUNK_MEMORY_MIB`
+- Optional `CHUNK_BACKEND_FILE`
 
-The runtime generates separate child and proxy-facing credentials and writes the
-private connection file only after authenticated registration and advancing ticks.
-Diagnostics go to `.chunk/runtime.log`. Ctrl-C stops the supervised JVM within a
-bounded deadline and removes the connection record. Check existing servers before
-starting the proxy on port 25565. The fixture initially supplies a grass session named `bridge`. Authenticated
-`CreateSession` and `FinishSession` RPCs manage additional sessions in the same JVM;
-automatic placement is supplied by the local control plane.
+The runtime starts empty; control provisions gameplay sessions. It generates
+separate child and proxy-facing credentials and publishes its private connection
+record only after authenticated registration and advancing ticks. JVM logs use
+the connection filename with a `.log` extension. Shutdown awaits JVM exit before
+writing an `.exit` acknowledgment. Rust hosts can call `server::Config::launch`
+and explicitly await `ManagedJvm::stop` for the same lifecycle in-process.
 
 Registration freezes deployment, runtime/process incarnation, machine profile,
 artifact identity, protocol version and both JVM endpoints. Inventory RPCs
@@ -74,7 +73,7 @@ confirm withdrawal, drive both client configuration acknowledgments, and activat
 the destination on the existing public connection.
 
 The optional `scope.backend` client is bound to the process deployment and session
-identity. Control's `--backend-file` passes the private connection to supervised
+identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to supervised
 JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once
 per player delivery; retry an uncertain result with the same ID and arguments.
 Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client

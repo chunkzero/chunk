@@ -3,7 +3,7 @@
 Implemented listener behavior and development commands. Run commands from the
 repository root.
 
-With `--backend-file .chunk/backend.json --control-file .chunk/control.json`, the
+With `CHUNK_BACKEND_FILE=.chunk/backend.json` and `CHUNK_CONTROL_FILE=.chunk/control.json`, the
 proxy runs live backend status/admission/routing hooks and waits in configuration
 while control provisions gameplay. Each delivery uses a dedicated authenticated
 TCP path through the runtime to Minestom. Admission and preparation have a
@@ -29,34 +29,25 @@ queues replacement moves, and stops it when empty or at its persisted deadline.
 The CLI reports completion only after confirmed runtime/JVM shutdown. Retain the
 printed operation ID with `--operation` when retrying an uncertain command.
 
-## Standalone waiting-world fixture
+## Standalone service
+
+The reusable proxy library is hosted by the `chunk-edge` binary:
 
 ```sh
-cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk edge"
+CHUNK_BACKEND_FILE=.chunk/local/backend.json CHUNK_CONTROL_FILE=.chunk/local/control.json CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-edge
 ```
 
-Add `localhost:25565` to a Java Edition client's server list to see the MOTD
-and ping. The proxy advertises 26.1 (protocol 775) and authenticates logins
-through Mojang's session service in online mode. After configuration, players
-enter a packet-simulated waiting world: an empty End void,
-with no Minecraft server or JVM running. Players float at (8, 64, 8) in
-spectator mode with movement speed set to zero. Movement packets are ignored.
-Once loaded, the client sees “Preparing your server...” for ten seconds. This fixture
-does not select a gameplay destination. Other versions receive a mismatch message;
-legacy pre-1.7 pings and transfer handshakes are unsupported.
+The edge requires backend/control discovery records. Library callers can omit
+`Config::platform` to use the waiting-world fixture. The listener supports
+Java Edition 26.1 (protocol 775), with online authentication through Mojang.
 
-`mc-26-1` is the only version feature and is enabled by default. Features are
-forwarded from `chunk` through the edge and proxy to `chunk-protocol`.
-To select it explicitly:
-
-```sh
-cargo run -p chunk --no-default-features --features mc-26-1 -- edge
-```
+`mc-26-1` is enabled by default and forwarded from the edge to the proxy and protocol.
+Select it explicitly with `cargo run -p chunk-edge --no-default-features --features mc-26-1`.
 
 Without version features, protocol primitives remain available but the proxy
 refuses to start. Features select releases; they do not translate versions.
 
-`--max-connections` limits concurrent exchanges (default 1024). Each exchange
+`CHUNK_MAX_CONNECTIONS` limits concurrent exchanges (default 1024). Each exchange
 has a ten-second deadline, including authentication and Login Acknowledged.
 Mojang requests use HTTPS with a five-second timeout and bounded responses;
 failed verification never falls back to offline identities. The authenticated
