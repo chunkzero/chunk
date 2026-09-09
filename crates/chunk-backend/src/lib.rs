@@ -73,3 +73,6 @@ impl Error {
         matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch))
     }
 }
+
+#[cfg(test)]
+mod document_tests;
