@@ -1,136 +1,33 @@
-use std::collections::BTreeMap;
-
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::{
-    Cancellation, Error, Execution, Invocation, Limits, ReadHost, Write,
+    Cancellation, Error, Execution, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
     model::bounds,
     termination::{Reason, Termination},
 };
 
-pub(crate) struct Worker {
-    source: String,
-    specifier: String,
-    limits: Limits,
-    engine: Option<Engine>,
-    executor: tokio::runtime::Runtime,
-    deadline: Deadline,
+pub(crate) struct Prepared {
+    pub export: String,
+    pub caller: String,
+    pub arguments: String,
+    pub timestamp: i64,
+    pub seed: u64,
+    pub capabilities: Capabilities,
 }
 
-impl Worker {
-    pub(crate) fn new(id: &str, source: String, limits: Limits) -> Result<Self, Error> {
-        if source.len() > bounds::SOURCE_BYTES {
-            return Err(Error::Invalid("invalid source"));
-        }
-        if !(bounds::MIN_HEAP_BYTES..=bounds::MAX_HEAP_BYTES).contains(&limits.heap_bytes)
-            || limits.execution.is_zero()
-            || limits.execution > bounds::MAX_EXECUTION
-        {
-            return Err(Error::Invalid("limits outside local execution budget"));
-        }
-        let executor = tokio::runtime::Builder::new_current_thread().build()?;
-        let deadline = Deadline::new()?;
-        let specifier = format!("chunk:deployment/{id}");
-        let engine = Engine::load(
-            &executor,
-            &deadline,
-            &specifier,
-            &source,
-            limits,
-            &Cancellation::default(),
-        )?;
-        Ok(Self {
-            source,
-            specifier,
-            limits,
-            engine: Some(engine),
-            executor,
-            deadline,
-        })
-    }
-
-    pub(crate) fn execute(
-        &mut self,
-        invocation: Invocation,
-        host: Box<dyn ReadHost>,
-        cancellation: &Cancellation,
-    ) -> Result<Execution, Error> {
-        if invocation.export.is_empty() || invocation.export.len() > bounds::NAME_BYTES {
-            return Err(Error::Invalid("invalid export"));
-        }
-        let caller = serde_json::to_string(&invocation.caller).map_err(js_error)?;
-        let arguments = serde_json::to_string(&invocation.arguments).map_err(js_error)?;
-        if caller.len() > bounds::JSON_BYTES || arguments.len() > bounds::JSON_BYTES {
-            return Err(Error::Invalid("input exceeds size limit"));
-        }
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        if self
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.calls >= bounds::RUNTIME_CALLS)
-        {
-            self.engine = None;
-        }
-        let mut engine = match self.engine.take() {
-            Some(engine) => engine,
-            None => Engine::load(
-                &self.executor,
-                &self.deadline,
-                &self.specifier,
-                &self.source,
-                self.limits,
-                cancellation,
-            )?,
-        };
-        let _entered = self.executor.enter();
-        let prepared = Prepared {
-            export: invocation.export,
-            caller,
-            arguments,
-            timestamp: invocation.timestamp,
-            seed: invocation.seed,
-            capabilities: Capabilities {
-                generation: engine.calls + 1,
-                host,
-                mode: invocation.mode,
-                cancellation: cancellation.clone(),
-                writes: BTreeMap::new(),
-                calls: 0,
-                write_bytes: 0,
-            },
-        };
-        let result = engine.execute(&self.executor, &self.deadline, prepared, self.limits, cancellation);
-        if result.is_ok() {
-            self.engine = Some(engine);
-        }
-        result
-    }
-}
-
-struct Prepared {
-    export: String,
-    caller: String,
-    arguments: String,
-    timestamp: i64,
-    seed: u64,
-    capabilities: Capabilities,
-}
-
-struct Engine {
+pub(crate) struct State {
     // Persistent handles must drop before their isolate.
     run: Option<v8::Global<v8::Function>>,
     namespace: Option<v8::Global<v8::Object>>,
-    runtime: JsRuntime,
+    pub runtime: JsRuntime,
     termination: Termination,
-    calls: u32,
+    pub calls: u32,
 }
 
-impl Engine {
-    fn execute(
+impl State {
+    pub(crate) fn execute(
         &mut self,
         executor: &tokio::runtime::Runtime,
         deadline: &Deadline,
@@ -150,7 +47,9 @@ impl Engine {
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            executor.block_on(engine.invoke(&export, &caller, &arguments))
+            let result = executor.block_on(engine.invoke(&export, &caller, &arguments));
+            executor.block_on(engine.drain())?;
+            result
         });
         crate::profile::end(&mut self.runtime);
         let capabilities = self
@@ -172,15 +71,7 @@ impl Engine {
         Ok(Execution { value, writes })
     }
 
-    fn load(
-        executor: &tokio::runtime::Runtime,
-        deadline: &Deadline,
-        specifier: &str,
-        source: &str,
-        limits: Limits,
-        cancellation: &Cancellation,
-    ) -> Result<Self, Error> {
-        let _entered = executor.enter();
+    pub(crate) fn new(limits: Limits) -> Self {
         let termination = Termination::default();
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![chunk_capabilities::init(), crate::profile::chunk_profile::init()],
@@ -200,17 +91,27 @@ impl Engine {
             handle.terminate_execution();
             limit + bounds::EMERGENCY_HEAP_BYTES
         });
-        let mut engine = Self {
+        Self {
             run: None,
             namespace: None,
             runtime,
             termination,
             calls: 0,
-        };
-        engine.guarded(deadline, limits, cancellation, |engine| {
-            executor.block_on(engine.initialize(specifier, source))
-        })?;
-        Ok(engine)
+        }
+    }
+
+    pub(crate) fn initialize_on(
+        &mut self,
+        executor: &tokio::runtime::Runtime,
+        deadline: &Deadline,
+        specifier: &str,
+        source: &str,
+        limits: Limits,
+        cancellation: &Cancellation,
+    ) -> Result<(), Error> {
+        self.guarded(deadline, limits, cancellation, |state| {
+            executor.block_on(state.initialize(specifier, source))
+        })
     }
 
     fn guarded<T>(
@@ -292,7 +193,6 @@ impl Engine {
             .with_event_loop_promise(call, PollEventLoopOptions::default())
             .await
             .map_err(js_error)?;
-        self.drain().await?;
         deno_core::scope!(scope, &mut self.runtime);
         let output = v8::Local::new(scope, output);
         let output = v8::Local::<v8::String>::try_from(output).map_err(js_error)?;

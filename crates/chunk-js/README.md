@@ -1,83 +1,66 @@
 # Embedded transactional JavaScript
 
-`Deployment::new(id, source, limits)` loads a bundled ES module into one persistent
-`deno_core`/V8 runtime. `deployment.execute(invocation, host, cancellation)` selects
-an exported function and calls it with `(ctx, arguments)`. Source and identity are
-fixed at registration; calls supply export, arguments, caller, mode, snapshot timestamp
-and seed. Imports
-must be bundled before registration. Module initialization has no host capabilities.
+`Engine::new()` owns one caller-thread executor, one deadline watchdog, and a
+registry of persistent V8 runtimes. `register(DeploymentId, source, limits)` loads
+a bundled ES module; `execute(&id, invocation, host, cancellation)` calls an export
+with `(ctx, arguments)`. `release(&id)` drops the runtime and retained source.
+Duplicate identities fail. Bundle imports before registration; module initialization
+has no invocation capabilities. Stack traces identify the deployment.
 
-The environment backend owns one `Deployment` per resident version. Each handle
-starts a dedicated worker thread that creates, uses and drops its V8 runtime.
-Calls require exclusive mutable access to the handle, allowing one outstanding
-invocation with no growing internal queue. Construction and execution block; callers
-should use their bounded blocking executor. Dropping the handle joins its worker.
-The shared V8 platform is initialized before workers start. There is no global
-deployment registry. Idle deployment workers sleep waiting for requests.
+Construct, use and drop the engine on exactly one environment thread. `Engine` is
+neither `Send` nor `Sync`; initialize its V8 platform on the common parent before
+spawning environment threads. The backend serializes execution and owns admission,
+version retention, queues and storage commits. Do not call this synchronous engine
+inside another Tokio runtime. The single-deployment owner is only a test helper.
 
-`ctx.db.get(table, id)` and `ctx.db.scan(table, start, end)` read a fresh memory-only
-`ReadHost` snapshot on each call, recording dependencies and including speculative
-writes. `ReadHost::get` and `scan` return raw snapshot data; the engine owns
-invocation overlay merging and the `[id, value]` scan encoding. Mutations can `put(table, id, value)` and `delete(table, id)`. Queries cannot
-write. Only successful execution returns writes; backend validation and atomic
-storage commit are separate. No host method may publish external effects or block
-on I/O. The watchdog cannot interrupt Rust host code.
+The private `isolate.rs` wrapper enters parked isolates for access and destruction,
+restoring the prior isolate on return or unwind. Only that wrapper and `allocator.rs`
+allow unsafe code; the rest of the crate denies it. The allocator implements V8's
+backing-store callbacks, with aggregate accounting across concurrent GC frees.
 
-Each invocation gets fresh caller data, capability budgets and speculative writes.
-Host capabilities carry a generation checked by Rust; retaining an old `ctx.db`
-cannot access a later call's snapshot or writes. Capabilities and the snapshot are
-removed before execution returns. Module/global state survives successful calls.
-It is disposable, never authoritative: handlers must not cache documents or caller
-state, or use mutable counters to determine transactional results. Purity and complete
-dependency tracking are application requirements, not enforced by context reuse.
+`ReadHost::get` and `scan` return raw snapshot data and record dependencies.
+The engine merges invocation-local puts/deletes and encodes scans as `[id, value]`
+pairs. Queries cannot write. Only successful calls return speculative writes; the
+backend validates and commits them. Hosts must publish no external effects and
+bound their own reads: the watchdog cannot interrupt Rust host code. The backend
+currently performs synchronous SQLite snapshot reads and decoding.
 
-The default budget is one second and 32 MiB of V8 heap, with a separate aggregate
-live ArrayBuffer backing-store cap of the same size. Only `allocator.rs` allows
-unsafe code for V8's allocator callbacks; the rest of the crate denies it.
-A separate watchdog
-interrupts synchronous loops and cancellation; the near-heap callback terminates
-execution with 8 MiB of emergency headroom. Initialization and each invocation have
-separate execution budgets. Any execution error drops the engine; the next call
-reloads the same bundle under the initialization budget. Engines also recycle after
-10,000 calls. Dropping a deployment releases its engine and retained source.
+Each invocation gets fresh caller data, capabilities and write budgets. Generation
+checks reject retained database capabilities. Capabilities and profile context expire
+after the event-loop drain. Module globals survive success and ordinary application
+errors, but remain disposable: handlers must derive results from arguments, caller,
+controlled time/randomness and tracked reads, never cached documents or mutable
+module counters. Purity and complete dependency tracking are application requirements.
+
+The default budget is one second and 32 MiB of V8 heap. A separate aggregate live
+ArrayBuffer backing-store budget equals the heap budget. Neither is an RSS limit.
+The watchdog sleeps indefinitely while idle and polls every two milliseconds while
+armed. Cancellation, deadlines, near-heap exhaustion and denied buffer allocations
+record the first termination reason; teardown time cannot change a completed call
+into a deadline failure. Near-heap termination gets 8 MiB of emergency headroom.
+Terminated runtimes reload the bundle; ordinary errors drain and retain it. Runtimes
+also recycle after 10,000 calls, independently of other deployments.
 
 Input/result/document JSON is limited to 1 MiB, source to 4 MiB, capability calls to
-4096 and writes to 256/8 MiB. JSON parsing enforces a nesting limit. The backend must
-bound resident deployments, concurrent work, queued requests and snapshot memory;
-the isolate heap budget is not a whole-process RSS limit. Release versions after
-references drain. Retaining a bundle for a future job need not keep its engine alive;
-admission, reference tracking and reload policy belong to the environment backend.
+4096 and distinct writes to 256/8 MiB. Static bounds live beside `Limits` in
+`model::bounds`. The result boundary validates storage-compatible JSON depth and
+Unicode, then returns JSON text for forwarding. Top-level `undefined` becomes `null`;
+nested non-JSON values are rejected. One bootstrap invocation constructs context,
+awaits the handler and serializes the result, followed by event-loop drain.
+
+The backend supplies snapshot-acquisition `timestamp` milliseconds and a `seed` on
+`Invocation`. `Date.now()`, `Date()` and zero-argument `new Date()` use that time;
+explicit Date construction, parsing, arithmetic and `instanceof` remain available.
+`Math.random()` uses deterministic SplitMix64. Invocation time/randomness fail at
+module initialization; any internal retry must reuse both values. Ordinary
+ArrayBuffer, DataView and typed arrays are supported. Resizable ArrayBuffers remain
+unavailable because V8 bypasses the custom allocator for their backing stores.
 
 No filesystem, network, process, Node/Deno globals or runtime imports are exposed.
-The backend supplies `Invocation::timestamp` in epoch milliseconds from its snapshot
-and a `seed`, fixed for the operation and its retries. `Date.now()`, zero-argument
-`new Date()` and `Date()` use that timestamp; explicit Date construction, parsing,
-arithmetic and `instanceof` remain available. `Math.random()` uses a per-invocation
-seeded SplitMix64 generator. Invocation time and randomness are unavailable during
-module initialization. Locale APIs, weak references/finalizers and WebAssembly
-remain unavailable.
+Locale methods, Intl, performance, weak references/finalizers, WebAssembly and
+SharedArrayBuffer remain unavailable. Language objects, collections and Promises
+are supported. A promise with no possible completion fails; infinite microtask chains
+are interrupted, and unhandled rejections fail the invocation.
 
-ArrayBuffer, DataView and typed-array constructors remain available. Their live
-backing stores share the isolate's bounded allocator, including retained globals.
-Resizable buffers are rejected because V8 allocates their pages outside that
-allocator; SharedArrayBuffer remains unavailable. Allocation budget failure rejects
-the invocation and recycles the runtime, even if JS catches the allocation error.
-Language objects, collections and Promises are supported. A returned Promise with
-no possible completion fails; infinite microtask chains are interrupted. The event
-loop drains before capabilities expire, and unhandled rejections fail the call.
-
-The backend must propagate cancellation when request/session scope ends. Typed
-contracts, the broader web API subset, conflict
-retries and subscription scheduling remain outside this PR.
-
-Focused verification: `cargo test -p chunk-js` and
+Focused checks: `cargo test -p chunk-js` and
 `cargo clippy -p chunk-js --all-targets -- -D warnings`.
-
-Termination records the first actual cancellation, deadline or heap signal. Teardown
-time cannot turn a completed invocation into a deadline failure. Execution is bounded
-by the watchdog without redundant Tokio timers. Static execution and capability
-bounds live beside `Limits` in `model::bounds`. Stack traces identify the deployment.
-
-Caller and arguments cross as JSON text. One bootstrap invocation constructs context,
-awaits the handler and serializes the result, followed by event-loop drain. The persistent
-watchdog sleeps indefinitely while idle and polls every two milliseconds while armed.

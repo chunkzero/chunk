@@ -43,7 +43,7 @@ pub struct Write {
 
 /// A snapshot capability that records dependencies and performs no external effects.
 /// The engine merges this invocation's writes into returned snapshot data.
-pub trait ReadHost: Send + 'static {
+pub trait ReadHost: 'static {
     /// # Errors
     /// Reports invalid keys or snapshot limits without publishing effects.
     fn get(&mut self, key: &Key) -> Result<Option<Value>, String>;
@@ -131,8 +131,8 @@ pub enum Error {
     Heap,
     #[error("JavaScript: {0}")]
     JavaScript(String),
-    #[error("deployment worker stopped")]
-    WorkerStopped,
+    #[error("deployment is not registered")]
+    UnknownDeployment,
     #[error("runtime I/O: {0}")]
     Io(#[from] std::io::Error),
 }
