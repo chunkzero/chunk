@@ -47,6 +47,38 @@ fn status(error: Error) -> Status {
 
 #[tonic::async_trait]
 impl LocalControl for Service {
+    async fn drain(
+        &self,
+        request: Request<chunk_proto::v1::DrainRequest>,
+    ) -> Result<Response<chunk_proto::v1::DrainStatus>, Status> {
+        self.authorize(&request)?;
+        self.control
+            .drain(request.into_inner())
+            .map(Response::new)
+            .map_err(status)
+    }
+    async fn move_player(
+        &self,
+        request: Request<chunk_proto::v1::MovePlayerRequest>,
+    ) -> Result<Response<ClaimRequest>, Status> {
+        self.authorize(&request)?;
+        self.control
+            .move_player(request.into_inner())
+            .map(Response::new)
+            .map_err(status)
+    }
+
+    async fn poll_move(
+        &self,
+        request: Request<ClaimRequest>,
+    ) -> Result<Response<chunk_proto::v1::PendingMove>, Status> {
+        self.authorize(&request)?;
+        self.control
+            .poll_move(request.get_ref())
+            .map(Response::new)
+            .map_err(status)
+    }
+
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
         self.authorize(&request)?;
         let control = self.control.clone();

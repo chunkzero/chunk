@@ -192,7 +192,11 @@ pub(super) fn packet_id(mut frame: &[u8]) -> io::Result<i32> {
 }
 
 /// Relays the destination's configuration before allowing play traffic.
-pub(super) async fn relay<S, D>(client: &mut Transport<S>, destination: &mut Transport<D>) -> io::Result<()>
+pub(super) async fn relay<S, D>(
+    client: &mut Transport<S>,
+    destination: &mut Transport<D>,
+    settings: &mut ConfigurationClientInformation,
+) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     D: AsyncRead + AsyncWrite + Unpin,
@@ -211,6 +215,9 @@ where
             }
             frame = client.read_frame(FRAME_LIMIT) => {
                 let frame = frame?;
+                if packet_id(&frame)? == ConfigurationClientInformation::ID {
+                    *settings = decode_packet(&frame).map_err(invalid_data)?;
+                }
                 let acknowledged = packet_id(&frame)? == AcknowledgeConfiguration::ID;
                 if acknowledged {
                     if !finishing { return Err(invalid_data("premature configuration acknowledgment")); }

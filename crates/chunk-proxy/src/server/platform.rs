@@ -74,6 +74,16 @@ impl Platform {
 
     pub async fn route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
         let arguments = json!({"uuid": uuid, "username": username});
+        self.admit(arguments.clone()).await?;
+        let route: Route = self.hook("route", arguments).await?;
+        Ok(SessionDemand {
+            key: route.key,
+            session_type: route.session_type,
+            machine_profile: route.machine_profile,
+        })
+    }
+
+    async fn admit(&self, arguments: Value) -> io::Result<()> {
         let admission: Admission = self.hook("admit", arguments.clone()).await?;
         if !admission.allow {
             let reason = admission.reason.unwrap_or_else(|| "Admission denied.".into());
@@ -82,12 +92,34 @@ impl Platform {
                 reason.chars().take(256).collect::<String>(),
             ));
         }
-        let route: Route = self.hook("route", arguments).await?;
-        Ok(SessionDemand {
-            key: route.key,
-            session_type: route.session_type,
-            machine_profile: route.machine_profile,
-        })
+        Ok(())
+    }
+
+    pub async fn approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
+        let identity = claim
+            .identity
+            .as_ref()
+            .ok_or_else(|| invalid_data("missing move identity"))?;
+        let demand = claim
+            .demand
+            .as_ref()
+            .ok_or_else(|| invalid_data("missing move demand"))?;
+        self.admit(json!({"uuid": identity.uuid, "username": identity.username}))
+            .await?;
+        let route: Route = self.hook("move", json!({
+            "uuid": identity.uuid, "username": identity.username,
+            "destination": {"key": demand.key, "session_type": demand.session_type, "machine_profile": demand.machine_profile}
+        })).await?;
+        if route.key != demand.key
+            || route.session_type != demand.session_type
+            || route.machine_profile != demand.machine_profile
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Move destination denied",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn status(&self, host: &str) -> io::Result<Vec<u8>> {

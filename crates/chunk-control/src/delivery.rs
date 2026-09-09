@@ -35,10 +35,14 @@ impl Control {
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         self.update(|state| {
+            crate::moves::authorize_destination(state, identity)?;
             let claim = state
                 .claims
                 .get_mut(&identity.operation_id)
                 .ok_or(Error::Invalid("unknown claim"))?;
+            if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
+                return Err(Error::Invalid("destination draining"));
+            }
             if claim.identity(&identity.operation_id) != *identity
                 || claim.assignment.is_none()
                 || state.players.get(&claim.player).and_then(|p| p.current.as_ref()) != Some(&identity.operation_id)
@@ -61,6 +65,13 @@ impl Control {
     pub async fn cancel(&self, request: ClaimRequest) -> Result<ClaimIdentity> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
+        if self.cancel_intent(&request)? {
+            return Ok(ClaimIdentity {
+                operation_id: request.operation_id,
+                proxy_id: request.proxy_id,
+                ..Default::default()
+            });
+        }
         let state = self.state()?;
         let claim = state
             .claims
@@ -160,6 +171,11 @@ impl Control {
                 Some(DeliveryPhase::Prepared) => claim.phase,
                 _ => return Err(Error::Unresolved("unknown runtime delivery phase")),
             };
+            let phase = if claim.phase == Phase::Withdrawing && phase != Phase::Released {
+                Phase::Withdrawing
+            } else {
+                phase
+            };
             if phase != claim.phase {
                 self.update(|state| {
                     if phase == Phase::Released {
@@ -211,10 +227,13 @@ impl Control {
 fn release(state: &mut State, operation: &str) -> Result<()> {
     let claim = state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?;
     set_phase(claim, Phase::Released)?;
-    if let Some(player) = state.players.get_mut(&claim.player)
-        && player.current.as_deref() == Some(operation)
-    {
-        player.current = None;
+    if let Some(player) = state.players.get_mut(&claim.player) {
+        if player.current.as_deref() == Some(operation) {
+            player.current = None;
+        }
+        if player.pending.as_deref() == Some(operation) {
+            player.pending = None;
+        }
     }
     Ok(())
 }

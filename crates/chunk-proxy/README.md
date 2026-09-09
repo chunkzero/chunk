@@ -1,8 +1,35 @@
 # Minecraft proxy
 
 Implemented listener behavior and development commands. Run commands from the
-repository root. Gameplay handoff and configuration-screen waiting during
-backend wakeup are planned; the waiting world described below is current code.
+repository root.
+
+With `--backend-file .chunk/backend.json --control-file .chunk/control.json`, the
+proxy runs live backend status/admission/routing hooks and waits in configuration
+while control provisions gameplay. Each delivery uses a dedicated authenticated
+TCP path through the runtime to Minestom. Admission and preparation have a
+45-second total limit; arrival has a 20-second limit while packets continue flowing.
+
+Same-proxy moves preserve authentication, encryption, compression and the public
+socket, including across JVMs. The `proxy/move` hook approves the requested route
+after admission. The destination reserves capacity without creating a player;
+source withdrawal must complete before native login to the destination. The proxy
+discards late source output, acknowledges the PLAY-to-CONFIGURATION boundary,
+retains the latest settings, and relays the full destination configuration.
+Preparation failure leaves the source playing. An unresolved cutover ends within
+a bounded deadline; it does not replay packets or promise rollback.
+
+```sh
+chunk players --player <uuid> move --session-type arena --key arena
+chunk players --player <uuid> drain --timeout-seconds 60
+```
+
+These local operator commands use the private control connection file. A move is
+queued for the owning proxy; a drain retires the selected player's current runtime,
+queues replacement moves, and stops it when empty or at its persisted deadline.
+The CLI reports completion only after confirmed runtime/JVM shutdown. Retain the
+printed operation ID with `--operation` when retrying an uncertain command.
+
+## Standalone waiting-world fixture
 
 ```sh
 cargo run -p chunk -- edge --bind 127.0.0.1:25565 --motd "My chunk edge"
@@ -14,8 +41,8 @@ through Mojang's session service in online mode. After configuration, players
 enter a packet-simulated waiting world: an empty End void,
 with no Minecraft server or JVM running. Players float at (8, 64, 8) in
 spectator mode with movement speed set to zero. Movement packets are ignored.
-Once loaded, the client sees “Preparing your server...” for ten seconds. Playable sessions and session
-handoff are not available yet. Other versions receive a mismatch message;
+Once loaded, the client sees “Preparing your server...” for ten seconds. This fixture
+does not select a gameplay destination. Other versions receive a mismatch message;
 legacy pre-1.7 pings and transfer handshakes are unsupported.
 
 `mc-26-1` is the only version feature and is enabled by default. Features are

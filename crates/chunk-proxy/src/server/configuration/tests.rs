@@ -251,7 +251,7 @@ async fn destination_configuration_relays_settings_and_retains_coalesced_play() 
     let task = tokio::spawn(async move {
         let mut external = authenticated.transport;
         let mut internal = Transport::new(internal);
-        relay(&mut external, &mut internal).await.unwrap();
+        relay(&mut external, &mut internal, &mut information()).await.unwrap();
         decode_packet::<PlayPing>(&external.read_frame(FRAME_LIMIT).await.unwrap()).unwrap()
     });
     client.write_packet(&information()).await.unwrap();
@@ -272,7 +272,12 @@ async fn destination_configuration_rejects_early_acknowledgment() {
     let (mut client, mut authenticated) = connection(8192);
     let (internal, _backend) = tokio::io::duplex(8192);
     client.write_packet(&AcknowledgeConfiguration).await.unwrap();
-    let result = relay(&mut authenticated.transport, &mut Transport::new(internal)).await;
+    let result = relay(
+        &mut authenticated.transport,
+        &mut Transport::new(internal),
+        &mut information(),
+    )
+    .await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
 }
 

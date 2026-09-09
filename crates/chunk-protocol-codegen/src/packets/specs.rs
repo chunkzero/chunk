@@ -218,6 +218,14 @@ packets![
     ("play", "toServer", "flying", "MoveStatus", []),
     ("play", "toServer", "player_loaded", "PlayerLoaded", []),
     ("play", "toServer", "tick_end", "TickEnd", []),
+    ("play", "toClient", "start_configuration", "StartConfiguration", []),
+    (
+        "play",
+        "toServer",
+        "configuration_acknowledged",
+        "ConfigurationAcknowledged",
+        []
+    ),
     ("play", "toClient", "abilities", "PlayerAbilities", []),
     ("play", "toClient", "update_view_position", "SetChunkCenter", []),
     ("play", "toClient", "chunk_batch_start", "ChunkBatchStart", []),

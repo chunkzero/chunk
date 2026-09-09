@@ -11,6 +11,9 @@ service LocalControl {
   rpc Inspect(ClaimRequest) returns (Assignment);
   rpc Activate(ActivateClaim) returns (Assignment);
   rpc Cancel(ClaimRequest) returns (ClaimIdentity);
+  rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
+  rpc PollMove(ClaimRequest) returns (PendingMove);
+  rpc Drain(DrainRequest) returns (DrainStatus);
 }
 
 message SessionDemand {
@@ -25,6 +28,32 @@ message ClaimRequest {
   string connection_id = 3;
   Identity identity = 4;
   SessionDemand demand = 5;
+  ClaimIdentity source = 6;
+}
+
+message MovePlayerRequest {
+  string operation_id = 1;
+  string player_id = 2;
+  SessionDemand demand = 3;
+}
+
+message PendingMove {
+  ClaimRequest claim = 1;
+}
+
+// Selects the runtime currently hosting this player; retries retain that runtime.
+message DrainRequest {
+  string operation_id = 1;
+  string player_id = 2;
+  uint32 timeout_seconds = 3;
+}
+
+message DrainStatus {
+  string operation_id = 1;
+  string host_id = 2;
+  uint64 deadline_ms = 3;
+  uint32 remaining_claims = 4;
+  bool stopped = 5;
 }
 
 message ClaimIdentity {
