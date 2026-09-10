@@ -10,6 +10,19 @@ struct Service {
     task: Task,
 }
 impl Service {
+    async fn ready<T>(slot: &mut Option<Self>, started: oneshot::Receiver<T>, name: &str) -> io::Result<T> {
+        if let Ok(connection) = started.await {
+            return Ok(connection);
+        }
+        let result = (&mut slot.as_mut().expect("service started").task).await;
+        slot.take();
+        match result {
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(io::Error::other(error)),
+            Ok(Ok(())) => Err(io::Error::other(format!("{name} stopped before readiness"))),
+        }
+    }
+
     async fn stop(self) -> io::Result<()> {
         self.stop.cancel();
         self.task.await.map_err(io::Error::other)?
@@ -38,7 +51,7 @@ impl Services {
             task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())),
             stop: token,
         });
-        let backend_connection = started.await.map_err(|_| io::Error::other("backend startup failed"))?;
+        let backend_connection = Service::ready(&mut self.backend, started, "backend").await?;
         let control_state = options.state.join("control").join(&artifact.id);
         let authority: chunk_control::Config = chunk_service::read(&options.state.join("control-config.json"))?;
         let embedded = Arc::new(chunk_control::EmbeddedHost::new(
@@ -68,7 +81,7 @@ impl Services {
             task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())),
             stop: token,
         });
-        let control_connection = started.await.map_err(|_| io::Error::other("control startup failed"))?;
+        let control_connection = Service::ready(&mut self.control, started, "control").await?;
         let proxy = chunk_edge::Proxy::bind(
             options.bind,
             chunk_edge::ProxyConfig {

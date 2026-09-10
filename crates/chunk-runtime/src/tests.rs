@@ -36,7 +36,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-struct FakeJvm {
+pub(super) struct FakeJvm {
     identity: ProcessIdentity,
     endpoint: String,
     unavailable: Arc<AtomicBool>,
@@ -117,7 +117,7 @@ fn request<T>(body: T, child: bool) -> Request<T> {
     request
 }
 
-async fn fixture(
+pub(super) async fn fixture(
     ingress: &TcpListener,
 ) -> (
     Arc<Shared>,
@@ -360,7 +360,7 @@ async fn startup_deadline_and_exited_child_leave_no_owned_process() {
     assert!(
         crate::ManagedJvm::launch(launch(vec!["-c".into(), "printf '%s' \"$$\"; exec sleep 60".into()]))
             .await
-            .is_err()
+            .is_err_and(|error| matches!(error, crate::LaunchError::Stopped(_)))
     );
     let pid = std::fs::read_to_string(&log).unwrap();
     assert!(
@@ -375,7 +375,7 @@ async fn startup_deadline_and_exited_child_leave_no_owned_process() {
     assert!(
         crate::ManagedJvm::launch(launch(vec!["-c".into(), "exit 7".into()]))
             .await
-            .is_err()
+            .is_err_and(|error| matches!(error, crate::LaunchError::Stopped(_)))
     );
 }
 

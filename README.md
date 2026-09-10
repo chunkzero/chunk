@@ -86,7 +86,7 @@ Chunk Cloud; its API endpoint is not configured yet. Custom URLs may include an
 API path and must use HTTP(S) without embedded credentials, queries or fragments.
 
 Authentication, `auth whoami`, and `auth logout` remain stubs. Login saves only the target and
-then exits unsuccessfully with an explicit authentication-not-implemented message.
+returns success with a "Login coming soon" message.
 No credentials are read or stored and no platform requests are made. Future
 authentication will use target-scoped OS credential storage, with `CHUNK_API_TOKEN`
 as a CI override; that variable is currently unused.

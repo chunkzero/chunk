@@ -83,3 +83,37 @@ async fn failed_edge_start_releases_earlier_services() {
         assert!(!options.state.join("control.json").exists());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_bundle_preserves_startup_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = Options {
+        project: "unused".into(),
+        state: directory.path().into(),
+        java: "unused".into(),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        backend_bind: "127.0.0.1:0".parse().unwrap(),
+        control_bind: "127.0.0.1:0".parse().unwrap(),
+    };
+    let project = Project {
+        environment: "local".into(),
+        gameplay_distribution: "unused".into(),
+        gameplay_module: ":unused".into(),
+        profiles: BTreeMap::new(),
+        session_types: BTreeMap::new(),
+        max_processes: 1,
+    };
+    let artifact = Artifact {
+        id: "missing".into(),
+        directory: directory.path().join("missing"),
+    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        run(&options, &project, &artifact, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(!options.state.join("backend.json").exists());
+}

@@ -165,10 +165,7 @@ pub(crate) fn auth(command: Auth) -> io::Result<()> {
             if std::env::var_os("CHUNK_API_URL").is_some() {
                 cliclack::log::warning("CHUNK_API_URL overrides your saved platform.")?;
             }
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Login is not available yet.",
-            ))
+            cliclack::log::info("Login coming soon.")
         }
         Auth::Status => cliclack::log::info(format!("{} · Login coming soon", target()?)),
         Auth::Whoami => unsupported("Account lookup"),

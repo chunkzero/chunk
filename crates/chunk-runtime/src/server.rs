@@ -1,5 +1,5 @@
 //! JVM service configuration shared by standalone and embedded hosts.
-use crate::{DeploymentRef, Launch, ManagedJvm, Phase, RuntimeConnection};
+use crate::{DeploymentRef, Launch, LaunchError, ManagedJvm, Phase, RuntimeConnection};
 use std::{io, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -16,13 +16,20 @@ pub struct Config {
 impl Config {
     /// Starts an empty JVM and returns ownership after authenticated readiness.
     /// # Errors
-    /// Reports invalid configuration and JVM startup errors.
+    /// Reports configuration/startup errors, recording an exit only when no JVM can remain.
     pub async fn launch(&self) -> io::Result<ManagedJvm> {
-        if !(128..=8192).contains(&self.memory_mib) {
-            return Err(io::Error::other("invalid JVM memory"));
+        match self.start().await {
+            Ok(process) => Ok(process),
+            Err(error) => Err(record_launch_failure(&self.connection, error)),
         }
+    }
+
+    async fn start(&self) -> Result<ManagedJvm, LaunchError> {
         if let Some(parent) = self.connection.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        if !(128..=8192).contains(&self.memory_mib) {
+            return Err(io::Error::other("invalid JVM memory").into());
         }
         ManagedJvm::launch(Launch {
             backend: self.backend.clone(),
@@ -74,4 +81,56 @@ pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     process.stop().await?;
     std::fs::write(config.connection.with_extension("exit"), b"stopped")?;
     result
+}
+
+fn record_launch_failure(connection: &std::path::Path, error: LaunchError) -> io::Error {
+    if matches!(error, LaunchError::Stopped(_))
+        && let Err(record_error) = std::fs::write(connection.with_extension("exit"), b"launch failed")
+    {
+        return io::Error::other(format!("{error}; recording failed launch: {record_error}"));
+    }
+    error.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_standalone_launch_records_confirmed_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        for memory_mib in [1, 512] {
+            let connection = directory.path().join(memory_mib.to_string()).join("runtime.json");
+            let config = Config {
+                distribution: directory.path().into(),
+                java: directory.path().join("missing-java"),
+                connection: connection.clone(),
+                deployment: DeploymentRef {
+                    environment: "local".into(),
+                    deployment: "test".into(),
+                },
+                machine_profile: "test".into(),
+                artifact_digest: "test".into(),
+                memory_mib,
+                backend: None,
+            };
+            let error = run(config, CancellationToken::new()).await.unwrap_err();
+            if memory_mib == 1 {
+                assert_eq!(error.to_string(), "invalid JVM memory");
+            } else {
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+            assert!(connection.with_extension("exit").is_file());
+            assert!(!connection.exists());
+        }
+    }
+
+    #[test]
+    fn ambiguous_launch_cleanup_never_acknowledges_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let error = record_launch_failure(&path, LaunchError::Unresolved(io::Error::other("wait failed")));
+        assert_eq!(error.to_string(), "wait failed");
+        assert!(!path.with_extension("exit").exists());
+    }
 }

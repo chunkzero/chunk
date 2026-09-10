@@ -63,13 +63,51 @@ pub struct ManagedJvm {
     shared: Arc<Shared>,
     endpoint: String,
     task: Option<JoinHandle<io::Result<()>>>,
+    failure: Option<Arc<io::Error>>,
+}
+
+/// A launch can fail either before spawning/after confirmed cleanup, or with cleanup unresolved.
+#[derive(Debug)]
+pub enum LaunchError {
+    Stopped(io::Error),
+    Unresolved(io::Error),
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped(error) | Self::Unresolved(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Stopped(error) | Self::Unresolved(error) => Some(error),
+        }
+    }
+}
+
+impl From<io::Error> for LaunchError {
+    fn from(error: io::Error) -> Self {
+        Self::Stopped(error)
+    }
+}
+
+impl From<LaunchError> for io::Error {
+    fn from(error: LaunchError) -> Self {
+        match error {
+            LaunchError::Stopped(error) | LaunchError::Unresolved(error) => error,
+        }
+    }
 }
 
 impl ManagedJvm {
     /// Launches one scoped JVM and waits for authenticated registration plus advancing ticks.
     /// # Errors
-    /// Rejects invalid launch settings and reports startup/child failures after cleanup.
-    pub async fn launch(launch: Launch) -> io::Result<Self> {
+    /// Returns `Stopped` before spawn or after confirmed cleanup; `Unresolved` if cleanup fails.
+    pub async fn launch(launch: Launch) -> Result<Self, LaunchError> {
         if launch.startup_timeout.is_zero()
             || launch.startup_timeout > Duration::from_secs(120)
             || launch.deployment.environment.is_empty()
@@ -77,7 +115,7 @@ impl ManagedJvm {
             || launch.machine_profile.is_empty()
             || launch.artifact_digest.is_empty()
         {
-            return Err(io::Error::other("invalid JVM launch settings"));
+            return Err(io::Error::other("invalid JVM launch settings").into());
         }
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let ingress = TcpListener::bind("127.0.0.1:0").await?;
@@ -112,6 +150,7 @@ impl ManagedJvm {
             shared,
             endpoint,
             task: Some(task),
+            failure: None,
         };
         let ready = timeout(launch.startup_timeout, async {
             receiver
@@ -128,11 +167,8 @@ impl ManagedJvm {
                 .status()
                 .diagnostic
                 .unwrap_or_else(|| "JVM registration/readiness deadline".into());
-            process.stop().await?;
-            Err(io::Error::other(format!(
-                "{diagnostic}; diagnostics: {}",
-                launch.log_path.display()
-            )))
+            process.stop().await.map_err(LaunchError::Unresolved)?;
+            Err(io::Error::other(format!("{diagnostic}; diagnostics: {}", launch.log_path.display())).into())
         }
     }
 
@@ -168,10 +204,22 @@ impl ManagedJvm {
     /// Reports monitor failure or an unconfirmed JVM exit.
     pub async fn stop(mut self) -> io::Result<()> {
         self.shared.shutdown.cancel();
-        if let Some(task) = self.task.take() {
-            task.await.map_err(io::Error::other)??;
+        self.wait().await
+    }
+
+    /// Awaits monitor completion without requesting shutdown.
+    /// # Errors
+    /// Reports monitor failure or an unconfirmed JVM exit.
+    pub async fn wait(&mut self) -> io::Result<()> {
+        if let Some(task) = self.task.as_mut() {
+            let result = task.await.map_err(io::Error::other).and_then(std::convert::identity);
+            self.task.take();
+            self.failure = result.err().map(Arc::new);
         }
-        Ok(())
+        match &self.failure {
+            Some(error) => Err(io::Error::new(error.kind(), error.clone())),
+            None => Ok(()),
+        }
     }
 }
 
@@ -318,4 +366,35 @@ fn spawn_jvm(launch: &Launch, shared: &Shared, endpoint: &str) -> io::Result<Chi
         .stderr(Stdio::from(log))
         .kill_on_drop(true)
         .spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_wait_and_stop_preserve_the_monitor_outcome() {
+        let ingress = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (shared, _, _, stop, server) = crate::tests::fixture(&ingress).await;
+        for outcome in 0..3 {
+            let task = tokio::spawn(async move {
+                match outcome {
+                    0 => Ok(()),
+                    1 => Err(io::Error::other("unconfirmed exit")),
+                    _ => panic!("monitor failure"),
+                }
+            });
+            let mut process = ManagedJvm {
+                shared: shared.clone(),
+                endpoint: "http://127.0.0.1:1".into(),
+                task: Some(task),
+                failure: None,
+            };
+            assert_eq!(process.wait().await.is_ok(), outcome == 0);
+            assert_eq!(process.wait().await.is_ok(), outcome == 0);
+            assert_eq!(process.stop().await.is_ok(), outcome == 0);
+        }
+        stop.cancel();
+        server.await.unwrap();
+    }
 }
