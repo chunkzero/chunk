@@ -42,19 +42,9 @@ abstract class WriteChunkArtifacts : DefaultTask() {
         }
         val appJars = apps.map { File(it.jar).canonicalFile }.toSet()
         val classpath =
-            artifacts
-                .flatMap { module ->
-                    module.classpath +
-                        ClasspathEntry(
-                            module.jar,
-                            File(module.jar).name,
-                            mapOf(
-                                "kind" to "project",
-                                "build" to ":",
-                                "path" to module.projectPath,
-                            ),
-                        )
-                }.filter { File(it.file).canonicalFile !in appJars }
+            apps
+                .flatMap { it.classpath }
+                .filter { File(it.file).canonicalFile !in appJars }
                 .distinctBy { File(it.file).canonicalFile }
                 .sortedWith(compareBy({ it.component.toString() }, { it.artifact }))
         val java = requireNotNull(artifacts.maxByOrNull { it.javaVersion }) { "No compiled JVM modules" }
