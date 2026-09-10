@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn publication_is_reproducible_and_new_inputs_cannot_change_a_running_artifact() {

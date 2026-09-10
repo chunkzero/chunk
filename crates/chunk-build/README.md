@@ -60,6 +60,44 @@ including domains and redundant app names, are rejected.
 The backend compiler can discover apps without a root `chunk.toml`. The local
 runner still consumes `project.json` and its existing distribution inputs.
 
+## Complete releases
+
+`publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)`
+combines separately built backend and JVM outputs into `dist/<id>/` and
+`dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-1 JSON
+descriptor. Every discovered app must have exactly one descriptor entry, an app
+JAR containing matching `META-INF/chunk/app.json` metadata, and one
+`dev.chunkzero.runtime.SessionProvider` service registration. Publication never
+runs Java or Gradle. The older `publish` API remains available for the existing
+local runner until its build orchestration consumes these descriptors.
+
+The release includes `source.mjs`, `contract.json`, an optional source map,
+`backend.json`, `release.json`, and content-named JARs under `gameplay/lib`.
+Root `assets/` and discovered apps' `apps/<id>/assets/` retain their paths.
+`release.json` records app identities, JAR hashes, resolved dependency coordinates,
+Java requirements, app capacity/profile requirements, referenced profile definitions
+and asset hashes. Original dependency artifact names distinguish classifier JARs.
+All JARs share one classpath: conflicting module versions, component/artifact bytes
+or effective class definitions fail publication. Multi-release JARs are checked
+against the selected Java version; unsupported and preview bytecode is rejected.
+
+The descriptor's absolute file paths and Java executable are local build inputs.
+They are excluded from the release, along with environment names, local process
+limits, `.sdk` caches, generated sources, project build files and unrelated files
+such as `.env`. Only explicitly supplied asset directories are collected.
+Inputs are bounded to 4096 payload files and 256 MiB in total; individual files
+are limited to 128 MiB. Symlinks and ambiguous portable paths are rejected.
+
+One digest covers sorted payload names and bytes plus normalized release metadata
+before its ID is added. `backend.json` is derived afterward; both JSON manifests
+carry that same deployment ID. The archive wrapper does not participate in identity.
+Tar entries use stable ordering, permissions and timestamps, including deterministic
+long-path records; gzip headers contain no local filename or timestamp. Moving
+identical inputs to another machine does not change the ID or archive bytes.
+Directories and archives are each published atomically without replacing existing
+content. Reuse verifies their bytes and rejects tampering. Archive upload and
+deployment promotion remain separate operations.
+
 ## Client generation
 
 An installed `chunk` CLI can compile the backend and generate one selected client
