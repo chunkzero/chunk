@@ -5,6 +5,11 @@ The proxy owns public authentication, encryption and compression and relays
 Minestom configuration and play. The Rust runtime supervises the JVM and relays
 each player's connection. Minestom uses protocol 775, compatible with Java Edition 26.1.
 
+`jvm:runtime` is a Java platform with no Kotlin standard library or coroutine
+production dependency. It runs on JDK 25 and starts through
+`dev.chunkzero.runtime.BridgeMain`. Kotlin lifecycle conveniences are provided by
+`jvm:runtime-kotlin`.
+
 Use `just local` to run the complete example, or build `cargo build -p chunk-runtime`
 and `./gradlew :jvm:runtime:installDist` for independent hosting. `chunk-runtime`
 reads configuration exclusively from the environment:

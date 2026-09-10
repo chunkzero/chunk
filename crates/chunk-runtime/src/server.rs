@@ -38,7 +38,7 @@ impl Config {
                 format!("-Xmx{}M", self.memory_mib),
                 "-cp".into(),
                 self.distribution.join("lib/*").to_string_lossy().into_owned(),
-                "dev.chunkzero.runtime.BridgeMainKt".into(),
+                "dev.chunkzero.runtime.BridgeMain".into(),
             ],
             deployment: self.deployment.clone(),
             machine_profile: self.machine_profile.clone(),

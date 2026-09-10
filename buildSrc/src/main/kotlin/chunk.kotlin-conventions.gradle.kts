@@ -18,6 +18,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(kotlin("stdlib"))
     testImplementation(platform(libs.findLibrary("junit-bom").get()))
     testImplementation(libs.findLibrary("junit-jupiter").get())
     testImplementation(libs.findLibrary("kotest-runner").get())

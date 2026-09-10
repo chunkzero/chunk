@@ -157,6 +157,7 @@ class GameplayServiceTest {
                 delivery.toBuilder().setProcessGeneration(6).build(),
                 delivery.toBuilder().setProtocol(774).build(),
                 delivery.toBuilder().setDeployment(deployment.toBuilder().setDeployment("other")).build(),
+                delivery.toBuilder().setProxyId("\u00a0").build(),
             )) {
                 assertEquals(
                     Status.Code.FAILED_PRECONDITION,
