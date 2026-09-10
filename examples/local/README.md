@@ -61,12 +61,17 @@ composes the physical schema; `server/*.ts` exports validated function descripto
 `.chunk/build/backend` and shared JVM bindings under `.chunk/generated/jvm`.
 The standalone example uses the public Chunk settings and project plugins with
 repository composite builds for local framework dependencies. Its temporary
-`:gameplay` project keeps the existing sources in `jvm/example`; `installDist`
-includes the matching backend for the current local runner.
+`:gameplay` project keeps the shared session implementation in `jvm/example`.
+The discovered `apps/lobby` and `apps/arena` projects each package one
+`SessionProvider` service that creates fresh session state. The plugin generates
+`META-INF/chunk/app.json` in each app JAR, and the runtime verifies that its
+provider belongs to that same JAR. `installDist` includes both app JARs and the
+matching backend for the current local runner.
 
 Shared descriptors use `shared/<file>/<export>`; app-local descriptors use
 `apps/<app>/<file>/<export>`. The initial managed caller's `app` identifies its
-registered session type. Annotation-driven registration remains deferred.
+registered app ID. Multiple session instances may belong to the same app.
+Annotation-driven registration remains deferred.
 
 Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
 bundle and project metadata. Content changes produce a new deployment; existing

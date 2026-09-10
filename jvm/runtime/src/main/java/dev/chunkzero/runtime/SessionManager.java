@@ -14,6 +14,7 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import net.minestom.server.entity.Player;
 import org.jetbrains.annotations.Nullable;
 
@@ -21,18 +22,19 @@ final class SessionManager {
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
 
     private final TickExecutor ticks;
-    private final Map<String, Supplier<Session>> factories;
+    private final Map<String, SessionRegistration> factories;
     private final @Nullable BiFunction<String, String, BackendSession> backend;
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
     private Function<String, CompletionStage<Void>> withdraw = ignored -> CompletableFuture.completedFuture(null);
 
     SessionManager(TickExecutor ticks, Map<String, Supplier<Session>> factories) {
-        this(ticks, factories, null);
+        this(ticks, factories.entrySet().stream().collect(Collectors.toMap(
+                Map.Entry::getKey, entry -> new SessionRegistration(entry.getKey(), entry.getValue()))), null);
     }
 
     SessionManager(
             TickExecutor ticks,
-            Map<String, Supplier<Session>> factories,
+            Map<String, SessionRegistration> factories,
             @Nullable BiFunction<String, String, BackendSession> backend) {
         this.ticks = ticks;
         this.factories = Map.copyOf(factories);
@@ -62,7 +64,7 @@ final class SessionManager {
             if (sessions.size() >= 256) throw new IllegalStateException("Session history full");
             var factory = factories.get(command.getSessionType());
             if (factory == null) throw new IllegalArgumentException("Unknown session type");
-            var session = new ManagedSession(command, factory.get());
+            var session = new ManagedSession(command, factory);
             sessions.put(command.getSession().getId(), session);
             session.start();
             return session;
@@ -101,15 +103,15 @@ final class SessionManager {
         private boolean finishing;
         private @Nullable Throwable creationFailure;
 
-        ManagedSession(SessionCommand command, Session behavior) {
+        ManagedSession(SessionCommand command, SessionRegistration registration) {
             this.command = command;
-            this.behavior = behavior;
+            behavior = registration.create();
             scope = new SessionScope(
                     command.getSession().getId(),
                     command.getGeneration(),
                     ticks,
                     this::finish,
-                    backend == null ? null : backend.apply(command.getSession().getId(), command.getSessionType()));
+                    registration.backend(command.getSession().getId(), backend));
         }
 
         SessionCommand getCommand() {

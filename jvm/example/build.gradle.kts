@@ -8,7 +8,14 @@ plugins {
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 kotlin { compilerOptions { allWarningsAsErrors = true } }
 
+val appJars by configurations.creating {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+
 dependencies {
+    appJars(project(path = ":apps:lobby", configuration = "runtimeElements"))
+    appJars(project(path = ":apps:arena", configuration = "runtimeElements"))
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
@@ -19,6 +26,7 @@ application {
     applicationName = "example"
 }
 distributions.main { distributionBaseName = "example" }
+tasks.startScripts { classpath = files(classpath, appJars) }
 
 abstract class WriteExampleFile : DefaultTask() {
     @get:Input
@@ -48,6 +56,7 @@ val moduleMarker =
 val generate = rootProject.tasks.named<GenerateChunkBackend>("generateChunkBackend")
 distributions.main {
     contents {
+        from(appJars) { into("lib") }
         from(generate.flatMap { it.backendDirectory }) {
             include("backend.json", "contract.json", "source.mjs", "source.mjs.map")
             into("backend")

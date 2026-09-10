@@ -4,7 +4,6 @@ import dev.chunkzero.backend.client.QueryResult
 import dev.chunkzero.example.generated.CoroutineBackendClient
 import dev.chunkzero.runtime.CoroutineSession
 import dev.chunkzero.runtime.Session
-import dev.chunkzero.runtime.SessionProvider
 import dev.chunkzero.runtime.SessionScope
 import dev.chunkzero.runtime.coroutines
 import kotlinx.coroutines.flow.distinctUntilChangedBy
@@ -16,24 +15,21 @@ import net.minestom.server.entity.Player
 import net.minestom.server.instance.LightingChunk
 import net.minestom.server.instance.block.Block
 import net.minestom.server.tag.Tag
-import java.util.function.Supplier
 
-class ExampleSessions : SessionProvider {
-    override fun sessions(): Map<String, Supplier<Session>> {
+object ExampleSessions {
+    internal val coinAction: Tag<Runnable> = Tag.Transient("chunk-example-coin")
+
+    init {
         MinecraftServer.getCommandManager().register(
             Command("coin").apply {
                 setDefaultExecutor { sender, _ -> (sender as? Player)?.getTag(coinAction)?.run() }
             },
         )
-        return mapOf(
-            "lobby" to Supplier { ExampleSession("Lobby", Block.GRASS_BLOCK) },
-            "arena" to Supplier { ExampleSession("Arena", Block.SANDSTONE) },
-        )
     }
 
-    companion object {
-        internal val coinAction: Tag<Runnable> = Tag.Transient("chunk-example-coin")
-    }
+    fun lobby(): Session = ExampleSession("Lobby", Block.GRASS_BLOCK)
+
+    fun arena(): Session = ExampleSession("Arena", Block.SANDSTONE)
 }
 
 private class ExampleSession(
