@@ -36,6 +36,7 @@ tasks.register<WriteJavaExecutable>("writeJavaExecutable") {
 tasks.named<GenerateBackend>("generateBackend") {
     backendProject.set(rootProject.layout.projectDirectory.dir("examples/local"))
     packageName.set("dev.chunkzero.example.generated")
+    kotlinClient.set(true)
 }
 
 val buildBackendExecutable =

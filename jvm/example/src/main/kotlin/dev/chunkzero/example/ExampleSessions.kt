@@ -1,8 +1,7 @@
 package dev.chunkzero.example
 
-import dev.chunkzero.backend.CoroutineBackend
 import dev.chunkzero.backend.client.QueryResult
-import dev.chunkzero.example.generated.BackendTypes
+import dev.chunkzero.example.generated.CoroutineBackendClient
 import dev.chunkzero.runtime.CoroutineSession
 import dev.chunkzero.runtime.Session
 import dev.chunkzero.runtime.SessionProvider
@@ -54,16 +53,14 @@ private class ExampleSession(
     }
 
     override suspend fun join(player: Player) {
-        val backend = scope.coroutines.backend(requireNotNull(scope.backend), player)
-        val data = PlayerData(backend)
+        val playerBackend = CoroutineBackendClient(scope.coroutines.backend(requireNotNull(scope.backend), player))
+        val data = PlayerData(playerBackend)
         players[player] = data
         player.setTag(ExampleSessions.coinAction, Runnable { increment(player, data) })
         scope.coroutines.launch {
-            backend
-                .watch(
-                    BackendTypes.Shared.Players.stats,
-                    BackendTypes.Shared.Players.StatsArgs(),
-                ).distinctUntilChangedBy { it.stale() to it.snapshot() }
+            playerBackend.shared.players
+                .watchStats()
+                .distinctUntilChangedBy { it.stale() to it.snapshot() }
                 .collect { state ->
                     if (players[player] === data && player.isOnline) {
                         val result = state.snapshot().orElse(null)?.result()
@@ -79,12 +76,8 @@ private class ExampleSession(
                     }
                 }
         }
-        val stats = backend.query(BackendTypes.Shared.Players.stats, BackendTypes.Shared.Players.StatsArgs())
-        backend.mutate(
-            BackendTypes.Shared.Players.join,
-            BackendTypes.Shared.Players.JoinArgs(),
-            scope.operationId(player, "join"),
-        )
+        val stats = playerBackend.shared.players.stats()
+        playerBackend.shared.players.join(operation = scope.operationId(player, "join"))
         player.sendMessage(Component.text("Welcome to $label. Saved coins: ${stats.coins()}. Use /coin to earn one."))
     }
 
@@ -96,11 +89,8 @@ private class ExampleSession(
             if (players[player] !== data || !player.isOnline || data.busy) return@launch
             data.busy = true
             try {
-                data.backend.mutate(
-                    BackendTypes.Shared.Players.coin,
-                    BackendTypes.Shared.Players.CoinArgs(),
-                    scope.operationId(player, "coin-${data.sequence}"),
-                )
+                data.playerBackend.shared.players
+                    .coin(operation = scope.operationId(player, "coin-${data.sequence}"))
                 data.sequence++
             } catch (error: java.util.concurrent.CancellationException) {
                 throw error
@@ -122,7 +112,7 @@ private class ExampleSession(
     }
 
     private class PlayerData(
-        val backend: CoroutineBackend,
+        val playerBackend: CoroutineBackendClient,
     ) {
         var sequence = 0L
         var busy = false

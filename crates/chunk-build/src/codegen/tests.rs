@@ -137,3 +137,31 @@ fn owned_source_directories_cannot_be_redirected_through_symlinks() {
     assert!(outside.join("example/backend/BackendTypes.java").is_file());
     assert!(!output.join("api.ts").exists());
 }
+
+#[test]
+fn kotlin_target_reuses_java_sources_and_removes_its_facade_when_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let target = GenerationTarget::Java {
+        package: "example.backend",
+    };
+    generate(&fixture(), root.path(), target).unwrap();
+    let java = root.path().join("java/example/backend/BackendTypes.java");
+    let java_client = root.path().join("java-client/example/backend/BackendClient.java");
+    let original = fs::read(&java).unwrap();
+    let original_client = fs::read(&java_client).unwrap();
+    generate(
+        &fixture(),
+        root.path(),
+        GenerationTarget::Kotlin {
+            package: "example.backend",
+        },
+    )
+    .unwrap();
+    assert_eq!(original, fs::read(java).unwrap());
+    assert_eq!(original_client, fs::read(java_client).unwrap());
+    let kotlin = root.path().join("kotlin/example/backend/CoroutineBackendClient.kt");
+    assert!(kotlin.is_file());
+    assert!(!root.path().join("api.ts").exists());
+    generate(&fixture(), root.path(), target).unwrap();
+    assert!(!kotlin.exists());
+}

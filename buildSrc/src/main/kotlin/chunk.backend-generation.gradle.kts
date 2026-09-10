@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
+
 plugins {
     java
 }
@@ -6,6 +8,7 @@ val generateBackend =
     tasks.register<GenerateBackend>("generateBackend") {
         platformDirectory.set(rootProject.layout.projectDirectory)
         moduleName.set(project.path)
+        kotlinClient.convention(false)
         outputDirectory.set(layout.buildDirectory.dir("generated/chunk"))
         inputs.dir(rootProject.file("packages/server/src")).withPathSensitivity(PathSensitivity.RELATIVE)
         inputs
@@ -29,6 +32,11 @@ sourceSets.main {
 }
 tasks.named("compileJava") { dependsOn(generateBackend) }
 plugins.withId("org.jetbrains.kotlin.jvm") {
+    extensions.configure<KotlinJvmProjectExtension> {
+        sourceSets.named("main") {
+            kotlin.srcDir(generateBackend.flatMap { it.outputDirectory.dir("client/kotlin") })
+        }
+    }
     tasks.named("compileKotlin") { dependsOn(generateBackend) }
 }
 plugins.withId("application") {
