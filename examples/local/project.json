@@ -18,5 +18,5 @@
     }
   },
   "max_processes": 4,
-  "gameplay_module": ":jvm:example"
+  "gameplay_module": ":gameplay"
 }

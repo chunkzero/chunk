@@ -51,6 +51,9 @@ The [repository architecture](docs/architecture.md) records the broader proposed
 
 ## Development
 
+The [Gradle plugin](jvm/gradle-plugin/README.md) discovers app projects from Rust
+metadata and compiles shared Java bindings, with an explicit Kotlin facade opt in.
+
 Toolchains are pinned in `mise.toml`. Install [mise](https://mise.jdx.dev),
 [just](https://just.systems), OpenSSL development headers and `pkg-config`, then
 run `mise install`. Use `just --list` to find tasks and run the narrowest checks

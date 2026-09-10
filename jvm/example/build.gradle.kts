@@ -1,68 +1,80 @@
+import dev.chunkzero.gradle.GenerateChunkBackend
+
 plugins {
-    id("chunk.kotlin-conventions")
-    id("chunk.backend-generation")
+    id("dev.chunkzero.chunk.kotlin")
     application
 }
 
-kotlin {
-    jvmToolchain(25)
-    compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25 }
+java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+kotlin { compilerOptions { allWarningsAsErrors = true } }
+
+dependencies {
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
 }
 
-dependencies { implementation(project(":jvm:runtime-kotlin")) }
+application {
+    mainClass = "dev.chunkzero.runtime.BridgeMain"
+    applicationName = "example"
+}
+distributions.main { distributionBaseName = "example" }
 
-application { mainClass = "dev.chunkzero.runtime.BridgeMain" }
-
-val localJava = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
-
-abstract class WriteJavaExecutable : DefaultTask() {
+abstract class WriteExampleFile : DefaultTask() {
     @get:Input
-    abstract val executable: Property<String>
+    abstract val content: Property<String>
 
     @get:OutputFile
     abstract val outputFile: RegularFileProperty
 
     @TaskAction
     fun write() {
-        outputFile.get().asFile.writeText(executable.get())
+        val output = outputFile.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(content.get())
     }
 }
 
-tasks.register<WriteJavaExecutable>("writeJavaExecutable") {
-    executable.set(localJava.map { it.executablePath.asFile.absolutePath })
+val localJava = javaToolchains.launcherFor(java.toolchain)
+tasks.register<WriteExampleFile>("writeJavaExecutable") {
+    content.set(localJava.map { it.executablePath.asFile.absolutePath })
     outputFile.set(layout.buildDirectory.file("java-executable.txt"))
 }
-
-tasks.named<GenerateBackend>("generateBackend") {
-    backendProject.set(rootProject.layout.projectDirectory.dir("examples/local"))
-    packageName.set("dev.chunkzero.example.generated")
-    kotlinClient.set(true)
+val moduleMarker =
+    tasks.register<WriteExampleFile>("writeGameplayModule") {
+        content.set(project.path)
+        outputFile.set(layout.buildDirectory.file("compatibility/gameplay-module.txt"))
+    }
+val generate = rootProject.tasks.named<GenerateChunkBackend>("generateChunkBackend")
+distributions.main {
+    contents {
+        from(generate.flatMap { it.backendDirectory }) {
+            include("backend.json", "contract.json", "source.mjs", "source.mjs.map")
+            into("backend")
+        }
+        from(moduleMarker) { into("backend") }
+    }
 }
 
+val platformDirectory = rootProject.file("../..")
 val buildBackendExecutable =
     tasks.register<Exec>("buildBackendExecutable") {
-        workingDir(rootProject.projectDir)
-        inputs.files(rootProject.fileTree("crates") { include("**/src/**", "**/Cargo.toml", "**/build.rs") })
+        workingDir(platformDirectory)
         inputs.files(
-            rootProject.file("Cargo.toml"),
-            rootProject.file("Cargo.lock"),
-            rootProject.file("rust-toolchain.toml"),
-            rootProject.file("mise.toml"),
+            fileTree(platformDirectory.resolve("crates")) { include("**/src/**", "**/Cargo.toml", "**/build.rs") },
         )
-        inputs.dir(rootProject.file("proto"))
-        outputs.file(rootProject.file("target/debug/chunk-backend"))
+        inputs.files(
+            listOf("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "mise.toml").map(platformDirectory::resolve),
+        )
+        inputs.dir(platformDirectory.resolve("proto"))
+        outputs.file(platformDirectory.resolve("target/debug/chunk-backend"))
         commandLine("cargo", "build", "-q", "-p", "chunk-backend")
     }
 tasks.test {
-    dependsOn(buildBackendExecutable)
+    useJUnitPlatform()
+    dependsOn(buildBackendExecutable, generate)
     inputs.files(buildBackendExecutable)
-    inputs.dir(tasks.named<GenerateBackend>("generateBackend").flatMap { it.outputDirectory.dir("backend") })
-    systemProperty("chunk.executable", rootProject.file("target/debug/chunk-backend").absolutePath)
-    systemProperty(
-        "chunk.backend",
-        layout.buildDirectory
-            .dir("generated/chunk/backend")
-            .get()
-            .asFile.absolutePath,
-    )
+    inputs.dir(generate.flatMap { it.backendDirectory })
+    systemProperty("chunk.executable", platformDirectory.resolve("target/debug/chunk-backend").absolutePath)
+    systemProperty("chunk.backend", rootProject.file(".chunk/build/backend").absolutePath)
 }

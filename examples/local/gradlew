@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$project_dir/../../gradlew" --project-dir "$project_dir" "$@"
