@@ -25,6 +25,7 @@ class ChunkPluginTest {
         assertEquals(listOf("inspect"), calls())
         run("chunkArtifacts")
         val first = descriptor()
+        assertAppManifests(first)
         assertEquals(listOf("lobby"), first.getAsJsonArray("apps").map { it.asJsonObject["id"].asString })
         assertFalse(first.toString().contains("kotlin"))
         val classpath = first.getAsJsonArray("classpath").map { it.asJsonObject }
@@ -32,12 +33,14 @@ class ChunkPluginTest {
         assertTrue(classpath.all { Path.of(it["file"].asString).toFile().isFile })
         JarFile(directory.resolve("build/libs/chunk-backend.jar").toFile()).use {
             assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
+            assertTrue(it.getEntry("META-INF/chunk/app.json") == null)
         }
         val reused = run("chunkArtifacts")
         assertTrue(reused.output.contains("Reusing configuration cache"))
         assertEquals(2, calls().count { it == "gen java" })
         app("arena")
         run("chunkArtifacts")
+        assertAppManifests(descriptor())
         assertEquals(
             listOf("arena", "lobby"),
             descriptor().getAsJsonArray("apps").map { it.asJsonObject["id"].asString },
@@ -49,11 +52,13 @@ class ChunkPluginTest {
         fixture(kotlin = true)
         app("lobby", kotlin = true)
         run("chunkArtifacts")
+        assertAppManifests(descriptor())
         val classpath = descriptor().getAsJsonArray("classpath").map { it.asJsonObject }
         val facade = classpath.single { it["artifact"].asString == "chunk-backend-kotlin.jar" }
         JarFile(facade["file"].asString).use {
             assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null)
             assertTrue(it.getEntry("fixture/generated/Bindings.class") == null)
+            assertTrue(it.getEntry("META-INF/chunk/app.json") == null)
         }
         assertEquals(1, classpath.count { it["artifact"].asString == "chunk-backend.jar" })
         assertTrue(calls().contains("gen kotlin"))
@@ -234,6 +239,23 @@ class ChunkPluginTest {
     private fun runFailure(vararg arguments: String) = runner(*arguments).buildAndFail()
 
     private fun calls() = directory.resolve("calls.txt").toFile().readLines()
+
+    private fun assertAppManifests(artifacts: JsonObject) {
+        artifacts.getAsJsonArray("apps").forEach { app ->
+            JarFile(app.asJsonObject["jar"].asString).use { jar ->
+                val entry = requireNotNull(jar.getJarEntry("META-INF/chunk/app.json"))
+                val manifest =
+                    jar
+                        .getInputStream(
+                            entry,
+                        ).bufferedReader()
+                        .use { JsonParser.parseReader(it).asJsonObject }
+                assertEquals(setOf("version", "id"), manifest.keySet())
+                assertEquals(1, manifest["version"].asInt)
+                assertEquals(app.asJsonObject["id"].asString, manifest["id"].asString)
+            }
+        }
+    }
 
     private fun descriptor(): JsonObject =
         JsonParser

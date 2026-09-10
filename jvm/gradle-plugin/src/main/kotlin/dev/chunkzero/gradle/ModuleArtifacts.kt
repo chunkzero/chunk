@@ -5,6 +5,7 @@ import org.gradle.api.Project
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier
 import org.gradle.api.plugins.JavaPluginExtension
+import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.jvm.tasks.Jar
 import org.gradle.jvm.toolchain.JavaToolchainService
 
@@ -12,6 +13,16 @@ internal fun configureModule(
     project: Project,
     appId: String,
 ) {
+    if (appId.isNotEmpty()) {
+        val manifest =
+            project.tasks.register("generateChunkAppManifest", WriteAppManifest::class.java) {
+                app.set(appId)
+                outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/app-resources"))
+            }
+        project.extensions.getByType(SourceSetContainer::class.java).named("main") {
+            resources.srcDir(manifest.flatMap { it.outputDirectory })
+        }
+    }
     val java = project.extensions.getByType(JavaPluginExtension::class.java)
     val launcher = project.extensions.getByType(JavaToolchainService::class.java).launcherFor(java.toolchain)
     val runtime = project.configurations.named("runtimeClasspath")
