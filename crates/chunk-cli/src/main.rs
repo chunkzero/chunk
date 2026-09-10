@@ -1,11 +1,11 @@
 //! Developer commands for the chunk platform.
 use clap::{Parser, Subcommand};
 use std::{io, path::PathBuf, process::ExitCode};
+mod building;
 mod generation;
 mod local;
 mod platform;
 mod players;
-use chunk_service::shutdown_signal;
 
 #[derive(Parser)]
 #[command(name = "chunk", version, about = "Build and run Minecraft apps")]
@@ -18,13 +18,8 @@ enum Command {
     /// Run the local dev server.
     #[command(visible_alias = "local")]
     Dev(local::Options),
-    /// Check and bundle TypeScript.
-    Build {
-        #[arg(default_value = ".")]
-        project: PathBuf,
-        #[arg(long, default_value = ".chunk/build")]
-        output: PathBuf,
-    },
+    /// Build the backend and JVM apps into one portable release archive.
+    Build(building::Options),
     /// Compile the backend and generate explicitly selected client sources.
     Gen(generation::Options),
     /// Inspect project and app manifests as JSON without building.
@@ -78,13 +73,7 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
         Command::Dev(options) => local::run(options).await,
-        Command::Build { project, output } => tokio::task::spawn_blocking(move || {
-            cliclack::log::info("Building…")?;
-            chunk_build::compile(&project, &output)?;
-            cliclack::log::success(format!("Built → {}", output.display()))
-        })
-        .await
-        .map_err(io::Error::other)?,
+        Command::Build(options) => building::run(options).await,
         Command::Gen(options) => tokio::task::spawn_blocking(move || generation::run(options))
             .await
             .map_err(io::Error::other)?,
@@ -119,6 +108,10 @@ mod tests {
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "java"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "build", "example", "--output", "dist"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "dev", "example"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "local", "example", "--java", "/jdk/bin/java"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "dev", "--project", "project.json"]).is_err());
         assert!(Cli::try_parse_from(["chunk", "auth", "login", "--cloud", "--url", "https://example.com"]).is_err());
     }
 }

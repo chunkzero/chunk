@@ -4,9 +4,10 @@ use std::{collections::BTreeMap, fs, time::Duration};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_edge_start_releases_earlier_services() {
     let directory = tempfile::tempdir().unwrap();
-    let artifact = Artifact {
+    let artifact = Release {
         id: "test".into(),
         directory: directory.path().join("artifact"),
+        archive: directory.path().join("artifact.tar.gz"),
     };
     fs::create_dir(&artifact.directory).unwrap();
     let bundle = chunk_contract::Deployment {
@@ -22,10 +23,12 @@ async fn failed_edge_start_releases_earlier_services() {
         serde_json::to_vec(&bundle).unwrap(),
     )
     .unwrap();
-    let project = Project {
-        environment: "local".into(),
-        gameplay_distribution: "unused".into(),
-        gameplay_module: ":unused".into(),
+    let control = chunk_control::Config {
+        deployment: chunk_proto::v1::DeploymentRef {
+            environment: "local".into(),
+            deployment: artifact.id.clone(),
+        },
+        artifact_digest: artifact.id.clone(),
         profiles: BTreeMap::from([(
             "local".into(),
             chunk_control::MachineProfile {
@@ -42,24 +45,8 @@ async fn failed_edge_start_releases_earlier_services() {
         )]),
         max_processes: 4,
     };
-    fs::write(
-        directory.path().join("control-config.json"),
-        serde_json::to_vec(&chunk_control::Config {
-            deployment: chunk_proto::v1::DeploymentRef {
-                environment: "local".into(),
-                deployment: artifact.id.clone(),
-            },
-            artifact_digest: artifact.id.clone(),
-            profiles: project.profiles.clone(),
-            session_types: project.session_types.clone(),
-            max_processes: 4,
-        })
-        .unwrap(),
-    )
-    .unwrap();
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let options = Options {
-        project: "unused".into(),
+    let options = Settings {
         state: directory.path().into(),
         java: "unused".into(),
         bind: occupied.local_addr().unwrap(),
@@ -68,7 +55,7 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     for _ in 0..2 {
         let mut services = Services::default();
-        let error = tokio::time::timeout(Duration::from_secs(10), services.start(&options, &project, &artifact))
+        let error = tokio::time::timeout(Duration::from_secs(10), services.start(&options, &control, &artifact))
             .await
             .unwrap()
             .unwrap_err();
@@ -87,29 +74,31 @@ async fn failed_edge_start_releases_earlier_services() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_bundle_preserves_startup_error() {
     let directory = tempfile::tempdir().unwrap();
-    let options = Options {
-        project: "unused".into(),
+    let options = Settings {
         state: directory.path().into(),
         java: "unused".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
         backend_bind: "127.0.0.1:0".parse().unwrap(),
         control_bind: "127.0.0.1:0".parse().unwrap(),
     };
-    let project = Project {
-        environment: "local".into(),
-        gameplay_distribution: "unused".into(),
-        gameplay_module: ":unused".into(),
+    let control = chunk_control::Config {
+        deployment: chunk_proto::v1::DeploymentRef {
+            environment: "local".into(),
+            deployment: "missing".into(),
+        },
+        artifact_digest: "missing".into(),
         profiles: BTreeMap::new(),
         session_types: BTreeMap::new(),
         max_processes: 1,
     };
-    let artifact = Artifact {
+    let artifact = Release {
         id: "missing".into(),
         directory: directory.path().join("missing"),
+        archive: directory.path().join("missing.tar.gz"),
     };
     let error = tokio::time::timeout(
         Duration::from_secs(10),
-        run(&options, &project, &artifact, CancellationToken::new()),
+        run(&options, &control, &artifact, CancellationToken::new()),
     )
     .await
     .unwrap()

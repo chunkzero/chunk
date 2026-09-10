@@ -1,39 +1,5 @@
 use super::*;
-use std::fs;
-
-#[test]
-fn publication_is_reproducible_and_new_inputs_cannot_change_a_running_artifact() {
-    let root = tempfile::tempdir().unwrap();
-    let distribution = root.path().join("distribution");
-    fs::create_dir_all(distribution.join("lib")).unwrap();
-    fs::write(distribution.join("lib/gameplay.jar"), b"gameplay-one").unwrap();
-    let source = root.path().join("backend.mjs");
-    fs::write(&source, "export function status() { return 1; }").unwrap();
-    let contract = root.path().join("contract.json");
-    fs::write(&contract, br#"{"contract_version":1,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
-    let inputs = Inputs {
-        source,
-        contract,
-        distribution,
-    };
-    let artifacts = root.path().join("artifacts");
-    let first = publish(&inputs, &artifacts, b"project").unwrap();
-    let repeated = publish(&inputs, &artifacts, b"project").unwrap();
-    assert_eq!(first.id, repeated.id);
-    let bundle: Deployment = serde_json::from_slice(&fs::read(first.directory.join("backend.json")).unwrap()).unwrap();
-    assert_eq!(bundle.id, first.id);
-    fs::write(inputs.distribution.join("lib/gameplay.jar"), b"gameplay-two").unwrap();
-    let second = publish(&inputs, &artifacts, b"project").unwrap();
-    assert_ne!(first.id, second.id);
-    assert_eq!(
-        fs::read(first.directory.join("gameplay/lib/gameplay.jar")).unwrap(),
-        b"gameplay-one"
-    );
-    assert_ne!(second.id, publish(&inputs, &artifacts, b"changed-project").unwrap().id);
-    // Extra classpath entries invalidate a published artifact, even when its expected files remain intact.
-    fs::write(second.directory.join("gameplay/lib/extra.jar"), b"unexpected").unwrap();
-    assert!(publish(&inputs, &artifacts, b"project").is_err());
-}
+use std::{fs, path::Path};
 
 #[cfg(unix)]
 #[test]

@@ -29,13 +29,17 @@ url = { version = "2", features = ["serde"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time"] }
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 tokio-util = "0.7"
 tonic = "0.14.6"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tempfile = "3"
 cliclack = "0.5.6"
+
+[dev-dependencies]
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 [lints]
 workspace = true
