@@ -5,6 +5,7 @@ use chunk_contract::{Deployment, Schema};
 use super::BackendMetadata;
 
 mod java;
+mod kotlin;
 mod output;
 mod typescript;
 
@@ -12,6 +13,7 @@ mod typescript;
 #[derive(Debug, Clone, Copy)]
 pub enum GenerationTarget<'a> {
     Java { package: &'a str },
+    Kotlin { package: &'a str },
     TypeScript,
 }
 
@@ -24,6 +26,15 @@ pub fn generate(contract: &Path, output: &Path, target: GenerationTarget<'_>) ->
     let contract = read_contract(contract)?;
     let files = match target {
         GenerationTarget::Java { package } => java::bindings(&contract)?.sources(package)?,
+        GenerationTarget::Kotlin { package } => {
+            let bindings = java::bindings(&contract)?;
+            let mut files = bindings.sources(package)?;
+            files.insert(
+                format!("kotlin/{}/CoroutineBackendClient.kt", package.replace('.', "/")),
+                kotlin::source(package, &bindings.root),
+            );
+            files
+        }
         GenerationTarget::TypeScript => BTreeMap::from([("api.ts".into(), typescript::generate(&contract))]),
     };
     output::write(output, &files)

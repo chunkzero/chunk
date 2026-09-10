@@ -24,6 +24,9 @@ abstract class GenerateBackend
         abstract val packageName: Property<String>
 
         @get:Input
+        abstract val kotlinClient: Property<Boolean>
+
+        @get:Input
         abstract val moduleName: Property<String>
 
         @get:Internal
@@ -66,7 +69,7 @@ abstract class GenerateBackend
                     "--bin",
                     "chunk-codegen",
                     "--",
-                    "java",
+                    if (kotlinClient.get()) "kotlin" else "java",
                     output.resolve("backend/contract.json"),
                     output.resolve("client"),
                     packageName.get(),

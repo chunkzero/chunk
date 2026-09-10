@@ -19,7 +19,7 @@ pub(crate) struct Options {
     /// Compiler artifact/cache directory (defaults to PROJECT/.chunk/build/backend).
     #[arg(long)]
     backend_output: Option<PathBuf>,
-    /// Java package (defaults to dev.chunkzero.generated for the Java target).
+    /// Shared JVM package (defaults to dev.chunkzero.generated for Java/Kotlin targets).
     #[arg(long)]
     java_package: Option<String>,
 }
@@ -27,6 +27,7 @@ pub(crate) struct Options {
 #[derive(Clone, Copy, ValueEnum)]
 enum Target {
     Java,
+    Kotlin,
     Typescript,
 }
 
@@ -39,9 +40,15 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
             },
             "java",
         ),
+        Target::Kotlin => (
+            GenerationTarget::Kotlin {
+                package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated"),
+            },
+            "kotlin",
+        ),
         Target::Typescript => {
             if options.java_package.is_some() {
-                return Err(io::Error::other("--java-package requires --target java"));
+                return Err(io::Error::other("--java-package requires --target java or kotlin"));
             }
             (GenerationTarget::TypeScript, "typescript")
         }

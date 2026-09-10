@@ -42,3 +42,10 @@ Kotlin consumers can use `jvm:backend-client-kotlin` for `CoroutineBackend`,
 which adds suspend calls and `Flow<WatchState<R>>` over the same Java client.
 The adapter requires an owned coroutine scope and closes its calls and watches
 when that scope ends.
+
+Select `chunk gen PROJECT --target kotlin --java-package com.example.backend`
+for a generated `CoroutineBackendClient` with property-style namespace access,
+suspending calls, and full watch-state flows. Construct it with an owned
+`CoroutineBackend`; it reuses the Java models and typed references and creates no
+additional coroutine scope. Empty arguments have convenience overloads, while
+mutation operation IDs stay explicit.

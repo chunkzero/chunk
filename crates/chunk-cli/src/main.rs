@@ -118,7 +118,7 @@ mod tests {
         assert!(Cli::try_parse_from(["chunk", "gen"]).is_err());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "java"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());
-        assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_err());
+        assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "auth", "login", "--cloud", "--url", "https://example.com"]).is_err());
     }
 }

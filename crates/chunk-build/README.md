@@ -67,6 +67,7 @@ language without invoking Gradle:
 
 ```sh
 chunk gen . --target java --java-package com.example.backend
+chunk gen . --target kotlin --java-package com.example.backend
 chunk gen . --target typescript
 ```
 
@@ -78,6 +79,27 @@ Add both source roots to a Java consumer; the Java package defaults to
 `.chunk/generated/typescript/api.ts`, retaining nested references and document
 validators from the compiled contract. Java generation does not emit TypeScript,
 and TypeScript generation does not require a Java package or JVM tools.
+
+Kotlin output defaults to `.chunk/generated/kotlin` and contains the same Java
+model/client source roots plus `kotlin/<package>/CoroutineBackendClient.kt`.
+Compile all three source roots with `backend-client-kotlin` on the classpath.
+The facade borrows an existing owned `CoroutineBackend` and uses the shared Java
+records, codecs, and references. Java-only generation adds no Kotlin sources or
+dependencies.
+
+```kotlin
+val playerBackend = CoroutineBackendClient(ownedPlayerBackend)
+val stats = playerBackend.shared.players.stats()
+playerBackend.shared.players.coin(operation = reward)
+playerBackend.shared.players.watchStats().collect { state -> /* full WatchState */ }
+```
+
+Queries and mutations suspend in the caller's context. Mutation IDs remain
+explicit and reusable after an unknown outcome. Watches are cold
+`Flow<WatchState<R>>` values, retaining stale flags, snapshot revisions, query
+failures, and transport errors. Cancelling a call or collection cancels its
+RPC or watch; closing the adapter ends its calls and watches. The facade
+creates no scope and does not own the supplied adapter.
 
 Java callers use grouped methods such as `playerBackend.shared().players().stats()`
 and `coin(operation)`, plus closeable `watchStats(observer)` subscriptions carrying
@@ -106,5 +128,6 @@ Repository fixtures can generate directly from an existing contract:
 
 ```sh
 cargo run -p chunk-build --bin chunk-codegen -- java CONTRACT OUTPUT JAVA_PACKAGE
+cargo run -p chunk-build --bin chunk-codegen -- kotlin CONTRACT OUTPUT JAVA_PACKAGE
 cargo run -p chunk-build --bin chunk-codegen -- typescript CONTRACT OUTPUT
 ```
