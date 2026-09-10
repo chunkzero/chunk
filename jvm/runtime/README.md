@@ -96,4 +96,4 @@ Put final result mutations in `finish()`: the manager awaits that hook before
 closing session resources. Request termination with `scope.finish()` without
 awaiting it from work that the same termination will cancel. Slow Flow collectors
 fail at 64 queued updates instead of dropping stale transitions. Java-only backend
-consumers can continue using `jvm:backend-java` without these Kotlin adapters.
+consumers can continue using `jvm:backend-client` without these Kotlin adapters.

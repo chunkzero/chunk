@@ -43,17 +43,20 @@ public final class BackendSession implements AutoCloseable {
 
     public BackendSession(Channel channel, String credential, String environment, String deployment,
             SessionIdentity identity, ScheduledExecutorService scheduler, Duration deadline) {
-        this(authenticated(channel, credential), environment, deployment, identity, scheduler, deadline, () -> {});
-    }
-    private BackendSession(BackendGrpc.BackendStub stub, String environment, String deployment,
-            SessionIdentity identity, ScheduledExecutorService scheduler, Duration deadline, Runnable onClose) {
+        stub = authenticated(channel, credential);
         if (environment == null || environment.isEmpty() || environment.length() > 128 || deployment == null || deployment.isEmpty() || deployment.length() > 128)
             throw new IllegalArgumentException("Invalid environment or deployment");
         if (deadline.isNegative() || deadline.isZero() || deadline.compareTo(Duration.ofMinutes(5)) > 0)
             throw new IllegalArgumentException("Invalid call deadline");
-        this.stub = stub; this.environment = environment; this.deployment = deployment;
+        this.environment = environment; this.deployment = deployment;
         this.identity = Objects.requireNonNull(identity); this.scheduler = Objects.requireNonNull(scheduler);
-        this.deadline = deadline; this.onClose = onClose;
+        this.deadline = deadline; this.onClose = () -> {};
+        caller = ByteString.copyFromUtf8(identity.json().toString());
+    }
+    private BackendSession(BackendSession parent, SessionIdentity identity, Runnable onClose) {
+        stub = parent.stub; scheduler = parent.scheduler;
+        environment = parent.environment; deployment = parent.deployment; deadline = parent.deadline;
+        this.identity = Objects.requireNonNull(identity); this.onClose = onClose;
         caller = ByteString.copyFromUtf8(identity.json().toString());
     }
     private static BackendGrpc.BackendStub authenticated(Channel channel, String credential) {
@@ -63,8 +66,8 @@ public final class BackendSession implements AutoCloseable {
         return BackendGrpc.newStub(channel).withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
     }
     public BackendSession forPlayer(PlayerId player) {
-        var child = new BackendSession(stub, environment, deployment,
-            new SessionIdentity(identity.session(), identity.app(), Optional.of(player)), scheduler, deadline,
+        var child = new BackendSession(this,
+            new SessionIdentity(identity.session(), identity.app(), Optional.of(player)),
             () -> children.removeIf(scope -> scope.closed.get()));
         children.add(child); if (closed.get()) child.close(); return child;
     }
