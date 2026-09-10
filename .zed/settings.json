@@ -1,0 +1,163 @@
+{
+  "format_on_save": "on",
+  "formatter": "none",
+  "tab_size": 4,
+  "hard_tabs": false,
+  "preferred_line_length": 120,
+  "prettier": {
+    "allowed": false
+  },
+  "languages": {
+    "Rust": {
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "rustfmt", "--emit", "stdout"]
+        }
+      }
+    },
+    "Kotlin": {
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": [
+            "exec",
+            "--",
+            "ktlint",
+            "--log-level=none",
+            "--format",
+            "--stdin",
+            "--stdin-path",
+            "{buffer_path}"
+          ]
+        }
+      }
+    },
+    "Java": {
+      "preferred_line_length": 100,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "google-java-format", "--aosp", "-"]
+        }
+      }
+    },
+    "Proto": {
+      "tab_size": 2,
+      "language_servers": ["buf"],
+      "formatter": {
+        "language_server": {
+          "name": "buf"
+        }
+      }
+    },
+    "JavaScript": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "language_servers": ["oxlint", "..."]
+    },
+    "JSX": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "language_servers": ["oxlint", "..."]
+    },
+    "TypeScript": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "language_servers": ["oxlint", "..."]
+    },
+    "TSX": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "language_servers": ["oxlint", "..."]
+    },
+    "JSON": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    },
+    "JSONC": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    },
+    "JSON5": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    },
+    "YAML": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    },
+    "TOML": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    },
+    "Markdown": {
+      "tab_size": 2,
+      "formatter": {
+        "external": {
+          "command": "mise",
+          "arguments": ["exec", "--", "pnpm", "exec", "oxfmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      }
+    }
+  },
+  "lsp": {
+    "buf": {
+      "binary": {
+        "path": "mise",
+        "arguments": ["exec", "--", "buf", "lsp", "serve"]
+      }
+    },
+    "oxlint": {
+      "binary": {
+        "path": "mise",
+        "arguments": ["exec", "--", "pnpm", "exec", "oxlint", "--lsp"]
+      }
+    }
+  }
+}
