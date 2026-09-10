@@ -11,7 +11,7 @@ kotlin {
 
 dependencies { implementation(project(":jvm:runtime-kotlin")) }
 
-application { mainClass = "dev.chunkzero.runtime.BridgeMainKt" }
+application { mainClass = "dev.chunkzero.runtime.BridgeMain" }
 
 val localJava = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
 

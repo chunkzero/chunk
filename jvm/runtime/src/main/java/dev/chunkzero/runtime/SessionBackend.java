@@ -40,9 +40,11 @@ final class SessionBackend implements AutoCloseable {
     }
 
     @Override
-    public void close() throws InterruptedException {
+    public void close() {
         try {
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         } finally {
             scheduler.shutdownNow();
         }
