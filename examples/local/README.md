@@ -78,8 +78,8 @@ validated function descriptors. Paths in this paragraph are relative to
 `examples/local/.chunk/build/backend` and shared JVM bindings under
 `examples/local/.chunk/generated/jvm`.
 The standalone example uses the public Chunk settings and project plugins with
-repository composite builds for local framework dependencies. Its temporary
-`:gameplay` project keeps the shared session implementation in `jvm/example`.
+repository composite builds for local framework dependencies. Its explicit
+`shared` project contains the common session implementation and backend boundary test.
 The discovered `apps/lobby` and `apps/arena` projects each package one
 `SessionProvider` service that creates fresh session state. The plugin generates
 `META-INF/chunk/app.json` in each app JAR, and the runtime verifies that its
@@ -108,7 +108,7 @@ all addresses must remain loopback.
 
 ## Automated backend boundary check
 
-`examples/local/gradlew :gameplay:test --tests '*BackendIntegrationTest'` builds the Rust
+`examples/local/gradlew :shared:test --tests '*BackendIntegrationTest'` builds the Rust
 backend and generated Java client, then calls the actual TypeScript coin/stat
 handlers over authenticated loopback gRPC. It verifies durable operation recovery,
 stale/fresh watch transitions across backend restart, shared data between retained

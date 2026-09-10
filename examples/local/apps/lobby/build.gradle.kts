@@ -5,4 +5,4 @@ plugins {
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 kotlin { compilerOptions { allWarningsAsErrors = true } }
 
-dependencies { implementation(project(":gameplay")) }
+dependencies { implementation(project(":shared")) }

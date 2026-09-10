@@ -26,5 +26,4 @@ dependencyResolutionManagement {
 
 includeBuild("../..") { name = "chunk-platform" }
 rootProject.name = "local"
-include(":gameplay")
-project(":gameplay").projectDir = file("../../jvm/example")
+include(":shared")
