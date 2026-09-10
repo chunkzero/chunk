@@ -63,20 +63,17 @@ fn generated_typescript_references_validate_the_cross_language_fixtures() {
     super::generate(
         &fixtures.join("contract.json"),
         output.path(),
-        "dev.chunkzero.generated",
+        GenerationTarget::TypeScript,
     )
     .unwrap();
     let api = fs::read_to_string(output.path().join("api.ts")).unwrap();
-    let java_file = output.path().join("java/dev/chunkzero/generated/BackendTypes.java");
-    let java = fs::read(&java_file).unwrap();
     super::generate(
         &fixtures.join("contract.json"),
         output.path(),
-        "dev.chunkzero.generated",
+        GenerationTarget::TypeScript,
     )
     .unwrap();
     assert_eq!(api, fs::read_to_string(output.path().join("api.ts")).unwrap());
-    assert_eq!(java, fs::read(java_file).unwrap());
     assert!(!api.contains("hidden"));
     let sdk = root.join("packages/server/src/index.ts");
     fs::write(
@@ -142,7 +139,14 @@ fn codegen_rejects_colliding_names_and_unsupported_literals_before_writing() {
         (invalid_name, "invalid schema identifier"),
     ] {
         fs::write(&contract_file, serde_json::to_vec(&contract).unwrap()).unwrap();
-        let error = super::generate(&contract_file, &output, "dev.chunkzero.generated").unwrap_err();
+        let error = super::generate(
+            &contract_file,
+            &output,
+            GenerationTarget::Java {
+                package: "dev.chunkzero.generated",
+            },
+        )
+        .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert!(!output.exists());
     }

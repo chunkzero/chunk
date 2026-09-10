@@ -22,6 +22,7 @@ val generateTestContracts =
             "--bin",
             "chunk-codegen",
             "--",
+            "java",
             file("src/test/resources/contract.json"),
             generatedFixtures.get().asFile,
             "dev.chunkzero.generated",
