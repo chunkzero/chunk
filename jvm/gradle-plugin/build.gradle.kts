@@ -3,10 +3,6 @@ plugins {
     `java-gradle-plugin`
 }
 
-dependencies {
-    implementation(project(":jvm:build-api"))
-}
-
 gradlePlugin {
     plugins {
         create("chunk") {
