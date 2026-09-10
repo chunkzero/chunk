@@ -72,7 +72,7 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
     cliclack::log::success(format!("Generated → {}", output.display()))
 }
 
-fn destination(path: &Path) -> io::Result<PathBuf> {
+pub(super) fn destination(path: &Path) -> io::Result<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         if component == Component::ParentDir {

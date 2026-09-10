@@ -20,6 +20,14 @@ class ChunkPluginTest {
     fun `discovers apps without generation and builds one shared Java artifact with configuration cache`() {
         fixture()
         app("lobby")
+        library("fixture", "shared", "1.0")
+        library("fixture", "shared", "2.0")
+        directory.resolve("build.gradle.kts").toFile().appendText(
+            "\ndependencies { api(\"fixture:shared:1.0\") }\n",
+        )
+        directory.resolve("apps/lobby/build.gradle.kts").toFile().appendText(
+            "\ndependencies { implementation(\"fixture:shared:2.0\") }\n",
+        )
         val projects = run("projects")
         assertTrue(projects.output.contains(":apps:lobby"))
         assertEquals(listOf("inspect"), calls())
@@ -30,6 +38,10 @@ class ChunkPluginTest {
         assertFalse(first.toString().contains("kotlin"))
         val classpath = first.getAsJsonArray("classpath").map { it.asJsonObject }
         assertEquals(1, classpath.count { it["artifact"].asString == "chunk-backend.jar" })
+        assertEquals(
+            listOf("shared-2.0.jar"),
+            classpath.map { it["artifact"].asString }.filter { it.startsWith("shared-") },
+        )
         assertTrue(classpath.all { Path.of(it["file"].asString).toFile().isFile })
         JarFile(directory.resolve("build/libs/chunk-backend.jar").toFile()).use {
             assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
@@ -44,6 +56,14 @@ class ChunkPluginTest {
         assertEquals(
             listOf("arena", "lobby"),
             descriptor().getAsJsonArray("apps").map { it.asJsonObject["id"].asString },
+        )
+        assertEquals(
+            listOf("shared-1.0.jar", "shared-2.0.jar"),
+            descriptor()
+                .getAsJsonArray("classpath")
+                .map { it.asJsonObject["artifact"].asString }
+                .filter { it.startsWith("shared-") }
+                .sorted(),
         )
     }
 
@@ -208,11 +228,19 @@ class ChunkPluginTest {
 
     private fun module(name: String) {
         val version = System.getProperty("chunk.plugin.version")
-        val path = "maven/dev/chunkzero/$name/$version/$name-$version"
+        library("dev.chunkzero", name, version)
+    }
+
+    private fun library(
+        group: String,
+        name: String,
+        version: String,
+    ) {
+        val path = "maven/${group.replace('.', '/')}/$name/$version/$name-$version"
         write(
             "$path.pom",
             """
-            <project><modelVersion>4.0.0</modelVersion><groupId>dev.chunkzero</groupId>
+            <project><modelVersion>4.0.0</modelVersion><groupId>$group</groupId>
             <artifactId>$name</artifactId><version>$version</version></project>
         """,
         )

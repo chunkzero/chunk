@@ -1,9 +1,8 @@
 # Backend compiler
 
-From the repository, run `just toolchain`, then
-`cargo run -p chunk-cli -- build PROJECT --output OUTPUT`.
-Gradle uses the equivalent `chunk-compile` helper.
-This type-checks the project's `server/**/*.ts` and discovered apps' `server/**/*.ts`
+Run `chunk gen PROJECT --target java` to compile backend code and generate a
+Java client. The repository-only `chunk-compile PROJECT OUTPUT` helper compiles
+backend artifacts without client generation. Compilation type-checks the project's `server/**/*.ts` and discovered apps' `server/**/*.ts`
 and bundles them directly with the Rust Rolldown API. The explicitly composed default export in
 `server/schema/index.ts` supplies the database schema.
 
@@ -14,9 +13,8 @@ in the bounded transactional engine, without executing project code in Node.
 Node builtins, remote imports and native modules are unsupported.
 
 Successful compilation writes `source.mjs`, `source.mjs.map`, and
-`contract.json`. No generated client or JVM build is required. `chunk_build::publish`
-combines this output with a gameplay distribution and project metadata into an
-immutable content-addressed artifact. The six SDK source files are embedded in `chunk-build` and materialized under
+`contract.json`. Backend compilation does not run Gradle or build JVM apps.
+The six SDK source files are embedded in `chunk-build` and materialized under
 `OUTPUT/.sdk/<digest>` for checking and bundling; modified cache files are rejected.
 
 `just toolchain` installs native TypeScript 7.0.2 and its library declarations under
@@ -57,10 +55,23 @@ references. Local capacity is 1–128 players, process count is 1–32, and prof
 allow 128–8192 MiB and 1–16 sessions. No second app list is needed. Unknown fields,
 including domains and redundant app names, are rejected.
 
-The backend compiler can discover apps without a root `chunk.toml`. The local
-runner still consumes `project.json` and its existing distribution inputs.
+The backend compiler can discover apps without a root `chunk.toml`. Public CLI
+commands require the root manifest. `chunk dev PROJECT` uses its local settings
+and each discovered app’s resolved requirements for session placement.
 
 ## Complete releases
+
+`chunk build PROJECT` validates project metadata, runs the project’s Gradle
+wrapper with `chunkArtifacts`, and publishes the complete release into
+`PROJECT/dist`. Gradle invokes `chunk gen` before compiling app code and writes
+`.chunk/build/jvm/artifacts.json`; the CLI supplies its own executable with
+`-Pchunk.executable` so generation uses the same installation. `--output PATH`
+selects a release directory relative to the current working directory. Failed or
+cancelled Gradle builds stop their child processes and do not publish a release.
+From a checkout, `just toolchain` followed by
+`target/debug/chunk build examples/local` builds the two-app example without
+starting services. Its archive and release directory appear under
+`examples/local/dist`.
 
 `publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)`
 combines separately built backend and JVM outputs into `dist/<id>/` and
@@ -68,8 +79,9 @@ combines separately built backend and JVM outputs into `dist/<id>/` and
 descriptor. Every discovered app must have exactly one descriptor entry, an app
 JAR containing matching `META-INF/chunk/app.json` metadata, and one
 `dev.chunkzero.runtime.SessionProvider` service registration. Publication never
-runs Java or Gradle. The older `publish` API remains available for the existing
-local runner until its build orchestration consumes these descriptors.
+runs Java or Gradle. The descriptor’s selected Java executable is used by
+`chunk dev` unless `--java PATH` overrides it; the executable must satisfy the
+release’s Java version requirement. Local state defaults to `PROJECT/.chunk/local`.
 
 The release includes `source.mjs`, `contract.json`, an optional source map,
 `backend.json`, `release.json`, and content-named JARs under `gameplay/lib`.
