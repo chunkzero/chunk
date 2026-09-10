@@ -23,4 +23,9 @@ callbacks. Nontransient failures remain stale with an error until closed.
 
 The public runtime classpath contains Java libraries only. The protobuf module
 uses the Java convention plugin because it generates Java sources exclusively.
-Focused check: `./gradlew :jvm:backend-java:test`.
+Focused check: `./gradlew :jvm:backend-client:test`.
+
+Kotlin consumers can use `jvm:backend-client-kotlin` for `CoroutineBackend`,
+which adds suspend calls and `Flow<WatchState<R>>` over the same Java client.
+The adapter requires an owned coroutine scope and closes its calls and watches
+when that scope ends.
