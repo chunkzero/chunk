@@ -44,7 +44,7 @@ local *args:
     pnpm install --frozen-lockfile
     node packages/compiler/install-toolchain.mjs
     ./gradlew :jvm:example:installDist :jvm:example:writeJavaExecutable
-    cargo run -p chunk-cli -- local --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
+    cargo run -p chunk-cli -- local --project examples/local/project.json --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
 
 # Operate on players connected to the local example.
 players *args:

@@ -24,9 +24,9 @@ fn executable() -> io::Result<PathBuf> {
         .join(VERSION)
         .join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
     if !path.is_file() {
-        return Err(io::Error::other(
-            "TypeScript toolchain missing; run `just toolchain` or set CHUNK_TYPESCRIPT to the pinned native tsc executable",
-        ));
+        return Err(io::Error::other(format!(
+            "TypeScript {VERSION} missing. Reinstall the CLI or set CHUNK_TYPESCRIPT to its executable."
+        )));
     }
     Ok(path)
 }

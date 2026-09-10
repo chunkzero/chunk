@@ -69,9 +69,27 @@ feature selection and standalone hosting.
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
 - `chunk build PROJECT --output OUTPUT` checks TypeScript and builds backend artifacts.
-- `chunk local` runs the development stack with embedded services and child JVMs.
+- `chunk dev` (`chunk local`) runs the development stack with embedded services and child JVMs.
 - `chunk players` operates on local players.
-- `chunk login` and `chunk upload ARTIFACT` are explicit, non-successful stubs.
+- `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use
+  `--cloud` or `--url URL` for non-interactive selection. `chunk login` is an alias.
+- `chunk auth status` shows the effective target and authentication implementation status.
+- `chunk deploy [PROJECT]`, `chunk upload ARTIFACT`, `chunk logs [--follow]`,
+  `chunk deployments list`, `chunk environments list`, and `chunk apps list`
+  are explicit, non-successful stubs. Deploy, logs and listings accept `--app`
+  and `--environment` (also `CHUNK_APP` and `CHUNK_ENVIRONMENT`).
+
+Target selection is saved in `chunk/target.json` under the OS configuration
+folder; `CHUNK_CONFIG_DIR` overrides the containing directory. `CHUNK_API_URL`
+overrides the saved target for platform commands. Without either, the target is
+Chunk Cloud; its API endpoint is not configured yet. Custom URLs may include an
+API path and must use HTTP(S) without embedded credentials, queries or fragments.
+
+Authentication, `auth whoami`, and `auth logout` remain stubs. Login saves only the target and
+then exits unsuccessfully with an explicit authentication-not-implemented message.
+No credentials are read or stored and no platform requests are made. Future
+authentication will use target-scoped OS credential storage, with `CHUNK_API_TOKEN`
+as a CI override; that variable is currently unused.
 
 Run `just toolchain` before using the build command from a checkout. `just package-cli`
 assembles the CLI and pinned native TypeScript compiler under `target/dist`.

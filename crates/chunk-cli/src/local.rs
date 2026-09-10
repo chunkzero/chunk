@@ -8,11 +8,11 @@ mod services;
 
 #[derive(Clone, clap::Args)]
 pub(crate) struct Options {
-    #[arg(long, default_value = "examples/local/project.json")]
+    #[arg(long, default_value = "project.json")]
     project: PathBuf,
     #[arg(long, default_value = ".chunk/local")]
     state: PathBuf,
-    /// Java 25 executable. `just local` resolves this from the Gradle toolchain.
+    /// Path to Java 25 or newer.
     #[arg(long)]
     java: PathBuf,
     #[arg(long, default_value = "127.0.0.1:25565")]
@@ -149,7 +149,7 @@ async fn java_version(java: &std::path::Path) -> io::Result<()> {
         .and_then(|v| v.parse::<u32>().ok());
     if !output.status.success() || major.is_none_or(|v| v < 25) {
         return Err(io::Error::other(
-            "gameplay requires Java 25; use `just local` or supply --java",
+            "Java 25+ required. Set --java to a Java 25+ executable.",
         ));
     }
     Ok(())

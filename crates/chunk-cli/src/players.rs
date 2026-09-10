@@ -54,7 +54,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         .map_err(io::Error::other)?;
     let mut client = LocalControlClient::new(channel);
     let operation_id = options.operation.unwrap_or_else(uuid::Uuid::new_v4).to_string();
-    tracing::info!(operation = %operation_id, "player operation");
+    cliclack::log::info(format!("Player operation: {operation_id}"))?;
     match options.action {
         Action::Move {
             session_type,
@@ -76,7 +76,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
                 )?)
                 .await
                 .map_err(io::Error::other)?;
-            tracing::info!("move queued; destination admission and preparation run at the proxy");
+            cliclack::log::success("Move queued.")?;
         }
         Action::Drain { timeout_seconds } => {
             let request = DrainRequest {
@@ -92,7 +92,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
                     .map_err(io::Error::other)?
                     .into_inner();
                 if status.stopped {
-                    tracing::info!("runtime drain complete");
+                    cliclack::log::success("Runtime drained.")?;
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
