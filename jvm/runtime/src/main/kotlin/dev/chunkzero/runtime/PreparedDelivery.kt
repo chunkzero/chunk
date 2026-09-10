@@ -33,7 +33,7 @@ internal class PreparedDelivery(
     private var closed = false
     private var connection: PlayerConnection? = null
     private var player: ManagedPlayer? = null
-    private var joining = CompletableFuture.completedFuture(Unit)
+    private var joining = CompletableFuture.completedFuture<Void>(null)
     private val removed = CompletableFuture<Unit>()
     private var arrived = false
     private var joinStarted = false
@@ -146,7 +146,7 @@ internal class PreparedDelivery(
                     player
                 }
             }.thenCompose { currentPlayer ->
-                if (currentPlayer == null) CompletableFuture.completedFuture(Unit) else session.leave(currentPlayer)
+                if (currentPlayer == null) CompletableFuture.completedFuture(null) else session.leave(currentPlayer)
             }.whenComplete { _, error ->
                 synchronized(this) {
                     connection = null

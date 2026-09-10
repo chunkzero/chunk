@@ -1,13 +1,13 @@
 package dev.chunkzero.example
 
 import dev.chunkzero.backend.CoroutineBackend
-import dev.chunkzero.backend.client.OperationId
 import dev.chunkzero.backend.client.QueryResult
 import dev.chunkzero.example.generated.BackendTypes
 import dev.chunkzero.runtime.CoroutineSession
 import dev.chunkzero.runtime.Session
 import dev.chunkzero.runtime.SessionProvider
 import dev.chunkzero.runtime.SessionScope
+import dev.chunkzero.runtime.coroutines
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
@@ -17,17 +17,18 @@ import net.minestom.server.entity.Player
 import net.minestom.server.instance.LightingChunk
 import net.minestom.server.instance.block.Block
 import net.minestom.server.tag.Tag
+import java.util.function.Supplier
 
 class ExampleSessions : SessionProvider {
-    override fun sessions(): Map<String, () -> Session> {
+    override fun sessions(): Map<String, Supplier<Session>> {
         MinecraftServer.getCommandManager().register(
             Command("coin").apply {
                 setDefaultExecutor { sender, _ -> (sender as? Player)?.getTag(coinAction)?.run() }
             },
         )
         return mapOf(
-            "lobby" to { ExampleSession("Lobby", Block.GRASS_BLOCK) },
-            "arena" to { ExampleSession("Arena", Block.SANDSTONE) },
+            "lobby" to Supplier { ExampleSession("Lobby", Block.GRASS_BLOCK) },
+            "arena" to Supplier { ExampleSession("Arena", Block.SANDSTONE) },
         )
     }
 
@@ -82,7 +83,7 @@ private class ExampleSession(
         backend.mutate(
             BackendTypes.`shared$players$join`,
             BackendTypes.`Fn$shared$players$join$Args`(),
-            OperationId(scope.operationId(player, "join")),
+            scope.operationId(player, "join"),
         )
         player.sendMessage(Component.text("Welcome to $label. Saved coins: ${stats.coins()}. Use /coin to earn one."))
     }
@@ -98,7 +99,7 @@ private class ExampleSession(
                 data.backend.mutate(
                     BackendTypes.`shared$players$coin`,
                     BackendTypes.`Fn$shared$players$coin$Args`(),
-                    OperationId(scope.operationId(player, "coin-${data.sequence}")),
+                    scope.operationId(player, "coin-${data.sequence}"),
                 )
                 data.sequence++
             } catch (error: java.util.concurrent.CancellationException) {

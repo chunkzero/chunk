@@ -9,7 +9,7 @@ kotlin {
     compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25 }
 }
 
-dependencies { implementation(project(":jvm:runtime")) }
+dependencies { implementation(project(":jvm:runtime-kotlin")) }
 
 application { mainClass = "dev.chunkzero.runtime.BridgeMainKt" }
 

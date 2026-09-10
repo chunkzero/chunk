@@ -32,6 +32,7 @@ import java.util.Optional
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.function.Supplier
 
 class SessionCoroutinesTest {
     @Test
@@ -94,50 +95,59 @@ class SessionCoroutinesTest {
             SessionManager(
                 ticks,
                 mapOf(
-                    "game" to {
-                        object : CoroutineSession() {
-                            lateinit var backend: CoroutineBackend
+                    "game" to
+                        Supplier {
+                            object : CoroutineSession() {
+                                lateinit var backend: CoroutineBackend
 
-                            override suspend fun create(scope: SessionScope) {
-                                scope.createInstance()
-                                backend =
-                                    scope.coroutines.backend(
-                                        BackendSession(
-                                            channel,
-                                            "test-credential-with-at-least-32-bytes",
-                                            "local",
-                                            "build",
-                                            SessionIdentity(SessionId(scope.id), "duels", Optional.empty()),
-                                            scheduler,
-                                            Duration.ofSeconds(5),
-                                        ),
-                                    )
-                                scope.coroutines.launch {
-                                    backend
-                                        .watch(
-                                            QueryRef("read", Codecs.NULL, Codecs.INTEGER),
+                                override suspend fun create(scope: SessionScope) {
+                                    scope.createInstance()
+                                    backend =
+                                        scope.coroutines.backend(
+                                            BackendSession(
+                                                channel,
+                                                "test-credential-with-at-least-32-bytes",
+                                                "local",
+                                                "build",
+                                                SessionIdentity(SessionId(scope.id), "duels", Optional.empty()),
+                                                scheduler,
+                                                Duration.ofSeconds(5),
+                                            ),
+                                        )
+                                    scope.coroutines.launch {
+                                        backend
+                                            .watch(
+                                                QueryRef("read", Codecs.NULL, Codecs.INTEGER),
+                                                NullValue.INSTANCE,
+                                            ).collect {
+                                                ticks.checkThread()
+                                                if (!it.stale()) observed = true
+                                            }
+                                    }
+                                }
+
+                                override suspend fun finish() {
+                                    val value =
+                                        backend.mutate(
+                                            MutationRef("finish", Codecs.NULL, Codecs.INTEGER),
                                             NullValue.INSTANCE,
-                                        ).collect {
-                                            ticks.checkThread()
-                                            if (!it.stale()) observed = true
-                                        }
+                                            OperationId("final-result"),
+                                        )
+                                    ticks.checkThread()
+                                    assertEquals(7L, value)
+                                    committed = true
                                 }
                             }
-
-                            override suspend fun finish() {
-                                val value =
-                                    backend.mutate(
-                                        MutationRef("finish", Codecs.NULL, Codecs.INTEGER),
-                                        NullValue.INSTANCE,
-                                        OperationId("final-result"),
-                                    )
-                                ticks.checkThread()
-                                assertEquals(7L, value)
-                                committed = true
+                        },
+                    "flat" to
+                        Supplier {
+                            object : Session() {
+                                override fun onCreate(scope: SessionScope): CompletableFuture<Void> {
+                                    scope.createInstance()
+                                    return CompletableFuture.completedFuture(null)
+                                }
                             }
-                        }
-                    },
-                    "flat" to { FlatSession() },
+                        },
                 ),
             )
 

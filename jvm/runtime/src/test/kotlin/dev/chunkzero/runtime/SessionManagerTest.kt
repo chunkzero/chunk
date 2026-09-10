@@ -15,28 +15,30 @@ import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.function.Supplier
 
 class SessionManagerTest {
     @Test
     fun `resource disposal failure still awaits the leave hook`() {
         MinecraftServer.init()
         val ticks = TickExecutor()
-        val left = CompletableFuture<Unit>()
+        val left = CompletableFuture<Void>()
         var leaving = false
         val manager =
             SessionManager(
                 ticks,
                 mapOf(
-                    "game" to {
-                        object : Session() {
-                            override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
+                    "game" to
+                        Supplier {
+                            object : Session() {
+                                override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
 
-                            override fun onLeave(player: Player): CompletableFuture<Unit> {
-                                leaving = true
-                                return left
+                                override fun onLeave(player: Player): CompletableFuture<Void> {
+                                    leaving = true
+                                    return left
+                                }
                             }
-                        }
-                    },
+                        },
                 ),
             )
         val command =
@@ -70,13 +72,13 @@ class SessionManagerTest {
             ticks.flush()
             assertTrue(leaving)
             assertFalse(leavingResult.isDone)
-            left.complete(Unit)
+            left.complete(null)
             assertTrue(leavingResult.isCompletedExceptionally)
             val ended = manager.finish(command)
             repeat(8) { ticks.flush() }
             ended.join()
         } finally {
-            left.complete(Unit)
+            left.complete(null)
             MinecraftServer.process().stop()
         }
     }
@@ -85,28 +87,29 @@ class SessionManagerTest {
     fun `readiness and ending await hooks and dispose only the owning session`() {
         MinecraftServer.init()
         val ticks = TickExecutor()
-        val created = CompletableFuture<Unit>()
-        val finished = CompletableFuture<Unit>()
+        val created = CompletableFuture<Void>()
+        val finished = CompletableFuture<Void>()
         var disposed = 0
         lateinit var ownedScope: SessionScope
         val manager =
             SessionManager(
                 ticks,
                 mapOf(
-                    "delayed" to {
-                        object : Session() {
-                            override fun onCreate(scope: SessionScope): CompletableFuture<Unit> {
-                                ownedScope = scope
-                                scope.createInstance()
-                                scope.createInstance()
-                                scope.own(AutoCloseable { disposed++ })
-                                return created
-                            }
+                    "delayed" to
+                        Supplier {
+                            object : Session() {
+                                override fun onCreate(scope: SessionScope): CompletableFuture<Void> {
+                                    ownedScope = scope
+                                    scope.createInstance()
+                                    scope.createInstance()
+                                    scope.own(AutoCloseable { disposed++ })
+                                    return created
+                                }
 
-                            override fun onFinish() = finished
-                        }
-                    },
-                    "flat" to { FlatSession() },
+                                override fun onFinish() = finished
+                            }
+                        },
+                    "flat" to Supplier { FlatSession() },
                 ),
             )
 
@@ -130,7 +133,7 @@ class SessionManagerTest {
             assertFalse(pending.isDone)
             assertEquals(SessionPhase.SESSION_PHASE_READY, independent.join().phase)
             assertEquals(3, MinecraftServer.getInstanceManager().instances.size)
-            created.complete(Unit)
+            created.complete(null)
             repeat(4) { ticks.flush() }
             assertEquals(SessionPhase.SESSION_PHASE_READY, pending.join().phase)
             val duplicate = manager.create(first)
@@ -143,7 +146,7 @@ class SessionManagerTest {
             repeat(5) { ticks.flush() }
             assertFalse(ending.isDone)
             assertEquals(0, disposed)
-            finished.complete(Unit)
+            finished.complete(null)
             repeat(5) { ticks.flush() }
             assertEquals(SessionPhase.SESSION_PHASE_ENDED, ending.join().phase)
             assertEquals(1, disposed)

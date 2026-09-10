@@ -13,6 +13,10 @@ import net.minestom.server.entity.Player
 import java.util.concurrent.CompletableFuture
 import kotlin.coroutines.CoroutineContext
 
+/** One session-owned adapter, available only while its scope is active on the tick thread. */
+val SessionScope.coroutines: SessionCoroutines
+    get() = resource(SessionCoroutines::class.java) { SessionCoroutines(this, ticks) }
+
 /** Session-owned work always resumes on the process tick thread unless explicitly moved elsewhere. */
 class SessionCoroutines internal constructor(
     private val session: SessionScope,
@@ -56,16 +60,22 @@ class SessionCoroutines internal constructor(
 abstract class CoroutineSession : Session() {
     private lateinit var coroutines: SessionCoroutines
 
-    final override fun onCreate(scope: SessionScope): CompletableFuture<Unit> {
+    final override fun onCreate(scope: SessionScope): CompletableFuture<Void?> {
         coroutines = scope.coroutines
-        return coroutines.future { create(scope) }
+        return lifecycle { create(scope) }
     }
 
-    final override fun onJoin(player: Player): CompletableFuture<Unit> = coroutines.future { join(player) }
+    final override fun onJoin(player: Player): CompletableFuture<Void?> = lifecycle { join(player) }
 
-    final override fun onLeave(player: Player): CompletableFuture<Unit> = coroutines.future { leave(player) }
+    final override fun onLeave(player: Player): CompletableFuture<Void?> = lifecycle { leave(player) }
 
-    final override fun onFinish(): CompletableFuture<Unit> = coroutines.future { finish() }
+    final override fun onFinish(): CompletableFuture<Void?> = lifecycle { finish() }
+
+    private fun lifecycle(block: suspend () -> Unit): CompletableFuture<Void?> =
+        coroutines.future {
+            block()
+            null
+        }
 
     open suspend fun create(scope: SessionScope) {}
 
