@@ -1,12 +1,10 @@
 {
-  "name": "@chunk/server",
+  "name": "@chunk/sdk-internal",
+  "private": true,
   "version": "0.1.0",
-  "description": "Chunk application declarations and function SDK scaffold",
+  "description": "Embedded TypeScript SDK sources and internal tests",
   "license": "FSL-1.1-MIT",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs"

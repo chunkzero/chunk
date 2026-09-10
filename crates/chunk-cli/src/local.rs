@@ -80,6 +80,9 @@ fn build(options: &Options) -> io::Result<(Project, Artifact)> {
     let directory = file
         .parent()
         .ok_or_else(|| io::Error::other("project directory missing"))?;
+    if directory.join("server").is_dir() {
+        chunk_build::generate_sdk(directory)?;
+    }
     let distribution = directory.join(&project.gameplay_distribution);
     let module = fs::read_to_string(distribution.join("backend/gameplay-module.txt"))?;
     if module.trim() != project.gameplay_module {

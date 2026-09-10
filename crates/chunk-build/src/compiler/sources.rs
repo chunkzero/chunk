@@ -1,51 +1,11 @@
-use sha2::{Digest, Sha256};
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-const SDK: &[(&str, &str)] = &[
-    ("index.ts", include_str!("../../../../packages/server/src/index.ts")),
-    (
-        "functions.ts",
-        include_str!("../../../../packages/server/src/functions.ts"),
-    ),
-    (
-        "validators.ts",
-        include_str!("../../../../packages/server/src/validators.ts"),
-    ),
-    (
-        "documents.ts",
-        include_str!("../../../../packages/server/src/documents.ts"),
-    ),
-    ("schema.ts", include_str!("../../../../packages/server/src/schema.ts")),
-    ("web.d.ts", include_str!("../../../../packages/server/src/web.d.ts")),
-];
-
 pub(super) struct Source {
     pub path: PathBuf,
     pub namespace: String,
-}
-
-pub(super) fn sdk(output: &Path) -> io::Result<PathBuf> {
-    let mut hash = Sha256::new();
-    for (name, source) in SDK {
-        hash.update(name.as_bytes());
-        hash.update(source.as_bytes());
-    }
-    let directory = output.join(".sdk").join(format!("{:x}", hash.finalize()));
-    fs::create_dir_all(&directory)?;
-    for (name, source) in SDK {
-        let path = directory.join(name);
-        if path.exists() {
-            if super::super::read_limited(&path, 1024 * 1024)? != source.as_bytes() {
-                return Err(io::Error::other("embedded SDK cache was modified"));
-            }
-        } else {
-            fs::write(path, source)?;
-        }
-    }
-    directory.canonicalize()
 }
 
 pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
@@ -97,7 +57,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
             .file_name()
             .into_string()
             .map_err(|_| io::Error::other("source paths must be UTF-8"))?;
-        if ["node_modules", "_generated"].contains(&name.as_str()) {
+        if ["node_modules", "_generated", ".chunk"].contains(&name.as_str()) {
             continue;
         }
         let kind = entry.file_type()?;

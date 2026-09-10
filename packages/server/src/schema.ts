@@ -42,3 +42,6 @@ export function defineSchema<const T extends Record<string, TableDefinition>>(ta
   }))
   return freeze({ tables: { ...tables }, contract })
 }
+
+export { v } from "./validators.ts"
+export type { Validator, OptionalValidator, Shape, Infer, InferObject, Id, PlayerId, SessionId, JsonValue } from "./validators.ts"

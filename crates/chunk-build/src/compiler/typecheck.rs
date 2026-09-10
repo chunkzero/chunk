@@ -6,7 +6,7 @@ use std::{
 };
 const VERSION: &str = "7.0.2";
 
-fn executable() -> io::Result<PathBuf> {
+pub(super) fn executable() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("CHUNK_TYPESCRIPT") {
         return Ok(path.into());
     }
@@ -31,7 +31,7 @@ fn executable() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn check(files: &[Source], sdk: &Path, output: &Path) -> io::Result<()> {
+pub(super) fn check(files: &[Source], output: &Path) -> io::Result<()> {
     let compiler = executable()?;
     let version = Command::new(&compiler).arg("--version").output()?;
     if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != format!("Version {VERSION}") {
@@ -44,7 +44,7 @@ pub(super) fn check(files: &[Source], sdk: &Path, output: &Path) -> io::Result<(
             "compilerOptions": {
                 "target": "ES2023", "module": "ESNext", "moduleResolution": "Bundler",
                 "strict": true, "exactOptionalPropertyTypes": true, "noEmit": true, "allowImportingTsExtensions": true,
-                "paths": { "@chunk/server": [sdk.join("index.ts")] }, "types": [], "lib": ["ES2023"]
+                "types": [], "lib": ["ES2023"]
             },
             "files": files.iter().map(|file| &file.path).collect::<Vec<_>>()
         }))

@@ -77,7 +77,7 @@ implementation remains open; no separate API module exists yet.
 `jvm/proto` is the shared transport binding scaffold. `jvm/build-api` isolates
 build integration from Gradle, and `jvm/gradle-plugin` is currently a no-op plugin.
 
-`packages/server` is the empty `@chunk/server` SDK scaffold; it has no exported API.
+`packages/server` maintains the TypeScript SDK sources embedded in the CLI; projects import the generated SDK through `#chunk` and `#chunk/schema`.
 V1 targets minimal JavaScript plus explicit engine capabilities and pure-JS
 libraries, without ambient Node or browser globals. Start with `deno_core`/V8. Bundling
 will likely use Rolldown; type checking, contract extraction and exact client

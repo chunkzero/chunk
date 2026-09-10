@@ -13,8 +13,10 @@ export interface RawWriter extends RawReader {
   put(table: string, id: string, value: JsonValue): void
   delete(table: string, id: string): void
 }
-export interface QueryContext { readonly caller: JsonValue; readonly db: RawReader }
-export interface MutationContext { readonly caller: JsonValue; readonly db: RawWriter }
+interface RawQueryContext { readonly caller: JsonValue; readonly db: RawReader }
+interface RawMutationContext { readonly caller: JsonValue; readonly db: RawWriter }
+export interface QueryContext<T extends Tables> { readonly caller: JsonValue; readonly db: Reader<T> }
+export interface MutationContext<T extends Tables> { readonly caller: JsonValue; readonly db: Writer<T> }
 export type FunctionKind = "query" | "mutation"
 export type Visibility = "public" | "internal"
 const definition = Symbol.for("@chunk/function")
@@ -22,7 +24,7 @@ const definition = Symbol.for("@chunk/function")
 export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = never, R = unknown> {
   readonly [definition]: true
   readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema }
-  readonly handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: A) => R | Promise<R>
+  readonly handler: (ctx: K extends "query" ? RawQueryContext : RawMutationContext, args: A) => R | Promise<R>
 }
 
 export interface FunctionReference<K extends FunctionKind, A, R> {
@@ -36,7 +38,7 @@ function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
   return <const S extends Shape, R>(options: {
     args: S
     returns: Validator<R>
-    handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
+    handler: (ctx: K extends "query" ? RawQueryContext : RawMutationContext, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
   }): FunctionDefinition<K, InferObject<S>, R> => freeze({
     [definition]: true as const,
     contract: { kind, visibility, arguments: v.object(options.args).schema, result: options.returns.schema },
@@ -58,10 +60,10 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
     return <const S extends Shape, R>(options: {
       args: S
       returns: Validator<R>
-      handler: (ctx: { readonly caller: JsonValue; readonly db: K extends "query" ? Reader<T> : Writer<T> }, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
+      handler: (ctx: K extends "query" ? QueryContext<T> : MutationContext<T>, args: InferObject<S>) => NoInfer<R> | Promise<NoInfer<R>>
     }): FunctionDefinition<K, InferObject<S>, R> => builder(kind, visibility)({
       args: options.args, returns: options.returns,
-      handler: (ctx, args) => options.handler({ caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") as K extends "query" ? Reader<T> : Writer<T> }, args),
+      handler: (ctx, args) => options.handler({ caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") } as K extends "query" ? QueryContext<T> : MutationContext<T>, args),
     })
   }
   return freeze({ query: typed("query", "public"), mutation: typed("mutation", "public"), internalQuery: typed("query", "internal"), internalMutation: typed("mutation", "internal") })

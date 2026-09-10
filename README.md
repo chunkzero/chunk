@@ -40,7 +40,7 @@ It is not included in this branch; asset publication remains proposed.
 | --- | --- |
 | `crates/` | Rust proxy, protocol, platform and toolchain crates |
 | `jvm/` | Managed Minestom sessions, backend client, generated transport and example |
-| `packages/server` | Typed `@chunk/server` declarations and document API |
+| `packages/server` | Embedded TypeScript SDK sources and internal tests |
 | `proto/` | Generated lifecycle/backend/control contracts and remaining transport proposals |
 | `examples/local/` | TypeScript backend source and local project configuration |
 | `docs/architecture.md` | Broader platform design proposals |
@@ -68,7 +68,8 @@ feature selection and standalone hosting.
 
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
-- `chunk build PROJECT --output OUTPUT` checks TypeScript and builds backend artifacts.
+- `chunk codegen PROJECT` prepares the schema-aware SDK for editors without services.
+- `chunk build PROJECT --output OUTPUT` generates the SDK, checks TypeScript, and builds backend artifacts.
 - `chunk dev` (`chunk local`) runs the development stack with embedded services and child JVMs.
 - `chunk players` operates on local players.
 - `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use

@@ -18,6 +18,16 @@ Use `/coin` to commit a mutation; chat and the action bar reflect subscriptions.
 A join explicitly reads saved coins and increments visits. Nothing saves world
 simulation state across JVM shutdown.
 
+For editor setup without starting services, run:
+
+```sh
+cargo run -p chunk-cli -- codegen examples/local
+```
+
+This materializes the ignored SDK under `examples/local/.chunk/`. Application
+modules import builders and named types from `#chunk`; schema modules use
+`#chunk/schema`. Both resolve through `examples/local/package.json`.
+
 ## Moves and drain
 
 The player's UUID appears beside `player=` in `.chunk/local/edge.log`. In another
@@ -71,7 +81,10 @@ Standalone app manifests and annotation-driven module discovery remain deferred.
 
 Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
 bundle and project metadata. Content changes produce a new deployment; existing
-artifacts are verified before reuse. Stop and rerun after editing the example.
+artifacts are verified before reuse. `chunk dev` refreshes the editor SDK at startup
+but publishes the already-built distribution; it does not watch or rebuild source.
+Run `just local` again after editing to rebuild the distribution and restart.
+Schema edits update editor types directly without a generation watch loop.
 Backend data stays under `.chunk/local/backend`; placement state is separate for
 each deployment. This runner does not implement overlapping deployment rollouts.
 

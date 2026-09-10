@@ -24,6 +24,11 @@ enum Command {
         #[arg(long, default_value = ".chunk/build")]
         output: PathBuf,
     },
+    /// Generate the schema-aware TypeScript SDK for your editor.
+    Codegen {
+        #[arg(default_value = ".")]
+        project: PathBuf,
+    },
     /// Upload assets (coming soon).
     Upload { artifact: PathBuf },
     /// Manage authentication.
@@ -70,6 +75,12 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
+        Command::Codegen { project } => tokio::task::spawn_blocking(move || {
+            chunk_build::generate_sdk(&project)?;
+            cliclack::log::success(format!("Generated SDK → {}", project.join(".chunk").display()))
+        })
+        .await
+        .map_err(io::Error::other)?,
         Command::Upload { .. } => platform::unsupported("Asset uploads"),
         Command::Auth(auth) => platform::auth(auth),
         Command::Login(options) => platform::auth(platform::Auth::Login(options)),
@@ -91,5 +102,17 @@ mod tests {
     fn command_structure_is_valid() {
         Cli::command().debug_assert();
         assert!(Cli::try_parse_from(["chunk", "auth", "login", "--cloud", "--url", "https://example.com"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn codegen_sets_up_editors_without_a_distribution_or_services() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        std::fs::write(project.path().join("server/schema/index.ts"), "unfinished schema").unwrap();
+        let cli = Cli::try_parse_from(["chunk", "codegen", project.path().to_str().unwrap()]).unwrap();
+        run(cli).await.unwrap();
+        assert!(project.path().join(".chunk/generated/index.ts").is_file());
+        assert!(!project.path().join(".chunk/build").exists());
+        assert!(!project.path().join(".chunk/local").exists());
     }
 }

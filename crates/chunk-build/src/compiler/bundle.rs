@@ -12,14 +12,13 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fs, io,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
 const ENTRY: &str = "\0chunk-entry";
 
 #[derive(Debug)]
 struct Boundary {
-    sdk: PathBuf,
     entry: Option<String>,
     exports: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
@@ -59,11 +58,6 @@ impl Plugin for Boundary {
             let source = args.specifier;
             if source == ENTRY {
                 return Ok(Some(HookResolveIdOutput::from_id(ENTRY)));
-            }
-            if source == "@chunk/server" {
-                return Ok(Some(HookResolveIdOutput::from_id(
-                    self.sdk.join("index.ts").to_string_lossy().as_ref(),
-                )));
             }
             let scheme = source
                 .split_once(':')
@@ -123,7 +117,6 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
                 .collect(),
         ),
         vec![Arc::new(Boundary {
-            sdk: sdk.into(),
             entry: None,
             exports: discovered_exports.clone(),
         })],
@@ -151,7 +144,6 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
     let mut bundler = Bundler::with_plugins(
         config,
         vec![Arc::new(Boundary {
-            sdk: sdk.into(),
             entry: Some(source),
             exports: Arc::default(),
         })],
@@ -163,10 +155,10 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
     if let Some(warning) = result.warnings.first() {
         return Err(error(warning));
     }
-    write_output(&result.assets, root, output, sdk)
+    write_output(&result.assets, root, output)
 }
 
-fn write_output(assets: &[Output], root: &Path, output: &Path, sdk: &Path) -> io::Result<()> {
+fn write_output(assets: &[Output], root: &Path, output: &Path) -> io::Result<()> {
     let chunks: Vec<_> = assets
         .iter()
         .filter_map(|asset| {
@@ -193,9 +185,7 @@ fn write_output(assets: &[Output], root: &Path, output: &Path, sdk: &Path) -> io
         for source in sources {
             if let Some(name) = source.as_str() {
                 let path = output.join(name).canonicalize().unwrap_or_else(|_| output.join(name));
-                let relative = if let Ok(relative) = path.strip_prefix(sdk) {
-                    format!("@chunk/server/{}", relative.to_string_lossy())
-                } else if let Ok(relative) = path.strip_prefix(root) {
+                let relative = if let Ok(relative) = path.strip_prefix(root) {
                     relative.to_string_lossy().into_owned()
                 } else {
                     name.into()
@@ -219,7 +209,7 @@ fn entry_source(
     let mut source = format!(
         "import schema from {};\nimport {{ isFunction }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
-        quote(sdk.join("index.ts").to_string_lossy())
+        quote(sdk.join("functions.ts").to_string_lossy())
     );
     let mut metadata = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
