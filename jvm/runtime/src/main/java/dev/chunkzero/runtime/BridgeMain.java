@@ -8,12 +8,10 @@ import chunk.v1.Supervision.SessionCommand;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import java.net.InetSocketAddress;
 import java.util.LinkedHashMap;
-import java.util.ServiceLoader;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Supplier;
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.timer.TaskSchedule;
 
@@ -45,16 +43,19 @@ public final class BridgeMain {
         var shutdown = new CountDownLatch(1);
         var ticks = new AtomicLong();
         var tickExecutor = new TickExecutor();
-        var backend = SessionBackend.fromEnvironment(deployment, environment);
-        var factories = new LinkedHashMap<String, Supplier<Session>>();
-        factories.put("bridge", FlatSession::new);
-        for (var provider : ServiceLoader.load(SessionProvider.class)) {
-            provider.sessions().forEach((name, factory) -> {
-                if (factories.putIfAbsent(name, factory) != null) {
-                    throw new IllegalArgumentException("Duplicate session type: " + name);
+        var factories = new LinkedHashMap<String, SessionRegistration>();
+        try {
+            factories.putAll(AppRegistry.load(Thread.currentThread().getContextClassLoader()));
+            if (environment.bootstrapSession()) {
+                if (factories.putIfAbsent("bridge", new SessionRegistration("bridge", FlatSession::new)) != null) {
+                    throw new IllegalArgumentException("Bootstrap fixture conflicts with app bridge");
                 }
-            });
+            }
+        } catch (Exception | LinkageError error) {
+            process.stop();
+            throw error;
         }
+        var backend = SessionBackend.fromEnvironment(deployment, environment);
         var sessions = new SessionManager(tickExecutor, factories, backend == null ? null : backend::client);
         var gameplay = new GameplayService(deployment, identity.getGeneration(), sessions, System::nanoTime, identity.getRuntimeId());
         var server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", supervisor == null ? 25566 : 0))

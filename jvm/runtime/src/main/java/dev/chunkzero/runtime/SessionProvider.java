@@ -1,9 +1,7 @@
 package dev.chunkzero.runtime;
 
-import java.util.Map;
-import java.util.function.Supplier;
-
-/** Application JARs register a provider with Java's ServiceLoader. Factories create fresh session state. */
+/** One app-owned service provider creates fresh session state for each instance of that app. */
+@FunctionalInterface
 public interface SessionProvider {
-    Map<String, Supplier<Session>> sessions();
+    Session create();
 }
