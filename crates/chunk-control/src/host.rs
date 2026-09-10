@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Stdio,
@@ -27,7 +26,7 @@ pub struct MachineProfile {
 #[tonic::async_trait]
 pub trait Host: Send + Sync {
     async fn ensure(&self, id: &str, profile: &str) -> Result<RuntimeConnection>;
-    /// Idempotently kills only this runtime and its descendants, independently of runtime control.
+    /// Idempotently stops only this runtime and its descendants.
     /// Success guarantees `stopped(id)`.
     async fn terminate(&self, id: &str) -> Result<()>;
     /// True requires affirmative evidence of complete runtime/JVM shutdown.
@@ -74,30 +73,22 @@ impl Host for ProcessHost {
                 let mut command = Command::new(&self.program);
                 #[cfg(unix)]
                 command.process_group(0);
+                let backend_path = self.directory.join(format!("{id}.backend"));
                 if let Some(backend) = &self.backend {
-                    command
-                        .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
-                        .env("CHUNK_BACKEND_TOKEN", &backend.token);
+                    private_file(&backend_path)?.write_all(&serde_json::to_vec(backend)?)?;
+                    command.env("CHUNK_BACKEND_FILE", &backend_path);
+                } else {
+                    command.env_remove("CHUNK_BACKEND_FILE");
                 }
                 let child = command
-                    .arg("runtime")
-                    .arg("--managed")
-                    .arg("--connection")
-                    .arg(&record)
-                    .arg("--distribution")
-                    .arg(&self.distribution)
-                    .arg("--java")
-                    .arg(&self.java)
-                    .arg("--environment")
-                    .arg(&self.deployment.environment)
-                    .arg("--deployment")
-                    .arg(&self.deployment.deployment)
-                    .arg("--machine-profile")
-                    .arg(profile)
-                    .arg("--artifact-digest")
-                    .arg(&self.artifact_digest)
-                    .arg("--memory-mib")
-                    .arg(size.memory_mib.to_string())
+                    .env("CHUNK_CONNECTION", &record)
+                    .env("CHUNK_DISTRIBUTION", &self.distribution)
+                    .env("CHUNK_JAVA", &self.java)
+                    .env("CHUNK_ENVIRONMENT", &self.deployment.environment)
+                    .env("CHUNK_DEPLOYMENT", &self.deployment.deployment)
+                    .env("CHUNK_MACHINE_PROFILE", profile)
+                    .env("CHUNK_ARTIFACT_DIGEST", &self.artifact_digest)
+                    .env("CHUNK_MEMORY_MIB", size.memory_mib.to_string())
                     .stdin(Stdio::null())
                     .stdout(Stdio::from(log.try_clone()?))
                     .stderr(Stdio::from(log))
@@ -156,66 +147,110 @@ impl Host for ProcessHost {
     }
 }
 
-/// Terminates a runtime and its descendants using its persisted supervisor PID.
+/// Requests authenticated termination and requires an exit acknowledgment.
+/// Persisted numeric PIDs are diagnostic data, never authority to signal a process.
 /// # Errors
-/// Returns an error for invalid IDs or PIDs, filesystem failures, or unsupported platforms.
+/// Reports invalid identity, unavailable runtime control or unconfirmed shutdown.
 pub async fn terminate_runtime(directory: &Path, id: &str) -> Result<()> {
     uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("invalid host ID"))?;
-    let exit = directory.join(id).with_extension("exit");
+    let path = directory.join(id).with_extension("json");
+    let exit = path.with_extension("exit");
     if exit.is_file() {
         return Ok(());
     }
-    #[cfg(unix)]
-    {
-        let pid = std::fs::read_to_string(directory.join(id).with_extension("pid"))?
-            .parse::<u32>()
-            .ok()
-            .filter(|pid| (2..=i32::MAX as u32).contains(pid))
-            .ok_or(Error::Invalid("invalid supervisor PID"))?;
-        signal_group(pid, "-TERM").await;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if exit.is_file() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-        signal_group(pid, "-KILL").await;
-        match private_file(&exit) {
-            Ok(mut file) => file.write_all(b"terminated")?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
+    match chunk_service::read::<RuntimeConnection>(&path) {
+        Ok(connection) => request_stop(connection).await?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    #[cfg(not(unix))]
-    {
-        let _ = exit;
-        Err(Error::Unresolved("host termination requires Unix process groups"))
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !exit.is_file() {
+        if Instant::now() >= deadline {
+            return Err(Error::Unresolved("runtime shutdown not confirmed"));
+        }
+        sleep(Duration::from_millis(25)).await;
     }
+    Ok(())
+}
+
+async fn request_stop(connection: RuntimeConnection) -> Result<()> {
+    let address: std::net::SocketAddr = connection
+        .endpoint
+        .strip_prefix("http://")
+        .ok_or(Error::Invalid("runtime URL"))?
+        .parse()
+        .map_err(|_| Error::Invalid("runtime address"))?;
+    if !address.ip().is_loopback() {
+        return Err(Error::Invalid("runtime requires loopback"));
+    }
+    let mut request = tonic::Request::new(connection.identity);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", connection.token)
+            .parse()
+            .map_err(|_| Error::Invalid("runtime token"))?,
+    );
+    let Ok(channel) = tonic::transport::Channel::from_shared(connection.endpoint)
+        .map_err(|_| Error::Invalid("runtime URL"))?
+        .connect_timeout(Duration::from_secs(3))
+        .connect()
+        .await
+    else {
+        // A self-stopping runtime may close transport before publishing its exit.
+        return Ok(());
+    };
+    let mut client = chunk_proto::v1::process_control_client::ProcessControlClient::new(channel);
+    let rpc = client.stop_process(request);
+    // The server may close its transport while completing shutdown.
+    let _ = tokio::time::timeout(Duration::from_secs(10), rpc).await;
+    Ok(())
 }
 
 #[cfg(unix)]
 async fn signal_group(pid: u32, signal: &str) {
     let _ = Command::new("kill")
         .args([signal, "--", &format!("-{pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .status()
         .await;
 }
 
-pub(crate) fn private_file(path: &Path) -> io::Result<std::fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+pub(crate) use chunk_service::private_file;
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn stale_pid_without_runtime_authority_never_records_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            directory.path().join(format!("{id}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(super::terminate_runtime(directory.path(), &id).await.is_err());
+        assert!(!directory.path().join(format!("{id}.exit")).exists());
     }
-    options.open(path)
+    #[tokio::test]
+    async fn unavailable_runtime_waits_for_confirmed_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        for has_connection in [false, true] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let exit = directory.path().join(format!("{id}.exit"));
+            if has_connection {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let connection = chunk_runtime::RuntimeConnection {
+                    endpoint: format!("http://{}", listener.local_addr().unwrap()),
+                    token: "test".into(),
+                    identity: chunk_proto::v1::ProcessIdentity::default(),
+                };
+                std::fs::write(exit.with_extension("json"), serde_json::to_vec(&connection).unwrap()).unwrap();
+            }
+            let acknowledge = async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                std::fs::write(&exit, b"stopped").unwrap();
+            };
+            let (result, ()) = tokio::join!(super::terminate_runtime(directory.path(), &id), acknowledge);
+            result.unwrap();
+        }
+    }
 }

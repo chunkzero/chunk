@@ -103,7 +103,7 @@ fn generated_typescript_references_validate_the_cross_language_fixtures() {
     fs::write(output.path().join("tsconfig.json"), serde_json::to_vec(&serde_json::json!({"compilerOptions":{"strict":true,"noEmit":true,"target":"ES2023","module":"ESNext","moduleResolution":"Bundler","allowImportingTsExtensions":true,"exactOptionalPropertyTypes":true,"lib":["ES2023"],"types":[]},"files":["api.ts","types.ts"]})).unwrap()).unwrap();
     assert!(
         std::process::Command::new("node")
-            .arg(root.join("packages/compiler/node_modules/typescript/bin/tsc"))
+            .arg(root.join("node_modules/typescript/bin/tsc"))
             .arg("--project")
             .arg(output.path().join("tsconfig.json"))
             .status()

@@ -1,11 +1,18 @@
 # Local control
 
-`chunk control --java /path/to/java25/bin/java` starts the loopback ownership and
-placement service on 25567. Build `cargo build -p chunk` and
-`./gradlew :jvm:runtime:installDist` first. The fixture declares the `bridge` session
-type with 16 slots, a 512 MiB `local` profile, four sessions per process and four
-processes. Application configuration is supplied through `Config`; the project
-runner assembles it in a later integration change.
+`chunk-control` is an environment-configured service; `chunk_control::server::run`
+is its embeddable entry point. Build with `cargo build -p chunk-control -p chunk-runtime`.
+Required environment variables:
+
+- `CHUNK_STATE`, `CHUNK_CONNECTION`: durable state directory and discovery record.
+- `CHUNK_CONFIG`: JSON `chunk_control::Config` with deployment, profiles and session types.
+- `CHUNK_RUNTIME_EXECUTABLE`: path to the standalone `chunk-runtime` executable.
+- `CHUNK_DISTRIBUTION`, `CHUNK_JAVA`: gameplay distribution and Java 25 executable.
+- Optional `CHUNK_BACKEND_FILE` and `CHUNK_BIND` (default `127.0.0.1:25567`).
+
+`chunk local` constructs the same typed configuration and uses `EmbeddedHost` to
+own Rust supervisors in-process. Standalone control uses `ProcessHost` to launch
+runtime executables.
 
 The private `.chunk/control.json` connection file authorizes gRPC calls. `Claim`
 accepts authenticated identity, proxy incarnation, connection identity and a session
@@ -34,7 +41,9 @@ Runtime processes outlive abrupt control-process failure. Restart with the same
 state directory and configuration to reconcile surviving player streams. Durable
 launch markers prevent duplicate hosts when launch outcome is uncertain. Missing
 connection files are unresolved, not proof that a process stopped; the runtime
-writes a separate exit marker only after bounded JVM cleanup. Graceful control
+writes a separate exit marker only after confirmed JVM cleanup. Persisted PIDs
+are diagnostic data; recovery never signals an unverified PID. If authenticated
+runtime shutdown is unavailable, termination reports an unresolved outcome. Graceful control
 shutdown stops its runtime processes. Process/JVM failure loses transient worlds;
 no packets or worlds are replayed.
 

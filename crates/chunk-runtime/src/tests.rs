@@ -30,13 +30,13 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::{
-    DeploymentRef, Launch, ManagedJvm, Phase, Status as RuntimeStatus,
+    DeploymentRef, Phase, Status as RuntimeStatus,
     service::{Service, Shared},
     wire,
 };
 
 #[derive(Clone)]
-struct FakeJvm {
+pub(super) struct FakeJvm {
     identity: ProcessIdentity,
     endpoint: String,
     unavailable: Arc<AtomicBool>,
@@ -117,7 +117,7 @@ fn request<T>(body: T, child: bool) -> Request<T> {
     request
 }
 
-async fn fixture(
+pub(super) async fn fixture(
     ingress: &TcpListener,
 ) -> (
     Arc<Shared>,
@@ -338,12 +338,13 @@ async fn scoped_registration_and_single_use_relay_survive_lifecycle_reconciliati
     task.await.unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::test]
 async fn startup_deadline_and_exited_child_leave_no_owned_process() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("child.log");
-    let launch = |arguments| Launch {
+    let launch = |arguments| crate::Launch {
+        backend: None,
         bootstrap_session: false,
         program: "/bin/sh".into(),
         arguments,
@@ -357,16 +358,24 @@ async fn startup_deadline_and_exited_child_leave_no_owned_process() {
         startup_timeout: Duration::from_millis(100),
     };
     assert!(
-        ManagedJvm::launch(launch(vec!["-c".into(), "printf '%s' \"$$\"; exec sleep 60".into()]))
+        crate::ManagedJvm::launch(launch(vec!["-c".into(), "printf '%s' \"$$\"; exec sleep 60".into()]))
             .await
-            .is_err()
+            .is_err_and(|error| matches!(error, crate::LaunchError::Stopped(_)))
     );
     let pid = std::fs::read_to_string(&log).unwrap();
-    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     assert!(
-        ManagedJvm::launch(launch(vec!["-c".into(), "exit 7".into()]))
+        !std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        crate::ManagedJvm::launch(launch(vec!["-c".into(), "exit 7".into()]))
             .await
-            .is_err()
+            .is_err_and(|error| matches!(error, crate::LaunchError::Stopped(_)))
     );
 }
 
@@ -391,6 +400,7 @@ async fn stalled_ticks_fail_health_and_stop_the_owned_child() {
         crate::launch::monitor(shared.clone(), child, listener, ingress),
     )
     .await
+    .unwrap()
     .unwrap();
     assert_eq!(shared.status.borrow().phase, Phase::Failed);
     assert_eq!(

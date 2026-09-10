@@ -8,13 +8,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+chunk-service = { path = "../chunk-service" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-protocol = { path = "../chunk-protocol" }
 chunk-proto = { path = "../chunk-proto" }
 prost = "0.14.4"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt", "macros", "io-util", "net", "process", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "process", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"
 tonic = "0.14.6"

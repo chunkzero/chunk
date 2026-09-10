@@ -151,3 +151,8 @@ fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
+
+pub mod server;
+
+mod embedded;
+pub use embedded::EmbeddedHost;

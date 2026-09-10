@@ -35,29 +35,21 @@ new reservations on the selected runtime, moves its players, and shuts it down
 when empty or at the deadline. Operator commands print an operation ID; supply
 `--operation <id>` when retrying an uncertain command.
 
-## Backend restart and recovery
+## Lifecycle
 
-While the runner is active, restart only its backend:
+Backend, control and edge run as tasks in one development process. The backend
+retains its dedicated JavaScript and storage threads. Runtime supervisors are
+embedded; each gameplay JVM is still a child process.
 
-```sh
-kill -TERM "$(cat .chunk/local/backend.pid)"
-```
+Ctrl-C closes player connections, drains control operations, stops owned JVMs,
+and joins backend workers. An unexpected service exit stops the local stack;
+there is no independent process restart in this mode. Use the standalone service
+binaries when testing process failure and recovery. An abrupt dev-process crash
+can leave an unresolved JVM launch; the next run refuses to claim ownership from
+a stale PID. Resolve the leftover JVM before reusing that state.
 
-Gameplay continues. Subscriptions report reconnecting and then resume with a fresh
-snapshot. The runner starts the same deployment with the same SQLite database,
-endpoint and credential after a short delay. Coins and visits survive; disconnect
-and rejoin to verify a fresh login reads them.
-
-An abruptly crashed control process is also restarted against its existing durable
-authority, preserving surviving runtime connections. Repeated service failures are
-bounded and reported. An edge crash loses public sockets; a runtime/JVM crash loses
-that gameplay delivery. The proxy sends a bounded disconnect and a subsequent login
-can provision replacement capacity. World state and player TCP packets are not replayed.
-
-Ctrl-C stops the proxy, control, runtimes/JVMs and backend. The runner also attempts
-runtime cleanup from private connection records if control has already failed.
-An unresolved shutdown is reported as an error. Tailscale and other applications
-are unaffected.
+Service logs go to the console and JVM logs stay in the runtime state directory.
+An unresolved shutdown is reported as an error.
 
 ## Files and configuration
 
@@ -80,12 +72,10 @@ Standalone app manifests and annotation-driven module discovery remain deferred.
 Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
 bundle and project metadata. Content changes produce a new deployment; existing
 artifacts are verified before reuse. Stop and rerun after editing the example.
-The platform executable is also pinned under `.chunk/local/platform`, so rebuilding
-the CLI cannot change or invalidate child launches during a running session.
 Backend data stays under `.chunk/local/backend`; placement state is separate for
 each deployment. This runner does not implement overlapping deployment rollouts.
 
-Logs and live service PID files are under `.chunk/local`. Connection records contain
+Connection records under `.chunk/local` contain
 private credentials and must not be shared. Backend/control use loopback ports
 25568/25567; the public listener uses 25565. The runner refuses occupied ports or a
 second owner of its state directory. `just local --state <directory> --bind <address>

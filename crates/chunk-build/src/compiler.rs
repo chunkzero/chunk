@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path, process::Command};
+mod bundle;
+mod sources;
+mod typecheck;
+use std::{fs, io, path::Path};
 
 use chunk_contract::Deployment;
 use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Key, Limits, Mode, ReadHost};
@@ -27,16 +30,13 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     fs::create_dir_all(output)?;
     let output = output.canonicalize()?;
     let staging = tempfile::Builder::new().prefix(".compile-").tempdir_in(&output)?;
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/compiler/bundle.mjs");
-    let result = Command::new("node")
-        .env("NO_COLOR", "1")
-        .arg(script)
-        .arg(&project)
-        .arg(staging.path())
-        .output()?;
-    if !result.status.success() {
-        return Err(io::Error::other(String::from_utf8_lossy(&result.stderr).into_owned()));
-    }
+    let files = sources::discover(&project)?;
+    let sdk = sources::sdk(&output)?;
+    typecheck::check(&files, &sdk, staging.path())?;
+    // This synchronous compiler entry point runs on a blocking thread in async callers.
+    let executor = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    executor.block_on(bundle::build(&project, staging.path(), &sdk, &files))?;
+    drop(executor);
     let source = String::from_utf8(super::read_limited(
         &staging.path().join("source.mjs"),
         4 * 1024 * 1024,
@@ -164,12 +164,14 @@ mod tests {
             .unwrap();
         assert_eq!(result.value, "3");
         drop(engine);
+        let source_map = fs::read(output.path().join("source.mjs.map")).unwrap();
         compile(project.path(), output.path()).unwrap();
         assert_eq!(contract, fs::read(output.path().join("contract.json")).unwrap());
         assert_eq!(source, fs::read_to_string(output.path().join("source.mjs")).unwrap());
+        assert_eq!(source_map, fs::read(output.path().join("source.mjs.map")).unwrap());
         fs::write(
             project.path().join("server/bad.ts"),
-            "import 'node:fs'; export const value=1;",
+            "// @ts-ignore\nimport 'node:fs'; export const value=1;",
         )
         .unwrap();
         assert!(compile(project.path(), output.path()).is_err());

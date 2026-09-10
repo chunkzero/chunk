@@ -20,6 +20,7 @@ pub(super) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub(super) struct Platform {
     pub target: PlatformTarget,
+    pub cleanup: tokio_util::task::TaskTracker,
     pub proxy_id: String,
     pub control: LocalControlClient<Channel>,
     backend: BackendClient<Channel>,
@@ -34,6 +35,7 @@ impl Platform {
                 .max_decoding_message_size(8 * 1024 * 1024),
             backend: BackendClient::new(channel(&target.backend.endpoint)?),
             target,
+            cleanup: tokio_util::task::TaskTracker::new(),
             proxy_id: uuid::Uuid::new_v4().to_string(),
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),

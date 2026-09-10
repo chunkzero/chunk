@@ -1,6 +1,6 @@
 [package]
-name = "chunk"
-description = "The chunk command: toolchain and platform processes in one binary"
+name = "chunk-cli"
+description = "Developer CLI for application builds, platform operations and local development"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,27 +16,26 @@ name = "chunk"
 path = "src/main.rs"
 
 [dependencies]
+chunk-service = { path = "../chunk-service" }
 chunk-backend = { path = "../chunk-backend" }
 chunk-contract = { path = "../chunk-contract" }
-chunk-store = { path = "../chunk-store" }
 chunk-build = { path = "../chunk-build" }
 chunk-control = { path = "../chunk-control" }
 chunk-edge = { path = "../chunk-edge", default-features = false }
 chunk-runtime = { path = "../chunk-runtime" }
 chunk-proto = { path = "../chunk-proto" }
 clap = { version = "4", features = ["derive", "env"] }
+url = { version = "2", features = ["serde"] }
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"
 tonic = "0.14.6"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
 tempfile = "3"
+cliclack = "0.5.6"
 
 [lints]
 workspace = true

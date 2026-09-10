@@ -11,6 +11,8 @@ use crate::{Backend, Call, Error};
 pub struct Service {
     backend: Backend,
     credential: String,
+    workers: tokio_util::task::TaskTracker,
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl Service {
@@ -26,6 +28,8 @@ impl Service {
         }
         Ok(Self {
             backend,
+            workers: tokio_util::task::TaskTracker::new(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             credential: format!("Bearer {credential}"),
         })
     }
@@ -35,6 +39,13 @@ impl Service {
         backend_server::BackendServer::new(self)
             .max_decoding_message_size(2 * 1024 * 1024)
             .max_encoding_message_size(2 * 1024 * 1024)
+    }
+
+    pub(crate) fn workers(&self) -> tokio_util::task::TaskTracker {
+        self.workers.clone()
+    }
+    pub(crate) fn shutdown(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
@@ -136,10 +147,12 @@ impl backend_server::Backend for Service {
             .await
             .map_err(|error| status(&error))?;
         let (sender, receiver) = mpsc::channel(1);
-        tokio::spawn(async move {
+        let shutdown = self.shutdown.clone();
+        self.workers.spawn(async move {
             loop {
                 let result = tokio::select! {
                     () = sender.closed() => break,
+                    () = shutdown.cancelled() => break,
                     result = group.next() => result,
                 };
                 let result = result
@@ -160,7 +173,8 @@ impl backend_server::Backend for Service {
                     })
                     .map_err(|error| status(&error));
                 let failed = result.is_err();
-                if sender.send(result).await.is_err() || failed {
+                let sent = tokio::select! { () = shutdown.cancelled() => break, sent = sender.send(result) => sent };
+                if sent.is_err() || failed {
                     break;
                 }
             }

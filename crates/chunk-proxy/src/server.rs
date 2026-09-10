@@ -194,6 +194,10 @@ impl Proxy {
         };
         drop(self.listener);
         connections.shutdown().await;
+        if let Some(platform) = self.platform {
+            platform.cleanup.close();
+            platform.cleanup.wait().await;
+        }
         result
     }
 }

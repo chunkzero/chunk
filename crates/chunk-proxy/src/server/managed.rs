@@ -30,7 +30,7 @@ impl Drop for ClaimGuard {
         }
         let platform = self.platform.clone();
         let claim = self.claim.clone();
-        tokio::spawn(async move {
+        self.platform.cleanup.spawn(async move {
             for attempt in 0..2 {
                 let Ok(message) = request(claim.clone(), &platform.target.control.token) else {
                     return;
