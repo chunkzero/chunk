@@ -3,7 +3,7 @@
 mod program;
 pub use program::pin_program;
 mod codegen;
-pub use codegen::generate;
+pub use codegen::{GenerationTarget, generate};
 mod compiler;
 pub use compiler::compile;
 pub mod project;

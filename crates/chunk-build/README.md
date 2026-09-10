@@ -59,3 +59,46 @@ including domains and redundant app names, are rejected.
 
 The backend compiler can discover apps without a root `chunk.toml`. The local
 runner still consumes `project.json` and its existing distribution inputs.
+
+## Client generation
+
+An installed `chunk` CLI can compile the backend and generate one selected client
+language without invoking Gradle:
+
+```sh
+chunk gen . --target java --java-package com.example.backend
+chunk gen . --target typescript
+```
+
+Generation validates the same `chunk.toml` and discovered app metadata as
+`chunk inspect`. Java output defaults to `.chunk/generated/java`, containing
+`java/<package>/BackendTypes.java` and `java-client/<package>/BackendClient.java`.
+Add both source roots to a Java consumer; the Java package defaults to
+`dev.chunkzero.generated`. TypeScript output defaults to
+`.chunk/generated/typescript/api.ts`, retaining nested references and document
+validators from the compiled contract. Java generation does not emit TypeScript,
+and TypeScript generation does not require a Java package or JVM tools.
+
+`--output PATH` overrides the selected client directory. `--backend-output PATH`
+overrides the compiler output, whose default is `.chunk/build/backend`. Defaults
+are relative to the project; explicit paths are relative to the working directory.
+The two output directories must be separate, with neither containing the other.
+Compiler output contains the required executable `source.mjs`, source map,
+`contract.json`, and internal `.sdk` cache. Client directories contain only the
+selected sources and `.chunk-codegen.json`, the generator's ownership record.
+Neither ownership records nor `.sdk` caches are release artifacts.
+
+Regeneration removes stale files recorded in the destination's ownership record,
+including old Java package paths. It preserves other files and rejects collisions
+with handwritten files or modifications to previously generated files. Keep the
+ownership record alongside generated sources; moving an edited generated file
+aside allows regeneration. Outputs from older generators without an ownership
+record should use a fresh destination. Each destination belongs to one target;
+selecting a different target there replaces its previously generated files.
+
+Repository fixtures can generate directly from an existing contract:
+
+```sh
+cargo run -p chunk-build --bin chunk-codegen -- java CONTRACT OUTPUT JAVA_PACKAGE
+cargo run -p chunk-build --bin chunk-codegen -- typescript CONTRACT OUTPUT
+```

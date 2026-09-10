@@ -55,7 +55,6 @@ abstract class GenerateBackend
                     output.resolve("backend"),
                 )
             }
-            check(output.resolve("client").deleteRecursively()) { "Could not remove stale generated clients" }
             exec.exec {
                 workingDir(platformDirectory.get().asFile)
                 commandLine(
@@ -67,6 +66,7 @@ abstract class GenerateBackend
                     "--bin",
                     "chunk-codegen",
                     "--",
+                    "java",
                     output.resolve("backend/contract.json"),
                     output.resolve("client"),
                     packageName.get(),

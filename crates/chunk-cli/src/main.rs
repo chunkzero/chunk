@@ -1,6 +1,7 @@
 //! Developer commands for the chunk platform.
 use clap::{Parser, Subcommand};
 use std::{io, path::PathBuf, process::ExitCode};
+mod generation;
 mod local;
 mod platform;
 mod players;
@@ -24,6 +25,8 @@ enum Command {
         #[arg(long, default_value = ".chunk/build")]
         output: PathBuf,
     },
+    /// Compile the backend and generate explicitly selected client sources.
+    Gen(generation::Options),
     /// Inspect project and app manifests as JSON without building.
     Inspect {
         #[arg(default_value = ".")]
@@ -82,6 +85,9 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
+        Command::Gen(options) => tokio::task::spawn_blocking(move || generation::run(options))
+            .await
+            .map_err(io::Error::other)?,
         Command::Inspect { project } => {
             let metadata = chunk_build::project::inspect(&project)?;
             let stdout = io::stdout();
@@ -109,6 +115,10 @@ mod tests {
     #[test]
     fn command_structure_is_valid() {
         Cli::command().debug_assert();
+        assert!(Cli::try_parse_from(["chunk", "gen"]).is_err());
+        assert!(Cli::try_parse_from(["chunk", "gen", "--target", "java"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());
+        assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_err());
         assert!(Cli::try_parse_from(["chunk", "auth", "login", "--cloud", "--url", "https://example.com"]).is_err());
     }
 }
