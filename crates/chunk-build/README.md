@@ -79,6 +79,12 @@ Add both source roots to a Java consumer; the Java package defaults to
 validators from the compiled contract. Java generation does not emit TypeScript,
 and TypeScript generation does not require a Java package or JVM tools.
 
+Java callers use grouped methods such as `playerBackend.shared().players().stats()`
+and `coin(operation)`, plus closeable `watchStats(observer)` subscriptions carrying
+the full watch state. Empty-object arguments have no-argument conveniences;
+typed overloads and generic references remain available. Public models follow the
+same hierarchy, for example `BackendTypes.Shared.Players.StatsResult`.
+
 `--output PATH` overrides the selected client directory. `--backend-output PATH`
 overrides the compiler output, whose default is `.chunk/build/backend`. Defaults
 are relative to the project; explicit paths are relative to the working directory.

@@ -8,12 +8,25 @@ children; closing `forPlayer(...)` cancels only that child.
 
 `chunk-codegen` also writes `java-client/<package>/BackendClient.java`. Add `java`
 and `java-client` output directories to the application's generated source set.
-Generated `call$<path>` methods accept records and return `CompletableFuture<R>`.
+Generated clients follow the backend namespace:
+
+```java
+var playerBackend = new BackendClient(playerSession);
+playerBackend.shared().players().stats();
+playerBackend.shared().players().coin(operation);
+playerBackend.shared().players().watchStats(observer);
+```
+
+Calls return `CompletableFuture<R>`. Object arguments use records such as
+`BackendTypes.Shared.Players.StatsArgs`; empty objects also have argument-free
+overloads that send `{}`. Scalar and list results remain unwrapped.
 Mutation methods require an `OperationId`: retain it with the request and reuse it
 after an unknown outcome. Unary calls do not automatically retry. Cancelling the
 future cancels the RPC; losing its reply does not prove the mutation failed.
 
-Generated query `watch$<path>` methods return a closeable subscription. For an
+Generated query `watchStats`-style methods return a closeable subscription and
+deliver the complete `WatchState<R>`. Typed references such as
+`BackendTypes.Shared.Players.stats` remain available for generic calls. For an
 atomic heterogeneous group, bind references with `session.bind`, then use
 `watchGroup` and retrieve each typed result with its original bound query object.
 Per-query errors are values. Transport interruption retains the last snapshot

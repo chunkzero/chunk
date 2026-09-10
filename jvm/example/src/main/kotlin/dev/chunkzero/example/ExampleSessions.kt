@@ -61,8 +61,8 @@ private class ExampleSession(
         scope.coroutines.launch {
             backend
                 .watch(
-                    BackendTypes.`shared$players$stats`,
-                    BackendTypes.`Fn$shared$players$stats$Args`(),
+                    BackendTypes.Shared.Players.stats,
+                    BackendTypes.Shared.Players.StatsArgs(),
                 ).distinctUntilChangedBy { it.stale() to it.snapshot() }
                 .collect { state ->
                     if (players[player] === data && player.isOnline) {
@@ -79,10 +79,10 @@ private class ExampleSession(
                     }
                 }
         }
-        val stats = backend.query(BackendTypes.`shared$players$stats`, BackendTypes.`Fn$shared$players$stats$Args`())
+        val stats = backend.query(BackendTypes.Shared.Players.stats, BackendTypes.Shared.Players.StatsArgs())
         backend.mutate(
-            BackendTypes.`shared$players$join`,
-            BackendTypes.`Fn$shared$players$join$Args`(),
+            BackendTypes.Shared.Players.join,
+            BackendTypes.Shared.Players.JoinArgs(),
             scope.operationId(player, "join"),
         )
         player.sendMessage(Component.text("Welcome to $label. Saved coins: ${stats.coins()}. Use /coin to earn one."))
@@ -97,8 +97,8 @@ private class ExampleSession(
             data.busy = true
             try {
                 data.backend.mutate(
-                    BackendTypes.`shared$players$coin`,
-                    BackendTypes.`Fn$shared$players$coin$Args`(),
+                    BackendTypes.Shared.Players.coin,
+                    BackendTypes.Shared.Players.CoinArgs(),
                     scope.operationId(player, "coin-${data.sequence}"),
                 )
                 data.sequence++

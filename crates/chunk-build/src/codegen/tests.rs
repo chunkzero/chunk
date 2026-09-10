@@ -7,6 +7,43 @@ fn fixture() -> std::path::PathBuf {
 }
 
 #[test]
+fn java_rejects_lexical_collisions_without_writing_partial_sources() {
+    use serde_json::json;
+
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    let mut namespace = original.clone();
+    namespace["functions"]["shared/player_stats/read"] = json!({
+        "kind": "query", "visibility": "public", "export": "snakeCase",
+        "arguments": {"type": "null"}, "result": {"type": "null"}
+    });
+    namespace["functions"]["shared/playerStats/write"] = json!({
+        "kind": "query", "visibility": "public", "export": "camelCase",
+        "arguments": {"type": "null"}, "result": {"type": "null"}
+    });
+    let mut fields = original.clone();
+    fields["functions"]["shared/profile/total"]["arguments"] = json!({
+        "type": "object", "fields": {
+            "class": {"schema": {"type": "string"}},
+            "class_": {"schema": {"type": "string"}}
+        }
+    });
+    let mut watch = original;
+    watch["functions"]["shared/profile/watch_total"] = json!({
+        "kind": "query", "visibility": "public", "export": "watchName",
+        "arguments": {"type": "null"}, "result": {"type": "null"}
+    });
+    for (contract, symbol) in [(namespace, "PlayerStats"), (fields, "class_"), (watch, "watchTotal")] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contract.json");
+        fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+        let output = root.path().join("output");
+        let error = generate(&path, &output, GenerationTarget::Java { package: "example" }).unwrap_err();
+        assert!(error.to_string().contains(&format!("{symbol} collides")), "{error}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
 fn selected_outputs_replace_stale_packages_and_preserve_handwritten_files() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("generated");

@@ -54,11 +54,11 @@ class BackendSessionTest {
     }
     @Test void generatedJavaCallRecoversLostReplyWithoutChangingIdentity() throws Exception {
         var client = new BackendClient(session);
-        var arguments = new BackendTypes.Fn$shared$profile$record$Args(1L, new Id<>("profiles:p1"), List.of(),
-            FieldValue.absent(), new PlayerId("spoof"), new BackendTypes.Fn$shared$profile$record$Args$state.V0("ready"));
+        var arguments = new BackendTypes.Shared.Profile.RecordArgs(1L, new Id<>("profiles:p1"), List.of(),
+            FieldValue.absent(), new PlayerId("spoof"), new BackendTypes.Shared.Profile.RecordArgs.State.V0("ready"));
         var operation = OperationId.create();
-        assertThrows(ExecutionException.class, () -> client.call$shared$profile$record(arguments, operation).get(2, TimeUnit.SECONDS));
-        var result = client.call$shared$profile$record(arguments, operation).get(2, TimeUnit.SECONDS);
+        assertThrows(ExecutionException.class, () -> client.shared().profile().record_(arguments, operation).get(2, TimeUnit.SECONDS));
+        var result = client.shared().profile().record_(arguments, operation).get(2, TimeUnit.SECONDS);
         assertTrue(result.ok()); assertEquals(new SessionId("s1"), result.session());
         assertEquals(1, fixture.saved.size());
         assertEquals(2, fixture.calls.size());
@@ -68,7 +68,35 @@ class BackendSessionTest {
         assertEquals("trusted", Codecs.parse(request.getCallerJson().toStringUtf8()).getAsJsonObject().get("player").getAsString());
         assertEquals("spoof", Codecs.parse(request.getArgumentsJson().toStringUtf8()).getAsJsonObject().get("player").getAsString());
         assertTrue(fixture.deadlineObserved);
-        assertEquals(3L, client.call$shared$profile$read(new BackendTypes.Fn$shared$profile$read$Args(new PlayerId("spoof"))).get(2, TimeUnit.SECONDS));
+        assertEquals(3L, client.shared().profile().read(new BackendTypes.Shared.Profile.ReadArgs(new PlayerId("spoof"))).get(2, TimeUnit.SECONDS));
+    }
+    @Test void emptyArgumentOverloadsRetainTypedPayloadsRetryIdsAndFullWatchState() throws Exception {
+        var profile = new BackendClient(session).shared().profile();
+        assertEquals(3L, profile.total().get(2, TimeUnit.SECONDS));
+        assertEquals("shared/profile/total", fixture.calls.getFirst().getFunction());
+        assertEquals("{}", fixture.calls.getFirst().getArgumentsJson().toStringUtf8());
+
+        var operation = OperationId.create();
+        assertThrows(ExecutionException.class, () -> profile.reward(operation).get(2, TimeUnit.SECONDS));
+        var recovered = profile.reward(new BackendTypes.Shared.Profile.RewardArgs(), operation).get(2, TimeUnit.SECONDS);
+        assertTrue(recovered.ok());
+        assertEquals(fixture.calls.get(1), fixture.calls.get(2));
+        assertEquals("{}", fixture.calls.get(1).getArgumentsJson().toStringUtf8());
+
+        var states = new LinkedBlockingQueue<WatchState<Long>>();
+        try (var watch = profile.watchTotal(states::add)) {
+            assertNotNull(watch);
+            var initial = states.poll(2, TimeUnit.SECONDS); assertNotNull(initial);
+            assertTrue(initial.stale()); assertTrue(initial.snapshot().isEmpty());
+            var fresh = states.poll(2, TimeUnit.SECONDS); assertNotNull(fresh);
+            assertFalse(fresh.stale()); assertTrue(fresh.error().isEmpty());
+            assertEquals(1L, fresh.snapshot().orElseThrow().revision());
+            assertEquals(3L, fresh.snapshot().orElseThrow().result().valueOrThrow());
+            var request = fixture.watchRequests.poll(2, TimeUnit.SECONDS); assertNotNull(request);
+            assertEquals("shared/profile/total", request.getQueries(0).getFunction());
+            assertEquals("{}", request.getQueries(0).getArgumentsJson().toStringUtf8());
+        }
+        assertTrue(fixture.watchCancelled.await(2, TimeUnit.SECONDS));
     }
     @Test void unaryResultWaitsForFinalStatusAndRemainsSessionOwned() throws Exception {
         var reference = new QueryRef<NullValue, Long>("shared/partial", Codecs.NULL, Codecs.INTEGER);
@@ -108,7 +136,7 @@ class BackendSessionTest {
     @Test void playerDepartureCancelsItsCallsAndDeadlinesReachTheServer() throws Exception {
         var a = session.forPlayer(new PlayerId("a")); var b = session.forPlayer(new PlayerId("b"));
         var hang = new QueryRef<NullValue, Long>("shared/hang", Codecs.NULL, Codecs.INTEGER);
-        var waiting = a.query(hang, NullValue.INSTANCE);
+        var waiting = new BackendClient(a).shared().hang(NullValue.INSTANCE);
         assertTrue(fixture.hanging.await(2, TimeUnit.SECONDS));
         a.close(); assertTrue(waiting.isCancelled()); assertTrue(fixture.cancelled.await(2, TimeUnit.SECONDS));
         var read = new QueryRef<NullValue, Long>("shared/read", Codecs.NULL, Codecs.INTEGER);
@@ -125,11 +153,14 @@ class BackendSessionTest {
         final AtomicInteger watches = new AtomicInteger();
         final CountDownLatch hanging = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
+        final CountDownLatch watchCancelled = new CountDownLatch(1);
+        final LinkedBlockingQueue<BackendWatch> watchRequests = new LinkedBlockingQueue<>();
         final LinkedBlockingQueue<StreamObserver<BackendResult>> partial = new LinkedBlockingQueue<>();
         volatile StreamObserver<BackendUpdate> watch;
         volatile boolean deadlineObserved;
         @Override public void call(BackendCall request, StreamObserver<BackendResult> response) {
             deadlineObserved = Context.current().getDeadline() != null;
+            calls.add(request);
             if (request.getFunction().equals("shared/partial")) {
                 response.onNext(BackendResult.newBuilder().setRevision(1).setResultJson(ByteString.copyFromUtf8("3")).build());
                 partial.add(response); return;
@@ -142,12 +173,18 @@ class BackendSessionTest {
                 response.onNext(BackendResult.newBuilder().setRevision(1).setResultJson(ByteString.copyFromUtf8("3")).build());
                 response.onCompleted(); return;
             }
-            calls.add(request);
             var result = BackendResult.newBuilder().setRevision(1).setResultJson(ByteString.copyFromUtf8("{\"ok\":true,\"session\":\"s1\"}")).build();
             if (saved.putIfAbsent(request.getOperationId(), result) == null) response.onError(Status.UNAVAILABLE.asRuntimeException());
             else { response.onNext(saved.get(request.getOperationId())); response.onCompleted(); }
         }
         @Override public void watch(BackendWatch request, StreamObserver<BackendUpdate> response) {
+            if (request.getQueriesCount() == 1) {
+                watchRequests.add(request);
+                ((ServerCallStreamObserver<BackendUpdate>) response).setOnCancelHandler(watchCancelled::countDown);
+                response.onNext(BackendUpdate.newBuilder().setRevision(1)
+                    .addResultsJson(ByteString.copyFromUtf8("3")).addErrors("").build());
+                return;
+            }
             int attempt = watches.incrementAndGet(); watch = response;
             response.onNext(BackendUpdate.newBuilder().setRevision(attempt)
                 .addResultsJson(ByteString.copyFromUtf8(Integer.toString(attempt)))
