@@ -1,7 +1,10 @@
 package dev.chunkzero.example;
 
+import static org.junit.jupiter.api.Assertions.*;
+
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
 import dev.chunkzero.backend.api.PlayerId;
 import dev.chunkzero.backend.api.SessionId;
 import dev.chunkzero.backend.client.BackendSession;
@@ -10,30 +13,43 @@ import dev.chunkzero.backend.client.SessionIdentity;
 import dev.chunkzero.backend.client.WatchState;
 import dev.chunkzero.example.generated.BackendClient;
 import dev.chunkzero.example.generated.BackendTypes.Shared.Players;
+
 import io.grpc.ManagedChannelBuilder;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.Executors;
 import java.util.function.Predicate;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import static org.junit.jupiter.api.Assertions.*;
 
 class BackendIntegrationTest {
     @TempDir Path directory;
 
-    @Test void generatedJavaCallsTypeScriptAndRetainedWatchesRecoverAcrossBackendRestart() throws Exception {
+    @Test
+    void generatedJavaCallsTypeScriptAndRetainedWatchesRecoverAcrossBackendRestart()
+            throws Exception {
         var scheduler = Executors.newSingleThreadScheduledExecutor();
         try (var backend = new BackendProcess(directory)) {
             var endpoint = backend.start("version-a", "127.0.0.1:0");
             var channel = ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build();
-            try (var session = new BackendSession(channel, backend.token, "test", "version-a",
-                    new SessionIdentity(new SessionId("session-a"), "lobby", Optional.of(new PlayerId("trusted-player"))),
-                    scheduler, Duration.ofSeconds(5))) {
+            try (var session =
+                    new BackendSession(
+                            channel,
+                            backend.token,
+                            "test",
+                            "version-a",
+                            new SessionIdentity(
+                                    new SessionId("session-a"),
+                                    "lobby",
+                                    Optional.of(new PlayerId("trusted-player"))),
+                            scheduler,
+                            Duration.ofSeconds(5))) {
                 var client = new BackendClient(session);
                 var updates = new LinkedBlockingQueue<WatchState<Players.StatsResult>>();
                 try (var watch = client.shared().players().watchStats(updates::add)) {
@@ -45,16 +61,34 @@ class BackendIntegrationTest {
                     await(updates, state -> state.stale() && coins(state) == 1);
                     backend.start("version-b", endpoint);
                     await(updates, state -> !state.stale() && coins(state) == 1);
-                    try (var next = new BackendSession(channel, backend.token, "test", "version-b",
-                            new SessionIdentity(new SessionId("session-b"), "arena", Optional.of(new PlayerId("trusted-player"))),
-                            scheduler, Duration.ofSeconds(5))) {
+                    try (var next =
+                            new BackendSession(
+                                    channel,
+                                    backend.token,
+                                    "test",
+                                    "version-b",
+                                    new SessionIdentity(
+                                            new SessionId("session-b"),
+                                            "arena",
+                                            Optional.of(new PlayerId("trusted-player"))),
+                                    scheduler,
+                                    Duration.ofSeconds(5))) {
                         var newer = new BackendClient(next);
-                        assertEquals(2L, newer.shared().players().coin(new OperationId("new-reward")).get());
+                        assertEquals(
+                                2L,
+                                newer.shared().players().coin(new OperationId("new-reward")).get());
                         await(updates, state -> !state.stale() && coins(state) == 2);
                         assertEquals(1L, client.shared().players().coin(operation).get());
                         assertEquals(2L, newer.shared().players().stats().get().coins());
                         try (var other = next.forPlayer(new PlayerId("other-player"))) {
-                            assertEquals(0L, new BackendClient(other).shared().players().stats().get().coins());
+                            assertEquals(
+                                    0L,
+                                    new BackendClient(other)
+                                            .shared()
+                                            .players()
+                                            .stats()
+                                            .get()
+                                            .coins());
                         }
                     }
                 }
@@ -68,10 +102,13 @@ class BackendIntegrationTest {
     }
 
     private static long coins(WatchState<Players.StatsResult> state) {
-        return state.snapshot().map(snapshot -> snapshot.result().valueOrThrow().coins()).orElse(-1L);
+        return state.snapshot()
+                .map(snapshot -> snapshot.result().valueOrThrow().coins())
+                .orElse(-1L);
     }
 
-    private static <T> void await(LinkedBlockingQueue<T> values, Predicate<T> matches) throws Exception {
+    private static <T> void await(LinkedBlockingQueue<T> values, Predicate<T> matches)
+            throws Exception {
         var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (System.nanoTime() < deadline) {
             var value = values.poll(100, TimeUnit.MILLISECONDS);
@@ -85,11 +122,15 @@ class BackendIntegrationTest {
         Process process;
         String token;
 
-        BackendProcess(Path directory) { this.directory = directory; }
+        BackendProcess(Path directory) {
+            this.directory = directory;
+        }
 
         String start(String id, String address) throws Exception {
             var generated = Path.of(System.getProperty("chunk.backend"));
-            var bundle = JsonParser.parseString(Files.readString(generated.resolve("contract.json"))).getAsJsonObject();
+            var bundle =
+                    JsonParser.parseString(Files.readString(generated.resolve("contract.json")))
+                            .getAsJsonObject();
             bundle.addProperty("id", id);
             bundle.addProperty("source", Files.readString(generated.resolve("source.mjs")));
             var bundlePath = directory.resolve("bundle.json");
@@ -97,19 +138,31 @@ class BackendIntegrationTest {
             var connection = directory.resolve("connection.json");
             Files.deleteIfExists(connection);
             var builder = new ProcessBuilder(System.getProperty("chunk.executable"));
-            builder.environment().putAll(java.util.Map.of(
-                    "CHUNK_BUNDLE", bundlePath.toString(), "CHUNK_ENVIRONMENT", "test",
-                    "CHUNK_STATE", directory.resolve("state").toString(),
-                    "CHUNK_CONNECTION", connection.toString(), "CHUNK_BIND", address));
-            process = builder.redirectErrorStream(true)
-                    .redirectOutput(directory.resolve("backend.log").toFile()).start();
+            builder.environment()
+                    .putAll(
+                            java.util.Map.of(
+                                    "CHUNK_BUNDLE",
+                                    bundlePath.toString(),
+                                    "CHUNK_ENVIRONMENT",
+                                    "test",
+                                    "CHUNK_STATE",
+                                    directory.resolve("state").toString(),
+                                    "CHUNK_CONNECTION",
+                                    connection.toString(),
+                                    "CHUNK_BIND",
+                                    address));
+            process =
+                    builder.redirectErrorStream(true)
+                            .redirectOutput(directory.resolve("backend.log").toFile())
+                            .start();
             var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (!Files.exists(connection)) {
                 assertTrue(process.isAlive(), "Backend process exited before readiness");
                 assertTrue(System.nanoTime() < deadline, "Backend readiness timed out");
                 Thread.sleep(10);
             }
-            JsonObject record = JsonParser.parseString(Files.readString(connection)).getAsJsonObject();
+            JsonObject record =
+                    JsonParser.parseString(Files.readString(connection)).getAsJsonObject();
             token = record.get("token").getAsString();
             return record.get("endpoint").getAsString().replace("http://", "");
         }
@@ -124,6 +177,8 @@ class BackendIntegrationTest {
             process = null;
         }
 
-        public void close() throws Exception { stop(); }
+        public void close() throws Exception {
+            stop();
+        }
     }
 }

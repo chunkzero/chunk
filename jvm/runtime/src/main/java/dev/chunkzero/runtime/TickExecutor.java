@@ -1,9 +1,10 @@
 package dev.chunkzero.runtime;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Supplier;
-import org.jetbrains.annotations.Nullable;
 
 final class TickExecutor {
     private final ConcurrentLinkedQueue<Runnable> pending = new ConcurrentLinkedQueue<>();
@@ -14,18 +15,20 @@ final class TickExecutor {
     }
 
     void checkThread() {
-        if (!isCurrentThread()) throw new IllegalStateException("Use SessionScope.onTick for world changes");
+        if (!isCurrentThread())
+            throw new IllegalStateException("Use SessionScope.onTick for world changes");
     }
 
     <T> CompletableFuture<T> submit(Supplier<T> action) {
         var result = new CompletableFuture<T>();
-        pending.add(() -> {
-            try {
-                result.complete(action.get());
-            } catch (Exception error) {
-                result.completeExceptionally(error);
-            }
-        });
+        pending.add(
+                () -> {
+                    try {
+                        result.complete(action.get());
+                    } catch (Exception error) {
+                        result.completeExceptionally(error);
+                    }
+                });
         return result;
     }
 

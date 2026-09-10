@@ -97,10 +97,7 @@ impl Deployment {
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && value.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
@@ -158,9 +155,7 @@ mod tests {
                     kind: FunctionKind::Query,
                     visibility: Visibility::Public,
                     export: "read".into(),
-                    arguments: Schema::Object {
-                        fields: BTreeMap::new(),
-                    },
+                    arguments: Schema::Object { fields: BTreeMap::new() },
                     result: Schema::Null,
                 },
             )]
@@ -191,29 +186,14 @@ mod tests {
 
     #[test]
     fn wire_values_preserve_optional_null_and_integer_boundaries() {
-        for value in [
-            json!(9_007_199_254_740_991_i64),
-            json!(-9_007_199_254_740_991_i64),
-            json!(0.125),
-        ] {
+        for value in [json!(9_007_199_254_740_991_i64), json!(-9_007_199_254_740_991_i64), json!(0.125)] {
             validate_wire_value(&value).unwrap();
         }
-        for value in [
-            json!(9_007_199_254_740_992_i64),
-            json!(i64::MIN),
-            json!({"nested": [u64::MAX]}),
-        ] {
+        for value in [json!(9_007_199_254_740_992_i64), json!(i64::MIN), json!({"nested": [u64::MAX]})] {
             assert!(validate_wire_value(&value).is_err());
         }
         let schema = Schema::Object {
-            fields: [(
-                "value".into(),
-                crate::Field {
-                    schema: Schema::String,
-                    optional: true,
-                },
-            )]
-            .into(),
+            fields: [("value".into(), crate::Field { schema: Schema::String, optional: true })].into(),
         };
         assert!(schema.accepts(&json!({})));
         assert!(schema.accepts(&json!({"value": "text"})));

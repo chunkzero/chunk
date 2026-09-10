@@ -58,52 +58,29 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let claim = login_claim(&authenticated.profile, platform);
     let destination = async {
         let mut claim = claim;
-        let identity = claim
-            .identity
-            .as_ref()
-            .ok_or_else(|| invalid_data("missing authenticated identity"))?;
+        let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing authenticated identity"))?;
         claim.demand = Some(platform.route(&identity.uuid, &identity.username).await?);
         // Construct before sending: cancellation must cover a claim whose reply was lost.
-        let guard = ClaimGuard {
-            platform: platform.clone(),
-            claim,
-            armed: true,
-        };
+        let guard = ClaimGuard { platform: platform.clone(), claim, armed: true };
         let mut message = request(guard.claim.clone(), &platform.target.control.token)?;
         message.set_timeout(WAIT_TIMEOUT);
-        let assignment = platform
-            .control
-            .clone()
-            .claim(message)
-            .await
-            .map_err(claim_error)?
-            .into_inner();
+        let assignment = platform.control.clone().claim(message).await.map_err(claim_error)?.into_inner();
         validate(&assignment, &guard)?;
         Ok((guard, assignment))
     };
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
     loop {
-        let mut internal = timeout(
-            deadline.min(WAIT_TIMEOUT),
-            open(&assignment, &guard, &authenticated, &settings),
-        )
-        .await
-        .map_err(io::Error::other)??;
+        let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
+            .await
+            .map_err(io::Error::other)??;
         timeout(
             deadline.min(WAIT_TIMEOUT),
-            Box::pin(configuration::relay(
-                &mut authenticated.transport,
-                &mut internal,
-                &mut settings,
-            )),
+            Box::pin(configuration::relay(&mut authenticated.transport, &mut internal, &mut settings)),
         )
         .await
         .map_err(io::Error::other)??;
-        let identity = assignment
-            .claim
-            .clone()
-            .ok_or_else(|| invalid_data("missing claim identity"))?;
+        let identity = assignment.claim.clone().ok_or_else(|| invalid_data("missing claim identity"))?;
         let arrival = relay::until(
             &mut authenticated.transport,
             &mut internal,
@@ -161,29 +138,17 @@ async fn open<S>(
     settings: &chunk_protocol::versions::v26_1::ConfigurationClientInformation,
 ) -> io::Result<Transport<tokio::net::TcpStream>> {
     validate(assignment, guard)?;
-    if assignment
-        .configuration
-        .as_ref()
-        .is_none_or(|c| c.protocol != authenticated.protocol_version)
-    {
+    if assignment.configuration.as_ref().is_none_or(|c| c.protocol != authenticated.protocol_version) {
         return Err(invalid_data("destination protocol differs from client"));
     }
     guard
         .platform
         .control
         .clone()
-        .activate(request(
-            ActivateClaim {
-                claim: assignment.claim.clone(),
-            },
-            &guard.platform.target.control.token,
-        )?)
+        .activate(request(ActivateClaim { claim: assignment.claim.clone() }, &guard.platform.target.control.token)?)
         .await
         .map_err(io::Error::other)?;
-    let preparation = assignment
-        .preparation
-        .clone()
-        .ok_or_else(|| invalid_data("missing preparation"))?;
+    let preparation = assignment.preparation.clone().ok_or_else(|| invalid_data("missing preparation"))?;
     gameplay::login(authenticated, settings, preparation).await
 }
 
@@ -213,23 +178,13 @@ async fn next_move(
         {
             return Err(invalid_data("move identity mismatch"));
         }
-        let guard = ClaimGuard {
-            platform: source.platform.clone(),
-            claim,
-            armed: true,
-        };
+        let guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true };
         let prepare = async {
             guard.platform.approve_move(&guard.claim).await?;
             let mut message = request(guard.claim.clone(), &guard.platform.target.control.token)?;
             message.set_timeout(WAIT_TIMEOUT);
-            let assignment = guard
-                .platform
-                .control
-                .clone()
-                .claim(message)
-                .await
-                .map_err(io::Error::other)?
-                .into_inner();
+            let assignment =
+                guard.platform.control.clone().claim(message).await.map_err(io::Error::other)?.into_inner();
             validate(&assignment, &guard)?;
             if assignment.configuration.as_ref().is_none_or(|c| c.protocol != protocol) {
                 return Err(invalid_data("destination protocol differs from client"));
@@ -279,14 +234,8 @@ fn claim_error(error: tonic::Status) -> io::Error {
 
 fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
     let claim = assignment.claim.as_ref().ok_or_else(|| invalid_data("missing claim"))?;
-    let delivery = assignment
-        .delivery
-        .as_ref()
-        .ok_or_else(|| invalid_data("missing delivery"))?;
-    let config = assignment
-        .configuration
-        .as_ref()
-        .ok_or_else(|| invalid_data("missing configuration"))?;
+    let delivery = assignment.delivery.as_ref().ok_or_else(|| invalid_data("missing delivery"))?;
+    let config = assignment.configuration.as_ref().ok_or_else(|| invalid_data("missing configuration"))?;
     let backend = &guard.platform.target.backend;
     let deployment = chunk_proto::v1::DeploymentRef {
         environment: backend.environment.clone(),
@@ -300,10 +249,7 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || delivery.operation_id != claim.operation_id
         || delivery.proxy_id != claim.proxy_id
         || delivery.connection_id != guard.claim.connection_id
-        || delivery
-            .identity
-            .as_ref()
-            .is_some_and(|identity| Some(identity) != guard.claim.identity.as_ref())
+        || delivery.identity.as_ref().is_some_and(|identity| Some(identity) != guard.claim.identity.as_ref())
         || delivery.membership_generation != claim.membership_generation
         || delivery.owner_generation != claim.delivery_generation
         || delivery.session_generation == 0
@@ -320,10 +266,7 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
     {
         return Err(invalid_data("control assignment identity mismatch"));
     }
-    let prepared = assignment
-        .preparation
-        .as_ref()
-        .ok_or_else(|| invalid_data("missing preparation"))?;
+    let prepared = assignment.preparation.as_ref().ok_or_else(|| invalid_data("missing preparation"))?;
     let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
     if prepared.operation_id != claim.operation_id
         || prepared.capability.len() != 32
@@ -337,20 +280,14 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
 
 async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(20);
-    let activation = ActivateClaim {
-        claim: Some(identity.clone()),
-    };
+    let activation = ActivateClaim { claim: Some(identity.clone()) };
     let mut activated = true;
     while Instant::now() < deadline {
         let mut client = guard.platform.control.clone();
         let result = if activated {
-            client
-                .inspect(request(guard.claim.clone(), &guard.platform.target.control.token)?)
-                .await
+            client.inspect(request(guard.claim.clone(), &guard.platform.target.control.token)?).await
         } else {
-            client
-                .activate(request(activation.clone(), &guard.platform.target.control.token)?)
-                .await
+            client.activate(request(activation.clone(), &guard.platform.target.control.token)?).await
         };
         match result {
             Ok(response) => {

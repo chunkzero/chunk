@@ -25,12 +25,7 @@ fn invocation() -> Invocation {
     }
 }
 fn deployment(body: &str, limits: Limits) -> Deployment {
-    Deployment::new(
-        "build-a".into(),
-        format!("export default async (ctx, args) => {{ {body} }}"),
-        limits,
-    )
-    .unwrap()
+    Deployment::new("build-a".into(), format!("export default async (ctx, args) => {{ {body} }}"), limits).unwrap()
 }
 fn call(deployment: &mut Deployment) -> Result<Execution, Error> {
     deployment.execute(invocation(), Box::new(Snapshot), &Cancellation::default())
@@ -46,10 +41,7 @@ fn deployment_reuses_module_state_but_isolates_snapshots_and_other_deployments()
     assert_eq!(first.id(), "build-a");
     for counter in 1..=2 {
         let result = call(&mut first).unwrap();
-        assert_eq!(
-            value(&result),
-            json!({"counter":counter,"p":{"coins":4},"caller":"player"})
-        );
+        assert_eq!(value(&result), json!({"counter":counter,"p":{"coins":4},"caller":"player"}));
         assert_eq!(result.writes.len(), 1);
         assert_eq!(result.writes[0].value, Some(json!({"coins":4})));
     }
@@ -78,13 +70,8 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
     call(&mut engine).unwrap();
     let mut next = invocation();
     next.caller = json!({"player":"other"}).into();
-    let result = engine
-        .execute(next, Box::new(Snapshot), &Cancellation::default())
-        .unwrap();
-    assert_eq!(
-        value(&result),
-        json!({"denied":4,"old":"player","current":"other","p":{"coins":3}})
-    );
+    let result = engine.execute(next, Box::new(Snapshot), &Cancellation::default()).unwrap();
+    assert_eq!(value(&result), json!({"denied":4,"old":"player","current":"other","p":{"coins":3}}));
     assert!(result.writes.is_empty());
 }
 
@@ -97,11 +84,7 @@ fn failed_call_discards_writes_and_retains_module_state() {
     assert_eq!(value(&call(&mut engine).unwrap()), json!(1));
     let mut fail = invocation();
     fail.arguments = json!({"fail":true}).into();
-    assert!(
-        engine
-            .execute(fail, Box::new(Snapshot), &Cancellation::default())
-            .is_err()
-    );
+    assert!(engine.execute(fail, Box::new(Snapshot), &Cancellation::default()).is_err());
     let result = call(&mut engine).unwrap();
     assert_eq!(value(&result), json!(3));
     assert!(result.writes.is_empty());
@@ -119,43 +102,24 @@ fn ambient_apis_and_query_writes_are_denied() {
     assert_eq!(call(&mut engine).unwrap().writes.len(), 1);
     let mut query = invocation();
     query.mode = Mode::Query;
-    assert!(
-        engine
-            .execute(query, Box::new(Snapshot), &Cancellation::default())
-            .is_err()
-    );
+    assert!(engine.execute(query, Box::new(Snapshot), &Cancellation::default()).is_err());
 }
 
 #[test]
 fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
-    for body in [
-        "while(true) {}",
-        "await new Promise(() => {});",
-        "while(true) { await Promise.resolve(); }",
-    ] {
+    for body in ["while(true) {}", "await new Promise(() => {});", "while(true) { await Promise.resolve(); }"] {
         let mut engine = deployment(
             &format!("if(args.fail) {{ {body} }} return 42;"),
-            Limits {
-                execution: Duration::from_millis(100),
-                ..Limits::default()
-            },
+            Limits { execution: Duration::from_millis(100), ..Limits::default() },
         );
         let mut fail = invocation();
         fail.arguments = json!({"fail":true}).into();
-        assert!(
-            engine
-                .execute(fail, Box::new(Snapshot), &Cancellation::default())
-                .is_err(),
-            "{body}"
-        );
+        assert!(engine.execute(fail, Box::new(Snapshot), &Cancellation::default()).is_err(), "{body}");
         assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
     let mut engine = deployment(
         "if(args.fail) { const a=[]; while(true) a.push(new Array(10000).fill('xxxxxxxx')); } return 42;",
-        Limits {
-            execution: Duration::from_secs(5),
-            heap_bytes: 16 * 1024 * 1024,
-        },
+        Limits { execution: Duration::from_secs(5), heap_bytes: 16 * 1024 * 1024 },
     );
     let mut fail = invocation();
     fail.arguments = json!({"fail":true}).into();
@@ -166,10 +130,7 @@ fn loops_pending_promises_and_heap_exhaustion_recycle_the_engine() {
         Deployment::new(
             "bad".into(),
             "while(true) {}".into(),
-            Limits {
-                execution: Duration::from_millis(100),
-                ..Limits::default()
-            }
+            Limits { execution: Duration::from_millis(100), ..Limits::default() }
         )
         .is_err()
     );
@@ -211,9 +172,7 @@ fn invocation_time_and_randomness_are_deterministic_without_removing_date_behavi
     let mut next = invocation();
     next.timestamp += 1;
     next.seed += 1;
-    let second = engine
-        .execute(next, Box::new(Snapshot), &Cancellation::default())
-        .unwrap();
+    let second = engine.execute(next, Box::new(Snapshot), &Cancellation::default()).unwrap();
     assert_ne!(first["now"], value(&second)["now"]);
     assert_ne!(first["random"], value(&second)["random"]);
     for value in value(&second)["random"].as_array().unwrap() {
@@ -223,13 +182,7 @@ fn invocation_time_and_randomness_are_deterministic_without_removing_date_behavi
 
 #[test]
 fn initialization_cannot_observe_invocation_time_or_randomness() {
-    for expression in [
-        "Date.now()",
-        "new Date()",
-        "Date()",
-        "Math.random()",
-        "new Date(0).constructor.now()",
-    ] {
+    for expression in ["Date.now()", "new Date()", "Date()", "Math.random()", "new Date(0).constructor.now()"] {
         assert!(
             Deployment::new(
                 "clock".into(),
@@ -243,20 +196,14 @@ fn initialization_cannot_observe_invocation_time_or_randomness() {
     let mut engine = deployment("return Date.now();", Limits::default());
     let mut invalid = invocation();
     invalid.timestamp = i64::MAX;
-    assert!(matches!(
-        engine.execute(invalid, Box::new(Snapshot), &Cancellation::default()),
-        Err(Error::Invalid(_))
-    ));
+    assert!(matches!(engine.execute(invalid, Box::new(Snapshot), &Cancellation::default()), Err(Error::Invalid(_))));
 }
 
 #[test]
 fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion() {
     let mut engine = deployment(
         "if (args.fail) { globalThis.buffers = []; for(let i=0; i<16; i++) buffers.push(new Uint8Array(2 * 1024 * 1024)); } return 42;",
-        Limits {
-            execution: Duration::from_secs(5),
-            heap_bytes: 16 * 1024 * 1024,
-        },
+        Limits { execution: Duration::from_secs(5), heap_bytes: 16 * 1024 * 1024 },
     );
     let mut fail = invocation();
     fail.arguments = json!({"fail": true}).into();
@@ -275,10 +222,8 @@ fn buffer_budget_bounds_total_retained_allocations_and_recycles_after_exhaustion
 
 #[test]
 fn cancellation_interrupts_execution_and_discards_speculative_writes() {
-    let mut engine = deployment(
-        "if(args.fail) { ctx.db.put('profiles','p',{}); while(true) {} } return 42;",
-        Limits::default(),
-    );
+    let mut engine =
+        deployment("if(args.fail) { ctx.db.put('profiles','p',{}); while(true) {} } return 42;", Limits::default());
     let cancellation = Cancellation::default();
     let trigger = cancellation.clone();
     let thread = std::thread::spawn(move || {
@@ -323,9 +268,7 @@ fn engine_merges_puts_and_deletes_into_raw_snapshot_ranges() {
         "ctx.db.delete('p','a'); ctx.db.put('p','b',3); ctx.db.put('p','c',4); ctx.db.put('p','z',5); return ctx.db.scan('p','a','d');",
         Limits::default(),
     );
-    let result = engine
-        .execute(invocation(), Box::new(Rows), &Cancellation::default())
-        .unwrap();
+    let result = engine.execute(invocation(), Box::new(Rows), &Cancellation::default()).unwrap();
     assert_eq!(value(&result), json!([["b", 3], ["c", 4]]));
 }
 
@@ -340,9 +283,7 @@ fn json_boundary_preserves_unicode_and_rejects_non_json_results() {
     input.caller = json!({"name": "Alex 🦊"}).into();
     input.arguments = json!({"雪": [null, true, "\\\"\n"]}).into();
     let expected = json!({"caller": serde_json::from_str::<Value>(input.caller.as_str()).unwrap(), "args": serde_json::from_str::<Value>(input.arguments.as_str()).unwrap()});
-    let result = engine
-        .execute(input, Box::new(Snapshot), &Cancellation::default())
-        .unwrap();
+    let result = engine.execute(input, Box::new(Snapshot), &Cancellation::default()).unwrap();
     assert_eq!(value(&result), expected);
     for expression in ["Infinity", "1n", "({bad: undefined})", "[Symbol()]"] {
         assert!(run(&format!("return {expression};")).is_err(), "{expression}");
@@ -358,11 +299,7 @@ fn engine_switches_releases_and_recycles_independent_deployments() {
     for id in &ids {
         engine.register(id.clone(), source.into(), Limits::default()).unwrap();
     }
-    assert!(
-        engine
-            .register(ids[0].clone(), source.into(), Limits::default())
-            .is_err()
-    );
+    assert!(engine.register(ids[0].clone(), source.into(), Limits::default()).is_err());
     let execute = |engine: &mut Engine, id: &DeploymentId, input| {
         engine.execute(id, input, Box::new(Snapshot), &Cancellation::default())
     };
@@ -373,16 +310,9 @@ fn engine_switches_releases_and_recycles_independent_deployments() {
     }
     assert!(engine.release(&ids[0]));
     assert!(!engine.release(&ids[0]));
-    assert!(matches!(
-        execute(&mut engine, &ids[0], invocation()),
-        Err(Error::UnknownDeployment)
-    ));
+    assert!(matches!(execute(&mut engine, &ids[0], invocation()), Err(Error::UnknownDeployment)));
     let bad = DeploymentId::new("bad").unwrap();
-    assert!(
-        engine
-            .register(bad, "throw Error('init');".into(), Limits::default())
-            .is_err()
-    );
+    assert!(engine.register(bad, "throw Error('init');".into(), Limits::default()).is_err());
     let mut fail = invocation();
     fail.arguments = json!({"fail": true}).into();
     assert!(execute(&mut engine, &ids[1], fail).is_err());
@@ -415,21 +345,10 @@ fn host_runs_on_the_callers_thread_without_send_or_locks() {
     }
     let mut engine = Engine::new().unwrap();
     let id = DeploymentId::new("local").unwrap();
-    engine
-        .register(
-            id.clone(),
-            "export default ctx => ctx.db.get('p','1');".into(),
-            Limits::default(),
-        )
-        .unwrap();
+    engine.register(id.clone(), "export default ctx => ctx.db.get('p','1');".into(), Limits::default()).unwrap();
     let calls = Rc::new(Cell::new(0));
-    let host = LocalHost {
-        calls: calls.clone(),
-        owner: thread::current().id(),
-    };
-    let result = engine
-        .execute(&id, invocation(), Box::new(host), &Cancellation::default())
-        .unwrap();
+    let host = LocalHost { calls: calls.clone(), owner: thread::current().id() };
+    let result = engine.execute(&id, invocation(), Box::new(host), &Cancellation::default()).unwrap();
     assert_eq!(value(&result), json!(42));
     assert_eq!(calls.get(), 1);
 }
@@ -443,11 +362,7 @@ fn storage_incompatible_results_fail_only_the_invocation() {
         );
         let mut fail = invocation();
         fail.arguments = json!({"fail":true}).into();
-        assert!(
-            engine
-                .execute(fail, Box::new(Snapshot), &Cancellation::default())
-                .is_err()
-        );
+        assert!(engine.execute(fail, Box::new(Snapshot), &Cancellation::default()).is_err());
         let result = call(&mut engine).unwrap();
         assert_eq!(value(&result), json!(42));
         assert!(result.writes.is_empty());
@@ -493,10 +408,7 @@ fn fixed_web_apis_preserve_data_and_use_bounded_deterministic_capabilities() {
     assert_eq!(value["independent"], true);
     assert_eq!(value["set"], json!([1, 2]));
     assert_eq!(value["date"], 123);
-    assert_eq!(
-        value["hash"],
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
+    assert_eq!(value["hash"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     assert_eq!(first.logs.len(), 1);
     assert_eq!(first.logs[0].message, "hello {\"value\":42}");
     assert!(run("for(let i=0;i<33;i++) console.log('x'); return 1;").is_err());
@@ -504,11 +416,7 @@ fn fixed_web_apis_preserve_data_and_use_bounded_deterministic_capabilities() {
     assert!(run("return import('ext:core/mod.js');").is_err());
     assert!(run("return import('ext:deno_web/02_timers.js');").is_err());
     assert!(run("return structuredClone({f(){}});").is_err());
-    for expression in [
-        "crypto.randomUUID()",
-        "crypto.getRandomValues(new Uint8Array(0))",
-        "console.log('x')",
-    ] {
+    for expression in ["crypto.randomUUID()", "crypto.getRandomValues(new Uint8Array(0))", "console.log('x')"] {
         assert!(
             Deployment::new(
                 "web-init".into(),
@@ -522,10 +430,9 @@ fn fixed_web_apis_preserve_data_and_use_bounded_deterministic_capabilities() {
 
 #[test]
 fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
-    for allocation in [
-        "new TextEncoder().encode('x'.repeat(1024*1024))",
-        "structuredClone(new Uint8Array(2*1024*1024))",
-    ] {
+    for allocation in
+        ["new TextEncoder().encode('x'.repeat(1024*1024))", "structuredClone(new Uint8Array(2*1024*1024))"]
+    {
         let mut engine = deployment(
             &format!(
                 "if(args.fail) {{ globalThis.buffers=[]; for(let i=0;i<32;i++) buffers.push({allocation}); }} return 42;"
@@ -534,10 +441,7 @@ fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
         );
         let mut input = invocation();
         input.arguments = json!({"fail":true}).into();
-        assert!(matches!(
-            engine.execute(input, Box::new(Snapshot), &Cancellation::default()),
-            Err(Error::Heap)
-        ));
+        assert!(matches!(engine.execute(input, Box::new(Snapshot), &Cancellation::default()), Err(Error::Heap)));
         assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
 }

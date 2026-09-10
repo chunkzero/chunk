@@ -14,11 +14,7 @@ pub(super) struct Scope {
 
 impl Scope {
     pub fn new(path: Vec<String>) -> Self {
-        Self {
-            path,
-            names: names::Names::default(),
-            declarations: Vec::new(),
-        }
+        Self { path, names: names::Names::default(), declarations: Vec::new() }
     }
 
     pub fn declare(&mut self, name: &str, origin: &str) -> io::Result<()> {
@@ -61,10 +57,7 @@ impl Generator {
             Schema::Literal { value } => match value {
                 Value::Null => ("NullValue".into(), "Codecs.NULL".into()),
                 Value::Bool(value) => ("Boolean".into(), format!("Codecs.literal(Codecs.BOOLEAN, {value})")),
-                Value::String(value) => (
-                    "String".into(),
-                    format!("Codecs.literal(Codecs.STRING, {})", quote(value)),
-                ),
+                Value::String(value) => ("String".into(), format!("Codecs.literal(Codecs.STRING, {})", quote(value))),
                 Value::Number(value) => {
                     if let Some(integer) = value.as_i64() {
                         ("Long".into(), format!("Codecs.literal(Codecs.INTEGER, {integer}L)"))
@@ -107,24 +100,12 @@ impl Generator {
             checks.push(format!("Objects.requireNonNull({id});"));
             if definition.optional {
                 components.push(format!("FieldValue<{}> {id}", field_type.ty));
-                reads.push(format!(
-                    "Codecs.optional(object, {}, {})",
-                    quote(field),
-                    field_type.codec
-                ));
-                writes.push(format!(
-                    "Codecs.optional(object, {}, {}, value.{id}());",
-                    quote(field),
-                    field_type.codec
-                ));
+                reads.push(format!("Codecs.optional(object, {}, {})", quote(field), field_type.codec));
+                writes.push(format!("Codecs.optional(object, {}, {}, value.{id}());", quote(field), field_type.codec));
             } else {
                 components.push(format!("{} {id}", field_type.ty));
                 reads.push(format!("Codecs.field(object, {}, {})", quote(field), field_type.codec));
-                writes.push(format!(
-                    "object.add({}, {}.encode(value.{id}()));",
-                    quote(field),
-                    field_type.codec
-                ));
+                writes.push(format!("object.add({}, {}.encode(value.{id}()));", quote(field), field_type.codec));
                 if matches!(definition.schema, Schema::Array { .. }) {
                     checks.push(format!("{id} = List.copyOf({id});"));
                 }
@@ -135,10 +116,7 @@ impl Generator {
             components.join(", "), checks.join(" "), scope.declarations.join("\n"),
             fields.keys().map(|name| quote(name)).collect::<Vec<_>>().join(","), reads.join(","), writes.join(" ")
         ));
-        Ok(Type {
-            codec: format!("{ty}.CODEC"),
-            ty,
-        })
+        Ok(Type { codec: format!("{ty}.CODEC"), ty })
     }
 
     fn union(&mut self, parent: &mut Scope, name: &str, variants: &[Schema], origin: &str) -> io::Result<Type> {
@@ -170,9 +148,6 @@ impl Generator {
             "public sealed interface {name} {{\n{}\nCodec<{ty}> CODEC = Codecs.of(input -> {{ {} throw new IllegalArgumentException(\"No union variant matched\"); }}, value -> {{ {} throw new IllegalArgumentException(\"Unknown union variant\"); }});\n}}",
             scope.declarations.join("\n"), reads.join("\n"), writes.join("\n")
         ));
-        Ok(Type {
-            codec: format!("{ty}.CODEC"),
-            ty,
-        })
+        Ok(Type { codec: format!("{ty}.CODEC"), ty })
     }
 }

@@ -92,15 +92,13 @@ impl Schema {
             Self::Integer => value.is_i64(),
             Self::String => value.is_string(),
             Self::Id { table } => value.as_str().is_some_and(|id| {
-                id.strip_prefix(table)
-                    .and_then(|suffix| suffix.strip_prefix(':'))
-                    .is_some_and(valid_id)
+                id.strip_prefix(table).and_then(|suffix| suffix.strip_prefix(':')).is_some_and(valid_id)
             }),
             Self::Player | Self::Session => value.as_str().is_some_and(valid_id),
             Self::Literal { value: expected } => value == expected,
-            Self::Array { items } => value
-                .as_array()
-                .is_some_and(|items_value| items_value.iter().all(|v| items.accepts_at(v, depth + 1))),
+            Self::Array { items } => {
+                value.as_array().is_some_and(|items_value| items_value.iter().all(|v| items.accepts_at(v, depth + 1)))
+            }
             Self::Object { fields } => accepts_object(fields, value, depth),
             Self::Union { variants } => variants.iter().any(|v| v.accepts_at(value, depth + 1)),
         }
@@ -134,9 +132,7 @@ impl Schema {
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 impl TableSchema {
@@ -172,11 +168,9 @@ impl TableSchema {
 fn accepts_object(fields: &BTreeMap<String, Field>, value: &Value, depth: usize) -> bool {
     value.as_object().is_some_and(|object| {
         object.keys().all(|key| fields.contains_key(key))
-            && fields.iter().all(|(key, field)| {
-                object
-                    .get(key)
-                    .map_or(field.optional, |v| field.schema.accepts_at(v, depth + 1))
-            })
+            && fields
+                .iter()
+                .all(|(key, field)| object.get(key).map_or(field.optional, |v| field.schema.accepts_at(v, depth + 1)))
     })
 }
 
@@ -216,10 +210,7 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
 /// Rejects invalid declarations, case collisions and excessive schema sizes.
 pub fn validate(schema: &DatabaseSchema) -> Result<(), &'static str> {
     if schema.len() > MAX_TABLES
-        || serde_json::to_vec(schema)
-            .map_err(|_| "invalid schema serialization")?
-            .len()
-            > MAX_SCHEMA_BYTES
+        || serde_json::to_vec(schema).map_err(|_| "invalid schema serialization")?.len() > MAX_SCHEMA_BYTES
     {
         return Err("schema size limit");
     }

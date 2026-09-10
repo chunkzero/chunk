@@ -1,12 +1,15 @@
 package dev.chunkzero.runtime;
 
 import chunk.v1.GameplayOuterClass.PlayerDelivery;
-import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
+
 import net.minestom.server.entity.Player;
 import net.minestom.server.network.player.GameProfile;
 import net.minestom.server.network.player.PlayerConnection;
+
 import org.jetbrains.annotations.Nullable;
+
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 final class ManagedPlayer extends Player {
     private @Nullable PlayerDelivery binding;
@@ -25,7 +28,8 @@ final class ManagedPlayer extends Player {
         this.binding = Objects.requireNonNull(binding);
     }
 
-    @Nullable CompletableFuture<Void> getInitialization() {
+    @Nullable
+    CompletableFuture<Void> getInitialization() {
         return initialization;
     }
 
@@ -34,10 +38,12 @@ final class ManagedPlayer extends Player {
         var completion = new CompletableFuture<Void>();
         initialization = completion;
         try {
-            super.UNSAFE_init().whenComplete((ignored, error) -> {
-                if (error == null) completion.complete(null);
-                else completion.completeExceptionally(error);
-            });
+            super.UNSAFE_init()
+                    .whenComplete(
+                            (ignored, error) -> {
+                                if (error == null) completion.complete(null);
+                                else completion.completeExceptionally(error);
+                            });
         } catch (Exception error) {
             completion.completeExceptionally(error);
         }

@@ -11,9 +11,7 @@ pub(crate) struct Termination(Arc<AtomicU8>);
 
 impl Termination {
     pub fn record(&self, reason: Reason) {
-        let _ = self
-            .0
-            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.0.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
     pub fn take(&self) -> Option<Error> {

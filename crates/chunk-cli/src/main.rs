@@ -74,9 +74,9 @@ async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
         Command::Dev(options) => local::run(options).await,
         Command::Build(options) => building::run(options).await,
-        Command::Gen(options) => tokio::task::spawn_blocking(move || generation::run(options))
-            .await
-            .map_err(io::Error::other)?,
+        Command::Gen(options) => {
+            tokio::task::spawn_blocking(move || generation::run(options)).await.map_err(io::Error::other)?
+        }
         Command::Inspect { project } => {
             let metadata = chunk_build::project::inspect(&project)?;
             let stdout = io::stdout();

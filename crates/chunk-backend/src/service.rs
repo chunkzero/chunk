@@ -111,21 +111,11 @@ impl Command {
 }
 
 pub(crate) enum Event {
-    Prepared {
-        operation: String,
-        result: Result<chunk_store::RetryContext>,
-    },
+    Prepared { operation: String, result: Result<chunk_store::RetryContext> },
     Request(Box<Command>),
-    Committed {
-        operation: String,
-        result: Result<(Update, Snapshot)>,
-    },
-    Activated {
-        result: Result<chunk_store::Snapshot>,
-    },
-    Released {
-        result: Result<bool>,
-    },
+    Committed { operation: String, result: Result<(Update, Snapshot)> },
+    Activated { result: Result<chunk_store::Snapshot> },
+    Released { result: Result<bool> },
     Wake,
 }
 
@@ -168,9 +158,8 @@ impl Backend {
         let stop = stopped.clone();
         let outgoing = events.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
-            .name("chunk-environment".into())
-            .spawn(move || match Actor::new(store, outgoing) {
+        let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
+            match Actor::new(store, outgoing) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
@@ -179,7 +168,8 @@ impl Backend {
                 Err(error) => {
                     let _ = ready.send(Err(error));
                 }
-            })?;
+            }
+        })?;
         let backend = Self(Arc::new(Owner {
             environment,
             events,
@@ -202,11 +192,7 @@ impl Backend {
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
     pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
         deployment.validate().map_err(Error::Invalid)?;
-        self.submit(|reply| Command::Deploy {
-            deployment: Arc::new(deployment),
-            reply,
-        })
-        .await
+        self.submit(|reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
     }
 
     async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
@@ -217,18 +203,11 @@ impl Backend {
         let cancellation = Cancellation::default();
         let _cancel = CancelOnDrop(cancellation.clone());
         let (reply, response) = oneshot::channel();
-        let request = Request {
-            cancellation,
-            reply,
-            _permit: permit,
-        };
-        self.0
-            .events
-            .try_send(Event::Request(Box::new(make(request))))
-            .map_err(|error| match error {
-                queue::error::TrySendError::Full(_) => Error::Busy,
-                queue::error::TrySendError::Closed(_) => Error::Closed,
-            })?;
+        let request = Request { cancellation, reply, _permit: permit };
+        self.0.events.try_send(Event::Request(Box::new(make(request)))).map_err(|error| match error {
+            queue::error::TrySendError::Full(_) => Error::Busy,
+            queue::error::TrySendError::Closed(_) => Error::Closed,
+        })?;
         response.await.map_err(|_| Error::Closed)?
     }
 
@@ -239,13 +218,7 @@ impl Backend {
         if source.len() > 4 * 1024 * 1024 {
             return Err(Error::Invalid("source limit"));
         }
-        self.submit(|reply| Command::Register {
-            id,
-            source,
-            limits,
-            reply,
-        })
-        .await
+        self.submit(|reply| Command::Register { id, source, limits, reply }).await
     }
 
     /// # Errors
@@ -313,10 +286,7 @@ pub struct GroupSubscription {
 
 impl GroupSubscription {
     pub(crate) fn new(receiver: watch::Receiver<Result<GroupUpdate>>) -> Self {
-        Self {
-            receiver,
-            initial: true,
-        }
+        Self { receiver, initial: true }
     }
 
     /// Returns the initial result, then waits for changed results or an error.
@@ -339,9 +309,6 @@ impl Subscription {
     /// Reports execution, storage failure or shutdown.
     pub async fn next(&mut self) -> Result<Update> {
         let mut group = self.0.next().await?;
-        Ok(Update {
-            revision: group.revision,
-            json: group.results.remove(0)?,
-        })
+        Ok(Update { revision: group.revision, json: group.results.remove(0)? })
     }
 }

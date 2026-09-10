@@ -28,9 +28,7 @@ pub(super) fn insert(files: &mut Files, name: String, bytes: Vec<u8>) -> io::Res
 
 fn relative_name(name: &str) -> io::Result<()> {
     if name.chars().any(|ch| ch.is_control() || "\\:*?\"<>|".contains(ch))
-        || name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' ']))
+        || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' ']))
     {
         return Err(io::Error::other(format!("artifact path is not portable: {name:?}")));
     }
@@ -46,15 +44,9 @@ pub(super) fn collect(directory: &Path, prefix: &str, files: &mut Files) -> io::
     }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
-        let filename = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| io::Error::other("artifact filenames must be UTF-8"))?;
-        let name = if prefix.is_empty() {
-            filename
-        } else {
-            format!("{prefix}/{filename}")
-        };
+        let filename =
+            entry.file_name().into_string().map_err(|_| io::Error::other("artifact filenames must be UTF-8"))?;
+        let name = if prefix.is_empty() { filename } else { format!("{prefix}/{filename}") };
         let kind = entry.file_type()?;
         if kind.is_dir() {
             collect(&entry.path(), &name, files)?;
@@ -142,10 +134,7 @@ fn rename_directory(source: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
 fn rename_directory(_: &Path, _: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic directory publication is unsupported on this OS",
-    ))
+    Err(io::Error::new(io::ErrorKind::Unsupported, "atomic directory publication is unsupported on this OS"))
 }
 
 fn verify(directory: &Path, expected: &Files) -> io::Result<()> {

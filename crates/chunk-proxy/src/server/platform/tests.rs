@@ -47,10 +47,7 @@ impl Backend for Hooks {
             }
             _ => panic!("unexpected hook"),
         };
-        Ok(Response::new(BackendResult {
-            revision: 1,
-            result_json: serde_json::to_vec(&result).unwrap(),
-        }))
+        Ok(Response::new(BackendResult { revision: 1, result_json: serde_json::to_vec(&result).unwrap() }))
     }
 
     type WatchStream = ReceiverStream<Result<BackendUpdate, Status>>;
@@ -70,10 +67,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
             environment: "local".into(),
             deployment: "example".into(),
         },
-        control: chunk_contract::ControlConnection {
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-        },
+        control: chunk_contract::ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "unused".into() },
     })
     .unwrap();
     let server = tokio::spawn(

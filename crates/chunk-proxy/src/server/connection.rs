@@ -28,12 +28,9 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     compression: Option<usize>,
     platform: Option<&super::platform::Platform>,
 ) -> io::Result<Option<Authenticated<S>>> {
-    timeout(
-        deadline,
-        exchange(Transport::new(stream), responses, authentication, compression, platform),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "initial exchange timed out"))?
+    timeout(deadline, exchange(Transport::new(stream), responses, authentication, compression, platform))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "initial exchange timed out"))?
 }
 
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
@@ -49,9 +46,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         1 => {
             decode_packet::<StatusRequest>(&transport.read_frame(INITIAL_FRAME_LIMIT).await?).map_err(invalid_data)?;
             if let Some(platform) = platform {
-                transport
-                    .write_encoded(&platform.status(handshake.server_address.as_str()).await?)
-                    .await?;
+                transport.write_encoded(&platform.status(handshake.server_address.as_str()).await?).await?;
             } else {
                 transport.write_encoded(&responses.status).await?;
             }
@@ -66,14 +61,8 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             let ping = decode_packet::<Ping>(&frame).map_err(invalid_data)?;
             transport.write_packet(&Pong { payload: ping.payload }).await?;
         }
-        2 if SUPPORTED
-            .iter()
-            .any(|version| version.protocol == handshake.protocol_version.0) =>
-        {
-            return authentication
-                .login(transport, handshake.protocol_version.0, compression)
-                .await
-                .map(Some);
+        2 if SUPPORTED.iter().any(|version| version.protocol == handshake.protocol_version.0) => {
+            return authentication.login(transport, handshake.protocol_version.0, compression).await.map(Some);
         }
         2 => transport.write_encoded(&responses.unsupported_version).await?,
         _ => return Err(invalid_data("unsupported handshake intention")),
@@ -100,22 +89,13 @@ mod tests {
                 next_state: chunk_protocol::VarInt(1),
             };
             client.write_all(&encode_packet(&handshake).unwrap()).await.unwrap();
-            client
-                .write_all(&encode_packet(&StatusRequest {}).unwrap())
-                .await
-                .unwrap();
+            client.write_all(&encode_packet(&StatusRequest {}).unwrap()).await.unwrap();
             client.write_all(suffix).await.unwrap();
             client.shutdown().await.unwrap();
             let responses = Responses::new(&Config::default()).unwrap();
-            let result = serve(
-                server,
-                &responses,
-                &Authentication::new().await.unwrap(),
-                Duration::from_secs(10),
-                None,
-                None,
-            )
-            .await;
+            let result =
+                serve(server, &responses, &Authentication::new().await.unwrap(), Duration::from_secs(10), None, None)
+                    .await;
             if suffix.is_empty() {
                 result.unwrap();
             } else {
@@ -132,17 +112,11 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(64);
         client.write_all(&[0x80]).await.unwrap();
         let responses = Responses::new(&Config::default()).unwrap();
-        let error = serve(
-            server,
-            &responses,
-            &Authentication::new().await.unwrap(),
-            Duration::from_secs(10),
-            None,
-            None,
-        )
-        .await
-        .err()
-        .unwrap();
+        let error =
+            serve(server, &responses, &Authentication::new().await.unwrap(), Duration::from_secs(10), None, None)
+                .await
+                .err()
+                .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
     }

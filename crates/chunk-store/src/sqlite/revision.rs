@@ -21,18 +21,9 @@ impl ToSql for Revision {
 }
 
 pub(super) fn current(connection: &Connection) -> Result<Revision> {
-    Ok(
-        connection.query_row("SELECT revision FROM _chunk_metadata WHERE singleton = 1", [], |row| {
-            row.get(0)
-        })?,
-    )
+    Ok(connection.query_row("SELECT revision FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?)
 }
 
 pub(super) fn next(current: Revision) -> Result<Revision> {
-    current
-        .0
-        .checked_add(1)
-        .filter(|value| *value <= i64::MAX.cast_unsigned())
-        .map(Revision)
-        .ok_or(Error::Capacity)
+    current.0.checked_add(1).filter(|value| *value <= i64::MAX.cast_unsigned()).map(Revision).ok_or(Error::Capacity)
 }

@@ -105,10 +105,7 @@ mod tests {
                 distribution: directory.path().into(),
                 java: directory.path().join("missing-java"),
                 connection: connection.clone(),
-                deployment: DeploymentRef {
-                    environment: "local".into(),
-                    deployment: "test".into(),
-                },
+                deployment: DeploymentRef { environment: "local".into(), deployment: "test".into() },
                 machine_profile: "test".into(),
                 artifact_digest: "test".into(),
                 memory_mib,

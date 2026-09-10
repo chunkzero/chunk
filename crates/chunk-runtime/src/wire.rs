@@ -24,7 +24,5 @@ pub(crate) async fn write_packet<S: AsyncWrite + Unpin, P: Packet + Encode>(
     stream: &mut S,
     packet: &P,
 ) -> io::Result<()> {
-    stream
-        .write_all(&encode_packet(packet).map_err(io::Error::other)?)
-        .await
+    stream.write_all(&encode_packet(packet).map_err(io::Error::other)?).await
 }

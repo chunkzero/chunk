@@ -107,24 +107,13 @@ const SUPPORT_NAMES: &[&str] = &[
     "CODEC",
 ];
 
-const OBJECT_METHODS: &[&str] = &[
-    "wait",
-    "notify",
-    "notifyAll",
-    "getClass",
-    "clone",
-    "finalize",
-    "equals",
-    "hashCode",
-    "toString",
-];
+const OBJECT_METHODS: &[&str] =
+    &["wait", "notify", "notifyAll", "getClass", "clone", "finalize", "equals", "hashCode", "toString"];
 
 pub(super) fn valid_package(package: &str) -> bool {
     !package.is_empty()
         && package.split('.').all(|part| {
-            part.bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            part.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
                 && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 && !KEYWORDS.contains(&part)
         })
@@ -173,9 +162,7 @@ pub(super) struct Names(BTreeMap<String, String>);
 impl Names {
     pub fn insert(&mut self, scope: &str, name: &str, origin: &str) -> io::Result<()> {
         if let Some(previous) = self.0.insert(name.into(), origin.into()) {
-            return Err(io::Error::other(format!(
-                "Java name {scope}.{name} collides between {previous} and {origin}"
-            )));
+            return Err(io::Error::other(format!("Java name {scope}.{name} collides between {previous} and {origin}")));
         }
         Ok(())
     }

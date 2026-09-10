@@ -4,10 +4,7 @@ use super::*;
 fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("chunk.toml"), "[local]\nenvironment='development'\nmachine_profile='small'\ncapacity=16\nmax_processes=4\n[local.profiles.small]\nmemory_mib=512\nmax_sessions=2\n[local.profiles.large]\nmemory_mib=1024\nmax_sessions=4\n").unwrap();
-    for (id, manifest) in [
-        ("lobby", ""),
-        ("arena", "[runtime]\nmachine_profile='large'\ncapacity=8\n"),
-    ] {
+    for (id, manifest) in [("lobby", ""), ("arena", "[runtime]\nmachine_profile='large'\ncapacity=8\n")] {
         let directory = root.path().join("apps").join(id);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("app.toml"), manifest).unwrap();
@@ -18,10 +15,7 @@ fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
     assert_eq!(config.deployment.environment, "development");
     assert_eq!(config.deployment.deployment, "release-id");
     assert_eq!(config.artifact_digest, "release-id");
-    assert_eq!(
-        config.session_types.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["arena", "lobby"]
-    );
+    assert_eq!(config.session_types.keys().map(String::as_str).collect::<Vec<_>>(), ["arena", "lobby"]);
     assert_eq!(config.session_types["arena"].machine_profile, "large");
     assert_eq!(config.session_types["arena"].capacity, 8);
     assert_eq!(config.session_types["lobby"].machine_profile, "small");

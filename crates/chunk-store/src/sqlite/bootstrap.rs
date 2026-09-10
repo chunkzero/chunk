@@ -14,12 +14,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, File)> {
     let canonical = path.canonicalize()?;
     let mut lock_path = canonical.as_os_str().to_os_string();
     lock_path.push(".writer.lock");
-    let writer_lock = File::options()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
+    let writer_lock = File::options().create(true).truncate(false).read(true).write(true).open(lock_path)?;
     writer_lock.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => Error::WriterLocked,
         std::fs::TryLockError::Error(error) => Error::Io(error),
@@ -61,11 +56,8 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
         transaction.execute("INSERT INTO _chunk_metadata VALUES (1, ?1, 0, 0, 0)", [environment])?;
         transaction.commit()?;
     }
-    let stored: String = connection.query_row(
-        "SELECT environment FROM _chunk_metadata WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )?;
+    let stored: String =
+        connection.query_row("SELECT environment FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?;
     if stored != environment {
         return Err(Error::EnvironmentMismatch);
     }

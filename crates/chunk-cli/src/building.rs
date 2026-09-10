@@ -30,17 +30,10 @@ pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
     let root = options.project.canonicalize()?;
     let metadata = chunk_build::project::inspect(&root)?;
     let output = crate::generation::destination(options.output.as_deref().unwrap_or(&root.join("dist")))?;
-    for source in [
-        root.join(".chunk"),
-        root.join("server"),
-        root.join("apps"),
-        root.join("assets"),
-    ] {
+    for source in [root.join(".chunk"), root.join("server"), root.join("apps"), root.join("assets")] {
         let source = crate::generation::destination(&source)?;
         if output.starts_with(&source) || source.starts_with(&output) {
-            return Err(io::Error::other(
-                "release output must be separate from project sources and build outputs",
-            ));
+            return Err(io::Error::other("release output must be separate from project sources and build outputs"));
         }
     }
     Ok(Project { root, metadata, output })
@@ -68,16 +61,10 @@ pub(crate) async fn execute(project: &Project, stop: CancellationToken) -> io::R
     let output = project.output.clone();
     let built = tokio::task::spawn_blocking(move || {
         let descriptor = chunk_build::read_jvm_descriptor(&inputs.jvm_descriptor).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("Gradle JVM descriptor {}: {error}", inputs.jvm_descriptor.display()),
-            )
+            io::Error::new(error.kind(), format!("Gradle JVM descriptor {}: {error}", inputs.jvm_descriptor.display()))
         })?;
         let release = chunk_build::publish_release(&inputs, &output)?;
-        Ok::<_, io::Error>(Built {
-            release,
-            java: descriptor.java,
-        })
+        Ok::<_, io::Error>(Built { release, java: descriptor.java })
     })
     .await
     .map_err(io::Error::other)??;

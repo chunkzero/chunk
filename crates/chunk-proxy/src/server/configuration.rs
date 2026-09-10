@@ -152,12 +152,7 @@ pub(super) async fn finish<S: AsyncRead + AsyncWrite + Unpin>(
         let frame = transport.read_frame(FRAME_LIMIT).await?;
         match packet_id(&frame)? {
             KnownPacks::ID => {
-                if !decode_packet::<KnownPacks>(&frame)
-                    .map_err(invalid_data)?
-                    .packs
-                    .as_slice()
-                    .is_empty()
-                {
+                if !decode_packet::<KnownPacks>(&frame).map_err(invalid_data)?.packs.as_slice().is_empty() {
                     return Err(invalid_data("client selected an unoffered pack"));
                 }
                 break;

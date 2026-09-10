@@ -18,28 +18,14 @@ pub(super) fn fields(
             return Err(format!("unsupported container field {field}").into());
         }
         let source = string(&field["name"])?;
-        let path = if path.is_empty() {
-            source.into()
-        } else {
-            format!("{path}.{source}")
-        };
-        let rename = spec
-            .fields
-            .iter()
-            .find(|field| field.path == path)
-            .and_then(|field| field.rename);
+        let path = if path.is_empty() { source.into() } else { format!("{path}.{source}") };
+        let rename = spec.fields.iter().find(|field| field.path == path).and_then(|field| field.rename);
         let name = field_name(rename.unwrap_or(source))?;
         if !names.insert(name.clone()) {
             return Err(format!("duplicate field name {name}").into());
         }
-        let ty = wire_type(
-            spec,
-            &path,
-            &field["type"],
-            &format!("{parent}{}", pascal_case(&name)),
-            definitions,
-        )
-        .map_err(|error| format!("{path}: {error}"))?;
+        let ty = wire_type(spec, &path, &field["type"], &format!("{parent}{}", pascal_case(&name)), definitions)
+            .map_err(|error| format!("{path}: {error}"))?;
         if consumes_remainder(&field["type"]) && index + 1 != fields.len() {
             return Err(format!("{path}: restBuffer must be the last field").into());
         }
@@ -51,9 +37,9 @@ pub(super) fn fields(
 pub(super) fn contains_float(schema: &Value) -> bool {
     match schema[0].as_str() {
         Some("option") => contains_float(&schema[1]),
-        Some("container") => schema[1]
-            .as_array()
-            .is_some_and(|fields| fields.iter().any(|field| contains_float(&field["type"]))),
+        Some("container") => {
+            schema[1].as_array().is_some_and(|fields| fields.iter().any(|field| contains_float(&field["type"])))
+        }
         Some("array" | "mapper") => contains_float(&schema[1]["type"]),
         _ => schema == "f32" || schema == "f64",
     }
@@ -62,9 +48,9 @@ pub(super) fn contains_float(schema: &Value) -> bool {
 fn consumes_remainder(schema: &Value) -> bool {
     match schema[0].as_str() {
         Some("option") => consumes_remainder(&schema[1]),
-        Some("container") => schema[1]
-            .as_array()
-            .is_some_and(|fields| fields.iter().any(|field| consumes_remainder(&field["type"]))),
+        Some("container") => {
+            schema[1].as_array().is_some_and(|fields| fields.iter().any(|field| consumes_remainder(&field["type"])))
+        }
         Some("array") => consumes_remainder(&schema[1]["type"]),
         _ => schema == "restBuffer",
     }
@@ -91,10 +77,7 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
             other => return Err(format!("unsupported wire type {other}").into()),
         });
     }
-    let parts = schema
-        .as_array()
-        .filter(|parts| parts.len() == 2)
-        .ok_or("expected a two-part schema type")?;
+    let parts = schema.as_array().filter(|parts| parts.len() == 2).ok_or("expected a two-part schema type")?;
     let tag = string(&parts[0])?;
     let args = &parts[1];
     match tag {
@@ -107,22 +90,12 @@ fn wire_type(spec: &PacketSpec, path: &str, schema: &Value, name: &str, definiti
             if consumes_remainder(&args["type"]) {
                 return Err("restBuffer cannot be an array element".into());
             }
-            let element_path = if args["type"][0] == "container" {
-                path.into()
-            } else {
-                format!("{path}[]")
-            };
+            let element_path = if args["type"][0] == "container" { path.into() } else { format!("{path}[]") };
             let element = wire_type(spec, &element_path, &args["type"], &format!("{name}Entry"), definitions)?;
             Ok(format!("BoundedArray<{element}, {count}>"))
         }
         "container" => {
-            let body = fields(
-                spec,
-                args.as_array().ok_or("expected container fields")?,
-                path,
-                name,
-                definitions,
-            )?;
+            let body = fields(spec, args.as_array().ok_or("expected container fields")?, path, name, definitions)?;
             let eq = if contains_float(schema) { "" } else { "Eq," };
             writeln!(
                 definitions,
@@ -145,10 +118,7 @@ fn mapper(schema: &Value, name: &str, definitions: &mut String) -> Result<String
     if args.as_object().is_none_or(|args| args.len() != 2) {
         return Err("unsupported enum mapper".into());
     }
-    let mappings = args["mappings"]
-        .as_object()
-        .filter(|entries| !entries.is_empty())
-        .ok_or("missing enum mappings")?;
+    let mappings = args["mappings"].as_object().filter(|entries| !entries.is_empty()).ok_or("missing enum mappings")?;
     let mut variants = String::new();
     let mut encode = String::new();
     let mut decode = String::new();
@@ -173,11 +143,7 @@ fn mapper(schema: &Value, name: &str, definitions: &mut String) -> Result<String
     } else {
         format!("(match self {{ {encode} }} as u8)")
     };
-    let decode_value = if wire == "VarInt" {
-        "VarInt::decode(input)?.0"
-    } else {
-        "i32::from(u8::decode(input)?)"
-    };
+    let decode_value = if wire == "VarInt" { "VarInt::decode(input)?.0" } else { "i32::from(u8::decode(input)?)" };
     write!(
         definitions,
         "

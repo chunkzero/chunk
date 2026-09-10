@@ -28,18 +28,12 @@ impl Control {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
         let state = self.state()?;
-        let claim = state
-            .claims
-            .get(&request.operation_id)
-            .ok_or(Error::Invalid("unknown claim"))?;
+        let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(&request)?;
         if matches!(claim.phase, Phase::Withdrawing | Phase::Released) {
             return Err(Error::Invalid("claim closed"));
         }
-        let session = state
-            .sessions
-            .get(&claim.session)
-            .ok_or(Error::Invalid("missing session"))?;
+        let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let runtime = self.runtime(&state, &session.host).await?;
         let channel = channel(&runtime).await?;
         if let Some(bytes) = &claim.assignment {
@@ -55,9 +49,7 @@ impl Control {
                 SessionCommand {
                     identity: Some(runtime.identity.clone()),
                     operation_id: format!("session/{}", claim.session),
-                    session: Some(SessionRef {
-                        id: claim.session.clone(),
-                    }),
+                    session: Some(SessionRef { id: claim.session.clone() }),
                     generation: 1,
                     session_type: session.session_type.clone(),
                     capacity: session.capacity,
@@ -71,20 +63,14 @@ impl Control {
             || created.session.as_ref().map(|s| &s.id) != Some(&claim.session)
         {
             self.update(|s| {
-                s.sessions
-                    .get_mut(&claim.session)
-                    .ok_or(Error::Invalid("missing session"))?
-                    .retired = true;
+                s.sessions.get_mut(&claim.session).ok_or(Error::Invalid("missing session"))?.retired = true;
                 Ok(())
             })?;
             return Err(Error::Unresolved("session is not ready"));
         }
         let assignment = self.prepare_assignment(&runtime, channel, claim, &request).await?;
         self.update(|state| {
-            let claim = state
-                .claims
-                .get_mut(&request.operation_id)
-                .ok_or(Error::Invalid("unknown claim"))?;
+            let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
                 return Err(Error::Invalid("claim no longer reserved"));
             }
@@ -109,25 +95,18 @@ impl Control {
             deployment: Some(self.config.deployment.clone()),
             process_generation: runtime.identity.generation,
             operation_id: request.operation_id.clone(),
-            session: Some(SessionRef {
-                id: claim.session.clone(),
-            }),
+            session: Some(SessionRef { id: claim.session.clone() }),
             session_generation: 1,
             membership_generation: claim.membership_generation,
             proxy_id: claim.proxy.clone(),
             connection_id: request.connection_id.clone(),
-            player: Some(PlayerRef {
-                id: claim.player.clone(),
-            }),
+            player: Some(PlayerRef { id: claim.player.clone() }),
             owner_generation: claim.delivery_generation,
             identity: request.identity.clone(),
             protocol: config.protocol,
             runtime_id: runtime.identity.runtime_id.clone(),
         };
-        let preparation = gameplay
-            .prepare_player(auth(runtime, delivery.clone(), 3)?)
-            .await?
-            .into_inner();
+        let preparation = gameplay.prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
         if preparation.operation_id != request.operation_id || preparation.capability.len() != 32 {
             return Err(Error::Invalid("invalid preparation"));
         }
@@ -149,13 +128,7 @@ impl Control {
     ) -> Result<chunk_proto::v1::ConfigurationResponse> {
         let mut gameplay = GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
         let config = gameplay
-            .configuration(auth(
-                runtime,
-                ConfigurationRequest {
-                    deployment: Some(self.config.deployment.clone()),
-                },
-                3,
-            )?)
+            .configuration(auth(runtime, ConfigurationRequest { deployment: Some(self.config.deployment.clone()) }, 3)?)
             .await?
             .into_inner();
         if config.deployment.as_ref() != Some(&self.config.deployment)
@@ -181,10 +154,7 @@ impl Control {
 }
 
 fn validate(request: &ClaimRequest) -> Result<()> {
-    let identity = request
-        .identity
-        .as_ref()
-        .ok_or(Error::Invalid("missing authenticated identity"))?;
+    let identity = request.identity.as_ref().ok_or(Error::Invalid("missing authenticated identity"))?;
     let demand = request.demand.as_ref().ok_or(Error::Invalid("missing demand"))?;
     if request.encoded_len() > 65_536
         || request.operation_id.is_empty()
@@ -195,13 +165,8 @@ fn validate(request: &ClaimRequest) -> Result<()> {
         || request.connection_id.len() > 128
         || identity.username.is_empty()
         || identity.username.len() > 16
-        || !identity
-            .username
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
-        || uuid::Uuid::parse_str(&identity.uuid)
-            .ok()
-            .is_none_or(|uuid| uuid.to_string() != identity.uuid)
+        || !identity.username.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        || uuid::Uuid::parse_str(&identity.uuid).ok().is_none_or(|uuid| uuid.to_string() != identity.uuid)
         || demand.key.is_empty()
         || demand.key.len() > 128
     {
@@ -225,10 +190,7 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
     if let Some(source) = &request.source {
         let owner = state.players.get(player).ok_or(Error::Invalid("missing move owner"))?;
-        let previous = state
-            .claims
-            .get(&source.operation_id)
-            .ok_or(Error::Invalid("missing move source"))?;
+        let previous = state.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
         let original = ClaimRequest::decode(previous.request.as_slice())?;
         if owner.current.as_ref() != Some(&source.operation_id)
             || owner.pending.is_some()
@@ -240,11 +202,7 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
         {
             return Err(Error::Invalid("stale or competing move"));
         }
-    } else if state
-        .players
-        .get(player)
-        .is_some_and(|p| p.current.is_some() || p.pending.is_some())
-    {
+    } else if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
         return Err(Error::Invalid("player already owned"));
     }
     let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?)?;
@@ -275,10 +233,7 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
 }
 
 fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::SessionDemand) -> Result<String> {
-    let spec = config
-        .session_types
-        .get(&demand.session_type)
-        .ok_or(Error::Invalid("unknown session type"))?;
+    let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
     if !demand.machine_profile.is_empty() && demand.machine_profile != spec.machine_profile {
         return Err(Error::Invalid("session profile mismatch"));
     }
@@ -289,11 +244,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
             !session.retired
                 && session.session_type == demand.session_type
                 && session.demand_key == demand.key
-                && state
-                    .claims
-                    .values()
-                    .filter(|c| c.session == **id && c.phase != Phase::Released)
-                    .count()
+                && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count()
                     < session.capacity as usize
         })
         .map(|(id, _)| id.clone());
@@ -303,11 +254,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
         if state.sessions.len() >= 256 {
             return Err(Error::Capacity);
         }
-        let limit = config
-            .profiles
-            .get(&spec.machine_profile)
-            .ok_or(Error::Invalid("missing profile"))?
-            .max_sessions;
+        let limit = config.profiles.get(&spec.machine_profile).ok_or(Error::Invalid("missing profile"))?.max_sessions;
         let existing_host = state
             .hosts
             .iter()
@@ -315,12 +262,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
                 !host.retired
                     && host.profile == spec.machine_profile
                     && state.sessions.values().filter(|s| s.host == **id && !s.retired).count() < usize::from(limit)
-                    && state
-                        .sessions
-                        .values()
-                        .filter(|s| s.host == **id && !s.retired)
-                        .map(|s| s.capacity)
-                        .sum::<u32>()
+                    && state.sessions.values().filter(|s| s.host == **id && !s.retired).map(|s| s.capacity).sum::<u32>()
                         + spec.capacity
                         <= 128
             })
@@ -332,13 +274,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
                 return Err(Error::Capacity);
             }
             let id = uuid::Uuid::new_v4().to_string();
-            state.hosts.insert(
-                id.clone(),
-                HostState {
-                    profile: spec.machine_profile.clone(),
-                    retired: false,
-                },
-            );
+            state.hosts.insert(id.clone(), HostState { profile: spec.machine_profile.clone(), retired: false });
             id
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -358,10 +294,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
 }
 
 pub(crate) async fn channel(runtime: &RuntimeConnection) -> Result<Channel> {
-    let endpoint = runtime
-        .endpoint
-        .strip_prefix("http://")
-        .ok_or(Error::Invalid("local runtime URL"))?;
+    let endpoint = runtime.endpoint.strip_prefix("http://").ok_or(Error::Invalid("local runtime URL"))?;
     let address: std::net::SocketAddr = endpoint.parse().map_err(|_| Error::Invalid("runtime address"))?;
     if !address.ip().is_loopback() || address.port() == 0 {
         return Err(Error::Invalid("runtime must be loopback"));
@@ -378,9 +311,7 @@ pub(crate) fn auth<T>(runtime: &RuntimeConnection, body: T, seconds: u64) -> Res
     let mut request = Request::new(body);
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {}", runtime.token)
-            .parse()
-            .map_err(|_| Error::Invalid("runtime credential"))?,
+        format!("Bearer {}", runtime.token).parse().map_err(|_| Error::Invalid("runtime credential"))?,
     );
     request.set_timeout(Duration::from_secs(seconds));
     Ok(request)

@@ -5,33 +5,20 @@ use serde_json::json;
 use crate::{DatabaseSchema, Field, Schema, TableSchema, validate};
 
 fn field(schema: Schema) -> Field {
-    Field {
-        schema,
-        optional: false,
-    }
+    Field { schema, optional: false }
 }
 
 #[test]
 fn typed_ids_preserve_table_identity_and_platform_namespaces() {
-    let id = Schema::Id {
-        table: "profiles".into(),
-    };
+    let id = Schema::Id { table: "profiles".into() };
     assert!(id.accepts(&json!("profiles:p1")));
-    for invalid in [
-        json!("matches:p1"),
-        json!("profiles:"),
-        json!("profiles:bad id"),
-        json!(null),
-    ] {
+    for invalid in [json!("matches:p1"), json!("profiles:"), json!("profiles:bad id"), json!(null)] {
         assert!(!id.accepts(&invalid));
     }
     assert!(Schema::Player.accepts(&json!("player-1")));
     assert!(Schema::Session.accepts(&json!("session-1")));
     assert!(!Schema::Player.accepts(&json!("profiles:p1")));
-    assert_eq!(
-        serde_json::to_value(&id).unwrap(),
-        json!({"type":"id", "table":"profiles"})
-    );
+    assert_eq!(serde_json::to_value(&id).unwrap(), json!({"type":"id", "table":"profiles"}));
     assert!(
         validate(&database(TableSchema {
             fields: [("ref".into(), field(id))].into(),
@@ -49,32 +36,18 @@ fn database(table: TableSchema) -> DatabaseSchema {
 fn nested_documents_require_declared_properties_without_scalar_coercion() {
     let schema = Schema::Object {
         fields: [
-            (
-                "items".into(),
-                field(Schema::Array {
-                    items: Box::new(Schema::Integer),
-                }),
-            ),
+            ("items".into(), field(Schema::Array { items: Box::new(Schema::Integer) })),
             (
                 "state".into(),
-                field(Schema::Union {
-                    variants: vec![Schema::Null, Schema::Literal { value: json!("ready") }],
-                }),
+                field(Schema::Union { variants: vec![Schema::Null, Schema::Literal { value: json!("ready") }] }),
             ),
-            (
-                "label".into(),
-                Field {
-                    schema: Schema::String,
-                    optional: true,
-                },
-            ),
+            ("label".into(), Field { schema: Schema::String, optional: true }),
         ]
         .into(),
     };
-    for value in [
-        json!({"items": [], "state": null}),
-        json!({"items": [i64::MIN, i64::MAX], "state": "ready", "label": ""}),
-    ] {
+    for value in
+        [json!({"items": [], "state": null}), json!({"items": [i64::MIN, i64::MAX], "state": "ready", "label": ""})]
+    {
         assert!(schema.accepts(&value));
     }
     for value in [
@@ -111,9 +84,7 @@ fn complete_database_validation_rejects_name_collisions_and_invalid_indexes() {
         assert!(validate(&database(invalid)).is_err());
     }
     let mut complex = table.clone();
-    complex.fields.get_mut("coins").unwrap().schema = Schema::Union {
-        variants: vec![Schema::Null, Schema::Integer],
-    };
+    complex.fields.get_mut("coins").unwrap().schema = Schema::Union { variants: vec![Schema::Null, Schema::Integer] };
     assert!(validate(&database(complex)).is_err());
     let mut collision = table.clone();
     collision.fields.insert("Coins".into(), field(Schema::Integer));
@@ -125,17 +96,13 @@ fn complete_database_validation_rejects_name_collisions_and_invalid_indexes() {
 
 #[test]
 fn declaration_limits_accept_the_boundary_and_reject_one_more() {
-    let mut tables: DatabaseSchema = (0..128)
-        .map(|i| (format!("table{i}"), TableSchema::default()))
-        .collect();
+    let mut tables: DatabaseSchema = (0..128).map(|i| (format!("table{i}"), TableSchema::default())).collect();
     assert!(validate(&tables).is_ok());
     tables.insert("overflow".into(), TableSchema::default());
     assert!(validate(&tables).is_err());
     let mut table = TableSchema {
         fields: (0..64).map(|i| (format!("field{i}"), field(Schema::Integer))).collect(),
-        indexes: (0..16)
-            .map(|i| (format!("index{i}"), (0..8).map(|j| format!("field{j}")).collect()))
-            .collect(),
+        indexes: (0..16).map(|i| (format!("index{i}"), (0..8).map(|j| format!("field{j}")).collect())).collect(),
     };
     assert!(validate(&database(table.clone())).is_ok());
     table.fields.insert("overflow".into(), field(Schema::Integer));
@@ -150,24 +117,10 @@ fn declaration_limits_accept_the_boundary_and_reject_one_more() {
 
 #[test]
 fn union_depth_and_literal_limits_are_checked_before_storage() {
-    let table = |schema| {
-        database(TableSchema {
-            fields: [("value".into(), field(schema))].into(),
-            indexes: BTreeMap::new(),
-        })
-    };
-    assert!(
-        validate(&table(Schema::Union {
-            variants: vec![Schema::String; 16]
-        }))
-        .is_ok()
-    );
-    assert!(
-        validate(&table(Schema::Union {
-            variants: vec![Schema::String; 17]
-        }))
-        .is_err()
-    );
+    let table =
+        |schema| database(TableSchema { fields: [("value".into(), field(schema))].into(), indexes: BTreeMap::new() });
+    assert!(validate(&table(Schema::Union { variants: vec![Schema::String; 16] })).is_ok());
+    assert!(validate(&table(Schema::Union { variants: vec![Schema::String; 17] })).is_err());
     assert!(validate(&table(Schema::Union { variants: vec![] })).is_err());
     for value in [json!(null), json!(true), json!(1), json!("x")] {
         assert!(validate(&table(Schema::Literal { value })).is_ok());
@@ -177,15 +130,8 @@ fn union_depth_and_literal_limits_are_checked_before_storage() {
     }
     let mut nested = Schema::Integer;
     for _ in 0..32 {
-        nested = Schema::Array {
-            items: Box::new(nested),
-        };
+        nested = Schema::Array { items: Box::new(nested) };
     }
     assert!(validate(&table(nested.clone())).is_ok());
-    assert!(
-        validate(&table(Schema::Array {
-            items: Box::new(nested)
-        }))
-        .is_err()
-    );
+    assert!(validate(&table(Schema::Array { items: Box::new(nested) })).is_err());
 }

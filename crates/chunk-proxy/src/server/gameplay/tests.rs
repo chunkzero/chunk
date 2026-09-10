@@ -69,9 +69,7 @@ async fn native_login_presents_capability_and_preserves_profile_and_settings() {
             expected
         );
     });
-    let mut internal = within(WRITE_TIMEOUT, login(&authenticated, &settings, prepared))
-        .await
-        .unwrap();
+    let mut internal = within(WRITE_TIMEOUT, login(&authenticated, &settings, prepared)).await.unwrap();
     decode_packet::<FinishConfiguration>(&internal.read_frame(4096).await.unwrap()).unwrap();
     task.await.unwrap();
 }

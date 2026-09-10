@@ -38,9 +38,7 @@ impl Classpath {
             let file = jar.by_index(index).map_err(io::Error::other)?;
             let name = file.name().to_owned();
             if !names.insert(name.clone()) || name.len() > 4096 || file.enclosed_name().is_none() {
-                return Err(io::Error::other(format!(
-                    "{label} contains an invalid or duplicate JAR entry"
-                )));
+                return Err(io::Error::other(format!("{label} contains an invalid or duplicate JAR entry")));
             }
             if file.is_dir() {
                 continue;
@@ -74,9 +72,7 @@ impl Classpath {
         for (name, (_, hash)) in classes {
             if let Some((previous, owner)) = self.classes.get(&name) {
                 if previous != &hash {
-                    return Err(io::Error::other(format!(
-                        "conflicting class {name} in {owner} and {label}"
-                    )));
+                    return Err(io::Error::other(format!("conflicting class {name} in {owner} and {label}")));
                 }
             } else {
                 self.classes.insert(name, (hash, label.into()));
@@ -125,9 +121,8 @@ fn effective_class(name: &str, multi_release: bool, java: u32) -> io::Result<Opt
         if !multi_release {
             return Ok(None);
         }
-        let (version, class) = rest
-            .split_once('/')
-            .ok_or_else(|| io::Error::other("invalid multi-release class path"))?;
+        let (version, class) =
+            rest.split_once('/').ok_or_else(|| io::Error::other("invalid multi-release class path"))?;
         let version: u32 = version.parse().map_err(io::Error::other)?;
         if version < 9 || version > java {
             return Ok(None);
@@ -151,9 +146,7 @@ fn validate_bytecode(bytes: &[u8], java: u32, name: &str) -> io::Result<()> {
     let minor = u16::from_be_bytes([bytes[4], bytes[5]]);
     let major = u16::from_be_bytes([bytes[6], bytes[7]]);
     if minor == u16::MAX || u32::from(major) > java + 44 {
-        return Err(io::Error::other(format!(
-            "{name} requires incompatible or preview Java bytecode"
-        )));
+        return Err(io::Error::other(format!("{name} requires incompatible or preview Java bytecode")));
     }
     Ok(())
 }
@@ -173,9 +166,7 @@ fn validate_registration(
 ) -> io::Result<()> {
     let Some(app) = app else {
         if metadata.is_some() || provider.is_some() {
-            return Err(io::Error::other(
-                "dependency JAR contains an undeclared app registration",
-            ));
+            return Err(io::Error::other("dependency JAR contains an undeclared app registration"));
         }
         return Ok(());
     };
@@ -198,18 +189,14 @@ fn validate_registration(
         || !class_name(providers[0])
         || !names.contains(&format!("{}.class", providers[0].replace('.', "/")))
     {
-        return Err(io::Error::other(
-            "app JAR requires one SessionProvider class in that JAR",
-        ));
+        return Err(io::Error::other("app JAR requires one SessionProvider class in that JAR"));
     }
     Ok(())
 }
 
 fn class_name(name: &str) -> bool {
     name.split('.').all(|part| {
-        part.chars()
-            .next()
-            .is_some_and(|ch| ch.is_alphabetic() || ch == '_' || ch == '$')
+        part.chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_' || ch == '$')
             && part.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
     })
 }

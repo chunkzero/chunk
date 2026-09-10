@@ -36,10 +36,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     let service = Service::new(control.clone(), token.clone()).map_err(io::Error::other)?;
     let operations = service.operations();
     let result = async {
-        let connection = ControlConnection {
-            endpoint: format!("http://{address}"),
-            token,
-        };
+        let connection = ControlConnection { endpoint: format!("http://{address}"), token };
         if path.exists() {
             let old: ControlConnection = chunk_service::read(&path)?;
             if old.token != connection.token {

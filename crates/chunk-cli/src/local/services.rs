@@ -53,10 +53,8 @@ impl Services {
             connection: options.state.join("backend.json"),
             bind: options.backend_bind,
         };
-        self.backend = Some(Service {
-            task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())),
-            stop: token,
-        });
+        self.backend =
+            Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
         let backend_connection = Service::ready(&mut self.backend, started, "backend").await?;
         let control_state = options.state.join("control").join(&artifact.id);
         let embedded = Arc::new(chunk_control::EmbeddedHost::new(
@@ -82,18 +80,13 @@ impl Services {
             control: authority.clone(),
             host: embedded,
         };
-        self.control = Some(Service {
-            task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())),
-            stop: token,
-        });
+        self.control =
+            Some(Service { task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())), stop: token });
         let control_connection = Service::ready(&mut self.control, started, "control").await?;
         let proxy = chunk_edge::Proxy::bind(
             options.bind,
             chunk_edge::ProxyConfig {
-                platform: Some(chunk_edge::PlatformTarget {
-                    backend: backend_connection,
-                    control: control_connection,
-                }),
+                platform: Some(chunk_edge::PlatformTarget { backend: backend_connection, control: control_connection }),
                 ..Default::default()
             },
         )
@@ -110,10 +103,7 @@ impl Services {
         Ok::<_, io::Error>(())
     }
     fn failed(&self) -> bool {
-        [&self.backend, &self.control, &self.edge]
-            .into_iter()
-            .flatten()
-            .any(|service| service.task.is_finished())
+        [&self.backend, &self.control, &self.edge].into_iter().flatten().any(|service| service.task.is_finished())
     }
     async fn stop(self) -> io::Result<()> {
         let mut result = Ok(());

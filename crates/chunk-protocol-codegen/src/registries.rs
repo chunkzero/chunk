@@ -19,12 +19,7 @@ const DAMAGE_TAGS: &[(&str, &[&str])] = &[
     ),
     (
         "minecraft:is_explosion",
-        &[
-            "minecraft:fireworks",
-            "minecraft:explosion",
-            "minecraft:player_explosion",
-            "minecraft:bad_respawn_point",
-        ],
+        &["minecraft:fireworks", "minecraft:explosion", "minecraft:player_explosion", "minecraft:bad_respawn_point"],
     ),
     (
         "minecraft:bypasses_shield",
@@ -70,12 +65,7 @@ pub(super) fn generate(protocol: &Value, bytes: &[u8]) -> Result<TokenStream> {
     for registry in registries.values() {
         let mut body = Vec::new();
         varint(
-            usize::try_from(super::packets::packet_id(
-                protocol,
-                "configuration",
-                "toClient",
-                "registry_data",
-            )?)?,
+            usize::try_from(super::packets::packet_id(protocol, "configuration", "toClient", "registry_data")?)?,
             &mut body,
         )?;
         text(string(&registry["id"])?, &mut body)?;
@@ -93,15 +83,9 @@ pub(super) fn generate(protocol: &Value, bytes: &[u8]) -> Result<TokenStream> {
         frame.extend(body);
         packets.push(quote! { &[#(#frame),*] as &[u8] });
     }
-    let biomes = registries["minecraft:worldgen/biome"]["entries"]
-        .as_array()
-        .ok_or("missing biomes")?;
-    let end = i32::try_from(
-        biomes
-            .iter()
-            .position(|entry| entry["key"] == "minecraft:the_end")
-            .ok_or("missing End biome")?,
-    )?;
+    let biomes = registries["minecraft:worldgen/biome"]["entries"].as_array().ok_or("missing biomes")?;
+    let end =
+        i32::try_from(biomes.iter().position(|entry| entry["key"] == "minecraft:the_end").ok_or("missing End biome")?)?;
     let tags = limbo_tags(protocol, registries)?;
     Ok(quote! {
         /// Framed limbo registries; unused enchantments and dialogs are empty.
@@ -117,25 +101,14 @@ fn limbo_data(bytes: &[u8]) -> Result<Value> {
     // Limbo has no enchanted items or dialogs. Their vanilla definitions depend
     // on gameplay tags that this world does not synchronize.
     for registry in ["minecraft:enchantment", "minecraft:dialog"] {
-        data["dimensionCodec"][registry]["entries"]
-            .as_array_mut()
-            .ok_or("missing optional registry")?
-            .clear();
+        data["dimensionCodec"][registry]["entries"].as_array_mut().ok_or("missing optional registry")?.clear();
     }
     Ok(data)
 }
 
 fn limbo_tags(protocol: &Value, registries: &serde_json::Map<String, Value>) -> Result<Vec<u8>> {
     let mut body = Vec::new();
-    varint(
-        usize::try_from(super::packets::packet_id(
-            protocol,
-            "configuration",
-            "toClient",
-            "tags",
-        )?)?,
-        &mut body,
-    )?;
+    varint(usize::try_from(super::packets::packet_id(protocol, "configuration", "toClient", "tags")?)?, &mut body)?;
     varint(3, &mut body)?;
     // Vanilla 26.1 bindings required by dimensions and item component initializers.
     // Nested tags are flattened; registry IDs are resolved from the pinned snapshot.
@@ -145,12 +118,7 @@ fn limbo_tags(protocol: &Value, registries: &serde_json::Map<String, Value>) -> 
         &[
             (
                 "minecraft:in_overworld",
-                &[
-                    "minecraft:villager_schedule",
-                    "minecraft:day",
-                    "minecraft:moon",
-                    "minecraft:early_game",
-                ],
+                &["minecraft:villager_schedule", "minecraft:day", "minecraft:moon", "minecraft:early_game"],
             ),
             ("minecraft:in_nether", &["minecraft:villager_schedule"]),
             ("minecraft:in_end", &["minecraft:villager_schedule"]),
@@ -188,9 +156,7 @@ fn append_tags(
     tags: &[(&str, &[&str])],
     body: &mut Vec<u8>,
 ) -> Result<()> {
-    let entries = registries[registry]["entries"]
-        .as_array()
-        .ok_or("missing tag registry")?;
+    let entries = registries[registry]["entries"].as_array().ok_or("missing tag registry")?;
     text(registry, body)?;
     varint(tags.len(), body)?;
     for (name, members) in tags {

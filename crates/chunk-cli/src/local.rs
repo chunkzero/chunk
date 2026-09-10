@@ -51,19 +51,14 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
     let _lock = runner_lock(&state.join("runner.lock"))?;
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     let built = building::execute(&project, stop.clone()).await?;
-    let java = options
-        .java
-        .map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
+    let java = options.java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
     tokio::select! {
         () = stop.cancelled() => return building::cancelled(&stop),
         result = java_version(&java, built.java.version) => result?,
     }
     control.deployment.deployment.clone_from(&built.release.id);
     control.artifact_digest.clone_from(&built.release.id);
-    fs::write(
-        state.join("control-config.json"),
-        serde_json::to_vec(&control).map_err(io::Error::other)?,
-    )?;
+    fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
     tracing::info!(deployment = %built.release.id, "local project packaged");
     let settings = Settings {
         state,
@@ -76,10 +71,8 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
 }
 
 fn control_config(project: &ProjectMetadata, deployment: &str) -> io::Result<chunk_control::Config> {
-    let local = project
-        .local
-        .as_ref()
-        .ok_or_else(|| io::Error::other("chunk dev requires [local] settings in chunk.toml"))?;
+    let local =
+        project.local.as_ref().ok_or_else(|| io::Error::other("chunk dev requires [local] settings in chunk.toml"))?;
     if project.apps.is_empty() {
         return Err(io::Error::other("chunk dev requires at least one discovered app"));
     }
@@ -92,17 +85,8 @@ fn control_config(project: &ProjectMetadata, deployment: &str) -> io::Result<chu
                 .machine_profile
                 .clone()
                 .ok_or_else(|| io::Error::other("app machine profile is unresolved"))?;
-            let capacity = app
-                .runtime
-                .capacity
-                .ok_or_else(|| io::Error::other("app capacity is unresolved"))?;
-            Ok((
-                app.id.clone(),
-                chunk_control::SessionType {
-                    machine_profile,
-                    capacity,
-                },
-            ))
+            let capacity = app.runtime.capacity.ok_or_else(|| io::Error::other("app capacity is unresolved"))?;
+            Ok((app.id.clone(), chunk_control::SessionType { machine_profile, capacity }))
         })
         .collect::<io::Result<_>>()?;
     Ok(chunk_control::Config {
@@ -138,9 +122,7 @@ fn available_addresses(bind: SocketAddr, backend: SocketAddr, control: SocketAdd
             return Err(io::Error::other("local runner requires fixed loopback ports"));
         }
         std::net::TcpListener::bind(address).map_err(|error| {
-            io::Error::other(format!(
-                "{address} is unavailable; stop the existing server first: {error}"
-            ))
+            io::Error::other(format!("{address} is unavailable; stop the existing server first: {error}"))
         })?;
     }
     Ok(())
@@ -155,38 +137,25 @@ fn runner_lock(path: &Path) -> io::Result<fs::File> {
         options.mode(0o600);
     }
     let file = options.open(path)?;
-    file.try_lock()
-        .map_err(|_| io::Error::other("another local runner owns this state directory"))?;
+    file.try_lock().map_err(|_| io::Error::other("another local runner owns this state directory"))?;
     Ok(file)
 }
 
 async fn java_version(java: &Path, required: u32) -> io::Result<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(java)
-            .arg("-version")
-            .kill_on_drop(true)
-            .output(),
+        tokio::process::Command::new(java).arg("-version").kill_on_drop(true).output(),
     )
     .await
     .map_err(io::Error::other)??;
-    let version = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    );
+    let version = format!("{}\n{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
     let major = version.lines().find_map(|line| {
         let version = line
             .strip_prefix("openjdk version ")
             .or_else(|| line.strip_prefix("java version "))
             .or_else(|| line.strip_prefix("openjdk "))
             .or_else(|| line.strip_prefix("java "))?;
-        version
-            .trim_start_matches('"')
-            .split(|ch: char| !ch.is_ascii_digit())
-            .next()?
-            .parse::<u32>()
-            .ok()
+        version.trim_start_matches('"').split(|ch: char| !ch.is_ascii_digit()).next()?.parse::<u32>().ok()
     });
     if !output.status.success() || major.is_none_or(|version| version < required) {
         return Err(io::Error::other(format!(

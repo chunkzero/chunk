@@ -46,10 +46,7 @@ fn handshake_matches_wire_and_framing_preserves_partial_input() {
         assert_eq!(&buffer[..], &[1, 0]);
     }
     for wire in [&[0][..], &[0x80, 0x80, 0x80], &[0x81, 0x20]] {
-        assert_eq!(
-            decode_frame(&mut BytesMut::from(wire), 4096),
-            Err(Error::InvalidFrameLength)
-        );
+        assert_eq!(decode_frame(&mut BytesMut::from(wire), 4096), Err(Error::InvalidFrameLength));
     }
 }
 
@@ -76,18 +73,9 @@ fn derived_generic_packet_checks_id_and_consumes_entire_payload() {
     assert_eq!(encode_packet(&packet).unwrap(), [5, 2, 0x80, 1, 0x63, 0xdd]);
     assert_eq!(Generic::<VarInt>::STATE, State::Login);
     assert_eq!(Generic::<VarInt>::DIRECTION, Direction::Clientbound);
-    assert_eq!(
-        decode_packet::<Generic<VarInt>>(&[2, 0x80, 1, 0x63, 0xdd]).unwrap(),
-        packet
-    );
-    assert_eq!(
-        decode_packet::<Generic<VarInt>>(&[1, 0, 0, 0]),
-        Err(Error::UnexpectedPacket)
-    );
-    assert_eq!(
-        decode_packet::<Generic<VarInt>>(&[2, 0, 0, 0, 1]),
-        Err(Error::TrailingBytes)
-    );
+    assert_eq!(decode_packet::<Generic<VarInt>>(&[2, 0x80, 1, 0x63, 0xdd]).unwrap(), packet);
+    assert_eq!(decode_packet::<Generic<VarInt>>(&[1, 0, 0, 0]), Err(Error::UnexpectedPacket));
+    assert_eq!(decode_packet::<Generic<VarInt>>(&[2, 0, 0, 0, 1]), Err(Error::TrailingBytes));
 }
 
 #[test]
@@ -109,8 +97,5 @@ fn bounded_collections_and_optional_values_reject_invalid_input() {
     assert_eq!(Option::<VarInt>::decode(&mut &[2][..]), Err(Error::InvalidBoolean));
     assert_eq!(Option::<VarInt>::decode(&mut &[1][..]), Err(Error::Incomplete));
     assert_eq!(Uuid::decode(&mut &[0; 15][..]), Err(Error::Incomplete));
-    assert_eq!(
-        RemainingBytes::<2>::decode(&mut &[0; 3][..]),
-        Err(Error::CollectionTooLong)
-    );
+    assert_eq!(RemainingBytes::<2>::decode(&mut &[0; 3][..]), Err(Error::CollectionTooLong));
 }

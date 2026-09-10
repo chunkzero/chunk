@@ -44,34 +44,22 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
         let server = tokio::spawn(async move {
             let mut settings = information();
             settings.view_distance = 2;
-            until(&mut public, &mut internal, &mut settings, prepared, true)
-                .await
-                .unwrap()
-                .unwrap();
+            until(&mut public, &mut internal, &mut settings, prepared, true).await.unwrap().unwrap();
             stopped.send(()).unwrap();
             late.await.unwrap();
-            start_configuration(&mut public, &mut internal, &mut settings)
-                .await
-                .unwrap();
+            start_configuration(&mut public, &mut internal, &mut settings).await.unwrap();
             drop(internal);
             let (destination, backend) = tokio::io::duplex(8192);
             let mut destination = Transport::new(destination);
             let mut backend = Transport::new(backend);
             let backend = tokio::spawn(async move {
-                backend
-                    .write_packet(&SelectKnownPacks {
-                        packs: BoundedArray::new(vec![]).unwrap(),
-                    })
-                    .await
-                    .unwrap();
+                backend.write_packet(&SelectKnownPacks { packs: BoundedArray::new(vec![]).unwrap() }).await.unwrap();
                 decode_packet::<KnownPacks>(&backend.read_frame(4096).await.unwrap()).unwrap();
                 backend.write_body(&packets).await.unwrap();
                 backend.write_packet(&FinishConfiguration).await.unwrap();
                 decode_packet::<AcknowledgeConfiguration>(&backend.read_frame(4096).await.unwrap()).unwrap();
             });
-            configuration::relay(&mut public, &mut destination, &mut settings)
-                .await
-                .unwrap();
+            configuration::relay(&mut public, &mut destination, &mut settings).await.unwrap();
             backend.await.unwrap();
             settings
         });
@@ -101,17 +89,9 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
             assert_eq!(jvm.read_frame(4096).await.unwrap().as_ref(), body);
         }
         client.write_packet(&ConfigurationAcknowledged).await.unwrap();
-        assert_eq!(
-            jvm.read_frame(4096).await.unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert_eq!(jvm.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         decode_packet::<SelectKnownPacks>(&client.read_frame(4096).await.unwrap()).unwrap();
-        client
-            .write_packet(&KnownPacks {
-                packs: BoundedArray::new(vec![]).unwrap(),
-            })
-            .await
-            .unwrap();
+        client.write_packet(&KnownPacks { packs: BoundedArray::new(vec![]).unwrap() }).await.unwrap();
         assert_eq!(client.read_frame(4096).await.unwrap().as_ref(), expected);
         decode_packet::<FinishConfiguration>(&client.read_frame(4096).await.unwrap()).unwrap();
         client.write_packet(&AcknowledgeConfiguration).await.unwrap();

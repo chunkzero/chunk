@@ -21,11 +21,7 @@ pub(crate) struct View {
 
 impl View {
     pub fn new(base: Snapshot) -> Self {
-        Self {
-            revision: base.revision,
-            base,
-            overlay: BTreeMap::new(),
-        }
+        Self { revision: base.revision, base, overlay: BTreeMap::new() }
     }
 
     pub fn get(&self, key: &DocumentKey, budget: &mut ReadBudget) -> Result<Option<Document>> {
@@ -41,12 +37,8 @@ impl View {
     }
 
     pub fn scan(&self, range: &KeyRange, budget: &mut ReadBudget) -> Result<BTreeMap<String, Value>> {
-        let mut rows: BTreeMap<_, _> = self
-            .base
-            .scan_bounded(range, budget)?
-            .into_iter()
-            .map(|(id, doc)| (id, doc.value))
-            .collect();
+        let mut rows: BTreeMap<_, _> =
+            self.base.scan_bounded(range, budget)?.into_iter().map(|(id, doc)| (id, doc.value)).collect();
         for (key, value) in &self.overlay {
             if covers(range, key) {
                 match value {
@@ -95,10 +87,7 @@ impl View {
         let mut rows: Vec<_> = rows.into_iter().collect();
         rows.sort_by(|a, b| IndexQuery::compare(fields, a, b));
         rows.truncate(query.limit);
-        Ok(IndexRows {
-            fields: fields.clone(),
-            rows,
-        })
+        Ok(IndexRows { fields: fields.clone(), rows })
     }
 
     pub fn changes(&self, writes: &[Write]) -> Result<Vec<Change>> {
@@ -117,10 +106,7 @@ impl View {
 
     pub fn apply(&mut self, revision: Revision, writes: &[Write]) {
         for write in writes {
-            self.overlay.insert(
-                write.key.clone(),
-                write.value.clone().map(|value| Document { revision, value }),
-            );
+            self.overlay.insert(write.key.clone(), write.value.clone().map(|value| Document { revision, value }));
         }
         self.revision = revision;
     }
@@ -129,11 +115,7 @@ impl View {
         let mut bytes = 0;
         for write in writes {
             write.key.validate()?;
-            let table = self
-                .base
-                .schema()
-                .get(&write.key.table)
-                .ok_or(Error::Invalid("undeclared table"))?;
+            let table = self.base.schema().get(&write.key.table).ok_or(Error::Invalid("undeclared table"))?;
             if let Some(value) = &write.value {
                 if !table.accepts(value) {
                     return Err(Error::Invalid("document does not match schema"));
@@ -172,11 +154,7 @@ impl Dependencies {
                 || self.ranges.iter().any(|range| covers(range, &change.key))
                 || self.indexes.iter().any(|(query, fields)| {
                     query.table == change.key.table
-                        && change
-                            .before
-                            .iter()
-                            .chain(change.after.iter())
-                            .any(|value| query.matches(fields, value))
+                        && change.before.iter().chain(change.after.iter()).any(|value| query.matches(fields, value))
                 })
         })
     }
@@ -241,29 +219,17 @@ impl ReadHost for Host {
         end: Option<&str>,
     ) -> std::result::Result<Vec<(String, Value)>, String> {
         self.table(table)?;
-        let range = KeyRange {
-            table: table.into(),
-            start: start.map(str::to_owned),
-            end: end.map(str::to_owned),
-        };
+        let range = KeyRange { table: table.into(), start: start.map(str::to_owned), end: end.map(str::to_owned) };
         range.validate().map_err(|error| error.to_string())?;
         self.trace.borrow_mut().ranges.push(range.clone());
         self.view
             .scan(&range, &mut self.budget)
-            .and_then(|rows| {
-                rows.into_iter()
-                    .map(|(id, value)| Ok((id, self.value(table, value)?)))
-                    .collect()
-            })
+            .and_then(|rows| rows.into_iter().map(|(id, value)| Ok((id, self.value(table, value)?))).collect())
             .map_err(|error| error.to_string())
     }
     fn scan_index(&mut self, query: &IndexQuery) -> std::result::Result<IndexRows, String> {
         self.table(&query.table)?;
-        if self
-            .contract
-            .as_ref()
-            .is_some_and(|c| !c.tables[&query.table].indexes.contains_key(&query.index))
-        {
+        if self.contract.as_ref().is_some_and(|c| !c.tables[&query.table].indexes.contains_key(&query.index)) {
             return Err("undeclared index".into());
         }
         let table = self.view.base.schema().get(&query.table).ok_or("undeclared table")?;

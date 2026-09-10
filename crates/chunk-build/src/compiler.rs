@@ -37,17 +37,11 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let executor = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     executor.block_on(bundle::build(&project, staging.path(), &sdk, &files))?;
     drop(executor);
-    let source = String::from_utf8(super::read_limited(
-        &staging.path().join("source.mjs"),
-        4 * 1024 * 1024,
-    )?)
-    .map_err(io::Error::other)?;
+    let source = String::from_utf8(super::read_limited(&staging.path().join("source.mjs"), 4 * 1024 * 1024)?)
+        .map_err(io::Error::other)?;
     let contract = extract(&source)
         .map_err(|error| io::Error::other(format!("Backend deployment at {}: {error}", project.display())))?;
-    fs::write(
-        staging.path().join("contract.json"),
-        serde_json::to_vec(&contract).map_err(io::Error::other)?,
-    )?;
+    fs::write(staging.path().join("contract.json"), serde_json::to_vec(&contract).map_err(io::Error::other)?)?;
     for name in ["source.mjs", "source.mjs.map", "contract.json"] {
         fs::rename(staging.path().join(name), output.join(name))?;
     }
@@ -58,9 +52,7 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
     Engine::init_platform();
     let mut engine = Engine::new().map_err(io::Error::other)?;
     let id = DeploymentId::new("declaration-extraction").map_err(io::Error::other)?;
-    engine
-        .register(id.clone(), source.into(), Limits::default())
-        .map_err(io::Error::other)?;
+    engine.register(id.clone(), source.into(), Limits::default()).map_err(io::Error::other)?;
     let result = engine
         .execute(
             &id,
@@ -111,11 +103,7 @@ mod tests {
             error.contains("server/schema/index.ts must default-export a schema created with defineSchema()"),
             "{error}"
         );
-        fs::write(
-            &schema,
-            "import {defineSchema} from '@chunk/server'; export default defineSchema({});",
-        )
-        .unwrap();
+        fs::write(&schema, "import {defineSchema} from '@chunk/server'; export default defineSchema({});").unwrap();
         fs::write(
             project.path().join("server/invalid-name.ts"),
             "import {query,v} from '@chunk/server'; export const value=query({args:{},returns:v.null(),handler:()=>null});",
@@ -123,10 +111,7 @@ mod tests {
         .unwrap();
         let error = compile(project.path(), output.path()).unwrap_err().to_string();
         assert!(error.contains("invalid function path"), "{error}");
-        assert!(
-            error.contains(&project.path().canonicalize().unwrap().display().to_string()),
-            "{error}"
-        );
+        assert!(error.contains(&project.path().canonicalize().unwrap().display().to_string()), "{error}");
         assert!(!error.contains('\u{1b}'), "{error}");
     }
 
@@ -139,11 +124,7 @@ mod tests {
         fs::write(project.path().join("apps/duels/app.toml"), "").unwrap();
         fs::write(project.path().join("apps/duels/build.gradle.kts"), "").unwrap();
         fs::create_dir_all(project.path().join("apps/unregistered/server")).unwrap();
-        fs::write(
-            project.path().join("apps/unregistered/server/ignored.ts"),
-            "invalid TypeScript",
-        )
-        .unwrap();
+        fs::write(project.path().join("apps/unregistered/server/ignored.ts"), "invalid TypeScript").unwrap();
         fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '@chunk/server'; export default defineSchema({profiles:defineTable({player:v.player()}).index('by_player',['player'])});").unwrap();
         fs::write(project.path().join("apps/duels/server/match.ts"), "import {query,internalMutation,v} from '@chunk/server'; export function helper(n:number){return n+1} export const score=query({args:{value:v.integer()},returns:v.integer(),handler:(_,a)=>helper(a.value)}); export const hidden=internalMutation({args:{},returns:v.null(),handler:()=>null});").unwrap();
         compile(project.path(), output.path()).unwrap();
@@ -177,11 +158,8 @@ mod tests {
         assert_eq!(contract, fs::read(output.path().join("contract.json")).unwrap());
         assert_eq!(source, fs::read_to_string(output.path().join("source.mjs")).unwrap());
         assert_eq!(source_map, fs::read(output.path().join("source.mjs.map")).unwrap());
-        fs::write(
-            project.path().join("server/bad.ts"),
-            "// @ts-ignore\nimport 'node:fs'; export const value=1;",
-        )
-        .unwrap();
+        fs::write(project.path().join("server/bad.ts"), "// @ts-ignore\nimport 'node:fs'; export const value=1;")
+            .unwrap();
         assert!(compile(project.path(), output.path()).is_err());
         fs::write(project.path().join("server/bad.ts"), "export const value=Date.now();").unwrap();
         assert!(compile(project.path(), output.path()).is_err());

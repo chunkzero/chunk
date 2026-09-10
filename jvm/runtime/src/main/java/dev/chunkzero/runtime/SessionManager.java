@@ -3,7 +3,13 @@ package dev.chunkzero.runtime;
 import chunk.v1.Supervision.SessionCommand;
 import chunk.v1.Supervision.SessionInventory;
 import chunk.v1.Supervision.SessionPhase;
+
 import dev.chunkzero.backend.client.BackendSession;
+
+import net.minestom.server.entity.Player;
+
+import org.jetbrains.annotations.Nullable;
+
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -15,8 +21,6 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import net.minestom.server.entity.Player;
-import org.jetbrains.annotations.Nullable;
 
 final class SessionManager {
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
@@ -25,11 +29,20 @@ final class SessionManager {
     private final Map<String, SessionRegistration> factories;
     private final @Nullable BiFunction<String, String, BackendSession> backend;
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
-    private Function<String, CompletionStage<Void>> withdraw = ignored -> CompletableFuture.completedFuture(null);
+    private Function<String, CompletionStage<Void>> withdraw =
+            ignored -> CompletableFuture.completedFuture(null);
 
     SessionManager(TickExecutor ticks, Map<String, Supplier<Session>> factories) {
-        this(ticks, factories.entrySet().stream().collect(Collectors.toMap(
-                Map.Entry::getKey, entry -> new SessionRegistration(entry.getKey(), entry.getValue()))), null);
+        this(
+                ticks,
+                factories.entrySet().stream()
+                        .collect(
+                                Collectors.toMap(
+                                        Map.Entry::getKey,
+                                        entry ->
+                                                new SessionRegistration(
+                                                        entry.getKey(), entry.getValue()))),
+                null);
     }
 
     SessionManager(
@@ -50,42 +63,55 @@ final class SessionManager {
     }
 
     CompletableFuture<SessionInventory> create(SessionCommand command) {
-        return ticks.submit(() -> {
-            if (!SESSION_ID.matcher(command.getSession().getId()).matches() || command.getGeneration() <= 0
-                    || command.getOperationId().isEmpty() || command.getOperationId().length() > 128
-                    || command.getCapacity() < 1 || command.getCapacity() > 128) {
-                throw new IllegalArgumentException("Invalid session command");
-            }
-            var previous = sessions.get(command.getSession().getId());
-            if (previous != null) {
-                if (!previous.command.equals(command)) throw new IllegalArgumentException("Session creation changed");
-                return previous;
-            }
-            if (sessions.size() >= 256) throw new IllegalStateException("Session history full");
-            var factory = factories.get(command.getSessionType());
-            if (factory == null) throw new IllegalArgumentException("Unknown session type");
-            var session = new ManagedSession(command, factory);
-            sessions.put(command.getSession().getId(), session);
-            session.start();
-            return session;
-        }).thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
+        return ticks.submit(
+                        () -> {
+                            if (!SESSION_ID.matcher(command.getSession().getId()).matches()
+                                    || command.getGeneration() <= 0
+                                    || command.getOperationId().isEmpty()
+                                    || command.getOperationId().length() > 128
+                                    || command.getCapacity() < 1
+                                    || command.getCapacity() > 128) {
+                                throw new IllegalArgumentException("Invalid session command");
+                            }
+                            var previous = sessions.get(command.getSession().getId());
+                            if (previous != null) {
+                                if (!previous.command.equals(command))
+                                    throw new IllegalArgumentException("Session creation changed");
+                                return previous;
+                            }
+                            if (sessions.size() >= 256)
+                                throw new IllegalStateException("Session history full");
+                            var factory = factories.get(command.getSessionType());
+                            if (factory == null)
+                                throw new IllegalArgumentException("Unknown session type");
+                            var session = new ManagedSession(command, factory);
+                            sessions.put(command.getSession().getId(), session);
+                            session.start();
+                            return session;
+                        })
+                .thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
     }
 
     CompletableFuture<SessionInventory> finish(SessionCommand command) {
-        return ticks.submit(() -> {
-            var session = sessions.get(command.getSession().getId());
-            if (session == null || session.command.getGeneration() != command.getGeneration()) {
-                throw new IllegalArgumentException("Unknown session generation");
-            }
-            return session;
-        }).thenCompose(session -> session.finish().thenApply(ignored -> session.inventory()));
+        return ticks.submit(
+                        () -> {
+                            var session = sessions.get(command.getSession().getId());
+                            if (session == null
+                                    || session.command.getGeneration() != command.getGeneration()) {
+                                throw new IllegalArgumentException("Unknown session generation");
+                            }
+                            return session;
+                        })
+                .thenCompose(session -> session.finish().thenApply(ignored -> session.inventory()));
     }
 
     ManagedSession get(String id, long generation) {
         var session = sessions.get(id);
         if (session == null) throw new IllegalArgumentException("Unknown session");
-        if (session.command.getGeneration() != generation) throw new IllegalArgumentException("Stale session generation");
-        if (session.phase != SessionPhase.SESSION_PHASE_READY) throw new IllegalStateException("Session unavailable");
+        if (session.command.getGeneration() != generation)
+            throw new IllegalArgumentException("Stale session generation");
+        if (session.phase != SessionPhase.SESSION_PHASE_READY)
+            throw new IllegalStateException("Session unavailable");
         return session;
     }
 
@@ -106,12 +132,13 @@ final class SessionManager {
         ManagedSession(SessionCommand command, SessionRegistration registration) {
             this.command = command;
             behavior = registration.create();
-            scope = new SessionScope(
-                    command.getSession().getId(),
-                    command.getGeneration(),
-                    ticks,
-                    this::finish,
-                    registration.backend(command.getSession().getId(), backend));
+            scope =
+                    new SessionScope(
+                            command.getSession().getId(),
+                            command.getGeneration(),
+                            ticks,
+                            this::finish,
+                            registration.backend(command.getSession().getId(), backend));
         }
 
         SessionCommand getCommand() {
@@ -127,76 +154,117 @@ final class SessionManager {
         }
 
         void start() {
-            invoke(() -> behavior.onCreate(scope)).whenComplete((ignored, error) -> ticks.submit(() -> {
-                if (error == null && !scope.getInstances().isEmpty()) {
-                    if (!finishing) phase = SessionPhase.SESSION_PHASE_READY;
-                    ready.complete(null);
-                } else {
-                    phase = SessionPhase.SESSION_PHASE_FAILED;
-                    creationFailure = error == null ? new IllegalStateException("Session has no instances") : error;
-                    ready.completeExceptionally(creationFailure);
-                    finish();
-                }
-                return null;
-            }));
+            invoke(() -> behavior.onCreate(scope))
+                    .whenComplete(
+                            (ignored, error) ->
+                                    ticks.submit(
+                                            () -> {
+                                                if (error == null
+                                                        && !scope.getInstances().isEmpty()) {
+                                                    if (!finishing)
+                                                        phase = SessionPhase.SESSION_PHASE_READY;
+                                                    ready.complete(null);
+                                                } else {
+                                                    phase = SessionPhase.SESSION_PHASE_FAILED;
+                                                    creationFailure =
+                                                            error == null
+                                                                    ? new IllegalStateException(
+                                                                            "Session has no"
+                                                                                    + " instances")
+                                                                    : error;
+                                                    ready.completeExceptionally(creationFailure);
+                                                    finish();
+                                                }
+                                                return null;
+                                            }));
         }
 
         CompletableFuture<Void> join(Player player) {
-            return ticks.submit(() -> {
-                if (phase != SessionPhase.SESSION_PHASE_READY) throw new IllegalStateException("Session unavailable");
-                scope.getPlayers().add(player);
-                return invoke(() -> behavior.onJoin(player));
-            }).thenCompose(Function.identity());
+            return ticks.submit(
+                            () -> {
+                                if (phase != SessionPhase.SESSION_PHASE_READY)
+                                    throw new IllegalStateException("Session unavailable");
+                                scope.getPlayers().add(player);
+                                return invoke(() -> behavior.onJoin(player));
+                            })
+                    .thenCompose(Function.identity());
         }
 
         CompletableFuture<Void> leave(Player player) {
-            return ticks.submit(() -> {
-                if (!scope.getPlayers().remove(player)) return CompletableFuture.<Void>completedFuture(null);
-                Exception disposalFailure = null;
-                try {
-                    scope.releasePlayer(player);
-                } catch (Exception error) {
-                    disposalFailure = error;
-                }
-                var failure = disposalFailure;
-                return invoke(() -> behavior.onLeave(player)).<Void>handle((ignored, error) -> {
-                    if (failure != null) {
-                        if (error != null) failure.addSuppressed(error);
-                        throw new CompletionException(failure);
-                    }
-                    if (error != null) throw new CompletionException(error);
-                    return null;
-                });
-            }).thenCompose(Function.identity());
+            return ticks.submit(
+                            () -> {
+                                if (!scope.getPlayers().remove(player))
+                                    return CompletableFuture.<Void>completedFuture(null);
+                                Exception disposalFailure = null;
+                                try {
+                                    scope.releasePlayer(player);
+                                } catch (Exception error) {
+                                    disposalFailure = error;
+                                }
+                                var failure = disposalFailure;
+                                return invoke(() -> behavior.onLeave(player))
+                                        .<Void>handle(
+                                                (ignored, error) -> {
+                                                    if (failure != null) {
+                                                        if (error != null)
+                                                            failure.addSuppressed(error);
+                                                        throw new CompletionException(failure);
+                                                    }
+                                                    if (error != null)
+                                                        throw new CompletionException(error);
+                                                    return null;
+                                                });
+                            })
+                    .thenCompose(Function.identity());
         }
 
         CompletableFuture<Void> finish() {
-            ticks.submit(() -> {
-                if (!finishing) {
-                    finishing = true;
-                    phase = SessionPhase.SESSION_PHASE_ENDING;
-                    // Creation must settle before scoped resources can be disposed.
-                    ready.handle((ignored, error) -> null)
-                            .thenCompose(ignored -> withdraw.apply(command.getSession().getId()))
-                            .thenCompose(ignored -> ticks.submit(() -> invoke(behavior::onFinish))
-                                    .thenCompose(Function.identity()))
-                            .whenComplete((ignored, error) -> ticks.submit(() -> {
-                                try {
-                                    scope.dispose();
-                                    var failure = error == null ? creationFailure : error;
-                                    phase = failure == null
-                                            ? SessionPhase.SESSION_PHASE_ENDED : SessionPhase.SESSION_PHASE_FAILED;
-                                    if (failure == null) ended.complete(null);
-                                    else ended.completeExceptionally(failure);
-                                } catch (Exception failure) {
-                                    phase = SessionPhase.SESSION_PHASE_FAILED;
-                                    ended.completeExceptionally(failure);
-                                }
-                                return null;
-                            }));
-                }
-                return null;
-            });
+            ticks.submit(
+                    () -> {
+                        if (!finishing) {
+                            finishing = true;
+                            phase = SessionPhase.SESSION_PHASE_ENDING;
+                            // Creation must settle before scoped resources can be disposed.
+                            ready.handle((ignored, error) -> null)
+                                    .thenCompose(
+                                            ignored -> withdraw.apply(command.getSession().getId()))
+                                    .thenCompose(
+                                            ignored ->
+                                                    ticks.submit(() -> invoke(behavior::onFinish))
+                                                            .thenCompose(Function.identity()))
+                                    .whenComplete(
+                                            (ignored, error) ->
+                                                    ticks.submit(
+                                                            () -> {
+                                                                try {
+                                                                    scope.dispose();
+                                                                    var failure =
+                                                                            error == null
+                                                                                    ? creationFailure
+                                                                                    : error;
+                                                                    phase =
+                                                                            failure == null
+                                                                                    ? SessionPhase
+                                                                                            .SESSION_PHASE_ENDED
+                                                                                    : SessionPhase
+                                                                                            .SESSION_PHASE_FAILED;
+                                                                    if (failure == null)
+                                                                        ended.complete(null);
+                                                                    else
+                                                                        ended.completeExceptionally(
+                                                                                failure);
+                                                                } catch (Exception failure) {
+                                                                    phase =
+                                                                            SessionPhase
+                                                                                    .SESSION_PHASE_FAILED;
+                                                                    ended.completeExceptionally(
+                                                                            failure);
+                                                                }
+                                                                return null;
+                                                            }));
+                        }
+                        return null;
+                    });
             return ended;
         }
 

@@ -12,22 +12,10 @@ use crate::{
 };
 
 pub(crate) enum Job {
-    Prepare {
-        operation: Operation,
-        context: chunk_store::RetryContext,
-    },
-    Release {
-        id: String,
-    },
-    Activate {
-        deployment: Arc<chunk_contract::Deployment>,
-    },
-    Commit {
-        expected: Revision,
-        operation: Operation,
-        writes: Vec<Write>,
-        result: Arc<str>,
-    },
+    Prepare { operation: Operation, context: chunk_store::RetryContext },
+    Release { id: String },
+    Activate { deployment: Arc<chunk_contract::Deployment> },
+    Commit { expected: Revision, operation: Operation, writes: Vec<Write>, result: Arc<str> },
 }
 
 pub(crate) struct Committer {
@@ -57,10 +45,7 @@ impl Committer {
                             store.prepare_operation(&operation, context).map_err(Error::from)
                         };
                         failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-                        Event::Prepared {
-                            operation: operation.id,
-                            result,
-                        }
+                        Event::Prepared { operation: operation.id, result }
                     }
                     Job::Release { id } => {
                         let result = if failed {
@@ -75,26 +60,18 @@ impl Committer {
                         let result = if failed {
                             Err(Error::CommitFailed)
                         } else {
-                            store
-                                .activate_deployment(&deployment)
-                                .map_err(Error::from)
-                                .and_then(|revision| {
-                                    let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
-                                    if snapshot.revision != revision {
-                                        return Err(Error::CommitFailed);
-                                    }
-                                    Ok(snapshot)
-                                })
+                            store.activate_deployment(&deployment).map_err(Error::from).and_then(|revision| {
+                                let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
+                                if snapshot.revision != revision {
+                                    return Err(Error::CommitFailed);
+                                }
+                                Ok(snapshot)
+                            })
                         };
                         failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
                         Event::Activated { result }
                     }
-                    Job::Commit {
-                        expected,
-                        operation,
-                        writes,
-                        result,
-                    } => {
+                    Job::Commit { expected, operation, writes, result } => {
                         let id = operation.id.clone();
                         let result = if failed {
                             Err(Error::CommitFailed)
@@ -112,23 +89,16 @@ impl Committer {
                 }
             }
         })?;
-        let committer = Self {
-            jobs: Some(jobs),
-            thread: Some(thread),
-        };
+        let committer = Self { jobs: Some(jobs), thread: Some(thread) };
         let (snapshot, deployments) = initialized.recv().map_err(|_| Error::Closed)??;
         Ok((committer, snapshot, deployments))
     }
 
     pub fn send(&self, job: Job) -> Result<()> {
-        self.jobs
-            .as_ref()
-            .ok_or(Error::Closed)?
-            .try_send(job)
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => Error::Busy,
-                mpsc::TrySendError::Disconnected(_) => Error::Closed,
-            })
+        self.jobs.as_ref().ok_or(Error::Closed)?.try_send(job).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => Error::Busy,
+            mpsc::TrySendError::Disconnected(_) => Error::Closed,
+        })
     }
 }
 
@@ -140,12 +110,7 @@ fn commit(
     json: Arc<str>,
 ) -> Result<(Update, Snapshot)> {
     // Storage currently takes Value; only the durable boundary decodes results.
-    let outcome = store.commit(Commit {
-        expected,
-        operation,
-        writes,
-        result: serde_json::from_str(&json)?,
-    })?;
+    let outcome = store.commit(Commit { expected, operation, writes, result: serde_json::from_str(&json)? })?;
     if expected.0.checked_add(1) != Some(outcome.revision.0) {
         return Err(Error::CommitFailed);
     }
@@ -153,13 +118,7 @@ fn commit(
     if snapshot.revision != outcome.revision {
         return Err(Error::CommitFailed);
     }
-    Ok((
-        Update {
-            revision: outcome.revision,
-            json,
-        },
-        snapshot,
-    ))
+    Ok((Update { revision: outcome.revision, json }, snapshot))
 }
 
 impl Drop for Committer {

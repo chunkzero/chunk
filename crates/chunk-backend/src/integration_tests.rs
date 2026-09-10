@@ -41,11 +41,7 @@ fn deployment(id: &str) -> Deployment {
                 name.into(),
                 Function {
                     kind,
-                    visibility: if name == "privateRead" {
-                        Visibility::Internal
-                    } else {
-                        Visibility::Public
-                    },
+                    visibility: if name == "privateRead" { Visibility::Internal } else { Visibility::Public },
                     export: name.into(),
                     arguments: Schema::Null,
                     result: Schema::Integer,
@@ -69,9 +65,7 @@ fn request(function: &str, operation: &str) -> BackendCall {
 
 fn authorized<T>(value: T) -> Request<T> {
     let mut request = Request::new(value);
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {CREDENTIAL}").parse().unwrap());
+    request.metadata_mut().insert("authorization", format!("Bearer {CREDENTIAL}").parse().unwrap());
     request
 }
 
@@ -96,11 +90,7 @@ impl Running {
                 .unwrap();
         });
         let client = BackendClient::connect(format!("http://{address}")).await.unwrap();
-        Self {
-            client,
-            stop: Some(stop),
-            task,
-        }
+        Self { client, stop: Some(stop), task }
     }
 
     async fn shutdown(mut self) {
@@ -126,32 +116,15 @@ async fn grpc_contracts_groups_and_restart_preserve_one_durable_operation() {
     backend.deploy(deployment("b")).await.unwrap();
     let mut server = Running::start(backend.clone()).await;
     verify_contracts(&mut server.client).await;
-    let queries = vec![
-        request("get", ""),
-        BackendCall {
-            deployment: "b".into(),
-            ..request("strict", "")
-        },
-    ];
-    let mut watch = server
-        .client
-        .watch(authorized(BackendWatch {
-            queries: queries.clone(),
-        }))
-        .await
-        .unwrap()
-        .into_inner();
+    let queries = vec![request("get", ""), BackendCall { deployment: "b".into(), ..request("strict", "") }];
+    let mut watch =
+        server.client.watch(authorized(BackendWatch { queries: queries.clone() })).await.unwrap().into_inner();
     let initial = watch.message().await.unwrap().unwrap();
     assert_eq!(initial.results_json[0], b"0");
     assert!(initial.results_json[1].is_empty());
     assert!(!initial.errors[1].is_empty());
     // Discard the successful reply: the caller will recover it by identity after restart.
-    let reply = server
-        .client
-        .call(authorized(request("increment", "lost-reply")))
-        .await
-        .unwrap()
-        .into_inner();
+    let reply = server.client.call(authorized(request("increment", "lost-reply"))).await.unwrap().into_inner();
     let revision = reply.revision;
     drop(reply);
     let update = watch.message().await.unwrap().unwrap();
@@ -169,10 +142,7 @@ async fn grpc_contracts_groups_and_restart_preserve_one_durable_operation() {
     let mut server = Running::start(backend).await;
     let recovered = server
         .client
-        .call(authorized(BackendCall {
-            deployment: "b".into(),
-            ..request("increment", "lost-reply")
-        }))
+        .call(authorized(BackendCall { deployment: "b".into(), ..request("increment", "lost-reply") }))
         .await
         .unwrap()
         .into_inner();
@@ -180,16 +150,8 @@ async fn grpc_contracts_groups_and_restart_preserve_one_durable_operation() {
     assert_eq!(recovered.result_json, b"1");
     let mut mismatch = request("increment", "lost-reply");
     mismatch.caller_json = b"{}".to_vec();
-    assert_eq!(
-        server.client.call(authorized(mismatch)).await.unwrap_err().code(),
-        Code::AlreadyExists
-    );
-    let mut watch = server
-        .client
-        .watch(authorized(BackendWatch { queries }))
-        .await
-        .unwrap()
-        .into_inner();
+    assert_eq!(server.client.call(authorized(mismatch)).await.unwrap_err().code(), Code::AlreadyExists);
+    let mut watch = server.client.watch(authorized(BackendWatch { queries })).await.unwrap().into_inner();
     let fresh = watch.message().await.unwrap().unwrap();
     assert_eq!(fresh.revision, revision);
     assert_eq!(fresh.results_json, vec![b"1".to_vec(), b"1".to_vec()]);
@@ -198,10 +160,7 @@ async fn grpc_contracts_groups_and_restart_preserve_one_durable_operation() {
 }
 
 async fn verify_contracts(client: &mut BackendClient<Channel>) {
-    assert_eq!(
-        client.call(request("get", "")).await.unwrap_err().code(),
-        Code::Unauthenticated
-    );
+    assert_eq!(client.call(request("get", "")).await.unwrap_err().code(), Code::Unauthenticated);
     for credential in [
         format!("Bearer {CREDENTIAL}extra"),
         format!("Bearer {}", &CREDENTIAL[1..]),
@@ -209,42 +168,18 @@ async fn verify_contracts(client: &mut BackendClient<Channel>) {
         format!("Bearer {}X", &CREDENTIAL[..CREDENTIAL.len() - 1]),
     ] {
         let mut request = Request::new(request("get", ""));
-        request
-            .metadata_mut()
-            .insert("authorization", credential.parse().unwrap());
+        request.metadata_mut().insert("authorization", credential.parse().unwrap());
         assert_eq!(client.call(request).await.unwrap_err().code(), Code::Unauthenticated);
     }
     let mut wrong_environment = request("get", "");
     wrong_environment.environment = "other".into();
+    assert_eq!(client.call(authorized(wrong_environment)).await.unwrap_err().code(), Code::PermissionDenied);
+    assert_eq!(client.call(authorized(request("privateRead", ""))).await.unwrap_err().code(), Code::NotFound);
     assert_eq!(
-        client.call(authorized(wrong_environment)).await.unwrap_err().code(),
-        Code::PermissionDenied
-    );
-    assert_eq!(
-        client
-            .call(authorized(request("privateRead", "")))
-            .await
-            .unwrap_err()
-            .code(),
-        Code::NotFound
-    );
-    assert_eq!(
-        client
-            .call(authorized(request("badResult", "invalid")))
-            .await
-            .unwrap_err()
-            .code(),
+        client.call(authorized(request("badResult", "invalid"))).await.unwrap_err().code(),
         Code::InvalidArgument
     );
-    assert_eq!(
-        client
-            .call(authorized(request("get", "")))
-            .await
-            .unwrap()
-            .into_inner()
-            .result_json,
-        b"0"
-    );
+    assert_eq!(client.call(authorized(request("get", ""))).await.unwrap().into_inner().result_json, b"0");
 }
 
 #[tokio::test]
@@ -263,26 +198,17 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     };
     let first = backend.mutate("first".into(), call("old", "increment")).await.unwrap();
     let mut next = deployment("new");
-    next.tables.get_mut("counters").unwrap().fields.insert(
-        "label".into(),
-        serde_json::from_value(json!({"schema":{"type":"string"},"optional":true})).unwrap(),
-    );
     next.tables
         .get_mut("counters")
         .unwrap()
-        .indexes
-        .insert("by_value".into(), vec!["value".into()]);
+        .fields
+        .insert("label".into(), serde_json::from_value(json!({"schema":{"type":"string"},"optional":true})).unwrap());
+    next.tables.get_mut("counters").unwrap().indexes.insert("by_value".into(), vec!["value".into()]);
     backend.deploy(next.clone()).await.unwrap();
-    let mut group = backend
-        .subscribe_group(vec![call("old", "get"), call("new", "get")])
-        .await
-        .unwrap();
+    let mut group = backend.subscribe_group(vec![call("old", "get"), call("new", "get")]).await.unwrap();
     let initial = group.next().await.unwrap();
     assert!(initial.revision > first.revision);
-    assert!(matches!(
-        backend.release(DeploymentId::new("old").unwrap()).await,
-        Err(crate::Error::Busy)
-    ));
+    assert!(matches!(backend.release(DeploymentId::new("old").unwrap()).await, Err(crate::Error::Busy)));
     let second = backend.mutate("second".into(), call("new", "increment")).await.unwrap();
     let update = group.next().await.unwrap();
     assert_eq!(update.revision, second.revision);
@@ -290,26 +216,14 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     assert_eq!(&*update.results[1].as_ref().unwrap().clone(), "2");
     let mut bad = next.clone();
     bad.id = "bad".into();
-    bad.tables
-        .get_mut("counters")
-        .unwrap()
-        .fields
-        .get_mut("value")
-        .unwrap()
-        .schema = Schema::String;
+    bad.tables.get_mut("counters").unwrap().fields.get_mut("value").unwrap().schema = Schema::String;
     assert!(matches!(backend.deploy(bad).await, Err(crate::Error::Contract)));
     assert!(backend.query(call("bad", "get")).await.is_err());
     assert_eq!(&*backend.query(call("old", "get")).await.unwrap().json, "2");
-    assert!(matches!(
-        backend.mutate("failed-old".into(), call("old", "badResult")).await,
-        Err(crate::Error::Contract)
-    ));
+    assert!(matches!(backend.mutate("failed-old".into(), call("old", "badResult")).await, Err(crate::Error::Contract)));
     drop(group);
     assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
-    assert!(matches!(
-        backend.deploy(deployment("old")).await,
-        Err(crate::Error::Contract)
-    ));
+    assert!(matches!(backend.deploy(deployment("old")).await, Err(crate::Error::Contract)));
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
     drop(backend);
     let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
@@ -319,24 +233,10 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     let mut changed = deployment("old");
     changed.source.push_str("\n// changed");
     assert!(matches!(backend.deploy(changed).await, Err(crate::Error::Contract)));
-    assert_eq!(
-        backend
-            .mutate("first".into(), call("new", "increment"))
-            .await
-            .unwrap()
-            .revision,
-        first.revision
-    );
-    assert!(
-        matches!(backend.mutate("failed-old".into(), call("new", "badResult")).await,
-            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
-    );
-    assert!(
-        backend
-            .mutate("bad-result".into(), call("new", "badResult"))
-            .await
-            .is_err()
-    );
+    assert_eq!(backend.mutate("first".into(), call("new", "increment")).await.unwrap().revision, first.revision);
+    assert!(matches!(backend.mutate("failed-old".into(), call("new", "badResult")).await,
+            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch)));
+    assert!(backend.mutate("bad-result".into(), call("new", "badResult")).await.is_err());
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
 }
 
@@ -363,25 +263,14 @@ async fn service_shutdown_closes_watchers_and_releases_durable_state() {
             ready,
             stop.clone(),
         ));
-        let connection = tokio::time::timeout(Duration::from_secs(10), started)
-            .await
-            .unwrap()
-            .unwrap();
+        let connection = tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap();
         let mut client = BackendClient::connect(connection.endpoint).await.unwrap();
-        let mut request = Request::new(BackendWatch {
-            queries: vec![request("get", "")],
-        });
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());
+        let mut request = Request::new(BackendWatch { queries: vec![request("get", "")] });
+        request.metadata_mut().insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());
         let mut stream = client.watch(request).await.unwrap().into_inner();
         assert!(stream.message().await.unwrap().is_some());
         stop.cancel();
-        tokio::time::timeout(Duration::from_secs(10), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap().unwrap();
         assert!(!path.exists());
         assert!(stream.message().await.unwrap().is_none());
     }

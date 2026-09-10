@@ -48,10 +48,7 @@ impl DocumentKey {
     /// # Errors
     /// Rejects invalid table names and empty or oversized IDs.
     pub fn new(table: impl Into<String>, id: impl Into<String>) -> Result<Self> {
-        let key = Self {
-            table: table.into(),
-            id: id.into(),
-        };
+        let key = Self { table: table.into(), id: id.into() };
         key.validate()?;
         Ok(key)
     }
@@ -96,12 +93,7 @@ impl KeyRange {
     /// Rejects reversed bounds and invalid table names.
     pub fn validate(&self) -> Result<()> {
         validate_table(&self.table)?;
-        if self
-            .start
-            .as_ref()
-            .zip(self.end.as_ref())
-            .is_some_and(|(start, end)| start > end)
-        {
+        if self.start.as_ref().zip(self.end.as_ref()).is_some_and(|(start, end)| start > end) {
             return Err(Error::Invalid("reversed index range"));
         }
         Ok(())
@@ -130,21 +122,14 @@ impl IndexRange {
     pub fn validate(&self, table: &chunk_contract::TableSchema) -> Result<()> {
         validate_table(&self.table)?;
         chunk_contract::validate_name(&self.index).map_err(Error::Invalid)?;
-        let fields = table
-            .indexes
-            .get(&self.index)
-            .ok_or(Error::Invalid("undeclared index"))?;
+        let fields = table.indexes.get(&self.index).ok_or(Error::Invalid("undeclared index"))?;
         if self.limit == 0 || self.limit > 100_000 || self.prefix.len() > fields.len() {
             return Err(Error::Invalid("invalid index range"));
         }
         let validate_value = |name: &str, value: &Value| -> Result<()> {
             let field = table.fields.get(name).ok_or(Error::Invalid("undeclared index field"))?;
             if !field.schema.is_scalar()
-                || !(if value.is_null() {
-                    field.optional
-                } else {
-                    field.schema.accepts(value)
-                })
+                || !(if value.is_null() { field.optional } else { field.schema.accepts(value) })
             {
                 return Err(Error::Invalid("invalid index value"));
             }
@@ -154,9 +139,7 @@ impl IndexRange {
             validate_value(name, value)?;
         }
         if self.start.is_some() || self.end.is_some() {
-            let name = fields
-                .get(self.prefix.len())
-                .ok_or(Error::Invalid("index range has no remaining field"))?;
+            let name = fields.get(self.prefix.len()).ok_or(Error::Invalid("index range has no remaining field"))?;
             for value in self.start.iter().chain(self.end.iter()) {
                 validate_value(name, value)?;
             }

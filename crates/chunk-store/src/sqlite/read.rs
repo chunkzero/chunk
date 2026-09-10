@@ -27,13 +27,7 @@ pub(super) fn snapshot(path: &Path, schema: Arc<DatabaseSchema>) -> Result<Snaps
     connection.execute_batch("BEGIN")?;
     // The first read establishes the WAL snapshot before any writer can advance it.
     let revision = revision::current(&connection)?;
-    Ok(Snapshot::new(
-        revision,
-        Reader {
-            connection: Mutex::new(connection),
-            schema,
-        },
-    ))
+    Ok(Snapshot::new(revision, Reader { connection: Mutex::new(connection), schema }))
 }
 
 impl Reader {
@@ -63,11 +57,7 @@ impl Reader {
                 Ok(total + length)
             })?;
             bytes = bytes.max(raw_bytes)
-                + row
-                    .get_ref(0)?
-                    .as_bytes()
-                    .map_err(|_| Error::Corrupt("invalid document ID"))?
-                    .len();
+                + row.get_ref(0)?.as_bytes().map_err(|_| Error::Corrupt("invalid document ID"))?.len();
             budget.charge(bytes)?;
             let id = row.get(0)?;
             let revision = row.get(1)?;
@@ -77,13 +67,7 @@ impl Reader {
                     fields.insert(name.clone(), value);
                 }
             }
-            documents.push((
-                id,
-                Document {
-                    revision,
-                    value: Value::Object(fields),
-                },
-            ));
+            documents.push((id, Document { revision, value: Value::Object(fields) }));
         }
         Ok(documents)
     }
@@ -102,15 +86,8 @@ impl SnapshotReader for Reader {
     fn get(&self, key: &DocumentKey, budget: &mut ReadBudget) -> Result<Option<Document>> {
         key.validate()?;
         let table = self.table(&key.table)?;
-        let sql = format!(
-            "SELECT {} FROM {} WHERE _id = ?",
-            select(table),
-            codec::quote(&key.table)
-        );
-        Ok(self
-            .query(table, &sql, vec![key.id.clone().into()], budget)?
-            .pop()
-            .map(|(_, document)| document))
+        let sql = format!("SELECT {} FROM {} WHERE _id = ?", select(table), codec::quote(&key.table));
+        Ok(self.query(table, &sql, vec![key.id.clone().into()], budget)?.pop().map(|(_, document)| document))
     }
 
     fn scan(&self, range: &KeyRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>> {
@@ -127,11 +104,7 @@ impl SnapshotReader for Reader {
             params.push(end.clone().into());
         }
         let predicate = predicate(&conditions);
-        let sql = format!(
-            "SELECT {} FROM {}{predicate} ORDER BY _id",
-            select(table),
-            codec::quote(&range.table)
-        );
+        let sql = format!("SELECT {} FROM {}{predicate} ORDER BY _id", select(table), codec::quote(&range.table));
         self.query(table, &sql, params, budget)
     }
 
@@ -156,9 +129,7 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
         conditions.push(format!("{} IS ?", codec::quote(name)));
     }
     if range.start.is_some() || range.end.is_some() {
-        let name = fields
-            .get(range.prefix.len())
-            .ok_or(Error::Invalid("index range has no remaining field"))?;
+        let name = fields.get(range.prefix.len()).ok_or(Error::Invalid("index range has no remaining field"))?;
         let field = &table.fields[name];
         let column = codec::quote(name);
         if let Some(start) = &range.start {
@@ -190,11 +161,7 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
         codec::quote(&schema::index_name(&range.table, &range.index)),
         order.join(", ")
     );
-    params.push(
-        i64::try_from(range.limit)
-            .map_err(|_| Error::Invalid("index limit"))?
-            .into(),
-    );
+    params.push(i64::try_from(range.limit).map_err(|_| Error::Invalid("index limit"))?.into());
     Ok((sql, params))
 }
 
@@ -212,9 +179,6 @@ fn predicate(conditions: &[impl AsRef<str>]) -> String {
     if conditions.is_empty() {
         String::new()
     } else {
-        format!(
-            " WHERE {}",
-            conditions.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(" AND ")
-        )
+        format!(" WHERE {}", conditions.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(" AND "))
     }
 }

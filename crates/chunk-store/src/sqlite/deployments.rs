@@ -37,27 +37,16 @@ pub(super) fn insert(transaction: &rusqlite::Transaction<'_>, deployment: &Deplo
         return Err(Error::Invalid("deployment identity was retired"));
     }
     let existing: Option<String> = transaction
-        .query_row(
-            "SELECT contract FROM _chunk_deployments WHERE id = ?1",
-            [&deployment.id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT contract FROM _chunk_deployments WHERE id = ?1", [&deployment.id], |row| row.get(0))
         .optional()?;
     if let Some(existing) = existing {
-        return if existing == encoded {
-            Ok(())
-        } else {
-            Err(Error::Invalid("immutable deployment changed"))
-        };
+        return if existing == encoded { Ok(()) } else { Err(Error::Invalid("immutable deployment changed")) };
     }
     let count: i64 = transaction.query_row("SELECT count(*) FROM _chunk_deployments", [], |row| row.get(0))?;
     if count >= 16 {
         return Err(Error::Capacity);
     }
-    transaction.execute(
-        "INSERT INTO _chunk_deployments VALUES (?1, ?2)",
-        params![deployment.id, encoded],
-    )?;
+    transaction.execute("INSERT INTO _chunk_deployments VALUES (?1, ?2)", params![deployment.id, encoded])?;
     Ok(())
 }
 

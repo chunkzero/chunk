@@ -5,8 +5,10 @@ import chunk.v1.Supervision.ProcessIdentity;
 import chunk.v1.Supervision.ProcessInventory;
 import chunk.v1.Supervision.SessionCommand;
 import chunk.v1.Supervision.SessionInventory;
+
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,15 +37,19 @@ final class ProcessService extends ProcessControlGrpc.ProcessControlImplBase {
     @Override
     public void inventory(ProcessIdentity request, StreamObserver<ProcessInventory> response) {
         if (!request.equals(identity)) {
-            response.onError(Status.FAILED_PRECONDITION.withDescription("Stale process identity").asRuntimeException());
+            response.onError(
+                    Status.FAILED_PRECONDITION
+                            .withDescription("Stale process identity")
+                            .asRuntimeException());
             return;
         }
-        response.onNext(ProcessInventory.newBuilder()
-                .setIdentity(identity)
-                .setTickCount(ticks.get())
-                .addAllDeliveries(gameplay.deliveries())
-                .addAllSessions(gameplay.sessions())
-                .build());
+        response.onNext(
+                ProcessInventory.newBuilder()
+                        .setIdentity(identity)
+                        .setTickCount(ticks.get())
+                        .addAllDeliveries(gameplay.deliveries())
+                        .addAllSessions(gameplay.sessions())
+                        .build());
         response.onCompleted();
     }
 
@@ -65,32 +71,41 @@ final class ProcessService extends ProcessControlGrpc.ProcessControlImplBase {
             response.onError(Status.FAILED_PRECONDITION.asRuntimeException());
             return;
         }
-        action.get().whenComplete((result, error) -> {
-            if (error != null) {
-                response.onError(Status.FAILED_PRECONDITION.withDescription("Session operation failed").asRuntimeException());
-            } else {
-                response.onNext(result);
-                response.onCompleted();
-            }
-        });
+        action.get()
+                .whenComplete(
+                        (result, error) -> {
+                            if (error != null) {
+                                response.onError(
+                                        Status.FAILED_PRECONDITION
+                                                .withDescription("Session operation failed")
+                                                .asRuntimeException());
+                            } else {
+                                response.onNext(result);
+                                response.onCompleted();
+                            }
+                        });
     }
 
     @Override
     public void stopProcess(ProcessIdentity request, StreamObserver<ProcessIdentity> response) {
         if (!request.equals(identity)) {
-            response.onError(Status.FAILED_PRECONDITION.withDescription("Stale process identity").asRuntimeException());
+            response.onError(
+                    Status.FAILED_PRECONDITION
+                            .withDescription("Stale process identity")
+                            .asRuntimeException());
             return;
         }
         response.onNext(identity);
         response.onCompleted();
-        Thread.startVirtualThread(() -> {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            } finally {
-                shutdown.countDown();
-            }
-        });
+        Thread.startVirtualThread(
+                () -> {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        shutdown.countDown();
+                    }
+                });
     }
 }

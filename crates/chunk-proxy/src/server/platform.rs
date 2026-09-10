@@ -43,14 +43,8 @@ impl Platform {
     }
 
     async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: Value) -> io::Result<T> {
-        let hooks = if phase == "status" {
-            &self.status_hooks
-        } else {
-            &self.hooks
-        };
-        let _permit = hooks
-            .try_acquire()
-            .map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
+        let hooks = if phase == "status" { &self.status_hooks } else { &self.hooks };
+        let _permit = hooks.try_acquire().map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
         let result = self
             .backend
             .clone()
@@ -78,36 +72,22 @@ impl Platform {
         let arguments = json!({"uuid": uuid, "username": username});
         self.admit(arguments.clone()).await?;
         let route: Route = self.hook("route", arguments).await?;
-        Ok(SessionDemand {
-            key: route.key,
-            session_type: route.session_type,
-            machine_profile: route.machine_profile,
-        })
+        Ok(SessionDemand { key: route.key, session_type: route.session_type, machine_profile: route.machine_profile })
     }
 
     async fn admit(&self, arguments: Value) -> io::Result<()> {
         let admission: Admission = self.hook("admit", arguments.clone()).await?;
         if !admission.allow {
             let reason = admission.reason.unwrap_or_else(|| "Admission denied.".into());
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                reason.chars().take(256).collect::<String>(),
-            ));
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason.chars().take(256).collect::<String>()));
         }
         Ok(())
     }
 
     pub async fn approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
-        let identity = claim
-            .identity
-            .as_ref()
-            .ok_or_else(|| invalid_data("missing move identity"))?;
-        let demand = claim
-            .demand
-            .as_ref()
-            .ok_or_else(|| invalid_data("missing move demand"))?;
-        self.admit(json!({"uuid": identity.uuid, "username": identity.username}))
-            .await?;
+        let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing move identity"))?;
+        let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing move demand"))?;
+        self.admit(json!({"uuid": identity.uuid, "username": identity.username})).await?;
         let route: Route = self.hook("move", json!({
             "uuid": identity.uuid, "username": identity.username,
             "destination": {"key": demand.key, "session_type": demand.session_type, "machine_profile": demand.machine_profile}
@@ -116,26 +96,16 @@ impl Platform {
             || route.session_type != demand.session_type
             || route.machine_profile != demand.machine_profile
         {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Move destination denied",
-            ));
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Move destination denied"));
         }
         Ok(())
     }
 
     pub async fn status(&self, host: &str) -> io::Result<Vec<u8>> {
-        let status: Status = self
-            .hook("status", json!({"host": host}))
-            .await
-            .unwrap_or_else(|error| {
-                tracing::debug!(%error, "status hook unavailable");
-                Status {
-                    motd: "Server temporarily unavailable".into(),
-                    online: 0,
-                    max: 0,
-                }
-            });
+        let status: Status = self.hook("status", json!({"host": host})).await.unwrap_or_else(|error| {
+            tracing::debug!(%error, "status hook unavailable");
+            Status { motd: "Server temporarily unavailable".into(), online: 0, max: 0 }
+        });
         let version = SUPPORTED.last().ok_or_else(|| invalid_data("missing protocol"))?;
         encode_packet(&StatusResponse {
             json: McString::new(
@@ -175,10 +145,7 @@ struct Status {
 
 pub(super) fn request<T>(body: T, token: &str) -> io::Result<Request<T>> {
     let mut request = Request::new(body);
-    request.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().map_err(invalid_data)?,
-    );
+    request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().map_err(invalid_data)?);
     request.set_timeout(RPC_TIMEOUT);
     Ok(request)
 }

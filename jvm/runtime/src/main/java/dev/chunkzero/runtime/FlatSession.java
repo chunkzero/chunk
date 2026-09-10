@@ -1,9 +1,10 @@
 package dev.chunkzero.runtime;
 
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import net.minestom.server.instance.LightingChunk;
 import net.minestom.server.instance.block.Block;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 final class FlatSession extends Session {
     @Override
