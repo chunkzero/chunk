@@ -52,7 +52,7 @@ private class ExampleSession(
         val playerBackend = CoroutineBackendClient(scope.coroutines.backend(requireNotNull(scope.backend), player))
         val data = PlayerData(playerBackend)
         players[player] = data
-        player.setTag(ExampleSessions.coinAction, Runnable { increment(player, data) })
+        player.setTag(ExampleSessions.coinAction, Runnable { scope.onTick { increment(player, data) } })
         scope.coroutines.launch {
             playerBackend.shared.players
                 .watchStats()
