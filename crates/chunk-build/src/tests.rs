@@ -121,7 +121,7 @@ fn codegen_rejects_colliding_names_and_unsupported_literals_before_writing() {
     ))
     .unwrap();
     let mut collision = original.clone();
-    collision["functions"]["Doc/profiles/Codec"] = json!({
+    collision["functions"]["shared/profile/record_args/read"] = json!({
         "kind": "query", "visibility": "public", "export": "collision",
         "arguments": {"type": "null"}, "result": {"type": "null"}
     });
@@ -133,7 +133,7 @@ fn codegen_rejects_colliding_names_and_unsupported_literals_before_writing() {
     let mut invalid_name = original;
     invalid_name["tables"]["profiles"]["fields"]["not-valid"] = json!({"schema": {"type": "null"}, "optional": false});
     for (contract, message) in [
-        (collision, "collides with generated codec"),
+        (collision, "RecordArgs collides"),
         (unsafe_literal, "safe range"),
         (large_literal, "Java string constant limit"),
         (invalid_name, "invalid schema identifier"),

@@ -9,7 +9,7 @@ import dev.chunkzero.backend.client.OperationId;
 import dev.chunkzero.backend.client.SessionIdentity;
 import dev.chunkzero.backend.client.WatchState;
 import dev.chunkzero.example.generated.BackendClient;
-import dev.chunkzero.example.generated.BackendTypes.*;
+import dev.chunkzero.example.generated.BackendTypes.Shared.Players;
 import io.grpc.ManagedChannelBuilder;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,11 +35,11 @@ class BackendIntegrationTest {
                     new SessionIdentity(new SessionId("session-a"), "lobby", Optional.of(new PlayerId("trusted-player"))),
                     scheduler, Duration.ofSeconds(5))) {
                 var client = new BackendClient(session);
-                var updates = new LinkedBlockingQueue<WatchState<Fn$shared$players$stats$Result>>();
-                try (var watch = client.watch$shared$players$stats(new Fn$shared$players$stats$Args(), updates::add)) {
+                var updates = new LinkedBlockingQueue<WatchState<Players.StatsResult>>();
+                try (var watch = client.shared().players().watchStats(updates::add)) {
                     await(updates, state -> !state.stale() && coins(state) == 0);
                     var operation = new OperationId("stable-reward");
-                    assertEquals(1L, client.call$shared$players$coin(new Fn$shared$players$coin$Args(), operation).get());
+                    assertEquals(1L, client.shared().players().coin(operation).get());
                     await(updates, state -> !state.stale() && coins(state) == 1);
                     backend.stop();
                     await(updates, state -> state.stale() && coins(state) == 1);
@@ -49,12 +49,12 @@ class BackendIntegrationTest {
                             new SessionIdentity(new SessionId("session-b"), "arena", Optional.of(new PlayerId("trusted-player"))),
                             scheduler, Duration.ofSeconds(5))) {
                         var newer = new BackendClient(next);
-                        assertEquals(2L, newer.call$shared$players$coin(new Fn$shared$players$coin$Args(), new OperationId("new-reward")).get());
+                        assertEquals(2L, newer.shared().players().coin(new OperationId("new-reward")).get());
                         await(updates, state -> !state.stale() && coins(state) == 2);
-                        assertEquals(1L, client.call$shared$players$coin(new Fn$shared$players$coin$Args(), operation).get());
-                        assertEquals(2L, newer.call$shared$players$stats(new Fn$shared$players$stats$Args()).get().coins());
+                        assertEquals(1L, client.shared().players().coin(operation).get());
+                        assertEquals(2L, newer.shared().players().stats().get().coins());
                         try (var other = next.forPlayer(new PlayerId("other-player"))) {
-                            assertEquals(0L, new BackendClient(other).call$shared$players$stats(new Fn$shared$players$stats$Args()).get().coins());
+                            assertEquals(0L, new BackendClient(other).shared().players().stats().get().coins());
                         }
                     }
                 }
@@ -67,7 +67,7 @@ class BackendIntegrationTest {
         }
     }
 
-    private static long coins(WatchState<Fn$shared$players$stats$Result> state) {
+    private static long coins(WatchState<Players.StatsResult> state) {
         return state.snapshot().map(snapshot -> snapshot.result().valueOrThrow().coins()).orElse(-1L);
     }
 
