@@ -39,7 +39,11 @@ build: toolchain
     examples/local/gradlew assemble
 
 # Everything CI runs. Run before opening a PR.
-ready: fmt-check lint typecheck test build
+ready: fmt-check lint typecheck test build consumers
+
+# Build real Java and Kotlin consumers from source-only scratch copies.
+consumers: toolchain
+    python3 scripts/check-consumers.py target/debug/chunk
 
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
 local *args: toolchain

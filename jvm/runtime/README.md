@@ -48,11 +48,19 @@ characters), `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT`; without
 `CHUNK_SUPERVISOR` it binds control on 25566 and uses a fixed fixture incarnation.
 Production local launches should use the supervisor.
 
-Session implementations extend `Session` and are registered by type in the process
-factory map or a `SessionProvider` loaded from `META-INF/services`. `onCreate`,
+Each discovered app packages a public `SessionProvider` with a no-argument
+constructor and a `Session create()` method. The app owns exactly one service
+entry in `META-INF/services/dev.chunkzero.runtime.SessionProvider`; the Gradle
+plugin generates `META-INF/chunk/app.json` with its directory-derived app ID.
+The runtime requires metadata and the provider class to come from that same app
+JAR. Registration uses packaged JARs on one shared classpath. The factory creates
+fresh session state, and multiple sessions can use the same app.
+
+Session implementations extend `Session`. `onCreate`,
 `onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>` and begin on the
 process tick thread. Do not block that thread. Resume asynchronous
-world changes with `scope.onTick { ... }`. Creation becomes ready only after its
+world changes with `scope.onTick(() -> ...)` in Java or `scope.onTick { ... }` in
+Kotlin. Creation becomes ready only after its
 stage completes and at least one instance exists. `scope.finish()` requests ending;
 do not await it from a lifecycle hook whose own completion ending must await.
 
@@ -78,8 +86,9 @@ JVM. Managed proxy moves prepare a new TCP delivery while the source plays,
 confirm withdrawal, drive both client configuration acknowledgments, and activate
 the destination on the existing public connection.
 
-The optional `scope.backend` client is bound to the process deployment and session
-identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to supervised
+The optional `scope.getBackend()` client (`scope.backend` in Kotlin) is bound to
+the process deployment, session and registered app ID. Function arguments do not
+choose that identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to supervised
 JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once
 per player delivery. It returns a typed `OperationId`; retry an uncertain result
 with the same ID and arguments.
@@ -104,7 +113,8 @@ cleanup cannot affect a later admission of the same UUID.
 Put final result mutations in `finish()`: the manager awaits that hook before
 closing session resources. Request termination with `scope.finish()` without
 awaiting it from work that the same termination will cancel. Slow Flow collectors
-fail at 64 queued updates instead of dropping stale transitions. Java session
-implementations use `jvm:runtime` and register `Supplier<Session>` factories through
-`SessionProvider`. The coroutine adapters
-live in `jvm:runtime-kotlin`; backend-only Java consumers use `jvm:backend-client`.
+fail at 64 queued updates instead of dropping stale transitions. Both languages
+use the same `SessionProvider.create()` registration contract. The
+[Java consumer](../../examples/java/README.md) demonstrates the Java lifecycle and
+generated client without Kotlin dependencies. The coroutine adapters live in
+`jvm:runtime-kotlin`; backend-only Java consumers use `jvm:backend-client`.
