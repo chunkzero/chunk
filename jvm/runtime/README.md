@@ -84,7 +84,8 @@ JVMs. Use `scope.operationId(player, action)` for a mutation that should happen 
 per player delivery. It returns a typed `OperationId`; retry an uncertain result
 with the same ID and arguments.
 Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client
-whose calls and watches close on departure. Session clients close on disposal. The `jvm/example` application demonstrates persistent coins, visits and
+whose calls and watches close on departure. Session clients close on disposal.
+The [local example](../../examples/local/README.md) demonstrates persistent coins, visits and
 subscription updates, including stale state during backend disconnection.
 Sessions own their instances, event handlers and scoped resources. Session hooks
 run through the process tick executor. Withdrawal waits for pending joins and
