@@ -43,12 +43,11 @@ ready: fmt-check lint typecheck test build
 
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
 local *args: toolchain
-    examples/local/gradlew :gameplay:installDist :gameplay:writeJavaExecutable
-    cargo run -p chunk-cli -- local --project examples/local/project.json --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
+    cargo run -p chunk-cli -- dev examples/local {{args}}
 
 # Operate on players connected to the local example.
 players *args:
-    cargo run -p chunk-cli -- players --control-file .chunk/local/control.json {{args}}
+    cargo run -p chunk-cli -- players --control-file examples/local/.chunk/local/control.json {{args}}
 
 # Build the development CLI and install its pinned native TypeScript toolchain.
 toolchain:

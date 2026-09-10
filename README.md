@@ -72,7 +72,7 @@ feature selection and standalone hosting.
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
 - `chunk inspect PROJECT` reads project and app metadata as JSON without building.
-- `chunk gen PROJECT --target java|typescript` compiles backend code and generates selected clients.
+- `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
 - `chunk build PROJECT` runs the project Gradle wrapper and packages backend code,
   app JARs, dependencies and assets as `PROJECT/dist/<id>.tar.gz` and `PROJECT/dist/<id>/`.
 - `chunk dev PROJECT` (`chunk local`) builds that release and runs the development
@@ -105,6 +105,11 @@ Consumer builds need their project Gradle wrapper and an explicit Java toolchain
 `chunk.toml` and immediate `apps/*/app.toml` files define the project; `chunk dev`
 requires `[local]` settings. Local state defaults to `PROJECT/.chunk/local`.
 Explicit `--output` and `--state` paths are relative to the working directory.
+
+To package the example without starting services, run `just toolchain`, then
+`target/debug/chunk build examples/local`. Its releases appear in
+`examples/local/dist`; `just local` builds and runs the same project with state
+under `examples/local/.chunk/local`.
 
 Standalone `chunk-backend`, `chunk-control`, `chunk-edge` and `chunk-runtime` binaries
 read environment variables and call the same libraries. They have no CLI argument

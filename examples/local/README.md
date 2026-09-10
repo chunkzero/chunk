@@ -7,11 +7,22 @@ just local
 ```
 
 This installs pinned JS dependencies, compiles TypeScript declarations and handlers,
-generates Java records/references before Kotlin compilation, resolves Java 25, packages
+generates shared JVM clients before Kotlin compilation, resolves Java 25, packages
 an immutable deployment, and starts the backend, control and proxy. Join
 `localhost:25565` with a signed-in official Minecraft Java Edition 26.1 client.
 Status runs JavaScript without starting gameplay. Login runs admission/routing and
 automatically creates a lobby session.
+
+To build the complete release without starting services:
+
+```sh
+just toolchain
+target/debug/chunk build examples/local
+```
+
+The project Gradle wrapper builds both apps and supplies its Java toolchain in
+`examples/local/.chunk/build/jvm/artifacts.json`. The CLI packages those outputs
+under `examples/local/dist/<id>/` and `examples/local/dist/<id>.tar.gz`.
 
 The grass lobby and sandstone arenas share persistent coins and visit counts.
 Use `/coin` to commit a mutation; chat and the action bar reflect subscriptions.
@@ -20,7 +31,7 @@ simulation state across JVM shutdown.
 
 ## Moves and drain
 
-The player's UUID appears beside `player=` in `.chunk/local/edge.log`. In another
+The player's UUID appears beside `player=` in the service console logs. In another
 terminal, substitute that UUID below:
 
 ```sh
@@ -53,33 +64,42 @@ An unresolved shutdown is reported as an error.
 
 ## Files and configuration
 
-`project.json` selects the environment, built gameplay distribution, session types
-and machine profiles. `gameplay_module` must match the module recorded by Gradle
-in the generated distribution; mismatches fail before launching services. Paths are relative to that file. `server/schema/index.ts`
-composes the physical schema; `server/*.ts` exports validated function descriptors.
+`chunk.toml` selects the local environment and default runtime requirements:
+16 players per session, two sessions per 512 MiB JVM, and at most four JVMs.
+The `apps/lobby/app.toml` and `apps/arena/app.toml` manifests discover the two apps;
+their IDs also identify session types. There is no separate session-type list.
+Java 25 remains explicit in the Gradle builds. The local runner uses Gradle's
+selected executable, with an optional `--java PATH` override.
+
+`server/schema/index.ts` composes the physical schema; `server/*.ts` exports
+validated function descriptors. Paths in this paragraph are relative to
+`examples/local`.
 `examples/local/gradlew generateChunkBackend` emits the backend under
-`.chunk/build/backend` and shared JVM bindings under `.chunk/generated/jvm`.
+`examples/local/.chunk/build/backend` and shared JVM bindings under
+`examples/local/.chunk/generated/jvm`.
 The standalone example uses the public Chunk settings and project plugins with
 repository composite builds for local framework dependencies. Its temporary
 `:gameplay` project keeps the shared session implementation in `jvm/example`.
 The discovered `apps/lobby` and `apps/arena` projects each package one
 `SessionProvider` service that creates fresh session state. The plugin generates
 `META-INF/chunk/app.json` in each app JAR, and the runtime verifies that its
-provider belongs to that same JAR. `installDist` includes both app JARs and the
-matching backend for the current local runner.
+provider belongs to that same JAR. `chunkArtifacts` describes both app JARs and
+their shared runtime classpath for the Rust release publisher.
 
 Shared descriptors use `shared/<file>/<export>`; app-local descriptors use
 `apps/<app>/<file>/<export>`. The initial managed caller's `app` identifies its
 registered app ID. Multiple session instances may belong to the same app.
 Annotation-driven registration remains deferred.
 
-Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
-bundle and project metadata. Content changes produce a new deployment; existing
-artifacts are verified before reuse. Stop and rerun after editing the example.
-Backend data stays under `.chunk/local/backend`; placement state is separate for
-each deployment. This runner does not implement overlapping deployment rollouts.
+Releases under `examples/local/dist/<id>` include JARs, the backend bundle,
+normalized release metadata and explicitly supplied assets. Each release also
+has a sibling `.tar.gz` archive. Content changes produce a new deployment;
+existing releases are verified before reuse. Stop and rerun after editing the
+example. Backend data stays under `examples/local/.chunk/local/backend`;
+placement state is separate for each deployment. This runner does not implement
+overlapping deployment rollouts.
 
-Connection records under `.chunk/local` contain
+Connection records under `examples/local/.chunk/local` contain
 private credentials and must not be shared. Backend/control use loopback ports
 25568/25567; the public listener uses 25565. The runner refuses occupied ports or a
 second owner of its state directory. `just local --state <directory> --bind <address>

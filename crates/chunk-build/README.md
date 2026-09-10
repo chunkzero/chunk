@@ -68,6 +68,10 @@ wrapper with `chunkArtifacts`, and publishes the complete release into
 `-Pchunk.executable` so generation uses the same installation. `--output PATH`
 selects a release directory relative to the current working directory. Failed or
 cancelled Gradle builds stop their child processes and do not publish a release.
+From a checkout, `just toolchain` followed by
+`target/debug/chunk build examples/local` builds the two-app example without
+starting services. Its archive and release directory appear under
+`examples/local/dist`.
 
 `publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)`
 combines separately built backend and JVM outputs into `dist/<id>/` and
