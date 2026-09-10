@@ -5,6 +5,7 @@
 # Gradle / JVM
 .gradle/
 build/
+/jvm/*/bin/
 !gradle/wrapper/gradle-wrapper.jar
 .kotlin/
 

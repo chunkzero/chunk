@@ -74,8 +74,8 @@ exports later.
 SDK and Minestom integration, including multiple sessions per process and
 generated backend clients. The module split between public API and runtime
 implementation remains open; no separate API module exists yet.
-`jvm/proto` is the shared transport binding scaffold. `jvm/build-api` isolates
-build integration from Gradle, and `jvm/gradle-plugin` is currently a no-op plugin.
+`jvm/proto` is the shared transport binding scaffold. `jvm/gradle-plugin` is
+currently a no-op plugin.
 
 `packages/server` is the empty `@chunk/server` SDK scaffold; it has no exported API.
 V1 targets minimal JavaScript plus explicit engine capabilities and pure-JS
