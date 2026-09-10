@@ -6,8 +6,10 @@ function arguments never modify caller identity. The channel and scheduler belon
 to the parent runtime. Closing the session cancels its calls, watches and player
 children; closing `forPlayer(...)` cancels only that child.
 
-`chunk-codegen` also writes `java-client/<package>/BackendClient.java`. Add `java`
-and `java-client` output directories to the application's generated source set.
+`chunk gen PROJECT --target java` writes `java-client/<package>/BackendClient.java`
+beside the generated models. The [Gradle plugin](../gradle-plugin/README.md)
+compiles both source roots into one shared bindings JAR. For explicit generation,
+add `java` and `java-client` to the consumer's generated source set.
 Generated clients follow the backend namespace:
 
 ```java
@@ -49,3 +51,9 @@ suspending calls, and full watch-state flows. Construct it with an owned
 `CoroutineBackend`; it reuses the Java models and typed references and creates no
 additional coroutine scope. Empty arguments have convenience overloads, while
 mutation operation IDs stay explicit.
+
+With `dev.chunkzero.chunk.kotlin`, the Gradle build compiles that facade into
+`chunk-backend-kotlin`, separately from the shared Java bindings. The
+[local example](../../examples/local/README.md) shows grouped suspend calls and
+watch flows; the [Java consumer](../../examples/java/README.md) uses the same Java
+model hierarchy through asynchronous methods.

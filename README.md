@@ -4,17 +4,17 @@ A Minecraft application platform: a sync engine with embedded JavaScript,
 automatic gameplay-session provisioning, a Minestom server framework, and the
 toolchain and control plane that connect them.
 
-The v1 design has one authoritative backend per **environment** (`prod`, `beta`),
-with multiple immutable **deployments** sharing its database. Sessions retain
-their deployment's functions and assets while old deployments drain. Chunk
+Each **environment** (`prod`, `beta`) has one authoritative backend. Multiple
+immutable **deployments** can share its database, with session clients bound to
+their deployment's functions. Chunk
 creates and places sessions automatically from server routing/demand policies; many
 sessions can share one JVM. The initial embedded runtime uses `deno_core`/V8 with
 language APIs and pure-JS packages, without Node compatibility.
 
-Apps keep `app.toml` metadata, their own Gradle builds, and annotated JVM gameplay.
-Server code owns optional matchmaking/queues. File-based `server/domains/` supplies
-inherited proxy commands and `createHook` handlers; the connected JVM supplies
-app-local commands. These APIs remain proposed, not implemented.
+Apps keep `app.toml` metadata, their own Gradle builds, and Java or Kotlin gameplay.
+Each app JAR registers one `SessionProvider` that creates fresh session state.
+The build generates typed backend clients and packages all apps, shared
+dependencies, backend code and assets into one portable release.
 
 ## Status
 
@@ -27,27 +27,30 @@ runner embeds services and stops the stack if one fails.
 Run the [local example](examples/local/README.md) with `just local`. It packages
 an immutable deployment, starts all services, and demonstrates persistent coins,
 subscriptions, session moves and drain. Ctrl-C stops its services and gameplay JVMs.
-The broader app/domain SDK, hosted adapters, cross-proxy transfers, world persistence
-and overlapping deployment rollouts remain deferred.
+Domains, annotation registration and dependency injection, the broader event API,
+hosted adapters, cross-proxy transfers, world persistence and overlapping
+deployment rollouts remain deferred. Queues and matchmaking remain server-owned policy.
 
 Dashboard/management scaffolding exists separately on
-`feat/self-hosted-dashboard-assets` (at `5584cab` when this cleanup was prepared).
-It is not included in this branch; asset publication remains proposed.
+`feat/self-hosted-dashboard-assets`. It is not included in this branch;
+dashboard integration and asset uploads remain deferred.
 
 ## Repository
 
 | Path | Contents |
 | --- | --- |
 | `crates/` | Rust proxy, protocol, platform and toolchain crates |
-| `jvm/` | Managed Minestom sessions, backend client and generated transport |
+| `jvm/` | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
 | `packages/server` | Typed `@chunk/server` declarations and document API |
 | `proto/` | Generated lifecycle/backend/control contracts and remaining transport proposals |
 | `examples/local/` | App modules, shared gameplay, TypeScript backend and project configuration |
-| `docs/architecture.md` | Broader platform design proposals |
+| `examples/java/` | Java consumer using the runtime and generated typed backend API |
+| `docs/architecture.md` | Implemented boundaries and deferred platform design |
 
 The intended platform design lives in the
 [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase).
-The [repository architecture](docs/architecture.md) records the broader proposed design.
+The [repository architecture](docs/architecture.md) maps the implementation and
+identifies the remaining proposals.
 
 ## Development
 
@@ -58,6 +61,13 @@ Toolchains are pinned in `mise.toml`. Install [mise](https://mise.jdx.dev),
 [just](https://just.systems), OpenSSL development headers and `pkg-config`, then
 run `mise install`. Use `just --list` to find tasks and run the narrowest checks
 for a change; `just ready` runs the full CI checks before a PR.
+
+Root Gradle `test` and `assemble` tasks cover the framework modules and plugin.
+The local example is a separate Gradle build. `just consumers` builds the real
+[Java consumer](examples/java/README.md) and Kotlin example from scratch source
+copies using the prepared CLI, then checks their release archives and runtime
+classpaths. It starts no gameplay or backend services and also runs in CI and
+`just ready`.
 
 ```sh
 just local
