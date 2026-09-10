@@ -1,4 +1,5 @@
 pluginManagement {
+    includeBuild("jvm/gradle-plugin") { name = "chunk-gradle-plugin" }
     repositories {
         gradlePluginPortal()
         mavenCentral()
@@ -24,6 +25,3 @@ include(":jvm:backend-client")
 include(":jvm:backend-client-kotlin")
 include(":jvm:runtime")
 include(":jvm:runtime-kotlin")
-include(":jvm:gradle-plugin")
-
-include(":jvm:example")

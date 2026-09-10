@@ -57,17 +57,16 @@ An unresolved shutdown is reported as an error.
 and machine profiles. `gameplay_module` must match the module recorded by Gradle
 in the generated distribution; mismatches fail before launching services. Paths are relative to that file. `server/schema/index.ts`
 composes the physical schema; `server/*.ts` exports validated function descriptors.
-`jvm:example:generateBackend` emits the bundle, contract, source map and Java/TS
-clients under the module's build directory. The `chunk.backend-generation`
-convention plugin wires generation before Java/Kotlin compilation and includes
-the matching backend in `installDist`. The runner publishes that distribution's
-backend and JARs together; no contract JSON or gRPC configuration is handwritten.
+`examples/local/gradlew generateChunkBackend` emits the backend under
+`.chunk/build/backend` and shared JVM bindings under `.chunk/generated/jvm`.
+The standalone example uses the public Chunk settings and project plugins with
+repository composite builds for local framework dependencies. Its temporary
+`:gameplay` project keeps the existing sources in `jvm/example`; `installDist`
+includes the matching backend for the current local runner.
 
-Apply that convention to another JVM application and configure its
-`GenerateBackend` task with `backendProject` and `packageName`. Shared descriptors
-use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`.
-The initial managed caller's `app` identifies its registered session type.
-Standalone app manifests and annotation-driven module discovery remain deferred.
+Shared descriptors use `shared/<file>/<export>`; app-local descriptors use
+`apps/<app>/<file>/<export>`. The initial managed caller's `app` identifies its
+registered session type. Annotation-driven registration remains deferred.
 
 Artifacts under `.chunk/local/artifacts/<digest>` include copied JARs, the backend
 bundle and project metadata. Content changes produce a new deployment; existing
@@ -84,7 +83,7 @@ all addresses must remain loopback.
 
 ## Automated backend boundary check
 
-`./gradlew :jvm:example:test --tests '*BackendIntegrationTest'` builds the Rust
+`examples/local/gradlew :gameplay:test --tests '*BackendIntegrationTest'` builds the Rust
 backend and generated Java client, then calls the actual TypeScript coin/stat
 handlers over authenticated loopback gRPC. It verifies durable operation recovery,
 stale/fresh watch transitions across backend restart, shared data between retained

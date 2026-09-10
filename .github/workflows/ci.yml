@@ -51,8 +51,10 @@ jobs:
       - uses: nbadal/action-ktlint-setup@v1
         with:
           ktlint_version: 1.8.0
-      - run: ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
+      - run: ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "examples/**/*.kt" "examples/**/*.kts" "*.kts" "!**/build/**" "!**/.chunk/**"
+      - run: cargo build -p chunk-cli
       - run: ./gradlew build
+      - run: examples/local/gradlew build
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
