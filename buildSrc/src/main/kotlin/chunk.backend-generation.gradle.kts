@@ -11,8 +11,7 @@ val generateBackend =
         inputs
             .files(
                 listOf(
-                    "packages/compiler/install-toolchain.mjs",
-                    "packages/compiler/package.json",
+                    "scripts/install-typescript.mjs",
                     "packages/server/package.json",
                     "package.json",
                     "pnpm-lock.yaml",

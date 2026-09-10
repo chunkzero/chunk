@@ -6,10 +6,8 @@ settings:
 
 importers:
 
-  .: {}
-
-  packages/compiler:
-    dependencies:
+  .:
+    devDependencies:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
