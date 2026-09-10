@@ -39,6 +39,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.function.Supplier
 
 class GameplayLifecycleTest {
     @Test
@@ -49,35 +50,37 @@ class GameplayLifecycleTest {
         val ticks = TickExecutor()
         val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
         val joinStarted = CompletableFuture<Unit>()
-        val joinFinished = CompletableFuture<Unit>()
+        val joinFinished = CompletableFuture<Void>()
         val manager =
             SessionManager(
                 ticks,
                 mapOf(
-                    "flat" to {
-                        object : Session() {
-                            lateinit var scope: SessionScope
+                    "flat" to
+                        Supplier {
+                            object : Session() {
+                                lateinit var scope: SessionScope
 
-                            override fun onCreate(scope: SessionScope) =
-                                FlatSession().onCreate(scope).also { this.scope = scope }
+                                override fun onCreate(scope: SessionScope) =
+                                    FlatSession().onCreate(scope).also { this.scope = scope }
 
-                            override fun onJoin(player: Player): CompletableFuture<Unit> {
-                                scope.own(player, AutoCloseable { closedPlayers.add(player) })
-                                return CompletableFuture.completedFuture(Unit)
+                                override fun onJoin(player: Player): CompletableFuture<Void> {
+                                    scope.own(player, AutoCloseable { closedPlayers.add(player) })
+                                    return CompletableFuture.completedFuture(null)
+                                }
                             }
-                        }
-                    },
-                    "gated" to {
-                        object : Session() {
-                            override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
+                        },
+                    "gated" to
+                        Supplier {
+                            object : Session() {
+                                override fun onCreate(scope: SessionScope) = FlatSession().onCreate(scope)
 
-                            override fun onJoin(player: Player): CompletableFuture<Unit> {
-                                assertTrue(player.isOnline)
-                                joinStarted.complete(Unit)
-                                return joinFinished
+                                override fun onJoin(player: Player): CompletableFuture<Void> {
+                                    assertTrue(player.isOnline)
+                                    joinStarted.complete(Unit)
+                                    return joinFinished
+                                }
                             }
-                        }
-                    },
+                        },
                 ),
             )
         val deployment =
@@ -295,7 +298,7 @@ class GameplayLifecycleTest {
             val conflicting = delivery("c", 5)
             assertThrows(IllegalStateException::class.java) { connect(conflicting) }
             assertTrue(!withdrawn.isDone, "Withdrawal must await the old asynchronous join")
-            joinFinished.complete(Unit)
+            joinFinished.complete(null)
             assertEquals(pendingWithdrawal, withdrawn.get(3, TimeUnit.SECONDS))
             val replacement = delivery("c", 6)
             val replacementSocket = connect(replacement)

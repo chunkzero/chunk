@@ -23,6 +23,7 @@ include(":jvm:backend-api")
 include(":jvm:backend-client")
 include(":jvm:backend-client-kotlin")
 include(":jvm:runtime")
+include(":jvm:runtime-kotlin")
 include(":jvm:gradle-plugin")
 
 include(":jvm:example")

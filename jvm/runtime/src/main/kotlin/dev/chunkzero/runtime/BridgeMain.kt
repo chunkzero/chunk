@@ -17,6 +17,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.function.BiFunction
+import java.util.function.Supplier
 
 fun main() {
     val environment = RuntimeEnvironment.load()
@@ -47,13 +49,13 @@ fun main() {
     val ticks = AtomicLong()
     val tickExecutor = TickExecutor()
     val backend = SessionBackend.fromEnvironment(deployment, environment)
-    val factories = mutableMapOf<String, () -> Session>("bridge" to { FlatSession() })
+    val factories = mutableMapOf<String, Supplier<Session>>("bridge" to Supplier { FlatSession() })
     ServiceLoader.load(SessionProvider::class.java).forEach { provider ->
         provider.sessions().forEach { (name, factory) ->
             require(factories.putIfAbsent(name, factory) == null) { "Duplicate session type: $name" }
         }
     }
-    val sessions = SessionManager(tickExecutor, factories, backend?.let { it::client })
+    val sessions = SessionManager(tickExecutor, factories, backend?.let { BiFunction(it::client) })
     val gameplay = GameplayService(deployment, identity.generation, sessions, runtimeId = identity.runtimeId)
     val server =
         NettyServerBuilder
@@ -134,11 +136,11 @@ fun main() {
 }
 
 internal class FlatSession : Session() {
-    override fun onCreate(scope: SessionScope): CompletionStage<Unit> {
+    override fun onCreate(scope: SessionScope): CompletionStage<Void> {
         val instance = scope.createInstance()
         instance.setChunkSupplier(::LightingChunk)
         instance.setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
         return CompletableFuture
-            .completedFuture(Unit)
+            .completedFuture(null)
     }
 }

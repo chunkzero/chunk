@@ -43,12 +43,12 @@ internal class GameplayService(
     var endpoint = ""
 
     init {
-        manager.withdraw = { id ->
+        manager.setWithdraw { id ->
             val closing =
                 synchronized(
                     preparations,
                 ) { preparations.values.filter { it.delivery.session.id == id }.map { it.close() } }
-            CompletableFuture.allOf(*closing.toTypedArray()).thenApply<Unit> { }
+            CompletableFuture.allOf(*closing.toTypedArray())
         }
         events.addListener(AsyncPlayerPreLoginEvent::class.java) { event ->
             try {

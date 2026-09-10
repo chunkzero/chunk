@@ -44,8 +44,9 @@ characters), `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT`; without
 Production local launches should use the supervisor.
 
 Session implementations extend `Session` and are registered by type in the process
-factory map or a `SessionProvider` loaded from `META-INF/services`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return completion stages
-and begin on the process tick thread. Do not block that thread. Resume asynchronous
+factory map or a `SessionProvider` loaded from `META-INF/services`. `onCreate`,
+`onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>` and begin on the
+process tick thread. Do not block that thread. Resume asynchronous
 world changes with `scope.onTick { ... }`. Creation becomes ready only after its
 stage completes and at least one instance exists. `scope.finish()` requests ending;
 do not await it from a lifecycle hook whose own completion ending must await.
@@ -75,7 +76,8 @@ the destination on the existing public connection.
 The optional `scope.backend` client is bound to the process deployment and session
 identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to supervised
 JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once
-per player delivery; retry an uncertain result with the same ID and arguments.
+per player delivery. It returns a typed `OperationId`; retry an uncertain result
+with the same ID and arguments.
 Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client
 whose calls and watches close on departure. Session clients close on disposal. The `jvm/example` application demonstrates persistent coins, visits and
 subscription updates, including stale state during backend disconnection.
@@ -84,8 +86,9 @@ run through the process tick executor. Withdrawal waits for pending joins and
 initialization, removes the player and runs its leave hook before releasing the
 ownership fence. Arrival is reported after spawn and teleport acknowledgment.
 
-Kotlin applications can extend `CoroutineSession` and implement suspend
-`create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` owns their jobs
+Kotlin applications depend on `jvm:runtime-kotlin`, import
+`dev.chunkzero.runtime.coroutines`, and can extend `CoroutineSession` and implement
+suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` owns their jobs
 and resumes continuations on the process tick thread. Wrap a Java `BackendSession`
 with `scope.coroutines.backend(client)` for suspend calls and bounded `Flow`
 watches; the overload accepting an admitted `Player` creates a child identity and
@@ -95,5 +98,7 @@ cleanup cannot affect a later admission of the same UUID.
 Put final result mutations in `finish()`: the manager awaits that hook before
 closing session resources. Request termination with `scope.finish()` without
 awaiting it from work that the same termination will cancel. Slow Flow collectors
-fail at 64 queued updates instead of dropping stale transitions. Java-only backend
-consumers can continue using `jvm:backend-client` without these Kotlin adapters.
+fail at 64 queued updates instead of dropping stale transitions. Java session
+implementations use `jvm:runtime` and register `Supplier<Session>` factories through
+`SessionProvider`. The coroutine adapters
+live in `jvm:runtime-kotlin`; backend-only Java consumers use `jvm:backend-client`.
