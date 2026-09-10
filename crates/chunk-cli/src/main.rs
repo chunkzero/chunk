@@ -24,6 +24,11 @@ enum Command {
         #[arg(long, default_value = ".chunk/build")]
         output: PathBuf,
     },
+    /// Inspect project and app manifests as JSON without building.
+    Inspect {
+        #[arg(default_value = ".")]
+        project: PathBuf,
+    },
     /// Upload assets (coming soon).
     Upload { artifact: PathBuf },
     /// Manage authentication.
@@ -50,12 +55,19 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    chunk_service::logging();
+    let inspection = matches!(&cli.command, Command::Inspect { .. });
+    if !inspection {
+        chunk_service::logging();
+    }
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => ExitCode::from(130),
         Err(error) => {
-            let _ = cliclack::outro_cancel(error);
+            if inspection {
+                eprintln!("{error}");
+            } else {
+                let _ = cliclack::outro_cancel(error);
+            }
             ExitCode::FAILURE
         }
     }
@@ -70,6 +82,13 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
+        Command::Inspect { project } => {
+            let metadata = chunk_build::project::inspect(&project)?;
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            serde_json::to_writer_pretty(&mut output, &metadata).map_err(io::Error::other)?;
+            io::Write::write_all(&mut output, b"\n")
+        }
         Command::Upload { .. } => platform::unsupported("Asset uploads"),
         Command::Auth(auth) => platform::auth(auth),
         Command::Login(options) => platform::auth(platform::Auth::Login(options)),

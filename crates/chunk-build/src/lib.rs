@@ -6,6 +6,7 @@ mod codegen;
 pub use codegen::generate;
 mod compiler;
 pub use compiler::compile;
+pub mod project;
 
 use std::{
     collections::BTreeMap,

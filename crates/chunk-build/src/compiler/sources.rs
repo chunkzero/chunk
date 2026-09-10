@@ -51,17 +51,13 @@ pub(super) fn sdk(output: &Path) -> io::Result<PathBuf> {
 pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
     let mut files = Vec::new();
     collect(&root.join("server"), "shared", &mut files, 0)?;
-    for app in entries(&root.join("apps"))? {
-        if app.file_type()?.is_symlink() {
-            return Err(io::Error::other("app symlinks are unsupported"));
-        }
-        if app.file_type()?.is_dir() {
-            let name = app
-                .file_name()
-                .into_string()
-                .map_err(|_| io::Error::other("source paths must be UTF-8"))?;
-            collect(&app.path().join("server"), &format!("apps/{name}"), &mut files, 0)?;
-        }
+    for app in crate::project::discover_apps(root)? {
+        collect(
+            &root.join(&app.directory).join("server"),
+            &format!("apps/{}", app.id),
+            &mut files,
+            0,
+        )?;
     }
     if files.iter().try_fold(0_u64, |total, source| {
         Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len())

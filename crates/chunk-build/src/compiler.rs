@@ -136,6 +136,14 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         fs::create_dir_all(project.path().join("server/schema")).unwrap();
         fs::create_dir_all(project.path().join("apps/duels/server")).unwrap();
+        fs::write(project.path().join("apps/duels/app.toml"), "").unwrap();
+        fs::write(project.path().join("apps/duels/build.gradle.kts"), "").unwrap();
+        fs::create_dir_all(project.path().join("apps/unregistered/server")).unwrap();
+        fs::write(
+            project.path().join("apps/unregistered/server/ignored.ts"),
+            "invalid TypeScript",
+        )
+        .unwrap();
         fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '@chunk/server'; export default defineSchema({profiles:defineTable({player:v.player()}).index('by_player',['player'])});").unwrap();
         fs::write(project.path().join("apps/duels/server/match.ts"), "import {query,internalMutation,v} from '@chunk/server'; export function helper(n:number){return n+1} export const score=query({args:{value:v.integer()},returns:v.integer(),handler:(_,a)=>helper(a.value)}); export const hidden=internalMutation({args:{},returns:v.null(),handler:()=>null});").unwrap();
         compile(project.path(), output.path()).unwrap();
