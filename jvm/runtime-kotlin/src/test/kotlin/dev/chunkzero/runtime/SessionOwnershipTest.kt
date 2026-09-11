@@ -1,6 +1,7 @@
 package dev.chunkzero.runtime
 
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import net.minestom.server.MinecraftServer
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows

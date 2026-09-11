@@ -22,6 +22,8 @@ import io.grpc.ManagedChannelBuilder
 import io.grpc.ServerBuilder
 import io.grpc.stub.ServerCallStreamObserver
 import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import net.minestom.server.MinecraftServer
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -118,16 +120,14 @@ class SessionCoroutinesTest {
                                                 Duration.ofSeconds(5),
                                             ),
                                         )
-                                    scope.coroutines.launch {
-                                        backend
-                                            .watch(
-                                                QueryRef("read", nullType, integerType),
-                                                null,
-                                            ).collect {
-                                                ticks.checkThread()
-                                                if (!it.stale()) observed = true
-                                            }
-                                    }
+                                    backend
+                                        .watch(
+                                            QueryRef("read", nullType, integerType),
+                                            null,
+                                        ).onEach {
+                                            ticks.checkThread()
+                                            if (!it.stale()) observed = true
+                                        }.launchIn(scope.coroutines)
                                 }
 
                                 override suspend fun finish() {

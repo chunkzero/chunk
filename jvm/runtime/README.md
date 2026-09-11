@@ -93,11 +93,12 @@ player and runs its leave hook before releasing the ownership fence. Arrival is 
 acknowledgment.
 
 Kotlin applications depend on `jvm:runtime-kotlin`, import `dev.chunkzero.runtime.coroutines`, and can extend
-`CoroutineSession` and implement suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` owns their
-jobs and resumes continuations on the process tick thread. Wrap a Java `BackendSession` with
-`scope.coroutines.backend(client)` for suspend calls and bounded `Flow` watches; the overload accepting an admitted
-`Player` creates a child identity and closes its calls/watches on departure. Player resources use object identity so
-cleanup cannot affect a later admission of the same UUID.
+`CoroutineSession` and implement suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` is a
+session-owned `CoroutineScope` with the process tick dispatcher as its default. Use standard coroutine extensions such
+as `kotlinx.coroutines.launch`, `async`, `future`, and `Flow.launchIn`; disposal cancels the scope's jobs. Wrap a Java
+`BackendSession` with `scope.coroutines.backend(client)` for suspend calls and bounded `Flow` watches; the overload
+accepting an admitted `Player` creates a child identity and closes its calls/watches on departure. Player resources use
+object identity so cleanup cannot affect a later admission of the same UUID.
 
 Put final result mutations in `finish()`: the manager awaits that hook before closing session resources. Request
 termination with `scope.finish()` without awaiting it from work that the same termination will cancel. Slow Flow

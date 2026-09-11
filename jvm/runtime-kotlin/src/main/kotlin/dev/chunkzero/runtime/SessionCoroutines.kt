@@ -5,10 +5,9 @@ import dev.chunkzero.backend.api.PlayerId
 import dev.chunkzero.backend.client.BackendSession
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.future.future
-import kotlinx.coroutines.launch
 import net.minestom.server.entity.Player
 import java.util.concurrent.CompletableFuture
 import kotlin.coroutines.CoroutineContext
@@ -21,38 +20,32 @@ val SessionScope.coroutines: SessionCoroutines
 class SessionCoroutines internal constructor(
     private val session: SessionScope,
     ticks: TickExecutor,
-) : AutoCloseable {
-    private val job = SupervisorJob()
-    private val scope =
-        CoroutineScope(
-            job +
-                object : CoroutineDispatcher() {
-                    override fun isDispatchNeeded(context: CoroutineContext) = !ticks.isCurrentThread()
-
-                    override fun dispatch(
-                        context: CoroutineContext,
-                        block: Runnable,
-                    ) {
-                        ticks.submit { block.run() }
-                    }
-                },
-        )
-
-    fun <T> future(block: suspend CoroutineScope.() -> T): CompletableFuture<T> = scope.future(block = block)
-
-    fun launch(block: suspend CoroutineScope.() -> Unit): Job = scope.launch(block = block)
-
-    fun backend(client: BackendSession): CoroutineBackend = session.own(CoroutineBackend(client, scope))
+) : CoroutineScope by CoroutineScope(SupervisorJob() + TickDispatcher(ticks)),
+    AutoCloseable {
+    fun backend(client: BackendSession): CoroutineBackend = session.own(CoroutineBackend(client, this))
 
     /** Identity comes from the admitted Player object; leaving disposes this child independently. */
     fun backend(
         client: BackendSession,
         player: Player,
     ): CoroutineBackend =
-        session.own(player, CoroutineBackend(client.forPlayer(PlayerId(player.uuid.toString())), scope))
+        session.own(player, CoroutineBackend(client.forPlayer(PlayerId(player.uuid.toString())), this))
 
     override fun close() {
-        job.cancel()
+        cancel()
+    }
+}
+
+private class TickDispatcher(
+    private val ticks: TickExecutor,
+) : CoroutineDispatcher() {
+    override fun isDispatchNeeded(context: CoroutineContext) = !ticks.isCurrentThread()
+
+    override fun dispatch(
+        context: CoroutineContext,
+        block: Runnable,
+    ) {
+        ticks.submit { block.run() }
     }
 }
 
