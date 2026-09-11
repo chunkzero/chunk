@@ -26,6 +26,15 @@ The grass lobby and sandstone arenas share persistent coins and visit counts. Us
 the action bar reflect subscriptions. A join explicitly reads saved coins and increments visits. Nothing saves world
 simulation state across JVM shutdown.
 
+For editor setup without starting services, run:
+
+```sh
+cargo run -p chunk-cli -- codegen examples/local
+```
+
+This materializes the ignored SDK under `examples/local/.chunk/`. Application modules import builders and named types
+from `#chunk`; schema modules use `#chunk/schema`. Both resolve through `examples/local/package.json`.
+
 ## Moves and drain
 
 The player's UUID appears beside `player=` in the service console logs. In another terminal, substitute that UUID below:

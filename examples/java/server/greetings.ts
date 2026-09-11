@@ -1,4 +1,4 @@
-import { query, v } from "@chunk/server";
+import { query, v } from "#chunk";
 
 export const message = query({
   args: { name: v.string() },

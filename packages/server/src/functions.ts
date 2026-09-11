@@ -20,13 +20,21 @@ export interface RawWriter extends RawReader {
   put(table: string, id: string, value: JsonValue): void;
   delete(table: string, id: string): void;
 }
-export interface QueryContext {
+interface RawQueryContext {
   readonly caller: JsonValue;
   readonly db: RawReader;
 }
-export interface MutationContext {
+interface RawMutationContext {
   readonly caller: JsonValue;
   readonly db: RawWriter;
+}
+export interface QueryContext<T extends Tables> {
+  readonly caller: JsonValue;
+  readonly db: Reader<T>;
+}
+export interface MutationContext<T extends Tables> {
+  readonly caller: JsonValue;
+  readonly db: Writer<T>;
 }
 export type FunctionKind = "query" | "mutation";
 export type Visibility = "public" | "internal";
@@ -35,7 +43,7 @@ const definition = Symbol.for("@chunk/function");
 export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = never, R = unknown> {
   readonly [definition]: true;
   readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema };
-  readonly handler: (ctx: K extends "query" ? QueryContext : MutationContext, args: A) => R | Promise<R>;
+  readonly handler: (ctx: K extends "query" ? RawQueryContext : RawMutationContext, args: A) => R | Promise<R>;
 }
 
 export interface FunctionReference<K extends FunctionKind, A, R> {
@@ -50,7 +58,7 @@ function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
     args: S;
     returns: Validator<R>;
     handler: (
-      ctx: K extends "query" ? QueryContext : MutationContext,
+      ctx: K extends "query" ? RawQueryContext : RawMutationContext,
       args: InferObject<S>,
     ) => NoInfer<R> | Promise<NoInfer<R>>;
   }): FunctionDefinition<K, InferObject<S>, R> =>
@@ -76,7 +84,7 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
       args: S;
       returns: Validator<R>;
       handler: (
-        ctx: { readonly caller: JsonValue; readonly db: K extends "query" ? Reader<T> : Writer<T> },
+        ctx: K extends "query" ? QueryContext<T> : MutationContext<T>,
         args: InferObject<S>,
       ) => NoInfer<R> | Promise<NoInfer<R>>;
     }): FunctionDefinition<K, InferObject<S>, R> =>
@@ -88,10 +96,9 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
         returns: options.returns,
         handler: (ctx, args) =>
           options.handler(
-            {
-              caller: ctx.caller,
-              db: documents(schema, ctx.db, kind === "mutation") as K extends "query" ? Reader<T> : Writer<T>,
-            },
+            { caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") } as K extends "query"
+              ? QueryContext<T>
+              : MutationContext<T>,
             args,
           ),
       });

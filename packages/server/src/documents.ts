@@ -26,6 +26,7 @@ export interface IndexRange<S extends Shape, K extends readonly (keyof S & strin
   lt<N extends K[0]>(field: N, value: ReturnType<S[N]["parse"]>): IndexRange<S, K>;
 }
 export interface Reader<T extends Tables> {
+  get<N extends keyof T & string>(table: N, id: Id<NoInfer<N>>): Document<T, N> | null;
   get<N extends keyof T & string>(id: Id<N>): Document<T, N> | null;
   query<N extends keyof T & string>(
     table: N,
@@ -66,8 +67,11 @@ export function documents<T extends Tables>(
         }) as Document<T, N>);
   }
   const reader: Reader<T> = {
-    get<N extends keyof T & string>(id: Id<N>) {
+    get<N extends keyof T & string>(tableOrId: N | Id<N>, explicitId?: Id<N>) {
+      const id = explicitId ?? tableOrId;
       const name = key(id) as N;
+      if (explicitId !== undefined && name !== tableOrId)
+        throw new Error(`Document ID does not belong to table: ${tableOrId}`);
       return document(name, id, raw.get(name, id));
     },
     query(name) {

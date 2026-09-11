@@ -14,7 +14,7 @@ async fn compiled_match_and_profile_updates_are_atomic_and_preserve_newer_fields
     fs::write(
         root.path().join("server/schema/index.ts"),
         r"
-import {defineSchema,defineTable,v} from '@chunk/server';
+import {defineSchema,defineTable,v} from '#chunk/schema';
 export default defineSchema({
  profiles:defineTable({player:v.player(),wins:v.integer(),note:v.optional(v.string())}).index('by_player',['player']),
  matches:defineTable({player:v.player()}).index('by_player',['player'])
@@ -22,19 +22,18 @@ export default defineSchema({
     )
     .unwrap();
     fs::write(root.path().join("server/matches.ts"), r"
-import {defineFunctions,v,unset} from '@chunk/server';
+import {query,mutation,v,unset} from '#chunk';
 import schema from './schema/index.ts';
-const f=defineFunctions(schema);
-export const record=f.mutation({args:{player:v.player()},returns:v.id('matches'),handler:({db},a)=>{
+export const record=mutation({args:{player:v.player()},returns:v.id('matches'),handler:({db},a)=>{
  const id=db.insert('matches',{player:a.player});
  const profile=db.query('profiles').withIndex('by_player',q=>q.eq('player',a.player)).unique();
  if(profile) db.patch(profile._id,{wins:profile.wins+1,note:unset});
  else db.insert('profiles',{player:a.player,wins:1});
  return id;
 }});
-export const duplicate=f.mutation({args:{player:v.player()},returns:v.id('profiles'),handler:({db},a)=>db.insert('profiles',{player:a.player,wins:0})});
-export const profile=f.query({args:{player:v.player()},returns:v.union(v.null(),v.document('profiles',schema.tables.profiles.fields)),handler:({db},a)=>db.query('profiles').withIndex('by_player',q=>q.eq('player',a.player)).first()});
-export const count=f.query({args:{player:v.player()},returns:v.integer(),handler:({db},a)=>db.query('matches').withIndex('by_player',q=>q.eq('player',a.player)).collect(100).length});
+export const duplicate=mutation({args:{player:v.player()},returns:v.id('profiles'),handler:({db},a)=>db.insert('profiles',{player:a.player,wins:0})});
+export const profile=query({args:{player:v.player()},returns:v.union(v.null(),v.document('profiles',schema.tables.profiles.fields)),handler:({db},a)=>db.query('profiles').withIndex('by_player',q=>q.eq('player',a.player)).first()});
+export const count=query({args:{player:v.player()},returns:v.integer(),handler:({db},a)=>db.query('matches').withIndex('by_player',q=>q.eq('player',a.player)).collect(100).length});
 ").unwrap();
     let output = root.path().join("compiled");
     let project = root.path().to_owned();

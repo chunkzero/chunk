@@ -34,7 +34,7 @@ branch; dashboard integration and asset uploads remain deferred.
 | ---------------------- | ---------------------------------------------------------------------------------------- |
 | `crates/`              | Rust proxy, protocol, platform and toolchain crates                                      |
 | `jvm/`                 | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
-| `packages/server`      | Typed `@chunk/server` declarations and document API                                      |
+| `packages/server`      | Embedded TypeScript SDK sources and internal tests                                       |
 | `proto/`               | Generated lifecycle/backend/control contracts and remaining transport proposals          |
 | `examples/local/`      | App modules, shared gameplay, TypeScript backend and project configuration               |
 | `examples/java/`       | Java consumer using the runtime and generated typed backend API                          |
@@ -103,6 +103,7 @@ managed delivery, timeouts, feature selection and standalone hosting.
 
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
+- `chunk codegen PROJECT` prepares the schema-aware TypeScript SDK for editors without building or starting services.
 - `chunk inspect PROJECT` reads project and app metadata as JSON without building.
 - `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
 - `chunk build PROJECT` runs the project Gradle wrapper and packages backend code, app JARs, dependencies and assets as

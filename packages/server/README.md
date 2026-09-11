@@ -1,21 +1,65 @@
 # Server declarations
 
-`@chunk/server` declares tables and query/mutation contracts. Compose tables explicitly; exported descriptors register
-functions during compilation, while ordinary helpers remain ordinary functions.
+The shared SDK is maintained here as ordinary TypeScript and embedded in the CLI. This private workspace package is only
+for internal checks; applications need no SDK dependency.
+
+Run `chunk codegen PROJECT` after checkout to prepare your editor. It creates `.chunk/sdk/` (shared implementation),
+`.chunk/generated/` (schema-bound builders and types), and these `package.json` imports:
+
+```json
+{
+  "imports": {
+    "#chunk": "./.chunk/generated/index.ts",
+    "#chunk/schema": "./.chunk/sdk/schema.ts"
+  }
+}
+```
+
+Commit the package mappings and your `tsconfig.json`; keep `.chunk/` ignored. Generation preserves unrelated package
+settings, including import conditions and their order. It creates an editor `tsconfig.json` only if one is missing,
+leaving existing configuration untouched. Existing editor configurations should use `moduleResolution: "Bundler"`,
+`allowImportingTsExtensions: true`, `noEmit: true`, and `lib: ["ES2023"]` for the transactional globals.
+
+Compose the default schema in `server/schema/index.ts` using the independent schema entry point:
 
 ```ts
-import { defineSchema, defineTable, query, v } from "@chunk/server";
+import { defineSchema, defineTable, v } from "#chunk/schema";
 
-export const schema = defineSchema({
+export default defineSchema({
   profiles: defineTable({ player: v.player(), wins: v.integer() }).index("by_player", ["player"]),
 });
+```
 
-export const greeting = query({
-  args: { name: v.string() },
-  returns: v.string(),
-  handler: (_, { name }) => `Hello, ${name}`,
+Application modules and ordinary shared helpers use schema-bound exports:
+
+```ts
+import { query, mutation, v } from "#chunk";
+import type { QueryContext, MutationContext, Doc, Id } from "#chunk";
+
+function getProfile(ctx: QueryContext, id: Id<"profiles">): Doc<"profiles"> | null {
+  return ctx.db.get("profiles", id);
+}
+
+export const wins = query({
+  args: { id: v.id("profiles") },
+  returns: v.integer(),
+  handler: (ctx, { id }) => getProfile(ctx, id)?.wins ?? 0,
+});
+
+export const create = mutation({
+  args: { player: v.player() },
+  returns: v.id("profiles"),
+  handler: (ctx, { player }) => ctx.db.insert("profiles", { player, wins: 0 }),
 });
 ```
+
+Queries receive a typed Reader, mutations a Writer. `MutationContext` can also be passed to read helpers. `caller`
+remains `JsonValue`. Types refer directly to the schema, so schema edits update editor types without regenerating copied
+fields. Use `#chunk/schema` throughout schema modules to keep them independent of the builders that import that schema.
+
+`chunk build` and `chunk dev` generate the SDK before type-checking and building the complete app release. Dev runs that
+release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to
+repair missing or stale SDK files. Unchanged generated files are not rewritten.
 
 Result validators are required. `v.optional` means an absent object property; use `v.union(v.null(), ...)` for explicit
 null. Numbers must be finite, and integer values must fit JavaScript's safe range. IDs are branded strings: document IDs
@@ -24,28 +68,7 @@ authority.
 
 `internalQuery` and `internalMutation` are excluded from public clients. Helpers may receive the current context to
 share its transaction. Module initialization must be pure and context-independent; mutable globals are not database
-state. The typed document API, artifact compiler and generated clients are separate roadmap changes.
-
-Bind handlers to the explicit schema with `defineFunctions(schema)` to infer the transaction's document API without
-generated files:
-
-```ts
-const { mutation } = defineFunctions(schema);
-export const record = mutation({
-  args: { player: v.player() },
-  returns: v.id("matches"),
-  handler: ({ db }, { player }) => {
-    const id = db.insert("matches", { player });
-    const profile = db
-      .query("profiles")
-      .withIndex("by_player", (q) => q.eq("player", player))
-      .unique();
-    if (profile) db.patch(profile._id, { wins: profile.wins + 1 });
-    else db.insert("profiles", { player, wins: 1 });
-    return id;
-  },
-});
-```
+state.
 
 Documents include a readonly `_id`; `v.document(table, fields)` validates returned documents. Returned values are local
 copies; use `patch` to persist edits. IDs contain their table and 128 pseudorandom bits from the invocation's seeded

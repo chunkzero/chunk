@@ -1,9 +1,10 @@
 # Backend compiler
 
-Run `chunk gen PROJECT --target java` to compile backend code and generate a Java client. The repository-only
-`chunk-compile PROJECT OUTPUT` helper compiles backend artifacts without client generation. Compilation type-checks the
-project's `server/**/*.ts` and discovered apps' `server/**/*.ts` and bundles them directly with the Rust Rolldown API.
-The explicitly composed default export in `server/schema/index.ts` supplies the database schema.
+Run `chunk codegen PROJECT` to prepare the schema-aware TypeScript SDK for editors without a build or running services.
+`chunk gen PROJECT --target java` compiles backend code and generates a Java client. The repository-only
+`chunk-compile PROJECT OUTPUT` helper compiles backend artifacts without client generation. Compilation prepares the
+SDK, type-checks the project's `server/**/*.ts` and discovered apps' `server/**/*.ts`, then bundles them directly with
+the Rust Rolldown API. The explicitly composed default export in `server/schema/index.ts` supplies the database schema.
 
 Named function declarations become paths such as `shared/profile/get` and `apps/duels/match/score`. Helpers remain
 ordinary TypeScript exports; only SDK query/mutation declarations enter the contract. Declarations are evaluated in the
@@ -11,8 +12,18 @@ bounded transactional engine, without executing project code in Node. Node built
 are unsupported.
 
 Successful compilation writes `source.mjs`, `source.mjs.map`, and `contract.json`. Backend compilation does not run
-Gradle or build JVM apps. The six SDK source files are embedded in `chunk-build` and materialized under
-`OUTPUT/.sdk/<digest>` for checking and bundling; modified cache files are rejected.
+Gradle or build JVM apps. `chunk_build::publish_release` combines the backend output with app JARs, shared dependencies,
+assets and project metadata into an immutable content-addressed release. Shared SDK sources are embedded in
+`chunk-build` and materialized in `PROJECT/.chunk/sdk/`. `PROJECT/.chunk/generated/` contains builders and named
+context/document/ID types derived from the project's schema. `package.json` maps `#chunk` and `#chunk/schema` to those
+sources; both TypeScript and Rolldown resolve the mappings directly. Schema helpers have no dependency on the
+schema-bound builders. Missing/stale files are repaired, unchanged files retain their timestamps, and generated
+directories are excluded from source discovery. The default `.chunk/build/` output contains deployment artifacts only.
+
+Generation preserves existing project configuration and merges only its two owned imports. It creates a suitable
+`tsconfig.json` if missing. See the [SDK guide](../../packages/server/README.md) for setup and typed helper examples.
+The Java, Kotlin and TypeScript client generators remain separate; `#chunk/api` and a TypeScript transport client are
+deferred.
 
 `just toolchain` installs native TypeScript 7.0.2 and its library declarations under
 `target/debug/toolchain/typescript/7.0.2`. Compilation calls that executable directly, without Node. `CHUNK_TYPESCRIPT`
@@ -131,10 +142,10 @@ example `BackendTypes.Shared.Players.StatsResult`.
 
 `--output PATH` overrides the selected client directory. `--backend-output PATH` overrides the compiler output, whose
 default is `.chunk/build/backend`. Defaults are relative to the project; explicit paths are relative to the working
-directory. The two output directories must be separate, with neither containing the other. Compiler output contains the
-required executable `source.mjs`, source map, `contract.json`, and internal `.sdk` cache. Client directories contain
-only the selected sources and `.chunk-codegen.json`, the generator's ownership record. Neither ownership records nor
-`.sdk` caches are release artifacts.
+directory. The two output directories must be separate, with neither containing the other. Compiler output contains only
+the executable `source.mjs`, source map and `contract.json`. The editor SDK lives in the project's `.chunk/sdk` and
+`.chunk/generated/index.ts`. Client directories contain only the selected sources and `.chunk-codegen.json`, the
+generator's ownership record. Generated sources and ownership records are not release artifacts.
 
 Regeneration removes stale files recorded in the destination's ownership record, including old Java package paths. It
 preserves other files and rejects collisions with handwritten files or modifications to previously generated files. Keep

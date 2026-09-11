@@ -29,12 +29,13 @@ fn generated_typescript_references_validate_the_cross_language_fixtures() {
     super::generate(&fixtures.join("contract.json"), output.path(), GenerationTarget::TypeScript).unwrap();
     assert_eq!(api, fs::read_to_string(output.path().join("api.ts")).unwrap());
     assert!(!api.contains("hidden"));
-    let sdk = root.join("packages/server/src/index.ts");
+    fs::create_dir_all(output.path().join("server/schema")).unwrap();
     fs::write(
-        output.path().join("api.ts"),
-        api.replace("'@chunk/server'", &serde_json::to_string(sdk.to_str().unwrap()).unwrap()),
+        output.path().join("server/schema/index.ts"),
+        "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
     )
     .unwrap();
+    super::generate_sdk(output.path()).unwrap();
     let fixtures_json = fs::read_to_string(fixtures.join("values.json")).unwrap();
     let script = format!(
         "import assert from 'node:assert/strict'; import {{api}} from './api.ts'; const fixtures={fixtures_json}; for(const value of fixtures) assert.deepEqual(api.shared.profile.record.arguments.parse(value),value); assert.throws(()=>api.shared.profile.record.arguments.parse({{...fixtures[0],count:9007199254740992}})); assert(Object.hasOwn(api, '__proto__')); assert.equal(Object.getPrototypeOf(api), Object.prototype); assert.equal(api.__proto__.read.path, '__proto__/read');"

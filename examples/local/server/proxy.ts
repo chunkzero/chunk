@@ -1,8 +1,5 @@
-import { defineFunctions, v } from "@chunk/server";
+import { query, v } from "#chunk";
 
-import schema from "./schema/index.ts";
-
-const { query } = defineFunctions(schema);
 const user = { uuid: v.string(), username: v.string() };
 const destination = v.object({ key: v.string(), session_type: v.string(), machine_profile: v.string() });
 

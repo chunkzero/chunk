@@ -17,7 +17,7 @@ test("document arrays can be edited locally while metadata stays readonly", () =
     args: {},
     returns: v.null(),
     handler: ({ db }) => {
-      const doc = db.get("profiles:p1");
+      const doc = db.get("profiles", "profiles:p1");
       doc.tags.push("new");
       assert.deepEqual(stored.tags, ["old"]);
       assert.throws(() => {
@@ -102,6 +102,7 @@ test("typed patches distinguish null from unset and queries expose no writes", (
       assert.throws(() => db.patch("profiles:p1", { wins: unset }));
       assert.throws(() => db.get("matches:p1"));
       assert.throws(() => db.get("profiles:"));
+      assert.throws(() => db.get("matches", "profiles:p1"));
       return null;
     },
   });

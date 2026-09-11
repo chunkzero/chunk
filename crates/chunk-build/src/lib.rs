@@ -10,6 +10,8 @@ pub mod project;
 mod publication;
 mod release;
 pub use release::{JavaRuntime, JvmDescriptor, Release, ReleaseInputs, publish_release, read_jvm_descriptor};
+mod sdk;
+pub use sdk::generate_sdk;
 
 use std::collections::BTreeMap;
 

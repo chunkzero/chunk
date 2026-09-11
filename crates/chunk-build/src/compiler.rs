@@ -27,12 +27,13 @@ impl ReadHost for Declarations {
 /// Reports compiler diagnostics, unsupported imports, impure declarations or invalid contracts.
 pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let project = project.canonicalize()?;
+    super::generate_sdk(&project)?;
     fs::create_dir_all(output)?;
     let output = output.canonicalize()?;
     let staging = tempfile::Builder::new().prefix(".compile-").tempdir_in(&output)?;
     let files = sources::discover(&project)?;
-    let sdk = sources::sdk(&output)?;
-    typecheck::check(&files, &sdk, staging.path())?;
+    let sdk = project.join(".chunk/sdk");
+    typecheck::check(&files, staging.path())?;
     // This synchronous compiler entry point runs on a blocking thread in async callers.
     let executor = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     executor.block_on(bundle::build(&project, staging.path(), &sdk, &files))?;
@@ -95,7 +96,7 @@ mod tests {
         let schema = project.path().join("server/schema/index.ts");
         fs::write(
             &schema,
-            "import {defineTable,v} from '@chunk/server'; export default defineTable({name:v.string()});",
+            "import {defineTable,v} from '#chunk/schema'; export default defineTable({name:v.string()});",
         )
         .unwrap();
         let error = compile(project.path(), output.path()).unwrap_err().to_string();
@@ -103,10 +104,10 @@ mod tests {
             error.contains("server/schema/index.ts must default-export a schema created with defineSchema()"),
             "{error}"
         );
-        fs::write(&schema, "import {defineSchema} from '@chunk/server'; export default defineSchema({});").unwrap();
+        fs::write(&schema, "import {defineSchema} from '#chunk/schema'; export default defineSchema({});").unwrap();
         fs::write(
             project.path().join("server/invalid-name.ts"),
-            "import {query,v} from '@chunk/server'; export const value=query({args:{},returns:v.null(),handler:()=>null});",
+            "import {query,v} from '#chunk'; export const value=query({args:{},returns:v.null(),handler:()=>null});",
         )
         .unwrap();
         let error = compile(project.path(), output.path()).unwrap_err().to_string();
@@ -123,11 +124,19 @@ mod tests {
         fs::create_dir_all(project.path().join("apps/duels/server")).unwrap();
         fs::write(project.path().join("apps/duels/app.toml"), "").unwrap();
         fs::write(project.path().join("apps/duels/build.gradle.kts"), "").unwrap();
+        fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '#chunk/schema'; export default defineSchema({profiles:defineTable({player:v.player()}).index('by_player',['player'])});").unwrap();
+        fs::write(project.path().join("apps/duels/server/match.ts"), "import {query,internalMutation,v} from '#chunk'; export function helper(n:number){return n+1} export const score=query({args:{value:v.integer()},returns:v.integer(),handler:(_,a)=>helper(a.value)}); export const hidden=internalMutation({args:{},returns:v.null(),handler:()=>null});").unwrap();
+        for directory in
+            [".chunk/generated", "server/.chunk/build", "apps/duels/server/.chunk/sdk", "server/_generated"]
+        {
+            fs::create_dir_all(project.path().join(directory)).unwrap();
+            fs::write(project.path().join(directory).join("ignored.ts"), "invalid TypeScript").unwrap();
+        }
+        compile(project.path(), output.path()).unwrap();
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 3);
+        check_editor(project.path());
         fs::create_dir_all(project.path().join("apps/unregistered/server")).unwrap();
         fs::write(project.path().join("apps/unregistered/server/ignored.ts"), "invalid TypeScript").unwrap();
-        fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '@chunk/server'; export default defineSchema({profiles:defineTable({player:v.player()}).index('by_player',['player'])});").unwrap();
-        fs::write(project.path().join("apps/duels/server/match.ts"), "import {query,internalMutation,v} from '@chunk/server'; export function helper(n:number){return n+1} export const score=query({args:{value:v.integer()},returns:v.integer(),handler:(_,a)=>helper(a.value)}); export const hidden=internalMutation({args:{},returns:v.null(),handler:()=>null});").unwrap();
-        compile(project.path(), output.path()).unwrap();
         let contract = fs::read(output.path().join("contract.json")).unwrap();
         let decoded: BackendMetadata = serde_json::from_slice(&contract).unwrap();
         assert_eq!(decoded.functions.len(), 2);
@@ -154,14 +163,92 @@ mod tests {
         assert_eq!(result.value, "3");
         drop(engine);
         let source_map = fs::read(output.path().join("source.mjs.map")).unwrap();
+        fs::remove_file(project.path().join(".chunk/generated/index.ts")).unwrap();
+        fs::write(project.path().join(".chunk/sdk/functions.ts"), "stale SDK").unwrap();
         compile(project.path(), output.path()).unwrap();
         assert_eq!(contract, fs::read(output.path().join("contract.json")).unwrap());
         assert_eq!(source, fs::read_to_string(output.path().join("source.mjs")).unwrap());
         assert_eq!(source_map, fs::read(output.path().join("source.mjs.map")).unwrap());
+        let checkout = tempfile::tempdir().unwrap();
+        for file in [
+            "server/schema/index.ts",
+            "apps/duels/server/match.ts",
+            "apps/duels/app.toml",
+            "apps/duels/build.gradle.kts",
+        ] {
+            let destination = checkout.path().join(file);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(project.path().join(file), destination).unwrap();
+        }
+        let rebuilt = checkout.path().join(".chunk/build");
+        compile(checkout.path(), &rebuilt).unwrap();
+        assert_eq!(contract, fs::read(rebuilt.join("contract.json")).unwrap());
+        assert_eq!(source, fs::read_to_string(rebuilt.join("source.mjs")).unwrap());
+        assert_eq!(source_map, fs::read(rebuilt.join("source.mjs.map")).unwrap());
         fs::write(project.path().join("server/bad.ts"), "// @ts-ignore\nimport 'node:fs'; export const value=1;")
             .unwrap();
         assert!(compile(project.path(), output.path()).is_err());
         fs::write(project.path().join("server/bad.ts"), "export const value=Date.now();").unwrap();
         assert!(compile(project.path(), output.path()).is_err());
+    }
+
+    #[test]
+    fn generated_helpers_infer_the_live_schema_and_resolve_package_imports() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        fs::create_dir_all(project.path().join("apps/duels/server")).unwrap();
+        fs::write(project.path().join("apps/duels/app.toml"), "").unwrap();
+        fs::write(project.path().join("apps/duels/build.gradle.kts"), "").unwrap();
+        let schema = project.path().join("server/schema/index.ts");
+        let schema_source = "import {defineSchema,defineTable,v} from '#chunk/schema'; export default defineSchema({profiles:defineTable({wins:v.integer(),note:v.optional(v.string())}).index('by_wins',['wins']),matches:defineTable({score:v.integer()}).index('by_score',['score'])});";
+        fs::write(&schema, schema_source).unwrap();
+        fs::write(project.path().join("server/helpers.ts"), include_str!("compiler/helper-types.ts")).unwrap();
+        fs::write(
+            project.path().join("package.json"),
+            r##"{"type":"module","imports":{"#helpers":"./server/helpers.ts"}}"##,
+        )
+        .unwrap();
+        fs::write(project.path().join("apps/duels/server/profile.ts"), "import {query,v} from '#chunk'; import {getProfile} from '#helpers'; export const read=query({args:{id:v.id('profiles')},returns:v.integer(),handler:(ctx,{id})=>getProfile(ctx,id)?.wins??0});").unwrap();
+        compile(project.path(), output.path()).unwrap();
+        check_editor(project.path());
+        let contract: BackendMetadata =
+            serde_json::from_slice(&fs::read(output.path().join("contract.json")).unwrap()).unwrap();
+        assert_eq!(contract.functions.len(), 5);
+        assert_eq!(contract.functions["shared/helpers/internalWins"].visibility, chunk_contract::Visibility::Internal);
+
+        let generated = project.path().join(".chunk/generated/index.ts");
+        let timestamp = fs::metadata(&generated).unwrap().modified().unwrap();
+        fs::write(&schema, schema_source.replace("wins:v.integer()", "wins:v.integer(),added:v.string()")).unwrap();
+        fs::write(
+            project.path().join("server/new-field.ts"),
+            "import type {Doc} from '#chunk'; export const added=(doc:Doc<'profiles'>):string=>doc.added;",
+        )
+        .unwrap();
+        let files = sources::discover(project.path()).unwrap();
+        // No generation between schema edits: TypeScript follows typeof schema.tables.
+        let error = typecheck::check(&files, output.path()).unwrap_err().to_string();
+        assert!(error.contains("added") && error.contains("missing"), "{error}");
+        fs::write(
+            project.path().join("server/helpers.ts"),
+            include_str!("compiler/helper-types.ts").replace("{ wins: 1 }", "{ wins: 1, added: 'new' }"),
+        )
+        .unwrap();
+        typecheck::check(&files, output.path()).unwrap();
+        assert_eq!(fs::metadata(generated).unwrap().modified().unwrap(), timestamp);
+    }
+
+    fn check_editor(project: &Path) {
+        let result = std::process::Command::new(typecheck::executable().unwrap())
+            .args(["--pretty", "false", "--project"])
+            .arg(project.join("tsconfig.json"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }

@@ -1,9 +1,6 @@
-import { defineFunctions, v } from "@chunk/server";
-import type { JsonValue } from "@chunk/server";
+import { query, mutation, v } from "#chunk";
+import type { JsonValue } from "#chunk";
 
-import schema from "./schema/index.ts";
-
-const { query, mutation } = defineFunctions(schema);
 const identity = v.object({ session: v.session(), app: v.string(), player: v.player() });
 const player = (caller: JsonValue) => identity.parse(caller).player;
 const statistics = v.object({ coins: v.integer(), visits: v.integer() });

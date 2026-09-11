@@ -79,11 +79,11 @@ coroutine adapter. Session hooks and continuations that modify gameplay run thro
 and player resources have separate lifetimes. See the [runtime](../jvm/runtime/README.md) and
 [backend client](../jvm/backend-client/README.md) APIs.
 
-`packages/server` exports the `@chunk/server` validators, schema/table builders, query and mutation declarations, typed
-document access and function references. The compiler checks TypeScript with the pinned native compiler, bundles with
-Rolldown and extracts contracts by evaluating declarations in the bounded JavaScript engine. The SDK is embedded in the
-CLI; consumers do not install a Node toolchain through Gradle. Runtime code has language APIs and a bounded web subset,
-without ambient filesystem, network, process or Node capabilities. See
+`packages/server` maintains the TypeScript SDK embedded in the CLI. Projects import schema-bound builders and types
+through `#chunk`, with independent schema helpers at `#chunk/schema`. The compiler checks TypeScript with the pinned
+native compiler, bundles with Rolldown and extracts contracts by evaluating declarations in the bounded JavaScript
+engine. The SDK is embedded in the CLI; consumers do not install a Node toolchain through Gradle. Runtime code has
+language APIs and a bounded web subset, without ambient filesystem, network, process or Node capabilities. See
 [JavaScript execution](../crates/chunk-js/README.md) for its limits.
 
 ## Developer layout and execution contracts
