@@ -4,6 +4,7 @@ use std::{io, path::PathBuf, process::ExitCode};
 mod building;
 mod generation;
 mod local;
+mod nodes;
 mod platform;
 mod players;
 
@@ -54,6 +55,8 @@ enum Command {
     Apps(platform::ListCommand),
     /// Move players or drain runtimes.
     Players(players::Options),
+    /// Inspect nodes and request shutdown.
+    Nodes(nodes::Options),
 }
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -104,6 +107,7 @@ async fn run(cli: Cli) -> io::Result<()> {
         Command::Environments(_) => platform::unsupported("Environment listing"),
         Command::Apps(_) => platform::unsupported("App listing"),
         Command::Players(options) => players::run(options).await,
+        Command::Nodes(options) => nodes::run(options).await,
     }
 }
 

@@ -3,6 +3,9 @@
 //! Build tooling resolves declarations into this contract; storage adapters map
 //! it to physical tables and indexes. This crate has no I/O or JavaScript execution.
 
+mod app;
+pub use app::{AppArtifact, AppManifest, SessionDeclaration, class_name};
+
 mod connections;
 mod deployment;
 mod index;

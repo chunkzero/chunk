@@ -36,6 +36,7 @@ pub(crate) struct MoveIntent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct HostState {
+    pub app: String,
     pub profile: String,
     pub retired: bool,
 }

@@ -13,7 +13,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 chunk-service = { path = "../chunk-service" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-proto = { path = "../chunk-proto" }
-chunk-runtime = { path = "../chunk-runtime" }
 chunk-store = { path = "../chunk-store" }
 prost = "0.14.4"
 serde = { version = "1", features = ["derive"] }

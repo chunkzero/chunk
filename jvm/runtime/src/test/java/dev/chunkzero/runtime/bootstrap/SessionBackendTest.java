@@ -81,9 +81,8 @@ class SessionBackendTest {
                         .build()
                         .start();
         try {
-            var environment = environment("http://127.0.0.1:" + server.getPort(), false);
-            try (var backend =
-                    SessionBackend.fromEnvironment(deployment("build-a"), environment, true)) {
+            var environment = environment("http://127.0.0.1:" + server.getPort());
+            try (var backend = SessionBackend.fromEnvironment(deployment("build-a"), environment)) {
                 assertNotNull(backend);
             }
             var failure =
@@ -91,21 +90,8 @@ class SessionBackendTest {
                             StatusRuntimeException.class,
                             () ->
                                     SessionBackend.fromEnvironment(
-                                            deployment("build-b"), environment, true));
+                                            deployment("build-b"), environment));
             assertEquals(Status.Code.NOT_FOUND, failure.getStatus().getCode());
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () ->
-                            SessionBackend.fromEnvironment(
-                                    deployment("build-a"), environment(null, false), true));
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () ->
-                            SessionBackend.fromEnvironment(
-                                    deployment("build-a"), environment(null, true), true));
-            assertNull(
-                    SessionBackend.fromEnvironment(
-                            deployment("build-a"), environment(null, true), false));
         } finally {
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
         }
@@ -115,7 +101,7 @@ class SessionBackendTest {
         return DeploymentRef.newBuilder().setEnvironment("local").setDeployment(id).build();
     }
 
-    private static RuntimeEnvironment environment(String endpoint, boolean fixture) {
+    private static RuntimeEnvironment environment(String endpoint) {
         return new RuntimeEnvironment(
                 TOKEN,
                 "local",
@@ -126,7 +112,7 @@ class SessionBackendTest {
                 1,
                 "local",
                 "artifact",
-                fixture,
+                "test",
                 endpoint,
                 TOKEN);
     }

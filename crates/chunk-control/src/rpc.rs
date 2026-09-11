@@ -52,6 +52,21 @@ fn status(error: Error) -> Status {
 
 #[tonic::async_trait]
 impl LocalControl for Service {
+    async fn nodes(
+        &self,
+        request: Request<chunk_proto::v1::NodesRequest>,
+    ) -> Result<Response<chunk_proto::v1::NodeList>, Status> {
+        self.authorize(&request)?;
+        self.control.nodes().map(Response::new).map_err(status)
+    }
+    async fn shutdown_node(
+        &self,
+        request: Request<chunk_proto::v1::ShutdownNodeRequest>,
+    ) -> Result<Response<chunk_proto::v1::NodeStatus>, Status> {
+        self.authorize(&request)?;
+        self.control.shutdown_node(request.get_ref()).map(Response::new).map_err(status)
+    }
+
     async fn drain(
         &self,
         request: Request<chunk_proto::v1::DrainRequest>,
@@ -112,5 +127,21 @@ impl LocalControl for Service {
             .map_err(|_| Status::internal("cancellation task failed"))?
             .map(Response::new)
             .map_err(status)
+    }
+}
+
+#[tonic::async_trait]
+impl chunk_proto::v1::supervisor_server::Supervisor for Service {
+    async fn register_process(
+        &self,
+        request: Request<chunk_proto::v1::ProcessRegistration>,
+    ) -> Result<Response<chunk_proto::v1::ProcessIdentity>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("missing process credential"))?
+            .to_owned();
+        self.control.host.register(&token, request.into_inner()).map(Response::new).map_err(status)
     }
 }

@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, fs, time::Duration};
 async fn failed_edge_start_releases_earlier_services() {
     let directory = tempfile::tempdir().unwrap();
     let artifact = Release {
+        apps: vec![],
         id: "test".into(),
         directory: directory.path().join("artifact"),
         archive: directory.path().join("artifact.tar.gz"),
@@ -20,6 +21,7 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     fs::write(artifact.directory.join("backend.json"), serde_json::to_vec(&bundle).unwrap()).unwrap();
     let control = chunk_control::Config {
+        apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: artifact.id.clone() },
         artifact_digest: artifact.id.clone(),
         profiles: BTreeMap::from([(
@@ -27,8 +29,8 @@ async fn failed_edge_start_releases_earlier_services() {
             chunk_control::MachineProfile { memory_mib: 512, max_sessions: 4 },
         )]),
         session_types: BTreeMap::from([(
-            "bridge".into(),
-            chunk_control::SessionType { machine_profile: "local".into(), capacity: 4 },
+            "bridge/default".into(),
+            chunk_control::SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 4 },
         )]),
         max_processes: 4,
     };
@@ -66,6 +68,7 @@ async fn missing_bundle_preserves_startup_error() {
         control_bind: "127.0.0.1:0".parse().unwrap(),
     };
     let control = chunk_control::Config {
+        apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: "missing".into() },
         artifact_digest: "missing".into(),
         profiles: BTreeMap::new(),
@@ -73,6 +76,7 @@ async fn missing_bundle_preserves_startup_error() {
         max_processes: 1,
     };
     let artifact = Release {
+        apps: vec![],
         id: "missing".into(),
         directory: directory.path().join("missing"),
         archive: directory.path().join("missing.tar.gz"),

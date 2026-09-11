@@ -20,7 +20,7 @@ class ChunkPlugin : Plugin<Project> {
                 "Apply dev.chunkzero.chunk to the root project before its consumers"
             }
             project.dependencies.add("implementation", project.dependencies.project(mapOf("path" to ":")))
-            project.dependencies.add("implementation", framework("runtime"))
+            project.dependencies.add("implementation", framework("runtime-minestom"))
         }
         configureModule(
             project,
@@ -57,7 +57,7 @@ private fun configureRoot(
     project.dependencies.add("api", framework("backend-client"))
     project.tasks.register("chunkArtifacts", WriteChunkArtifacts::class.java) {
         group = "chunk"
-        description = "Describe the compiled app JARs and complete JVM runtime classpath"
+        description = "Describe the executable app JARs and their Java requirements"
         appIds.set(configuration.apps.map { it.id })
         outputFile.set(configuration.directory.resolve(".chunk/build/jvm/artifacts.json"))
     }

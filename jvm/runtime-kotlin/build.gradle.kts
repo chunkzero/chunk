@@ -6,7 +6,7 @@ kotlin {
 }
 
 dependencies {
-    api(project(":jvm:runtime"))
+    api(project(":jvm:runtime-minestom"))
     api(project(":jvm:backend-client-kotlin"))
     testImplementation(project(":jvm:proto"))
     testImplementation(libs.grpc.netty)

@@ -5,8 +5,10 @@ Minestom server framework, and the toolchain and control plane that connect them
 
 Each **environment** (`prod`, `beta`) has one authoritative backend. Multiple immutable **deployments** can share its
 database, with session clients bound to their deployment's functions. Chunk creates and places sessions automatically
-from server routing/demand policies; many sessions can share one JVM. The initial embedded runtime uses `deno_core`/V8
-with language APIs and pure-JS packages, without Node compatibility.
+from server routing/demand policies; many sessions of the same app and machine profile can share one JVM. Apps own their
+main function and embed the generic Chunk lifecycle library plus the Minestom adapter. Control launches and monitors
+JVMs directly, without a per-server sidecar. The initial embedded runtime uses `deno_core`/V8 with language APIs and
+pure-JS packages, without Node compatibility.
 
 Apps keep `app.toml` metadata, their own Gradle builds, and Java or Kotlin gameplay. Each app JAR registers one
 `SessionProvider` that creates fresh session state. The build generates typed backend clients and packages all apps,
@@ -21,9 +23,8 @@ services and stops the stack if one fails.
 
 Run the [local example](examples/local/README.md) with `just local`. It packages an immutable deployment, starts all
 services, and demonstrates persistent coins, subscriptions, session moves and drain. Ctrl-C stops its services and
-gameplay JVMs. Domains, annotation registration and dependency injection, the broader event API, hosted adapters,
-cross-proxy transfers, world persistence and overlapping deployment rollouts remain deferred. Queues and matchmaking
-remain server-owned policy.
+gameplay JVMs. Domains and dependency injection, the broader event API, hosted adapters, cross-proxy transfers, world
+persistence and overlapping deployment rollouts remain deferred. Queues and matchmaking remain server-owned policy.
 
 Dashboard/management scaffolding exists separately on `feat/self-hosted-dashboard-assets`. It is not included in this
 branch; dashboard integration and asset uploads remain deferred.
@@ -89,7 +90,7 @@ formatting and plugin settings are tracked under `.idea/` and `.vscode/`.
 
 Root Gradle `test` and `assemble` tasks cover the framework modules and plugin. The local example is a separate Gradle
 build. `just consumers` builds the real [Java consumer](examples/java/README.md) and Kotlin example from scratch source
-copies using the prepared CLI, then checks their release archives and runtime classpaths. It starts no gameplay or
+copies using the prepared CLI, then checks their release archives and executable app contents. It starts no gameplay or
 backend services and also runs in CI and `just ready`.
 
 ```sh
@@ -138,11 +139,11 @@ To package the example without starting services, run `just toolchain`, then `ta
 Its releases appear in `examples/local/dist`; `just local` builds and runs the same project with state under
 `examples/local/.chunk/local`.
 
-Standalone `chunk-backend`, `chunk-control`, `chunk-edge` and `chunk-runtime` binaries read environment variables and
-call the same libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted
-by edge. Backend requires `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_CONNECTION`, and optional
-`CHUNK_BIND` (default `127.0.0.1:25568`). See the [control](crates/chunk-control/README.md),
-[proxy](crates/chunk-proxy/README.md), and [runtime](jvm/runtime/README.md) docs for the other service environments.
+Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
+libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted by edge.
+Backend requires `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_CONNECTION`, and optional `CHUNK_BIND`
+(default `127.0.0.1:25568`). See the [control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md),
+and [runtime](jvm/runtime/README.md) docs for the other service environments.
 
 ## License
 

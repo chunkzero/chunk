@@ -51,6 +51,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
     private final ConfigurationResponse configurationArtifact;
     private final EventNode<Event> events = EventNode.all("gameplay-delivery");
     private String endpoint = "";
+    private final java.util.function.BooleanSupplier ready;
 
     public GameplayService(
             DeploymentRef deployment,
@@ -58,6 +59,17 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
             SessionManager manager,
             LongSupplier now,
             String runtimeId) {
+        this(deployment, generation, manager, now, runtimeId, () -> true);
+    }
+
+    public GameplayService(
+            DeploymentRef deployment,
+            long generation,
+            SessionManager manager,
+            LongSupplier now,
+            String runtimeId,
+            java.util.function.BooleanSupplier ready) {
+        this.ready = ready;
         this.deployment = deployment;
         this.generation = generation;
         this.manager = manager;
@@ -171,6 +183,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                                 "Operation reused with different delivery");
                     }
                 } else {
+                    if (!ready.getAsBoolean()) throw new IllegalStateException("Server not ready");
                     if (preparations.size() >= 4096) {
                         throw new IllegalStateException(
                                 "Process preparation history capacity reached");

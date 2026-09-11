@@ -35,24 +35,7 @@ enum Action {
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
-    let connection: chunk_contract::ControlConnection =
-        serde_json::from_slice(&std::fs::read(options.control_file)?).map_err(io::Error::other)?;
-    let address: std::net::SocketAddr = connection
-        .endpoint
-        .strip_prefix("http://")
-        .ok_or_else(|| io::Error::other("control requires loopback HTTP"))?
-        .parse()
-        .map_err(io::Error::other)?;
-    if !address.ip().is_loopback() {
-        return Err(io::Error::other("control requires loopback HTTP"));
-    }
-    let channel = Channel::from_shared(connection.endpoint)
-        .map_err(io::Error::other)?
-        .connect_timeout(Duration::from_secs(3))
-        .connect()
-        .await
-        .map_err(io::Error::other)?;
-    let mut client = LocalControlClient::new(channel);
+    let (mut client, token) = connect(&options.control_file).await?;
     let operation_id = options.operation.unwrap_or_else(uuid::Uuid::new_v4).to_string();
     cliclack::log::info(format!("Player operation: {operation_id}"))?;
     match options.action {
@@ -64,7 +47,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
                         player_id: options.player.to_string(),
                         demand: Some(SessionDemand { session_type, key, machine_profile }),
                     },
-                    &connection.token,
+                    &token,
                 )?)
                 .await
                 .map_err(io::Error::other)?;
@@ -74,11 +57,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
             let request = DrainRequest { operation_id, player_id: options.player.to_string(), timeout_seconds };
             let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds.min(120)) + 30);
             loop {
-                let status = client
-                    .drain(auth(request.clone(), &connection.token)?)
-                    .await
-                    .map_err(io::Error::other)?
-                    .into_inner();
+                let status = client.drain(auth(request.clone(), &token)?).await.map_err(io::Error::other)?.into_inner();
                 if status.stopped {
                     cliclack::log::success("Runtime drained.")?;
                     break;
@@ -95,9 +74,30 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     Ok(())
 }
 
-fn auth<T>(body: T, token: &str) -> io::Result<Request<T>> {
+pub(crate) fn auth<T>(body: T, token: &str) -> io::Result<Request<T>> {
     let mut request = Request::new(body);
     request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().map_err(io::Error::other)?);
     request.set_timeout(Duration::from_secs(5));
     Ok(request)
+}
+
+pub(crate) async fn connect(path: &std::path::Path) -> io::Result<(LocalControlClient<Channel>, String)> {
+    let connection: chunk_contract::ControlConnection =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
+    let address: std::net::SocketAddr = connection
+        .endpoint
+        .strip_prefix("http://")
+        .ok_or_else(|| io::Error::other("control requires loopback HTTP"))?
+        .parse()
+        .map_err(io::Error::other)?;
+    if !address.ip().is_loopback() {
+        return Err(io::Error::other("control requires loopback HTTP"));
+    }
+    let channel = Channel::from_shared(connection.endpoint)
+        .map_err(io::Error::other)?
+        .connect_timeout(Duration::from_secs(3))
+        .connect()
+        .await
+        .map_err(io::Error::other)?;
+    Ok((LocalControlClient::new(channel), connection.token))
 }

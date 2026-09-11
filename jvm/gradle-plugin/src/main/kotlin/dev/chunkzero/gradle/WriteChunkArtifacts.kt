@@ -12,7 +12,6 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.work.DisableCachingByDefault
-import java.io.File
 
 @DisableCachingByDefault(because = "The descriptor records machine-local build inputs")
 abstract class WriteChunkArtifacts : DefaultTask() {
@@ -40,23 +39,15 @@ abstract class WriteChunkArtifacts : DefaultTask() {
             "Every discovered app must apply a Chunk project plugin exactly once: " +
                 "expected ${appIds.get()}, found $found"
         }
-        val appJars = apps.map { File(it.jar).canonicalFile }.toSet()
-        val classpath =
-            apps
-                .flatMap { it.classpath }
-                .filter { File(it.file).canonicalFile !in appJars }
-                .distinctBy { File(it.file).canonicalFile }
-                .sortedWith(compareBy({ it.component.toString() }, { it.artifact }))
         val java = requireNotNull(artifacts.maxByOrNull { it.javaVersion }) { "No compiled JVM modules" }
         val output = outputFile.get().asFile
         output.parentFile.mkdirs()
         output.writeText(
             gson.toJson(
                 mapOf(
-                    "version" to 1,
+                    "version" to 2,
                     "java" to mapOf("version" to java.javaVersion, "executable" to java.javaExecutable),
                     "apps" to apps.map { mapOf("id" to it.app, "jar" to it.jar, "java_version" to it.javaVersion) },
-                    "classpath" to classpath,
                 ),
             ) + "\n",
         )

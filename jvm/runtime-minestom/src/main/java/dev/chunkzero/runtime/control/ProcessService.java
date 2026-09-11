@@ -6,6 +6,7 @@ import chunk.v1.Supervision.ProcessInventory;
 import chunk.v1.Supervision.SessionCommand;
 import chunk.v1.Supervision.SessionInventory;
 
+import dev.chunkzero.runtime.ChunkProcess;
 import dev.chunkzero.runtime.SessionManager;
 import dev.chunkzero.runtime.delivery.GameplayService;
 
@@ -15,8 +16,7 @@ import io.grpc.stub.StreamObserver;
 import org.jetbrains.annotations.ApiStatus;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 @ApiStatus.Internal
@@ -24,20 +24,23 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
     private final ProcessIdentity identity;
     private final GameplayService gameplay;
     private final SessionManager sessions;
-    private final AtomicLong ticks;
-    private final CountDownLatch shutdown;
+    private final LongSupplier ticks;
+    private final ChunkProcess process;
+    private final java.util.Map<String, Integer> capacities;
 
     public ProcessService(
             ProcessIdentity identity,
             GameplayService gameplay,
             SessionManager sessions,
-            AtomicLong ticks,
-            CountDownLatch shutdown) {
+            LongSupplier ticks,
+            ChunkProcess process,
+            java.util.Map<String, Integer> capacities) {
         this.identity = identity;
         this.gameplay = gameplay;
         this.sessions = sessions;
         this.ticks = ticks;
-        this.shutdown = shutdown;
+        this.process = process;
+        this.capacities = java.util.Map.copyOf(capacities);
     }
 
     @Override
@@ -52,7 +55,8 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
         response.onNext(
                 ProcessInventory.newBuilder()
                         .setIdentity(identity)
-                        .setTickCount(ticks.get())
+                        .setTickCount(ticks.getAsLong())
+                        .setDraining(!process.isReady())
                         .addAllDeliveries(gameplay.deliveries())
                         .addAllSessions(gameplay.sessions())
                         .build());
@@ -61,6 +65,19 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
 
     @Override
     public void createSession(SessionCommand request, StreamObserver<SessionInventory> response) {
+        if (!java.util.Objects.equals(
+                capacities.get(request.getSessionType()), request.getCapacity())) {
+            response.onError(
+                    Status.FAILED_PRECONDITION
+                            .withDescription("Session declaration mismatch")
+                            .asRuntimeException());
+            return;
+        }
+        if (!process.isReady()) {
+            response.onError(
+                    Status.UNAVAILABLE.withDescription("Server not ready").asRuntimeException());
+            return;
+        }
         sessionReply(request, response, () -> sessions.create(request));
     }
 
@@ -90,28 +107,5 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
                                 response.onCompleted();
                             }
                         });
-    }
-
-    @Override
-    public void stopProcess(ProcessIdentity request, StreamObserver<ProcessIdentity> response) {
-        if (!request.equals(identity)) {
-            response.onError(
-                    Status.FAILED_PRECONDITION
-                            .withDescription("Stale process identity")
-                            .asRuntimeException());
-            return;
-        }
-        response.onNext(identity);
-        response.onCompleted();
-        Thread.startVirtualThread(
-                () -> {
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException ignored) {
-                        Thread.currentThread().interrupt();
-                    } finally {
-                        shutdown.countDown();
-                    }
-                });
     }
 }

@@ -4,6 +4,7 @@ package chunk.v1;
 
 import "chunk/v1/common.proto";
 import "chunk/v1/gameplay.proto";
+import "chunk/v1/supervision.proto";
 
 // One authenticated local proxy group and one durable ownership authority.
 service LocalControl {
@@ -14,6 +15,8 @@ service LocalControl {
   rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
   rpc PollMove(ClaimRequest) returns (PendingMove);
   rpc Drain(DrainRequest) returns (DrainStatus);
+  rpc Nodes(NodesRequest) returns (NodeList);
+  rpc ShutdownNode(ShutdownNodeRequest) returns (NodeStatus);
 }
 
 message SessionDemand {
@@ -85,4 +88,34 @@ message ActivateClaim {
   ClaimIdentity claim = 1;
   reserved 2;
   reserved "client_information";
+}
+
+message NodesRequest {}
+message NodeList {
+  repeated NodeStatus nodes = 1;
+}
+enum NodePhase {
+  NODE_PHASE_UNSPECIFIED = 0;
+  NODE_PHASE_STARTING = 1;
+  NODE_PHASE_ONLINE = 2;
+  NODE_PHASE_UNHEALTHY = 3;
+  NODE_PHASE_UNREACHABLE = 4;
+  NODE_PHASE_DRAINING = 5;
+  NODE_PHASE_STOPPING = 6;
+  NODE_PHASE_STOPPED = 7;
+}
+message NodeStatus {
+  string host_id = 1;
+  string app_id = 2;
+  string machine_profile = 3;
+  NodePhase phase = 4;
+  ProcessHealth health = 5;
+  uint64 observed_at_ms = 6;
+  uint32 consecutive_failures = 7;
+}
+// Retries bind this operation to the same host and drain deadline.
+message ShutdownNodeRequest {
+  string operation_id = 1;
+  string host_id = 2;
+  uint32 timeout_seconds = 3;
 }

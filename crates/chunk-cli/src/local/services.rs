@@ -35,7 +35,7 @@ struct Services {
     backend: Option<Service>,
     control: Option<Service>,
     edge: Option<Service>,
-    host: Option<Arc<chunk_control::EmbeddedHost>>,
+    host: Option<Arc<chunk_control::ProcessHost>>,
 }
 impl Services {
     async fn start(
@@ -57,19 +57,15 @@ impl Services {
             Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
         let backend_connection = Service::ready(&mut self.backend, started, "backend").await?;
         let control_state = options.state.join("control").join(&artifact.id);
-        let embedded = Arc::new(chunk_control::EmbeddedHost::new(
-            chunk_runtime::server::Config {
-                distribution: artifact.directory.join("gameplay"),
-                java: options.java.clone(),
-                connection: control_state.join("runtimes/runtime.json"),
-                deployment: authority.deployment.clone(),
-                machine_profile: String::new(),
-                artifact_digest: artifact.id.clone(),
-                memory_mib: 512,
-                backend: Some(backend_connection.clone()),
-            },
-            authority.profiles.clone(),
-        ));
+        let embedded = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
+            distribution: artifact.directory.clone(),
+            java: options.java.clone(),
+            directory: control_state.join("nodes"),
+            deployment: authority.deployment.clone(),
+            apps: authority.apps.clone(),
+            profiles: authority.profiles.clone(),
+            backend: backend_connection.clone(),
+        }));
         self.host = Some(embedded.clone());
         let token = CancellationToken::new();
         let (ready, started) = oneshot::channel();

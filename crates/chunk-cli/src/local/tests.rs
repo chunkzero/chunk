@@ -11,22 +11,23 @@ fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
         fs::write(directory.join("build.gradle.kts"), "").unwrap();
     }
     let metadata = chunk_build::project::inspect(root.path()).unwrap();
-    let config = control_config(&metadata, "release-id").unwrap();
+    let config =
+        control_config(&metadata, "release-id", &[app("arena", "large", 8), app("lobby", "small", 16)]).unwrap();
     assert_eq!(config.deployment.environment, "development");
     assert_eq!(config.deployment.deployment, "release-id");
     assert_eq!(config.artifact_digest, "release-id");
-    assert_eq!(config.session_types.keys().map(String::as_str).collect::<Vec<_>>(), ["arena", "lobby"]);
-    assert_eq!(config.session_types["arena"].machine_profile, "large");
-    assert_eq!(config.session_types["arena"].capacity, 8);
-    assert_eq!(config.session_types["lobby"].machine_profile, "small");
-    assert_eq!(config.session_types["lobby"].capacity, 16);
+    assert_eq!(config.session_types.keys().map(String::as_str).collect::<Vec<_>>(), ["arena/default", "lobby/default"]);
+    assert_eq!(config.session_types["arena/default"].machine_profile, "large");
+    assert_eq!(config.session_types["arena/default"].capacity, 8);
+    assert_eq!(config.session_types["lobby/default"].machine_profile, "small");
+    assert_eq!(config.session_types["lobby/default"].capacity, 16);
     assert_eq!(config.profiles["large"].memory_mib, 1024);
     assert_eq!(config.profiles["small"].max_sessions, 2);
     assert_eq!(config.max_processes, 4);
     fs::write(root.path().join("chunk.toml"), "").unwrap();
     fs::write(root.path().join("apps/arena/app.toml"), "").unwrap();
     assert!(
-        control_config(&chunk_build::project::inspect(root.path()).unwrap(), "release-id")
+        control_config(&chunk_build::project::inspect(root.path()).unwrap(), "release-id", &[])
             .err()
             .unwrap()
             .to_string()
@@ -46,4 +47,11 @@ async fn java_executable_must_meet_the_descriptor_requirement() {
     let error = java_version(&java, 27).await.unwrap_err();
     assert!(error.to_string().contains("Java 27+"));
     assert!(error.to_string().contains(java.to_str().unwrap()));
+}
+
+pub(super) fn app(id: &str, profile: &str, capacity: u32) -> chunk_contract::AppArtifact {
+    serde_json::from_value(serde_json::json!({"id":id,"jar":"app.jar","sha256":"artifact","java_version":25,
+        "manifest_digest":"manifest", "manifest":{"version":2,"id":id,"main_class":"test.Main",
+        "sessions":{"default":{"provider":"test.Factory","machine_profile":profile,"capacity":capacity}}}}))
+    .unwrap()
 }

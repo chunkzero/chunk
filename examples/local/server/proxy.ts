@@ -31,13 +31,14 @@ export const admit = query({
 export const route = query({
   args: user,
   returns: destination,
-  handler: () => ({ key: "lobby", session_type: "lobby", machine_profile: "local" }),
+  handler: () => ({ key: "lobby", session_type: "lobby/default", machine_profile: "local" }),
 });
 export const move = query({
   args: { ...user, destination },
   returns: destination,
   handler: (_, { destination }) => {
-    if (!["lobby", "arena"].includes(destination.session_type)) throw new Error("Unknown destination");
+    if (!["lobby/default", "arena/default", "arena/large"].includes(destination.session_type))
+      throw new Error("Unknown destination");
     return destination;
   },
 });

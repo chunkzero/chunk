@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::RuntimeConnection;
 use chunk_proto::v1::{
     ActivateClaim, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeliveryInventory,
     DeliveryPhase, DeploymentRef, Identity, PlayerDelivery, PlayerPreparation, PlayerWithdrawal, ProcessIdentity,
@@ -14,7 +15,6 @@ use chunk_proto::v1::{
     gameplay_server::{Gameplay, GameplayServer},
     process_control_server::{ProcessControl, ProcessControlServer},
 };
-use chunk_runtime::RuntimeConnection;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
@@ -35,6 +35,7 @@ struct FakeRuntime {
     lost_withdrawal: AtomicBool,
     stopped: AtomicBool,
     withdrawals: AtomicUsize,
+    ticks: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -86,14 +87,6 @@ impl ProcessControl for RuntimeService {
                 .collect(),
             draining: false,
         }))
-    }
-    async fn stop_process(
-        &self,
-        request: Request<ProcessIdentity>,
-    ) -> std::result::Result<Response<ProcessIdentity>, Status> {
-        self.check(&request)?;
-        self.stopped.store(true, Ordering::Release);
-        Ok(Response::new(self.identity.clone()))
     }
     async fn create_session(
         &self,
@@ -202,13 +195,23 @@ struct FakeHost {
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
-    async fn ensure(&self, id: &str, _: &str) -> Result<RuntimeConnection> {
+    fn connection(&self, _: &str) -> Option<RuntimeConnection> {
+        Some(RuntimeConnection {
+            endpoint: self.endpoint.clone(),
+            player_endpoint: "127.0.0.1:1".into(),
+            token: "test-runtime-credential".into(),
+            identity: self.runtime.identity.clone(),
+        })
+    }
+
+    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<RuntimeConnection> {
         self.ids.lock().unwrap().insert(id.into());
         if self.stopped(id) {
             return Err(Error::Stopped);
         }
         Ok(RuntimeConnection {
             endpoint: self.endpoint.clone(),
+            player_endpoint: "127.0.0.1:1".into(),
             token: "test-runtime-credential".into(),
             identity: self.runtime.identity.clone(),
         })
@@ -236,6 +239,7 @@ impl Fixture {
         let deployment = DeploymentRef { environment: "test".into(), deployment: "build".into() };
         let runtime = Arc::new(FakeRuntime {
             identity: ProcessIdentity {
+                app_id: "bridge".into(),
                 deployment: Some(deployment.clone()),
                 runtime_id: "runtime".into(),
                 process_id: "jvm".into(),
@@ -250,6 +254,7 @@ impl Fixture {
             lost_withdrawal: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             withdrawals: AtomicUsize::new(0),
+            ticks: AtomicUsize::new(0),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -258,6 +263,7 @@ impl Fixture {
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(GameplayServer::new(service.clone()))
+                .add_service(chunk_proto::v1::node_control_server::NodeControlServer::new(service.clone()))
                 .add_service(ProcessControlServer::new(service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = stopped.await;
@@ -272,12 +278,13 @@ impl Fixture {
             terminated: Mutex::default(),
         });
         let config = Config {
+            apps: BTreeMap::from([("bridge".into(), test_app())]),
             deployment,
             artifact_digest: "artifact".into(),
             profiles: BTreeMap::from([("local".into(), MachineProfile { memory_mib: 512, max_sessions: 2 })]),
             session_types: BTreeMap::from([(
-                "bridge".into(),
-                SessionType { machine_profile: "local".into(), capacity: 2 },
+                "bridge/default".into(),
+                SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 2 },
             )]),
             max_processes: 1,
         };
@@ -300,7 +307,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
         identity: Some(Identity { uuid: player.into(), username: "player".into(), properties: Vec::new() }),
         demand: Some(SessionDemand {
             key: "lobby".into(),
-            session_type: "bridge".into(),
+            session_type: "bridge/default".into(),
             machine_profile: "local".into(),
         }),
         source: None,
@@ -565,4 +572,79 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         }
         fixture.close().await;
     }
+}
+
+pub(crate) fn test_app() -> chunk_contract::AppArtifact {
+    serde_json::from_value(serde_json::json!({"id":"bridge","jar":"app.jar","sha256":"artifact","java_version":25,
+        "manifest_digest":"manifest", "manifest":{"version":2,"id":"bridge","main_class":"test.Main",
+        "sessions":{"default":{"provider":"test.Factory","machine_profile":"local","capacity":2}}}}))
+    .unwrap()
+}
+
+#[tonic::async_trait]
+impl chunk_proto::v1::node_control_server::NodeControl for RuntimeService {
+    async fn health(
+        &self,
+        request: Request<ProcessIdentity>,
+    ) -> std::result::Result<Response<chunk_proto::v1::ProcessHealth>, Status> {
+        self.check(&request)?;
+        Ok(Response::new(chunk_proto::v1::ProcessHealth {
+            identity: Some(self.identity.clone()),
+            ready: true,
+            tick_count: self.ticks.fetch_add(1, Ordering::AcqRel) as u64 + 1,
+            ..Default::default()
+        }))
+    }
+    async fn stop_process(
+        &self,
+        request: Request<ProcessIdentity>,
+    ) -> std::result::Result<Response<ProcessIdentity>, Status> {
+        self.check(&request)?;
+        self.stopped.store(true, Ordering::Release);
+        Ok(Response::new(self.identity.clone()))
+    }
+}
+
+#[tokio::test]
+async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
+    use chunk_proto::v1::{NodePhase, ShutdownNodeRequest};
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let request = request("active", &uuid::Uuid::new_v4().to_string());
+    let assignment = control.claim(request.clone()).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("active").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.poll_health().await.unwrap();
+    let online = control.nodes().unwrap().nodes.remove(0);
+    assert_eq!(online.phase, NodePhase::Online as i32);
+    assert!(online.health.as_ref().unwrap().ready);
+    fixture.runtime.available.store(false, Ordering::Release);
+    control.poll_health().await.unwrap();
+    let unreachable = control.nodes().unwrap().nodes.remove(0);
+    assert_eq!(unreachable.phase, NodePhase::Unreachable as i32);
+    assert_eq!(unreachable.observed_at_ms, online.observed_at_ms);
+    assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
+    let command = ShutdownNodeRequest {
+        operation_id: "operator-stop".into(),
+        host_id: online.host_id.clone(),
+        timeout_seconds: 60,
+    };
+    assert_eq!(control.shutdown_node(&command).unwrap().phase, NodePhase::Draining as i32);
+    let deadline = control.state().unwrap().drains["node/operator-stop"].deadline_ms;
+    drop(control);
+    let control = fixture.control();
+    control.shutdown_node(&command).unwrap();
+    assert_eq!(control.state().unwrap().drains["node/operator-stop"].deadline_ms, deadline);
+    assert!(control.shutdown_node(&ShutdownNodeRequest { timeout_seconds: 0, ..command }).is_err());
+    control.poll_health().await.unwrap();
+    control.poll_health().await.unwrap();
+    control.poll_health().await.unwrap();
+    assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopping as i32);
+    assert!(!fixture.host.stopped(&online.host_id));
+    assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
+    control.progress_drains().await.unwrap();
+    control.reconcile_all().await.unwrap();
+    assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopped as i32);
+    assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
+    fixture.close().await;
 }

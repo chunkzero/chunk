@@ -74,20 +74,20 @@ followed by `target/debug/chunk build examples/local` builds the two-app example
 and release directory appear under `examples/local/dist`.
 
 `publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)` combines separately built backend and JVM
-outputs into `dist/<id>/` and `dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-1 JSON
-descriptor. Every discovered app must have exactly one descriptor entry, an app JAR containing matching
-`META-INF/chunk/app.json` metadata, and one `dev.chunkzero.runtime.SessionProvider` service registration. Publication
-never runs Java or Gradle. The descriptor’s selected Java executable is used by `chunk dev` unless `--java PATH`
-overrides it; the executable must satisfy the release’s Java version requirement. Local state defaults to
-`PROJECT/.chunk/local`.
+outputs into `dist/<id>/` and `dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-2 JSON
+descriptor. Every discovered app must have exactly one descriptor entry, an app JAR containing a matching generated
+version 2 `META-INF/chunk/app.json` catalog, and an executable `Main-Class`. Publication never runs Java or Gradle. The
+descriptor’s selected Java executable is used by `chunk dev` unless `--java PATH` overrides it; the executable must
+satisfy the release’s Java version requirement. Local state defaults to `PROJECT/.chunk/local`.
 
 The release includes `source.mjs`, `contract.json`, an optional source map, `backend.json`, `release.json`, and
-content-named JARs under `gameplay/lib`. Root `assets/` and discovered apps' `apps/<id>/assets/` retain their paths.
-`release.json` records app identities, JAR hashes, resolved dependency coordinates, Java requirements, app
-capacity/profile requirements, referenced profile definitions and asset hashes. Original dependency artifact names
-distinguish classifier JARs. All JARs share one classpath: conflicting module versions, component/artifact bytes or
-effective class definitions fail publication. Multi-release JARs are checked against the selected Java version;
-unsupported and preview bytecode is rejected.
+content-named executable JARs under `apps/<id>/`. Root `assets/` and discovered apps' `apps/<id>/assets/` retain their
+paths. `release.json` records app identities, JAR hashes, resolved dependency coordinates, Java requirements, app
+session factory/profile/capacity declarations, main classes, manifest digests, referenced profile definitions and asset
+hashes. Each app carries its own dependencies; different apps may use different dependency versions. Duplicate class
+entries or multiple app catalogs within one executable fail packaging. Publication validates app/main/provider identity
+and effective multi-release bytecode against the declared Java version. The descriptor and release metadata use version
+2; shared classpath version 1 artifacts must be rebuilt.
 
 The descriptor's absolute file paths and Java executable are local build inputs. They are excluded from the release,
 along with environment names, local process limits, `.sdk` caches, generated sources, project build files and unrelated
