@@ -82,6 +82,10 @@ pub(crate) enum Command {
         id: DeploymentId,
         reply: Request<bool>,
     },
+    CheckDeployment {
+        id: DeploymentId,
+        reply: Request<()>,
+    },
     Query {
         call: Call,
         reply: Request<Update>,
@@ -100,7 +104,7 @@ pub(crate) enum Command {
 impl Command {
     pub fn reject(self, error: Error) {
         match self {
-            Self::Deploy { reply, .. } => reply.finish(Err(error)),
+            Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
@@ -225,6 +229,13 @@ impl Backend {
     /// Rejects release while mutations or live subscriptions still reference the version.
     pub async fn release(&self, id: DeploymentId) -> Result<bool> {
         self.submit(|reply| Command::Release { id, reply }).await
+    }
+
+    /// Checks that the exact deployment is resident and accepting calls.
+    /// # Errors
+    /// Reports unknown deployments, release in progress or unavailable service.
+    pub async fn check_deployment(&self, id: DeploymentId) -> Result<()> {
+        self.submit(|reply| Command::CheckDeployment { id, reply }).await
     }
 
     /// Reads the current view, waiting for durability if it includes staged writes.

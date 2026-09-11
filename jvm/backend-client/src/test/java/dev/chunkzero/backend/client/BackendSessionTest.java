@@ -14,8 +14,12 @@ import dev.chunkzero.generated.BackendTypes;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
@@ -23,6 +27,8 @@ import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import tools.jackson.core.type.TypeReference;
 
 import java.time.Duration;
 import java.util.List;
@@ -38,6 +44,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 class BackendSessionTest {
+    private static final JsonType<Void> NULL =
+            JsonType.of(new TypeReference<Void>() {}, BackendValues::checkNull);
+    private static final JsonType<Long> INTEGER =
+            JsonType.of(new TypeReference<Long>() {}, BackendValues::checkInteger);
     private final Fixture fixture = new Fixture();
     private Server server;
     private ManagedChannel channel;
@@ -46,7 +56,33 @@ class BackendSessionTest {
 
     @BeforeEach
     void start() throws Exception {
-        server = ServerBuilder.forPort(0).addService(fixture).build().start();
+        server =
+                ServerBuilder.forPort(0)
+                        .intercept(
+                                new ServerInterceptor() {
+                                    @Override
+                                    public <Q, R> ServerCall.Listener<Q> interceptCall(
+                                            ServerCall<Q, R> call,
+                                            Metadata headers,
+                                            ServerCallHandler<Q, R> next) {
+                                        assertEquals(
+                                                "local",
+                                                headers.get(
+                                                        Metadata.Key.of(
+                                                                "x-chunk-environment",
+                                                                Metadata.ASCII_STRING_MARSHALLER)));
+                                        assertEquals(
+                                                "immutable-build",
+                                                headers.get(
+                                                        Metadata.Key.of(
+                                                                "x-chunk-deployment",
+                                                                Metadata.ASCII_STRING_MARSHALLER)));
+                                        return next.startCall(call, headers);
+                                    }
+                                })
+                        .addService(fixture)
+                        .build()
+                        .start();
         channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort())
                         .usePlaintext()
@@ -82,11 +118,11 @@ class BackendSessionTest {
         var arguments =
                 new BackendTypes.Shared.Profile.RecordArgs(
                         1L,
-                        new Id<>("profiles:p1"),
+                        new BackendTypes.Ids.Profiles("profiles:p1"),
                         List.of(),
-                        FieldValue.absent(),
+                        null,
                         new PlayerId("spoof"),
-                        new BackendTypes.Shared.Profile.RecordArgs.State.V0("ready"));
+                        new BackendTypes.Shared.Profile.RecordArgs.State.Ready());
         var operation = OperationId.create();
         assertThrows(
                 ExecutionException.class,
@@ -103,19 +139,18 @@ class BackendSessionTest {
         assertEquals(2, fixture.calls.size());
         assertEquals(fixture.calls.get(0), fixture.calls.get(1));
         var request = fixture.calls.get(0);
-        assertEquals("immutable-build", request.getDeployment());
         assertEquals(
                 "trusted",
-                Codecs.parse(request.getCallerJson().toStringUtf8())
-                        .getAsJsonObject()
+                BackendJson.mapper()
+                        .readTree(request.getCallerJson().toStringUtf8())
                         .get("player")
-                        .getAsString());
+                        .asString());
         assertEquals(
                 "spoof",
-                Codecs.parse(request.getArgumentsJson().toStringUtf8())
-                        .getAsJsonObject()
+                BackendJson.mapper()
+                        .readTree(request.getArgumentsJson().toStringUtf8())
                         .get("player")
-                        .getAsString());
+                        .asString());
         assertTrue(fixture.deadlineObserved);
         assertEquals(
                 3L,
@@ -165,16 +200,15 @@ class BackendSessionTest {
 
     @Test
     void unaryResultWaitsForFinalStatusAndRemainsSessionOwned() throws Exception {
-        var reference =
-                new QueryRef<NullValue, Long>("shared/partial", Codecs.NULL, Codecs.INTEGER);
-        var result = session.query(reference, NullValue.INSTANCE);
+        var reference = new QueryRef<Void, Long>("shared/partial", NULL, INTEGER);
+        var result = session.query(reference, null);
         var response = fixture.partial.poll(2, TimeUnit.SECONDS);
         assertNotNull(response);
         response.onError(Status.UNAVAILABLE.asRuntimeException());
         var error = assertThrows(ExecutionException.class, () -> result.get(2, TimeUnit.SECONDS));
         assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(error.getCause()).getCode());
 
-        var pending = session.query(reference, NullValue.INSTANCE);
+        var pending = session.query(reference, null);
         assertNotNull(fixture.partial.poll(2, TimeUnit.SECONDS));
         session.close();
         assertTrue(pending.isCancelled());
@@ -182,7 +216,7 @@ class BackendSessionTest {
 
     @Test
     void groupedWatchSignalsStaleThenReplacesOneConsistentSnapshot() throws Exception {
-        var reference = new QueryRef<Long, Long>("shared/read", Codecs.INTEGER, Codecs.INTEGER);
+        var reference = new QueryRef<Long, Long>("shared/read", INTEGER, INTEGER);
         var first = session.bind(reference, 1L);
         var second = session.bind(reference, 2L);
         var states = new LinkedBlockingQueue<GroupState>();
@@ -214,50 +248,68 @@ class BackendSessionTest {
     }
 
     @Test
+    void successfulNullWatchResultIsAValue() throws Exception {
+        var states = new LinkedBlockingQueue<WatchState<Void>>();
+        var reference = new QueryRef<Void, Void>("shared/null", NULL, NULL);
+        try (var watch = session.watch(reference, null, states::add)) {
+            assertNotNull(watch);
+            assertTrue(states.poll(2, TimeUnit.SECONDS).stale());
+            var fresh = states.poll(2, TimeUnit.SECONDS);
+            assertNotNull(fresh);
+            assertFalse(fresh.stale());
+            var result = fresh.snapshot().orElseThrow().result();
+            assertInstanceOf(QueryResult.Value.class, result);
+            assertNull(result.valueOrThrow());
+        }
+    }
+
+    @Test
     void playerDepartureCancelsItsCallsAndDeadlinesReachTheServer() throws Exception {
         var a = session.forPlayer(new PlayerId("a"));
         var b = session.forPlayer(new PlayerId("b"));
-        var hang = new QueryRef<NullValue, Long>("shared/hang", Codecs.NULL, Codecs.INTEGER);
-        var waiting = new BackendClient(a).shared().hang(NullValue.INSTANCE);
+        var hang = new QueryRef<Void, Long>("shared/hang", NULL, INTEGER);
+        var waiting = new BackendClient(a).shared().hang(null);
         assertTrue(fixture.hanging.await(2, TimeUnit.SECONDS));
         a.close();
         assertTrue(waiting.isCancelled());
         assertTrue(fixture.cancelled.await(2, TimeUnit.SECONDS));
-        var read = new QueryRef<NullValue, Long>("shared/read", Codecs.NULL, Codecs.INTEGER);
-        assertEquals(3L, b.query(read, NullValue.INSTANCE).get(2, TimeUnit.SECONDS));
+        var read = new QueryRef<Void, Long>("shared/read", NULL, INTEGER);
+        assertEquals(3L, b.query(read, null).get(2, TimeUnit.SECONDS));
         try (var shortDeadline = create(Duration.ofMillis(50))) {
             var error =
                     assertThrows(
                             ExecutionException.class,
-                            () ->
-                                    shortDeadline
-                                            .query(hang, NullValue.INSTANCE)
-                                            .get(2, TimeUnit.SECONDS));
+                            () -> shortDeadline.query(hang, null).get(2, TimeUnit.SECONDS));
             assertEquals(
                     Status.Code.DEADLINE_EXCEEDED,
                     Status.fromThrowable(error.getCause()).getCode());
         }
         session.close();
-        assertTrue(b.query(read, NullValue.INSTANCE).isCancelled());
+        assertTrue(b.query(read, null).isCancelled());
     }
 
     private static final class Fixture extends BackendGrpc.BackendImplBase {
         final ConcurrentHashMap<String, BackendResult> saved = new ConcurrentHashMap<>();
-        final CopyOnWriteArrayList<BackendCall> calls = new CopyOnWriteArrayList<>();
+        final CopyOnWriteArrayList<BackendMutation> calls = new CopyOnWriteArrayList<>();
         final AtomicInteger watches = new AtomicInteger();
         final CountDownLatch hanging = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
         final CountDownLatch watchCancelled = new CountDownLatch(1);
-        final LinkedBlockingQueue<BackendWatch> watchRequests = new LinkedBlockingQueue<>();
+        final LinkedBlockingQueue<BackendWatchGroup> watchRequests = new LinkedBlockingQueue<>();
         final LinkedBlockingQueue<StreamObserver<BackendResult>> partial =
                 new LinkedBlockingQueue<>();
         volatile StreamObserver<BackendUpdate> watch;
         volatile boolean deadlineObserved;
 
         @Override
-        public void call(BackendCall request, StreamObserver<BackendResult> response) {
+        public void query(BackendQuery request, StreamObserver<BackendResult> response) {
             deadlineObserved = Context.current().getDeadline() != null;
-            calls.add(request);
+            calls.add(
+                    BackendMutation.newBuilder()
+                            .setFunction(request.getFunction())
+                            .setArgumentsJson(request.getArgumentsJson())
+                            .setCallerJson(request.getCallerJson())
+                            .build());
             if (request.getFunction().equals("shared/partial")) {
                 response.onNext(
                         BackendResult.newBuilder()
@@ -273,7 +325,7 @@ class BackendSessionTest {
                 hanging.countDown();
                 return;
             }
-            if (request.getOperationId().isEmpty()) {
+            {
                 response.onNext(
                         BackendResult.newBuilder()
                                 .setRevision(1)
@@ -282,6 +334,12 @@ class BackendSessionTest {
                 response.onCompleted();
                 return;
             }
+        }
+
+        @Override
+        public void mutate(BackendMutation request, StreamObserver<BackendResult> response) {
+            deadlineObserved = Context.current().getDeadline() != null;
+            calls.add(request);
             var result =
                     BackendResult.newBuilder()
                             .setRevision(1)
@@ -297,7 +355,7 @@ class BackendSessionTest {
         }
 
         @Override
-        public void watch(BackendWatch request, StreamObserver<BackendUpdate> response) {
+        public void watchGroup(BackendWatchGroup request, StreamObserver<BackendUpdate> response) {
             if (request.getQueriesCount() == 1) {
                 watchRequests.add(request);
                 ((ServerCallStreamObserver<BackendUpdate>) response)
@@ -305,7 +363,13 @@ class BackendSessionTest {
                 response.onNext(
                         BackendUpdate.newBuilder()
                                 .setRevision(1)
-                                .addResultsJson(ByteString.copyFromUtf8("3"))
+                                .addResultsJson(
+                                        ByteString.copyFromUtf8(
+                                                request.getQueries(0)
+                                                                .getFunction()
+                                                                .equals("shared/null")
+                                                        ? "null"
+                                                        : "3"))
                                 .addErrors("")
                                 .build());
                 return;

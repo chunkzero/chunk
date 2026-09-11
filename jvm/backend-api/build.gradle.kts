@@ -3,7 +3,7 @@ plugins {
 }
 
 dependencies {
-    api(libs.gson)
+    api(libs.jackson)
 }
 
 val generatedFixtures = layout.buildDirectory.dir("generated/contracts")

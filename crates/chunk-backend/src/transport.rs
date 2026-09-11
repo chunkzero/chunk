@@ -1,4 +1,4 @@
-use chunk_proto::v1::{BackendCall, BackendResult, BackendUpdate, BackendWatch, backend_server};
+use chunk_proto::v1::{BackendMutation, BackendQuery, BackendResult, BackendUpdate, BackendWatchGroup, backend_server};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -61,24 +61,34 @@ impl Service {
         Ok(())
     }
 
-    fn decode(&self, call: BackendCall) -> Result<(Call, String), Status> {
-        if call.environment != self.backend.environment() {
+    fn binding<T>(&self, request: &Request<T>) -> Result<chunk_js::DeploymentId, Status> {
+        self.authorize(request)?;
+        let metadata = request.metadata();
+        let environment = metadata
+            .get("x-chunk-environment")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::invalid_argument("missing environment binding"))?;
+        if environment != self.backend.environment() {
             return Err(Status::permission_denied("environment mismatch"));
         }
+        let deployment = metadata
+            .get("x-chunk-deployment")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::invalid_argument("missing deployment binding"))?;
+        chunk_js::DeploymentId::new(deployment).map_err(|_| Status::invalid_argument("deployment"))
+    }
+
+    fn decode(
+        deployment: chunk_js::DeploymentId,
+        function: String,
+        arguments: &[u8],
+        caller: &[u8],
+    ) -> Result<Call, Status> {
         let json = |bytes: &[u8]| {
             let text = std::str::from_utf8(bytes).map_err(|_| Status::invalid_argument("JSON UTF-8"))?;
             chunk_js::Json::parse(text).map_err(|_| Status::invalid_argument("invalid JSON"))
         };
-        Ok((
-            Call {
-                deployment: chunk_js::DeploymentId::new(call.deployment)
-                    .map_err(|_| Status::invalid_argument("deployment"))?,
-                function: call.function,
-                arguments: json(&call.arguments_json)?,
-                caller: json(&call.caller_json)?,
-            },
-            call.operation_id,
-        ))
+        Ok(Call { deployment, function, arguments: json(arguments)?, caller: json(caller)? })
     }
 }
 
@@ -104,33 +114,43 @@ fn status(error: &Error) -> Status {
 
 #[tonic::async_trait]
 impl backend_server::Backend for Service {
-    async fn call(&self, request: Request<BackendCall>) -> Result<Response<BackendResult>, Status> {
-        self.authorize(&request)?;
-        let (call, operation) = self.decode(request.into_inner())?;
-        let outcome = if operation.is_empty() {
-            self.backend.query(call).await
-        } else {
-            self.backend.mutate(operation, call).await
-        }
-        .map_err(|error| status(&error))?;
+    async fn check_deployment(&self, request: Request<()>) -> Result<Response<()>, Status> {
+        let deployment = self.binding(&request)?;
+        self.backend.check_deployment(deployment).await.map_err(|error| status(&error))?;
+        Ok(Response::new(()))
+    }
+
+    async fn query(&self, request: Request<BackendQuery>) -> Result<Response<BackendResult>, Status> {
+        let deployment = self.binding(&request)?;
+        let query = request.into_inner();
+        let call = Self::decode(deployment, query.function, &query.arguments_json, &query.caller_json)?;
+        let outcome = self.backend.query(call).await.map_err(|error| status(&error))?;
         Ok(Response::new(BackendResult { revision: outcome.revision.0, result_json: outcome.json.as_bytes().to_vec() }))
     }
 
-    type WatchStream = ReceiverStream<Result<BackendUpdate, Status>>;
+    async fn mutate(&self, request: Request<BackendMutation>) -> Result<Response<BackendResult>, Status> {
+        let deployment = self.binding(&request)?;
+        let mutation = request.into_inner();
+        if mutation.operation_id.is_empty() {
+            return Err(Status::invalid_argument("mutation requires an operation ID"));
+        }
+        let call = Self::decode(deployment, mutation.function, &mutation.arguments_json, &mutation.caller_json)?;
+        let outcome = self.backend.mutate(mutation.operation_id, call).await.map_err(|error| status(&error))?;
+        Ok(Response::new(BackendResult { revision: outcome.revision.0, result_json: outcome.json.as_bytes().to_vec() }))
+    }
 
-    async fn watch(&self, request: Request<BackendWatch>) -> Result<Response<Self::WatchStream>, Status> {
-        self.authorize(&request)?;
+    type WatchGroupStream = ReceiverStream<Result<BackendUpdate, Status>>;
+
+    async fn watch_group(
+        &self,
+        request: Request<BackendWatchGroup>,
+    ) -> Result<Response<Self::WatchGroupStream>, Status> {
+        let deployment = self.binding(&request)?;
         let calls = request
             .into_inner()
             .queries
             .into_iter()
-            .map(|call| {
-                let (call, operation) = self.decode(call)?;
-                if !operation.is_empty() {
-                    return Err(Status::invalid_argument("watch operation ID"));
-                }
-                Ok(call)
-            })
+            .map(|call| Self::decode(deployment.clone(), call.function, &call.arguments_json, &call.caller_json))
             .collect::<Result<_, _>>()?;
         let mut group = self.backend.subscribe_group(calls).await.map_err(|error| status(&error))?;
         let (sender, receiver) = mpsc::channel(1);

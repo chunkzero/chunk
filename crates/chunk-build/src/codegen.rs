@@ -80,9 +80,10 @@ fn validate_literals(schema: &Schema) -> io::Result<()> {
             }
             Ok(())
         }
+        Schema::Nullable { value } => validate_literals(value),
         Schema::Array { items } => validate_literals(items),
         Schema::Object { fields } => fields.values().try_for_each(|field| validate_literals(&field.schema)),
-        Schema::Union { variants } => variants.iter().try_for_each(validate_literals),
+        Schema::Union { variants } => variants.values().try_for_each(validate_literals),
         _ => Ok(()),
     }
 }

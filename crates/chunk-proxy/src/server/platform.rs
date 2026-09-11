@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use chunk_proto::v1::{
-    BackendCall, SessionDemand, backend_client::BackendClient, local_control_client::LocalControlClient,
+    BackendQuery, SessionDemand, backend_client::BackendClient, local_control_client::LocalControlClient,
 };
 use chunk_protocol::{
     McString, encode_packet,
@@ -45,26 +45,22 @@ impl Platform {
     async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: Value) -> io::Result<T> {
         let hooks = if phase == "status" { &self.status_hooks } else { &self.hooks };
         let _permit = hooks.try_acquire().map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
-        let result = self
-            .backend
-            .clone()
-            .call(request(
-                BackendCall {
-                    environment: self.target.backend.environment.clone(),
-                    deployment: self.target.backend.deployment.clone(),
-                    function: format!("shared/proxy/{phase}"),
-                    arguments_json: serde_json::to_vec(&arguments).map_err(invalid_data)?,
-                    caller_json: serde_json::to_vec(
-                        &json!({"kind": "proxy", "phase": phase, "proxyId": self.proxy_id}),
-                    )
+        let mut invocation = request(
+            BackendQuery {
+                function: format!("shared/proxy/{phase}"),
+                arguments_json: serde_json::to_vec(&arguments).map_err(invalid_data)?,
+                caller_json: serde_json::to_vec(&json!({"kind": "proxy", "phase": phase, "proxyId": self.proxy_id}))
                     .map_err(invalid_data)?,
-                    operation_id: String::new(),
-                },
-                &self.target.backend.token,
-            )?)
-            .await
-            .map_err(io::Error::other)?
-            .into_inner();
+            },
+            &self.target.backend.token,
+        )?;
+        invocation
+            .metadata_mut()
+            .insert("x-chunk-environment", self.target.backend.environment.parse().map_err(invalid_data)?);
+        invocation
+            .metadata_mut()
+            .insert("x-chunk-deployment", self.target.backend.deployment.parse().map_err(invalid_data)?);
+        let result = self.backend.clone().query(invocation).await.map_err(io::Error::other)?.into_inner();
         serde_json::from_slice(&result.result_json).map_err(invalid_data)
     }
 

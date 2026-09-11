@@ -15,7 +15,7 @@ environment:
 - `CHUNK_DISTRIBUTION`, `CHUNK_JAVA`, `CHUNK_CONNECTION`
 - `CHUNK_ENVIRONMENT`, `CHUNK_DEPLOYMENT`, `CHUNK_MACHINE_PROFILE`
 - `CHUNK_ARTIFACT_DIGEST`, `CHUNK_MEMORY_MIB`
-- Optional `CHUNK_BACKEND_FILE`
+- `CHUNK_BACKEND_FILE` for deployments containing apps
 
 The runtime starts empty; control provisions gameplay sessions. It generates separate child and proxy-facing credentials
 and publishes its private connection record only after authenticated registration and advancing ticks. JVM logs use the
@@ -67,10 +67,13 @@ activating that UUID elsewhere in the JVM. Managed proxy moves prepare a new TCP
 confirm withdrawal, drive both client configuration acknowledgments, and activate the destination on the existing public
 connection.
 
-The optional `scope.getBackend()` client (`scope.backend` in Kotlin) is bound to the process deployment, session and
-registered app ID. Function arguments do not choose that identity. Control's `CHUNK_BACKEND_FILE` passes the private
-connection to supervised JVMs. Use `scope.operationId(player, action)` for a mutation that should happen once per player
-delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
+The `scope.getBackend()` client (`scope.backend` in Kotlin) is bound to the process deployment, session and registered
+app ID. Function arguments do not choose that identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to
+supervised JVMs as `CHUNK_BACKEND_ENDPOINT` and `CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and
+`CHUNK_DEPLOYMENT` and checks that exact deployment with `CheckDeployment` before reporting ready. Missing
+configuration, an unavailable backend, or a missing deployment fails startup. Only the built-in bootstrap fixture with
+no app JARs may run without a backend. Use `scope.operationId(player, action)` for a mutation that should happen once
+per player delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
 `scope.coroutines.backend(scope.backend, player)` for a player-bound client whose calls and watches close on departure.
 Session clients close on disposal. The [local example](../../examples/local/README.md) demonstrates persistent coins,
 visits and subscription updates, including stale state during backend disconnection. Sessions own their instances, event

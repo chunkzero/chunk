@@ -30,8 +30,8 @@ fn body(namespace: &Namespace, indent: &str) -> String {
 
 fn methods(function: &Function, indent: &str) -> String {
     let name = &function.name;
-    let args = &function.arguments.ty;
-    let result = &function.result.ty;
+    let args = function.arguments.kotlin_type();
+    let result = function.result.kotlin_type();
     let reference = &function.reference;
     match function.kind {
         FunctionKind::Mutation => {

@@ -201,6 +201,6 @@ fn entry_source(
         }
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
-    write!(source, "export function __chunk_contract() {{ return {{contract_version:1,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}])}}; }}", metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}])}}; }}", metadata.join(",")).map_err(error)?;
     Ok(source)
 }

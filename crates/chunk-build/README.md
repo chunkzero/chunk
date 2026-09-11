@@ -120,8 +120,8 @@ tools.
 
 Kotlin output defaults to `.chunk/generated/kotlin` and contains the same Java model/client source roots plus
 `kotlin/<package>/CoroutineBackendClient.kt`. Compile all three source roots with `backend-client-kotlin` on the
-classpath. The facade borrows an existing owned `CoroutineBackend` and uses the shared Java records, codecs, and
-references. Java-only generation adds no Kotlin sources or dependencies.
+classpath. The facade borrows an existing owned `CoroutineBackend` and uses the shared Java records, Jackson bindings,
+and references. Java-only generation adds no Kotlin sources or dependencies.
 
 ```kotlin
 val playerBackend = CoroutineBackendClient(ownedPlayerBackend)

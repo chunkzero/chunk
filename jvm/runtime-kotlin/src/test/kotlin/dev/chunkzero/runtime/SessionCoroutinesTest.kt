@@ -1,18 +1,18 @@
 package dev.chunkzero.runtime
 
 import chunk.v1.BackendGrpc
-import chunk.v1.BackendOuterClass.BackendCall
+import chunk.v1.BackendOuterClass.BackendMutation
 import chunk.v1.BackendOuterClass.BackendResult
 import chunk.v1.BackendOuterClass.BackendUpdate
-import chunk.v1.BackendOuterClass.BackendWatch
+import chunk.v1.BackendOuterClass.BackendWatchGroup
 import chunk.v1.Common.SessionRef
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionPhase
 import com.google.protobuf.ByteString
 import dev.chunkzero.backend.CoroutineBackend
-import dev.chunkzero.backend.api.Codecs
+import dev.chunkzero.backend.api.BackendValues
+import dev.chunkzero.backend.api.JsonType
 import dev.chunkzero.backend.api.MutationRef
-import dev.chunkzero.backend.api.NullValue
 import dev.chunkzero.backend.api.QueryRef
 import dev.chunkzero.backend.api.SessionId
 import dev.chunkzero.backend.client.BackendSession
@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import tools.jackson.core.type.TypeReference
 import java.time.Duration
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
@@ -35,6 +36,9 @@ import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
 
 class SessionCoroutinesTest {
+    private val nullType = JsonType.of(object : TypeReference<Void?>() {}, BackendValues::checkNull)
+    private val integerType = JsonType.of(object : TypeReference<Long>() {}, BackendValues::checkInteger)
+
     @Test
     fun `tick resumptions and finishing await the result before disposing watches`() {
         MinecraftServer.init()
@@ -47,8 +51,8 @@ class SessionCoroutinesTest {
                 .forPort(0)
                 .addService(
                     object : BackendGrpc.BackendImplBase() {
-                        override fun call(
-                            request: BackendCall,
+                        override fun mutate(
+                            request: BackendMutation,
                             response: StreamObserver<BackendResult>,
                         ) {
                             mutationStarted.complete(Unit)
@@ -65,8 +69,8 @@ class SessionCoroutinesTest {
                             }
                         }
 
-                        override fun watch(
-                            request: BackendWatch,
+                        override fun watchGroup(
+                            request: BackendWatchGroup,
                             response: StreamObserver<BackendUpdate>,
                         ) {
                             (response as ServerCallStreamObserver<BackendUpdate>).setOnCancelHandler {
@@ -117,8 +121,8 @@ class SessionCoroutinesTest {
                                     scope.coroutines.launch {
                                         backend
                                             .watch(
-                                                QueryRef("read", Codecs.NULL, Codecs.INTEGER),
-                                                NullValue.INSTANCE,
+                                                QueryRef("read", nullType, integerType),
+                                                null,
                                             ).collect {
                                                 ticks.checkThread()
                                                 if (!it.stale()) observed = true
@@ -129,8 +133,8 @@ class SessionCoroutinesTest {
                                 override suspend fun finish() {
                                     val value =
                                         backend.mutate(
-                                            MutationRef("finish", Codecs.NULL, Codecs.INTEGER),
-                                            NullValue.INSTANCE,
+                                            MutationRef("finish", nullType, integerType),
+                                            null,
                                             OperationId("final-result"),
                                         )
                                     ticks.checkThread()

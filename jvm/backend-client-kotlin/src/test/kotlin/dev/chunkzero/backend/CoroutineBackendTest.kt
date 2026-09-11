@@ -1,7 +1,7 @@
 package dev.chunkzero.backend
 
-import dev.chunkzero.backend.api.Codecs
-import dev.chunkzero.backend.api.NullValue
+import dev.chunkzero.backend.api.BackendValues
+import dev.chunkzero.backend.api.JsonType
 import dev.chunkzero.backend.api.QueryRef
 import dev.chunkzero.backend.api.SessionId
 import dev.chunkzero.backend.client.BackendSession
@@ -17,12 +17,16 @@ import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import tools.jackson.core.type.TypeReference
 import java.time.Duration
 import java.util.Optional
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class CoroutineBackendTest {
+    private val nullType = JsonType.of(object : TypeReference<Void?>() {}, BackendValues::checkNull)
+    private val integerType = JsonType.of(object : TypeReference<Long>() {}, BackendValues::checkInteger)
+
     @Test
     fun `closing a backend discards queued watch states in an independent collector`() =
         runBlocking {
@@ -48,7 +52,7 @@ class CoroutineBackendTest {
                 val collector =
                     launch(start = CoroutineStart.UNDISPATCHED) {
                         try {
-                            backend.watch(QueryRef("read", Codecs.NULL, Codecs.INTEGER), NullValue.INSTANCE).collect {
+                            backend.watch(QueryRef("read", nullType, integerType), null).collect {
                                 observed++
                             }
                         } catch (_: CancellationException) {

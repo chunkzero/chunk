@@ -32,7 +32,7 @@ export const record=mutation({args:{player:v.player()},returns:v.id('matches'),h
  return id;
 }});
 export const duplicate=mutation({args:{player:v.player()},returns:v.id('profiles'),handler:({db},a)=>db.insert('profiles',{player:a.player,wins:0})});
-export const profile=query({args:{player:v.player()},returns:v.union(v.null(),v.document('profiles',schema.tables.profiles.fields)),handler:({db},a)=>db.query('profiles').withIndex('by_player',q=>q.eq('player',a.player)).first()});
+export const profile=query({args:{player:v.player()},returns:v.nullable(v.document('profiles',schema.tables.profiles.fields)),handler:({db},a)=>db.query('profiles').withIndex('by_player',q=>q.eq('player',a.player)).first()});
 export const count=query({args:{player:v.player()},returns:v.integer(),handler:({db},a)=>db.query('matches').withIndex('by_player',q=>q.eq('player',a.player)).collect(100).length});
 ").unwrap();
     let output = root.path().join("compiled");

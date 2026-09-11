@@ -39,7 +39,7 @@ impl Fixture {
         write_jar(&root.path().join("generated.jar"), &[("generated/BackendTypes.class", class(21, 1))]);
         fs::write(backend.join("source.mjs"), "export function status() { return 1; }").unwrap();
         fs::write(backend.join("source.mjs.map"), "{}").unwrap();
-        fs::write(backend.join("contract.json"), br#"{"contract_version":1,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
+        fs::write(backend.join("contract.json"), br#"{"contract_version":2,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
         fs::create_dir_all(backend.join(".sdk")).unwrap();
         fs::write(backend.join(".sdk/cache"), b"build cache").unwrap();
         let descriptor = json!({

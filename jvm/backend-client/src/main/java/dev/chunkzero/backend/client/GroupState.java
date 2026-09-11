@@ -32,7 +32,7 @@ public record GroupState(boolean stale, Optional<Snapshot> snapshot, Optional<St
             int index = queries.indexOf(query);
             if (index < 0)
                 throw new IllegalArgumentException("Query does not belong to this group");
-            // Only the transport constructs snapshots, using each slot's exact codec.
+            // Only the transport constructs snapshots, using each slot's declared result type.
             return (QueryResult<T>) results.get(index);
         }
     }

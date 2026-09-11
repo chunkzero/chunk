@@ -21,8 +21,8 @@ record RuntimeEnvironment(
         var generation = System.getenv("CHUNK_PROCESS_GENERATION");
         return new RuntimeEnvironment(
                 token,
-                valueOrDefault("CHUNK_ENVIRONMENT", "local"),
-                valueOrDefault("CHUNK_DEPLOYMENT", "local"),
+                required("CHUNK_ENVIRONMENT"),
+                required("CHUNK_DEPLOYMENT"),
                 System.getenv("CHUNK_SUPERVISOR"),
                 valueOrDefault("CHUNK_RUNTIME_ID", "bridge"),
                 valueOrDefault("CHUNK_PROCESS_ID", "bridge"),
@@ -32,6 +32,13 @@ record RuntimeEnvironment(
                 !"".equals(System.getenv("CHUNK_BOOTSTRAP_SESSION")),
                 System.getenv("CHUNK_BACKEND_ENDPOINT"),
                 System.getenv("CHUNK_BACKEND_TOKEN"));
+    }
+
+    private static String required(String name) {
+        var value = System.getenv(name);
+        if (value == null || value.isBlank())
+            throw new IllegalArgumentException(name + " is required");
+        return value;
     }
 
     private static String valueOrDefault(String name, String fallback) {

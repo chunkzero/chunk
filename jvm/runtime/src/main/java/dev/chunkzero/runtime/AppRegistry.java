@@ -1,6 +1,8 @@
 package dev.chunkzero.runtime;
 
-import dev.chunkzero.backend.api.Codecs;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import dev.chunkzero.backend.api.BackendJson;
 
 import java.io.IOException;
 import java.net.JarURLConnection;
@@ -13,9 +15,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.jar.JarFile;
 
@@ -96,16 +98,15 @@ final class AppRegistry {
 
     private static String appId(JarFile jar) throws IOException {
         try {
-            var manifest =
-                    Codecs.object(Codecs.parse(read(jar, MANIFEST)), Set.of("version", "id"));
-            if (Codecs.field(manifest, "version", Codecs.INTEGER) != 1L) {
+            var manifest = BackendJson.mapper().readValue(read(jar, MANIFEST), Manifest.class);
+            if (manifest.version() != 1L) {
                 throw new IllegalArgumentException("Unsupported app manifest version");
             }
-            var id = Codecs.field(manifest, "id", Codecs.STRING);
+            var id = manifest.id();
             if (!id.matches("[A-Za-z_][A-Za-z0-9_]{0,127}"))
                 throw new IllegalArgumentException("Invalid app ID: " + id);
             return id;
-        } catch (IllegalArgumentException error) {
+        } catch (RuntimeException error) {
             throw invalid(
                     Path.of(jar.getName()), "Invalid app manifest: " + error.getMessage(), error);
         }
@@ -166,6 +167,14 @@ final class AppRegistry {
 
     private static IllegalArgumentException invalid(Path jar, String message, Throwable cause) {
         return new IllegalArgumentException(jar + ": " + message, cause);
+    }
+
+    private record Manifest(
+            @JsonProperty(required = true) Long version, @JsonProperty(required = true) String id) {
+        private Manifest {
+            Objects.requireNonNull(version);
+            Objects.requireNonNull(id);
+        }
     }
 
     private record App(String id, Path jar, String provider) {}

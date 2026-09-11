@@ -202,7 +202,12 @@ impl Actor {
                 reply.finish(result);
             }
             Command::Release { id, reply } => self.start_release(id, reply),
-            Command::Query { call, reply } => {
+            Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
+            Command::Query { mut call, reply } => {
+                if let Err(error) = self.normalize_call(&mut call) {
+                    reply.finish(Err(error));
+                    return;
+                }
                 let result = self.evaluate(&call, Mode::Query, self.view.clone(), &reply.cancellation);
                 match result {
                     Ok((execution, dependencies)) => {
@@ -220,9 +225,41 @@ impl Actor {
                     Err(error) => reply.finish(Err(error)),
                 }
             }
-            Command::Mutate { operation, call, reply } => self.mutate(operation, call, reply),
-            Command::Subscribe { calls, reply } => self.subscribe(calls, reply),
+            Command::Mutate { operation, mut call, reply } => match self.normalize_call(&mut call) {
+                Ok(()) => self.mutate(operation, call, reply),
+                Err(error) => reply.finish(Err(error)),
+            },
+            Command::Subscribe { mut calls, reply } => {
+                match calls.iter_mut().try_for_each(|call| self.normalize_call(call)) {
+                    Ok(()) => self.subscribe(calls, reply),
+                    Err(error) => reply.finish(Err(error)),
+                }
+            }
         }
+    }
+
+    fn check_deployment(&self, id: &DeploymentId) -> Result<()> {
+        if self.releasing.as_ref().is_some_and(|(releasing, _)| releasing == id) {
+            return Err(Error::Busy);
+        }
+        self.versions.get(id).ok_or(Error::Unknown).map(|_| ())
+    }
+
+    fn normalize_call(&self, call: &mut Call) -> Result<()> {
+        self.check_deployment(&call.deployment)?;
+        if let Some(Some(deployment)) = self.versions.get(&call.deployment) {
+            let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?;
+            if function.visibility != Visibility::Public {
+                return Err(Error::Unknown);
+            }
+            let mut arguments = serde_json::from_str(call.arguments.as_str())?;
+            function.arguments.normalize_api(&mut arguments);
+            if !function.arguments.accepts(&arguments) {
+                return Err(Error::Contract);
+            }
+            call.arguments = arguments.into();
+        }
+        Ok(())
     }
 
     fn resolve(&self, call: &Call, mode: Mode) -> Result<Option<Function>> {
@@ -242,10 +279,6 @@ impl Actor {
             Mode::Mutation => FunctionKind::Mutation,
         };
         if function.kind != kind {
-            return Err(Error::Contract);
-        }
-        let arguments = serde_json::from_str(call.arguments.as_str())?;
-        if !function.arguments.accepts(&arguments) {
             return Err(Error::Contract);
         }
         Ok(Some(function.clone()))
@@ -304,15 +337,19 @@ impl Actor {
                 cancellation,
             )
             .map_err(Error::from)
-            .and_then(|execution| {
+            .and_then(|mut execution| {
                 for log in &execution.logs {
                     tracing::info!(target: "chunk_backend::console", deployment = call.deployment.as_str(), function = call.function, level = log.level, message = log.message);
                 }
-                let value = serde_json::from_str(&execution.value)?;
+                let mut value = serde_json::from_str(&execution.value)?;
+                if let Some(function) = &function {
+                    function.result.normalize_api(&mut value);
+                }
                 validate_wire_value(&value).map_err(Error::Invalid)?;
                 if function.as_ref().is_some_and(|f| !f.result.accepts(&value)) {
                     return Err(Error::Contract);
                 }
+                execution.value = serde_json::to_string(&value)?;
                 Ok(execution)
             });
         let dependencies = std::mem::take(&mut *trace.borrow_mut());

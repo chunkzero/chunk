@@ -5,6 +5,6 @@ export default defineSchema({
   settings: defineTable({
     name: v.string(),
     motd: v.string(),
-    admission: v.union(v.literal("allow"), v.literal("deny")),
+    admission: v.enum("allow", "deny"),
   }).index("by_name", ["name"]),
 });

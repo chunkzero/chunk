@@ -11,22 +11,22 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
                 "player": {"schema": {"type": "player"}, "optional": true},
                 "profile": {"schema": {"type": "id", "table": "profiles"}, "optional": true},
                 "active": {"schema": {"type": "boolean"}},
+                "admission": {"schema": {"type": "enum", "values": ["allow", "deny"]}, "optional": true},
                 "score": {"schema": {"type": "integer"}},
                 "rating": {"schema": {"type": "number"}},
-                "result": {"optional": true, "schema": {"type": "union", "variants": [
-                    {"type": "null"},
+                "result": {"optional": true, "schema": {"type": "nullable", "value":
                     {"type": "object", "fields": {"winner": {"schema": {"type": "string"}}}}
-                ]}},
+                }},
                 "rounds": {"schema": {"type": "array", "items": {"type": "integer"}}}
             },
-            "indexes": {"by_session": ["session"]}
+            "indexes": {"by_session": ["session"], "by_admission": ["admission"]}
         }
     }))
     .unwrap();
     store.apply_schema(&schema).unwrap();
     let values = [
-        json!({"session": "s", "player": "alex", "profile": "profiles:p1", "active": true, "score": i64::MAX, "rating": 9_007_199_254_740_993_i64, "rounds": [1, 2]}),
-        json!({"session": "s", "active": false, "score": i64::MIN, "rating": 1.5, "rounds": [], "result": null}),
+        json!({"session": "s", "player": "alex", "profile": "profiles:p1", "active": true, "admission": "allow", "score": i64::MAX, "rating": 9_007_199_254_740_993_i64, "rounds": [1, 2]}),
+        json!({"session": "s", "active": false, "admission": "deny", "score": i64::MIN, "rating": 1.5, "rounds": [], "result": null}),
         json!({"session": "s", "active": false, "score": 0, "rating": 1.0, "rounds": [3], "result": {"winner": "a"}}),
     ];
     let writes = values
@@ -101,7 +101,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
         .insert("name".into(), Field { schema: Schema::String, optional: true });
     expanded.insert("matches".into(), TableSchema::default());
     let deployment = chunk_contract::Deployment {
-        contract_version: 1,
+        contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: "new".into(),
         source: "export function get() { return null; }".into(),
@@ -143,7 +143,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
-            contract_version: 1,
+            contract_version: 2,
             runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
             id: "old".into(),
             source: "export {};".into(),
@@ -178,6 +178,30 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
             store.prepare_operation(&operation("failed"), RetryContext { deployment: "new".into(), ..context }),
             Err(Error::OperationMismatch)
         ));
+    }
+}
+
+#[test]
+fn obsolete_deployment_contracts_report_incompatible_state_without_changing_it() {
+    for arguments in [json!({"type": "null"}), json!({"type": "union", "variants": [{"type": "null"}]})] {
+        let (_directory, store) = open();
+        let contract = json!({
+            "contract_version": 1,
+            "runtime_profile": "transactional_v1",
+            "id": "old",
+            "source": "export function get() { return null; }",
+            "tables": {},
+            "functions": {"get": {
+                "kind": "query", "visibility": "public", "export": "get",
+                "arguments": arguments, "result": {"type": "null"}
+            }}
+        })
+        .to_string();
+        store.connection.execute("INSERT INTO _chunk_deployments VALUES ('old', ?1)", [&contract]).unwrap();
+        assert!(matches!(store.deployments(), Err(Error::Corrupt(message)) if message.contains("fresh local state")));
+        let retained: String =
+            store.connection.query_row("SELECT contract FROM _chunk_deployments", [], |row| row.get(0)).unwrap();
+        assert_eq!(retained, contract);
     }
 }
 

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chunk_proto::v1::{
-    BackendResult, BackendUpdate, BackendWatch,
+    BackendMutation, BackendResult, BackendUpdate, BackendWatchGroup,
     backend_server::{Backend, BackendServer},
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -18,12 +18,11 @@ struct Hooks {
 
 #[tonic::async_trait]
 impl Backend for Hooks {
-    async fn call(&self, request: Request<BackendCall>) -> Result<Response<BackendResult>, Status> {
+    async fn query(&self, request: Request<BackendQuery>) -> Result<Response<BackendResult>, Status> {
         assert_eq!(request.metadata().get("authorization").unwrap(), "Bearer test-token");
+        assert_eq!(request.metadata().get("x-chunk-environment").unwrap(), "local");
+        assert_eq!(request.metadata().get("x-chunk-deployment").unwrap(), "example");
         let call = request.into_inner();
-        assert_eq!(call.environment, "local");
-        assert_eq!(call.deployment, "example");
-        assert!(call.operation_id.is_empty());
         let caller: Value = serde_json::from_slice(&call.caller_json).unwrap();
         assert_eq!(caller["kind"], "proxy");
         assert!(caller["proxyId"].as_str().is_some_and(|value| !value.is_empty()));
@@ -50,8 +49,16 @@ impl Backend for Hooks {
         Ok(Response::new(BackendResult { revision: 1, result_json: serde_json::to_vec(&result).unwrap() }))
     }
 
-    type WatchStream = ReceiverStream<Result<BackendUpdate, Status>>;
-    async fn watch(&self, _: Request<BackendWatch>) -> Result<Response<Self::WatchStream>, Status> {
+    async fn check_deployment(&self, _: Request<()>) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn mutate(&self, _: Request<BackendMutation>) -> Result<Response<BackendResult>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    type WatchGroupStream = ReceiverStream<Result<BackendUpdate, Status>>;
+    async fn watch_group(&self, _: Request<BackendWatchGroup>) -> Result<Response<Self::WatchGroupStream>, Status> {
         Err(Status::unimplemented("unused"))
     }
 }

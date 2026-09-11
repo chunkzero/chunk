@@ -35,7 +35,7 @@ function table<S extends Shape, I extends Record<string, readonly (keyof S & str
         const field = shape[key];
         if (
           !field ||
-          !["boolean", "number", "integer", "string", "id", "player", "session"].includes(field.schema.type)
+          !["boolean", "number", "integer", "string", "id", "player", "session", "enum"].includes(field.schema.type)
         )
           throw new Error(`Index requires a scalar field: ${key}`);
       }
@@ -71,7 +71,7 @@ export function defineSchema<const T extends Record<string, TableDefinition>>(ta
   return freeze({ tables: { ...tables }, contract });
 }
 
-export { v } from "./validators.ts";
+export { v, apiValidator } from "./validators.ts";
 export type {
   Validator,
   OptionalValidator,

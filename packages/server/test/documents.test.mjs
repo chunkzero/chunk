@@ -4,9 +4,7 @@ import test from "node:test";
 import { defineFunctions, defineSchema, defineTable, unset, v } from "../src/index.ts";
 
 const schema = defineSchema({
-  profiles: defineTable({ wins: v.integer(), note: v.optional(v.union(v.null(), v.string())) }).index("by_wins", [
-    "wins",
-  ]),
+  profiles: defineTable({ wins: v.integer(), note: v.optional(v.nullable(v.string())) }).index("by_wins", ["wins"]),
 });
 const functions = defineFunctions(schema);
 

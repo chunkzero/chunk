@@ -8,9 +8,11 @@ export type Schema =
   | { type: "null" | "boolean" | "number" | "integer" | "string" | "player" | "session" }
   | { type: "id"; table: string }
   | { type: "literal"; value: null | boolean | number | string }
+  | { type: "enum"; values: string[] }
+  | { type: "nullable"; value: Schema }
   | { type: "array"; items: Schema }
   | { type: "object"; fields: Record<string, { schema: Schema; optional: boolean }> }
-  | { type: "union"; variants: Schema[] };
+  | { type: "union"; variants: Record<string, Schema> };
 
 export interface Validator<T> {
   readonly schema: Schema;
@@ -82,6 +84,10 @@ function accepts(schema: Schema, value: unknown, depth: number): boolean {
       );
     case "literal":
       return value === schema.value;
+    case "enum":
+      return typeof value === "string" && schema.values.includes(value);
+    case "nullable":
+      return value === null || accepts(schema.value, value, depth + 1);
     case "array":
       return (
         Array.isArray(value) &&
@@ -89,8 +95,17 @@ function accepts(schema: Schema, value: unknown, depth: number): boolean {
           (i) => Object.hasOwn(value, i) && accepts(schema.items, value[i], depth + 1),
         )
       );
-    case "union":
-      return schema.variants.some((item) => accepts(item, value, depth + 1));
+    case "union": {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+      if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
+      const { type, ...fields } = value as Record<string, unknown>;
+      return (
+        Object.hasOwn(value, "type") &&
+        typeof type === "string" &&
+        Object.hasOwn(schema.variants, type) &&
+        accepts(schema.variants[type], fields, depth + 1)
+      );
+    }
     case "object": {
       if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
       if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
@@ -103,6 +118,28 @@ function accepts(schema: Schema, value: unknown, depth: number): boolean {
       );
     }
   }
+}
+
+export function apiValidator<T>(value: Validator<T>): Validator<T> {
+  return freeze({ ...value, parse: (input: unknown): T => value.parse(normalizeApi(value.schema, input)) });
+}
+
+function normalizeApi(schema: Schema, value: unknown): unknown {
+  if (schema.type === "nullable") return value === null ? null : normalizeApi(schema.value, value);
+  if (schema.type === "array" && Array.isArray(value)) return value.map((item) => normalizeApi(schema.items, item));
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value;
+  const record = value as Record<string, unknown>;
+  if (schema.type === "union" && typeof record.type === "string" && Object.hasOwn(schema.variants, record.type))
+    return normalizeApi(schema.variants[record.type], value);
+  if (schema.type !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(record).flatMap(([key, item]) => {
+      const field = Object.hasOwn(schema.fields, key) ? schema.fields[key] : undefined;
+      if (!field) return [[key, item]];
+      return field.optional && item === null ? [] : [[key, normalizeApi(field.schema, item)]];
+    }),
+  );
 }
 
 export function fields(shape: Shape): Record<string, { schema: Schema; optional: boolean }> {
@@ -149,12 +186,34 @@ export const v = Object.freeze({
       throw new Error("Unsafe numeric literal");
     return validator({ type: "literal", value });
   },
+  enum: <const T extends readonly [string, ...string[]]>(...values: T): Validator<T[number]> => {
+    if (values.length === 0 || values.length > 64 || new Set(values).size !== values.length)
+      throw new Error("Enum requires 1..64 distinct values");
+    values.forEach(identifier);
+    return validator({ type: "enum", values: [...values] });
+  },
+  nullable: <T>(value: Validator<T>): Validator<T | null> => validator({ type: "nullable", value: value.schema }),
   optional: <T>(value: Validator<T>): OptionalValidator<T> => freeze({ ...value, optional: true as const }),
   array: <T>(items: Validator<T>): Validator<T[]> => validator({ type: "array", items: items.schema }),
   object: <const S extends Shape>(shape: S): Validator<InferObject<S>> =>
     validator({ type: "object", fields: fields(shape) }),
-  union: <const V extends readonly Validator<unknown>[]>(...variants: V): Validator<Infer<V[number]>> => {
-    if (variants.length === 0 || variants.length > 16) throw new Error("Union requires 1..16 variants");
-    return validator({ type: "union", variants: variants.map((v) => v.schema) });
+  union: <const V extends Record<string, Validator<object>>>(
+    variants: V,
+  ): Validator<
+    {
+      [K in keyof V]: { type: K } & Infer<V[K]>;
+    }[keyof V]
+  > => {
+    const entries = Object.entries(variants);
+    if (entries.length === 0 || entries.length > 16) throw new Error("Union requires 1..16 variants");
+    for (const [name, variant] of entries) {
+      identifier(name);
+      if (variant.schema.type !== "object" || Object.hasOwn(variant.schema.fields, "type"))
+        throw new Error("Union variants must be objects without a type field");
+    }
+    return validator({
+      type: "union",
+      variants: Object.fromEntries(entries.map(([key, value]) => [key, value.schema])),
+    });
   },
 });

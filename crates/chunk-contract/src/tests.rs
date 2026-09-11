@@ -37,10 +37,7 @@ fn nested_documents_require_declared_properties_without_scalar_coercion() {
     let schema = Schema::Object {
         fields: [
             ("items".into(), field(Schema::Array { items: Box::new(Schema::Integer) })),
-            (
-                "state".into(),
-                field(Schema::Union { variants: vec![Schema::Null, Schema::Literal { value: json!("ready") }] }),
-            ),
+            ("state".into(), field(Schema::Nullable { value: Box::new(Schema::Literal { value: json!("ready") }) })),
             ("label".into(), Field { schema: Schema::String, optional: true }),
         ]
         .into(),
@@ -84,7 +81,7 @@ fn complete_database_validation_rejects_name_collisions_and_invalid_indexes() {
         assert!(validate(&database(invalid)).is_err());
     }
     let mut complex = table.clone();
-    complex.fields.get_mut("coins").unwrap().schema = Schema::Union { variants: vec![Schema::Null, Schema::Integer] };
+    complex.fields.get_mut("coins").unwrap().schema = Schema::Nullable { value: Box::new(Schema::Integer) };
     assert!(validate(&database(complex)).is_err());
     let mut collision = table.clone();
     collision.fields.insert("Coins".into(), field(Schema::Integer));
@@ -119,9 +116,19 @@ fn declaration_limits_accept_the_boundary_and_reject_one_more() {
 fn union_depth_and_literal_limits_are_checked_before_storage() {
     let table =
         |schema| database(TableSchema { fields: [("value".into(), field(schema))].into(), indexes: BTreeMap::new() });
-    assert!(validate(&table(Schema::Union { variants: vec![Schema::String; 16] })).is_ok());
-    assert!(validate(&table(Schema::Union { variants: vec![Schema::String; 17] })).is_err());
-    assert!(validate(&table(Schema::Union { variants: vec![] })).is_err());
+    assert!(
+        validate(&table(Schema::Union {
+            variants: (0..16).map(|i| (format!("v{i}"), Schema::Object { fields: BTreeMap::new() })).collect()
+        }))
+        .is_ok()
+    );
+    assert!(
+        validate(&table(Schema::Union {
+            variants: (0..17).map(|i| (format!("v{i}"), Schema::Object { fields: BTreeMap::new() })).collect()
+        }))
+        .is_err()
+    );
+    assert!(validate(&table(Schema::Union { variants: BTreeMap::new() })).is_err());
     for value in [json!(null), json!(true), json!(1), json!("x")] {
         assert!(validate(&table(Schema::Literal { value })).is_ok());
     }
@@ -134,4 +141,45 @@ fn union_depth_and_literal_limits_are_checked_before_storage() {
     }
     assert!(validate(&table(nested.clone())).is_ok());
     assert!(validate(&table(Schema::Array { items: Box::new(nested) })).is_err());
+}
+
+#[test]
+fn tagged_unions_enums_and_api_null_normalization_share_one_schema() {
+    let state = Schema::Union {
+        variants: [
+            ("ready".into(), Schema::Object { fields: BTreeMap::new() }),
+            (
+                "waiting".into(),
+                Schema::Object { fields: [("reason".into(), Field { schema: Schema::String, optional: true })].into() },
+            ),
+        ]
+        .into(),
+    };
+    assert!(state.accepts(&json!({"type":"ready"})));
+    assert!(state.accepts(&json!({"type":"waiting","reason":"busy"})));
+    for invalid in [json!("ready"), json!({}), json!({"type":"other"}), json!({"type":"ready","reason":"extra"})] {
+        assert!(!state.accepts(&invalid));
+    }
+    let schema = Schema::Object {
+        fields: [
+            ("state".into(), field(state)),
+            ("note".into(), Field { schema: Schema::String, optional: true }),
+            (
+                "result".into(),
+                field(Schema::Nullable {
+                    value: Box::new(Schema::Enum { values: vec!["allow".into(), "deny".into()] }),
+                }),
+            ),
+        ]
+        .into(),
+    };
+    let mut value = json!({"state":{"type":"waiting","reason":null},"note":null,"result":null});
+    assert!(!schema.accepts(&value));
+    schema.normalize_api(&mut value);
+    assert_eq!(value, json!({"state":{"type":"waiting"},"result":null}));
+    assert!(schema.accepts(&value));
+    value["result"] = json!("unknown");
+    assert!(!schema.accepts(&value));
+    value["result"] = json!("allow");
+    assert!(schema.accepts(&value));
 }
