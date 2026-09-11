@@ -6,12 +6,14 @@ import net.minestom.server.entity.Player;
 import net.minestom.server.network.player.GameProfile;
 import net.minestom.server.network.player.PlayerConnection;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
-final class ManagedPlayer extends Player {
+@ApiStatus.Internal
+public final class ManagedPlayer extends Player {
     private @Nullable PlayerDelivery binding;
     private @Nullable CompletableFuture<Void> initialization;
 
@@ -24,12 +26,12 @@ final class ManagedPlayer extends Player {
         return binding;
     }
 
-    void setBinding(PlayerDelivery binding) {
+    public void setBinding(PlayerDelivery binding) {
         this.binding = Objects.requireNonNull(binding);
     }
 
     @Nullable
-    CompletableFuture<Void> getInitialization() {
+    public CompletableFuture<Void> getInitialization() {
         return initialization;
     }
 

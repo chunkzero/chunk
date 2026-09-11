@@ -1,14 +1,18 @@
 package dev.chunkzero.runtime;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Supplier;
 
-final class TickExecutor {
+@ApiStatus.Internal
+public final class TickExecutor {
     private final ConcurrentLinkedQueue<Runnable> pending = new ConcurrentLinkedQueue<>();
     private @Nullable Thread thread;
+
+    TickExecutor() {}
 
     boolean isCurrentThread() {
         return Thread.currentThread() == thread;
@@ -19,7 +23,7 @@ final class TickExecutor {
             throw new IllegalStateException("Use SessionScope.onTick for world changes");
     }
 
-    <T> CompletableFuture<T> submit(Supplier<T> action) {
+    public <T> CompletableFuture<T> submit(Supplier<T> action) {
         var result = new CompletableFuture<T>();
         pending.add(
                 () -> {

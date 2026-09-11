@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.bootstrap;
 
 import static org.junit.jupiter.api.Assertions.*;
 

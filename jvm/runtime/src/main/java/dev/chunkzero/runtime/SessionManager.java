@@ -8,6 +8,7 @@ import dev.chunkzero.backend.client.BackendSession;
 
 import net.minestom.server.entity.Player;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
@@ -22,7 +23,8 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-final class SessionManager {
+@ApiStatus.Internal
+public final class SessionManager {
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
 
     private final TickExecutor ticks;
@@ -54,15 +56,15 @@ final class SessionManager {
         this.backend = backend;
     }
 
-    TickExecutor getTicks() {
+    public TickExecutor getTicks() {
         return ticks;
     }
 
-    void setWithdraw(Function<String, CompletionStage<Void>> withdraw) {
+    public void setWithdraw(Function<String, CompletionStage<Void>> withdraw) {
         this.withdraw = withdraw;
     }
 
-    CompletableFuture<SessionInventory> create(SessionCommand command) {
+    public CompletableFuture<SessionInventory> create(SessionCommand command) {
         return ticks.submit(
                         () -> {
                             if (!SESSION_ID.matcher(command.getSession().getId()).matches()
@@ -92,7 +94,7 @@ final class SessionManager {
                 .thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
     }
 
-    CompletableFuture<SessionInventory> finish(SessionCommand command) {
+    public CompletableFuture<SessionInventory> finish(SessionCommand command) {
         return ticks.submit(
                         () -> {
                             var session = sessions.get(command.getSession().getId());
@@ -105,7 +107,7 @@ final class SessionManager {
                 .thenCompose(session -> session.finish().thenApply(ignored -> session.inventory()));
     }
 
-    ManagedSession get(String id, long generation) {
+    public ManagedSession get(String id, long generation) {
         var session = sessions.get(id);
         if (session == null) throw new IllegalArgumentException("Unknown session");
         if (session.command.getGeneration() != generation)
@@ -115,11 +117,12 @@ final class SessionManager {
         return session;
     }
 
-    List<SessionInventory> inventory() {
+    public List<SessionInventory> inventory() {
         return sessions.values().stream().map(ManagedSession::inventory).toList();
     }
 
-    final class ManagedSession {
+    @ApiStatus.Internal
+    public final class ManagedSession {
         private final SessionCommand command;
         private final Session behavior;
         private final SessionScope scope;
@@ -141,15 +144,15 @@ final class SessionManager {
                             registration.backend(command.getSession().getId(), backend));
         }
 
-        SessionCommand getCommand() {
+        public SessionCommand getCommand() {
             return command;
         }
 
-        SessionPhase getPhase() {
+        public SessionPhase getPhase() {
             return phase;
         }
 
-        SessionScope getScope() {
+        public SessionScope getScope() {
             return scope;
         }
 
@@ -179,7 +182,7 @@ final class SessionManager {
                                             }));
         }
 
-        CompletableFuture<Void> join(Player player) {
+        public CompletableFuture<Void> join(Player player) {
             return ticks.submit(
                             () -> {
                                 if (phase != SessionPhase.SESSION_PHASE_READY)
@@ -190,7 +193,7 @@ final class SessionManager {
                     .thenCompose(Function.identity());
         }
 
-        CompletableFuture<Void> leave(Player player) {
+        public CompletableFuture<Void> leave(Player player) {
             return ticks.submit(
                             () -> {
                                 if (!scope.getPlayers().remove(player))

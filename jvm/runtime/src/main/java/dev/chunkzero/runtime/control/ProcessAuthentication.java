@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.control;
 
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
@@ -6,12 +6,15 @@ import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 
-final class ProcessAuthentication implements ServerInterceptor {
+import org.jetbrains.annotations.ApiStatus;
+
+@ApiStatus.Internal
+public final class ProcessAuthentication implements ServerInterceptor {
     private static final Metadata.Key<String> AUTHORIZATION =
             Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
     private final String bearer;
 
-    ProcessAuthentication(String token) {
+    public ProcessAuthentication(String token) {
         if (token.length() < 32) {
             throw new IllegalArgumentException("Process token must contain at least 32 characters");
         }

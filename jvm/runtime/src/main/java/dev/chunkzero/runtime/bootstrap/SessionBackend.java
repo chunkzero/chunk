@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.bootstrap;
 
 import chunk.v1.BackendGrpc;
 import chunk.v1.Common.DeploymentRef;
@@ -14,6 +14,7 @@ import io.grpc.Metadata;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.MetadataUtils;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.net.InetAddress;
@@ -25,7 +26,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-final class SessionBackend implements AutoCloseable {
+@ApiStatus.Internal
+public final class SessionBackend implements AutoCloseable {
     private final ManagedChannel channel;
     private final String credential;
     private final DeploymentRef deployment;
@@ -37,7 +39,7 @@ final class SessionBackend implements AutoCloseable {
         this.deployment = deployment;
     }
 
-    BackendSession client(String id, String app) {
+    public BackendSession client(String id, String app) {
         return new BackendSession(
                 channel,
                 credential,
@@ -59,7 +61,7 @@ final class SessionBackend implements AutoCloseable {
         }
     }
 
-    static @Nullable SessionBackend fromEnvironment(
+    public static @Nullable SessionBackend fromEnvironment(
             DeploymentRef deployment, RuntimeEnvironment environment, boolean hasApps)
             throws UnknownHostException {
         var endpoint = environment.backendEndpoint();

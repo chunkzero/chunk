@@ -10,6 +10,8 @@ import chunk.v1.GameplayOuterClass.PlayerSetup
 import chunk.v1.GameplayOuterClass.PlayerWithdrawal
 import chunk.v1.Supervision.DeliveryPhase
 import chunk.v1.Supervision.SessionCommand
+import dev.chunkzero.runtime.bootstrap.FlatSession
+import dev.chunkzero.runtime.delivery.GameplayService
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer
@@ -89,7 +91,7 @@ class GameplayLifecycleTest {
                 .setEnvironment("local")
                 .setDeployment("test")
                 .build()
-        val service = GameplayService(deployment, 1, manager)
+        val service = GameplayService(deployment, 1, manager, System::nanoTime, "bridge")
         val server =
             NettyServerBuilder
                 .forAddress(

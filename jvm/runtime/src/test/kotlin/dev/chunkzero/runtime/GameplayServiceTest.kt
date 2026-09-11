@@ -10,6 +10,9 @@ import chunk.v1.GameplayOuterClass.ConfigurationRequest
 import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerSetup
 import com.google.protobuf.ByteString
+import dev.chunkzero.runtime.bootstrap.FlatSession
+import dev.chunkzero.runtime.control.ProcessAuthentication
+import dev.chunkzero.runtime.delivery.GameplayService
 import io.grpc.Metadata
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
@@ -78,7 +81,7 @@ class GameplayServiceTest {
         val clock =
             java.util.concurrent.atomic
                 .AtomicLong(System.nanoTime())
-        val service = GameplayService(deployment, 7, manager, clock::get)
+        val service = GameplayService(deployment, 7, manager, clock::get, "bridge")
         MinecraftServer
             .getSchedulerManager()
             .buildTask {

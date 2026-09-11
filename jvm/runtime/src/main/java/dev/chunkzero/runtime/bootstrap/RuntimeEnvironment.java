@@ -1,8 +1,10 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.bootstrap;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
-record RuntimeEnvironment(
+@ApiStatus.Internal
+public record RuntimeEnvironment(
         String processToken,
         String environment,
         String deployment,
@@ -15,7 +17,7 @@ record RuntimeEnvironment(
         boolean bootstrapSession,
         @Nullable String backendEndpoint,
         @Nullable String backendToken) {
-    static RuntimeEnvironment load() {
+    public static RuntimeEnvironment load() {
         var token = System.getenv("CHUNK_PROCESS_TOKEN");
         if (token == null) throw new IllegalArgumentException("CHUNK_PROCESS_TOKEN is required");
         var generation = System.getenv("CHUNK_PROCESS_GENERATION");

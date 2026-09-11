@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.control;
 
 import chunk.v1.Supervision.ProcessRegistration;
 import chunk.v1.SupervisorGrpc;
@@ -8,17 +8,20 @@ import io.grpc.Metadata;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.MetadataUtils;
 
+import org.jetbrains.annotations.ApiStatus;
+
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Reattachment repeats the frozen registration; it never disposes gameplay. */
-final class Registration implements AutoCloseable {
+@ApiStatus.Internal
+public final class Registration implements AutoCloseable {
     private final ManagedChannel channel;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread worker;
 
-    Registration(String endpoint, String token, ProcessRegistration registration) {
+    public Registration(String endpoint, String token, ProcessRegistration registration) {
         var address = URI.create(endpoint);
         if (!"127.0.0.1".equals(address.getHost())
                 || address.getPort() <= 0
