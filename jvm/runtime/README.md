@@ -100,6 +100,12 @@ as `kotlinx.coroutines.launch`, `async`, `future`, and `Flow.launchIn`; disposal
 accepting an admitted `Player` creates a child identity and closes its calls/watches on departure. Player resources use
 object identity so cleanup cannot affect a later admission of the same UUID.
 
+Import the extensions in `dev.chunkzero.runtime` for `scope.resource<MyResource> { ... }`, which creates one
+`AutoCloseable` per class and session and closes it on disposal, and `scope.repeatEvery(1.seconds) { ... }` with Kotlin
+durations. `scope.own(task)` and `scope.own(player, task)` attach an existing Minestom `Task` to session or player
+cleanup. These work with tasks created through KotStom; its event extensions can operate directly on `scope.events`.
+Register resources and tasks on the tick thread.
+
 Put final result mutations in `finish()`: the manager awaits that hook before closing session resources. Request
 termination with `scope.finish()` without awaiting it from work that the same termination will cancel. Slow Flow
 collectors fail at 64 queued updates instead of dropping stale transitions. Both languages use the same

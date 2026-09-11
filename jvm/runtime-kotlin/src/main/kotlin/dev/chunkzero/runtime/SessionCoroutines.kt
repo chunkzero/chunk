@@ -14,7 +14,7 @@ import kotlin.coroutines.CoroutineContext
 
 /** One session-owned adapter, available only while its scope is active on the tick thread. */
 val SessionScope.coroutines: SessionCoroutines
-    get() = resource(SessionCoroutines::class.java) { SessionCoroutines(this, ticks) }
+    get() = resource<SessionCoroutines> { SessionCoroutines(this, ticks) }
 
 /** Session-owned work always resumes on the process tick thread unless explicitly moved elsewhere. */
 class SessionCoroutines internal constructor(

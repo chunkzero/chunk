@@ -118,7 +118,8 @@ public final class SessionScope {
         return resource;
     }
 
-    <T extends AutoCloseable> T resource(Class<T> type, Supplier<T> factory) {
+    /** Return one owned resource per class, creating it on first access on the tick thread. */
+    public <T extends AutoCloseable> T resource(Class<T> type, Supplier<T> factory) {
         ticks.checkThread();
         checkActive();
         var existing = sharedResources.get(type);
