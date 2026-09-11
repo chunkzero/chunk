@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.control;
 
 import chunk.v1.ProcessControlGrpc;
 import chunk.v1.Supervision.ProcessIdentity;
@@ -6,22 +6,28 @@ import chunk.v1.Supervision.ProcessInventory;
 import chunk.v1.Supervision.SessionCommand;
 import chunk.v1.Supervision.SessionInventory;
 
+import dev.chunkzero.runtime.SessionManager;
+import dev.chunkzero.runtime.delivery.GameplayService;
+
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+
+import org.jetbrains.annotations.ApiStatus;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
-final class ProcessService extends ProcessControlGrpc.ProcessControlImplBase {
+@ApiStatus.Internal
+public final class ProcessService extends ProcessControlGrpc.ProcessControlImplBase {
     private final ProcessIdentity identity;
     private final GameplayService gameplay;
     private final SessionManager sessions;
     private final AtomicLong ticks;
     private final CountDownLatch shutdown;
 
-    ProcessService(
+    public ProcessService(
             ProcessIdentity identity,
             GameplayService gameplay,
             SessionManager sessions,

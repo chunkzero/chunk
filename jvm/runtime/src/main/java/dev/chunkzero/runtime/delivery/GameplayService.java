@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.delivery;
 
 import chunk.v1.Common.DeploymentRef;
 import chunk.v1.GameplayGrpc;
@@ -12,6 +12,9 @@ import chunk.v1.Supervision.DeliveryInventory;
 import chunk.v1.Supervision.DeliveryPhase;
 import chunk.v1.Supervision.SessionInventory;
 
+import dev.chunkzero.runtime.ManagedPlayer;
+import dev.chunkzero.runtime.SessionManager;
+
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
@@ -23,6 +26,8 @@ import net.minestom.server.event.EventNode;
 import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
 import net.minestom.server.event.player.AsyncPlayerPreLoginEvent;
 
+import org.jetbrains.annotations.ApiStatus;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +37,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
-final class GameplayService extends GameplayGrpc.GameplayImplBase {
+@ApiStatus.Internal
+public final class GameplayService extends GameplayGrpc.GameplayImplBase {
     private static final Pattern USERNAME = Pattern.compile("[A-Za-z0-9_]{1,16}");
 
     private final DeploymentRef deployment;
@@ -46,16 +52,7 @@ final class GameplayService extends GameplayGrpc.GameplayImplBase {
     private final EventNode<Event> events = EventNode.all("gameplay-delivery");
     private String endpoint = "";
 
-    GameplayService(DeploymentRef deployment, long generation, SessionManager manager) {
-        this(deployment, generation, manager, System::nanoTime, "bridge");
-    }
-
-    GameplayService(
-            DeploymentRef deployment, long generation, SessionManager manager, LongSupplier now) {
-        this(deployment, generation, manager, now, "bridge");
-    }
-
-    GameplayService(
+    public GameplayService(
             DeploymentRef deployment,
             long generation,
             SessionManager manager,
@@ -94,15 +91,15 @@ final class GameplayService extends GameplayGrpc.GameplayImplBase {
         MinecraftServer.getGlobalEventHandler().addChild(events);
     }
 
-    ConfigurationResponse getConfigurationArtifact() {
+    public ConfigurationResponse getConfigurationArtifact() {
         return configurationArtifact;
     }
 
-    String getEndpoint() {
+    public String getEndpoint() {
         return endpoint;
     }
 
-    void setEndpoint(String endpoint) {
+    public void setEndpoint(String endpoint) {
         this.endpoint = endpoint;
     }
 
@@ -209,19 +206,19 @@ final class GameplayService extends GameplayGrpc.GameplayImplBase {
         }
     }
 
-    void flush() {
+    public void flush() {
         synchronized (preparations) {
             preparations.values().forEach(PreparedDelivery::checkDeadline);
         }
     }
 
-    List<DeliveryInventory> deliveries() {
+    public List<DeliveryInventory> deliveries() {
         synchronized (preparations) {
             return preparations.values().stream().map(PreparedDelivery::inventory).toList();
         }
     }
 
-    List<SessionInventory> sessions() {
+    public List<SessionInventory> sessions() {
         return manager.inventory().stream()
                 .map(
                         session ->
@@ -272,7 +269,7 @@ final class GameplayService extends GameplayGrpc.GameplayImplBase {
                         });
     }
 
-    void close() {
+    public void close() {
         MinecraftServer.getGlobalEventHandler().removeChild(events);
         synchronized (preparations) {
             preparations.values().forEach(PreparedDelivery::close);

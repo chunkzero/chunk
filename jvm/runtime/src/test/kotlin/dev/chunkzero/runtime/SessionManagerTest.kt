@@ -3,6 +3,7 @@ package dev.chunkzero.runtime
 import chunk.v1.Common.SessionRef
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionPhase
+import dev.chunkzero.runtime.bootstrap.FlatSession
 import net.minestom.server.MinecraftServer
 import net.minestom.server.entity.Player
 import net.minestom.server.network.packet.server.SendablePacket

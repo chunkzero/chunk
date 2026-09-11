@@ -2,6 +2,8 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import dev.chunkzero.runtime.bootstrap.AppRegistry;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -23,6 +25,9 @@ import java.util.jar.JarOutputStream;
 import javax.tools.ToolProvider;
 
 class AppRegistryTest {
+    private static final String APP_MANIFEST = "META-INF/chunk/app.json";
+    private static final String SESSION_PROVIDER =
+            "META-INF/services/dev.chunkzero.runtime.SessionProvider";
     @TempDir Path directory;
 
     @Test
@@ -85,7 +90,7 @@ class AppRegistryTest {
                 jar("absent-class.jar", Map.of(), "lobby", "missing.Provider"));
         var exploded = directory.resolve("exploded");
         Files.createDirectories(exploded.resolve("META-INF/chunk"));
-        Files.writeString(exploded.resolve(AppRegistry.MANIFEST), manifest("lobby"));
+        Files.writeString(exploded.resolve(APP_MANIFEST), manifest("lobby"));
         assertInvalid("packaged JARs", exploded);
     }
 
@@ -157,10 +162,9 @@ class AppRegistryTest {
     private Path jar(String name, Map<String, byte[]> classes, String app, String provider)
             throws IOException {
         var entries = new TreeMap<>(classes);
-        if (app != null)
-            entries.put(AppRegistry.MANIFEST, manifest(app).getBytes(StandardCharsets.UTF_8));
+        if (app != null) entries.put(APP_MANIFEST, manifest(app).getBytes(StandardCharsets.UTF_8));
         if (provider != null)
-            entries.put(AppRegistry.SERVICE, (provider + "\n").getBytes(StandardCharsets.UTF_8));
+            entries.put(SESSION_PROVIDER, (provider + "\n").getBytes(StandardCharsets.UTF_8));
         var path = directory.resolve(name);
         try (var output = new JarOutputStream(Files.newOutputStream(path))) {
             for (var entry : entries.entrySet()) {

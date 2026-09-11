@@ -1,8 +1,12 @@
-package dev.chunkzero.runtime;
+package dev.chunkzero.runtime.bootstrap;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import dev.chunkzero.backend.api.BackendJson;
+import dev.chunkzero.runtime.SessionProvider;
+import dev.chunkzero.runtime.SessionRegistration;
+
+import org.jetbrains.annotations.ApiStatus;
 
 import java.io.IOException;
 import java.net.JarURLConnection;
@@ -22,14 +26,15 @@ import java.util.TreeMap;
 import java.util.jar.JarFile;
 
 /** Loads registrations from their originating app JARs on the shared gameplay classpath. */
-final class AppRegistry {
+@ApiStatus.Internal
+public final class AppRegistry {
     static final String MANIFEST = "META-INF/chunk/app.json";
     static final String SERVICE = "META-INF/services/" + SessionProvider.class.getName();
     private static final int RESOURCE_LIMIT = 65_536;
 
     private AppRegistry() {}
 
-    static Map<String, SessionRegistration> load(ClassLoader loader) throws IOException {
+    public static Map<String, SessionRegistration> load(ClassLoader loader) throws IOException {
         var apps = manifests(loader);
         var origins = new HashSet<Path>();
         apps.values().forEach(app -> origins.add(app.jar()));

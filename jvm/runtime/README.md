@@ -8,6 +8,10 @@ each player's connection. Minestom uses protocol 775, compatible with Java Editi
 and starts through `dev.chunkzero.runtime.BridgeMain`. Kotlin lifecycle conveniences are provided by
 `jvm:runtime-kotlin`.
 
+The `dev.chunkzero.runtime` package contains the session API, session lifecycle core and entrypoint. Its `bootstrap`
+package handles configuration and app loading, `control` handles supervisor communication, and `delivery` handles player
+preparation and attachment. Classes exposed across packages only for runtime wiring carry `@ApiStatus.Internal`.
+
 Use `just local` to run the complete example, or build `cargo build -p chunk-runtime` and
 `./gradlew :jvm:runtime:installDist` for independent hosting. `chunk-runtime` reads configuration exclusively from the
 environment:

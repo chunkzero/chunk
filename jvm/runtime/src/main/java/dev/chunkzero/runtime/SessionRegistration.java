@@ -2,6 +2,7 @@ package dev.chunkzero.runtime;
 
 import dev.chunkzero.backend.client.BackendSession;
 
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Objects;
@@ -9,8 +10,9 @@ import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
 /** App identity belongs to registration, independently of the session instance and routing key. */
-record SessionRegistration(String appId, Supplier<Session> factory) {
-    SessionRegistration {
+@ApiStatus.Internal
+public record SessionRegistration(String appId, Supplier<Session> factory) {
+    public SessionRegistration {
         Objects.requireNonNull(appId);
         Objects.requireNonNull(factory);
         if (!appId.matches("[A-Za-z_][A-Za-z0-9_]{0,127}"))
