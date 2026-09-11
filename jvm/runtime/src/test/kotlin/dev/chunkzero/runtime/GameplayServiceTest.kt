@@ -46,6 +46,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.function.Supplier
 
 class GameplayServiceTest {
     @Test
@@ -60,7 +61,7 @@ class GameplayServiceTest {
                 .build()
         MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
-        val manager = SessionManager(ticks, mapOf("bridge" to { FlatSession() }))
+        val manager = SessionManager(ticks, mapOf("bridge" to Supplier { FlatSession() }))
         manager.create(
             chunk.v1.Supervision.SessionCommand
                 .newBuilder()
@@ -156,6 +157,7 @@ class GameplayServiceTest {
                 delivery.toBuilder().setProcessGeneration(6).build(),
                 delivery.toBuilder().setProtocol(774).build(),
                 delivery.toBuilder().setDeployment(deployment.toBuilder().setDeployment("other")).build(),
+                delivery.toBuilder().setProxyId("\u00a0").build(),
             )) {
                 assertEquals(
                     Status.Code.FAILED_PRECONDITION,

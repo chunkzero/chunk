@@ -12,21 +12,13 @@ fn project() -> tempfile::TempDir {
 fn generation_repairs_missing_and_stale_files_without_rewriting_unchanged_files() {
     let project = project();
     generate_sdk(project.path()).unwrap();
-    let mut files: Vec<_> = SOURCES
-        .iter()
-        .map(|(name, _)| project.path().join(".chunk/sdk").join(name))
-        .collect();
+    let mut files: Vec<_> = SOURCES.iter().map(|(name, _)| project.path().join(".chunk/sdk").join(name)).collect();
     files.extend([".chunk/generated/index.ts", "package.json", "tsconfig.json"].map(|name| project.path().join(name)));
     let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let contents: Vec<_> = files
         .iter()
         .map(|file| {
-            fs::File::options()
-                .write(true)
-                .open(file)
-                .unwrap()
-                .set_modified(timestamp)
-                .unwrap();
+            fs::File::options().write(true).open(file).unwrap().set_modified(timestamp).unwrap();
             fs::read(file).unwrap()
         })
         .collect();
@@ -64,36 +56,20 @@ fn generation_preserves_project_configuration_and_repairs_owned_imports() {
     assert_eq!(generated["imports"]["#chunk/schema"], "./.chunk/sdk/schema.ts");
     generated["imports"].as_object_mut().unwrap().remove("#chunk/schema");
     generated["imports"]["#chunk"] = json!("./old.ts");
-    assert_eq!(
-        serde_json::to_string(&generated).unwrap(),
-        serde_json::to_string(&package).unwrap()
-    );
-    assert_eq!(
-        fs::read_to_string(project.path().join("tsconfig.json")).unwrap(),
-        config
-    );
+    assert_eq!(serde_json::to_string(&generated).unwrap(), serde_json::to_string(&package).unwrap());
+    assert_eq!(fs::read_to_string(project.path().join("tsconfig.json")).unwrap(), config);
 }
 
 #[test]
 fn generation_reports_missing_schema_and_invalid_configuration_without_overwriting_it() {
     let empty = tempfile::tempdir().unwrap();
-    assert!(
-        generate_sdk(empty.path())
-            .unwrap_err()
-            .to_string()
-            .contains("server/schema/index.ts")
-    );
+    assert!(generate_sdk(empty.path()).unwrap_err().to_string().contains("server/schema/index.ts"));
     assert!(!empty.path().join(".chunk").exists());
     let project = project();
     for invalid in ["{", "[]", "{\"imports\":null}"] {
         let package = project.path().join("package.json");
         fs::write(&package, invalid).unwrap();
-        assert!(
-            generate_sdk(project.path())
-                .unwrap_err()
-                .to_string()
-                .contains("package.json")
-        );
+        assert!(generate_sdk(project.path()).unwrap_err().to_string().contains("package.json"));
         assert_eq!(fs::read_to_string(package).unwrap(), invalid);
         assert!(!project.path().join(".chunk").exists());
     }

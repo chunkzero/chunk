@@ -169,19 +169,13 @@ pub(crate) fn auth(command: Auth) -> io::Result<()> {
         }
         Auth::Status => cliclack::log::info(format!("{} · Login coming soon", target()?)),
         Auth::Whoami => unsupported("Account lookup"),
-        Auth::Logout => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Logout is not available yet.",
-        )),
+        Auth::Logout => Err(io::Error::new(io::ErrorKind::Unsupported, "Logout is not available yet.")),
     }
 }
 
 pub(crate) fn unsupported(operation: &str) -> io::Result<()> {
     target()?;
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("{operation} — not available yet."),
-    ))
+    Err(io::Error::new(io::ErrorKind::Unsupported, format!("{operation} — not available yet.")))
 }
 
 #[cfg(test)]
@@ -190,14 +184,9 @@ mod tests {
 
     #[test]
     fn override_does_not_read_saved_target() {
-        let actual = resolve_target(Some("https://custom.example/api"), || {
-            panic!("must not read saved configuration")
-        })
-        .unwrap();
-        assert_eq!(
-            actual,
-            Target::Custom(Url::parse("https://custom.example/api").unwrap())
-        );
+        let actual =
+            resolve_target(Some("https://custom.example/api"), || panic!("must not read saved configuration")).unwrap();
+        assert_eq!(actual, Target::Custom(Url::parse("https://custom.example/api").unwrap()));
         assert!(resolve_target(Some(""), || Ok(Target::Cloud)).is_err());
     }
 

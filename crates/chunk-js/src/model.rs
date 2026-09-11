@@ -24,18 +24,9 @@ pub struct Key {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Read {
-    Get {
-        table: String,
-        id: String,
-    },
-    Scan {
-        table: String,
-        start: Option<String>,
-        end: Option<String>,
-    },
-    Index {
-        query: chunk_contract::IndexQuery,
-    },
+    Get { table: String, id: String },
+    Scan { table: String, start: Option<String>, end: Option<String> },
+    Index { query: chunk_contract::IndexQuery },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,12 +78,9 @@ impl Json {
 }
 
 impl From<Value> for Json {
-    fn from(value: Value) -> Self {
-        Self(
-            serde_json::to_string(&value)
-                .expect("JSON value is serializable")
-                .into(),
-        )
+    fn from(mut value: Value) -> Self {
+        value.sort_all_objects();
+        Self(serde_json::to_string(&value).expect("JSON value is serializable").into())
     }
 }
 
@@ -134,10 +122,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            execution: Duration::from_secs(1),
-            heap_bytes: 32 * 1024 * 1024,
-        }
+        Self { execution: Duration::from_secs(1), heap_bytes: 32 * 1024 * 1024 }
     }
 }
 
@@ -185,4 +170,16 @@ pub enum Error {
 pub struct Log {
     pub level: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Json;
+
+    #[test]
+    fn equivalent_json_has_the_same_encoding_regardless_of_object_key_order() {
+        let first = Json::parse(r#"{"z":0,"a":[{"y":2,"x":1}]}"#).unwrap();
+        let second = Json::parse(r#"{"a":[{"x":1,"y":2}],"z":0}"#).unwrap();
+        assert_eq!(first.as_str(), second.as_str());
+    }
 }

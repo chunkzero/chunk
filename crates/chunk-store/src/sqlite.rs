@@ -41,12 +41,7 @@ impl SqliteStore {
         let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
         let connection = bootstrap::open(&path, environment)?;
         let schema = Arc::new(schema::load(&connection)?);
-        Ok(Self {
-            connection,
-            path,
-            schema,
-            _writer_lock: writer_lock,
-        })
+        Ok(Self { connection, path, schema, _writer_lock: writer_lock })
     }
 }
 
@@ -57,9 +52,7 @@ impl Storage for SqliteStore {
 
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
         let migration = schema::merge(&self.schema, &deployment.tables)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         deployments::insert(&transaction, deployment)?;
         let revision = schema::install(&transaction, &migration)?;
         transaction.commit()?;
@@ -84,9 +77,7 @@ impl Storage for SqliteStore {
         if migration.statements.is_empty() {
             return revision::current(&self.connection);
         }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let next = schema::install(&transaction, &migration)?;
         transaction.commit()?;
         self.schema = Arc::new(migration.schema);
@@ -106,37 +97,21 @@ impl Storage for SqliteStore {
             return Ok(outcome);
         }
         let prepared = write::Prepared::new(&commit, &self.schema)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = revision::current(&transaction)?;
         if current != commit.expected {
-            return Err(Error::Conflict {
-                expected: commit.expected,
-                actual: current,
-            });
+            return Err(Error::Conflict { expected: commit.expected, actual: current });
         }
         let next = revision::next(current)?;
         prepared.apply(&transaction, next)?;
         transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
         transaction.execute(
             "INSERT INTO _chunk_operations VALUES (?1, ?2, ?3, ?4)",
-            params![
-                commit.operation.id,
-                commit.operation.fingerprint.as_slice(),
-                next,
-                prepared.result
-            ],
+            params![commit.operation.id, commit.operation.fingerprint.as_slice(), next, prepared.result],
         )?;
-        transaction.execute(
-            "DELETE FROM _chunk_retry_contexts WHERE operation_id = ?1",
-            [&commit.operation.id],
-        )?;
+        transaction.execute("DELETE FROM _chunk_retry_contexts WHERE operation_id = ?1", [&commit.operation.id])?;
         transaction.commit()?;
-        Ok(Outcome {
-            revision: next,
-            result: commit.result,
-        })
+        Ok(Outcome { revision: next, result: commit.result })
     }
 }
 

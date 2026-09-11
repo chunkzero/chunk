@@ -54,10 +54,7 @@ impl ProcessHost {
 #[tonic::async_trait]
 impl Host for ProcessHost {
     async fn ensure(&self, id: &str, profile: &str) -> Result<RuntimeConnection> {
-        let size = self
-            .profiles
-            .get(profile)
-            .ok_or(Error::Invalid("unknown machine profile"))?;
+        let size = self.profiles.get(profile).ok_or(Error::Invalid("unknown machine profile"))?;
         if let Some(backend) = &self.backend
             && (backend.environment != self.deployment.environment || backend.deployment != self.deployment.deployment)
         {
@@ -186,9 +183,7 @@ async fn request_stop(connection: RuntimeConnection) -> Result<()> {
     let mut request = tonic::Request::new(connection.identity);
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {}", connection.token)
-            .parse()
-            .map_err(|_| Error::Invalid("runtime token"))?,
+        format!("Bearer {}", connection.token).parse().map_err(|_| Error::Invalid("runtime token"))?,
     );
     let Ok(channel) = tonic::transport::Channel::from_shared(connection.endpoint)
         .map_err(|_| Error::Invalid("runtime URL"))?
@@ -208,10 +203,7 @@ async fn request_stop(connection: RuntimeConnection) -> Result<()> {
 
 #[cfg(unix)]
 async fn signal_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .status()
-        .await;
+    let _ = Command::new("kill").args([signal, "--", &format!("-{pid}")]).status().await;
 }
 
 pub(crate) use chunk_service::private_file;
@@ -222,11 +214,7 @@ mod tests {
     async fn stale_pid_without_runtime_authority_never_records_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        std::fs::write(
-            directory.path().join(format!("{id}.pid")),
-            std::process::id().to_string(),
-        )
-        .unwrap();
+        std::fs::write(directory.path().join(format!("{id}.pid")), std::process::id().to_string()).unwrap();
         assert!(super::terminate_runtime(directory.path(), &id).await.is_err());
         assert!(!directory.path().join(format!("{id}.exit")).exists());
     }

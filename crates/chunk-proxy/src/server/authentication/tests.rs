@@ -31,10 +31,7 @@ async fn mock_session(response: String) -> (Authentication, JoinHandle<String>) 
 }
 
 fn http_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
+    format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
 
 fn profile_json() -> String {
@@ -53,18 +50,12 @@ fn encrypt_response(request: &EncryptionRequest, secret: &[u8], token: &[u8]) ->
         bytes.truncate(count);
         ByteArray::new(bytes).unwrap()
     };
-    EncryptionResponse {
-        shared_secret: encrypt(secret),
-        verify_token: encrypt(token),
-    }
+    EncryptionResponse { shared_secret: encrypt(secret), verify_token: encrypt(token) }
 }
 
 async fn begin_login<S: AsyncRead + AsyncWrite + Unpin>(client: &mut Transport<S>) -> EncryptionRequest {
     client
-        .write_packet(&LoginStart {
-            username: McString::new("Alex").unwrap(),
-            player_uuid: Uuid([0xff; 16]),
-        })
+        .write_packet(&LoginStart { username: McString::new("Alex").unwrap(), player_uuid: Uuid([0xff; 16]) })
         .await
         .unwrap();
     decode_packet::<EncryptionRequest>(&client.read_frame(4096).await.unwrap()).unwrap()
@@ -81,26 +72,12 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
                 let mut accepted = auth.login(Transport::new(server), 775, compression).await.unwrap();
                 assert_eq!(
                     accepted.profile.uuid,
-                    Uuid([
-                        0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
-                    ])
+                    Uuid([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
                 );
-                assert_eq!(
-                    accepted.profile.properties.as_slice()[0]
-                        .signature
-                        .as_ref()
-                        .unwrap()
-                        .as_str(),
-                    "signed"
-                );
+                assert_eq!(accepted.profile.properties.as_slice()[0].signature.as_ref().unwrap().as_str(), "signed");
                 // A coalesced configuration packet survives the transition together with the identity.
                 let frame = accepted.transport.read_frame(4096).await.unwrap();
-                assert_eq!(
-                    decode_packet::<ConfigurationKeepAliveResponse>(&frame)
-                        .unwrap()
-                        .keep_alive_id,
-                    42
-                );
+                assert_eq!(decode_packet::<ConfigurationKeepAliveResponse>(&frame).unwrap().keep_alive_id, 42);
             };
             let client = async {
                 let request = begin_login(&mut client).await;
@@ -120,18 +97,11 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
                 assert_eq!(profile.username.as_str(), "Alex");
                 assert_eq!(profile.properties.as_slice()[0].value.as_str(), "x".repeat(1024));
                 client.write_packet(&LoginAcknowledged).await.unwrap();
-                client
-                    .write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 42 })
-                    .await
-                    .unwrap();
+                client.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 42 }).await.unwrap();
             };
             tokio::join!(server, client);
             let request = request_task.await.unwrap();
-            let query = Url::parse(&format!(
-                "http://localhost{}",
-                request.split_whitespace().nth(1).unwrap()
-            ))
-            .unwrap();
+            let query = Url::parse(&format!("http://localhost{}", request.split_whitespace().nth(1).unwrap())).unwrap();
             let params: std::collections::HashMap<_, _> = query.query_pairs().collect();
             assert_eq!(params["username"], "Alex");
             assert_eq!(params["serverId"], server_hash(&[0x12; 16], &auth.public_key));
@@ -153,18 +123,12 @@ async fn rejected_session_receives_an_encrypted_disconnect() {
         let client = async {
             let request = begin_login(&mut client).await;
             let secret = [7; 16];
-            client
-                .write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice()))
-                .await
-                .unwrap();
+            client.write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice())).await.unwrap();
             client.enable_encryption(&secret).unwrap();
             let frame = client.read_frame(4096).await.unwrap();
             let rejection = decode_packet::<LoginDisconnect>(&frame).unwrap();
             assert!(rejection.reason.as_str().contains("Unable to authenticate"));
-            assert_eq!(
-                client.read_frame(4096).await.unwrap_err().kind(),
-                io::ErrorKind::UnexpectedEof
-            );
+            assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         };
         tokio::join!(server, client);
         request_task.await.unwrap();
@@ -179,10 +143,7 @@ async fn session_service_fails_closed_on_bad_status_and_oversized_bodies() {
         http_response("503 Service Unavailable", ""),
         "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\n\r\n".into(),
         "HTTP/1.1 200 OK\r\nContent-Length: 65537\r\n\r\n".into(),
-        format!(
-            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10001\r\n{}\r\n0\r\n\r\n",
-            " ".repeat(65537)
-        ),
+        format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10001\r\n{}\r\n0\r\n\r\n", " ".repeat(65537)),
         http_response("200 OK", "{}"),
     ] {
         let (auth, request) = mock_session(response).await;
@@ -202,10 +163,7 @@ async fn rsa_response_requires_matching_nonce_and_exact_secret_length() {
         should_authenticate: true,
     };
     for (secret, response_token) in [(&[1; 15][..], &token[..]), (&[1; 16][..], &[4, 3, 2, 1][..])] {
-        assert!(
-            auth.shared_secret(&encrypt_response(&request, secret, response_token), token)
-                .is_err()
-        );
+        assert!(auth.shared_secret(&encrypt_response(&request, secret, response_token), token).is_err());
     }
     let invalid = EncryptionResponse {
         shared_secret: ByteArray::new(vec![0; 128]).unwrap(),
@@ -234,9 +192,7 @@ fn session_identity_is_validated_and_properties_preserved() {
     assert!(parse_profile(valid.as_bytes(), "SomeoneElse").is_err());
     assert!(
         parse_profile(
-            valid
-                .replace("00112233445566778899aabbccddeeff", "+1112233445566778899aabbccddeeff")
-                .as_bytes(),
+            valid.replace("00112233445566778899aabbccddeeff", "+1112233445566778899aabbccddeeff").as_bytes(),
             "Alex"
         )
         .is_err()
@@ -271,18 +227,12 @@ async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
             .unwrap();
         let request = begin_login(&mut client).await;
         let secret = [9; 16];
-        client
-            .write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice()))
-            .await
-            .unwrap();
+        client.write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice())).await.unwrap();
         client.enable_encryption(&secret).unwrap();
         decode_packet::<LoginSuccess>(&client.read_frame(65536).await.unwrap()).unwrap();
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
-        assert_eq!(
-            client.read_frame(4096).await.unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
     };
     tokio::join!(server, client);
     request_task.await.unwrap();
@@ -299,10 +249,7 @@ async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() 
         let (auth, request_task) = mock_session(http_response("200 OK", &profile_json())).await;
         let mut proxy = Proxy::bind(
             "127.0.0.1:0".parse().unwrap(),
-            Config {
-                max_connections: std::num::NonZeroUsize::new(1).unwrap(),
-                ..Config::default()
-            },
+            Config { max_connections: std::num::NonZeroUsize::new(1).unwrap(), ..Config::default() },
         )
         .await
         .unwrap();
@@ -322,22 +269,14 @@ async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() 
             .unwrap();
         let request = begin_login(&mut client).await;
         let secret = [5; 16];
-        client
-            .write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice()))
-            .await
-            .unwrap();
+        client.write_packet(&encrypt_response(&request, &secret, request.verify_token.as_slice())).await.unwrap();
         client.enable_encryption(&secret).unwrap();
         decode_packet::<SetCompression>(&client.read_frame(4096).await.unwrap()).unwrap();
         client.enable_compression(256);
         decode_packet::<LoginSuccess>(&client.read_frame(65536).await.unwrap()).unwrap();
         client.write_packet(&LoginAcknowledged).await.unwrap();
         let keepalive = decode_packet::<ConfigurationKeepAlive>(&client.read_frame(4096).await.unwrap()).unwrap();
-        client
-            .write_packet(&ConfigurationKeepAliveResponse {
-                keep_alive_id: keepalive.keep_alive_id,
-            })
-            .await
-            .unwrap();
+        client.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: keepalive.keep_alive_id }).await.unwrap();
         // A waiting player retains its capacity slot.
         let mut excess = TcpStream::connect(address).await.unwrap();
         let result = excess.read(&mut [0]).await;
@@ -345,10 +284,7 @@ async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() 
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();
         let error = client.read_frame(4096).await.unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-        ));
+        assert!(matches!(error.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset));
         request_task.await.unwrap();
     })
     .await

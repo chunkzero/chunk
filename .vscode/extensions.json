@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "editorconfig.editorconfig",
+    "rust-lang.rust-analyzer",
+    "rnoro.vscode-ktlint-formatter",
+    "redhat.java",
+    "jkillian.custom-local-formatters",
+    "oxc.oxc-vscode",
+    "bufbuild.vscode-buf"
+  ]
+}

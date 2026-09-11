@@ -85,8 +85,6 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
         result
     }
     .await;
-    tokio::task::spawn_blocking(move || drop(backend))
-        .await
-        .map_err(io::Error::other)?;
+    tokio::task::spawn_blocking(move || drop(backend)).await.map_err(io::Error::other)?;
     result
 }

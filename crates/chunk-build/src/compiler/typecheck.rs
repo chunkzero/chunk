@@ -11,18 +11,10 @@ pub(super) fn executable() -> io::Result<PathBuf> {
         return Ok(path.into());
     }
     let executable = std::env::current_exe()?;
-    let parent = executable
-        .parent()
-        .ok_or_else(|| io::Error::other("executable directory missing"))?;
-    let parent = if parent.file_name().is_some_and(|name| name == "deps") {
-        parent.parent().unwrap_or(parent)
-    } else {
-        parent
-    };
-    let path = parent
-        .join("toolchain/typescript")
-        .join(VERSION)
-        .join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
+    let parent = executable.parent().ok_or_else(|| io::Error::other("executable directory missing"))?;
+    let parent =
+        if parent.file_name().is_some_and(|name| name == "deps") { parent.parent().unwrap_or(parent) } else { parent };
+    let path = parent.join("toolchain/typescript").join(VERSION).join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
     if !path.is_file() {
         return Err(io::Error::other(format!(
             "TypeScript {VERSION} missing. Reinstall the CLI or set CHUNK_TYPESCRIPT to its executable."
@@ -50,10 +42,7 @@ pub(super) fn check(files: &[Source], output: &Path) -> io::Result<()> {
         }))
         .map_err(io::Error::other)?,
     )?;
-    let result = Command::new(compiler)
-        .args(["--pretty", "false", "--noEmit", "--project"])
-        .arg(config)
-        .output()?;
+    let result = Command::new(compiler).args(["--pretty", "false", "--noEmit", "--project"]).arg(config).output()?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
             "{}{}",

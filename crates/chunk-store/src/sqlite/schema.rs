@@ -6,11 +6,7 @@ use super::codec::{column, quote};
 
 pub(super) fn load(connection: &Connection) -> Result<DatabaseSchema> {
     let schema: Option<String> = connection
-        .query_row(
-            "SELECT schema FROM _chunk_migrations ORDER BY revision DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT schema FROM _chunk_migrations ORDER BY revision DESC LIMIT 1", [], |row| row.get(0))
         .optional()?;
     schema.map_or_else(
         || Ok(DatabaseSchema::new()),
@@ -68,11 +64,7 @@ pub(super) fn merge(current: &DatabaseSchema, incoming: &DatabaseSchema) -> Resu
                 "_bytes INTEGER NOT NULL CHECK (_bytes >= 0)".to_owned(),
             ];
             columns.extend(table.fields.iter().map(|(name, field)| column(name, field)));
-            statements.push(format!(
-                "CREATE TABLE {} ({}) STRICT, WITHOUT ROWID",
-                quote(name),
-                columns.join(", ")
-            ));
+            statements.push(format!("CREATE TABLE {} ({}) STRICT, WITHOUT ROWID", quote(name), columns.join(", ")));
             for (index, fields) in &table.indexes {
                 statements.push(create_index(name, index, fields));
             }
@@ -80,21 +72,13 @@ pub(super) fn merge(current: &DatabaseSchema, incoming: &DatabaseSchema) -> Resu
         }
     }
     chunk_contract::validate(&merged).map_err(Error::Invalid)?;
-    Ok(Migration {
-        schema: merged,
-        statements,
-    })
+    Ok(Migration { schema: merged, statements })
 }
 
 fn create_index(table: &str, index: &str, fields: &[String]) -> String {
     let mut columns: Vec<_> = fields.iter().map(|field| quote(field)).collect();
     columns.push("_id".into());
-    format!(
-        "CREATE INDEX {} ON {} ({})",
-        quote(&index_name(table, index)),
-        quote(table),
-        columns.join(", ")
-    )
+    format!("CREATE INDEX {} ON {} ({})", quote(&index_name(table, index)), quote(table), columns.join(", "))
 }
 
 pub(super) fn index_name(table: &str, index: &str) -> String {

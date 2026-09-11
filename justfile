@@ -3,22 +3,29 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# Format Rust, Kotlin and protobuf sources.
+# Format repository sources, configuration and documentation.
 fmt:
     cargo fmt --all
-    ktlint --format "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
+    ktlint --format "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "examples/**/*.kt" "examples/**/*.kts" "*.kts" "!**/build/**" "!**/.chunk/**"
     buf format --write proto
+    git ls-files -z --cached --others --exclude-standard -- '*.java' | xargs -0 google-java-format --aosp --replace
+    pnpm fmt
+    just --unstable --fmt
 
 # Verify formatting without modifying files.
 fmt-check:
     cargo fmt --all --check
-    ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "*.kts" "!**/build/**"
+    ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "examples/**/*.kt" "examples/**/*.kts" "*.kts" "!**/build/**" "!**/.chunk/**"
     buf format --diff --exit-code proto
+    git ls-files -z --cached --others --exclude-standard -- '*.java' | xargs -0 google-java-format --aosp --dry-run --set-exit-if-changed
+    pnpm fmt:check
+    just --unstable --fmt --check
 
 # Run linters.
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     buf lint proto
+    pnpm lint
 
 # Type-check the TypeScript packages.
 typecheck:
@@ -30,28 +37,32 @@ test: toolchain
     cargo test --workspace
     cargo test -p chunk-proxy --no-default-features
     ./gradlew test
+    examples/local/gradlew test
 
 # Build everything.
-build:
+build: toolchain
     cargo build --workspace
     ./gradlew assemble
+    examples/local/gradlew assemble
 
 # Everything CI runs. Run before opening a PR.
-ready: fmt-check lint typecheck test build
+ready: fmt-check lint typecheck test build consumers
+
+# Build real Java and Kotlin consumers from source-only scratch copies.
+consumers: toolchain
+    python3 scripts/check-consumers.py target/debug/chunk
 
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
-local *args:
-    pnpm install --frozen-lockfile
-    node scripts/install-typescript.mjs
-    ./gradlew :jvm:example:installDist :jvm:example:writeJavaExecutable
-    cargo run -p chunk-cli -- local --project examples/local/project.json --java "$(cat jvm/example/build/java-executable.txt)" {{args}}
+local *args: toolchain
+    cargo run -p chunk-cli -- dev examples/local {{ args }}
 
 # Operate on players connected to the local example.
 players *args:
-    cargo run -p chunk-cli -- players --control-file .chunk/local/control.json {{args}}
+    cargo run -p chunk-cli -- players --control-file examples/local/.chunk/local/control.json {{ args }}
 
-# Install the pinned native TypeScript toolchain beside development executables.
+# Build the development CLI and install its pinned native TypeScript toolchain.
 toolchain:
+    cargo build -p chunk-cli
     pnpm install --frozen-lockfile
     node scripts/install-typescript.mjs
 

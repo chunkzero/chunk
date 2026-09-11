@@ -1,20 +1,27 @@
-use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    fs, io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use chunk_build::{Artifact, Inputs};
-use chunk_control::{MachineProfile, SessionType};
-use serde::{Deserialize, Serialize};
+use chunk_build::project::ProjectMetadata;
+use tokio_util::sync::CancellationToken;
+
+use crate::building;
 
 mod services;
 
-#[derive(Clone, clap::Args)]
+#[derive(clap::Args)]
 pub(crate) struct Options {
-    #[arg(long, default_value = "project.json")]
-    project: PathBuf,
-    #[arg(long, default_value = ".chunk/local")]
-    state: PathBuf,
-    /// Path to Java 25 or newer.
+    #[command(flatten)]
+    build: building::Options,
+    /// Local service state directory (defaults to PROJECT/.chunk/local).
     #[arg(long)]
-    java: PathBuf,
+    state: Option<PathBuf>,
+    /// Override the Java executable selected by Gradle.
+    #[arg(long)]
+    java: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:25565")]
     bind: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:25568")]
@@ -23,104 +30,105 @@ pub(crate) struct Options {
     control_bind: SocketAddr,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Project {
-    environment: String,
-    gameplay_distribution: PathBuf,
-    gameplay_module: String,
-    profiles: BTreeMap<String, MachineProfile>,
-    session_types: BTreeMap<String, SessionType>,
-    max_processes: u16,
+struct Settings {
+    state: PathBuf,
+    java: PathBuf,
+    bind: SocketAddr,
+    backend_bind: SocketAddr,
+    control_bind: SocketAddr,
 }
 
-pub(crate) async fn run(mut options: Options) -> io::Result<()> {
-    let shutdown = crate::shutdown_signal()?;
-    tokio::pin!(shutdown);
-    fs::create_dir_all(&options.state)?;
-    options.state = options.state.canonicalize()?;
-    let _lock = runner_lock(&options.state.join("runner.lock"))?;
-    for address in [options.bind, options.backend_bind, options.control_bind] {
+pub(crate) async fn run(options: Options) -> io::Result<()> {
+    chunk_service::run(|stop| serve(options, stop)).await
+}
+
+async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
+    let project = building::prepare(&options.build)?;
+    let mut control = control_config(&project.metadata, "building")?;
+    let state = options.state.unwrap_or_else(|| project.root.join(".chunk/local"));
+    fs::create_dir_all(&state)?;
+    let state = state.canonicalize()?;
+    let _lock = runner_lock(&state.join("runner.lock"))?;
+    available_addresses(options.bind, options.backend_bind, options.control_bind)?;
+    let built = building::execute(&project, stop.clone()).await?;
+    let java = options.java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
+    tokio::select! {
+        () = stop.cancelled() => return building::cancelled(&stop),
+        result = java_version(&java, built.java.version) => result?,
+    }
+    control.deployment.deployment.clone_from(&built.release.id);
+    control.artifact_digest.clone_from(&built.release.id);
+    fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
+    tracing::info!(deployment = %built.release.id, "local project packaged");
+    let settings = Settings {
+        state,
+        java,
+        bind: options.bind,
+        backend_bind: options.backend_bind,
+        control_bind: options.control_bind,
+    };
+    services::run(&settings, &control, &built.release, stop).await
+}
+
+fn control_config(project: &ProjectMetadata, deployment: &str) -> io::Result<chunk_control::Config> {
+    let local =
+        project.local.as_ref().ok_or_else(|| io::Error::other("chunk dev requires [local] settings in chunk.toml"))?;
+    if project.apps.is_empty() {
+        return Err(io::Error::other("chunk dev requires at least one discovered app"));
+    }
+    let session_types = project
+        .apps
+        .iter()
+        .map(|app| {
+            let machine_profile = app
+                .runtime
+                .machine_profile
+                .clone()
+                .ok_or_else(|| io::Error::other("app machine profile is unresolved"))?;
+            let capacity = app.runtime.capacity.ok_or_else(|| io::Error::other("app capacity is unresolved"))?;
+            Ok((app.id.clone(), chunk_control::SessionType { machine_profile, capacity }))
+        })
+        .collect::<io::Result<_>>()?;
+    Ok(chunk_control::Config {
+        deployment: chunk_proto::v1::DeploymentRef {
+            environment: local.environment.clone(),
+            deployment: deployment.into(),
+        },
+        artifact_digest: deployment.into(),
+        profiles: local
+            .profiles
+            .iter()
+            .map(|(name, profile)| {
+                (
+                    name.clone(),
+                    chunk_control::MachineProfile {
+                        memory_mib: profile.memory_mib,
+                        max_sessions: profile.max_sessions,
+                    },
+                )
+            })
+            .collect(),
+        session_types,
+        max_processes: local.max_processes,
+    })
+}
+
+fn available_addresses(bind: SocketAddr, backend: SocketAddr, control: SocketAddr) -> io::Result<()> {
+    if bind == backend || bind == control || backend == control {
+        return Err(io::Error::other("local service addresses must differ"));
+    }
+    for address in [bind, backend, control] {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(io::Error::other("local runner requires fixed loopback ports"));
         }
         std::net::TcpListener::bind(address).map_err(|error| {
-            io::Error::other(format!(
-                "{address} is unavailable; stop the existing server first: {error}"
-            ))
+            io::Error::other(format!("{address} is unavailable; stop the existing server first: {error}"))
         })?;
     }
-    if options.bind == options.backend_bind
-        || options.bind == options.control_bind
-        || options.backend_bind == options.control_bind
-    {
-        return Err(io::Error::other("local service addresses must differ"));
-    }
-    tokio::select! {
-        result = &mut shutdown => return result,
-        result = java_version(&options.java) => result?,
-    }
-    let build_options = options.clone();
-    let (project, artifact) = tokio::task::spawn_blocking(move || build(&build_options))
-        .await
-        .map_err(io::Error::other)??;
-    tracing::info!(deployment = %artifact.id, "local project packaged");
-    let stop = tokio_util::sync::CancellationToken::new();
-    let running = services::run(&options, &project, &artifact, stop.clone());
-    tokio::pin!(running);
-    tokio::select! {
-        result = &mut running => result,
-        result = &mut shutdown => { stop.cancel(); let stopped = running.await; result.and(stopped) }
-    }
+    Ok(())
 }
 
-fn build(options: &Options) -> io::Result<(Project, Artifact)> {
-    let file = options.project.canonicalize()?;
-    let project: Project = serde_json::from_slice(&fs::read(&file)?).map_err(io::Error::other)?;
-    let directory = file
-        .parent()
-        .ok_or_else(|| io::Error::other("project directory missing"))?;
-    if directory.join("server").is_dir() {
-        chunk_build::generate_sdk(directory)?;
-    }
-    let distribution = directory.join(&project.gameplay_distribution);
-    let module = fs::read_to_string(distribution.join("backend/gameplay-module.txt"))?;
-    if module.trim() != project.gameplay_module {
-        return Err(io::Error::other(
-            "gameplay module does not match the generated distribution",
-        ));
-    }
-    let artifact = chunk_build::publish(
-        &Inputs {
-            source: directory
-                .join(&project.gameplay_distribution)
-                .join("backend/source.mjs"),
-            contract: directory
-                .join(&project.gameplay_distribution)
-                .join("backend/contract.json"),
-            distribution: directory.join(&project.gameplay_distribution),
-        },
-        &options.state.join("artifacts"),
-        &serde_json::to_vec(&project).map_err(io::Error::other)?,
-    )?;
-    let config = chunk_control::Config {
-        deployment: chunk_proto::v1::DeploymentRef {
-            environment: project.environment.clone(),
-            deployment: artifact.id.clone(),
-        },
-        artifact_digest: artifact.id.clone(),
-        profiles: project.profiles.clone(),
-        session_types: project.session_types.clone(),
-        max_processes: project.max_processes,
-    };
-    fs::write(
-        options.state.join("control-config.json"),
-        serde_json::to_vec(&config).map_err(io::Error::other)?,
-    )?;
-    Ok((project, artifact))
-}
-
-fn runner_lock(path: &std::path::Path) -> io::Result<fs::File> {
+fn runner_lock(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::File::options();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -129,31 +137,34 @@ fn runner_lock(path: &std::path::Path) -> io::Result<fs::File> {
         options.mode(0o600);
     }
     let file = options.open(path)?;
-    file.try_lock()
-        .map_err(|_| io::Error::other("another local runner owns this state directory"))?;
+    file.try_lock().map_err(|_| io::Error::other("another local runner owns this state directory"))?;
     Ok(file)
 }
 
-async fn java_version(java: &std::path::Path) -> io::Result<()> {
+async fn java_version(java: &Path, required: u32) -> io::Result<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(java)
-            .arg("-version")
-            .kill_on_drop(true)
-            .output(),
+        tokio::process::Command::new(java).arg("-version").kill_on_drop(true).output(),
     )
     .await
     .map_err(io::Error::other)??;
-    let version = String::from_utf8_lossy(&output.stderr);
-    let major = version
-        .split('"')
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|v| v.parse::<u32>().ok());
-    if !output.status.success() || major.is_none_or(|v| v < 25) {
-        return Err(io::Error::other(
-            "Java 25+ required. Set --java to a Java 25+ executable.",
-        ));
+    let version = format!("{}\n{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+    let major = version.lines().find_map(|line| {
+        let version = line
+            .strip_prefix("openjdk version ")
+            .or_else(|| line.strip_prefix("java version "))
+            .or_else(|| line.strip_prefix("openjdk "))
+            .or_else(|| line.strip_prefix("java "))?;
+        version.trim_start_matches('"').split(|ch: char| !ch.is_ascii_digit()).next()?.parse::<u32>().ok()
+    });
+    if !output.status.success() || major.is_none_or(|version| version < required) {
+        return Err(io::Error::other(format!(
+            "{} does not provide the Java {required}+ required by this release; select a compatible Gradle toolchain or --java executable",
+            java.display()
+        )));
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

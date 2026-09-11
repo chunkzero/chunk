@@ -36,14 +36,7 @@ impl State {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
-        let Prepared {
-            export,
-            caller,
-            arguments,
-            capabilities,
-            timestamp,
-            seed,
-        } = prepared;
+        let Prepared { export, caller, arguments, capabilities, timestamp, seed } = prepared;
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(Some(capabilities));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
@@ -60,14 +53,7 @@ impl State {
             .take()
             .expect("active invocation");
         let value = result?;
-        let writes = capabilities
-            .writes
-            .into_iter()
-            .map(|(key, write)| Write {
-                key,
-                value: write.value,
-            })
-            .collect();
+        let writes = capabilities.writes.into_iter().map(|(key, write)| Write { key, value: write.value }).collect();
         Ok(Execution { logs, value, writes })
     }
 
@@ -101,13 +87,7 @@ impl State {
             handle.terminate_execution();
             limit + bounds::EMERGENCY_HEAP_BYTES
         });
-        Self {
-            run: None,
-            namespace: None,
-            runtime,
-            termination,
-            calls: 0,
-        }
+        Self { run: None, namespace: None, runtime, termination, calls: 0 }
     }
 
     pub(crate) fn initialize_on(
@@ -119,9 +99,7 @@ impl State {
         limits: Limits,
         cancellation: &Cancellation,
     ) -> Result<(), Error> {
-        self.guarded(deadline, limits, cancellation, |state| {
-            executor.block_on(state.initialize(specifier, source))
-        })
+        self.guarded(deadline, limits, cancellation, |state| executor.block_on(state.initialize(specifier, source)))
     }
 
     fn guarded<T>(
@@ -139,20 +117,12 @@ impl State {
     }
 
     async fn initialize(&mut self, specifier: &str, source: &str) -> Result<(), Error> {
-        self.runtime
-            .execute_script("chunk:web", include_str!("web.js"))
-            .map_err(js_error)?;
-        let run = self
-            .runtime
-            .execute_script("chunk:bootstrap", include_str!("bootstrap.js"))
-            .map_err(js_error)?;
+        self.runtime.execute_script("chunk:web", include_str!("web.js")).map_err(js_error)?;
+        let run = self.runtime.execute_script("chunk:bootstrap", include_str!("bootstrap.js")).map_err(js_error)?;
         {
             deno_core::scope!(scope, &mut self.runtime);
             let run = v8::Local::new(scope, run);
-            self.run = Some(v8::Global::new(
-                scope,
-                v8::Local::<v8::Function>::try_from(run).map_err(js_error)?,
-            ));
+            self.run = Some(v8::Global::new(scope, v8::Local::<v8::Function>::try_from(run).map_err(js_error)?));
         }
         let module = self
             .runtime
@@ -160,20 +130,14 @@ impl State {
             .await
             .map_err(js_error)?;
         let evaluation = self.runtime.mod_evaluate(module);
-        self.runtime
-            .with_event_loop_promise(evaluation, PollEventLoopOptions::default())
-            .await
-            .map_err(js_error)?;
+        self.runtime.with_event_loop_promise(evaluation, PollEventLoopOptions::default()).await.map_err(js_error)?;
         self.drain().await?;
         self.namespace = Some(self.runtime.get_module_namespace(module).map_err(js_error)?);
         Ok(())
     }
 
     async fn drain(&mut self) -> Result<(), Error> {
-        self.runtime
-            .run_event_loop(PollEventLoopOptions::default())
-            .await
-            .map_err(js_error)
+        self.runtime.run_event_loop(PollEventLoopOptions::default()).await.map_err(js_error)
     }
 
     async fn invoke(&mut self, export: &str, caller: &str, arguments: &str) -> Result<String, Error> {
@@ -181,9 +145,7 @@ impl State {
             deno_core::scope!(scope, &mut self.runtime);
             let namespace = v8::Local::new(scope, self.namespace.as_ref().expect("initialized"));
             let key = v8::String::new(scope, export).ok_or(Error::Heap)?;
-            let function = namespace
-                .get(scope, key.into())
-                .ok_or(Error::Invalid("missing export"))?;
+            let function = namespace.get(scope, key.into()).ok_or(Error::Invalid("missing export"))?;
             if !function.is_function() {
                 return Err(Error::Invalid("missing export"));
             }
@@ -198,14 +160,9 @@ impl State {
                 v8::Global::new(scope, v8::Local::<v8::Value>::from(arguments)),
             ]
         };
-        let call = self
-            .runtime
-            .call_with_args(self.run.as_ref().expect("initialized"), &args);
-        let output = self
-            .runtime
-            .with_event_loop_promise(call, PollEventLoopOptions::default())
-            .await
-            .map_err(js_error)?;
+        let call = self.runtime.call_with_args(self.run.as_ref().expect("initialized"), &args);
+        let output =
+            self.runtime.with_event_loop_promise(call, PollEventLoopOptions::default()).await.map_err(js_error)?;
         deno_core::scope!(scope, &mut self.runtime);
         let output = v8::Local::new(scope, output);
         let output = v8::Local::<v8::String>::try_from(output).map_err(js_error)?;

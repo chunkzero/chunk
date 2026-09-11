@@ -1,0 +1,9 @@
+[local]
+environment = "local"
+machine_profile = "local"
+capacity = 16
+max_processes = 4
+
+[local.profiles.local]
+memory_mib = 512
+max_sessions = 2

@@ -89,14 +89,7 @@ impl Engine {
             limits,
             &Cancellation::default(),
         )?;
-        self.deployments.insert(
-            id,
-            Resident {
-                source,
-                limits,
-                runtime: Some(runtime),
-            },
-        );
+        self.deployments.insert(id, Resident { source, limits, runtime: Some(runtime) });
         Ok(())
     }
 
@@ -124,11 +117,7 @@ impl Engine {
         if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > bounds::JSON_BYTES {
             return Err(Error::Invalid("input exceeds size limit"));
         }
-        if resident
-            .runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.calls() >= bounds::RUNTIME_CALLS)
-        {
+        if resident.runtime.as_ref().is_some_and(|runtime| runtime.calls() >= bounds::RUNTIME_CALLS) {
             resident.runtime = None;
         }
         let mut runtime = match resident.runtime.take() {

@@ -37,12 +37,7 @@ impl OwnedRuntime {
             }
             std::fs::write(path.with_extension("exit"), b"stopped")
         });
-        Self {
-            connection,
-            status,
-            stop,
-            task: Some(task),
-        }
+        Self { connection, status, stop, task: Some(task) }
     }
 
     fn finished(&self) -> bool {
@@ -52,10 +47,7 @@ impl OwnedRuntime {
 
     async fn stop(&mut self) -> Result<()> {
         self.stop.cancel();
-        let task = self
-            .task
-            .as_mut()
-            .ok_or(Error::Unresolved("runtime shutdown not confirmed"))?;
+        let task = self.task.as_mut().ok_or(Error::Unresolved("runtime shutdown not confirmed"))?;
         let result = task.await;
         self.task.take();
         result.map_err(io::Error::other)??;
@@ -72,11 +64,7 @@ impl Drop for OwnedRuntime {
 impl EmbeddedHost {
     #[must_use]
     pub fn new(config: chunk_runtime::server::Config, profiles: BTreeMap<String, MachineProfile>) -> Self {
-        Self {
-            config,
-            profiles,
-            processes: Mutex::new(BTreeMap::new()),
-        }
+        Self { config, profiles, processes: Mutex::new(BTreeMap::new()) }
     }
     fn path(&self, id: &str) -> Result<std::path::PathBuf> {
         uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("invalid host ID"))?;
@@ -86,13 +74,8 @@ impl EmbeddedHost {
     /// # Errors
     /// Reports unconfirmed JVM exits or record errors.
     pub async fn shutdown(&self) -> Result<()> {
-        let ids: Vec<_> = self
-            .processes
-            .lock()
-            .map_err(|_| Error::Unresolved("host poisoned"))?
-            .keys()
-            .cloned()
-            .collect();
+        let ids: Vec<_> =
+            self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.keys().cloned().collect();
         let mut result = Ok(());
         for id in ids {
             if let Err(error) = self.terminate(&id).await {
@@ -106,11 +89,7 @@ impl EmbeddedHost {
 impl Host for EmbeddedHost {
     async fn ensure(&self, id: &str, profile: &str) -> Result<RuntimeConnection> {
         let path = self.path(id)?;
-        let memory = self
-            .profiles
-            .get(profile)
-            .ok_or(Error::Invalid("unknown machine profile"))?
-            .memory_mib;
+        let memory = self.profiles.get(profile).ok_or(Error::Invalid("unknown machine profile"))?.memory_mib;
         let entry = self
             .processes
             .lock()
@@ -151,12 +130,7 @@ impl Host for EmbeddedHost {
     }
     async fn terminate(&self, id: &str) -> Result<()> {
         let path = self.path(id)?;
-        let entry = self
-            .processes
-            .lock()
-            .map_err(|_| Error::Unresolved("host poisoned"))?
-            .get(id)
-            .cloned();
+        let entry = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.get(id).cloned();
         if let Some(entry) = entry {
             let mut process = entry.lock().await;
             if let Some(running) = process.as_mut() {

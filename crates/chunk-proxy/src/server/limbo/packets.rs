@@ -23,9 +23,7 @@ impl Cache {
     }
 
     pub(super) fn get(&self, protocol_version: i32) -> io::Result<&Packets> {
-        self.0
-            .get(&protocol_version)
-            .ok_or_else(|| invalid_data("no limbo packets for negotiated protocol version"))
+        self.0.get(&protocol_version).ok_or_else(|| invalid_data("no limbo packets for negotiated protocol version"))
     }
 }
 
@@ -42,9 +40,7 @@ impl Packets {
             return Err(invalid_data("unsupported limbo packet version"));
         }
         let mut known_packs = PreparedPackets::new(compression);
-        known_packs.push(&SelectKnownPacks {
-            packs: BoundedArray::new(vec![]).map_err(invalid_data)?,
-        })?;
+        known_packs.push(&SelectKnownPacks { packs: BoundedArray::new(vec![]).map_err(invalid_data)? })?;
         let mut configuration = PreparedPackets::new(compression);
         configuration.push(&FeatureFlags {
             features: BoundedArray::new(vec![McString::new("minecraft:vanilla").map_err(invalid_data)?])
@@ -56,19 +52,9 @@ impl Packets {
         configuration.push(&FinishConfiguration)?;
         let mut spawn = PreparedPackets::new(compression);
         spawn.push(&JoinLimbo)?;
-        spawn.push(&PlayerAbilities {
-            flags: 7,
-            flying_speed: 0.0,
-            walking_speed: 0.0,
-        })?;
-        spawn.push(&SetChunkCenter {
-            chunk_x: VarInt(0),
-            chunk_z: VarInt(0),
-        })?;
-        spawn.push(&GameEvent {
-            reason: GameEventReason::LevelChunksLoadStart,
-            value: 0.0,
-        })?;
+        spawn.push(&PlayerAbilities { flags: 7, flying_speed: 0.0, walking_speed: 0.0 })?;
+        spawn.push(&SetChunkCenter { chunk_x: VarInt(0), chunk_z: VarInt(0) })?;
+        spawn.push(&GameEvent { reason: GameEventReason::LevelChunksLoadStart, value: 0.0 })?;
         spawn.push(&ChunkBatchStart)?;
         for x in -2..=2 {
             for z in -2..=2 {
@@ -78,18 +64,9 @@ impl Packets {
         spawn.push(&ChunkBatchFinished { batch_size: VarInt(25) })?;
         spawn.push(&position())?;
         let mut title = PreparedPackets::new(compression);
-        title.push(&TitleTimes {
-            fade_in: 10,
-            stay: 200,
-            fade_out: 20,
-        })?;
+        title.push(&TitleTimes { fade_in: 10, stay: 200, fade_out: 20 })?;
         title.push(&PreparingTitle)?;
-        Ok(Self {
-            known_packs,
-            configuration,
-            spawn,
-            title,
-        })
+        Ok(Self { known_packs, configuration, spawn, title })
     }
 }
 

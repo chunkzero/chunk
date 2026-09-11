@@ -67,26 +67,18 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
         dependencies.push(path);
         inputs.insert(name.as_str(), contents);
     }
-    let protocol: Value = serde_json::from_slice(
-        inputs
-            .get("protocol.json")
-            .ok_or("protocol.json must be pinned in source.json")?,
-    )?;
-    let version: Value = serde_json::from_slice(
-        inputs
-            .get("version.json")
-            .ok_or("version.json must be pinned in source.json")?,
-    )?;
+    let protocol: Value =
+        serde_json::from_slice(inputs.get("protocol.json").ok_or("protocol.json must be pinned in source.json")?)?;
+    let version: Value =
+        serde_json::from_slice(inputs.get("version.json").ok_or("version.json must be pinned in source.json")?)?;
     let version_name = string(&version["minecraftVersion"])?;
     if version_name != "26.1" || string(&version["releaseType"])? != "release" {
         return Err("this generator's selected packets are validated for release 26.1".into());
     }
     let protocol_id = i32::try_from(version["version"].as_i64().ok_or("missing protocol version")?)?;
     let packets = packets::generate(&protocol)?;
-    let registries = registries::generate(
-        &protocol,
-        inputs.get("loginPacket.json").ok_or("missing loginPacket.json")?,
-    )?;
+    let registries =
+        registries::generate(&protocol, inputs.get("loginPacket.json").ok_or("missing loginPacket.json")?)?;
     let module = &invocation.module;
     let documentation = format!(
         "Java Edition {version_name}; selected handshake, status, login, configuration and play packets. Generated from `PrismarineJS/minecraft-data` @ {} (MIT). Attribution accompanies the dataset.",
@@ -116,9 +108,7 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
 }
 
 fn string(value: &Value) -> Result<&str> {
-    value
-        .as_str()
-        .ok_or_else(|| format!("expected schema string, got {value}").into())
+    value.as_str().ok_or_else(|| format!("expected schema string, got {value}").into())
 }
 
 #[cfg(test)]

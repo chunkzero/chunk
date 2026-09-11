@@ -9,11 +9,7 @@ use tokio::{io::DuplexStream, sync::oneshot, task::JoinHandle, time::advance};
 use super::super::transport::Transport;
 use super::*;
 
-type Handoff = (
-    Authenticated<DuplexStream>,
-    ConfigurationClientInformation,
-    &'static str,
-);
+type Handoff = (Authenticated<DuplexStream>, ConfigurationClientInformation, &'static str);
 
 fn information() -> ConfigurationClientInformation {
     ConfigurationClientInformation {
@@ -52,13 +48,7 @@ fn connection(capacity: usize) -> (Transport<DuplexStream>, Authenticated<Duplex
     )
 }
 
-fn start_wait(
-    max_wait: Duration,
-) -> (
-    Transport<DuplexStream>,
-    oneshot::Sender<()>,
-    JoinHandle<io::Result<Handoff>>,
-) {
+fn start_wait(max_wait: Duration) -> (Transport<DuplexStream>, oneshot::Sender<()>, JoinHandle<io::Result<Handoff>>) {
     let (client, authenticated) = connection(8192);
     let (ready, destination) = oneshot::channel();
     let server = tokio::spawn(wait_for_destination(
@@ -73,16 +63,11 @@ fn start_wait(
 }
 
 async fn challenge(client: &mut Transport<DuplexStream>) -> i64 {
-    decode_packet::<ConfigurationKeepAlive>(&client.read_frame(4096).await.unwrap())
-        .unwrap()
-        .keep_alive_id
+    decode_packet::<ConfigurationKeepAlive>(&client.read_frame(4096).await.unwrap()).unwrap().keep_alive_id
 }
 
 async fn answer(client: &mut Transport<DuplexStream>, id: i64) {
-    client
-        .write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: id })
-        .await
-        .unwrap();
+    client.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: id }).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -124,11 +109,7 @@ async fn responsive_client_waits_then_hands_off_identity_settings_and_buffered_p
 #[tokio::test(start_paused = true)]
 async fn readiness_waits_for_client_information() {
     let (mut client, authenticated) = connection(8192);
-    let server = tokio::spawn(wait_for_destination(
-        authenticated,
-        ready(Ok("ready")),
-        Duration::from_secs(300),
-    ));
+    let server = tokio::spawn(wait_for_destination(authenticated, ready(Ok("ready")), Duration::from_secs(300)));
     let id = challenge(&mut client).await;
     answer(&mut client, id).await;
     tokio::task::yield_now().await;
@@ -148,15 +129,8 @@ async fn missing_information_and_unanswered_keepalives_time_out() {
         let _ = challenge(&mut client).await;
         let error = server.await.unwrap().err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(
-            error
-                .to_string()
-                .contains(if send_information { "keepalive" } else { "information" })
-        );
-        assert_eq!(
-            client.read_frame(4096).await.unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert!(error.to_string().contains(if send_information { "keepalive" } else { "information" }));
+        assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
     }
 }
 
@@ -173,10 +147,7 @@ async fn wrong_duplicate_and_unsolicited_configuration_responses_are_rejected() 
         assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::InvalidData);
     }
     let (mut client, _ready, server) = start_wait(Duration::from_secs(300));
-    client
-        .write_packet(&chunk_protocol::versions::v26_1::AcknowledgeConfiguration)
-        .await
-        .unwrap();
+    client.write_packet(&chunk_protocol::versions::v26_1::AcknowledgeConfiguration).await.unwrap();
     assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::InvalidData);
 }
 
@@ -198,48 +169,33 @@ async fn client_disconnect_destination_failure_and_task_cancellation_release_con
     let (mut client, _ready, server) = start_wait(Duration::from_secs(300));
     challenge(&mut client).await;
     client.shutdown().await.unwrap();
-    assert_eq!(
-        server.await.unwrap().err().unwrap().kind(),
-        io::ErrorKind::UnexpectedEof
-    );
+    assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::UnexpectedEof);
 
     let (mut client, ready, server) = start_wait(Duration::from_secs(300));
     challenge(&mut client).await;
     drop(ready);
     assert!(server.await.unwrap().is_err());
     assert_eq!(client.read_frame(4096).await.unwrap()[0], 0x02);
-    assert_eq!(
-        client.read_frame(4096).await.unwrap_err().kind(),
-        io::ErrorKind::UnexpectedEof
-    );
+    assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 
     let (mut client, ready, server) = start_wait(Duration::from_secs(300));
     challenge(&mut client).await;
     server.abort();
     assert!(server.await.err().unwrap().is_cancelled());
     assert!(ready.is_closed());
-    assert_eq!(
-        client.read_frame(4096).await.unwrap_err().kind(),
-        io::ErrorKind::UnexpectedEof
-    );
+    assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
 
 #[tokio::test(start_paused = true)]
 async fn blocked_writes_are_bounded_and_never_reused() {
     let (mut client, authenticated) = connection(1);
-    let server = tokio::spawn(wait_for_destination(
-        authenticated,
-        pending::<io::Result<()>>(),
-        Duration::from_secs(300),
-    ));
+    let server =
+        tokio::spawn(wait_for_destination(authenticated, pending::<io::Result<()>>(), Duration::from_secs(300)));
     tokio::task::yield_now().await;
     advance(WRITE_TIMEOUT).await;
     let error = server.await.unwrap().err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(
-        client.read_frame(4096).await.unwrap_err().kind(),
-        io::ErrorKind::UnexpectedEof
-    );
+    assert_eq!(client.read_frame(4096).await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
 
 #[tokio::test]
@@ -272,12 +228,7 @@ async fn destination_configuration_rejects_early_acknowledgment() {
     let (mut client, mut authenticated) = connection(8192);
     let (internal, _backend) = tokio::io::duplex(8192);
     client.write_packet(&AcknowledgeConfiguration).await.unwrap();
-    let result = relay(
-        &mut authenticated.transport,
-        &mut Transport::new(internal),
-        &mut information(),
-    )
-    .await;
+    let result = relay(&mut authenticated.transport, &mut Transport::new(internal), &mut information()).await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
 }
 
@@ -286,18 +237,12 @@ async fn admission_denial_is_a_configuration_disconnect_with_unicode_reason() {
     let (mut client, authenticated) = connection(8192);
     let server = tokio::spawn(wait_for_destination(
         authenticated,
-        ready(Err::<(), _>(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Closed 🛠",
-        ))),
+        ready(Err::<(), _>(io::Error::new(io::ErrorKind::PermissionDenied, "Closed 🛠"))),
         Duration::from_secs(30),
     ));
     let frame = client.read_frame(4096).await.unwrap();
     assert_eq!(&frame[..4], &[0x02, 8, 0, 13]);
     assert_eq!(&frame[4..11], b"Closed ");
     assert_eq!(&frame[11..], &[0xed, 0xa0, 0xbd, 0xed, 0xbb, 0xa0]);
-    assert_eq!(
-        server.await.unwrap().err().unwrap().kind(),
-        io::ErrorKind::PermissionDenied
-    );
+    assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::PermissionDenied);
 }

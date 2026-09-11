@@ -19,11 +19,7 @@ impl Service {
         if token.len() < 32 {
             return Err(Error::Invalid("control credential too short"));
         }
-        Ok(Self {
-            control,
-            token,
-            operations: tokio_util::task::TaskTracker::new(),
-        })
+        Ok(Self { control, token, operations: tokio_util::task::TaskTracker::new() })
     }
 
     pub(crate) fn operations(&self) -> tokio_util::task::TaskTracker {
@@ -61,20 +57,14 @@ impl LocalControl for Service {
         request: Request<chunk_proto::v1::DrainRequest>,
     ) -> Result<Response<chunk_proto::v1::DrainStatus>, Status> {
         self.authorize(&request)?;
-        self.control
-            .drain(request.into_inner())
-            .map(Response::new)
-            .map_err(status)
+        self.control.drain(request.into_inner()).map(Response::new).map_err(status)
     }
     async fn move_player(
         &self,
         request: Request<chunk_proto::v1::MovePlayerRequest>,
     ) -> Result<Response<ClaimRequest>, Status> {
         self.authorize(&request)?;
-        self.control
-            .move_player(request.into_inner())
-            .map(Response::new)
-            .map_err(status)
+        self.control.move_player(request.into_inner()).map(Response::new).map_err(status)
     }
 
     async fn poll_move(
@@ -82,10 +72,7 @@ impl LocalControl for Service {
         request: Request<ClaimRequest>,
     ) -> Result<Response<chunk_proto::v1::PendingMove>, Status> {
         self.authorize(&request)?;
-        self.control
-            .poll_move(request.get_ref())
-            .map(Response::new)
-            .map_err(status)
+        self.control.poll_move(request.get_ref()).map(Response::new).map_err(status)
     }
 
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
@@ -102,11 +89,7 @@ impl LocalControl for Service {
 
     async fn inspect(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
         self.authorize(&request)?;
-        self.control
-            .inspect(request.into_inner())
-            .await
-            .map(Response::new)
-            .map_err(status)
+        self.control.inspect(request.into_inner()).await.map(Response::new).map_err(status)
     }
 
     async fn activate(&self, request: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {

@@ -59,10 +59,7 @@ impl ProcessControl for FakeJvm {
 
     async fn inventory(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessInventory>, Status> {
         assert_eq!(request.get_ref(), &self.identity);
-        assert_eq!(
-            request.metadata().get("authorization").unwrap(),
-            "Bearer child-credential"
-        );
+        assert_eq!(request.metadata().get("authorization").unwrap(), "Bearer child-credential");
         if self.unavailable.load(Ordering::Acquire) {
             return Err(Status::unavailable("injected channel outage"));
         }
@@ -90,10 +87,7 @@ impl Gameplay for FakeJvm {
         unreachable!()
     }
     async fn prepare_player(&self, request: Request<PlayerDelivery>) -> Result<Response<PlayerPreparation>, Status> {
-        assert_eq!(
-            request.metadata().get("authorization").unwrap(),
-            "Bearer child-credential"
-        );
+        assert_eq!(request.metadata().get("authorization").unwrap(), "Bearer child-credential");
         Ok(Response::new(PlayerPreparation {
             operation_id: request.into_inner().operation_id,
             endpoint: self.endpoint.clone(),
@@ -106,31 +100,16 @@ fn request<T>(body: T, child: bool) -> Request<T> {
     let mut request = Request::new(body);
     request.metadata_mut().insert(
         "authorization",
-        if child {
-            "Bearer child-credential"
-        } else {
-            "Bearer runtime-credential"
-        }
-        .parse()
-        .unwrap(),
+        if child { "Bearer child-credential" } else { "Bearer runtime-credential" }.parse().unwrap(),
     );
     request
 }
 
 pub(super) async fn fixture(
     ingress: &TcpListener,
-) -> (
-    Arc<Shared>,
-    FakeJvm,
-    ProcessRegistration,
-    CancellationToken,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (Arc<Shared>, FakeJvm, ProcessRegistration, CancellationToken, tokio::task::JoinHandle<()>) {
     let identity = ProcessIdentity {
-        deployment: Some(DeploymentRef {
-            environment: "local".into(),
-            deployment: "one".into(),
-        }),
+        deployment: Some(DeploymentRef { environment: "local".into(), deployment: "one".into() }),
         runtime_id: "runtime".into(),
         process_id: "jvm".into(),
         generation: 1,
@@ -141,11 +120,7 @@ pub(super) async fn fixture(
     let player_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_endpoint = listener.local_addr().unwrap().to_string();
     let endpoint = player_listener.local_addr().unwrap().to_string();
-    let fake = FakeJvm {
-        identity: identity.clone(),
-        endpoint: endpoint.clone(),
-        unavailable: Arc::default(),
-    };
+    let fake = FakeJvm { identity: identity.clone(), endpoint: endpoint.clone(), unavailable: Arc::default() };
     let stop = CancellationToken::new();
     let cancellation = stop.clone();
     let service = fake.clone();
@@ -203,12 +178,7 @@ pub(super) async fn fixture(
         registration: Mutex::new(None),
         bindings: Mutex::new(BTreeMap::new()),
         shutdown: CancellationToken::new(),
-        status: watch::channel(RuntimeStatus {
-            phase: Phase::Ready,
-            inventory: None,
-            diagnostic: None,
-        })
-        .0,
+        status: watch::channel(RuntimeStatus { phase: Phase::Ready, inventory: None, diagnostic: None }).0,
     });
     let registration = ProcessRegistration {
         identity: Some(identity.clone()),
@@ -226,20 +196,13 @@ pub(super) async fn fixture(
 
 async fn authenticate_registration(service: &Service, registration: &ProcessRegistration) {
     assert_eq!(
-        service
-            .register_process(Request::new(registration.clone()))
-            .await
-            .unwrap_err()
-            .code(),
+        service.register_process(Request::new(registration.clone())).await.unwrap_err().code(),
         tonic::Code::Unauthenticated
     );
     let mut invalid = registration.clone();
     invalid.identity.as_mut().unwrap().generation = 2;
     assert!(service.register_process(request(invalid, true)).await.is_err());
-    service
-        .register_process(request(registration.clone(), true))
-        .await
-        .unwrap();
+    service.register_process(request(registration.clone(), true)).await.unwrap();
     let mut changed = registration.clone();
     changed.player_endpoint = "127.0.0.1:9".into();
     assert!(service.register_process(request(changed, true)).await.is_err());
@@ -247,21 +210,8 @@ async fn authenticate_registration(service: &Service, registration: &ProcessRegi
 
 async fn rejected_setup(endpoint: &str, capability: Vec<u8>) {
     let mut stream = TcpStream::connect(endpoint).await.unwrap();
-    client_setup(
-        &mut stream,
-        &PlayerSetup {
-            operation_id: "one".into(),
-            capability,
-        },
-    )
-    .await
-    .unwrap();
-    assert!(
-        timeout(Duration::from_secs(1), stream.read_u8())
-            .await
-            .unwrap()
-            .is_err()
-    );
+    client_setup(&mut stream, &PlayerSetup { operation_id: "one".into(), capability }).await.unwrap();
+    assert!(timeout(Duration::from_secs(1), stream.read_u8()).await.unwrap().is_err());
 }
 
 #[tokio::test]
@@ -277,58 +227,24 @@ async fn scoped_registration_and_single_use_relay_survive_lifecycle_reconciliati
         operation_id: "one".into(),
         ..Default::default()
     };
-    let prepared = service
-        .prepare_player(request(delivery.clone(), false))
-        .await
-        .unwrap()
-        .into_inner();
+    let prepared = service.prepare_player(request(delivery.clone(), false)).await.unwrap().into_inner();
     assert_ne!(prepared.capability, vec![7; 32]);
-    assert_eq!(
-        service
-            .prepare_player(request(delivery.clone(), false))
-            .await
-            .unwrap()
-            .into_inner(),
-        prepared
-    );
-    assert!(
-        service
-            .prepare_player(request(
-                PlayerDelivery {
-                    owner_generation: 2,
-                    ..delivery
-                },
-                false
-            ))
-            .await
-            .is_err()
-    );
+    assert_eq!(service.prepare_player(request(delivery.clone(), false)).await.unwrap().into_inner(), prepared);
+    assert!(service.prepare_player(request(PlayerDelivery { owner_generation: 2, ..delivery }, false)).await.is_err());
     let relay = tokio::spawn(crate::relay::accept(ingress, shared.clone()));
     rejected_setup(&prepared.endpoint, vec![0; 32]).await;
     let mut stream = TcpStream::connect(&prepared.endpoint).await.unwrap();
-    client_setup(
-        &mut stream,
-        &PlayerSetup {
-            operation_id: "one".into(),
-            capability: prepared.capability.clone(),
-        },
-    )
-    .await
-    .unwrap();
+    client_setup(&mut stream, &PlayerSetup { operation_id: "one".into(), capability: prepared.capability.clone() })
+        .await
+        .unwrap();
     let _: LoginSuccess = wire::read_packet(&mut stream).await.unwrap();
     for unavailable in [false, true, false] {
         fake.unavailable.store(unavailable, Ordering::Release);
         assert_eq!(shared.inventory().await.is_err(), unavailable);
-        service
-            .register_process(request(registration.clone(), true))
-            .await
-            .unwrap();
+        service.register_process(request(registration.clone(), true)).await.unwrap();
         stream.write_all(b"independent player bytes").await.unwrap();
         let mut bytes = [0; 24];
-        timeout(Duration::from_secs(1), stream.read_exact(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
+        timeout(Duration::from_secs(1), stream.read_exact(&mut bytes)).await.unwrap().unwrap();
         assert_eq!(&bytes, b"independent player bytes");
     }
     rejected_setup(&prepared.endpoint, prepared.capability).await;
@@ -348,10 +264,7 @@ async fn startup_deadline_and_exited_child_leave_no_owned_process() {
         bootstrap_session: false,
         program: "/bin/sh".into(),
         arguments,
-        deployment: DeploymentRef {
-            environment: "local".into(),
-            deployment: "one".into(),
-        },
+        deployment: DeploymentRef { environment: "local".into(), deployment: "one".into() },
         machine_profile: "test".into(),
         artifact_digest: "test".into(),
         log_path: log.clone(),
@@ -385,28 +298,15 @@ async fn stalled_ticks_fail_health_and_stop_the_owned_child() {
     let ingress = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (shared, _, registration, stop, task) = fixture(&ingress).await;
-    Service(shared.clone())
-        .register_process(request(registration, true))
-        .await
-        .unwrap();
-    let child = tokio::process::Command::new("/bin/sleep")
-        .arg("60")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+    Service(shared.clone()).register_process(request(registration, true)).await.unwrap();
+    let child = tokio::process::Command::new("/bin/sleep").arg("60").kill_on_drop(true).spawn().unwrap();
     let pid = child.id().unwrap();
-    timeout(
-        Duration::from_secs(15),
-        crate::launch::monitor(shared.clone(), child, listener, ingress),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    timeout(Duration::from_secs(15), crate::launch::monitor(shared.clone(), child, listener, ingress))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(shared.status.borrow().phase, Phase::Failed);
-    assert_eq!(
-        shared.status.borrow().diagnostic.as_deref(),
-        Some("JVM ticks stopped advancing")
-    );
+    assert_eq!(shared.status.borrow().diagnostic.as_deref(), Some("JVM ticks stopped advancing"));
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     stop.cancel();
     task.await.unwrap();
@@ -423,14 +323,8 @@ async fn client_setup(stream: &mut TcpStream, setup: &PlayerSetup) -> std::io::R
         },
     )
     .await?;
-    wire::write_packet(
-        stream,
-        &LoginStart {
-            username: McString::new("Alex").unwrap(),
-            player_uuid: Uuid([1; 16]),
-        },
-    )
-    .await?;
+    wire::write_packet(stream, &LoginStart { username: McString::new("Alex").unwrap(), player_uuid: Uuid([1; 16]) })
+        .await?;
     let challenge: LoginPluginRequest = wire::read_packet(stream).await?;
     wire::write_packet(
         stream,

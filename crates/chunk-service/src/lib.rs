@@ -24,10 +24,7 @@ pub fn required<T: FromStr>(name: &str) -> io::Result<T> {
 /// Reports invalid or non-Unicode values.
 pub fn optional<T: FromStr>(name: &str) -> io::Result<Option<T>> {
     match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map(Some)
-            .map_err(|_| io::Error::other(format!("invalid {name}"))),
+        Ok(value) => value.parse().map(Some).map_err(|_| io::Error::other(format!("invalid {name}"))),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(_) => Err(io::Error::other(format!("invalid {name}"))),
     }
@@ -92,10 +89,7 @@ impl Record {
             let _ = fs::remove_file(temporary);
         }
         result?;
-        Ok(Self {
-            path: path.to_owned(),
-            bytes,
-        })
+        Ok(Self { path: path.to_owned(), bytes })
     }
 }
 impl Drop for Record {

@@ -231,8 +231,12 @@
       "kind": "query",
       "visibility": "public",
       "export": "backendTypes",
-      "arguments": { "type": "null" },
-      "result": { "type": "integer" }
+      "arguments": {
+        "type": "null"
+      },
+      "result": {
+        "type": "integer"
+      }
     },
     "Codecs": {
       "kind": "query",
@@ -248,6 +252,120 @@
             "type": "boolean"
           }
         ]
+      }
+    },
+    "shared/profile/total": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "total",
+      "arguments": {
+        "type": "object",
+        "fields": {}
+      },
+      "result": {
+        "type": "integer"
+      }
+    },
+    "shared/profile/reward": {
+      "kind": "mutation",
+      "visibility": "public",
+      "export": "reward",
+      "arguments": {
+        "type": "object",
+        "fields": {}
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "ok": {
+            "schema": {
+              "type": "boolean"
+            },
+            "optional": false
+          },
+          "session": {
+            "schema": {
+              "type": "session"
+            },
+            "optional": false
+          }
+        }
+      }
+    },
+    "shared/names/class": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "readNestedNames",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "when": {
+            "schema": {
+              "type": "string"
+            },
+            "optional": false
+          },
+          "CODEC": {
+            "schema": {
+              "type": "string"
+            },
+            "optional": false
+          },
+          "payload": {
+            "schema": {
+              "type": "object",
+              "fields": {
+                "items": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "fields": {
+                        "value": {
+                          "schema": {
+                            "type": "string"
+                          },
+                          "optional": false
+                        }
+                      }
+                    }
+                  },
+                  "optional": false
+                }
+              }
+            },
+            "optional": false
+          }
+        }
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "same/same/read": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "sameNestedName",
+      "arguments": {
+        "type": "object",
+        "fields": {}
+      },
+      "result": {
+        "type": "null"
+      }
+    },
+    "shared/hang": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "hang",
+      "arguments": {
+        "type": "null"
+      },
+      "result": {
+        "type": "integer"
       }
     }
   }

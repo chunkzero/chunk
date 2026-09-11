@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "oxc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "rules": {
+    "eqeqeq": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-shadow": "off",
+    "no-underscore-dangle": ["error", { "allow": ["_id"] }]
+  },
+  "overrides": [
+    {
+      "files": ["packages/server/src/index.ts"],
+      "rules": {
+        "typescript/triple-slash-reference": ["error", { "path": "always" }]
+      }
+    },
+    {
+      "files": ["crates/chunk-js/src/bootstrap.js"],
+      "rules": {
+        "no-extend-native": "off"
+      }
+    }
+  ]
+}

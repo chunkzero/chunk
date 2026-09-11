@@ -15,10 +15,7 @@ pub(super) fn column(name: &str, field: &Field) -> String {
         Schema::Integer => ("INTEGER", String::new()),
         // STRICT ANY preserves the integer/double distinction without REAL affinity
         // rounding large integers. The CHECK still restricts the column to numbers.
-        Schema::Number => (
-            "ANY",
-            format!(" CHECK ({name} IS NULL OR typeof({name}) IN ('integer', 'real'))"),
-        ),
+        Schema::Number => ("ANY", format!(" CHECK ({name} IS NULL OR typeof({name}) IN ('integer', 'real'))")),
         Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session => ("TEXT", String::new()),
         _ => ("TEXT", format!(" CHECK (json_valid({name}))")),
     };
@@ -28,11 +25,7 @@ pub(super) fn column(name: &str, field: &Field) -> String {
 
 pub(super) fn encode(field: &Field, value: Option<&Value>) -> Result<SqlValue> {
     let Some(value) = value else {
-        return if field.optional {
-            Ok(SqlValue::Null)
-        } else {
-            Err(Error::Invalid("missing required field"))
-        };
+        return if field.optional { Ok(SqlValue::Null) } else { Err(Error::Invalid("missing required field")) };
     };
     let encoded = match (&field.schema, value) {
         (Schema::Boolean, Value::Bool(value)) => Some(SqlValue::Integer(i64::from(*value))),
@@ -60,9 +53,9 @@ pub(super) fn decode(field: &Field, value: SqlValue) -> Result<Option<Value>> {
     let decoded = match (&field.schema, value) {
         (Schema::Boolean, SqlValue::Integer(value @ (0 | 1))) => Value::Bool(value == 1),
         (Schema::Integer | Schema::Number, SqlValue::Integer(value)) => value.into(),
-        (Schema::Number, SqlValue::Real(value)) => serde_json::Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or(Error::Corrupt("non-finite number"))?,
+        (Schema::Number, SqlValue::Real(value)) => {
+            serde_json::Number::from_f64(value).map(Value::Number).ok_or(Error::Corrupt("non-finite number"))?
+        }
         (Schema::String | Schema::Id { .. } | Schema::Player | Schema::Session, SqlValue::Text(value)) => {
             Value::String(value)
         }

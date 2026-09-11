@@ -9,14 +9,8 @@ impl Actor {
     pub(super) fn schema_ready(deployment: &Deployment, installed: &chunk_contract::DatabaseSchema) -> Result<()> {
         for (name, table) in &deployment.tables {
             let current = installed.get(name).ok_or(Error::Contract)?;
-            if table
-                .fields
-                .iter()
-                .any(|(name, field)| current.fields.get(name) != Some(field))
-                || table
-                    .indexes
-                    .iter()
-                    .any(|(name, fields)| current.indexes.get(name) != Some(fields))
+            if table.fields.iter().any(|(name, field)| current.fields.get(name) != Some(field))
+                || table.indexes.iter().any(|(name, fields)| current.indexes.get(name) != Some(fields))
             {
                 return Err(Error::Contract);
             }
@@ -30,11 +24,7 @@ impl Actor {
             return Err(Error::Busy);
         }
         if let Some(existing) = self.versions.get(&id) {
-            return if existing.as_deref() == Some(deployment.as_ref()) {
-                Ok(false)
-            } else {
-                Err(Error::Contract)
-            };
+            return if existing.as_deref() == Some(deployment.as_ref()) { Ok(false) } else { Err(Error::Contract) };
         }
         if self.outstanding != 0
             || self.deploying.is_some()
@@ -43,11 +33,8 @@ impl Actor {
         {
             return Err(Error::Busy);
         }
-        self.js
-            .register(id.clone(), deployment.source.clone(), Limits::default())?;
-        if let Err(error) = self.send(Job::Activate {
-            deployment: deployment.clone(),
-        }) {
+        self.js.register(id.clone(), deployment.source.clone(), Limits::default())?;
+        if let Err(error) = self.send(Job::Activate { deployment: deployment.clone() }) {
             self.js.release(&id);
             return Err(error);
         }
@@ -96,10 +83,7 @@ impl Actor {
         if self.outstanding != 0
             || self.deploying.is_some()
             || self.releasing.is_some()
-            || self
-                .subscriptions
-                .iter()
-                .any(|s| s.calls.iter().any(|c| c.deployment == id))
+            || self.subscriptions.iter().any(|s| s.calls.iter().any(|c| c.deployment == id))
             || self.mutations.values().any(|m| m.call.deployment == id)
         {
             reply.finish(Err(Error::Busy));

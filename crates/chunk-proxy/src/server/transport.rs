@@ -23,10 +23,7 @@ pub(super) struct PreparedPackets {
 
 impl PreparedPackets {
     pub(super) fn new(compression: Option<usize>) -> Self {
-        Self {
-            compression,
-            wire: Vec::new(),
-        }
+        Self { compression, wire: Vec::new() }
     }
 
     pub(super) fn push<P: Packet + Encode>(&mut self, packet: &P) -> io::Result<()> {
@@ -47,22 +44,11 @@ impl PreparedPackets {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     pub(super) fn new(stream: S) -> Self {
-        Self {
-            stream,
-            buffer: BytesMut::new(),
-            encrypt: None,
-            decrypt: None,
-            compression: None,
-        }
+        Self { stream, buffer: BytesMut::new(), encrypt: None, decrypt: None, compression: None }
     }
 
     pub(super) fn enable_encryption(&mut self, secret: &[u8; 16]) -> io::Result<()> {
-        self.encrypt = Some(Crypter::new(
-            Cipher::aes_128_cfb8(),
-            Mode::Encrypt,
-            secret,
-            Some(secret),
-        )?);
+        self.encrypt = Some(Crypter::new(Cipher::aes_128_cfb8(), Mode::Encrypt, secret, Some(secret))?);
         let mut decrypt = Crypter::new(Cipher::aes_128_cfb8(), Mode::Decrypt, secret, Some(secret))?;
         // Bytes read beyond Encryption Response already belong to the encrypted stream.
         self.buffer = transform(&mut decrypt, &self.buffer)?.as_slice().into();
@@ -77,23 +63,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     pub(super) async fn read_frame(&mut self, limit: usize) -> io::Result<Bytes> {
         loop {
             // A compressed frame needs room for its uncompressed-length prefix and zlib overhead.
-            let wire_limit = if self.compression.is_some() {
-                limit.saturating_add(1024)
-            } else {
-                limit
-            };
+            let wire_limit = if self.compression.is_some() { limit.saturating_add(1024) } else { limit };
             if let Some(frame) = decode_frame(&mut self.buffer, wire_limit).map_err(invalid_data)? {
-                return self
-                    .compression
-                    .map_or(Ok(frame.clone()), |threshold| inflate(&frame, threshold, limit));
+                return self.compression.map_or(Ok(frame.clone()), |threshold| inflate(&frame, threshold, limit));
             }
             let mut bytes = [0; 4096];
             let count = self.stream.read(&mut bytes).await?;
             if count == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "client closed the connection",
-                ));
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client closed the connection"));
             }
             if let Some(decrypt) = &mut self.decrypt {
                 self.buffer.extend_from_slice(&transform(decrypt, &bytes[..count])?);
@@ -112,9 +89,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
             return Err(invalid_data("invalid player frame size"));
         }
         let mut framed = Vec::with_capacity(body.len() + 5);
-        VarInt(i32::try_from(body.len()).map_err(invalid_data)?)
-            .encode(&mut framed)
-            .map_err(invalid_data)?;
+        VarInt(i32::try_from(body.len()).map_err(invalid_data)?).encode(&mut framed).map_err(invalid_data)?;
         framed.extend_from_slice(body);
         self.write_encoded(&framed).await
     }
@@ -167,9 +142,7 @@ fn transform(cipher: &mut Crypter, bytes: &[u8]) -> io::Result<Vec<u8>> {
 fn deflate(body: &[u8], threshold: usize) -> io::Result<Vec<u8>> {
     let mut payload = Vec::new();
     if body.len() >= threshold {
-        VarInt(i32::try_from(body.len()).map_err(invalid_data)?)
-            .encode(&mut payload)
-            .map_err(invalid_data)?;
+        VarInt(i32::try_from(body.len()).map_err(invalid_data)?).encode(&mut payload).map_err(invalid_data)?;
         let mut encoder = ZlibEncoder::new(payload, Compression::default());
         encoder.write_all(body)?;
         payload = encoder.finish()?;
@@ -181,9 +154,7 @@ fn deflate(body: &[u8], threshold: usize) -> io::Result<Vec<u8>> {
         return Err(invalid_data("compressed frame too large"));
     }
     let mut frame = Vec::new();
-    VarInt(i32::try_from(payload.len()).map_err(invalid_data)?)
-        .encode(&mut frame)
-        .map_err(invalid_data)?;
+    VarInt(i32::try_from(payload.len()).map_err(invalid_data)?).encode(&mut frame).map_err(invalid_data)?;
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
@@ -201,9 +172,7 @@ fn inflate(mut frame: &[u8], threshold: usize, limit: usize) -> io::Result<Bytes
     }
     let mut output = vec![0; length + 1];
     let mut decoder = Decompress::new(true);
-    let status = decoder
-        .decompress(frame, &mut output, FlushDecompress::Finish)
-        .map_err(invalid_data)?;
+    let status = decoder.decompress(frame, &mut output, FlushDecompress::Finish).map_err(invalid_data)?;
     if status != Status::StreamEnd || decoder.total_in() != frame.len() as u64 || decoder.total_out() != length as u64 {
         return Err(invalid_data("invalid or mismatched zlib stream"));
     }
@@ -255,10 +224,7 @@ mod tests {
                 }
                 for _ in 0..2 {
                     server.write_prepared(&prepared).await.unwrap();
-                    server
-                        .write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 123 })
-                        .await
-                        .unwrap();
+                    server.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 123 }).await.unwrap();
                     decode_packet::<LoginAcknowledged>(&client.read_frame(4096).await.unwrap()).unwrap();
                     assert_eq!(
                         decode_packet::<ConfigurationPluginMessage>(&client.read_frame(4096).await.unwrap()).unwrap(),
@@ -272,10 +238,7 @@ mod tests {
                     );
                 }
                 let mismatch = PreparedPackets::new(Some(17));
-                assert_eq!(
-                    server.write_prepared(&mismatch).await.unwrap_err().kind(),
-                    io::ErrorKind::InvalidData
-                );
+                assert_eq!(server.write_prepared(&mismatch).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
             }
         }
     }

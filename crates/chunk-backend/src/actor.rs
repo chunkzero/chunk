@@ -130,8 +130,7 @@ impl Actor {
             let Some(event) = event else {
                 break;
             };
-            self.subscriptions
-                .retain(|subscription| !subscription.sender.is_closed());
+            self.subscriptions.retain(|subscription| !subscription.sender.is_closed());
             match event {
                 Event::Request(command) => {
                     if stopped.load(Ordering::Acquire) {
@@ -190,23 +189,15 @@ impl Actor {
                 }
             }
             #[cfg(test)]
-            Command::Register {
-                id,
-                source,
-                limits,
-                reply,
-            } => {
+            Command::Register { id, source, limits, reply } => {
                 let result = if reply.cancellation.is_cancelled() {
                     Err(Error::Cancelled)
                 } else if self.versions.len() >= MAX_DEPLOYMENTS {
                     Err(Error::Busy)
                 } else {
-                    self.js
-                        .register(id.clone(), source, limits)
-                        .map_err(Error::from)
-                        .map(|()| {
-                            self.versions.insert(id, None);
-                        })
+                    self.js.register(id.clone(), source, limits).map_err(Error::from).map(|()| {
+                        self.versions.insert(id, None);
+                    })
                 };
                 reply.finish(result);
             }
@@ -215,16 +206,9 @@ impl Actor {
                 let result = self.evaluate(&call, Mode::Query, self.view.clone(), &reply.cancellation);
                 match result {
                     Ok((execution, dependencies)) => {
-                        let independent = self
-                            .pending
-                            .iter()
-                            .all(|pending| !dependencies.affected(&pending.changes));
+                        let independent = self.pending.iter().all(|pending| !dependencies.affected(&pending.changes));
                         let update = Update {
-                            revision: if independent {
-                                self.view.base.revision
-                            } else {
-                                self.view.revision
-                            },
+                            revision: if independent { self.view.base.revision } else { self.view.revision },
                             json: execution.value.into(),
                         };
                         if update.revision <= self.view.base.revision {
@@ -293,11 +277,7 @@ impl Actor {
         let trace = Rc::new(RefCell::new(Dependencies::default()));
         let (timestamp, seed) = context.unwrap_or_else(|| {
             (view.base.timestamp, {
-                u64::from_be_bytes(
-                    Sha256::digest(call.function.as_bytes())[..8]
-                        .try_into()
-                        .expect("digest prefix"),
-                )
+                u64::from_be_bytes(Sha256::digest(call.function.as_bytes())[..8].try_into().expect("digest prefix"))
             })
         });
         let host = Host {

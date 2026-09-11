@@ -5,13 +5,25 @@
 # Gradle / JVM
 .gradle/
 build/
+/jvm/*/bin/
 !gradle/wrapper/gradle-wrapper.jar
 .kotlin/
 
 # IDE
 .idea/
+!/.idea/
+/.idea/*
+!/.idea/externalDependencies.xml
+!/.idea/google-java-format.xml
+!/.idea/ktlint-plugin.xml
+!/.idea/OxcSettings.xml
+!/.idea/OxfmtSettings.xml
 *.iml
 .vscode/
+!/.vscode/
+/.vscode/*
+!/.vscode/extensions.json
+!/.vscode/settings.json
 .fleet/
 
 # Environment

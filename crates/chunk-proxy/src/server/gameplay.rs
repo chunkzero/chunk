@@ -33,21 +33,16 @@ struct Destination {
 impl Destination {
     fn request<T>(&self, body: T) -> io::Result<Request<T>> {
         let mut request = Request::new(body);
-        request.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {}", self.target.token).parse().map_err(invalid_data)?,
-        );
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {}", self.target.token).parse().map_err(invalid_data)?);
         Ok(request)
     }
 
     async fn prepare_player(&mut self, delivery: PlayerDelivery) -> io::Result<PlayerPreparation> {
         let request = self.request(delivery)?;
         within(WRITE_TIMEOUT, async {
-            self.client
-                .prepare_player(request)
-                .await
-                .map(tonic::Response::into_inner)
-                .map_err(io::Error::other)
+            self.client.prepare_player(request).await.map(tonic::Response::into_inner).map_err(io::Error::other)
         })
         .await
     }
@@ -60,24 +55,12 @@ async fn destination(target: &GameplayTarget) -> io::Result<(Destination, Config
         .connect()
         .await
         .map_err(io::Error::other)?;
-    let mut destination = Destination {
-        client: GameplayClient::new(channel).max_decoding_message_size(65_536),
-        target: target.clone(),
-    };
-    let deployment = DeploymentRef {
-        environment: target.environment.clone(),
-        deployment: target.deployment.clone(),
-    };
-    let request = destination.request(ConfigurationRequest {
-        deployment: Some(deployment.clone()),
-    })?;
+    let mut destination =
+        Destination { client: GameplayClient::new(channel).max_decoding_message_size(65_536), target: target.clone() };
+    let deployment = DeploymentRef { environment: target.environment.clone(), deployment: target.deployment.clone() };
+    let request = destination.request(ConfigurationRequest { deployment: Some(deployment.clone()) })?;
     let configuration = within(WRITE_TIMEOUT, async {
-        destination
-            .client
-            .configuration(request)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(io::Error::other)
+        destination.client.configuration(request).await.map(tonic::Response::into_inner).map_err(io::Error::other)
     })
     .await?;
     if configuration.deployment != Some(deployment) || configuration.process_generation == 0 {
@@ -110,15 +93,10 @@ fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse)
         process_generation: config.process_generation,
         operation_id: uuid::Uuid::new_v4().to_string(),
         session: Some(SessionRef { id: "bridge".into() }),
-        player: Some(PlayerRef {
-            id: identity.uuid.clone(),
-        }),
+        player: Some(PlayerRef { id: identity.uuid.clone() }),
         // Fixture-only ownership until the control plane supplies placement generations.
         owner_generation: u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(io::Error::other)?
-                .as_nanos(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_nanos(),
         )
         .map_err(invalid_data)?,
         identity: Some(identity),
@@ -148,15 +126,8 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         return Err(invalid_data("invalid player preparation"));
     }
     let mut internal = within(deadline, login(&authenticated, &settings, prepared)).await?;
-    within(
-        deadline,
-        Box::pin(configuration::relay(
-            &mut authenticated.transport,
-            &mut internal,
-            &mut settings,
-        )),
-    )
-    .await?;
+    within(deadline, Box::pin(configuration::relay(&mut authenticated.transport, &mut internal, &mut settings)))
+        .await?;
     tracing::info!("authenticated player admitted to Minestom listener");
     // Minestom owns the normal configuration and play exchange on this socket.
     loop {
@@ -204,10 +175,7 @@ pub(super) async fn login<S>(
     if challenge.channel.as_str() != "chunk:delivery" {
         return Err(invalid_data("unexpected login plugin request"));
     }
-    let setup = PlayerSetup {
-        operation_id: prepared.operation_id,
-        capability: prepared.capability,
-    };
+    let setup = PlayerSetup { operation_id: prepared.operation_id, capability: prepared.capability };
     internal
         .write_packet(&LoginPluginResponse {
             message_id: challenge.message_id,

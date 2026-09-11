@@ -3,9 +3,7 @@
     "player": "alex",
     "id": "profiles:p1",
     "count": 9007199254740991,
-    "labels": [
-      "héllo 🌍"
-    ],
+    "labels": ["héllo 🌍"],
     "state": "ready"
   },
   {

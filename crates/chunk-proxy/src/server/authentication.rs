@@ -40,9 +40,7 @@ pub(super) struct Authenticated<S> {
 
 impl Authentication {
     pub(super) async fn new() -> io::Result<Self> {
-        let key = tokio::task::spawn_blocking(|| Rsa::generate(1024))
-            .await
-            .map_err(io::Error::other)??;
+        let key = tokio::task::spawn_blocking(|| Rsa::generate(1024)).await.map_err(io::Error::other)??;
         let public_key = key.public_key_to_der()?;
         let client = Client::builder()
             .https_only(true)
@@ -51,12 +49,7 @@ impl Authentication {
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(io::Error::other)?;
-        Ok(Self {
-            key,
-            public_key,
-            client,
-            endpoint: Url::parse(SESSION_SERVER).map_err(io::Error::other)?,
-        })
+        Ok(Self { key, public_key, client, endpoint: Url::parse(SESSION_SERVER).map_err(io::Error::other)? })
     }
 
     pub(super) async fn login<S: AsyncRead + AsyncWrite + Unpin>(
@@ -66,11 +59,7 @@ impl Authentication {
         compression: Option<usize>,
     ) -> io::Result<Authenticated<S>> {
         let profile = self.negotiate(&mut transport, compression).await?;
-        Ok(Authenticated {
-            protocol_version,
-            profile,
-            transport,
-        })
+        Ok(Authenticated { protocol_version, profile, transport })
     }
 
     async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
@@ -112,9 +101,7 @@ impl Authentication {
         };
         if let Some(threshold) = compression {
             transport
-                .write_packet(&SetCompression {
-                    threshold: VarInt(i32::try_from(threshold).map_err(invalid_data)?),
-                })
+                .write_packet(&SetCompression { threshold: VarInt(i32::try_from(threshold).map_err(invalid_data)?) })
                 .await?;
             transport.enable_compression(threshold);
         }
@@ -130,21 +117,15 @@ impl Authentication {
         }
         let mut secret = Zeroizing::new(vec![0; size]);
         let mut returned_token = vec![0; size];
-        let secret_len = self
-            .key
-            .private_decrypt(response.shared_secret.as_slice(), &mut secret, Padding::PKCS1);
-        let token_len = self
-            .key
-            .private_decrypt(response.verify_token.as_slice(), &mut returned_token, Padding::PKCS1);
+        let secret_len = self.key.private_decrypt(response.shared_secret.as_slice(), &mut secret, Padding::PKCS1);
+        let token_len = self.key.private_decrypt(response.verify_token.as_slice(), &mut returned_token, Padding::PKCS1);
         if secret_len.ok() != Some(16)
             || token_len.ok() != Some(4)
             || !openssl::memcmp::eq(&returned_token[..4], &token)
         {
             return Err(invalid_data("invalid encryption response"));
         }
-        Ok(Zeroizing::new(
-            secret[..16].try_into().expect("validated AES key length"),
-        ))
+        Ok(Zeroizing::new(secret[..16].try_into().expect("validated AES key length")))
     }
 
     async fn verify(&self, username: &str, hash: &str) -> io::Result<LoginSuccess> {
@@ -158,17 +139,12 @@ impl Authentication {
         if response.status() != StatusCode::OK {
             return Err(invalid_data("session was not verified"));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > PROFILE_LIMIT as u64)
-        {
+        if response.content_length().is_some_and(|length| length > PROFILE_LIMIT as u64) {
             return Err(invalid_data("session profile too large"));
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| io::Error::other("session service response failed"))?
+        while let Some(chunk) =
+            response.chunk().await.map_err(|_| io::Error::other("session service response failed"))?
         {
             if chunk.len() > PROFILE_LIMIT - body.len() {
                 return Err(invalid_data("session profile too large"));

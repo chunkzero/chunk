@@ -1,7 +1,7 @@
 {
   "name": "@chunk/sdk-internal",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "description": "Embedded TypeScript SDK sources and internal tests",
   "license": "FSL-1.1-MIT",
   "type": "module",

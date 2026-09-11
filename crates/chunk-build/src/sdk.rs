@@ -8,18 +8,9 @@ use serde_json::{Value, json};
 
 const SOURCES: &[(&str, &str)] = &[
     ("index.ts", include_str!("../../../packages/server/src/index.ts")),
-    (
-        "functions.ts",
-        include_str!("../../../packages/server/src/functions.ts"),
-    ),
-    (
-        "validators.ts",
-        include_str!("../../../packages/server/src/validators.ts"),
-    ),
-    (
-        "documents.ts",
-        include_str!("../../../packages/server/src/documents.ts"),
-    ),
+    ("functions.ts", include_str!("../../../packages/server/src/functions.ts")),
+    ("validators.ts", include_str!("../../../packages/server/src/validators.ts")),
+    ("documents.ts", include_str!("../../../packages/server/src/documents.ts")),
     ("schema.ts", include_str!("../../../packages/server/src/schema.ts")),
     ("web.d.ts", include_str!("../../../packages/server/src/web.d.ts")),
 ];
@@ -41,23 +32,16 @@ pub fn generate_sdk(project: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     let original = package.clone();
-    let object = package
-        .as_object_mut()
-        .ok_or_else(|| io::Error::other("package.json must be an object"))?;
+    let object = package.as_object_mut().ok_or_else(|| io::Error::other("package.json must be an object"))?;
     let imports = object.entry("imports").or_insert_with(|| json!({}));
-    let imports = imports
-        .as_object_mut()
-        .ok_or_else(|| io::Error::other("package.json imports must be an object"))?;
+    let imports = imports.as_object_mut().ok_or_else(|| io::Error::other("package.json imports must be an object"))?;
     imports.insert("#chunk".into(), json!("./.chunk/generated/index.ts"));
     imports.insert("#chunk/schema".into(), json!("./.chunk/sdk/schema.ts"));
 
     for (name, source) in SOURCES {
         write_changed(&project.join(".chunk/sdk").join(name), source.as_bytes())?;
     }
-    write_changed(
-        &project.join(".chunk/generated/index.ts"),
-        include_bytes!("sdk/index.ts"),
-    )?;
+    write_changed(&project.join(".chunk/generated/index.ts"), include_bytes!("sdk/index.ts"))?;
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;
         bytes.push(b'\n');
@@ -77,9 +61,7 @@ fn write_changed(path: &Path, content: &[u8]) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("output directory missing"))?;
+    let parent = path.parent().ok_or_else(|| io::Error::other("output directory missing"))?;
     fs::create_dir_all(parent)?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(content)?;

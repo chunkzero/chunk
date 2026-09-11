@@ -11,28 +11,15 @@ pub(super) struct Source {
 pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
     let mut files = Vec::new();
     collect(&root.join("server"), "shared", &mut files, 0)?;
-    for app in entries(&root.join("apps"))? {
-        if app.file_type()?.is_symlink() {
-            return Err(io::Error::other("app symlinks are unsupported"));
-        }
-        if app.file_type()?.is_dir() {
-            let name = app
-                .file_name()
-                .into_string()
-                .map_err(|_| io::Error::other("source paths must be UTF-8"))?;
-            collect(&app.path().join("server"), &format!("apps/{name}"), &mut files, 0)?;
-        }
+    for app in crate::project::discover_apps(root)? {
+        collect(&root.join(&app.directory).join("server"), &format!("apps/{}", app.id), &mut files, 0)?;
     }
-    if files.iter().try_fold(0_u64, |total, source| {
-        Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len())
-    })? > 8 * 1024 * 1024
+    if files.iter().try_fold(0_u64, |total, source| Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len()))?
+        > 8 * 1024 * 1024
     {
         return Err(io::Error::other("backend source size limit"));
     }
-    if !files
-        .iter()
-        .any(|source| source.path == root.join("server/schema/index.ts"))
-    {
+    if !files.iter().any(|source| source.path == root.join("server/schema/index.ts")) {
         return Err(io::Error::other("missing explicitly composed server/schema/index.ts"));
     }
     Ok(files)
@@ -53,10 +40,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
         return Err(io::Error::other("source nesting limit"));
     }
     for entry in entries(directory)? {
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| io::Error::other("source paths must be UTF-8"))?;
+        let name = entry.file_name().into_string().map_err(|_| io::Error::other("source paths must be UTF-8"))?;
         if ["node_modules", "_generated", ".chunk"].contains(&name.as_str()) {
             continue;
         }
@@ -69,10 +53,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
         } else if kind.is_file()
             && let Some(stem) = name.strip_suffix(".ts").or_else(|| name.strip_suffix(".mts"))
         {
-            files.push(Source {
-                path: entry.path(),
-                namespace: format!("{namespace}/{stem}"),
-            });
+            files.push(Source { path: entry.path(), namespace: format!("{namespace}/{stem}") });
             if files.len() > 512 {
                 return Err(io::Error::other("too many backend source files"));
             }
