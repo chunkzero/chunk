@@ -61,9 +61,12 @@ fields. Use `#chunk/schema` throughout schema modules to keep them independent o
 release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to
 repair missing or stale SDK files. Unchanged generated files are not rewritten.
 
-Result validators are required. `v.optional` means an absent object property; use `v.union(v.null(), ...)` for explicit
-null. Numbers must be finite, and integer values must fit JavaScript's safe range. IDs are branded strings: document IDs
-carry their table prefix; player/session IDs have distinct contract types. IDs describe values and never confer caller
+Result validators are required. `v.optional` allows an absent object property; `v.nullable(...)` allows explicit null.
+At the API boundary, optional properties normalize explicit null to omission. Database values and patches retain
+explicit presence semantics. Use `v.enum("allow", "deny")` for string choices and
+`v.union({ready: v.object({}), waiting: v.object({reason: v.string()})})` for tagged unions with a `type` discriminator.
+Numbers must be finite, and integer values must fit JavaScript's safe range. IDs are branded strings: document IDs carry
+their table prefix; player/session IDs have distinct contract types. IDs describe values and never confer caller
 authority.
 
 `internalQuery` and `internalMutation` are excluded from public clients. Helpers may receive the current context to

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{DatabaseSchema, Schema};
 
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,9 +104,10 @@ fn identifier(value: &str) -> bool {
 fn validate_literals(schema: &Schema) -> Result<(), &'static str> {
     match schema {
         Schema::Literal { value } => validate_wire_value(value),
+        Schema::Nullable { value } => validate_literals(value),
         Schema::Array { items } => validate_literals(items),
         Schema::Object { fields } => fields.values().try_for_each(|f| validate_literals(&f.schema)),
-        Schema::Union { variants } => variants.iter().try_for_each(validate_literals),
+        Schema::Union { variants } => variants.values().try_for_each(validate_literals),
         _ => Ok(()),
     }
 }
@@ -199,7 +200,7 @@ mod tests {
         assert!(schema.accepts(&json!({"value": "text"})));
         assert!(!schema.accepts(&json!({"value": null})));
         let mut invalid = deployment();
-        invalid.functions.values_mut().next().unwrap().result = Schema::Union { variants: vec![] };
+        invalid.functions.values_mut().next().unwrap().result = Schema::Union { variants: BTreeMap::new() };
         assert!(invalid.validate().is_err());
     }
 }

@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "runtime_profile": "transactional_v1",
   "tables": {
     "profiles": {
@@ -43,15 +43,7 @@
           },
           "note": {
             "schema": {
-              "type": "union",
-              "variants": [
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "string"
-                }
-              ]
+              "type": "string"
             },
             "optional": true
           },
@@ -73,12 +65,16 @@
           "state": {
             "schema": {
               "type": "union",
-              "variants": [
-                {
-                  "type": "literal",
-                  "value": "ready"
+              "variants": {
+                "ready": {
+                  "type": "object",
+                  "fields": {}
                 },
-                {
+                "true": {
+                  "type": "object",
+                  "fields": {}
+                },
+                "waiting": {
                   "type": "object",
                   "fields": {
                     "reason": {
@@ -89,7 +85,7 @@
                     }
                   }
                 }
-              ]
+              }
             },
             "optional": false
           }
@@ -246,12 +242,8 @@
         "type": "null"
       },
       "result": {
-        "type": "union",
-        "variants": [
-          {
-            "type": "boolean"
-          }
-        ]
+        "type": "enum",
+        "values": ["allow", "deny"]
       }
     },
     "shared/profile/total": {
@@ -366,6 +358,40 @@
       },
       "result": {
         "type": "integer"
+      }
+    },
+    "shared/profile/nullable": {
+      "kind": "query",
+      "visibility": "public",
+      "export": "nullable",
+      "arguments": {
+        "type": "object",
+        "fields": {
+          "note": {
+            "schema": {
+              "type": "nullable",
+              "value": {
+                "type": "string"
+              }
+            },
+            "optional": false
+          }
+        }
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "nullable",
+          "value": {
+            "type": "array",
+            "items": {
+              "type": "nullable",
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        }
       }
     }
   }

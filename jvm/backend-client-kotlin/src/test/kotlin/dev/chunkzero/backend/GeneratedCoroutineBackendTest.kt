@@ -1,13 +1,13 @@
 package dev.chunkzero.backend
 
 import chunk.v1.BackendGrpc
-import chunk.v1.BackendOuterClass.BackendCall
+import chunk.v1.BackendOuterClass.BackendMutation
+import chunk.v1.BackendOuterClass.BackendQuery
 import chunk.v1.BackendOuterClass.BackendResult
 import chunk.v1.BackendOuterClass.BackendUpdate
-import chunk.v1.BackendOuterClass.BackendWatch
+import chunk.v1.BackendOuterClass.BackendWatchGroup
 import com.google.protobuf.ByteString
-import dev.chunkzero.backend.api.Codecs
-import dev.chunkzero.backend.api.NullValue
+import dev.chunkzero.backend.api.BackendJson
 import dev.chunkzero.backend.api.PlayerId
 import dev.chunkzero.backend.api.SessionId
 import dev.chunkzero.backend.client.BackendSession
@@ -75,11 +75,11 @@ class GeneratedCoroutineBackendTest {
                     assertEquals(1, fixture.saved.size)
                     assertEquals(fixture.calls[1], fixture.calls[2])
                     assertEquals(operation.value(), fixture.calls[1].operationId)
-                    val caller = Codecs.parse(fixture.calls[1].callerJson.toStringUtf8()).asJsonObject
-                    assertEquals("duels", caller.get("app").asString)
-                    assertEquals("trusted", caller.get("player").asString)
+                    val caller = BackendJson.mapper().readTree(fixture.calls[1].callerJson.toStringUtf8())
+                    assertEquals("duels", caller.get("app").asString())
+                    assertEquals("trusted", caller.get("player").asString())
 
-                    val pending = launch { playerBackend.shared.hang(NullValue.INSTANCE) }
+                    val pending = launch { playerBackend.shared.hang(null) }
                     fixture.hanging.await()
                     pending.cancelAndJoin()
                     fixture.callCancelled.await()
@@ -172,7 +172,7 @@ class GeneratedCoroutineBackendTest {
             .build()
 
     private class Watch(
-        val request: BackendWatch,
+        val request: BackendWatchGroup,
         val response: ServerCallStreamObserver<BackendUpdate>,
         val cancelled: CompletableDeferred<Unit>,
     )
@@ -180,7 +180,7 @@ class GeneratedCoroutineBackendTest {
     private class Fixture :
         BackendGrpc.BackendImplBase(),
         AutoCloseable {
-        val calls = CopyOnWriteArrayList<BackendCall>()
+        val calls = CopyOnWriteArrayList<BackendMutation>()
         val saved = ConcurrentHashMap<String, BackendResult>()
         val hanging = CompletableDeferred<Unit>()
         val callCancelled = CompletableDeferred<Unit>()
@@ -209,8 +209,31 @@ class GeneratedCoroutineBackendTest {
             )
         val client = CoroutineBackendClient(backend)
 
-        override fun call(
-            request: BackendCall,
+        override fun query(
+            request: BackendQuery,
+            response: StreamObserver<BackendResult>,
+        ) {
+            respond(
+                BackendMutation
+                    .newBuilder()
+                    .setFunction(
+                        request.function,
+                    ).setArgumentsJson(request.argumentsJson)
+                    .setCallerJson(request.callerJson)
+                    .build(),
+                response,
+            )
+        }
+
+        override fun mutate(
+            request: BackendMutation,
+            response: StreamObserver<BackendResult>,
+        ) {
+            respond(request, response)
+        }
+
+        private fun respond(
+            request: BackendMutation,
             response: StreamObserver<BackendResult>,
         ) {
             calls.add(request)
@@ -240,8 +263,8 @@ class GeneratedCoroutineBackendTest {
             }
         }
 
-        override fun watch(
-            request: BackendWatch,
+        override fun watchGroup(
+            request: BackendWatchGroup,
             response: StreamObserver<BackendUpdate>,
         ) {
             val observer = response as ServerCallStreamObserver<BackendUpdate>

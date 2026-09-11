@@ -1,18 +1,18 @@
 package dev.chunkzero.backend.client;
 
-import chunk.v1.BackendOuterClass.BackendCall;
+import chunk.v1.BackendOuterClass.BackendQuery;
 
-import dev.chunkzero.backend.api.Codec;
+import dev.chunkzero.backend.api.JsonType;
 
 /** A typed slot in a group, including its immutable encoded arguments and session binding. */
 public final class BoundQuery<T> {
     final BackendSession owner;
-    final BackendCall request;
-    final Codec<T> codec;
+    final BackendQuery request;
+    final JsonType<T> type;
 
-    BoundQuery(BackendSession owner, BackendCall request, Codec<T> codec) {
+    BoundQuery(BackendSession owner, BackendQuery request, JsonType<T> type) {
         this.owner = owner;
         this.request = request;
-        this.codec = codec;
+        this.type = type;
     }
 }

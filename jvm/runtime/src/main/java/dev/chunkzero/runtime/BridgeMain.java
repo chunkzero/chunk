@@ -49,8 +49,10 @@ public final class BridgeMain {
         var ticks = new AtomicLong();
         var tickExecutor = new TickExecutor();
         var factories = new LinkedHashMap<String, SessionRegistration>();
+        SessionBackend backend;
         try {
             factories.putAll(AppRegistry.load(Thread.currentThread().getContextClassLoader()));
+            boolean hasApps = !factories.isEmpty();
             if (environment.bootstrapSession()) {
                 if (factories.putIfAbsent(
                                 "bridge", new SessionRegistration("bridge", FlatSession::new))
@@ -59,11 +61,11 @@ public final class BridgeMain {
                             "Bootstrap fixture conflicts with app bridge");
                 }
             }
+            backend = SessionBackend.fromEnvironment(deployment, environment, hasApps);
         } catch (Exception | LinkageError error) {
             process.stop();
             throw error;
         }
-        var backend = SessionBackend.fromEnvironment(deployment, environment);
         var sessions =
                 new SessionManager(
                         tickExecutor, factories, backend == null ? null : backend::client);
@@ -93,6 +95,7 @@ public final class BridgeMain {
             server.shutdownNow();
             process.stop();
             gameplay.close();
+            if (backend != null) backend.close();
             throw error;
         }
         MinecraftServer.getSchedulerManager()

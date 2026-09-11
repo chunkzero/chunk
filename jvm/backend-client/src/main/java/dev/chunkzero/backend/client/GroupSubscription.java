@@ -1,9 +1,7 @@
 package dev.chunkzero.backend.client;
 
 import chunk.v1.BackendOuterClass.BackendUpdate;
-import chunk.v1.BackendOuterClass.BackendWatch;
-
-import dev.chunkzero.backend.api.Codecs;
+import chunk.v1.BackendOuterClass.BackendWatchGroup;
 
 import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
@@ -20,12 +18,12 @@ import java.util.function.Consumer;
 final class GroupSubscription implements AutoCloseable {
     private final BackendSession owner;
     private final List<BoundQuery<?>> queries;
-    private final BackendWatch request;
+    private final BackendWatchGroup request;
     private final Consumer<GroupState> observer;
     private boolean closed;
     private long generation;
     private GroupState.Snapshot snapshot;
-    private ClientCallStreamObserver<BackendWatch> stream;
+    private ClientCallStreamObserver<BackendWatchGroup> stream;
     private ScheduledFuture<?> retry;
 
     GroupSubscription(
@@ -34,7 +32,7 @@ final class GroupSubscription implements AutoCloseable {
         this.queries = queries;
         this.observer = observer;
         request =
-                BackendWatch.newBuilder()
+                BackendWatchGroup.newBuilder()
                         .addAllQueries(queries.stream().map(query -> query.request).toList())
                         .build();
     }
@@ -54,10 +52,10 @@ final class GroupSubscription implements AutoCloseable {
             return;
         }
         long attempt = ++generation;
-        owner.stub.watch(
+        owner.stub.watchGroup(
                 request,
-                new ClientResponseObserver<BackendWatch, BackendUpdate>() {
-                    public void beforeStart(ClientCallStreamObserver<BackendWatch> call) {
+                new ClientResponseObserver<BackendWatchGroup, BackendUpdate>() {
+                    public void beforeStart(ClientCallStreamObserver<BackendWatchGroup> call) {
                         synchronized (GroupSubscription.this) {
                             if (closed || attempt != generation) call.cancel("scope closed", null);
                             else stream = call;
@@ -121,7 +119,7 @@ final class GroupSubscription implements AutoCloseable {
     }
 
     private static <T> QueryResult<T> decode(BoundQuery<T> query, String json) {
-        return new QueryResult.Value<>(query.codec.decode(Codecs.parse(json)));
+        return new QueryResult.Value<>(query.type.read(json));
     }
 
     private synchronized void failed(long attempt, Status status) {

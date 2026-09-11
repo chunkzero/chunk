@@ -49,6 +49,12 @@ pub enum Schema {
     Literal {
         value: Value,
     },
+    Enum {
+        values: Vec<String>,
+    },
+    Nullable {
+        value: Box<Schema>,
+    },
     Array {
         items: Box<Schema>,
     },
@@ -56,7 +62,7 @@ pub enum Schema {
         fields: BTreeMap<String, Field>,
     },
     Union {
-        variants: Vec<Schema>,
+        variants: BTreeMap<String, Schema>,
     },
 }
 
@@ -69,6 +75,7 @@ impl Schema {
                 | Self::Number
                 | Self::Integer
                 | Self::String
+                | Self::Enum { .. }
                 | Self::Id { .. }
                 | Self::Player
                 | Self::Session
@@ -96,11 +103,45 @@ impl Schema {
             }),
             Self::Player | Self::Session => value.as_str().is_some_and(valid_id),
             Self::Literal { value: expected } => value == expected,
+            Self::Enum { values } => value.as_str().is_some_and(|v| values.iter().any(|item| item == v)),
+            Self::Nullable { value: inner } => value.is_null() || inner.accepts_at(value, depth + 1),
             Self::Array { items } => {
                 value.as_array().is_some_and(|items_value| items_value.iter().all(|v| items.accepts_at(v, depth + 1)))
             }
-            Self::Object { fields } => accepts_object(fields, value, depth),
-            Self::Union { variants } => variants.iter().any(|v| v.accepts_at(value, depth + 1)),
+            Self::Object { fields } => accepts_object(fields, value, depth, None),
+            Self::Union { variants } => value.as_object().is_some_and(|object| {
+                object.get("type").and_then(Value::as_str).and_then(|tag| variants.get(tag)).is_some_and(|variant| {
+                    matches!(variant, Self::Object { fields }
+                        if depth < MAX_DEPTH && accepts_object(fields, value, depth + 1, Some("type")))
+                })
+            }),
+        }
+    }
+
+    /// Normalizes optional API properties. Database values retain explicit presence semantics.
+    pub fn normalize_api(&self, value: &mut Value) {
+        match (self, value) {
+            (Self::Object { fields }, Value::Object(object)) => {
+                for (name, field) in fields {
+                    if field.optional && object.get(name).is_some_and(Value::is_null) {
+                        object.remove(name);
+                    } else if let Some(value) = object.get_mut(name) {
+                        field.schema.normalize_api(value);
+                    }
+                }
+            }
+            (Self::Array { items }, Value::Array(values)) => {
+                for value in values {
+                    items.normalize_api(value);
+                }
+            }
+            (Self::Nullable { value: inner }, value) if !value.is_null() => inner.normalize_api(value),
+            (Self::Union { variants }, value) => {
+                if let Some(variant) = value.get("type").and_then(Value::as_str).and_then(|tag| variants.get(tag)) {
+                    variant.normalize_api(value);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -110,13 +151,29 @@ impl Schema {
         }
         match self {
             Self::Id { table } => validate_name(table)?,
+            Self::Enum { values } => {
+                if values.is_empty()
+                    || values.len() > MAX_FIELDS
+                    || values.iter().collect::<BTreeSet<_>>().len() != values.len()
+                {
+                    return Err("invalid enum values");
+                }
+                for value in values {
+                    validate_name(value)?;
+                }
+            }
+            Self::Nullable { value } => value.validate(depth + 1)?,
             Self::Array { items } => items.validate(depth + 1)?,
             Self::Object { fields } => validate_fields(fields, depth + 1, true)?,
             Self::Union { variants } => {
                 if variants.is_empty() || variants.len() > MAX_UNION_VARIANTS {
                     return Err("invalid union size");
                 }
-                for variant in variants {
+                for (name, variant) in variants {
+                    validate_name(name)?;
+                    if !matches!(variant, Self::Object { fields } if !fields.contains_key("type")) {
+                        return Err("union variants must be objects without a type field");
+                    }
                     variant.validate(depth + 1)?;
                 }
             }
@@ -161,13 +218,13 @@ impl TableSchema {
 
     #[must_use]
     pub fn accepts(&self, value: &Value) -> bool {
-        accepts_object(&self.fields, value, 0)
+        accepts_object(&self.fields, value, 0, None)
     }
 }
 
-fn accepts_object(fields: &BTreeMap<String, Field>, value: &Value, depth: usize) -> bool {
+fn accepts_object(fields: &BTreeMap<String, Field>, value: &Value, depth: usize, ignored: Option<&str>) -> bool {
     value.as_object().is_some_and(|object| {
-        object.keys().all(|key| fields.contains_key(key))
+        object.keys().all(|key| Some(key.as_str()) == ignored || fields.contains_key(key))
             && fields
                 .iter()
                 .all(|(key, field)| object.get(key).map_or(field.optional, |v| field.schema.accepts_at(v, depth + 1)))

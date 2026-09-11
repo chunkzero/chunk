@@ -2,20 +2,30 @@ syntax = "proto3";
 
 package chunk.v1;
 
-// Loopback service authenticated by an environment credential. Only trusted
-// platform processes supply caller context; this is not a public client API.
+import "google/protobuf/empty.proto";
+
+// Loopback service authenticated by an environment credential. Every RPC carries
+// x-chunk-environment and x-chunk-deployment metadata, fixed by the owning client.
+// Only trusted platform processes supply caller context.
 service Backend {
-  rpc Call(BackendCall) returns (BackendResult);
-  rpc Watch(BackendWatch) returns (stream BackendUpdate);
+  rpc CheckDeployment(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Query(BackendQuery) returns (BackendResult);
+  rpc Mutate(BackendMutation) returns (BackendResult);
+  rpc WatchGroup(BackendWatchGroup) returns (stream BackendUpdate);
 }
 
-message BackendCall {
-  string environment = 1;
-  string deployment = 2;
-  string function = 3;
-  bytes arguments_json = 4;
-  bytes caller_json = 5;
-  string operation_id = 6;
+message BackendQuery {
+  string function = 1;
+  bytes arguments_json = 2;
+  bytes caller_json = 3;
+}
+
+message BackendMutation {
+  string function = 1;
+  bytes arguments_json = 2;
+  bytes caller_json = 3;
+  // Required. Reuse the same ID and deployment when recovering a lost reply.
+  string operation_id = 4;
 }
 
 message BackendResult {
@@ -23,8 +33,8 @@ message BackendResult {
   bytes result_json = 2;
 }
 
-message BackendWatch {
-  repeated BackendCall queries = 1;
+message BackendWatchGroup {
+  repeated BackendQuery queries = 1;
 }
 
 // Every reconnect begins with a fresh full group. Clients mark retained results

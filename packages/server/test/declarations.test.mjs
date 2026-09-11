@@ -4,7 +4,7 @@ import test from "node:test";
 import { defineSchema, defineTable, internalMutation, isFunction, query, v } from "../src/index.ts";
 
 test("validators preserve absence, null, safe integers and typed IDs", () => {
-  const shape = v.object({ name: v.optional(v.string()), state: v.union(v.null(), v.literal("ready")) });
+  const shape = v.object({ name: v.optional(v.string()), state: v.nullable(v.literal("ready")) });
   assert.deepEqual(shape.parse({ state: null }), { state: null });
   for (const value of [
     { name: null, state: null },
@@ -54,4 +54,20 @@ test("only explicit descriptors are functions and metadata excludes handlers", (
     arguments: { type: "object", fields: { count: { schema: { type: "integer" }, optional: false } } },
     result: { type: "integer" },
   });
+});
+
+test("named unions discriminate objects and API optional nulls normalize without changing database validators", async () => {
+  const { apiValidator } = await import("../src/schema.ts");
+  const state = v.union({ ready: v.object({}), waiting: v.object({ reason: v.optional(v.string()) }) });
+  assert.deepEqual(state.parse({ type: "ready" }), { type: "ready" });
+  for (const value of ["ready", {}, { type: "unknown" }, { type: "ready", reason: "extra" }])
+    assert.throws(() => state.parse(value));
+  assert.throws(() => v.union({ bad: v.string() }));
+  assert.throws(() => v.union({ bad: v.object({ type: v.string() }) }));
+  assert.throws(() => v.enum("allow", "allow"));
+  const value = v.object({ state, note: v.optional(v.string()), result: v.nullable(v.enum("allow", "deny")) });
+  const input = { state: { type: "waiting", reason: null }, note: null, result: null };
+  assert.throws(() => value.parse(input));
+  assert.deepEqual(apiValidator(value).parse(input), { state: { type: "waiting" }, result: null });
+  assert.equal(input.note, null);
 });

@@ -1,13 +1,14 @@
 package dev.chunkzero.backend.client;
 
 import chunk.v1.BackendGrpc;
-import chunk.v1.BackendOuterClass.BackendCall;
+import chunk.v1.BackendOuterClass.BackendMutation;
+import chunk.v1.BackendOuterClass.BackendQuery;
 import chunk.v1.BackendOuterClass.BackendResult;
 
 import com.google.protobuf.ByteString;
 
-import dev.chunkzero.backend.api.Codecs;
 import dev.chunkzero.backend.api.FunctionRef;
+import dev.chunkzero.backend.api.JsonType;
 import dev.chunkzero.backend.api.MutationRef;
 import dev.chunkzero.backend.api.PlayerId;
 import dev.chunkzero.backend.api.QueryRef;
@@ -38,8 +39,6 @@ public final class BackendSession implements AutoCloseable {
     final AtomicBoolean closed = new AtomicBoolean();
     private final Set<CompletableFuture<?>> calls = ConcurrentHashMap.newKeySet();
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
-    private final String environment;
-    private final String deployment;
     private final SessionIdentity identity;
     private final ByteString caller;
     private final Duration deadline;
@@ -53,7 +52,6 @@ public final class BackendSession implements AutoCloseable {
             SessionIdentity identity,
             ScheduledExecutorService scheduler,
             Duration deadline) {
-        stub = authenticated(channel, credential);
         if (environment == null
                 || environment.isEmpty()
                 || environment.length() > 128
@@ -65,8 +63,7 @@ public final class BackendSession implements AutoCloseable {
                 || deadline.isZero()
                 || deadline.compareTo(Duration.ofMinutes(5)) > 0)
             throw new IllegalArgumentException("Invalid call deadline");
-        this.environment = environment;
-        this.deployment = deployment;
+        stub = authenticated(channel, credential, environment, deployment);
         this.identity = Objects.requireNonNull(identity);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.deadline = deadline;
@@ -77,21 +74,26 @@ public final class BackendSession implements AutoCloseable {
     private BackendSession(BackendSession parent, SessionIdentity identity, Runnable onClose) {
         stub = parent.stub;
         scheduler = parent.scheduler;
-        environment = parent.environment;
-        deployment = parent.deployment;
         deadline = parent.deadline;
         this.identity = Objects.requireNonNull(identity);
         this.onClose = onClose;
         caller = ByteString.copyFromUtf8(identity.json().toString());
     }
 
-    private static BackendGrpc.BackendStub authenticated(Channel channel, String credential) {
+    private static BackendGrpc.BackendStub authenticated(
+            Channel channel, String credential, String environment, String deployment) {
         if (credential == null || credential.length() < 32)
             throw new IllegalArgumentException("Invalid backend credential");
         var metadata = new Metadata();
         metadata.put(
                 Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
                 "Bearer " + credential);
+        metadata.put(
+                Metadata.Key.of("x-chunk-environment", Metadata.ASCII_STRING_MARSHALLER),
+                environment);
+        metadata.put(
+                Metadata.Key.of("x-chunk-deployment", Metadata.ASCII_STRING_MARSHALLER),
+                deployment);
         return BackendGrpc.newStub(channel)
                 .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
     }
@@ -109,16 +111,30 @@ public final class BackendSession implements AutoCloseable {
     }
 
     public <A, R> CompletableFuture<R> query(QueryRef<A, R> reference, A arguments) {
-        return call(reference, arguments, "");
+        return this.<BackendQuery, R>call(
+                reference.result(),
+                observer -> timedStub().query(request(reference, arguments), observer));
     }
 
     public <A, R> CompletableFuture<R> mutate(
             MutationRef<A, R> reference, A arguments, OperationId operation) {
-        return call(reference, arguments, operation.value());
+        return this.<BackendMutation, R>call(
+                reference.result(),
+                observer -> {
+                    var query = request(reference, arguments);
+                    var mutation =
+                            BackendMutation.newBuilder()
+                                    .setFunction(query.getFunction())
+                                    .setArgumentsJson(query.getArgumentsJson())
+                                    .setCallerJson(query.getCallerJson())
+                                    .setOperationId(operation.value())
+                                    .build();
+                    timedStub().mutate(mutation, observer);
+                });
     }
 
     public <A, R> BoundQuery<R> bind(QueryRef<A, R> reference, A arguments) {
-        return new BoundQuery<>(this, request(reference, arguments, ""), reference.result());
+        return new BoundQuery<>(this, request(reference, arguments), reference.result());
     }
 
     public <A, R> AutoCloseable watch(
@@ -151,21 +167,22 @@ public final class BackendSession implements AutoCloseable {
         return watch;
     }
 
-    private <A, R> BackendCall request(FunctionRef<A, R> reference, A arguments, String operation) {
-        var encoded = ByteString.copyFromUtf8(reference.arguments().encode(arguments).toString());
+    private <A, R> BackendQuery request(FunctionRef<A, R> reference, A arguments) {
+        var encoded = ByteString.copyFromUtf8(reference.arguments().write(arguments));
         if (encoded.size() > 1024 * 1024) throw new IllegalArgumentException("Argument size limit");
-        return BackendCall.newBuilder()
-                .setEnvironment(environment)
-                .setDeployment(deployment)
+        return BackendQuery.newBuilder()
                 .setFunction(reference.path())
                 .setArgumentsJson(encoded)
                 .setCallerJson(caller)
-                .setOperationId(operation)
                 .build();
     }
 
-    private <A, R> CompletableFuture<R> call(
-            FunctionRef<A, R> reference, A arguments, String operation) {
+    private BackendGrpc.BackendStub timedStub() {
+        return stub.withDeadlineAfter(deadline.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    private <Q, R> CompletableFuture<R> call(
+            JsonType<R> resultType, Consumer<ClientResponseObserver<Q, BackendResult>> start) {
         var result = new CompletableFuture<R>();
         calls.add(result);
         result.whenComplete((value, error) -> calls.remove(result));
@@ -174,51 +191,40 @@ public final class BackendSession implements AutoCloseable {
             return result;
         }
         try {
-            var request = request(reference, arguments, operation);
-            stub.withDeadlineAfter(deadline.toNanos(), TimeUnit.NANOSECONDS)
-                    .call(
-                            request,
-                            new ClientResponseObserver<BackendCall, BackendResult>() {
-                                private BackendResult response;
+            start.accept(
+                    new ClientResponseObserver<Q, BackendResult>() {
+                        private BackendResult response;
 
-                                public void beforeStart(
-                                        ClientCallStreamObserver<BackendCall> stream) {
-                                    result.whenComplete(
-                                            (value, error) -> {
-                                                if (result.isCancelled())
-                                                    stream.cancel("session scope closed", null);
-                                            });
-                                }
+                        public void beforeStart(ClientCallStreamObserver<Q> stream) {
+                            result.whenComplete(
+                                    (value, error) -> {
+                                        if (result.isCancelled())
+                                            stream.cancel("session scope closed", null);
+                                    });
+                        }
 
-                                public void onNext(BackendResult value) {
-                                    response = value;
-                                }
+                        public void onNext(BackendResult value) {
+                            response = value;
+                        }
 
-                                public void onError(Throwable error) {
-                                    result.completeExceptionally(error);
-                                }
+                        public void onError(Throwable error) {
+                            result.completeExceptionally(error);
+                        }
 
-                                public void onCompleted() {
-                                    if (result.isDone()) return;
-                                    try {
-                                        if (response == null)
-                                            throw new IllegalStateException(
-                                                    "Missing backend result");
-                                        var encoded = response.getResultJson();
-                                        if (!encoded.isValidUtf8() || encoded.size() > 1024 * 1024)
-                                            throw new IllegalArgumentException(
-                                                    "Invalid backend JSON");
-                                        result.complete(
-                                                reference
-                                                        .result()
-                                                        .decode(
-                                                                Codecs.parse(
-                                                                        encoded.toStringUtf8())));
-                                    } catch (RuntimeException error) {
-                                        result.completeExceptionally(error);
-                                    }
-                                }
-                            });
+                        public void onCompleted() {
+                            if (result.isDone()) return;
+                            try {
+                                if (response == null)
+                                    throw new IllegalStateException("Missing backend result");
+                                var encoded = response.getResultJson();
+                                if (!encoded.isValidUtf8() || encoded.size() > 1024 * 1024)
+                                    throw new IllegalArgumentException("Invalid backend JSON");
+                                result.complete(resultType.read(encoded.toStringUtf8()));
+                            } catch (RuntimeException error) {
+                                result.completeExceptionally(error);
+                            }
+                        }
+                    });
         } catch (RuntimeException error) {
             result.completeExceptionally(error);
         }

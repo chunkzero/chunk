@@ -39,7 +39,7 @@ impl Fixture {
         fs::write(root.join("fixture/source.mjs"), "export const value = 1;").unwrap();
         fs::write(
             root.join("fixture/contract.json"),
-            br#"{"contract_version":1,"runtime_profile":"transactional_v1","tables":{},"functions":{}}"#,
+            br#"{"contract_version":2,"runtime_profile":"transactional_v1","tables":{},"functions":{}}"#,
         )
         .unwrap();
         fs::write(

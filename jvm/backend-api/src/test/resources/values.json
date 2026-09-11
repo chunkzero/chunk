@@ -4,7 +4,9 @@
     "id": "profiles:p1",
     "count": 9007199254740991,
     "labels": ["héllo 🌍"],
-    "state": "ready"
+    "state": {
+      "type": "ready"
+    }
   },
   {
     "player": "alex",
@@ -12,6 +14,7 @@
     "count": -9007199254740991,
     "labels": [],
     "state": {
+      "type": "waiting",
       "reason": "waiting"
     },
     "note": null
@@ -21,7 +24,9 @@
     "id": "profiles:p1",
     "count": 1,
     "labels": [],
-    "state": "ready",
+    "state": {
+      "type": "ready"
+    },
     "note": "present"
   }
 ]

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, fmt::Write, io};
 
 use chunk_contract::{Field, Schema};
 use serde_json::Value;
@@ -34,47 +34,111 @@ pub(super) struct Generator {
     pub ids: BTreeMap<String, String>,
 }
 
+pub(super) enum Validation {
+    Required,
+    Null,
+    Number,
+    Integer,
+    String,
+    Literal(Value),
+    Nullable(Box<Self>),
+    Array(Box<Self>),
+}
+
+impl Validation {
+    fn is_array(&self) -> bool {
+        match self {
+            Self::Array(_) => true,
+            Self::Nullable(inner) => inner.is_array(),
+            _ => false,
+        }
+    }
+
+    pub fn kotlin_type(&self, java: &str) -> String {
+        match self {
+            Self::Null | Self::Literal(Value::Null) => format!("{java}?"),
+            Self::Nullable(inner) => format!("{}?", inner.kotlin_type(java).trim_end_matches('?')),
+            Self::Array(inner) => format!("List<{}>", inner.kotlin_type(&java[5..java.len() - 1])),
+            _ => java.into(),
+        }
+    }
+
+    pub fn checks(&self, value: &str, depth: usize) -> String {
+        match self {
+            Self::Required => format!("Objects.requireNonNull({value});"),
+            Self::Null => format!("BackendValues.checkNull({value});"),
+            Self::Number => format!("BackendValues.checkNumber({value});"),
+            Self::Integer => format!("BackendValues.checkInteger({value});"),
+            Self::String => format!("BackendValues.checkString({value});"),
+            Self::Literal(expected) => {
+                let expected = match expected {
+                    Value::Number(n) if n.is_i64() => format!("{n}L"),
+                    Value::Number(n) => format!("{n}d"),
+                    other => other.to_string(),
+                };
+                format!("BackendValues.checkLiteral({value}, {expected});")
+            }
+            Self::Nullable(inner) => format!("if ({value} != null) {{ {} }}", inner.checks(value, depth)),
+            Self::Array(inner) => {
+                let item = format!("_item{depth}");
+                format!("BackendValues.checkArray({value}, {item} -> {{ {} }});", inner.checks(&item, depth + 1))
+            }
+        }
+    }
+}
+
 impl Generator {
     pub fn schema(&mut self, scope: &mut Scope, schema: &Schema, name: &str, origin: &str) -> io::Result<Type> {
-        let (ty, codec) = match schema {
-            Schema::Null => ("NullValue".into(), "Codecs.NULL".into()),
-            Schema::Boolean => ("Boolean".into(), "Codecs.BOOLEAN".into()),
-            Schema::Number => ("Double".into(), "Codecs.NUMBER".into()),
-            Schema::Integer => ("Long".into(), "Codecs.INTEGER".into()),
-            Schema::String => ("String".into(), "Codecs.STRING".into()),
-            Schema::Player => ("PlayerId".into(), "Codecs.PLAYER".into()),
-            Schema::Session => ("SessionId".into(), "Codecs.SESSION".into()),
+        let (ty, validation) = match schema {
+            Schema::Null => ("Void".into(), Validation::Null),
+            Schema::Boolean => ("Boolean".into(), Validation::Required),
+            Schema::Number => ("Double".into(), Validation::Number),
+            Schema::Integer => ("Long".into(), Validation::Integer),
+            Schema::String => ("String".into(), Validation::String),
+            Schema::Player => ("PlayerId".into(), Validation::Required),
+            Schema::Session => ("SessionId".into(), Validation::Required),
             Schema::Id { table } => {
-                let marker = self
+                let name = self
                     .ids
                     .entry(table.clone())
-                    .or_insert_with(|| names::type_name(table, &["BackendTypes".into(), "Tables".into()]));
-                (
-                    format!("Id<BackendTypes.Tables.{marker}>"),
-                    format!("Codecs.<BackendTypes.Tables.{marker}>id({})", quote(table)),
-                )
+                    .or_insert_with(|| names::type_name(table, &["BackendTypes".into(), "Ids".into()]));
+                (format!("BackendTypes.Ids.{name}"), Validation::Required)
             }
-            Schema::Literal { value } => match value {
-                Value::Null => ("NullValue".into(), "Codecs.NULL".into()),
-                Value::Bool(value) => ("Boolean".into(), format!("Codecs.literal(Codecs.BOOLEAN, {value})")),
-                Value::String(value) => ("String".into(), format!("Codecs.literal(Codecs.STRING, {})", quote(value))),
-                Value::Number(value) => {
-                    if let Some(integer) = value.as_i64() {
-                        ("Long".into(), format!("Codecs.literal(Codecs.INTEGER, {integer}L)"))
-                    } else {
-                        ("Double".into(), format!("Codecs.literal(Codecs.NUMBER, {value}d)"))
-                    }
-                }
-                _ => unreachable!("validated literal"),
-            },
+            Schema::Literal { value } => {
+                let ty = match value {
+                    Value::Null => "Void",
+                    Value::Bool(_) => "Boolean",
+                    Value::String(_) => "String",
+                    Value::Number(n) if n.is_i64() => "Long",
+                    Value::Number(_) => "Double",
+                    _ => unreachable!("validated literal"),
+                };
+                (ty.into(), Validation::Literal(value.clone()))
+            }
+            Schema::Nullable { value } => {
+                let inner = self.schema(scope, value, name, origin)?;
+                (inner.ty, Validation::Nullable(Box::new(inner.validation)))
+            }
             Schema::Array { items } => {
                 let item = self.schema(scope, items, &format!("{name}Item"), origin)?;
-                (format!("List<{}>", item.ty), format!("Codecs.array({})", item.codec))
+                (format!("List<{}>", item.ty), Validation::Array(Box::new(item.validation)))
             }
-            Schema::Object { fields } => return self.object(scope, name, fields, origin),
+            Schema::Enum { values } => {
+                let name = names::type_name(name, &scope.path);
+                let mut child = scope.child(&name, origin)?;
+                let mut constants = Vec::new();
+                for value in values {
+                    let constant = names::field_name(value);
+                    child.declare(&constant, value)?;
+                    constants.push(format!("@JsonProperty({}) {constant}", quote(value)));
+                }
+                scope.declarations.push(format!("public enum {name} {{ {} }}", constants.join(", ")));
+                (child.path.join("."), Validation::Required)
+            }
+            Schema::Object { fields } => return self.object(scope, name, fields, origin, None),
             Schema::Union { variants } => return self.union(scope, name, variants, origin),
         };
-        Ok(Type { ty, codec })
+        Ok(Type { ty, validation })
     }
 
     fn object(
@@ -83,71 +147,63 @@ impl Generator {
         name: &str,
         fields: &BTreeMap<String, Field>,
         origin: &str,
+        implements: Option<&str>,
     ) -> io::Result<Type> {
         let name = names::type_name(name, &parent.path);
         let mut scope = parent.child(&name, origin)?;
-        scope.declare("CODEC", "generated codec")?;
         let ty = scope.path.join(".");
         let mut components = Vec::new();
-        let mut reads = Vec::new();
-        let mut writes = Vec::new();
         let mut checks = Vec::new();
         for (field, definition) in fields {
             let origin = format!("{origin}.{field}");
             let id = names::field_name(field);
             scope.declare(&id, &origin)?;
             let field_type = self.schema(&mut scope, &definition.schema, field, &origin)?;
-            checks.push(format!("Objects.requireNonNull({id});"));
-            if definition.optional {
-                components.push(format!("FieldValue<{}> {id}", field_type.ty));
-                reads.push(format!("Codecs.optional(object, {}, {})", quote(field), field_type.codec));
-                writes.push(format!("Codecs.optional(object, {}, {}, value.{id}());", quote(field), field_type.codec));
-            } else {
-                components.push(format!("{} {id}", field_type.ty));
-                reads.push(format!("Codecs.field(object, {}, {})", quote(field), field_type.codec));
-                writes.push(format!("object.add({}, {}.encode(value.{id}()));", quote(field), field_type.codec));
-                if matches!(definition.schema, Schema::Array { .. }) {
-                    checks.push(format!("{id} = List.copyOf({id});"));
-                }
+            let annotation = if definition.optional { "@JsonInclude(JsonInclude.Include.NON_NULL) " } else { "" };
+            components.push(format!(
+                "{annotation}@JsonProperty(value = {}, required = {}) {} {id}",
+                quote(field),
+                !definition.optional,
+                field_type.ty
+            ));
+            let mut check = field_type.validation.checks(&id, 0);
+            if field_type.validation.is_array() {
+                write!(check, " if ({id} != null) {id} = BackendValues.copyArray({id});").expect("write to String");
+            }
+            if !definition.optional || !matches!(field_type.validation, Validation::Required) {
+                checks.push(if definition.optional { format!("if ({id} != null) {{ {check} }}") } else { check });
             }
         }
+        let implements = implements.map_or(String::new(), |ty| format!(" implements {ty}"));
         parent.declarations.push(format!(
-            "public record {name}({}) {{\npublic {name} {{ {} }}\n{}\npublic static final Codec<{ty}> CODEC = Codecs.of(input -> {{ var object = Codecs.object(input, Set.of({})); return new {ty}({}); }}, value -> {{ var object = new JsonObject(); {} return object; }});\n}}",
-            components.join(", "), checks.join(" "), scope.declarations.join("\n"),
-            fields.keys().map(|name| quote(name)).collect::<Vec<_>>().join(","), reads.join(","), writes.join(" ")
+            "public record {name}({}){implements} {{\npublic {name} {{ {} }}\n{}\n}}",
+            components.join(", "),
+            checks.join(" "),
+            scope.declarations.join("\n")
         ));
-        Ok(Type { codec: format!("{ty}.CODEC"), ty })
+        Ok(Type { validation: Validation::Required, ty })
     }
 
-    fn union(&mut self, parent: &mut Scope, name: &str, variants: &[Schema], origin: &str) -> io::Result<Type> {
+    fn union(
+        &mut self,
+        parent: &mut Scope,
+        name: &str,
+        variants: &BTreeMap<String, Schema>,
+        origin: &str,
+    ) -> io::Result<Type> {
         let name = names::type_name(name, &parent.path);
         let mut scope = parent.child(&name, origin)?;
-        scope.declare("CODEC", "generated codec")?;
         let ty = scope.path.join(".");
-        let mut reads = Vec::new();
-        let mut writes = Vec::new();
-        for (index, variant) in variants.iter().enumerate() {
-            let origin = format!("{origin} variant {index}");
-            let value_type = self.schema(&mut scope, variant, &format!("Value{index}"), &origin)?;
-            let wrapper = names::type_name(&format!("V{index}"), &scope.path);
-            scope.declare(&wrapper, &origin)?;
-            scope.declarations.push(format!(
-                "record {wrapper}({} value) implements {ty} {{ public {wrapper} {{ Objects.requireNonNull(value); }} }}",
-                value_type.ty
-            ));
-            reads.push(format!(
-                "try {{ return new {ty}.{wrapper}({}.decode(input)); }} catch (IllegalArgumentException ignored) {{}}",
-                value_type.codec
-            ));
-            writes.push(format!(
-                "if (value instanceof {ty}.{wrapper} variant) return {}.encode(variant.value());",
-                value_type.codec
-            ));
+        let mut subtypes = Vec::new();
+        for (tag, variant) in variants {
+            let Schema::Object { fields } = variant else { unreachable!("validated variant") };
+            let variant = self.object(&mut scope, tag, fields, &format!("{origin} variant {tag}"), Some(&ty))?;
+            subtypes.push(format!("@JsonSubTypes.Type(value = {}.class, name = {})", variant.ty, quote(tag)));
         }
         parent.declarations.push(format!(
-            "public sealed interface {name} {{\n{}\nCodec<{ty}> CODEC = Codecs.of(input -> {{ {} throw new IllegalArgumentException(\"No union variant matched\"); }}, value -> {{ {} throw new IllegalArgumentException(\"Unknown union variant\"); }});\n}}",
-            scope.declarations.join("\n"), reads.join("\n"), writes.join("\n")
+            "@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = \"type\")\n@JsonTypeResolver(TaggedUnionResolver.class)\n@JsonSubTypes({{{}}})\npublic sealed interface {name} {{\n{}\n}}",
+            subtypes.join(", "), scope.declarations.join("\n")
         ));
-        Ok(Type { codec: format!("{ty}.CODEC"), ty })
+        Ok(Type { validation: Validation::Required, ty })
     }
 }

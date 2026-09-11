@@ -11,7 +11,14 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<Deployment>> {
         if deployments.len() == 16 {
             return Err(Error::Corrupt("deployment retention limit"));
         }
-        let deployment: Deployment = serde_json::from_str(&contract?)?;
+        let deployment: Deployment = serde_json::from_str(&contract?).map_err(|_| {
+            Error::Corrupt("stored deployment contract is incompatible or corrupt; rebuild with fresh local state")
+        })?;
+        if deployment.contract_version != chunk_contract::CONTRACT_VERSION {
+            return Err(Error::Corrupt(
+                "stored deployment contract version is unsupported; rebuild with fresh local state",
+            ));
+        }
         deployment.validate().map_err(Error::Corrupt)?;
         deployments.push(deployment);
     }

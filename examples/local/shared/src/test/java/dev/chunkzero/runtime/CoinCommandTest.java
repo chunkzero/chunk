@@ -3,17 +3,18 @@ package dev.chunkzero.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import chunk.v1.BackendGrpc;
-import chunk.v1.BackendOuterClass.BackendCall;
+import chunk.v1.BackendOuterClass.BackendMutation;
+import chunk.v1.BackendOuterClass.BackendQuery;
 import chunk.v1.BackendOuterClass.BackendResult;
 import chunk.v1.BackendOuterClass.BackendUpdate;
-import chunk.v1.BackendOuterClass.BackendWatch;
+import chunk.v1.BackendOuterClass.BackendWatchGroup;
 import chunk.v1.Common.SessionRef;
 import chunk.v1.GameplayOuterClass.PlayerDelivery;
 import chunk.v1.Supervision.SessionCommand;
 
-import com.google.gson.JsonParser;
 import com.google.protobuf.ByteString;
 
+import dev.chunkzero.backend.api.BackendJson;
 import dev.chunkzero.backend.api.SessionId;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.SessionIdentity;
@@ -50,24 +51,34 @@ class CoinCommandTest {
     void commandsReachTheBackendFromPlayerThreadsAfterMovesAndRejoins() throws Exception {
         MinecraftServer.init();
         var ticks = new TickExecutor();
-        var coins = new LinkedBlockingQueue<BackendCall>();
+        var coins = new LinkedBlockingQueue<BackendMutation>();
         var server =
                 ServerBuilder.forPort(0)
                         .addService(
                                 new BackendGrpc.BackendImplBase() {
                                     @Override
-                                    public void call(
-                                            BackendCall request,
+                                    public void query(
+                                            BackendQuery request,
                                             StreamObserver<BackendResult> response) {
-                                        var result =
-                                                request.getFunction().equals("shared/players/stats")
-                                                        ? "{\"coins\":0,\"visits\":0}"
-                                                        : "1";
+                                        assertEquals("shared/players/stats", request.getFunction());
                                         response.onNext(
                                                 BackendResult.newBuilder()
                                                         .setRevision(1)
                                                         .setResultJson(
-                                                                ByteString.copyFromUtf8(result))
+                                                                ByteString.copyFromUtf8(
+                                                                        "{\"coins\":0,\"visits\":0}"))
+                                                        .build());
+                                        response.onCompleted();
+                                    }
+
+                                    @Override
+                                    public void mutate(
+                                            BackendMutation request,
+                                            StreamObserver<BackendResult> response) {
+                                        response.onNext(
+                                                BackendResult.newBuilder()
+                                                        .setRevision(1)
+                                                        .setResultJson(ByteString.copyFromUtf8("1"))
                                                         .build());
                                         response.onCompleted();
                                         if (request.getFunction().equals("shared/players/coin"))
@@ -75,8 +86,8 @@ class CoinCommandTest {
                                     }
 
                                     @Override
-                                    public void watch(
-                                            BackendWatch request,
+                                    public void watchGroup(
+                                            BackendWatchGroup request,
                                             StreamObserver<BackendUpdate> response) {
                                         response.onNext(
                                                 BackendUpdate.newBuilder()
@@ -149,11 +160,9 @@ class CoinCommandTest {
                                     .get(5, TimeUnit.SECONDS);
                     assertEquals(CommandResult.Type.SUCCESS, result.getType());
                     var call = pump(ticks, coins::poll);
-                    var caller =
-                            JsonParser.parseString(call.getCallerJson().toStringUtf8())
-                                    .getAsJsonObject();
-                    assertEquals(uuid.toString(), caller.get("player").getAsString());
-                    assertEquals(destination, caller.get("session").getAsString());
+                    var caller = BackendJson.mapper().readTree(call.getCallerJson().toStringUtf8());
+                    assertEquals(uuid.toString(), caller.get("player").asString());
+                    assertEquals(destination, caller.get("session").asString());
                     assertEquals(
                             destination + "/" + uuid + "/" + generation + "/coin-0",
                             call.getOperationId());

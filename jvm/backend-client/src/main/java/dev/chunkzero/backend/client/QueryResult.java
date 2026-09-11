@@ -6,10 +6,6 @@ public sealed interface QueryResult<T> permits QueryResult.Value, QueryResult.Fa
     T valueOrThrow();
 
     record Value<T>(T value) implements QueryResult<T> {
-        public Value {
-            Objects.requireNonNull(value);
-        }
-
         public T valueOrThrow() {
             return value;
         }
