@@ -43,15 +43,8 @@ pub(super) struct Dependency {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Component {
-    Module {
-        group: String,
-        name: String,
-        version: String,
-    },
-    Project {
-        build: String,
-        path: String,
-    },
+    Module { group: String, name: String, version: String },
+    Project { build: String, path: String },
 }
 
 /// Reads the versioned local descriptor without executing Java or Gradle.
@@ -64,14 +57,10 @@ pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
         || !(21..=100).contains(&descriptor.java.version)
         || !descriptor.java.executable.is_absolute()
     {
-        return Err(io::Error::other(
-            "JVM descriptor requires version 1, Java 21–100 and an absolute executable path",
-        ));
+        return Err(io::Error::other("JVM descriptor requires version 1, Java 21–100 and an absolute executable path"));
     }
     if descriptor.apps.is_empty() || descriptor.apps.len() > 128 || descriptor.classpath.len() > 1024 {
-        return Err(io::Error::other(
-            "JVM descriptor requires 1–128 apps and at most 1024 classpath entries",
-        ));
+        return Err(io::Error::other("JVM descriptor requires 1–128 apps and at most 1024 classpath entries"));
     }
     for app in &descriptor.apps {
         if !(21..=descriptor.java.version).contains(&app.java_version) || !jar_path(&app.jar) {
@@ -86,9 +75,7 @@ pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
             || !artifact_name(&dependency.artifact)
             || dependency.file.file_name().and_then(|name| name.to_str()) != Some(dependency.artifact.as_str())
         {
-            return Err(io::Error::other(
-                "classpath artifact must match its absolute JAR path's filename",
-            ));
+            return Err(io::Error::other("classpath artifact must match its absolute JAR path's filename"));
         }
         let valid = match &dependency.component {
             Component::Module { group, name, version } => {
@@ -110,16 +97,11 @@ fn jar_path(path: &Path) -> bool {
 fn coordinate(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
 }
 
 fn gradle_path(value: &str) -> bool {
-    value == ":"
-        || value
-            .strip_prefix(':')
-            .is_some_and(|rest| rest.split(':').all(coordinate))
+    value == ":" || value.strip_prefix(':').is_some_and(|rest| rest.split(':').all(coordinate))
 }
 
 fn artifact_name(value: &str) -> bool {

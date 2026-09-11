@@ -2,10 +2,12 @@ package dev.chunkzero.runtime;
 
 import chunk.v1.Supervision.ProcessRegistration;
 import chunk.v1.SupervisorGrpc;
+
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.MetadataUtils;
+
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,23 +20,34 @@ final class Registration implements AutoCloseable {
 
     Registration(String endpoint, String token, ProcessRegistration registration) {
         var address = URI.create(endpoint);
-        if (!"127.0.0.1".equals(address.getHost()) || address.getPort() <= 0 || !"http".equals(address.getScheme())) {
-            throw new IllegalArgumentException("Supervisor endpoint must be a loopback HTTP address");
+        if (!"127.0.0.1".equals(address.getHost())
+                || address.getPort() <= 0
+                || !"http".equals(address.getScheme())) {
+            throw new IllegalArgumentException(
+                    "Supervisor endpoint must be a loopback HTTP address");
         }
-        channel = NettyChannelBuilder.forAddress(address.getHost(), address.getPort()).usePlaintext().build();
+        channel =
+                NettyChannelBuilder.forAddress(address.getHost(), address.getPort())
+                        .usePlaintext()
+                        .build();
         worker = Thread.startVirtualThread(() -> register(token, registration));
     }
 
     private void register(String token, ProcessRegistration registration) {
         var metadata = new Metadata();
-        metadata.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer " + token);
-        var client = SupervisorGrpc.newBlockingStub(channel)
-                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
+        metadata.put(
+                Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
+                "Bearer " + token);
+        var client =
+                SupervisorGrpc.newBlockingStub(channel)
+                        .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
         while (!closed.get()) {
             try {
-                if (!client.withDeadlineAfter(3, TimeUnit.SECONDS).registerProcess(registration)
+                if (!client.withDeadlineAfter(3, TimeUnit.SECONDS)
+                        .registerProcess(registration)
                         .equals(registration.getIdentity())) {
-                    throw new IllegalStateException("Supervisor returned a different process identity");
+                    throw new IllegalStateException(
+                            "Supervisor returned a different process identity");
                 }
             } catch (Exception ignored) {
                 // Existing authenticated TCP deliveries retain their original ownership.

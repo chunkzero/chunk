@@ -78,9 +78,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     let discovered: BTreeSet<_> = project.apps.iter().map(|app| app.id.as_str()).collect();
     if descriptor_apps.len() != jvm.apps.len() || descriptor_apps.keys().copied().collect::<BTreeSet<_>>() != discovered
     {
-        return Err(io::Error::other(
-            "JVM descriptor apps must exactly match the discovered app inventory",
-        ));
+        return Err(io::Error::other("JVM descriptor apps must exactly match the discovered app inventory"));
     }
     let mut files = Files::new();
     let mut classes = jars::Classpath::default();
@@ -99,68 +97,34 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let sha256 = content_digest(&bytes);
         let jar = format!("gameplay/lib/{sha256}.jar");
         insert(&mut files, jar.clone(), bytes)?;
-        metadata.apps.push(App {
-            id: &app.id,
-            jar,
-            sha256,
-            java_version: input.java_version,
-            runtime: &app.runtime,
-        });
+        metadata.apps.push(App { id: &app.id, jar, sha256, java_version: input.java_version, runtime: &app.runtime });
         if let Some(profile) = &app.runtime.machine_profile {
-            let local = project
-                .local
-                .as_ref()
-                .ok_or_else(|| io::Error::other("missing runtime profile definitions"))?;
+            let local =
+                project.local.as_ref().ok_or_else(|| io::Error::other("missing runtime profile definitions"))?;
             metadata.profiles.insert(profile, &local.profiles[profile]);
         }
     }
     metadata.classpath = classpath(&jvm, &mut classes, &mut files)?;
-    assets(
-        &inputs.project.join("assets"),
-        "assets",
-        &mut files,
-        &mut metadata.assets,
-    )?;
+    assets(&inputs.project.join("assets"), "assets", &mut files, &mut metadata.assets)?;
     for app in &project.apps {
         let directory = format!("{}/assets", app.directory);
-        assets(
-            &inputs.project.join(&directory),
-            &directory,
-            &mut files,
-            &mut metadata.assets,
-        )?;
+        assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
     let mut backend = assemble_backend(&inputs.backend, &mut files)?;
-    insert(
-        &mut files,
-        "release.json".into(),
-        serde_json::to_vec(&metadata).map_err(io::Error::other)?,
-    )?;
+    insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
     let id = publication::digest(&files);
     backend.id.clone_from(&id);
     files.insert(
         "release.json".into(),
-        serde_json::to_vec(&Manifest {
-            id: &id,
-            metadata: &metadata,
-        })
-        .map_err(io::Error::other)?,
+        serde_json::to_vec(&Manifest { id: &id, metadata: &metadata }).map_err(io::Error::other)?,
     );
-    insert(
-        &mut files,
-        "backend.json".into(),
-        serde_json::to_vec(&backend).map_err(io::Error::other)?,
-    )?;
+    insert(&mut files, "backend.json".into(), serde_json::to_vec(&backend).map_err(io::Error::other)?)?;
     let archive = archive::prepare(dist, &files)?;
     let archive_path = dist.join(format!("{id}.tar.gz"));
     archive::verify_existing(&archive, &archive_path)?;
     let directory = publication::publish_directory(dist, &id, &files)?;
     archive::publish(archive, &archive_path)?;
-    Ok(Release {
-        id,
-        directory,
-        archive: archive_path.canonicalize()?,
-    })
+    Ok(Release { id, directory, archive: archive_path.canonicalize()? })
 }
 
 fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_contract::Deployment> {
@@ -183,11 +147,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
     insert(files, "contract.json".into(), encoded_contract)?;
     let source_map = directory.join("source.mjs.map");
     if publication::exists(&source_map)? {
-        insert(
-            files,
-            "source.mjs.map".into(),
-            read_limited(&source_map, 8 * 1024 * 1024)?,
-        )?;
+        insert(files, "source.mjs.map".into(), read_limited(&source_map, 8 * 1024 * 1024)?)?;
     }
     Ok(backend)
 }
@@ -198,23 +158,16 @@ fn classpath(jvm: &JvmDescriptor, classes: &mut jars::Classpath, files: &mut Fil
     let mut inspected = BTreeSet::new();
     for dependency in &jvm.classpath {
         if let descriptor::Component::Module { group, name, version } = &dependency.component
-            && versions
-                .insert((group, name), version)
-                .is_some_and(|previous| previous != version)
+            && versions.insert((group, name), version).is_some_and(|previous| previous != version)
         {
-            return Err(io::Error::other(format!(
-                "conflicting versions of JVM module {group}:{name}"
-            )));
+            return Err(io::Error::other(format!("conflicting versions of JVM module {group}:{name}")));
         }
         let bytes = read_limited(&dependency.file, 128 * 1024 * 1024)?;
         let sha256 = content_digest(&bytes);
         let key = (dependency.component.clone(), dependency.artifact.clone());
         if let Some(previous) = dependencies.get(&key) {
             if previous.sha256 != sha256 {
-                return Err(io::Error::other(format!(
-                    "conflicting bytes for JVM artifact {:?}",
-                    dependency.artifact
-                )));
+                return Err(io::Error::other(format!("conflicting bytes for JVM artifact {:?}", dependency.artifact)));
             }
             continue;
         }
@@ -225,12 +178,7 @@ fn classpath(jvm: &JvmDescriptor, classes: &mut jars::Classpath, files: &mut Fil
         insert(files, file.clone(), bytes)?;
         dependencies.insert(
             key,
-            Dependency {
-                file,
-                sha256,
-                artifact: dependency.artifact.clone(),
-                component: dependency.component.clone(),
-            },
+            Dependency { file, sha256, artifact: dependency.artifact.clone(), component: dependency.component.clone() },
         );
     }
     Ok(dependencies.into_values().collect())

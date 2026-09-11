@@ -47,20 +47,14 @@ impl Shared {
         let mut request = Request::new(body);
         request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", self.child_credential)
-                .parse()
-                .expect("generated credential"),
+            format!("Bearer {}", self.child_credential).parse().expect("generated credential"),
         );
         request.set_timeout(Duration::from_secs(3));
         request
     }
 
     fn authorize<T>(&self, request: &Request<T>, child: bool) -> Result<(), Status> {
-        let credential = if child {
-            &self.child_credential
-        } else {
-            &self.credential
-        };
+        let credential = if child { &self.child_credential } else { &self.credential };
         if request.metadata().get("authorization").and_then(|v| v.to_str().ok())
             != Some(format!("Bearer {credential}").as_str())
         {
@@ -84,10 +78,7 @@ impl Shared {
             .await?
             .into_inner();
         self.identity(
-            inventory
-                .identity
-                .as_ref()
-                .ok_or_else(|| Status::failed_precondition("missing inventory identity"))?,
+            inventory.identity.as_ref().ok_or_else(|| Status::failed_precondition("missing inventory identity"))?,
         )?;
         Ok(inventory)
     }
@@ -97,9 +88,7 @@ impl Shared {
 pub(crate) struct Service(pub Arc<Shared>);
 
 fn loopback(endpoint: &str) -> Result<SocketAddr, Status> {
-    let address: SocketAddr = endpoint
-        .parse()
-        .map_err(|_| Status::invalid_argument("invalid local endpoint"))?;
+    let address: SocketAddr = endpoint.parse().map_err(|_| Status::invalid_argument("invalid local endpoint"))?;
     if !address.ip().is_loopback() || address.port() == 0 {
         return Err(Status::invalid_argument("endpoint must be loopback"));
     }
@@ -114,16 +103,9 @@ impl supervisor_server::Supervisor for Service {
     ) -> Result<Response<ProcessIdentity>, Status> {
         self.0.authorize(&request, true)?;
         let registration = request.into_inner();
-        self.0.identity(
-            registration
-                .identity
-                .as_ref()
-                .ok_or_else(|| Status::invalid_argument("missing identity"))?,
-        )?;
-        let config = registration
-            .configuration
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("missing configuration"))?;
+        self.0.identity(registration.identity.as_ref().ok_or_else(|| Status::invalid_argument("missing identity"))?)?;
+        let config =
+            registration.configuration.as_ref().ok_or_else(|| Status::invalid_argument("missing configuration"))?;
         if config.deployment != self.0.identity.deployment
             || config.runtime_id != self.0.identity.runtime_id
             || config.process_generation != self.0.identity.generation
@@ -134,12 +116,8 @@ impl supervisor_server::Supervisor for Service {
         }
         let endpoint = loopback(&registration.control_endpoint)?;
         loopback(&registration.player_endpoint)?;
-        if let Some(previous) = self
-            .0
-            .registration
-            .lock()
-            .map_err(|_| Status::internal("registration poisoned"))?
-            .as_ref()
+        if let Some(previous) =
+            self.0.registration.lock().map_err(|_| Status::internal("registration poisoned"))?.as_ref()
         {
             if previous.registration != registration {
                 return Err(Status::failed_precondition("registration is immutable"));
@@ -153,15 +131,8 @@ impl supervisor_server::Supervisor for Service {
             .connect()
             .await
             .map_err(|_| Status::unavailable("JVM endpoint unavailable"))?;
-        let mut current = self
-            .0
-            .registration
-            .lock()
-            .map_err(|_| Status::internal("registration poisoned"))?;
-        if current
-            .as_ref()
-            .is_some_and(|previous| previous.registration != registration)
-        {
+        let mut current = self.0.registration.lock().map_err(|_| Status::internal("registration poisoned"))?;
+        if current.as_ref().is_some_and(|previous| previous.registration != registration) {
             return Err(Status::failed_precondition("registration is immutable"));
         }
         if current.is_none() {
@@ -187,9 +158,8 @@ impl gameplay_server::Gameplay for Service {
         if binding.delivery.owner_generation != withdrawal.owner_generation {
             return Err(Status::failed_precondition("stale owner generation"));
         }
-        let result = GameplayClient::new(binding.registered.channel.clone())
-            .withdraw_player(self.0.request(withdrawal))
-            .await?;
+        let result =
+            GameplayClient::new(binding.registered.channel.clone()).withdraw_player(self.0.request(withdrawal)).await?;
         binding.closed.store(true, Ordering::Release);
         Ok(result)
     }
@@ -206,11 +176,7 @@ impl gameplay_server::Gameplay for Service {
             return Err(Status::unavailable("JVM not ready"));
         }
         Ok(Response::new(
-            self.0
-                .registered()?
-                .registration
-                .configuration
-                .ok_or_else(|| Status::internal("missing configuration"))?,
+            self.0.registered()?.registration.configuration.ok_or_else(|| Status::internal("missing configuration"))?,
         ))
     }
 
@@ -230,11 +196,7 @@ impl gameplay_server::Gameplay for Service {
             return Err(Status::failed_precondition("invalid delivery identity"));
         }
         let binding = {
-            let mut bindings = self
-                .0
-                .bindings
-                .lock()
-                .map_err(|_| Status::internal("bindings poisoned"))?;
+            let mut bindings = self.0.bindings.lock().map_err(|_| Status::internal("bindings poisoned"))?;
             if let Some(binding) = bindings.get(&delivery.operation_id) {
                 if binding.delivery != delivery || binding.closed.load(Ordering::Acquire) {
                     return Err(Status::failed_precondition("delivery operation changed or closed"));
@@ -277,11 +239,7 @@ impl process_control_server::ProcessControl for Service {
     async fn create_session(&self, request: Request<SessionCommand>) -> Result<Response<SessionInventory>, Status> {
         self.0.authorize(&request, false)?;
         self.0.identity(
-            request
-                .get_ref()
-                .identity
-                .as_ref()
-                .ok_or_else(|| Status::invalid_argument("missing identity"))?,
+            request.get_ref().identity.as_ref().ok_or_else(|| Status::invalid_argument("missing identity"))?,
         )?;
         if self.0.status.borrow().phase != Phase::Ready || self.0.shutdown.is_cancelled() {
             return Err(Status::unavailable("runtime not ready"));
@@ -294,11 +252,7 @@ impl process_control_server::ProcessControl for Service {
     async fn finish_session(&self, request: Request<SessionCommand>) -> Result<Response<SessionInventory>, Status> {
         self.0.authorize(&request, false)?;
         self.0.identity(
-            request
-                .get_ref()
-                .identity
-                .as_ref()
-                .ok_or_else(|| Status::invalid_argument("missing identity"))?,
+            request.get_ref().identity.as_ref().ok_or_else(|| Status::invalid_argument("missing identity"))?,
         )?;
         ProcessControlClient::new(self.0.registered()?.channel)
             .finish_session(self.0.request(request.into_inner()))

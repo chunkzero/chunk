@@ -23,18 +23,10 @@ impl Actor {
         }
         let view = Rc::new(View::new(self.view.base.clone()));
         let (results, dependencies) = self.evaluate_group(&calls, &view, &reply.cancellation);
-        let (sender, receiver) = watch::channel(Ok(GroupUpdate {
-            revision: self.view.base.revision,
-            results: results.clone(),
-        }));
+        let (sender, receiver) =
+            watch::channel(Ok(GroupUpdate { revision: self.view.base.revision, results: results.clone() }));
         self.next_subscription += 1;
-        self.subscriptions.push(Subscribed {
-            id: self.next_subscription,
-            calls,
-            dependencies,
-            results,
-            sender,
-        });
+        self.subscriptions.push(Subscribed { id: self.next_subscription, calls, dependencies, results, sender });
         reply.finish(Ok(GroupSubscription::new(receiver)));
     }
 
@@ -90,11 +82,7 @@ impl Actor {
         let Some(index) = self.subscriptions.iter().position(|subscription| subscription.id == id) else {
             return;
         };
-        if batch
-            .changes
-            .as_ref()
-            .is_some_and(|changes| !self.subscriptions[index].dependencies.affected(changes))
-        {
+        if batch.changes.as_ref().is_some_and(|changes| !self.subscriptions[index].dependencies.affected(changes)) {
             return;
         }
         let view = batch.view.clone();
@@ -104,20 +92,16 @@ impl Actor {
         }
         let (results, dependencies) = self.evaluate_group(&subscription.calls, &view, &Cancellation::default());
         subscription.dependencies = dependencies;
-        let changed = results
-            .iter()
-            .zip(&subscription.results)
-            .any(|(next, previous)| match (next, previous) {
-                (Ok(a), Ok(b)) => a != b,
-                (Err(a), Err(b)) => a.to_string() != b.to_string(),
-                _ => true,
-            });
+        let changed = results.iter().zip(&subscription.results).any(|(next, previous)| match (next, previous) {
+            (Ok(a), Ok(b)) => a != b,
+            (Err(a), Err(b)) => a.to_string() != b.to_string(),
+            _ => true,
+        });
         if changed {
             subscription.results = results;
-            let _ = subscription.sender.send_replace(Ok(GroupUpdate {
-                revision: view.revision,
-                results: subscription.results.clone(),
-            }));
+            let _ = subscription
+                .sender
+                .send_replace(Ok(GroupUpdate { revision: view.revision, results: subscription.results.clone() }));
         }
         self.subscriptions.push(subscription);
     }

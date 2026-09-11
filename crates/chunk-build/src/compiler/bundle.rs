@@ -36,10 +36,7 @@ impl Plugin for Boundary {
         _: Option<&HookBuildEndArgs<'_>>,
     ) -> impl Future<Output = anyhow::Result<()>> + Send {
         std::future::ready((|| {
-            let mut exports = self
-                .exports
-                .lock()
-                .map_err(|_| anyhow::anyhow!("export discovery poisoned"))?;
+            let mut exports = self.exports.lock().map_err(|_| anyhow::anyhow!("export discovery poisoned"))?;
             for id in ctx.get_module_ids() {
                 if let Some(module) = ctx.get_module_info(&id)
                     && module.is_entry
@@ -61,9 +58,7 @@ impl Plugin for Boundary {
                 return Ok(Some(HookResolveIdOutput::from_id(ENTRY)));
             }
             if source == "@chunk/server" {
-                return Ok(Some(HookResolveIdOutput::from_id(
-                    self.sdk.join("index.ts").to_string_lossy().as_ref(),
-                )));
+                return Ok(Some(HookResolveIdOutput::from_id(self.sdk.join("index.ts").to_string_lossy().as_ref())));
             }
             let scheme = source
                 .split_once(':')
@@ -71,9 +66,7 @@ impl Plugin for Boundary {
             if source.starts_with("node:")
                 || nodejs_built_in_modules::is_nodejs_builtin_module(source)
                 || (scheme && !Path::new(source).is_absolute())
-                || Path::new(source)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("node"))
+                || Path::new(source).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("node"))
             {
                 anyhow::bail!("Unsupported transactional import: {source}");
             }
@@ -83,10 +76,10 @@ impl Plugin for Boundary {
     fn load(&self, _: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> impl Future<Output = HookLoadReturn> + Send {
         std::future::ready((|| {
             if args.id == ENTRY {
-                return Ok(self.entry.as_ref().map(|code| HookLoadOutput {
-                    code: code.as_str().into(),
-                    ..Default::default()
-                }));
+                return Ok(self
+                    .entry
+                    .as_ref()
+                    .map(|code| HookLoadOutput { code: code.as_str().into(), ..Default::default() }));
             }
             Ok(None)
         })())
@@ -109,24 +102,11 @@ fn options(root: &Path, input: Vec<String>) -> BundlerOptions {
 }
 
 pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Source]) -> io::Result<()> {
-    let entries: Vec<_> = files
-        .iter()
-        .filter(|source| !source.path.to_string_lossy().ends_with(".d.ts"))
-        .collect();
+    let entries: Vec<_> = files.iter().filter(|source| !source.path.to_string_lossy().ends_with(".d.ts")).collect();
     let discovered_exports = Arc::new(Mutex::new(BTreeMap::new()));
     let mut discovery = Bundler::with_plugins(
-        options(
-            root,
-            entries
-                .iter()
-                .map(|source| source.path.to_string_lossy().into_owned())
-                .collect(),
-        ),
-        vec![Arc::new(Boundary {
-            sdk: sdk.into(),
-            entry: None,
-            exports: discovered_exports.clone(),
-        })],
+        options(root, entries.iter().map(|source| source.path.to_string_lossy().into_owned()).collect()),
+        vec![Arc::new(Boundary { sdk: sdk.into(), entry: None, exports: discovered_exports.clone() })],
     )
     .map_err(error)?;
     let discovered = discovery.generate().await;
@@ -150,11 +130,7 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
     }));
     let mut bundler = Bundler::with_plugins(
         config,
-        vec![Arc::new(Boundary {
-            sdk: sdk.into(),
-            entry: Some(source),
-            exports: Arc::default(),
-        })],
+        vec![Arc::new(Boundary { sdk: sdk.into(), entry: Some(source), exports: Arc::default() })],
     )
     .map_err(error)?;
     let result = bundler.generate().await;
@@ -167,28 +143,15 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
 }
 
 fn write_output(assets: &[Output], root: &Path, output: &Path, sdk: &Path) -> io::Result<()> {
-    let chunks: Vec<_> = assets
-        .iter()
-        .filter_map(|asset| {
-            if let Output::Chunk(chunk) = asset {
-                Some(chunk)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let chunks: Vec<_> =
+        assets.iter().filter_map(|asset| if let Output::Chunk(chunk) = asset { Some(chunk) } else { None }).collect();
     if chunks.len() != 1 || !chunks[0].imports.is_empty() || !chunks[0].dynamic_imports.is_empty() {
         return Err(error("Backend must be one self-contained module"));
     }
     let chunk = chunks[0];
-    let mut map: serde_json::Value = serde_json::from_str(
-        &chunk
-            .map
-            .as_ref()
-            .ok_or_else(|| error("missing source map"))?
-            .to_json_string(),
-    )
-    .map_err(error)?;
+    let mut map: serde_json::Value =
+        serde_json::from_str(&chunk.map.as_ref().ok_or_else(|| error("missing source map"))?.to_json_string())
+            .map_err(error)?;
     if let Some(sources) = map["sources"].as_array_mut() {
         for source in sources {
             if let Some(name) = source.as_str() {
@@ -223,16 +186,9 @@ fn entry_source(
     );
     let mut metadata = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        writeln!(
-            source,
-            "import * as m{index} from {};",
-            quote(entry.path.to_string_lossy())
-        )
-        .map_err(error)?;
+        writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         let key = entry.path.to_string_lossy();
-        let module = modules
-            .get(key.as_ref())
-            .ok_or_else(|| error(format!("missing module exports: {key}")))?;
+        let module = modules.get(key.as_ref()).ok_or_else(|| error(format!("missing module exports: {key}")))?;
         let mut exports = module.clone();
         exports.sort();
         for exported in exports {
@@ -245,11 +201,7 @@ fn entry_source(
             let name = quote(format!("{}/{}", entry.namespace, exported));
             let binding = format!("f{}", metadata.len());
             let value = format!("m{index}[{}]", quote(exported));
-            writeln!(
-                source,
-                "export const {binding} = (ctx,args) => {value}.handler(ctx,args);"
-            )
-            .map_err(error)?;
+            writeln!(source, "export const {binding} = (ctx,args) => {value}.handler(ctx,args);").map_err(error)?;
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)

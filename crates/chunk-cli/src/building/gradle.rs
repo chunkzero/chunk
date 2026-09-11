@@ -40,10 +40,7 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
     let child = command.spawn().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("could not start Gradle wrapper {}: {error}", wrapper.display()),
-        )
+        io::Error::new(error.kind(), format!("could not start Gradle wrapper {}: {error}", wrapper.display()))
     })?;
     let mut process = BuildProcess { child, finished: false };
     let status = tokio::select! {

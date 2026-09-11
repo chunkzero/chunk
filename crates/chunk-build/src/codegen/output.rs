@@ -29,10 +29,7 @@ pub(super) fn write(output: &Path, files: &BTreeMap<String, String>) -> io::Resu
                 };
                 let bytes = crate::read_limited(&path, 16 * 1024 * 1024)?;
                 if digest(&bytes) != *expected {
-                    return Err(conflict(
-                        &path,
-                        "generated file was modified; move it before regenerating",
-                    ));
+                    return Err(conflict(&path, "generated file was modified; move it before regenerating"));
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -42,10 +39,7 @@ pub(super) fn write(output: &Path, files: &BTreeMap<String, String>) -> io::Resu
     fs::create_dir_all(output)?;
     let manifest = Manifest {
         version: 1,
-        files: files
-            .iter()
-            .map(|(name, source)| (name.clone(), digest(source.as_bytes())))
-            .collect(),
+        files: files.iter().map(|(name, source)| (name.clone(), digest(source.as_bytes()))).collect(),
     };
     // Prepare every source before replacing the previous output and its ownership record.
     let staging = tempfile::Builder::new().prefix(".codegen-").tempdir_in(output)?;
@@ -54,10 +48,7 @@ pub(super) fn write(output: &Path, files: &BTreeMap<String, String>) -> io::Resu
         fs::create_dir_all(path.parent().expect("validated relative file"))?;
         fs::write(path, source)?;
     }
-    fs::write(
-        staging.path().join(MANIFEST),
-        serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
-    )?;
+    fs::write(staging.path().join(MANIFEST), serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?)?;
     for name in previous.keys().filter(|name| !files.contains_key(*name)) {
         match fs::remove_file(output.join(name)) {
             Ok(()) => {}
@@ -101,9 +92,7 @@ fn check_path(output: &Path, name: &str) -> io::Result<()> {
     if name.is_empty()
         || name == MANIFEST
         || name.contains('\\')
-        || name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+        || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
         || relative.components().any(|part| !matches!(part, Component::Normal(_)))
     {
         return Err(conflict(relative, "invalid generated relative path"));

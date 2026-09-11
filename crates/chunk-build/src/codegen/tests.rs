@@ -47,9 +47,7 @@ fn java_rejects_lexical_collisions_without_writing_partial_sources() {
 fn selected_outputs_replace_stale_packages_and_preserve_handwritten_files() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("generated");
-    let first = GenerationTarget::Java {
-        package: "example.first",
-    };
+    let first = GenerationTarget::Java { package: "example.first" };
     generate(&fixture(), &output, first).unwrap();
     let types = output.join("java/example/first/BackendTypes.java");
     let client = output.join("java-client/example/first/BackendClient.java");
@@ -60,14 +58,7 @@ fn selected_outputs_replace_stale_packages_and_preserve_handwritten_files() {
     assert_eq!(original, fs::read(&types).unwrap());
     let handwritten = output.join("java/example/first/Custom.java");
     fs::write(&handwritten, "// Handwritten").unwrap();
-    generate(
-        &fixture(),
-        &output,
-        GenerationTarget::Java {
-            package: "example.second",
-        },
-    )
-    .unwrap();
+    generate(&fixture(), &output, GenerationTarget::Java { package: "example.second" }).unwrap();
     assert!(!types.exists());
     assert!(!client.exists());
     assert!(output.join("java/example/second/BackendTypes.java").is_file());
@@ -89,14 +80,7 @@ fn output_conflicts_do_not_replace_handwritten_or_modified_files() {
     fs::remove_file(&api).unwrap();
     generate(&fixture(), root.path(), GenerationTarget::TypeScript).unwrap();
     fs::write(&api, "// Edited generated source").unwrap();
-    let error = generate(
-        &fixture(),
-        root.path(),
-        GenerationTarget::Java {
-            package: "example.backend",
-        },
-    )
-    .unwrap_err();
+    let error = generate(&fixture(), root.path(), GenerationTarget::Java { package: "example.backend" }).unwrap_err();
     assert!(error.to_string().contains("generated file was modified"), "{error}");
     assert_eq!(fs::read_to_string(api).unwrap(), "// Edited generated source");
     assert!(!root.path().join("java").exists());
@@ -109,11 +93,7 @@ fn ownership_records_cannot_remove_files_outside_the_destination() {
     fs::create_dir(&output).unwrap();
     let outside = root.path().join("outside.ts");
     fs::write(&outside, "// Handwritten").unwrap();
-    fs::write(
-        output.join(".chunk-codegen.json"),
-        r#"{"version":1,"files":{"../outside.ts":"invalid"}}"#,
-    )
-    .unwrap();
+    fs::write(output.join(".chunk-codegen.json"), r#"{"version":1,"files":{"../outside.ts":"invalid"}}"#).unwrap();
     let error = generate(&fixture(), &output, GenerationTarget::TypeScript).unwrap_err();
     assert!(error.to_string().contains("invalid generated relative path"), "{error}");
     assert_eq!(fs::read_to_string(outside).unwrap(), "// Handwritten");
@@ -125,9 +105,7 @@ fn ownership_records_cannot_remove_files_outside_the_destination() {
 fn owned_source_directories_cannot_be_redirected_through_symlinks() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("generated");
-    let target = GenerationTarget::Java {
-        package: "example.backend",
-    };
+    let target = GenerationTarget::Java { package: "example.backend" };
     generate(&fixture(), &output, target).unwrap();
     let outside = root.path().join("outside");
     fs::rename(output.join("java"), &outside).unwrap();
@@ -141,22 +119,13 @@ fn owned_source_directories_cannot_be_redirected_through_symlinks() {
 #[test]
 fn kotlin_target_reuses_java_sources_and_removes_its_facade_when_disabled() {
     let root = tempfile::tempdir().unwrap();
-    let target = GenerationTarget::Java {
-        package: "example.backend",
-    };
+    let target = GenerationTarget::Java { package: "example.backend" };
     generate(&fixture(), root.path(), target).unwrap();
     let java = root.path().join("java/example/backend/BackendTypes.java");
     let java_client = root.path().join("java-client/example/backend/BackendClient.java");
     let original = fs::read(&java).unwrap();
     let original_client = fs::read(&java_client).unwrap();
-    generate(
-        &fixture(),
-        root.path(),
-        GenerationTarget::Kotlin {
-            package: "example.backend",
-        },
-    )
-    .unwrap();
+    generate(&fixture(), root.path(), GenerationTarget::Kotlin { package: "example.backend" }).unwrap();
     assert_eq!(original, fs::read(java).unwrap());
     assert_eq!(original_client, fs::read(java_client).unwrap());
     let kotlin = root.path().join("kotlin/example/backend/CoroutineBackendClient.kt");

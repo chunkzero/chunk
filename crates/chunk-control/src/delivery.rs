@@ -17,12 +17,7 @@ impl Control {
     pub async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
-        let claim = self
-            .state()?
-            .claims
-            .get(&request.operation_id)
-            .cloned()
-            .ok_or(Error::Invalid("unknown claim"))?;
+        let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(&request)?;
         self.reconcile(&request.operation_id).await
     }
@@ -36,10 +31,7 @@ impl Control {
         let _guard = operation.lock().await;
         self.update(|state| {
             crate::moves::authorize_destination(state, identity)?;
-            let claim = state
-                .claims
-                .get_mut(&identity.operation_id)
-                .ok_or(Error::Invalid("unknown claim"))?;
+            let claim = state.claims.get_mut(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
                 return Err(Error::Invalid("destination draining"));
             }
@@ -73,26 +65,16 @@ impl Control {
             });
         }
         let state = self.state()?;
-        let claim = state
-            .claims
-            .get(&request.operation_id)
-            .ok_or(Error::Invalid("unknown claim"))?;
+        let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(&request)?;
         let identity = claim.identity(&request.operation_id);
         if claim.phase == Phase::Released {
             return Ok(identity);
         }
-        let host = state
-            .sessions
-            .get(&claim.session)
-            .ok_or(Error::Invalid("missing session"))?
-            .host
-            .clone();
+        let host = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host.clone();
         self.update(|s| {
             set_phase(
-                s.claims
-                    .get_mut(&request.operation_id)
-                    .ok_or(Error::Invalid("unknown claim"))?,
+                s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?,
                 Phase::Withdrawing,
             )
         })?;
@@ -122,18 +104,11 @@ impl Control {
     async fn reconcile(&self, operation: &str) -> Result<Assignment> {
         let state = self.state()?;
         let claim = state.claims.get(operation).ok_or(Error::Invalid("unknown claim"))?;
-        let assignment = claim
-            .assignment
-            .as_ref()
-            .ok_or(Error::Unresolved("claim preparation incomplete"))?;
+        let assignment = claim.assignment.as_ref().ok_or(Error::Unresolved("claim preparation incomplete"))?;
         if claim.phase == Phase::Released {
             return Ok(Assignment::decode(assignment.as_slice())?);
         }
-        let host = &state
-            .sessions
-            .get(&claim.session)
-            .ok_or(Error::Invalid("missing session"))?
-            .host;
+        let host = &state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host;
         if self.host.stopped(host) {
             self.update(|state| release(state, operation))?;
         } else {
@@ -171,20 +146,14 @@ impl Control {
                 Some(DeliveryPhase::Prepared) => claim.phase,
                 _ => return Err(Error::Unresolved("unknown runtime delivery phase")),
             };
-            let phase = if claim.phase == Phase::Withdrawing && phase != Phase::Released {
-                Phase::Withdrawing
-            } else {
-                phase
-            };
+            let phase =
+                if claim.phase == Phase::Withdrawing && phase != Phase::Released { Phase::Withdrawing } else { phase };
             if phase != claim.phase {
                 self.update(|state| {
                     if phase == Phase::Released {
                         release(state, operation)
                     } else {
-                        set_phase(
-                            state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?,
-                            phase,
-                        )
+                        set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
                     }
                 })?;
             }

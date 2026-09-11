@@ -37,14 +37,7 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
     store.commit(commit("matches", 2, writes)).unwrap();
     let snapshot = store.snapshot().unwrap();
     for (id, value) in values.iter().enumerate() {
-        assert_eq!(
-            &snapshot
-                .get(&DocumentKey::new("matches", id.to_string()).unwrap())
-                .unwrap()
-                .unwrap()
-                .value,
-            value
-        );
+        assert_eq!(&snapshot.get(&DocumentKey::new("matches", id.to_string()).unwrap()).unwrap().unwrap().value, value);
     }
     let types: (String, String, String, String) = store
         .connection
@@ -54,10 +47,7 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(
-        types,
-        ("text".into(), "integer".into(), "integer".into(), "integer".into())
-    );
+    assert_eq!(types, ("text".into(), "integer".into(), "integer".into(), "integer".into()));
     let results: (bool, String) = store
         .connection
         .query_row(
@@ -69,11 +59,7 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
     assert_eq!(results, (true, "null".into()));
     let shared_table: usize = store
         .connection
-        .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name = 'documents'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'documents'", [], |row| row.get(0))
         .unwrap();
     assert_eq!(shared_table, 0);
 }
@@ -81,36 +67,18 @@ fn physical_columns_round_trip_scalars_json_and_absence() {
 #[test]
 fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
     let (directory, mut store) = open();
-    store
-        .commit(commit("player", 1, vec![write("a", Some(json!({"coins": 7})))]))
-        .unwrap();
+    store.commit(commit("player", 1, vec![write("a", Some(json!({"coins": 7})))])).unwrap();
     let old = store.snapshot().unwrap();
     let mut expanded = crate::tests::schema();
     let profile = expanded.get_mut("profiles").unwrap();
-    profile.fields.insert(
-        "rank".into(),
-        Field {
-            schema: Schema::Integer,
-            optional: true,
-        },
-    );
+    profile.fields.insert("rank".into(), Field { schema: Schema::Integer, optional: true });
     profile.indexes.insert("by_rank".into(), vec!["rank".into()]);
     assert_eq!(store.apply_schema(&expanded).unwrap(), Revision(3));
     let migrated = store.snapshot().unwrap();
-    let range = IndexRange {
-        index: "by_rank".into(),
-        prefix: vec![json!(null)],
-        ..by_coins()
-    };
+    let range = IndexRange { index: "by_rank".into(), prefix: vec![json!(null)], ..by_coins() };
     assert_eq!(migrated.scan_index(&range).unwrap()[0].0, "a");
     assert!(old.scan_index(&range).is_err());
-    store
-        .commit(commit(
-            "rank",
-            3,
-            vec![write("a", Some(json!({"coins": 7, "rank": 1})))],
-        ))
-        .unwrap();
+    store.commit(commit("rank", 3, vec![write("a", Some(json!({"coins": 7, "rank": 1})))])).unwrap();
     let key = DocumentKey::new("profiles", "a").unwrap();
     assert_eq!(old.get(&key).unwrap().unwrap().value, json!({"coins": 7}));
     assert_eq!(migrated.get(&key).unwrap().unwrap().value, json!({"coins": 7}));
@@ -118,10 +86,7 @@ fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
     drop(store);
     let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
     assert_eq!(store.apply_schema(&expanded).unwrap(), Revision(4));
-    assert_eq!(
-        store.snapshot().unwrap().get(&key).unwrap().unwrap().value,
-        json!({"coins": 7, "rank": 1})
-    );
+    assert_eq!(store.snapshot().unwrap().get(&key).unwrap().unwrap().value, json!({"coins": 7, "rank": 1}));
     assert_eq!(old.get(&key).unwrap().unwrap().revision, Revision(2));
 }
 
@@ -129,13 +94,11 @@ fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
 fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     let (_directory, mut store) = open();
     let mut expanded = crate::tests::schema();
-    expanded.get_mut("profiles").unwrap().fields.insert(
-        "name".into(),
-        Field {
-            schema: Schema::String,
-            optional: true,
-        },
-    );
+    expanded
+        .get_mut("profiles")
+        .unwrap()
+        .fields
+        .insert("name".into(), Field { schema: Schema::String, optional: true });
     expanded.insert("matches".into(), TableSchema::default());
     let deployment = chunk_contract::Deployment {
         contract_version: 1,
@@ -162,18 +125,12 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     assert_eq!(*store.schema, crate::tests::schema());
     let count: usize = store
         .connection
-        .query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'matches'", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'matches'", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
     let fields: usize = store
         .connection
-        .query_row(
-            "SELECT count(*) FROM pragma_table_info('profiles') WHERE name = 'name'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT count(*) FROM pragma_table_info('profiles') WHERE name = 'name'", [], |row| row.get(0))
         .unwrap();
     assert_eq!(fields, 0);
     store.connection.execute_batch("DROP TRIGGER fail_migration").unwrap();
@@ -194,24 +151,12 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
             functions: std::collections::BTreeMap::new(),
         };
         store.retain_deployment(&deployment).unwrap();
-        let outcome = store
-            .commit(commit("committed", 1, vec![write("a", Some(json!({"coins": 7})))]))
-            .unwrap();
-        let context = RetryContext {
-            deployment: "old".into(),
-            timestamp: 123,
-            seed: 456,
-        };
+        let outcome = store.commit(commit("committed", 1, vec![write("a", Some(json!({"coins": 7})))])).unwrap();
+        let context = RetryContext { deployment: "old".into(), timestamp: 123, seed: 456 };
         store.prepare_operation(&operation("failed"), context.clone()).unwrap();
-        store
-            .connection
-            .execute_batch("DROP TABLE _chunk_retired_deployments;")
-            .unwrap();
+        store.connection.execute_batch("DROP TABLE _chunk_retired_deployments;").unwrap();
         if version == 3 {
-            store
-                .connection
-                .execute_batch("DROP TABLE _chunk_retry_contexts;")
-                .unwrap();
+            store.connection.execute_batch("DROP TABLE _chunk_retry_contexts;").unwrap();
         }
         store.connection.pragma_update(None, "user_version", version).unwrap();
         drop(store);
@@ -219,14 +164,8 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let mut store = SqliteStore::open(&path, "local").unwrap();
         assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
-        assert_eq!(
-            store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value,
-            json!({"coins": 7})
-        );
-        assert_eq!(
-            store.prepare_operation(&operation("failed"), context.clone()).unwrap(),
-            context
-        );
+        assert_eq!(store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value, json!({"coins": 7}));
+        assert_eq!(store.prepare_operation(&operation("failed"), context.clone()).unwrap(), context);
         assert!(store.release_deployment("old").unwrap());
         drop(store);
 
@@ -236,13 +175,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         assert_eq!(store.snapshot().unwrap().revision, outcome.revision);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome));
         assert!(matches!(
-            store.prepare_operation(
-                &operation("failed"),
-                RetryContext {
-                    deployment: "new".into(),
-                    ..context
-                }
-            ),
+            store.prepare_operation(&operation("failed"), RetryContext { deployment: "new".into(), ..context }),
             Err(Error::OperationMismatch)
         ));
     }
@@ -256,29 +189,13 @@ fn invalid_schemas_and_documents_fail_without_changing_storage() {
         assert!(store.apply_schema(&schema).is_err(), "{name}");
     }
     let mut schema = crate::tests::schema();
-    schema
-        .get_mut("profiles")
-        .unwrap()
-        .fields
-        .get_mut("coins")
-        .unwrap()
-        .schema = Schema::String;
+    schema.get_mut("profiles").unwrap().fields.get_mut("coins").unwrap().schema = Schema::String;
     assert!(store.apply_schema(&schema).is_err());
     schema = crate::tests::schema();
-    schema.get_mut("profiles").unwrap().fields.insert(
-        "name".into(),
-        Field {
-            schema: Schema::String,
-            optional: false,
-        },
-    );
+    schema.get_mut("profiles").unwrap().fields.insert("name".into(), Field { schema: Schema::String, optional: false });
     assert!(store.apply_schema(&schema).is_err());
     schema = crate::tests::schema();
-    schema
-        .get_mut("profiles")
-        .unwrap()
-        .indexes
-        .insert("bad".into(), vec!["absent".into()]);
+    schema.get_mut("profiles").unwrap().indexes.insert("bad".into(), vec!["absent".into()]);
     assert!(store.apply_schema(&schema).is_err());
     for value in [
         json!({}),
@@ -287,26 +204,10 @@ fn invalid_schemas_and_documents_fail_without_changing_storage() {
         json!({"coins": 1, "extra": true}),
         json!({"coins": u64::MAX}),
     ] {
-        assert!(
-            store
-                .commit(commit("invalid", 1, vec![write("a", Some(value))]))
-                .is_err()
-        );
+        assert!(store.commit(commit("invalid", 1, vec![write("a", Some(value))])).is_err());
     }
-    assert!(
-        store
-            .commit(commit("duplicate", 1, vec![write("a", None), write("a", None)]))
-            .is_err()
-    );
-    assert!(
-        store
-            .commit(commit(
-                "unknown",
-                1,
-                vec![crate::tests::write_to("unknown", "a", Some(json!({})))]
-            ))
-            .is_err()
-    );
+    assert!(store.commit(commit("duplicate", 1, vec![write("a", None), write("a", None)])).is_err());
+    assert!(store.commit(commit("unknown", 1, vec![crate::tests::write_to("unknown", "a", Some(json!({})))])).is_err());
     assert_eq!(store.snapshot().unwrap().revision, Revision(1));
     assert_eq!(totals(&store), (0, 0));
 }
@@ -321,39 +222,26 @@ fn legacy_format_is_rejected_without_modifying_documents() {
             "CREATE TABLE documents (value TEXT); INSERT INTO documents VALUES ('preserve'); PRAGMA user_version = 1;",
         )
         .unwrap();
-    assert!(matches!(
-        SqliteStore::open(&path, "local"),
-        Err(Error::SchemaVersion(1))
-    ));
-    let value: String = connection
-        .query_row("SELECT value FROM documents", [], |row| row.get(0))
-        .unwrap();
+    assert!(matches!(SqliteStore::open(&path, "local"), Err(Error::SchemaVersion(1))));
+    let value: String = connection.query_row("SELECT value FROM documents", [], |row| row.get(0)).unwrap();
     assert_eq!(value, "preserve");
 }
 
 #[test]
 fn index_can_be_added_to_a_retained_but_omitted_field() {
     let (directory, mut store) = open();
-    store
-        .commit(commit("seed", 1, vec![write("a", Some(json!({"coins": 7})))]))
-        .unwrap();
+    store.commit(commit("seed", 1, vec![write("a", Some(json!({"coins": 7})))])).unwrap();
     let old = store.snapshot().unwrap();
     let partial: DatabaseSchema = serde_json::from_value(json!({
         "profiles": {"fields": {}, "indexes": {"by_retained_coins": ["coins"]}}
     }))
     .unwrap();
     assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
-    let range = IndexRange {
-        index: "by_retained_coins".into(),
-        ..by_coins()
-    };
+    let range = IndexRange { index: "by_retained_coins".into(), ..by_coins() };
     assert_eq!(store.snapshot().unwrap().scan_index(&range).unwrap()[0].0, "a");
     assert!(old.scan_index(&range).is_err());
     assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
     drop(store);
     let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
-    assert_eq!(
-        store.snapshot().unwrap().scan_index(&range).unwrap()[0].1.value,
-        json!({"coins": 7})
-    );
+    assert_eq!(store.snapshot().unwrap().scan_index(&range).unwrap()[0].1.value, json!({"coins": 7}));
 }

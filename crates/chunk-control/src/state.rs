@@ -138,22 +138,14 @@ impl Authority {
         // Reload after every boundary, including an ambiguous prior commit failure.
         let snapshot = self.store.snapshot()?;
         let key = DocumentKey::new("control", "state")?;
-        let mut state = snapshot
-            .get(&key)?
-            .map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))?;
+        let mut state = snapshot.get(&key)?.map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))?;
         let result = change(&mut state)?;
         let value = serde_json::json!({"state": serde_json::to_string(&state)?});
         let fingerprint = Sha256::digest(serde_json::to_vec(&value)?).into();
         self.store.commit(Commit {
             expected: snapshot.revision,
-            operation: Operation {
-                id: uuid::Uuid::new_v4().to_string(),
-                fingerprint,
-            },
-            writes: vec![Write {
-                key,
-                value: Some(value),
-            }],
+            operation: Operation { id: uuid::Uuid::new_v4().to_string(), fingerprint },
+            writes: vec![Write { key, value: Some(value) }],
             result: serde_json::Value::Null,
         })?;
         Ok(result)

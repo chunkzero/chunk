@@ -91,9 +91,7 @@ impl Control {
     }
 
     fn authority(&self) -> Result<MutexGuard<'_, Authority>> {
-        self.authority
-            .lock()
-            .map_err(|_| Error::Unresolved("control authority poisoned"))
+        self.authority.lock().map_err(|_| Error::Unresolved("control authority poisoned"))
     }
 
     fn state(&self) -> Result<State> {
@@ -105,10 +103,7 @@ impl Control {
     }
 
     fn operation(&self, id: &str) -> Result<Arc<AsyncMutex<()>>> {
-        let mut operations = self
-            .operations
-            .lock()
-            .map_err(|_| Error::Unresolved("operation mutex poisoned"))?;
+        let mut operations = self.operations.lock().map_err(|_| Error::Unresolved("operation mutex poisoned"))?;
         if operations.len() >= 1024 && !operations.contains_key(id) {
             return Err(Error::Capacity);
         }

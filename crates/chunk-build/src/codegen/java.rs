@@ -55,10 +55,7 @@ impl Bindings {
         let package_path = package.replace('.', "/");
         Ok(BTreeMap::from([
             (format!("java/{package_path}/BackendTypes.java"), source),
-            (
-                format!("java-client/{package_path}/BackendClient.java"),
-                client::source(package, &self.root),
-            ),
+            (format!("java-client/{package_path}/BackendClient.java"), client::source(package, &self.root)),
         ]))
     }
 }
@@ -71,19 +68,8 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
             validate_literals(&field.schema)?;
         }
         let mut fields = table.fields.clone();
-        fields.insert(
-            "_id".into(),
-            Field {
-                schema: Schema::Id { table: name.clone() },
-                optional: false,
-            },
-        );
-        generator.schema(
-            &mut documents,
-            &Schema::Object { fields },
-            name,
-            &format!("table {name}"),
-        )?;
+        fields.insert("_id".into(), Field { schema: Schema::Id { table: name.clone() }, optional: false });
+        generator.schema(&mut documents, &Schema::Object { fields }, name, &format!("table {name}"))?;
     }
     let mut root = Node::default();
     for (path, function) in &contract.functions {
@@ -159,12 +145,8 @@ fn describe(
             &format!("{base}Args"),
             &format!("{wire_path} arguments"),
         )?;
-        let result = generator.schema(
-            &mut scope,
-            &function.result,
-            &format!("{base}Result"),
-            &format!("{wire_path} result"),
-        )?;
+        let result =
+            generator.schema(&mut scope, &function.result, &format!("{base}Result"), &format!("{wire_path} result"))?;
         functions.push(Function {
             path: wire_path.into(),
             name: name.clone(),
@@ -176,13 +158,7 @@ fn describe(
             empty_arguments: matches!(&function.arguments, Schema::Object { fields } if fields.is_empty()),
         });
     }
-    Ok(Namespace {
-        type_name,
-        member_name: member.into(),
-        children,
-        functions,
-        declarations: scope.declarations,
-    })
+    Ok(Namespace { type_name, member_name: member.into(), children, functions, declarations: scope.declarations })
 }
 
 fn model_body(namespace: &Namespace) -> String {

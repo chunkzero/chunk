@@ -6,14 +6,20 @@ end_of_line = lf
 insert_final_newline = true
 indent_style = space
 indent_size = 4
+max_line_length = 120
 trim_trailing_whitespace = true
 
 [*.{kt,kts}]
 ktlint_code_style = ktlint_official
-max_line_length = 120
+ij_kotlin_allow_trailing_comma = true
+ij_kotlin_allow_trailing_comma_on_call_site = true
+ij_kotlin_packages_to_use_import_on_demand = unset
 
-[*.{yml,yaml,toml,json}]
+[*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,json,jsonc,json5,yml,yaml,toml,xml,proto,md}]
 indent_size = 2
+
+[*.java]
+max_line_length = 100
 
 [*.md]
 trim_trailing_whitespace = false

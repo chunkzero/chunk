@@ -56,21 +56,13 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     let operation_id = options.operation.unwrap_or_else(uuid::Uuid::new_v4).to_string();
     cliclack::log::info(format!("Player operation: {operation_id}"))?;
     match options.action {
-        Action::Move {
-            session_type,
-            key,
-            machine_profile,
-        } => {
+        Action::Move { session_type, key, machine_profile } => {
             client
                 .move_player(auth(
                     MovePlayerRequest {
                         operation_id,
                         player_id: options.player.to_string(),
-                        demand: Some(SessionDemand {
-                            session_type,
-                            key,
-                            machine_profile,
-                        }),
+                        demand: Some(SessionDemand { session_type, key, machine_profile }),
                     },
                     &connection.token,
                 )?)
@@ -79,11 +71,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
             cliclack::log::success("Move queued.")?;
         }
         Action::Drain { timeout_seconds } => {
-            let request = DrainRequest {
-                operation_id,
-                player_id: options.player.to_string(),
-                timeout_seconds,
-            };
+            let request = DrainRequest { operation_id, player_id: options.player.to_string(), timeout_seconds };
             let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds.min(120)) + 30);
             loop {
                 let status = client
@@ -109,10 +97,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
 
 fn auth<T>(body: T, token: &str) -> io::Result<Request<T>> {
     let mut request = Request::new(body);
-    request.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().map_err(io::Error::other)?,
-    );
+    request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().map_err(io::Error::other)?);
     request.set_timeout(Duration::from_secs(5));
     Ok(request)
 }

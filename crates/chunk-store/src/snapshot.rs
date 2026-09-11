@@ -58,13 +58,8 @@ impl Snapshot {
     pub fn new(revision: Revision, reader: impl SnapshotReader + 'static) -> Self {
         Self {
             revision,
-            timestamp: i64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis(),
-            )
-            .unwrap_or(i64::MAX),
+            timestamp: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis())
+                .unwrap_or(i64::MAX),
             reader: Arc::new(reader),
         }
     }

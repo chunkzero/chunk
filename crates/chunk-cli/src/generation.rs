@@ -35,15 +35,11 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
     chunk_build::project::inspect(&options.project)?;
     let (target, directory) = match options.target {
         Target::Java => (
-            GenerationTarget::Java {
-                package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated"),
-            },
+            GenerationTarget::Java { package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated") },
             "java",
         ),
         Target::Kotlin => (
-            GenerationTarget::Kotlin {
-                package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated"),
-            },
+            GenerationTarget::Kotlin { package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated") },
             "kotlin",
         ),
         Target::Typescript => {
@@ -53,18 +49,12 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
             (GenerationTarget::TypeScript, "typescript")
         }
     };
-    let output = options
-        .output
-        .unwrap_or_else(|| options.project.join(".chunk/generated").join(directory));
-    let backend = options
-        .backend_output
-        .unwrap_or_else(|| options.project.join(".chunk/build/backend"));
+    let output = options.output.unwrap_or_else(|| options.project.join(".chunk/generated").join(directory));
+    let backend = options.backend_output.unwrap_or_else(|| options.project.join(".chunk/build/backend"));
     let output = destination(&output)?;
     let backend = destination(&backend)?;
     if output.starts_with(&backend) || backend.starts_with(&output) {
-        return Err(io::Error::other(
-            "client and compiler output directories must be separate",
-        ));
+        return Err(io::Error::other("client and compiler output directories must be separate"));
     }
     cliclack::log::info("Generating backend clients…")?;
     chunk_build::compile(&options.project, &backend)?;

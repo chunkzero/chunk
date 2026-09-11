@@ -1,11 +1,16 @@
 package dev.chunkzero.runtime;
 
 import chunk.v1.Common.DeploymentRef;
+
 import dev.chunkzero.backend.api.SessionId;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.SessionIdentity;
+
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+
+import org.jetbrains.annotations.Nullable;
+
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
@@ -14,7 +19,6 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import org.jetbrains.annotations.Nullable;
 
 final class SessionBackend implements AutoCloseable {
     private final ManagedChannel channel;
@@ -50,14 +54,17 @@ final class SessionBackend implements AutoCloseable {
         }
     }
 
-    static @Nullable SessionBackend fromEnvironment(DeploymentRef deployment, RuntimeEnvironment environment)
-            throws UnknownHostException {
+    static @Nullable SessionBackend fromEnvironment(
+            DeploymentRef deployment, RuntimeEnvironment environment) throws UnknownHostException {
         var endpoint = environment.backendEndpoint();
         if (endpoint == null) return null;
         var credential = environment.backendToken();
-        if (credential == null) throw new IllegalArgumentException("CHUNK_BACKEND_TOKEN is required");
+        if (credential == null)
+            throw new IllegalArgumentException("CHUNK_BACKEND_TOKEN is required");
         var uri = URI.create(endpoint);
-        if (!"http".equals(uri.getScheme()) || uri.getPort() < 1 || uri.getPort() > 65535
+        if (!"http".equals(uri.getScheme())
+                || uri.getPort() < 1
+                || uri.getPort() > 65535
                 || !InetAddress.getByName(uri.getHost()).isLoopbackAddress()) {
             throw new IllegalArgumentException("Backend endpoint must be a loopback HTTP address");
         }

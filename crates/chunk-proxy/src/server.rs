@@ -32,25 +32,16 @@ struct Responses {
 impl Responses {
     fn new(config: &Config) -> io::Result<Self> {
         let version = SUPPORTED.last().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no Minecraft version enabled; enable a version feature",
-            )
+            io::Error::new(io::ErrorKind::InvalidInput, "no Minecraft version enabled; enable a version feature")
         })?;
         let json = serde_json::json!({
             "version": { "name": version.name, "protocol": version.protocol },
             "players": { "max": 0, "online": 0 },
             "description": { "text": config.motd },
         });
-        let status = encode_packet(&StatusResponse {
-            json: McString::new(json.to_string()).map_err(invalid_config)?,
-        })
-        .map_err(invalid_config)?;
-        let supported_names = SUPPORTED
-            .iter()
-            .map(|version| version.name)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let status = encode_packet(&StatusResponse { json: McString::new(json.to_string()).map_err(invalid_config)? })
+            .map_err(invalid_config)?;
+        let supported_names = SUPPORTED.iter().map(|version| version.name).collect::<Vec<_>>().join(", ");
         let unsupported_version = encode_packet(&LoginDisconnect {
             reason: McString::new(
                 serde_json::json!({
@@ -61,10 +52,7 @@ impl Responses {
             .map_err(invalid_config)?,
         })
         .map_err(invalid_config)?;
-        Ok(Self {
-            status,
-            unsupported_version,
-        })
+        Ok(Self { status, unsupported_version })
     }
 }
 
@@ -93,20 +81,11 @@ impl Proxy {
                 "connection and configuration timeouts must be positive",
             ));
         }
-        if config
-            .compression_threshold
-            .is_some_and(|threshold| threshold > chunk_protocol::MAX_FRAME_SIZE)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "compression threshold exceeds frame limit",
-            ));
+        if config.compression_threshold.is_some_and(|threshold| threshold > chunk_protocol::MAX_FRAME_SIZE) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "compression threshold exceeds frame limit"));
         }
         if config.platform.is_some() && config.gameplay.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "choose managed platform or fixture gameplay",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose managed platform or fixture gameplay"));
         }
         let platform = config.platform.clone().map(platform::Platform::new).transpose()?;
         let responses = Arc::new(Responses::new(&config)?);
@@ -114,14 +93,7 @@ impl Proxy {
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
-        Ok(Self {
-            listener,
-            config,
-            responses,
-            authentication,
-            limbo_packets,
-            platform,
-        })
+        Ok(Self { listener, config, responses, authentication, limbo_packets, platform })
     }
 
     /// # Errors
@@ -211,13 +183,8 @@ async fn route(
     if let Some(target) = gameplay {
         gameplay::serve(authenticated, target, deadline).await
     } else {
-        limbo::wait_for_destination(
-            authenticated,
-            std::future::pending::<io::Result<()>>(),
-            deadline,
-            limbo_packets,
-        )
-        .await
-        .map(|_| ())
+        limbo::wait_for_destination(authenticated, std::future::pending::<io::Result<()>>(), deadline, limbo_packets)
+            .await
+            .map(|_| ())
     }
 }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ExternalDependencies">
+    <plugin id="com.nbadal.ktlint" />
+    <plugin id="google-java-format" />
+    <plugin id="com.github.oxc.project.oxcintellijplugin" />
+    <plugin id="com.github.bufbuild.intellij" />
+  </component>
+</project>

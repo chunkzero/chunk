@@ -16,22 +16,13 @@ fn host(directory: &Path, java: std::path::PathBuf) -> EmbeddedHost {
             distribution: directory.into(),
             java,
             connection: directory.join("runtime.json"),
-            deployment: chunk_runtime::DeploymentRef {
-                environment: "local".into(),
-                deployment: "test".into(),
-            },
+            deployment: chunk_runtime::DeploymentRef { environment: "local".into(), deployment: "test".into() },
             machine_profile: "test".into(),
             artifact_digest: "test".into(),
             memory_mib: 512,
             backend: None,
         },
-        BTreeMap::from([(
-            "test".into(),
-            MachineProfile {
-                memory_mib: 512,
-                max_sessions: 1,
-            },
-        )]),
+        BTreeMap::from([("test".into(), MachineProfile { memory_mib: 512, max_sessions: 1 })]),
     )
 }
 
@@ -149,21 +140,13 @@ exit 7
                 protocol: 775,
             }),
         });
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {}", fields[1]).parse().unwrap());
-        SupervisorClient::connect(fields[0].clone())
-            .await
-            .unwrap()
-            .register_process(request)
+        request.metadata_mut().insert("authorization", format!("Bearer {}", fields[1]).parse().unwrap());
+        SupervisorClient::connect(fields[0].clone()).await.unwrap().register_process(request).await.unwrap();
+    };
+    let (connection, ()) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(host.ensure(&id, "test"), register) })
             .await
             .unwrap();
-    };
-    let (connection, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(host.ensure(&id, "test"), register)
-    })
-    .await
-    .unwrap();
     connection.unwrap();
     assert!(!host.stopped(&id));
     std::fs::write(program.with_extension("exit"), b"exit").unwrap();

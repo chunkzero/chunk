@@ -50,11 +50,7 @@ fn op_chunk_read(state: &mut OpState, generation: u32, #[string] request: &str) 
         Read::Get { table, id } => {
             let key = Key { table, id };
             let base = capabilities.host.get(&key).map_err(JsErrorBox::generic)?;
-            capabilities
-                .writes
-                .get(&key)
-                .map_or(base, |write| write.value.clone())
-                .unwrap_or(Value::Null)
+            capabilities.writes.get(&key).map_or(base, |write| write.value.clone()).unwrap_or(Value::Null)
         }
         Read::Scan { table, start, end } => {
             let mut rows: BTreeMap<_, _> = capabilities
@@ -81,15 +77,8 @@ fn op_chunk_read(state: &mut OpState, generation: u32, #[string] request: &str) 
             if query.limit == 0 || query.limit > 1024 {
                 return Err(JsErrorBox::generic("Index result limit must be 1..1024"));
             }
-            let extra = capabilities
-                .writes
-                .keys()
-                .filter(|key| key.table == query.table)
-                .count();
-            let candidates = chunk_contract::IndexQuery {
-                limit: query.limit + extra,
-                ..query.clone()
-            };
+            let extra = capabilities.writes.keys().filter(|key| key.table == query.table).count();
+            let candidates = chunk_contract::IndexQuery { limit: query.limit + extra, ..query.clone() };
             let indexed = capabilities.host.scan_index(&candidates).map_err(JsErrorBox::generic)?;
             let mut rows: BTreeMap<_, _> = indexed.rows.into_iter().collect();
             for (key, write) in &capabilities.writes {

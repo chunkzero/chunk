@@ -1,22 +1,28 @@
 package dev.chunkzero.backend.api;
 
+import static org.junit.jupiter.api.Assertions.*;
+
 import dev.chunkzero.generated.BackendTypes;
+
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
 
 class GeneratedContractsTest {
     @Test
     void nestedModelsAndReservedNamesRetainTheirWireShape() {
-        var input = Codecs.parse("{\"when\":\"now\",\"CODEC\":\"text\",\"payload\":{\"items\":[{\"value\":\"one\"}]}}");
+        var input =
+                Codecs.parse(
+                        "{\"when\":\"now\",\"CODEC\":\"text\",\"payload\":{\"items\":[{\"value\":\"one\"}]}}");
         var reference = BackendTypes.Shared.Names.class_;
         var args = reference.arguments().decode(input);
         assertEquals("now", args.when_());
         assertEquals("text", args.CODEC_());
-        BackendTypes.Shared.Names.ClassArgs.Payload.ItemsItem item = args.payload().items().getFirst();
+        BackendTypes.Shared.Names.ClassArgs.Payload.ItemsItem item =
+                args.payload().items().getFirst();
         assertEquals("one", item.value());
         assertEquals(input, reference.arguments().encode(args));
         List<String> result = reference.result().decode(Codecs.parse("[\"one\"]"));
@@ -28,12 +34,23 @@ class GeneratedContractsTest {
 
     @Test
     void generatedNamesAndScalarCodecsRoundTrip() {
-        var value = Codecs.parse("{\"Objects\":\"text\",\"List\":[null],\"class\":\"line\\n\\u0000🌍\",\"ratio\":0.5,\"flag\":true,\"exact\":42,\"fraction\":0.125,\"nothing\":null}");
+        var value =
+                Codecs.parse(
+                        "{\"Objects\":\"text\",\"List\":[null],\"class\":\"line\\n"
+                            + "\\u0000🌍\",\"ratio\":0.5,\"flag\":true,\"exact\":42,\"fraction\":0.125,\"nothing\":null}");
         var codec = BackendTypes.Proto.read.arguments();
         assertEquals(value, codec.encode(codec.decode(value)));
         var result = Codecs.parse("{\"_id\":\"profiles:p1\",\"wins\":3}");
-        assertEquals(result, BackendTypes.Proto.read.result().encode(BackendTypes.Proto.read.result().decode(result)));
-        assertEquals(Codecs.parse("true"), BackendTypes.codecs.result().encode(BackendTypes.codecs.result().decode(Codecs.parse("true"))));
+        assertEquals(
+                result,
+                BackendTypes.Proto.read
+                        .result()
+                        .encode(BackendTypes.Proto.read.result().decode(result)));
+        assertEquals(
+                Codecs.parse("true"),
+                BackendTypes.codecs
+                        .result()
+                        .encode(BackendTypes.codecs.result().decode(Codecs.parse("true"))));
     }
 
     @Test
@@ -51,8 +68,9 @@ class GeneratedContractsTest {
         assertEquals(new Id<>("profiles:p1"), absent.id());
         var present = codec.decode(fixtures.get(1));
         assertInstanceOf(FieldValue.Present.class, present.note());
-        assertInstanceOf(BackendTypes.Shared.Profile.RecordArgs.Note.V0.class,
-            ((FieldValue.Present<?>) present.note()).value());
+        assertInstanceOf(
+                BackendTypes.Shared.Profile.RecordArgs.Note.V0.class,
+                ((FieldValue.Present<?>) present.note()).value());
         var invalid = fixtures.get(0).getAsJsonObject().deepCopy();
         invalid.addProperty("count", 9_007_199_254_740_992L);
         assertThrows(IllegalArgumentException.class, () -> codec.decode(invalid));
@@ -63,9 +81,12 @@ class GeneratedContractsTest {
         invalid.addProperty("extra", true);
         assertThrows(IllegalArgumentException.class, () -> codec.decode(invalid));
         assertThrows(IllegalArgumentException.class, () -> Codecs.STRING.encode("\ud800"));
-        assertThrows(IllegalArgumentException.class, () -> Codecs.INTEGER.decode(Codecs.parse("1.5")));
+        assertThrows(
+                IllegalArgumentException.class, () -> Codecs.INTEGER.decode(Codecs.parse("1.5")));
         assertThrows(IllegalArgumentException.class, () -> Codecs.NUMBER.encode(Double.NaN));
-        assertTrue(Arrays.stream(BackendTypes.Shared.Profile.class.getFields()).noneMatch(field -> field.getName().contains("hidden")));
+        assertTrue(
+                Arrays.stream(BackendTypes.Shared.Profile.class.getFields())
+                        .noneMatch(field -> field.getName().contains("hidden")));
     }
 
     private static void assertReadableNames(Class<?> type) {

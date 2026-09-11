@@ -76,10 +76,7 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
     if let Some(local) = &manifest.local {
         local.validate(&manifest_path)?;
         for app in &mut apps {
-            let profile = app
-                .runtime
-                .machine_profile
-                .get_or_insert_with(|| local.machine_profile.clone());
+            let profile = app.runtime.machine_profile.get_or_insert_with(|| local.machine_profile.clone());
             if !local.profiles.contains_key(profile) {
                 return Err(invalid(
                     &root.join(&app.directory).join("app.toml"),
@@ -94,11 +91,7 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
             "runtime.machine_profile requires profiles in chunk.toml [local]",
         ));
     }
-    Ok(ProjectMetadata {
-        version: 1,
-        apps,
-        local: manifest.local,
-    })
+    Ok(ProjectMetadata { version: 1, apps, local: manifest.local })
 }
 
 /// Discovers sorted immediate `apps/*/app.toml` children using their directory names as app IDs.
@@ -133,10 +126,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             Err(error) => return Err(invalid(&manifest_path, error)),
             Ok(_) => {}
         }
-        let id = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| invalid(&entry.path(), "app IDs must be UTF-8"))?;
+        let id = entry.file_name().into_string().map_err(|_| invalid(&entry.path(), "app IDs must be UTF-8"))?;
         if !valid_id(&id) {
             return Err(invalid(
                 &manifest_path,
@@ -147,11 +137,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
         let manifest: AppManifest = read_manifest(&manifest_path)?;
-        if manifest
-            .runtime
-            .capacity
-            .is_some_and(|capacity| !(1..=128).contains(&capacity))
-        {
+        if manifest.runtime.capacity.is_some_and(|capacity| !(1..=128).contains(&capacity)) {
             return Err(invalid(&manifest_path, "runtime.capacity must be between 1 and 128"));
         }
         require_file(&entry.path().join("build.gradle.kts"))?;
@@ -179,18 +165,12 @@ impl LocalConfig {
         if !self.profiles.contains_key(&self.machine_profile) {
             return Err(invalid(
                 path,
-                format!(
-                    "local.machine_profile references unknown profile {:?}",
-                    self.machine_profile
-                ),
+                format!("local.machine_profile references unknown profile {:?}", self.machine_profile),
             ));
         }
         for (name, profile) in &self.profiles {
             if name.is_empty() || name.len() > 128 {
-                return Err(invalid(
-                    path,
-                    "local profile names must contain between 1 and 128 bytes",
-                ));
+                return Err(invalid(path, "local profile names must contain between 1 and 128 bytes"));
             }
             if !(128..=8192).contains(&profile.memory_mib) || !(1..=16).contains(&profile.max_sessions) {
                 return Err(invalid(
@@ -207,10 +187,7 @@ impl LocalConfig {
 
 fn valid_id(id: &str) -> bool {
     id.len() <= 128
-        && id
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && id.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 

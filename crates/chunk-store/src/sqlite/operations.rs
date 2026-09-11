@@ -31,11 +31,7 @@ pub(super) fn prepare(
     }
     transaction.execute(
         "INSERT INTO _chunk_retry_contexts VALUES (?1, ?2, ?3)",
-        params![
-            operation.id,
-            operation.fingerprint.as_slice(),
-            serde_json::to_string(&proposed)?
-        ],
+        params![operation.id, operation.fingerprint.as_slice(), serde_json::to_string(&proposed)?],
     )?;
     transaction.commit()?;
     Ok(proposed)

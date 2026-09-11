@@ -7,9 +7,7 @@ use chunk_protocol::{
 
 fn check_wire<P: Packet + Encode + Decode + std::fmt::Debug + PartialEq>(packet: &P, body: &[u8]) {
     let mut expected = Vec::new();
-    VarInt(i32::try_from(body.len()).unwrap())
-        .encode(&mut expected)
-        .unwrap();
+    VarInt(i32::try_from(body.len()).unwrap()).encode(&mut expected).unwrap();
     expected.extend_from_slice(body);
     assert_eq!(encode_packet(packet).unwrap(), expected);
     assert_eq!(&decode_packet::<P>(body).unwrap(), packet);
@@ -91,18 +89,8 @@ fn configuration_settings_keepalives_and_negotiation_match_wire() {
     assert_eq!(ConfigurationClientInformation::STATE, State::Configuration);
     assert_eq!(ConfigurationClientInformation::DIRECTION, Direction::Serverbound);
     let wire = [4, 0, 1, 2, 3, 4, 5, 6, 7];
-    check_wire(
-        &ConfigurationKeepAlive {
-            keep_alive_id: 0x0001_0203_0405_0607,
-        },
-        &wire,
-    );
-    check_wire(
-        &ConfigurationKeepAliveResponse {
-            keep_alive_id: 0x0001_0203_0405_0607,
-        },
-        &wire,
-    );
+    check_wire(&ConfigurationKeepAlive { keep_alive_id: 0x0001_0203_0405_0607 }, &wire);
+    check_wire(&ConfigurationKeepAliveResponse { keep_alive_id: 0x0001_0203_0405_0607 }, &wire);
     assert_eq!(ConfigurationKeepAlive::DIRECTION, Direction::Clientbound);
     check_wire(&FinishConfiguration, &[3]);
     check_wire(&AcknowledgeConfiguration, &[3]);
@@ -117,44 +105,22 @@ fn configuration_settings_keepalives_and_negotiation_match_wire() {
         },
         b"\x0e\x01\x09minecraft\x04core\x0426.1",
     );
+    check_wire(&KnownPacks { packs: BoundedArray::new(vec![]).unwrap() }, &[7, 0]);
     check_wire(
-        &KnownPacks {
-            packs: BoundedArray::new(vec![]).unwrap(),
-        },
-        &[7, 0],
-    );
-    check_wire(
-        &FeatureFlags {
-            features: BoundedArray::new(vec![McString::new("minecraft:vanilla").unwrap()]).unwrap(),
-        },
+        &FeatureFlags { features: BoundedArray::new(vec![McString::new("minecraft:vanilla").unwrap()]).unwrap() },
         b"\x0c\x01\x11minecraft:vanilla",
     );
 }
 
 #[test]
 fn malformed_login_and_configuration_fields_are_rejected() {
-    assert_eq!(
-        decode_packet::<EncryptionResponse>(&[1, 0xff, 0xff, 0xff, 0xff, 0x0f]),
-        Err(Error::CollectionTooLong)
-    );
+    assert_eq!(decode_packet::<EncryptionResponse>(&[1, 0xff, 0xff, 0xff, 0xff, 0x0f]), Err(Error::CollectionTooLong));
     // 1 MiB + 1, rejected before reading or allocating the buffer.
-    assert_eq!(
-        decode_packet::<EncryptionResponse>(&[1, 0x81, 0x80, 0x40]),
-        Err(Error::CollectionTooLong)
-    );
-    assert_eq!(
-        decode_packet::<LoginPluginResponse>(&[2, 0, 2]),
-        Err(Error::InvalidBoolean)
-    );
+    assert_eq!(decode_packet::<EncryptionResponse>(&[1, 0x81, 0x80, 0x40]), Err(Error::CollectionTooLong));
+    assert_eq!(decode_packet::<LoginPluginResponse>(&[2, 0, 2]), Err(Error::InvalidBoolean));
     let invalid_enum = b"\x00\x05en_US\x08\x00\x01\x7f\x01\x00\x01\x03";
-    assert_eq!(
-        decode_packet::<ConfigurationClientInformation>(invalid_enum),
-        Err(Error::InvalidEnumValue)
-    );
-    assert_eq!(
-        decode_packet::<KnownPacks>(&[7, 0x81, 8]),
-        Err(Error::CollectionTooLong)
-    );
+    assert_eq!(decode_packet::<ConfigurationClientInformation>(invalid_enum), Err(Error::InvalidEnumValue));
+    assert_eq!(decode_packet::<KnownPacks>(&[7, 0x81, 8]), Err(Error::CollectionTooLong));
 }
 
 #[test]
@@ -164,15 +130,9 @@ fn optional_plugin_payload_distinguishes_absent_from_empty() {
     for (data, wire) in [
         (None, vec![2, 42, 0]),
         (Some(RemainingBytes::new(vec![]).unwrap()), vec![2, 42, 1]),
-        (
-            Some(RemainingBytes::new(vec![0xab, 0xcd]).unwrap()),
-            vec![2, 42, 1, 0xab, 0xcd],
-        ),
+        (Some(RemainingBytes::new(vec![0xab, 0xcd]).unwrap()), vec![2, 42, 1, 0xab, 0xcd]),
     ] {
-        let packet = LoginPluginResponse {
-            message_id: VarInt(42),
-            data,
-        };
+        let packet = LoginPluginResponse { message_id: VarInt(42), data };
         assert_eq!(decode_packet::<LoginPluginResponse>(&wire).unwrap(), packet);
         let mut body = vec![2];
         packet.encode(&mut body).unwrap();
@@ -184,22 +144,9 @@ fn optional_plugin_payload_distinguishes_absent_from_empty() {
 fn generated_limbo_packets_match_wire() {
     fn requires_eq<T: Eq>() {}
 
-    check_wire(
-        &GameEvent {
-            reason: GameEventReason::LevelChunksLoadStart,
-            value: 0.0,
-        },
-        &[0x26, 13, 0, 0, 0, 0],
-    );
+    check_wire(&GameEvent { reason: GameEventReason::LevelChunksLoadStart, value: 0.0 }, &[0x26, 13, 0, 0, 0, 0]);
     assert!(decode_packet::<GameEvent>(&[0x26, 255, 0, 0, 0, 0]).is_err());
-    check_wire(
-        &TitleTimes {
-            fade_in: 10,
-            stay: 200,
-            fade_out: 20,
-        },
-        &[0x73, 0, 0, 0, 10, 0, 0, 0, 200, 0, 0, 0, 20],
-    );
+    check_wire(&TitleTimes { fade_in: 10, stay: 200, fade_out: 20 }, &[0x73, 0, 0, 0, 10, 0, 0, 0, 200, 0, 0, 0, 20]);
     check_wire(
         &PlayClientInformation {
             locale: McString::new("en_US").unwrap(),

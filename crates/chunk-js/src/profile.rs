@@ -30,12 +30,7 @@ pub(crate) fn begin(runtime: &mut JsRuntime, timestamp: i64, seed: u64) -> Resul
 }
 
 pub(crate) fn end(runtime: &mut JsRuntime) -> Vec<crate::Log> {
-    runtime
-        .op_state()
-        .borrow_mut()
-        .borrow_mut::<Option<Context>>()
-        .take()
-        .map_or_else(Vec::new, |context| context.logs)
+    runtime.op_state().borrow_mut().borrow_mut::<Option<Context>>().take().map_or_else(Vec::new, |context| context.logs)
 }
 
 fn context(state: &mut OpState) -> Result<&mut Context, JsErrorBox> {
@@ -70,10 +65,7 @@ fn op_chunk_log(state: &mut OpState, #[string] level: &str, #[string] message: &
         return Err(JsErrorBox::range_error("Invocation log limit exceeded"));
     }
     context.log_bytes += message.len();
-    context.logs.push(crate::Log {
-        level: level.into(),
-        message: message.into(),
-    });
+    context.logs.push(crate::Log { level: level.into(), message: message.into() });
     Ok(())
 }
 
@@ -101,7 +93,4 @@ fn op_chunk_digest(
     Ok(())
 }
 
-deno_core::extension!(
-    chunk_profile,
-    ops = [op_chunk_now, op_chunk_random, op_chunk_log, op_chunk_digest]
-);
+deno_core::extension!(chunk_profile, ops = [op_chunk_now, op_chunk_random, op_chunk_log, op_chunk_digest]);

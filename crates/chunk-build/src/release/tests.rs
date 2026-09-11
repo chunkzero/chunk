@@ -22,11 +22,7 @@ impl Fixture {
         fs::create_dir_all(project.join("assets")).unwrap();
         fs::write(project.join("chunk.toml"), "[local]\nenvironment='private-environment'\nmachine_profile='small'\ncapacity=16\nmax_processes=4\n[local.profiles.small]\nmemory_mib=512\nmax_sessions=2\n").unwrap();
         fs::write(project.join("assets/terrain 世界.txt"), b"world template").unwrap();
-        fs::write(
-            project.join("assets").join(format!("{}.txt", "long".repeat(40))),
-            b"long asset",
-        )
-        .unwrap();
+        fs::write(project.join("assets").join(format!("{}.txt", "long".repeat(40))), b"long asset").unwrap();
         fs::write(project.join(".env"), b"PRIVATE_TOKEN=secret").unwrap();
         for app in ["arena", "lobby"] {
             fs::create_dir_all(project.join(format!("apps/{app}/assets"))).unwrap();
@@ -39,14 +35,8 @@ impl Fixture {
             fs::write(project.join(format!("apps/{app}/assets/map.txt")), app).unwrap();
             write_app_jar(&root.path().join(format!("{app}.jar")), app, b"first");
         }
-        write_jar(
-            &root.path().join("library.jar"),
-            &[("sample/Library.class", class(21, 1))],
-        );
-        write_jar(
-            &root.path().join("generated.jar"),
-            &[("generated/BackendTypes.class", class(21, 1))],
-        );
+        write_jar(&root.path().join("library.jar"), &[("sample/Library.class", class(21, 1))]);
+        write_jar(&root.path().join("generated.jar"), &[("generated/BackendTypes.class", class(21, 1))]);
         fs::write(backend.join("source.mjs"), "export function status() { return 1; }").unwrap();
         fs::write(backend.join("source.mjs.map"), "{}").unwrap();
         fs::write(backend.join("contract.json"), br#"{"contract_version":1,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
@@ -64,25 +54,13 @@ impl Fixture {
             ]
         });
         let jvm_descriptor = root.path().join("artifacts.json");
-        let fixture = Self {
-            root,
-            inputs: ReleaseInputs {
-                project,
-                backend,
-                jvm_descriptor,
-            },
-            descriptor,
-        };
+        let fixture = Self { root, inputs: ReleaseInputs { project, backend, jvm_descriptor }, descriptor };
         fixture.save_descriptor();
         fixture
     }
 
     fn save_descriptor(&self) {
-        fs::write(
-            &self.inputs.jvm_descriptor,
-            serde_json::to_vec(&self.descriptor).unwrap(),
-        )
-        .unwrap();
+        fs::write(&self.inputs.jvm_descriptor, serde_json::to_vec(&self.descriptor).unwrap()).unwrap();
     }
 
     fn publish(&self) -> io::Result<Release> {
@@ -109,10 +87,7 @@ fn write_app_jar(path: &Path, app: &str, marker: &[u8]) {
     write_jar(
         path,
         &[
-            (
-                "META-INF/chunk/app.json",
-                serde_json::to_vec(&json!({"version":1,"id":app})).unwrap(),
-            ),
+            ("META-INF/chunk/app.json", serde_json::to_vec(&json!({"version":1,"id":app})).unwrap()),
             (
                 "META-INF/services/dev.chunkzero.runtime.SessionProvider",
                 format!("sample.{app}.Provider\n").into_bytes(),
@@ -156,12 +131,7 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
         let header = entry.header();
         assert!(header.entry_type().is_file());
         assert_eq!(
-            (
-                header.mode().unwrap(),
-                header.uid().unwrap(),
-                header.gid().unwrap(),
-                header.mtime().unwrap()
-            ),
+            (header.mode().unwrap(), header.uid().unwrap(), header.gid().unwrap(), header.mtime().unwrap()),
             (0o644, 0, 0, 0)
         );
         assert_eq!(header.username().unwrap(), Some(""));
@@ -178,21 +148,13 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     assert!(archived.contains_key(&format!("assets/{}.txt", "long".repeat(40))));
     assert!(archived.contains_key("apps/arena/assets/map.txt"));
     assert!(archived.contains_key("apps/lobby/assets/map.txt"));
-    for name in [
-        "source.mjs",
-        "source.mjs.map",
-        "contract.json",
-        "backend.json",
-        "release.json",
-    ] {
+    for name in ["source.mjs", "source.mjs.map", "contract.json", "backend.json", "release.json"] {
         assert!(archived.contains_key(name));
     }
     assert!(archived.keys().all(|name| {
         !name.contains(".sdk")
             && !name.contains(".env")
-            && Path::new(name)
-                .extension()
-                .is_none_or(|extension| extension != "java" && extension != "kt")
+            && Path::new(name).extension().is_none_or(|extension| extension != "java" && extension != "kt")
     }));
     let manifest: Value = serde_json::from_slice(&archived["release.json"]).unwrap();
     let backend: Value = serde_json::from_slice(&archived["backend.json"]).unwrap();
@@ -284,70 +246,27 @@ fn releases_reject_jvm_coordinate_class_and_app_identity_conflicts() {
     let original = fixture.descriptor.clone();
     let mut version_conflict = original["classpath"][0].clone();
     version_conflict["component"]["version"] = json!("2.0");
-    fixture.descriptor["classpath"]
-        .as_array_mut()
-        .unwrap()
-        .push(version_conflict);
+    fixture.descriptor["classpath"].as_array_mut().unwrap().push(version_conflict);
     fixture.save_descriptor();
-    assert!(
-        fixture
-            .publish()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("conflicting versions")
-    );
+    assert!(fixture.publish().err().unwrap().to_string().contains("conflicting versions"));
     fixture.descriptor = original.clone();
     let duplicate = fixture.root.path().join("another/library.jar");
     fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
     write_jar(&duplicate, &[("sample/Other.class", class(21, 2))]);
     let mut bytes_conflict = original["classpath"][0].clone();
     bytes_conflict["file"] = json!(duplicate);
-    fixture.descriptor["classpath"]
-        .as_array_mut()
-        .unwrap()
-        .push(bytes_conflict);
+    fixture.descriptor["classpath"].as_array_mut().unwrap().push(bytes_conflict);
     fixture.save_descriptor();
-    assert!(
-        fixture
-            .publish()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("conflicting bytes")
-    );
+    assert!(fixture.publish().err().unwrap().to_string().contains("conflicting bytes"));
     fixture.descriptor = original;
     fixture.save_descriptor();
-    write_jar(
-        &fixture.root.path().join("generated.jar"),
-        &[("sample/Library.class", class(21, 2))],
-    );
-    assert!(
-        fixture
-            .publish()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("conflicting class")
-    );
-    write_jar(
-        &fixture.root.path().join("generated.jar"),
-        &[("generated/BackendTypes.class", class(26, 1))],
-    );
+    write_jar(&fixture.root.path().join("generated.jar"), &[("sample/Library.class", class(21, 2))]);
+    assert!(fixture.publish().err().unwrap().to_string().contains("conflicting class"));
+    write_jar(&fixture.root.path().join("generated.jar"), &[("generated/BackendTypes.class", class(26, 1))]);
     assert!(fixture.publish().err().unwrap().to_string().contains("incompatible"));
-    write_jar(
-        &fixture.root.path().join("generated.jar"),
-        &[("generated/BackendTypes.class", class(21, 1))],
-    );
+    write_jar(&fixture.root.path().join("generated.jar"), &[("generated/BackendTypes.class", class(21, 1))]);
     write_app_jar(&fixture.root.path().join("lobby.jar"), "wrong", b"first");
-    assert!(
-        fixture
-            .publish()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("identity does not match")
-    );
+    assert!(fixture.publish().err().unwrap().to_string().contains("identity does not match"));
 }
 
 #[test]
@@ -356,10 +275,7 @@ fn class_conflicts_use_the_effective_multi_release_definition() {
     write_jar(
         &fixture.root.path().join("library.jar"),
         &[
-            (
-                "META-INF/MANIFEST.MF",
-                b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".to_vec(),
-            ),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".to_vec()),
             ("sample/Library.class", class(21, 1)),
             ("META-INF/versions/23/sample/Library.class", class(23, 2)),
             ("META-INF/versions/26/sample/Library.class", class(26, 3)),
@@ -368,24 +284,11 @@ fn class_conflicts_use_the_effective_multi_release_definition() {
     );
     write_jar(
         &fixture.root.path().join("generated.jar"),
-        &[
-            ("sample/Library.class", class(23, 2)),
-            ("module-info.class", class(21, 2)),
-        ],
+        &[("sample/Library.class", class(23, 2)), ("module-info.class", class(21, 2))],
     );
     fixture.publish().unwrap();
-    write_jar(
-        &fixture.root.path().join("generated.jar"),
-        &[("sample/Library.class", class(21, 1))],
-    );
-    assert!(
-        fixture
-            .publish()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("conflicting class")
-    );
+    write_jar(&fixture.root.path().join("generated.jar"), &[("sample/Library.class", class(21, 1))]);
+    assert!(fixture.publish().err().unwrap().to_string().contains("conflicting class"));
 }
 
 #[cfg(unix)]
@@ -396,11 +299,8 @@ fn assets_reject_symlinks_and_nonportable_paths() {
     fs::write(&path, b"ambiguous name").unwrap();
     assert!(fixture.publish().err().unwrap().to_string().contains("not portable"));
     fs::remove_file(path).unwrap();
-    std::os::unix::fs::symlink(
-        fixture.inputs.project.join(".env"),
-        fixture.inputs.project.join("assets/link"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(fixture.inputs.project.join(".env"), fixture.inputs.project.join("assets/link"))
+        .unwrap();
     assert!(fixture.publish().is_err());
     assert!(!fixture.root.path().join("dist").exists());
 }

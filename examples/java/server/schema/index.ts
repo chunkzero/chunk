@@ -1,3 +1,3 @@
-import { defineSchema } from '@chunk/server';
+import { defineSchema } from "@chunk/server";
 
 export default defineSchema({});

@@ -6,18 +6,9 @@ use std::{
 
 const SDK: &[(&str, &str)] = &[
     ("index.ts", include_str!("../../../../packages/server/src/index.ts")),
-    (
-        "functions.ts",
-        include_str!("../../../../packages/server/src/functions.ts"),
-    ),
-    (
-        "validators.ts",
-        include_str!("../../../../packages/server/src/validators.ts"),
-    ),
-    (
-        "documents.ts",
-        include_str!("../../../../packages/server/src/documents.ts"),
-    ),
+    ("functions.ts", include_str!("../../../../packages/server/src/functions.ts")),
+    ("validators.ts", include_str!("../../../../packages/server/src/validators.ts")),
+    ("documents.ts", include_str!("../../../../packages/server/src/documents.ts")),
     ("schema.ts", include_str!("../../../../packages/server/src/schema.ts")),
     ("web.d.ts", include_str!("../../../../packages/server/src/web.d.ts")),
 ];
@@ -52,23 +43,14 @@ pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
     let mut files = Vec::new();
     collect(&root.join("server"), "shared", &mut files, 0)?;
     for app in crate::project::discover_apps(root)? {
-        collect(
-            &root.join(&app.directory).join("server"),
-            &format!("apps/{}", app.id),
-            &mut files,
-            0,
-        )?;
+        collect(&root.join(&app.directory).join("server"), &format!("apps/{}", app.id), &mut files, 0)?;
     }
-    if files.iter().try_fold(0_u64, |total, source| {
-        Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len())
-    })? > 8 * 1024 * 1024
+    if files.iter().try_fold(0_u64, |total, source| Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len()))?
+        > 8 * 1024 * 1024
     {
         return Err(io::Error::other("backend source size limit"));
     }
-    if !files
-        .iter()
-        .any(|source| source.path == root.join("server/schema/index.ts"))
-    {
+    if !files.iter().any(|source| source.path == root.join("server/schema/index.ts")) {
         return Err(io::Error::other("missing explicitly composed server/schema/index.ts"));
     }
     Ok(files)
@@ -89,10 +71,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
         return Err(io::Error::other("source nesting limit"));
     }
     for entry in entries(directory)? {
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| io::Error::other("source paths must be UTF-8"))?;
+        let name = entry.file_name().into_string().map_err(|_| io::Error::other("source paths must be UTF-8"))?;
         if ["node_modules", "_generated"].contains(&name.as_str()) {
             continue;
         }
@@ -105,10 +84,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
         } else if kind.is_file()
             && let Some(stem) = name.strip_suffix(".ts").or_else(|| name.strip_suffix(".mts"))
         {
-            files.push(Source {
-                path: entry.path(),
-                namespace: format!("{namespace}/{stem}"),
-            });
+            files.push(Source { path: entry.path(), namespace: format!("{namespace}/{stem}") });
             if files.len() > 512 {
                 return Err(io::Error::other("too many backend source files"));
             }

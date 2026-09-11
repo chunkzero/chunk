@@ -7,16 +7,12 @@ use syn::{Data, DeriveInput, Fields, Index, LitInt, Path, parse_macro_input, par
 
 #[proc_macro_derive(Encode)]
 pub fn encode(input: TokenStream) -> TokenStream {
-    codec(&parse_macro_input!(input as DeriveInput), true)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    codec(&parse_macro_input!(input as DeriveInput), true).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 #[proc_macro_derive(Decode)]
 pub fn decode(input: TokenStream) -> TokenStream {
-    codec(&parse_macro_input!(input as DeriveInput), false)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    codec(&parse_macro_input!(input as DeriveInput), false).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
@@ -25,11 +21,8 @@ fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
     };
     let name = &input.ident;
     let mut generics = input.generics.clone();
-    let bound: Path = if encoding {
-        parse_quote!(::chunk_protocol::Encode)
-    } else {
-        parse_quote!(::chunk_protocol::Decode)
-    };
+    let bound: Path =
+        if encoding { parse_quote!(::chunk_protocol::Encode) } else { parse_quote!(::chunk_protocol::Decode) };
     for field in &data.fields {
         let ty = &field.ty;
         generics.make_where_clause().predicates.push(parse_quote!(#ty: #bound));
@@ -37,10 +30,8 @@ fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     if encoding {
         let fields = data.fields.iter().enumerate().map(|(index, field)| {
-            let member = field
-                .ident
-                .clone()
-                .map_or_else(|| syn::Member::Unnamed(Index::from(index)), syn::Member::Named);
+            let member =
+                field.ident.clone().map_or_else(|| syn::Member::Unnamed(Index::from(index)), syn::Member::Named);
             quote!(::chunk_protocol::Encode::encode(&self.#member, output)?;)
         });
         Ok(quote! {
@@ -55,10 +46,7 @@ fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
         let fields = data.fields.iter().map(|field| {
             let ty = &field.ty;
             let value = quote!(<#ty as ::chunk_protocol::Decode>::decode(input)?);
-            field
-                .ident
-                .as_ref()
-                .map_or_else(|| value.clone(), |name| quote!(#name: #value))
+            field.ident.as_ref().map_or_else(|| value.clone(), |name| quote!(#name: #value))
         });
         let value = match &data.fields {
             Fields::Named(_) => quote!(Self { #(#fields),* }),
@@ -78,9 +66,7 @@ fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
 /// Declares `#[packet(id = 0x00, state = Status, direction = Serverbound)]`.
 #[proc_macro_derive(Packet, attributes(packet))]
 pub fn packet(input: TokenStream) -> TokenStream {
-    packet_impl(&parse_macro_input!(input as DeriveInput))
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    packet_impl(&parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 fn packet_impl(input: &DeriveInput) -> syn::Result<Tokens> {
@@ -116,10 +102,7 @@ fn packet_impl(input: &DeriveInput) -> syn::Result<Tokens> {
         })?;
     }
     let (Some(id), Some(state), Some(direction)) = (id, state, direction) else {
-        return Err(syn::Error::new_spanned(
-            input,
-            "packet requires id, state, and direction",
-        ));
+        return Err(syn::Error::new_spanned(input, "packet requires id, state, and direction"));
     };
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();

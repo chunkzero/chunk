@@ -21,11 +21,7 @@ fn app(root: &Path, id: &str, manifest: &str) {
     let directory = root.join("apps").join(id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("app.toml"), manifest).unwrap();
-    fs::write(
-        directory.join("build.gradle.kts"),
-        "error(\"inspection must not run Gradle\")",
-    )
-    .unwrap();
+    fs::write(directory.join("build.gradle.kts"), "error(\"inspection must not run Gradle\")").unwrap();
 }
 
 #[test]
@@ -94,11 +90,7 @@ fn local_defaults_and_app_overrides_are_validated_against_profiles_and_limits() 
     app(root, "lobby", "");
     for (valid, invalid_value, expected) in [
         ("environment = \"local\"", "environment = ''", "local.environment"),
-        (
-            "machine_profile = \"small\"",
-            "machine_profile = 'missing'",
-            "unknown profile",
-        ),
+        ("machine_profile = \"small\"", "machine_profile = 'missing'", "unknown profile"),
         ("capacity = 16", "capacity = 129", "local.capacity"),
         ("max_processes = 4", "max_processes = 0", "local.max_processes"),
         ("memory_mib = 512", "memory_mib = 1", "local.profiles.small"),
@@ -116,10 +108,7 @@ fn local_defaults_and_app_overrides_are_validated_against_profiles_and_limits() 
     ] {
         fs::write(root.join("apps/lobby/app.toml"), manifest).unwrap();
         let error = inspect(root).unwrap_err().to_string();
-        assert!(
-            error.contains("apps/lobby/app.toml") && error.contains(expected),
-            "{error}"
-        );
+        assert!(error.contains("apps/lobby/app.toml") && error.contains(expected), "{error}");
     }
     fs::write(root.join("chunk.toml"), "").unwrap();
     fs::write(root.join("apps/lobby/app.toml"), "[runtime]\nmachine_profile = 'small'").unwrap();
@@ -134,19 +123,13 @@ fn app_ids_are_validated_before_becoming_wire_or_gradle_names() {
     assert!(discover_apps(root).unwrap().is_empty());
     app(root, "invalid-name", "");
     let error = discover_apps(root).unwrap_err().to_string();
-    assert!(
-        error.contains("invalid-name/app.toml") && error.contains("ASCII identifier"),
-        "{error}"
-    );
+    assert!(error.contains("invalid-name/app.toml") && error.contains("ASCII identifier"), "{error}");
     fs::rename(root.join("apps/invalid-name"), root.join("apps/lobby")).unwrap();
     app(root, "Lobby", "");
     // Case-insensitive filesystems refer to the same directory.
     if fs::read_dir(root.join("apps")).unwrap().count() == 2 {
         let error = discover_apps(root).unwrap_err().to_string();
-        assert!(
-            error.contains("app.toml") && error.contains("differ only by case"),
-            "{error}"
-        );
+        assert!(error.contains("app.toml") && error.contains("differ only by case"), "{error}");
     }
 }
 

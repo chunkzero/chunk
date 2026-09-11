@@ -65,10 +65,7 @@ fn open(directory: &tempfile::TempDir) -> SqliteStore {
 
 async fn pending<F: Future>(mut future: Pin<&mut F>) {
     poll_fn(|cx| {
-        assert!(
-            matches!(future.as_mut().poll(cx), Poll::Pending),
-            "response escaped before durability"
-        );
+        assert!(matches!(future.as_mut().poll(cx), Poll::Pending), "response escaped before durability");
         Poll::Ready(())
     })
     .await;
@@ -195,16 +192,7 @@ impl Harness {
         };
         let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
-        Self {
-            controls: Controls {
-                prepare,
-                commits,
-                notices: receiver,
-            },
-            backend,
-            directory,
-            base,
-        }
+        Self { controls: Controls { prepare, commits, notices: receiver }, backend, directory, base }
     }
 }
 
@@ -224,10 +212,7 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
     assert_eq!(value(&independent), json!(0));
     let mut query = Box::pin(backend.query(call("get", json!({"id": "p"}))));
     pending(query.as_mut()).await;
-    backend
-        .register(DeploymentId::new("other").unwrap(), SOURCE.into(), Limits::default())
-        .await
-        .unwrap();
+    backend.register(DeploymentId::new("other").unwrap(), SOURCE.into(), Limits::default()).await.unwrap();
     pending(first.as_mut()).await;
     pending(second.as_mut()).await;
     pending(query.as_mut()).await;
@@ -270,10 +255,7 @@ async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_
         }
         requests.push(request);
     }
-    assert!(matches!(
-        harness.backend.query(call("get", json!({"id": "p"}))).await,
-        Err(Error::Busy)
-    ));
+    assert!(matches!(harness.backend.query(call("get", json!({"id": "p"}))).await, Err(Error::Busy)));
     drop(requests.remove(0));
     harness.controls.commits[0].send(()).unwrap();
     for request in requests {
@@ -291,63 +273,29 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
     let mut first = Box::pin(harness.backend.mutate("first".into(), call("bump", json!({"id": "p"}))));
     pending(first.as_mut()).await;
     assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
-    let mut second = Box::pin(
-        harness
-            .backend
-            .mutate("second".into(), call("bump", json!({"id": "p"}))),
-    );
+    let mut second = Box::pin(harness.backend.mutate("second".into(), call("bump", json!({"id": "p"}))));
     pending(second.as_mut()).await;
-    harness
-        .backend
-        .register(DeploymentId::new("barrier").unwrap(), SOURCE.into(), Limits::default())
-        .await
-        .unwrap();
+    harness.backend.register(DeploymentId::new("barrier").unwrap(), SOURCE.into(), Limits::default()).await.unwrap();
     harness.controls.commits[0].send(()).unwrap();
     assert!(matches!(first.await, Err(Error::CommitFailed)));
     assert!(matches!(second.await, Err(Error::CommitFailed)));
-    assert!(matches!(
-        harness.backend.query(call("get", json!({"id": "p"}))).await,
-        Err(Error::CommitFailed)
-    ));
-    let Harness {
-        controls,
-        backend,
-        directory,
-        ..
-    } = harness;
+    assert!(matches!(harness.backend.query(call("get", json!({"id": "p"}))).await, Err(Error::CommitFailed)));
+    let Harness { controls, backend, directory, .. } = harness;
     drop(controls);
     drop(backend);
     let mut store = open(&directory);
     let snapshot = store.snapshot().unwrap();
-    assert_eq!(
-        snapshot
-            .get(&DocumentKey::new("profiles", "p").unwrap())
-            .unwrap()
-            .unwrap()
-            .value,
-        json!({"coins": 1})
-    );
+    assert_eq!(snapshot.get(&DocumentKey::new("profiles", "p").unwrap()).unwrap().unwrap().value, json!({"coins": 1}));
     let backend = Backend::new("local".into(), Box::new(store)).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
-    let recovered = backend
-        .mutate("first".into(), call("bump", json!({"id": "p"})))
-        .await
-        .unwrap();
+    let recovered = backend.mutate("first".into(), call("bump", json!({"id": "p"}))).await.unwrap();
     assert_eq!(value(&recovered), json!(1));
     let mut changed = call("bump", json!({"id": "p"}));
     changed.caller = json!({"player": "someone else"}).into();
     assert!(
         matches!(backend.mutate("first".into(), changed).await, Err(Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
     );
-    assert_eq!(
-        value(
-            &backend
-                .mutate("second".into(), call("bump", json!({"id": "p"})))
-                .await
-                .unwrap()
-        ),
-        json!(2)
-    );
+    assert_eq!(value(&backend.mutate("second".into(), call("bump", json!({"id": "p"}))).await.unwrap()), json!(2));
 }
 
 #[tokio::test]
@@ -355,41 +303,21 @@ async fn subscriptions_track_empty_ranges_and_update_dependencies_when_results_m
     let directory = tempfile::tempdir().unwrap();
     let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
-    for (key, document) in [
-        ("a", json!({"coins": 1})),
-        ("b", json!({"coins": 1})),
-        ("selector", json!({"selected": "a"})),
-    ] {
-        backend
-            .mutate(key.into(), call("put", json!({"id": key, "value": document})))
-            .await
-            .unwrap();
+    for (key, document) in
+        [("a", json!({"coins": 1})), ("b", json!({"coins": 1})), ("selector", json!({"selected": "a"}))]
+    {
+        backend.mutate(key.into(), call("put", json!({"id": key, "value": document}))).await.unwrap();
     }
     let mut selected = backend.subscribe(call("selected", json!({}))).await.unwrap();
     assert_eq!(value(&selected.next().await.unwrap()), json!(1));
-    backend
-        .mutate(
-            "switch".into(),
-            call("put", json!({"id": "selector", "value": {"selected": "b"}})),
-        )
-        .await
-        .unwrap();
-    backend
-        .mutate("bump-b".into(), call("bump", json!({"id": "b"})))
-        .await
-        .unwrap();
+    backend.mutate("switch".into(), call("put", json!({"id": "selector", "value": {"selected": "b"}}))).await.unwrap();
+    backend.mutate("bump-b".into(), call("bump", json!({"id": "b"}))).await.unwrap();
     assert_eq!(value(&selected.next().await.unwrap()), json!(2));
     let mut range = backend.subscribe(call("scan", json!({}))).await.unwrap();
     assert_eq!(value(&range.next().await.unwrap()), json!([]));
-    backend
-        .mutate("insert".into(), call("put", json!({"id": "x", "value": {"coins": 3}})))
-        .await
-        .unwrap();
+    backend.mutate("insert".into(), call("put", json!({"id": "x", "value": {"coins": 3}}))).await.unwrap();
     assert_eq!(value(&range.next().await.unwrap()), json!([["x", {"coins": 3}]]));
-    backend
-        .mutate("remove".into(), call("remove", json!({"id": "x"})))
-        .await
-        .unwrap();
+    backend.mutate("remove".into(), call("remove", json!({"id": "x"}))).await.unwrap();
     assert_eq!(value(&range.next().await.unwrap()), json!([]));
     assert!(matches!(backend.release(id()).await, Err(Error::Busy)));
     drop(selected);
@@ -416,14 +344,8 @@ async fn rejected_commit_drains_suffix_before_reusing_revisions() {
     assert!(matches!(first.await, Err(Error::Retry)));
     assert!(matches!(second.await, Err(Error::Retry)));
     assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
-    assert_eq!(
-        value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()),
-        json!(0)
-    );
-    assert!(matches!(
-        backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await,
-        Err(Error::Busy)
-    ));
+    assert_eq!(value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()), json!(0));
+    assert!(matches!(backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await, Err(Error::Busy)));
     harness.controls.commits[1].send(()).unwrap();
     let result = loop {
         match backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await {
@@ -445,40 +367,19 @@ async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_erro
     );
     backend.register(id(), source, Limits::default()).await.unwrap();
     for deep in [true, false] {
-        assert!(
-            backend
-                .mutate(format!("bad-{deep}"), call("invalid", json!({"deep":deep})))
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()),
-            json!(0)
-        );
+        assert!(backend.mutate(format!("bad-{deep}"), call("invalid", json!({"deep":deep}))).await.is_err());
+        assert_eq!(value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()), json!(0));
     }
-    backend
-        .mutate("put".into(), call("put", json!({"id":"p","value":{"coins":3}})))
-        .await
-        .unwrap();
+    backend.mutate("put".into(), call("put", json!({"id":"p","value":{"coins":3}}))).await.unwrap();
     let mut watch = backend.subscribe(call("strict", json!({}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!(3));
-    backend
-        .mutate("delete".into(), call("remove", json!({"id":"p"})))
-        .await
-        .unwrap();
+    backend.mutate("delete".into(), call("remove", json!({"id":"p"}))).await.unwrap();
     assert!(matches!(watch.next().await, Err(Error::JavaScript(_))));
-    backend
-        .mutate("restore".into(), call("put", json!({"id":"p","value":{"coins":3}})))
-        .await
-        .unwrap();
+    backend.mutate("restore".into(), call("put", json!({"id":"p","value":{"coins":3}}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!(3));
     let next = DeploymentId::new("next").unwrap();
     backend
-        .register(
-            next.clone(),
-            format!("{SOURCE} export function unused() {{ return 99; }}"),
-            Limits::default(),
-        )
+        .register(next.clone(), format!("{SOURCE} export function unused() {{ return 99; }}"), Limits::default())
         .await
         .unwrap();
     let mut retry = call("put", json!({"id":"p","value":{"coins":3}}));
@@ -496,15 +397,9 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
     for _ in 0..16 {
         watches.push(backend.subscribe(call("slow", json!({}))).await.unwrap());
     }
-    backend
-        .mutate("start".into(), call("bump", json!({"id":"p"})))
-        .await
-        .unwrap();
+    backend.mutate("start".into(), call("bump", json!({"id":"p"}))).await.unwrap();
     let count = value(&backend.query(call("count", json!({}))).await.unwrap());
-    assert!(
-        count.as_u64().unwrap() < 16,
-        "foreground query ran after every subscriber: {count}"
-    );
+    assert!(count.as_u64().unwrap() < 16, "foreground query ran after every subscriber: {count}");
 }
 
 #[tokio::test]
@@ -533,21 +428,9 @@ async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
     assert_eq!(value(&shift.await.unwrap()), json!([["c", {"coins":3}]]));
     assert_eq!(value(&query.await.unwrap()), json!([["c", {"coins":3}]]));
     assert_eq!(value(&watch.next().await.unwrap()), json!([["c", {"coins":3}]]));
-    backend
-        .mutate(
-            "leave-range".into(),
-            call("put", json!({"id":"c", "value":{"coins":9}})),
-        )
-        .await
-        .unwrap();
+    backend.mutate("leave-range".into(), call("put", json!({"id":"c", "value":{"coins":9}}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
-    backend
-        .mutate(
-            "enter-range".into(),
-            call("put", json!({"id":"z", "value":{"coins":2}})),
-        )
-        .await
-        .unwrap();
+    backend.mutate("enter-range".into(), call("put", json!({"id":"z", "value":{"coins":2}}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([["z", {"coins":2}]]));
 }
 
@@ -569,34 +452,21 @@ async fn rejected_operation_preserves_time_seed_and_deployment_across_restart() 
     let source = "export function attempt(ctx) { ctx.db.put('profiles','p',{coins:1}); return {time:Date.now(), random:Math.random(), id:crypto.randomUUID()}; }";
     let backend = Backend::new("local".into(), Box::new(store)).unwrap();
     backend.register(id(), source.into(), Limits::default()).await.unwrap();
-    assert!(matches!(
-        backend.mutate("stable".into(), call("attempt", Value::Null)).await,
-        Err(Error::Retry)
-    ));
+    assert!(matches!(backend.mutate("stable".into(), call("attempt", Value::Null)).await, Err(Error::Retry)));
     drop(backend);
     let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
     backend.register(id(), source.into(), Limits::default()).await.unwrap();
     let other = DeploymentId::new("different").unwrap();
-    backend
-        .register(other.clone(), source.into(), Limits::default())
-        .await
-        .unwrap();
+    backend.register(other.clone(), source.into(), Limits::default()).await.unwrap();
     let mut changed = call("attempt", Value::Null);
     changed.deployment = other;
     assert!(
         matches!(backend.mutate("stable".into(), changed).await, Err(Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
     );
-    let recovered = backend
-        .mutate("stable".into(), call("attempt", Value::Null))
-        .await
-        .unwrap();
+    let recovered = backend.mutate("stable".into(), call("attempt", Value::Null)).await.unwrap();
     assert_eq!(value(&recovered), attempts.lock().unwrap()[0]);
     assert_eq!(
-        backend
-            .mutate("stable".into(), call("attempt", Value::Null))
-            .await
-            .unwrap()
-            .revision,
+        backend.mutate("stable".into(), call("attempt", Value::Null)).await.unwrap().revision,
         recovered.revision
     );
 }

@@ -14,19 +14,11 @@ pub(super) struct FieldSpec {
 }
 
 const fn bounded(path: &'static str, limit: usize) -> FieldSpec {
-    FieldSpec {
-        path,
-        rename: None,
-        limit: Some(limit),
-    }
+    FieldSpec { path, rename: None, limit: Some(limit) }
 }
 
 const fn renamed(path: &'static str, rename: &'static str, limit: Option<usize>) -> FieldSpec {
-    FieldSpec {
-        path,
-        rename: Some(rename),
-        limit,
-    }
+    FieldSpec { path, rename: Some(rename), limit }
 }
 
 macro_rules! packets {
@@ -39,30 +31,12 @@ macro_rules! packets {
 
 // Collection limits are local resource bounds, not additional version support.
 packets![
-    (
-        "handshaking",
-        "toServer",
-        "set_protocol",
-        "Handshake",
-        [renamed("serverHost", "server_address", Some(255))]
-    ),
+    ("handshaking", "toServer", "set_protocol", "Handshake", [renamed("serverHost", "server_address", Some(255))]),
     ("status", "toServer", "ping_start", "StatusRequest", []),
-    (
-        "status",
-        "toClient",
-        "server_info",
-        "StatusResponse",
-        [renamed("response", "json", Some(32767))]
-    ),
+    ("status", "toClient", "server_info", "StatusResponse", [renamed("response", "json", Some(32767))]),
     ("status", "toServer", "ping", "Ping", [renamed("time", "payload", None)]),
     ("status", "toClient", "ping", "Pong", [renamed("time", "payload", None)]),
-    (
-        "login",
-        "toClient",
-        "disconnect",
-        "LoginDisconnect",
-        [bounded("reason", 32767)]
-    ),
+    ("login", "toClient", "disconnect", "LoginDisconnect", [bounded("reason", 32767)]),
     (
         "login",
         "toServer",
@@ -75,11 +49,7 @@ packets![
         "toClient",
         "encryption_begin",
         "EncryptionRequest",
-        [
-            bounded("serverId", 20),
-            bounded("publicKey", 1_048_576),
-            bounded("verifyToken", 1_048_576),
-        ]
+        [bounded("serverId", 20), bounded("publicKey", 1_048_576), bounded("verifyToken", 1_048_576),]
     ),
     (
         "login",
@@ -110,28 +80,10 @@ packets![
         "LoginPluginRequest",
         [bounded("channel", 32767), bounded("data", 1_048_576)]
     ),
-    (
-        "login",
-        "toServer",
-        "login_plugin_response",
-        "LoginPluginResponse",
-        [bounded("data", 1_048_576)]
-    ),
-    (
-        "configuration",
-        "toServer",
-        "settings",
-        "ConfigurationClientInformation",
-        [bounded("locale", 16)]
-    ),
+    ("login", "toServer", "login_plugin_response", "LoginPluginResponse", [bounded("data", 1_048_576)]),
+    ("configuration", "toServer", "settings", "ConfigurationClientInformation", [bounded("locale", 16)]),
     ("configuration", "toClient", "keep_alive", "ConfigurationKeepAlive", []),
-    (
-        "configuration",
-        "toServer",
-        "keep_alive",
-        "ConfigurationKeepAliveResponse",
-        []
-    ),
+    ("configuration", "toServer", "keep_alive", "ConfigurationKeepAliveResponse", []),
     ("configuration", "toClient", "ping", "ConfigurationPing", []),
     ("configuration", "toServer", "pong", "ConfigurationPong", []),
     (
@@ -148,20 +100,8 @@ packets![
         "ConfigurationPluginResponse",
         [bounded("channel", 32767), bounded("data", 32767)]
     ),
-    (
-        "configuration",
-        "toClient",
-        "finish_configuration",
-        "FinishConfiguration",
-        []
-    ),
-    (
-        "configuration",
-        "toServer",
-        "finish_configuration",
-        "AcknowledgeConfiguration",
-        []
-    ),
+    ("configuration", "toClient", "finish_configuration", "FinishConfiguration", []),
+    ("configuration", "toServer", "finish_configuration", "AcknowledgeConfiguration", []),
     (
         "configuration",
         "toClient",
@@ -193,20 +133,8 @@ packets![
         "FeatureFlags",
         [bounded("features", 1024), bounded("features[]", 32767)]
     ),
-    (
-        "play",
-        "toServer",
-        "settings",
-        "PlayClientInformation",
-        [bounded("locale", 16)]
-    ),
-    (
-        "play",
-        "toClient",
-        "game_state_change",
-        "GameEvent",
-        [renamed("gameMode", "value", None)]
-    ),
+    ("play", "toServer", "settings", "PlayClientInformation", [bounded("locale", 16)]),
+    ("play", "toClient", "game_state_change", "GameEvent", [renamed("gameMode", "value", None)]),
     ("play", "toClient", "set_title_time", "TitleTimes", []),
     ("play", "toClient", "keep_alive", "PlayKeepAlive", []),
     ("play", "toServer", "keep_alive", "PlayKeepAliveResponse", []),
@@ -219,13 +147,7 @@ packets![
     ("play", "toServer", "player_loaded", "PlayerLoaded", []),
     ("play", "toServer", "tick_end", "TickEnd", []),
     ("play", "toClient", "start_configuration", "StartConfiguration", []),
-    (
-        "play",
-        "toServer",
-        "configuration_acknowledged",
-        "ConfigurationAcknowledged",
-        []
-    ),
+    ("play", "toServer", "configuration_acknowledged", "ConfigurationAcknowledged", []),
     ("play", "toClient", "abilities", "PlayerAbilities", []),
     ("play", "toClient", "update_view_position", "SetChunkCenter", []),
     ("play", "toClient", "chunk_batch_start", "ChunkBatchStart", []),
@@ -233,11 +155,5 @@ packets![
     ("play", "toServer", "chunk_batch_received", "ChunkBatchReceived", []),
     ("play", "toServer", "ping_request", "PlayPing", []),
     ("play", "toClient", "ping_response", "PlayPong", []),
-    (
-        "play",
-        "toServer",
-        "custom_payload",
-        "PlayPluginMessage",
-        [bounded("channel", 32767), bounded("data", 32767)]
-    ),
+    ("play", "toServer", "custom_payload", "PlayPluginMessage", [bounded("channel", 32767), bounded("data", 32767)]),
 ];

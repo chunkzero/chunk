@@ -45,10 +45,7 @@ impl<'a> Prepared<'a> {
             let table = schema.get(&write.key.table).ok_or(Error::Invalid("undeclared table"))?;
             let mut bytes = 0;
             let values = if let Some(value) = &write.value {
-                if !value
-                    .as_object()
-                    .is_some_and(|object| object.keys().all(|name| table.fields.contains_key(name)))
-                {
+                if !value.as_object().is_some_and(|object| object.keys().all(|name| table.fields.contains_key(name))) {
                     return Err(Error::Invalid("document does not match table schema"));
                 }
                 bytes = serde_json::to_vec(value)?.len();
@@ -106,13 +103,9 @@ impl<'a> Prepared<'a> {
             if let Some(values) = &write.values {
                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&write.key.id, &next, &write.bytes];
                 params.extend(values.iter().map(|value| value as &dyn rusqlite::ToSql));
-                connection
-                    .prepare_cached(&write.upsert)?
-                    .execute(params_from_iter(params))?;
+                connection.prepare_cached(&write.upsert)?.execute(params_from_iter(params))?;
             } else {
-                connection
-                    .prepare_cached(&format!("DELETE FROM {table} WHERE _id = ?"))?
-                    .execute([&write.key.id])?;
+                connection.prepare_cached(&format!("DELETE FROM {table} WHERE _id = ?"))?.execute([&write.key.id])?;
             }
         }
         if count > MAX_DOCUMENTS || bytes > MAX_DOCUMENT_TOTAL_BYTES {
@@ -132,13 +125,7 @@ pub(super) fn outcome(connection: &Connection, operation: &Operation) -> Result<
         .query_row(
             "SELECT fingerprint, revision, result FROM _chunk_operations WHERE operation_id = ?1",
             [&operation.id],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Revision>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Revision>(1)?, row.get::<_, String>(2)?)),
         )
         .optional()?;
     record
@@ -146,10 +133,7 @@ pub(super) fn outcome(connection: &Connection, operation: &Operation) -> Result<
             if fingerprint != operation.fingerprint {
                 return Err(Error::OperationMismatch);
             }
-            Ok(Outcome {
-                revision,
-                result: serde_json::from_str(&result)?,
-            })
+            Ok(Outcome { revision, result: serde_json::from_str(&result)? })
         })
         .transpose()
 }
@@ -158,11 +142,7 @@ fn upsert(name: &str, table: &TableSchema) -> String {
     let mut columns = vec!["_id".to_owned(), "_revision".to_owned(), "_bytes".to_owned()];
     columns.extend(table.fields.keys().map(|name| quote(name)));
     let placeholders = vec!["?"; columns.len()].join(", ");
-    let update: Vec<_> = columns
-        .iter()
-        .skip(1)
-        .map(|name| format!("{name} = excluded.{name}"))
-        .collect();
+    let update: Vec<_> = columns.iter().skip(1).map(|name| format!("{name} = excluded.{name}")).collect();
     format!(
         "INSERT INTO {} ({}) VALUES ({placeholders}) ON CONFLICT (_id) DO UPDATE SET {}",
         quote(name),

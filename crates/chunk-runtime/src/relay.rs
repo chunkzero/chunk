@@ -42,11 +42,8 @@ impl Binding {
             delivery,
             registered,
             downstream: OnceCell::new(),
-            capability: [
-                uuid::Uuid::new_v4().as_bytes().as_slice(),
-                uuid::Uuid::new_v4().as_bytes().as_slice(),
-            ]
-            .concat(),
+            capability: [uuid::Uuid::new_v4().as_bytes().as_slice(), uuid::Uuid::new_v4().as_bytes().as_slice()]
+                .concat(),
             created: Instant::now(),
             consumed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -144,10 +141,7 @@ async fn admit(upstream: &mut TcpStream, shared: &Shared) -> io::Result<(TcpStre
         return Err(io::Error::other("invalid delivery setup"));
     }
     let close = CloseBinding(binding.clone());
-    let prepared = binding
-        .downstream
-        .get()
-        .ok_or_else(|| io::Error::other("unprepared delivery"))?;
+    let prepared = binding.downstream.get().ok_or_else(|| io::Error::other("unprepared delivery"))?;
     let mut downstream = timeout(Duration::from_secs(5), TcpStream::connect(&prepared.endpoint)).await??;
     downstream.set_nodelay(true)?;
     wire::write_packet(&mut downstream, &handshake).await?;

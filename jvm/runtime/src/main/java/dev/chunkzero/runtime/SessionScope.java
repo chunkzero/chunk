@@ -2,6 +2,16 @@ package dev.chunkzero.runtime;
 
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.OperationId;
+
+import net.minestom.server.MinecraftServer;
+import net.minestom.server.entity.Player;
+import net.minestom.server.event.EventFilter;
+import net.minestom.server.event.EventNode;
+import net.minestom.server.event.trait.PlayerEvent;
+import net.minestom.server.instance.InstanceContainer;
+
+import org.jetbrains.annotations.Nullable;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -15,13 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
-import net.minestom.server.MinecraftServer;
-import net.minestom.server.entity.Player;
-import net.minestom.server.event.EventFilter;
-import net.minestom.server.event.EventNode;
-import net.minestom.server.event.trait.PlayerEvent;
-import net.minestom.server.instance.InstanceContainer;
-import org.jetbrains.annotations.Nullable;
 
 /** Tick-thread ownership of one session's instances, events and closeable resources. */
 public final class SessionScope {
@@ -51,7 +54,9 @@ public final class SessionScope {
         this.ticks = ticks;
         this.requestFinish = requestFinish;
         this.backend = backend;
-        events = EventNode.value("session-" + id + "-" + generation, EventFilter.PLAYER, players::contains);
+        events =
+                EventNode.value(
+                        "session-" + id + "-" + generation, EventFilter.PLAYER, players::contains);
         MinecraftServer.getGlobalEventHandler().addChild(events);
         if (backend != null) resources.add(backend);
     }
@@ -87,7 +92,8 @@ public final class SessionScope {
     public InstanceContainer createInstance() {
         ticks.checkThread();
         checkActive();
-        if (ownedInstances.size() >= 16) throw new IllegalStateException("Session instance limit reached");
+        if (ownedInstances.size() >= 16)
+            throw new IllegalStateException("Session instance limit reached");
         var instance = MinecraftServer.getInstanceManager().createInstanceContainer();
         ownedInstances.add(instance);
         return instance;
@@ -129,25 +135,29 @@ public final class SessionScope {
     }
 
     public <T> CompletableFuture<T> onTick(Supplier<T> action) {
-        return ticks.submit(() -> {
-            checkActive();
-            return action.get();
-        });
+        return ticks.submit(
+                () -> {
+                    checkActive();
+                    return action.get();
+                });
     }
 
     public CompletableFuture<Void> onTick(Runnable action) {
-        return onTick(() -> {
-            action.run();
-            return null;
-        });
+        return onTick(
+                () -> {
+                    action.run();
+                    return null;
+                });
     }
 
     /** Stable mutation identity for one action on this exact player delivery. */
     public OperationId operationId(Player player, String action) {
-        if (!ACTION.matcher(action).matches()) throw new IllegalArgumentException("Invalid operation action");
+        if (!ACTION.matcher(action).matches())
+            throw new IllegalArgumentException("Invalid operation action");
         if (!players.contains(player)) throw new IllegalArgumentException("Player is not admitted");
         var binding = ((ManagedPlayer) player).getBinding();
-        return new OperationId(id + "/" + player.getUuid() + "/" + binding.getOwnerGeneration() + "/" + action);
+        return new OperationId(
+                id + "/" + player.getUuid() + "/" + binding.getOwnerGeneration() + "/" + action);
     }
 
     public CompletionStage<Void> finish() {
@@ -156,10 +166,16 @@ public final class SessionScope {
 
     public AutoCloseable repeatEvery(Duration interval, Runnable action) {
         ticks.checkThread();
-        if (interval.isNegative() || interval.isZero()) throw new IllegalArgumentException("Interval must be positive");
-        var task = MinecraftServer.getSchedulerManager().buildTask(() -> {
-            if (!disposed) action.run();
-        }).repeat(interval).schedule();
+        if (interval.isNegative() || interval.isZero())
+            throw new IllegalArgumentException("Interval must be positive");
+        var task =
+                MinecraftServer.getSchedulerManager()
+                        .buildTask(
+                                () -> {
+                                    if (!disposed) action.run();
+                                })
+                        .repeat(interval)
+                        .schedule();
         return own(task::cancel);
     }
 

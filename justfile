@@ -3,22 +3,29 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# Format Rust, Kotlin and protobuf sources.
+# Format repository sources, configuration and documentation.
 fmt:
     cargo fmt --all
     ktlint --format "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "examples/**/*.kt" "examples/**/*.kts" "*.kts" "!**/build/**" "!**/.chunk/**"
     buf format --write proto
+    git ls-files -z --cached --others --exclude-standard -- '*.java' | xargs -0 google-java-format --aosp --replace
+    pnpm fmt
+    just --unstable --fmt
 
 # Verify formatting without modifying files.
 fmt-check:
     cargo fmt --all --check
     ktlint "jvm/**/*.kt" "jvm/**/*.kts" "buildSrc/**/*.kt" "buildSrc/**/*.kts" "examples/**/*.kt" "examples/**/*.kts" "*.kts" "!**/build/**" "!**/.chunk/**"
     buf format --diff --exit-code proto
+    git ls-files -z --cached --others --exclude-standard -- '*.java' | xargs -0 google-java-format --aosp --dry-run --set-exit-if-changed
+    pnpm fmt:check
+    just --unstable --fmt --check
 
 # Run linters.
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     buf lint proto
+    pnpm lint
 
 # Type-check the TypeScript packages.
 typecheck:
@@ -47,11 +54,11 @@ consumers: toolchain
 
 # Build and run the complete local example. Ctrl-C stops its services and gameplay JVMs.
 local *args: toolchain
-    cargo run -p chunk-cli -- dev examples/local {{args}}
+    cargo run -p chunk-cli -- dev examples/local {{ args }}
 
 # Operate on players connected to the local example.
 players *args:
-    cargo run -p chunk-cli -- players --control-file examples/local/.chunk/local/control.json {{args}}
+    cargo run -p chunk-cli -- players --control-file examples/local/.chunk/local/control.json {{ args }}
 
 # Build the development CLI and install its pinned native TypeScript toolchain.
 toolchain:

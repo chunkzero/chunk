@@ -43,10 +43,7 @@ async fn closed(stream: &mut TcpStream) {
 async fn status_handles_fragmentation_and_multiple_protocol_versions() {
     let proxy = Proxy::bind(
         "127.0.0.1:0".parse().unwrap(),
-        Config {
-            motd: "hello \"player\"\nwelcome".into(),
-            ..Config::default()
-        },
+        Config { motd: "hello \"player\"\nwelcome".into(), ..Config::default() },
     )
     .await
     .unwrap();
@@ -66,10 +63,7 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
             client.write_all(&[byte]).await.unwrap();
         }
         // A coalesced status request and ping, with a signed 64-bit payload.
-        client
-            .write_all(&[1, 0, 9, 1, 0x80, 0, 0, 0, 0, 0, 0, 1])
-            .await
-            .unwrap();
+        client.write_all(&[1, 0, 9, 1, 0x80, 0, 0, 0, 0, 0, 0, 1]).await.unwrap();
         let frame = read_frame(&mut client).await;
         let status = decode_packet::<StatusResponse>(&frame).unwrap();
         let json: serde_json::Value = serde_json::from_str(status.json.as_str()).unwrap();
@@ -87,10 +81,7 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
 async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_on_shutdown() {
     let proxy = Proxy::bind(
         "127.0.0.1:0".parse().unwrap(),
-        Config {
-            max_connections: std::num::NonZeroUsize::new(1).unwrap(),
-            ..Config::default()
-        },
+        Config { max_connections: std::num::NonZeroUsize::new(1).unwrap(), ..Config::default() },
     )
     .await
     .unwrap();
@@ -104,15 +95,9 @@ async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_
     malformed.write_all(&[0x80, 0x80, 0x80]).await.unwrap();
     closed(&mut malformed).await;
     let mut login = TcpStream::connect(address).await.unwrap();
-    login
-        .write_all(b"\x10\x00\x87\x06\x09localhost\x63\xdd\x02")
-        .await
-        .unwrap();
+    login.write_all(b"\x10\x00\x87\x06\x09localhost\x63\xdd\x02").await.unwrap();
     // Login Start is pipelined after the handshake. Claimed UUID is not an identity.
-    login
-        .write_all(b"\x16\x00\x04Alex\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-        .await
-        .unwrap();
+    login.write_all(b"\x16\x00\x04Alex\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").await.unwrap();
     let frame = read_frame(&mut login).await;
     let request = decode_packet::<EncryptionRequest>(&frame).unwrap();
     assert!(request.should_authenticate);
@@ -120,10 +105,7 @@ async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_
     login.shutdown().await.unwrap();
     closed(&mut login).await;
     let mut outdated = TcpStream::connect(address).await.unwrap();
-    outdated
-        .write_all(b"\x0f\x00\x2f\x09localhost\x63\xdd\x02")
-        .await
-        .unwrap();
+    outdated.write_all(b"\x0f\x00\x2f\x09localhost\x63\xdd\x02").await.unwrap();
     let frame = read_frame(&mut outdated).await;
     let disconnect = decode_packet::<LoginDisconnect>(&frame).unwrap();
     let json: serde_json::Value = serde_json::from_str(disconnect.reason.as_str()).unwrap();
@@ -131,9 +113,7 @@ async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_
     closed(&mut outdated).await;
     let mut idle = TcpStream::connect(address).await.unwrap();
     // Status response ensures this socket has an active task waiting for ping.
-    idle.write_all(b"\x0f\x00\x2f\x09localhost\x63\xdd\x01\x01\x00")
-        .await
-        .unwrap();
+    idle.write_all(b"\x0f\x00\x2f\x09localhost\x63\xdd\x01\x01\x00").await.unwrap();
     read_frame(&mut idle).await;
     let mut excess = TcpStream::connect(address).await.unwrap();
     closed(&mut excess).await;

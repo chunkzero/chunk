@@ -1,10 +1,13 @@
 package dev.chunkzero.runtime;
 
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import net.minestom.server.entity.Player;
 
-/** Hooks run on the process tick thread; asynchronous continuations use {@link SessionScope#onTick}. */
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+
+/**
+ * Hooks run on the process tick thread; asynchronous continuations use {@link SessionScope#onTick}.
+ */
 public abstract class Session {
     public CompletionStage<Void> onCreate(SessionScope scope) {
         return CompletableFuture.completedFuture(null);

@@ -24,18 +24,9 @@ pub struct Key {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Read {
-    Get {
-        table: String,
-        id: String,
-    },
-    Scan {
-        table: String,
-        start: Option<String>,
-        end: Option<String>,
-    },
-    Index {
-        query: chunk_contract::IndexQuery,
-    },
+    Get { table: String, id: String },
+    Scan { table: String, start: Option<String>, end: Option<String> },
+    Index { query: chunk_contract::IndexQuery },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,11 +79,7 @@ impl Json {
 
 impl From<Value> for Json {
     fn from(value: Value) -> Self {
-        Self(
-            serde_json::to_string(&value)
-                .expect("JSON value is serializable")
-                .into(),
-        )
+        Self(serde_json::to_string(&value).expect("JSON value is serializable").into())
     }
 }
 
@@ -134,10 +121,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            execution: Duration::from_secs(1),
-            heap_bytes: 32 * 1024 * 1024,
-        }
+        Self { execution: Duration::from_secs(1), heap_bytes: 32 * 1024 * 1024 }
     }
 }
 

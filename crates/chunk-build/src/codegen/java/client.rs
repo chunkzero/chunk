@@ -21,10 +21,7 @@ fn body(namespace: &Namespace, name: &str, constructor: &str) -> String {
         ));
         initialize.push(format!("this.group{index} = new {ty}(session);"));
     }
-    declarations.push(format!(
-        "{constructor} {name}(BackendSession session) {{ {} }}",
-        initialize.join(" ")
-    ));
+    declarations.push(format!("{constructor} {name}(BackendSession session) {{ {} }}", initialize.join(" ")));
     declarations.extend(namespace.functions.iter().map(methods));
     declarations.join("\n")
 }

@@ -30,16 +30,9 @@ impl IndexQuery {
         {
             return false;
         }
-        let next = fields
-            .get(self.prefix.len())
-            .map_or(&Value::Null, |field| &document[field]);
-        self.start
-            .as_ref()
-            .is_none_or(|start| !compare_index_values(next, start).is_lt())
-            && self
-                .end
-                .as_ref()
-                .is_none_or(|end| compare_index_values(next, end).is_lt())
+        let next = fields.get(self.prefix.len()).map_or(&Value::Null, |field| &document[field]);
+        self.start.as_ref().is_none_or(|start| !compare_index_values(next, start).is_lt())
+            && self.end.as_ref().is_none_or(|end| compare_index_values(next, end).is_lt())
     }
 
     #[must_use]

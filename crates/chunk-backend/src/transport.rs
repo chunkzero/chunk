@@ -20,9 +20,7 @@ impl Service {
     /// Requires a nonempty opaque credential suitable for authorization metadata.
     pub fn new(backend: Backend, credential: &str) -> crate::Result<Self> {
         if !(32..=256).contains(&credential.len())
-            || !credential
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || !credential.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         {
             return Err(Error::Invalid("backend credential"));
         }
@@ -49,18 +47,14 @@ impl Service {
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        let valid = request
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|value| {
-                value.len() == self.credential.len()
-                    && value
-                        .bytes()
-                        .zip(self.credential.bytes())
-                        .fold(0, |difference, (a, b)| difference | std::hint::black_box(a ^ b))
-                        == 0
-            });
+        let valid = request.metadata().get("authorization").and_then(|v| v.to_str().ok()).is_some_and(|value| {
+            value.len() == self.credential.len()
+                && value
+                    .bytes()
+                    .zip(self.credential.bytes())
+                    .fold(0, |difference, (a, b)| difference | std::hint::black_box(a ^ b))
+                    == 0
+        });
         if !valid {
             return Err(Status::unauthenticated("invalid backend credential"));
         }
@@ -119,10 +113,7 @@ impl backend_server::Backend for Service {
             self.backend.mutate(operation, call).await
         }
         .map_err(|error| status(&error))?;
-        Ok(Response::new(BackendResult {
-            revision: outcome.revision.0,
-            result_json: outcome.json.as_bytes().to_vec(),
-        }))
+        Ok(Response::new(BackendResult { revision: outcome.revision.0, result_json: outcome.json.as_bytes().to_vec() }))
     }
 
     type WatchStream = ReceiverStream<Result<BackendUpdate, Status>>;
@@ -141,11 +132,7 @@ impl backend_server::Backend for Service {
                 Ok(call)
             })
             .collect::<Result<_, _>>()?;
-        let mut group = self
-            .backend
-            .subscribe_group(calls)
-            .await
-            .map_err(|error| status(&error))?;
+        let mut group = self.backend.subscribe_group(calls).await.map_err(|error| status(&error))?;
         let (sender, receiver) = mpsc::channel(1);
         let shutdown = self.shutdown.clone();
         self.workers.spawn(async move {
@@ -165,11 +152,7 @@ impl backend_server::Backend for Service {
                                 Err(error) => (Vec::new(), error.to_string()),
                             })
                             .unzip();
-                        BackendUpdate {
-                            revision: update.revision.0,
-                            results_json,
-                            errors,
-                        }
+                        BackendUpdate { revision: update.revision.0, results_json, errors }
                     })
                     .map_err(|error| status(&error));
                 let failed = result.is_err();

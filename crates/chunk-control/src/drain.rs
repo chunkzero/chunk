@@ -39,11 +39,7 @@ impl Control {
             if state.hosts[&host].retired {
                 return Err(Error::Invalid("runtime already retired"));
             }
-            state
-                .hosts
-                .get_mut(&host)
-                .ok_or(Error::Invalid("missing host"))?
-                .retired = true;
+            state.hosts.get_mut(&host).ok_or(Error::Invalid("missing host"))?.retired = true;
             for session in state.sessions.values_mut().filter(|s| s.host == host) {
                 session.retired = true;
             }

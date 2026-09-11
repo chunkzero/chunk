@@ -29,14 +29,8 @@ impl Fixture {
         let options = SimpleFileOptions::default();
         for (name, bytes) in [
             ("META-INF/chunk/app.json", br#"{"version":1,"id":"lobby"}"#.as_slice()),
-            (
-                "META-INF/services/dev.chunkzero.runtime.SessionProvider",
-                b"sample.Provider\n".as_slice(),
-            ),
-            (
-                "sample/Provider.class",
-                [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69].as_slice(),
-            ),
+            ("META-INF/services/dev.chunkzero.runtime.SessionProvider", b"sample.Provider\n".as_slice()),
+            ("sample/Provider.class", [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69].as_slice()),
         ] {
             jar.start_file(name, options).unwrap();
             jar.write_all(bytes).unwrap();
@@ -57,10 +51,7 @@ impl Fixture {
             .unwrap(),
         )
         .unwrap();
-        let fixture = Self {
-            _directory: directory,
-            root,
-        };
+        let fixture = Self { _directory: directory, root };
         fixture.wrapper("printf '%s\\n' \"$PWD\" \"$@\" > wrapper-arguments.txt\nmkdir -p .chunk/build/backend .chunk/build/jvm\ncp fixture/source.mjs fixture/contract.json .chunk/build/backend/\ncp fixture/artifacts.json .chunk/build/jvm/artifacts.json\n");
         fixture
     }
@@ -72,11 +63,7 @@ impl Fixture {
     }
 
     fn project(&self) -> Project {
-        prepare(&Options {
-            project: self.root.clone(),
-            output: None,
-        })
-        .unwrap()
+        prepare(&Options { project: self.root.clone(), output: None }).unwrap()
     }
 }
 
@@ -103,21 +90,11 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
     assert!(built.release.directory.join("backend.json").is_file());
     assert_eq!(built.java.version, 25);
     assert_eq!(built.java.executable, fixture.root.join("jdk/bin/java"));
-    let explicit = prepare(&Options {
-        project: fixture.root.clone(),
-        output: Some("target/consumer-releases".into()),
-    })
-    .unwrap();
-    assert_eq!(
-        explicit.output,
-        std::env::current_dir().unwrap().join("target/consumer-releases")
-    );
+    let explicit =
+        prepare(&Options { project: fixture.root.clone(), output: Some("target/consumer-releases".into()) }).unwrap();
+    assert_eq!(explicit.output, std::env::current_dir().unwrap().join("target/consumer-releases"));
     assert!(
-        prepare(&Options {
-            project: fixture.root.clone(),
-            output: Some(fixture.root.join(".chunk/build"))
-        })
-        .is_err()
+        prepare(&Options { project: fixture.root.clone(), output: Some(fixture.root.join(".chunk/build")) }).is_err()
     );
 }
 
@@ -126,14 +103,11 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     let fixture = Fixture::new();
     fs::write(fixture.root.join("chunk.toml"), "domains=[]").unwrap();
     assert!(
-        prepare(&Options {
-            project: fixture.root.clone(),
-            output: None
-        })
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("unknown field")
+        prepare(&Options { project: fixture.root.clone(), output: None })
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unknown field")
     );
     assert!(!fixture.root.join("wrapper-arguments.txt").exists());
     fs::write(fixture.root.join("chunk.toml"), "").unwrap();

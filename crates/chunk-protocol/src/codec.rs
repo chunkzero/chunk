@@ -121,11 +121,7 @@ impl<T: Encode> Encode for Option<T> {
 
 impl<T: Decode> Decode for Option<T> {
     fn decode(input: &mut &[u8]) -> Result<Self> {
-        if bool::decode(input)? {
-            Ok(Some(T::decode(input)?))
-        } else {
-            Ok(None)
-        }
+        if bool::decode(input)? { Ok(Some(T::decode(input)?)) } else { Ok(None) }
     }
 }
 

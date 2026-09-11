@@ -71,10 +71,7 @@ impl Deadline {
                 }
             }
         })?;
-        Ok(Self {
-            shared,
-            thread: Some(thread),
-        })
+        Ok(Self { shared, thread: Some(thread) })
     }
 
     pub(crate) fn arm(
@@ -86,15 +83,9 @@ impl Deadline {
     ) -> Guard<'_> {
         let mut active = self.shared.active.lock().unwrap();
         assert!(active.is_none(), "only one invocation can run at a time");
-        *active = Some(Active {
-            handle,
-            cancellation,
-            termination,
-        });
+        *active = Some(Active { handle, cancellation, termination });
         let micros = u64::try_from(budget.as_micros()).unwrap_or(u64::MAX).max(1);
-        self.shared
-            .at
-            .store(self.shared.now().saturating_add(micros), Ordering::Release);
+        self.shared.at.store(self.shared.now().saturating_add(micros), Ordering::Release);
         self.thread.as_ref().expect("watchdog thread").thread().unpark();
         Guard(self)
     }

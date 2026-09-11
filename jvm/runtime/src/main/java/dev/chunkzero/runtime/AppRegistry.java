@@ -1,6 +1,7 @@
 package dev.chunkzero.runtime;
 
 import dev.chunkzero.backend.api.Codecs;
+
 import java.io.IOException;
 import java.net.JarURLConnection;
 import java.net.URISyntaxException;
@@ -38,21 +39,27 @@ final class AppRegistry {
         var selected = new TreeMap<String, ServiceLoader.Provider<SessionProvider>>();
         for (var app : apps.values()) {
             var service = services.remove(app.provider());
-            if (service == null) throw invalid(app.jar(), "Missing or duplicate provider: " + app.provider());
+            if (service == null)
+                throw invalid(app.jar(), "Missing or duplicate provider: " + app.provider());
             var source = service.type().getProtectionDomain().getCodeSource();
             if (source == null || !localPath(source.getLocation()).equals(app.jar())) {
-                throw invalid(app.jar(), "Provider " + app.provider() + " belongs to a different JAR");
+                throw invalid(
+                        app.jar(), "Provider " + app.provider() + " belongs to a different JAR");
             }
             selected.put(app.id(), service);
         }
-        if (!services.isEmpty()) throw new IllegalArgumentException("Unregistered session providers: " + services.keySet());
+        if (!services.isEmpty())
+            throw new IllegalArgumentException(
+                    "Unregistered session providers: " + services.keySet());
         var registrations = new TreeMap<String, SessionRegistration>();
         for (var entry : selected.entrySet()) {
             try {
                 var provider = entry.getValue().get();
-                registrations.put(entry.getKey(), new SessionRegistration(entry.getKey(), provider::create));
+                registrations.put(
+                        entry.getKey(), new SessionRegistration(entry.getKey(), provider::create));
             } catch (ServiceConfigurationError error) {
-                throw new IllegalArgumentException("Cannot create session provider for app " + entry.getKey(), error);
+                throw new IllegalArgumentException(
+                        "Cannot create session provider for app " + entry.getKey(), error);
             }
         }
         return Collections.unmodifiableMap(registrations);
@@ -68,14 +75,19 @@ final class AppRegistry {
             if (!origins.add(path)) throw invalid(path, "Duplicate app manifest resource");
             try (var jar = new JarFile(path.toFile())) {
                 var id = appId(jar);
-                if (!identities.add(id.toLowerCase(Locale.ROOT))) throw invalid(path, "Duplicate app ID: " + id);
-                var entries = read(jar, SERVICE).lines()
-                        .map(line -> line.split("#", 2)[0].trim())
-                        .filter(line -> !line.isEmpty())
-                        .toList();
-                if (entries.size() != 1) throw invalid(path, "App requires exactly one session provider");
+                if (!identities.add(id.toLowerCase(Locale.ROOT)))
+                    throw invalid(path, "Duplicate app ID: " + id);
+                var entries =
+                        read(jar, SERVICE)
+                                .lines()
+                                .map(line -> line.split("#", 2)[0].trim())
+                                .filter(line -> !line.isEmpty())
+                                .toList();
+                if (entries.size() != 1)
+                    throw invalid(path, "App requires exactly one session provider");
                 var provider = entries.getFirst();
-                if (!providers.add(provider)) throw invalid(path, "Duplicate session provider: " + provider);
+                if (!providers.add(provider))
+                    throw invalid(path, "Duplicate session provider: " + provider);
                 apps.put(id, new App(id, path, provider));
             }
         }
@@ -84,40 +96,48 @@ final class AppRegistry {
 
     private static String appId(JarFile jar) throws IOException {
         try {
-            var manifest = Codecs.object(Codecs.parse(read(jar, MANIFEST)), Set.of("version", "id"));
+            var manifest =
+                    Codecs.object(Codecs.parse(read(jar, MANIFEST)), Set.of("version", "id"));
             if (Codecs.field(manifest, "version", Codecs.INTEGER) != 1L) {
                 throw new IllegalArgumentException("Unsupported app manifest version");
             }
             var id = Codecs.field(manifest, "id", Codecs.STRING);
-            if (!id.matches("[A-Za-z_][A-Za-z0-9_]{0,127}")) throw new IllegalArgumentException("Invalid app ID: " + id);
+            if (!id.matches("[A-Za-z_][A-Za-z0-9_]{0,127}"))
+                throw new IllegalArgumentException("Invalid app ID: " + id);
             return id;
         } catch (IllegalArgumentException error) {
-            throw invalid(Path.of(jar.getName()), "Invalid app manifest: " + error.getMessage(), error);
+            throw invalid(
+                    Path.of(jar.getName()), "Invalid app manifest: " + error.getMessage(), error);
         }
     }
 
-    private static Map<String, ServiceLoader.Provider<SessionProvider>> providers(ClassLoader loader) {
+    private static Map<String, ServiceLoader.Provider<SessionProvider>> providers(
+            ClassLoader loader) {
         var providers = new HashMap<String, ServiceLoader.Provider<SessionProvider>>();
         try {
-            for (var provider : ServiceLoader.load(SessionProvider.class, loader).stream().toList()) {
+            for (var provider :
+                    ServiceLoader.load(SessionProvider.class, loader).stream().toList()) {
                 providers.put(provider.type().getName(), provider);
             }
         } catch (ServiceConfigurationError | LinkageError error) {
-            throw new IllegalArgumentException("Invalid app session provider: " + error.getMessage(), error);
+            throw new IllegalArgumentException(
+                    "Invalid app session provider: " + error.getMessage(), error);
         }
         return providers;
     }
 
     private static Path origin(URL resource) throws IOException {
         if (!(resource.openConnection() instanceof JarURLConnection connection)) {
-            throw new IllegalArgumentException("App registration requires packaged JARs: " + resource);
+            throw new IllegalArgumentException(
+                    "App registration requires packaged JARs: " + resource);
         }
         return localPath(connection.getJarFileURL());
     }
 
     private static Path localPath(URL location) throws IOException {
         if (!location.getProtocol().equals("file")) {
-            throw new IllegalArgumentException("App registration requires a local JAR: " + location);
+            throw new IllegalArgumentException(
+                    "App registration requires a local JAR: " + location);
         }
         try {
             return Path.of(location.toURI()).toRealPath();
@@ -134,7 +154,8 @@ final class AppRegistry {
         if (entry.isDirectory()) throw invalid(Path.of(jar.getName()), "Expected file: " + name);
         try (var stream = jar.getInputStream(entry)) {
             var bytes = stream.readNBytes(RESOURCE_LIMIT + 1);
-            if (bytes.length > RESOURCE_LIMIT) throw invalid(Path.of(jar.getName()), "Registration resource too large: " + name);
+            if (bytes.length > RESOURCE_LIMIT)
+                throw invalid(Path.of(jar.getName()), "Registration resource too large: " + name);
             return new String(bytes, StandardCharsets.UTF_8);
         }
     }

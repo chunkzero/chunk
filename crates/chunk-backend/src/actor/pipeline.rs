@@ -41,10 +41,7 @@ impl Actor {
             Ok(Some(outcome)) => {
                 reply.finish(
                     serde_json::to_string(&outcome.result)
-                        .map(|json| Update {
-                            revision: outcome.revision,
-                            json: json.into(),
-                        })
+                        .map(|json| Update { revision: outcome.revision, json: json.into() })
                         .map_err(Error::from),
                 );
             }
@@ -54,25 +51,15 @@ impl Actor {
                     reply.finish(Err(Error::Busy));
                     return;
                 }
-                let mutation = Mutation {
-                    operation,
-                    context: None,
-                    call,
-                    waiters: vec![reply],
-                };
+                let mutation = Mutation { operation, context: None, call, waiters: vec![reply] };
                 let context = chunk_store::RetryContext {
                     deployment: mutation.call.deployment.as_str().into(),
                     timestamp: self.view.base.timestamp,
                     seed: u64::from_be_bytes(
-                        Sha256::digest(mutation.operation.id.as_bytes())[..8]
-                            .try_into()
-                            .expect("digest prefix"),
+                        Sha256::digest(mutation.operation.id.as_bytes())[..8].try_into().expect("digest prefix"),
                     ),
                 };
-                match self.send(Job::Prepare {
-                    operation: mutation.operation.clone(),
-                    context,
-                }) {
+                match self.send(Job::Prepare { operation: mutation.operation.clone(), context }) {
                     Ok(()) => {
                         self.mutations.insert(mutation.operation.id.clone(), mutation);
                     }
@@ -131,16 +118,9 @@ impl Actor {
         }
         self.resolve(call, Mode::Mutation)?;
         // Identity describes the business request; a durable result survives redeployment.
-        let request = serde_json::to_vec(&(
-            "mutation-v2",
-            &call.function,
-            call.arguments.as_str(),
-            call.caller.as_str(),
-        ))?;
-        Ok(Operation {
-            id,
-            fingerprint: Sha256::digest(request).into(),
-        })
+        let request =
+            serde_json::to_vec(&("mutation-v2", &call.function, call.arguments.as_str(), call.caller.as_str()))?;
+        Ok(Operation { id, fingerprint: Sha256::digest(request).into() })
     }
 
     fn stage(&mut self, mutation: &Mutation) -> Result<()> {
@@ -149,10 +129,7 @@ impl Actor {
         }
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
-        let context = mutation
-            .context
-            .as_ref()
-            .ok_or(Error::Invalid("operation not prepared"))?;
+        let context = mutation.context.as_ref().ok_or(Error::Invalid("operation not prepared"))?;
         let (execution, _) = self.evaluate_traced(
             &mutation.call,
             Mode::Mutation,
@@ -164,12 +141,7 @@ impl Actor {
         let mut writes = execution
             .writes
             .into_iter()
-            .map(|write| {
-                Ok(Write {
-                    key: DocumentKey::new(write.key.table, write.key.id)?,
-                    value: write.value,
-                })
-            })
+            .map(|write| Ok(Write { key: DocumentKey::new(write.key.table, write.key.id)?, value: write.value }))
             .collect::<Result<Vec<_>>>()?;
         if let Some(Some(contract)) = self.versions.get(&mutation.call.deployment) {
             let mut budget = crate::reads::read_budget();
@@ -214,13 +186,7 @@ impl Actor {
         }
         // Execution and validation are serialized on this thread, so no mutation
         // can change the read revision before this batch is applied.
-        let revision = Revision(
-            snapshot
-                .revision
-                .0
-                .checked_add(1)
-                .ok_or(Error::Invalid("revision exhausted"))?,
-        );
+        let revision = Revision(snapshot.revision.0.checked_add(1).ok_or(Error::Invalid("revision exhausted"))?);
         self.send(Job::Commit {
             expected: snapshot.revision,
             operation: mutation.operation.clone(),
@@ -229,13 +195,7 @@ impl Actor {
         })?;
         drop(snapshot);
         std::rc::Rc::make_mut(&mut self.view).apply(revision, &writes);
-        self.pending.push_back(Pending {
-            operation: mutation.operation.id.clone(),
-            revision,
-            writes,
-            changes,
-            bytes,
-        });
+        self.pending.push_back(Pending { operation: mutation.operation.id.clone(), revision, writes, changes, bytes });
         self.pending_bytes += bytes;
         Ok(())
     }
@@ -282,11 +242,7 @@ impl Actor {
                 reply.finish(Ok(update.clone()));
             }
         }
-        while self
-            .deferred
-            .front()
-            .is_some_and(|(query, _)| query.revision <= update.revision)
-        {
+        while self.deferred.front().is_some_and(|(query, _)| query.revision <= update.revision) {
             let (query, reply) = self.deferred.pop_front().expect("ready query");
             reply.finish(Ok(query));
         }

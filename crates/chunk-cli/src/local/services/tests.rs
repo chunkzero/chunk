@@ -18,30 +18,17 @@ async fn failed_edge_start_releases_earlier_services() {
         tables: BTreeMap::new(),
         functions: BTreeMap::new(),
     };
-    fs::write(
-        artifact.directory.join("backend.json"),
-        serde_json::to_vec(&bundle).unwrap(),
-    )
-    .unwrap();
+    fs::write(artifact.directory.join("backend.json"), serde_json::to_vec(&bundle).unwrap()).unwrap();
     let control = chunk_control::Config {
-        deployment: chunk_proto::v1::DeploymentRef {
-            environment: "local".into(),
-            deployment: artifact.id.clone(),
-        },
+        deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: artifact.id.clone() },
         artifact_digest: artifact.id.clone(),
         profiles: BTreeMap::from([(
             "local".into(),
-            chunk_control::MachineProfile {
-                memory_mib: 512,
-                max_sessions: 4,
-            },
+            chunk_control::MachineProfile { memory_mib: 512, max_sessions: 4 },
         )]),
         session_types: BTreeMap::from([(
             "bridge".into(),
-            chunk_control::SessionType {
-                machine_profile: "local".into(),
-                capacity: 4,
-            },
+            chunk_control::SessionType { machine_profile: "local".into(), capacity: 4 },
         )]),
         max_processes: 4,
     };
@@ -62,10 +49,7 @@ async fn failed_edge_start_releases_earlier_services() {
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert!(options.state.join("backend.json").exists());
         assert!(options.state.join("control.json").exists());
-        tokio::time::timeout(Duration::from_secs(10), services.stop())
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), services.stop()).await.unwrap().unwrap();
         assert!(!options.state.join("backend.json").exists());
         assert!(!options.state.join("control.json").exists());
     }
@@ -82,10 +66,7 @@ async fn missing_bundle_preserves_startup_error() {
         control_bind: "127.0.0.1:0".parse().unwrap(),
     };
     let control = chunk_control::Config {
-        deployment: chunk_proto::v1::DeploymentRef {
-            environment: "local".into(),
-            deployment: "missing".into(),
-        },
+        deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: "missing".into() },
         artifact_digest: "missing".into(),
         profiles: BTreeMap::new(),
         session_types: BTreeMap::new(),
@@ -96,13 +77,11 @@ async fn missing_bundle_preserves_startup_error() {
         directory: directory.path().join("missing"),
         archive: directory.path().join("missing.tar.gz"),
     };
-    let error = tokio::time::timeout(
-        Duration::from_secs(10),
-        run(&options, &control, &artifact, CancellationToken::new()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let error =
+        tokio::time::timeout(Duration::from_secs(10), run(&options, &control, &artifact, CancellationToken::new()))
+            .await
+            .unwrap()
+            .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!options.state.join("backend.json").exists());
 }

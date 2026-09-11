@@ -18,17 +18,9 @@ struct Budget {
 
 /// V8 retains the allocator with its backing stores, including stores freed by GC.
 pub(crate) fn bounded(limit: usize, exhausted: Termination) -> v8::UniqueRef<v8::Allocator> {
-    const VTABLE: v8::RustAllocatorVtable<Budget> = v8::RustAllocatorVtable {
-        allocate,
-        allocate_uninitialized: allocate,
-        free,
-        drop: drop_budget,
-    };
-    let budget = Box::new(Budget {
-        limit,
-        used: AtomicUsize::new(0),
-        exhausted,
-    });
+    const VTABLE: v8::RustAllocatorVtable<Budget> =
+        v8::RustAllocatorVtable { allocate, allocate_uninitialized: allocate, free, drop: drop_budget };
+    let budget = Box::new(Budget { limit, used: AtomicUsize::new(0), exhausted });
     // SAFETY: VTABLE receives this exact Budget until its drop callback reclaims
     // the Box. Atomic accounting supports V8's concurrent backing-store frees.
     unsafe { v8::new_rust_allocator(Box::into_raw(budget), &VTABLE) }
