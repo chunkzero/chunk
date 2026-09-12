@@ -1,0 +1,20 @@
+name: Cache Rust and V8
+description: Preserve Cargo dependencies and V8's native archive across CI jobs.
+inputs:
+  profile:
+    description: Cargo output profile directory (debug or release)
+    default: debug
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@v2
+    # rust-cache removes gn_out during cleanup; this later action saves it first.
+    - uses: actions/cache@v5
+      id: v8
+      with:
+        path: target/${{ inputs.profile }}/gn_out
+        key: v8-${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-${{ hashFiles('Cargo.lock') }}
+    - name: Rebuild V8 if its native archive was evicted
+      if: steps.v8.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo clean -p v8
