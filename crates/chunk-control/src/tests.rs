@@ -36,6 +36,7 @@ struct FakeRuntime {
     stopped: AtomicBool,
     withdrawals: AtomicUsize,
     ticks: AtomicUsize,
+    advance_ticks: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -255,6 +256,7 @@ impl Fixture {
             stopped: AtomicBool::new(false),
             withdrawals: AtomicUsize::new(0),
             ticks: AtomicUsize::new(0),
+            advance_ticks: AtomicBool::new(true),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -590,7 +592,11 @@ impl chunk_proto::v1::node_control_server::NodeControl for RuntimeService {
         Ok(Response::new(chunk_proto::v1::ProcessHealth {
             identity: Some(self.identity.clone()),
             ready: true,
-            tick_count: self.ticks.fetch_add(1, Ordering::AcqRel) as u64 + 1,
+            tick_count: if self.advance_ticks.load(Ordering::Acquire) {
+                self.ticks.fetch_add(1, Ordering::AcqRel) as u64 + 1
+            } else {
+                self.ticks.load(Ordering::Acquire) as u64
+            },
             ..Default::default()
         }))
     }
@@ -645,5 +651,50 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     control.reconcile_all().await.unwrap();
     assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopped as i32);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn delayed_health_monitor_does_not_retire_a_surviving_runtime() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let request = request("active", &uuid::Uuid::new_v4().to_string());
+    let assignment = control.claim(request).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("active").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    fixture.runtime.advance_ticks.store(false, Ordering::Release);
+    fixture.runtime.ticks.store(1, Ordering::Release);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let monitor = crate::server::monitor_health(&control, &stop);
+    tokio::pin!(monitor);
+    let observed = async {
+        while control.nodes().unwrap().nodes[0].health.is_none() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        () = &mut monitor => panic!("health monitor stopped"),
+        result = tokio::time::timeout(Duration::from_secs(3), observed) => result.unwrap(),
+    }
+
+    // The JVM advances while control is paused, then several rapid probes see the same tick.
+    tokio::time::pause();
+    fixture.runtime.ticks.store(2, Ordering::Release);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    tokio::time::resume();
+    tokio::select! {
+        () = &mut monitor => panic!("health monitor stopped"),
+        () = tokio::time::sleep(Duration::from_secs(1)) => {},
+    }
+    stop.cancel();
+    monitor.await;
+    let node = control.nodes().unwrap().nodes.remove(0);
+    assert_eq!(node.health.unwrap().tick_count, 2);
+    assert_eq!(node.phase, chunk_proto::v1::NodePhase::Online as i32);
+    assert_eq!(node.consecutive_failures, 0);
+    let state = control.state().unwrap();
+    assert!(state.drains.is_empty());
+    assert!(state.hosts.values().all(|host| !host.retired));
+    assert!(state.claims["active"].phase == Phase::Arrived);
     fixture.close().await;
 }
