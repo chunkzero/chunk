@@ -23,6 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
+      - name: Install the pinned Rust formatter
+        run: rustup component add rustfmt
       - uses: actions/setup-node@v5
         with:
           cache: pnpm
