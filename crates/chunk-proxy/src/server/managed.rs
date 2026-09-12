@@ -309,7 +309,7 @@ async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
                 ) => {}
             Err(error) => return Err(io::Error::other(error)),
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
     }
     Err(io::Error::new(io::ErrorKind::TimedOut, "session arrival timed out"))
 }
