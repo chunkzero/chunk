@@ -111,6 +111,13 @@ class SessionManagerTest {
                             }
                         },
                     "flat" to Supplier { FlatSession() },
+                    "failed" to
+                        Supplier {
+                            object : Session() {
+                                override fun onCreate(scope: SessionScope) =
+                                    CompletableFuture.failedFuture<Void>(IllegalStateException("Creation failed"))
+                            }
+                        },
                 ),
             )
 
@@ -128,15 +135,18 @@ class SessionManagerTest {
         try {
             val first = command("first", "delayed")
             val second = command("second", "flat")
+            assertEquals(0, manager.activeCount())
             val pending = manager.create(first)
             val independent = manager.create(second)
             repeat(4) { ticks.flush() }
             assertFalse(pending.isDone)
+            assertEquals(2, manager.activeCount())
             assertEquals(SessionPhase.SESSION_PHASE_READY, independent.join().phase)
             assertEquals(3, MinecraftServer.getInstanceManager().instances.size)
             created.complete(null)
             repeat(4) { ticks.flush() }
             assertEquals(SessionPhase.SESSION_PHASE_READY, pending.join().phase)
+            assertEquals(2, manager.activeCount())
             val duplicate = manager.create(first)
             repeat(2) { ticks.flush() }
             assertEquals(pending.join(), duplicate.join())
@@ -146,10 +156,12 @@ class SessionManagerTest {
             val ending = manager.finish(first)
             repeat(5) { ticks.flush() }
             assertFalse(ending.isDone)
+            assertEquals(2, manager.activeCount())
             assertEquals(0, disposed)
             finished.complete(null)
             repeat(5) { ticks.flush() }
             assertEquals(SessionPhase.SESSION_PHASE_ENDED, ending.join().phase)
+            assertEquals(1, manager.activeCount())
             assertEquals(1, disposed)
             assertEquals(1, MinecraftServer.getInstanceManager().instances.size)
             assertFalse(MinecraftServer.getGlobalEventHandler().children.any { it.name == ownedScope.events.name })
@@ -160,6 +172,16 @@ class SessionManagerTest {
             val stopSecond = manager.finish(second)
             repeat(8) { ticks.flush() }
             assertTrue(stopSecond.isDone)
+            assertEquals(0, manager.activeCount())
+            val failed = manager.create(command("failed", "failed"))
+            repeat(8) { ticks.flush() }
+            assertTrue(failed.isCompletedExceptionally)
+            assertEquals(
+                SessionPhase.SESSION_PHASE_FAILED,
+                manager.inventory().single { it.session.id == "failed" }.phase,
+            )
+            assertEquals(0, manager.activeCount())
+            assertEquals(3, manager.inventory().size)
         } finally {
             MinecraftServer.process().stop()
         }

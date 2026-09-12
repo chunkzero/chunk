@@ -91,7 +91,7 @@ public final class ChunkMinestom implements AutoCloseable {
                                         gameplay.flush();
                                         var inventory = sessions.inventory();
                                         process.progress(
-                                                inventory.size(),
+                                                sessions.activeCount(),
                                                 inventory.stream()
                                                         .mapToInt(SessionInventory::getAttached)
                                                         .sum());

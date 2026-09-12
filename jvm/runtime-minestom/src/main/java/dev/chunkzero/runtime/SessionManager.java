@@ -121,6 +121,21 @@ public final class SessionManager {
         return sessions.values().stream().map(ManagedSession::inventory).toList();
     }
 
+    int activeCount() {
+        return (int)
+                sessions.values().stream()
+                        .filter(
+                                session ->
+                                        switch (session.phase) {
+                                            case SESSION_PHASE_STARTING,
+                                                    SESSION_PHASE_READY,
+                                                    SESSION_PHASE_ENDING ->
+                                                    true;
+                                            default -> false;
+                                        })
+                        .count();
+    }
+
     @ApiStatus.Internal
     public final class ManagedSession {
         private final SessionCommand command;

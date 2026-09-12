@@ -55,7 +55,7 @@ require additional implementations. Use `just local` to run the example.
 
 The `dev.chunkzero.runtime` package retains the public app/session API. Generic process wiring lives in `bootstrap`
 and `control`; Minestom wiring lives in `minestom.internal`. Cross-package implementation APIs are marked
-`@ApiStatus.Internal`.
+`@ApiStatus.Internal`. Health reports active sessions; completed and failed sessions remain in inventory for replay.
 
 Session implementations extend `Session`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>`
 and begin on the process tick thread. Do not block that thread. Resume asynchronous world changes with
