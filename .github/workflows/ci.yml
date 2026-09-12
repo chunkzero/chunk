@@ -5,27 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   formatting:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
+      - uses: actions/setup-node@v5
+        with:
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: just fmt-check
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install --no-self-update
+      - uses: ./.github/actions/rust-cache
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -38,11 +49,15 @@ jobs:
       - run: cargo test -p chunk-proxy --no-default-features
 
   jvm:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 60
+    env:
+      GRADLE_OPTS: -Dorg.gradle.workers.max=2
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned Rust toolchain before parallel Gradle tasks
         run: rustup toolchain install --no-self-update
+      - uses: ./.github/actions/rust-cache
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -55,6 +70,11 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
       - run: cargo build -p chunk-cli
       - run: ./gradlew build
       - run: examples/local/gradlew build --no-daemon
@@ -68,7 +88,8 @@ jobs:
           retention-days: 7
 
   proto:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: bufbuild/buf-action@v1
@@ -78,7 +99,8 @@ jobs:
           pr_comment: false
 
   typescript:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
