@@ -40,6 +40,18 @@ test("schema composition is explicit, immutable and collision checked", () => {
   });
 });
 
+test("numbers and numeric literals share safe-integer boundaries", () => {
+  for (const value of [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 0.125]) {
+    assert.equal(v.number().parse(value), value);
+    assert.equal(v.literal(value).parse(value), value);
+  }
+  for (const value of [Number.MIN_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER + 1, 1e20, -1e20]) {
+    assert.throws(() => v.number().parse(value));
+    assert.throws(() => v.literal(value));
+  }
+  assert.equal(v.literal("100000000000000000000").parse("100000000000000000000"), "100000000000000000000");
+});
+
 test("only explicit descriptors are functions and metadata excludes handlers", () => {
   const helper = (x) => x + 1;
   const read = query({ args: { count: v.integer() }, returns: v.integer(), handler: (_, { count }) => helper(count) });

@@ -177,8 +177,11 @@ impl Schema {
                     variant.validate(depth + 1)?;
                 }
             }
-            Self::Literal { value } if value.is_array() || value.is_object() => {
-                return Err("literals must be scalar");
+            Self::Literal { value } => {
+                if value.is_array() || value.is_object() {
+                    return Err("literals must be scalar");
+                }
+                crate::validate_wire_value(value)?;
             }
             _ => {}
         }
