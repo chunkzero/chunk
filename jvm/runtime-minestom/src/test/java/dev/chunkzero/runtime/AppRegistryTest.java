@@ -2,7 +2,6 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import dev.chunkzero.runtime.bootstrap.AppManifest;
 import dev.chunkzero.runtime.minestom.internal.AppRegistry;
 
 import org.junit.jupiter.api.Test;
@@ -29,16 +28,17 @@ class AppRegistryTest {
     @TempDir Path directory;
 
     @Test
-    void generatedCatalogCreatesIndependentSessionsWithFixedCallerIdentity() throws Exception {
+    void serviceRegistryCreatesIndependentSessionsWithAssignedCallerIdentity() throws Exception {
         var lobby = compile("lobby");
-        var jar = jar("lobby.jar", lobby.classes());
+        var jar = jar("lobby.jar", lobby.classes(), lobby.provider());
         try (var loader = loader(jar)) {
-            var apps = AppRegistry.load(manifest("lobby", lobby.provider()), loader);
+            var apps = AppRegistry.load("lobby", loader);
             assertEquals(List.of("lobby/default"), new ArrayList<>(apps.keySet()));
             var factory = apps.get("lobby/default");
             var first = factory.create();
             assertEquals("lobby", first.toString());
             assertNotSame(first, factory.create());
+            assertTrue(AppRegistry.load("renamed", loader).containsKey("renamed/default"));
             factory.backend(
                     "instance",
                     (session, app) -> {
@@ -50,16 +50,31 @@ class AppRegistryTest {
     }
 
     @Test
-    void missingAndInvalidProvidersFailBeforeCreation() {
+    void missingAndInvalidProvidersFailBeforeCreation() throws Exception {
         for (var provider : List.of("missing.Provider", "java.lang.String")) {
+            try (var loader = loader(jar(provider + ".jar", Map.of(), provider))) {
+                assertThrows(
+                        IllegalArgumentException.class, () -> AppRegistry.load("lobby", loader));
+            }
+        }
+        try (var loader = loader(jar("empty.jar", Map.of(), ""))) {
+            assertThrows(IllegalArgumentException.class, () -> AppRegistry.load("lobby", loader));
+        }
+        var first = compile("first");
+        var second = compile("second");
+        var classes = new TreeMap<>(first.classes());
+        classes.putAll(second.classes());
+        try (var loader =
+                loader(
+                        jar(
+                                "duplicate.jar",
+                                classes,
+                                first.provider() + "\n" + second.provider()))) {
             var error =
                     assertThrows(
                             IllegalArgumentException.class,
-                            () ->
-                                    AppRegistry.load(
-                                            manifest("lobby", provider),
-                                            getClass().getClassLoader()));
-            assertTrue(error.getMessage().contains("Invalid session provider"), error.toString());
+                            () -> AppRegistry.load("lobby", loader));
+            assertTrue(error.getMessage().contains("Duplicate session type"), error.toString());
         }
     }
 
@@ -78,6 +93,7 @@ class AppRegistryTest {
                 package fixtures.%s;
                 import dev.chunkzero.runtime.Session;
                 import dev.chunkzero.runtime.SessionProvider;
+                @dev.chunkzero.runtime.SessionType("default")
                 public final class Provider implements SessionProvider {
                     public Session create() {
                         return new Session() { public String toString() { return "%s"; } };
@@ -90,7 +106,19 @@ class AppRegistryTest {
         assertNotNull(compiler, "App registry fixtures require the configured JDK");
         var runtime =
                 Path.of(Session.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-        var classpath = System.getProperty("java.class.path") + File.pathSeparator + runtime;
+        var core =
+                Path.of(
+                        SessionType.class
+                                .getProtectionDomain()
+                                .getCodeSource()
+                                .getLocation()
+                                .toURI());
+        var classpath =
+                System.getProperty("java.class.path")
+                        + File.pathSeparator
+                        + runtime
+                        + File.pathSeparator
+                        + core;
         var diagnostics = new StringWriter();
         try (var files = compiler.getStandardFileManager(null, null, StandardCharsets.UTF_8)) {
             var success =
@@ -120,9 +148,14 @@ class AppRegistryTest {
         return new Fixture("fixtures." + app + ".Provider", entries);
     }
 
-    private Path jar(String name, Map<String, byte[]> classes) throws IOException {
+    private Path jar(String name, Map<String, byte[]> classes, String providers)
+            throws IOException {
         var path = directory.resolve(name);
         try (var output = new JarOutputStream(Files.newOutputStream(path))) {
+            output.putNextEntry(
+                    new JarEntry("META-INF/services/dev.chunkzero.runtime.SessionProvider"));
+            output.write(providers.getBytes(StandardCharsets.UTF_8));
+            output.closeEntry();
             for (var entry : classes.entrySet()) {
                 output.putNextEntry(new JarEntry(entry.getKey()));
                 output.write(entry.getValue());
@@ -130,14 +163,6 @@ class AppRegistryTest {
             }
         }
         return path;
-    }
-
-    private static AppManifest manifest(String app, String provider) {
-        return new AppManifest(
-                2,
-                app,
-                "test.Main",
-                Map.of("default", new AppManifest.Factory(provider, "small", 16)));
     }
 
     private record Fixture(String provider, Map<String, byte[]> classes) {}

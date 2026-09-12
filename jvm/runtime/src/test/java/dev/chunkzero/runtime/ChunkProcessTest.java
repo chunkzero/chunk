@@ -16,49 +16,16 @@ import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 class ChunkProcessTest {
-    @TempDir Path directory;
     private static final String TOKEN = "test-process-credential-with-32-bytes";
 
     @Test
-    void missingAndDuplicateManifestsAreRejectedBeforeConnecting() throws Exception {
-        var environment = environment(1, 1);
-        try (var loader = new URLClassLoader(new URL[0], getClass().getClassLoader())) {
-            var error =
-                    assertThrows(
-                            IllegalArgumentException.class,
-                            () -> new ChunkProcess(environment, loader));
-            assertTrue(error.getMessage().contains("exactly one"), error.toString());
-        }
-        var urls = new URL[2];
-        for (var index = 0; index < urls.length; index++) {
-            var root = directory.resolve("app-" + index);
-            var metadata = root.resolve("META-INF/chunk/app.json");
-            Files.createDirectories(metadata.getParent());
-            Files.writeString(metadata, "{}");
-            urls[index] = root.toUri().toURL();
-        }
-        try (var loader = new URLClassLoader(urls, getClass().getClassLoader())) {
-            var error =
-                    assertThrows(
-                            IllegalArgumentException.class,
-                            () -> new ChunkProcess(environment, loader));
-            assertTrue(error.getMessage().contains("exactly one"), error.toString());
-        }
-    }
-
-    @Test
-    void readinessIsExplicitAndShutdownIsAuthenticatedAndIrreversible() throws Exception {
+    void connectsWithoutAManifestAndReadinessAndShutdownRemainAuthenticated() throws Exception {
         var registered = new AtomicReference<ProcessRegistration>();
         var backend =
                 ServerBuilder.forPort(0)
@@ -88,20 +55,8 @@ class ChunkProcessTest {
                                 })
                         .build()
                         .start();
-        var metadata = directory.resolve("META-INF/chunk/app.json");
-        Files.createDirectories(metadata.getParent());
-        Files.writeString(
-                metadata,
-                """
-                {"version":2,"id":"app","main_class":"test.Main","sessions":{
-                    "default":{"provider":"test.Factory","machine_profile":"local","capacity":16}}}
-                """);
         var environment = environment(supervisor.getPort(), backend.getPort());
-        try (var loader =
-                        new URLClassLoader(
-                                new URL[] {directory.toUri().toURL()},
-                                getClass().getClassLoader());
-                var process = new ChunkProcess(environment, loader)) {
+        try (var process = new ChunkProcess(environment)) {
             assertFalse(process.isReady());
             assertThrows(IllegalStateException.class, process::ready);
             process.bind(List.of(), "127.0.0.1:25565");
@@ -110,7 +65,6 @@ class ChunkProcessTest {
             process.ready();
             assertTrue(process.isReady());
             assertEquals(process.identity(), registered.get().getIdentity());
-            assertEquals(64, registered.get().getManifestDigest().length());
             var address = java.net.URI.create(registered.get().getControlEndpoint());
             var channel =
                     ManagedChannelBuilder.forAddress(address.getHost(), address.getPort())

@@ -64,15 +64,15 @@ self-hosted storage adapters are proposals.
 
 The JVM has a Java core and optional Kotlin adapters:
 
-| Module                                            | Responsibility                                                              |
-| ------------------------------------------------- | --------------------------------------------------------------------------- |
-| `jvm/backend-api`                                 | Java codecs, typed references and document identifiers                      |
-| `jvm/backend-client`                              | Asynchronous Java calls, mutation operation IDs and watch state             |
-| `jvm/runtime`                                     | Generic Java 25 process lifecycle, deployment binding, readiness and health |
-| `jvm/runtime-minestom`                            | Minestom sessions, scoped resources, player admission and tick scheduling   |
+| Module                                                     | Responsibility                                                              |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `jvm/backend-api`                                          | Java codecs, typed references and document identifiers                      |
+| `jvm/backend-client`                                       | Asynchronous Java calls, mutation operation IDs and watch state             |
+| `jvm/runtime`                                              | Generic Java 25 process lifecycle, deployment binding, readiness and health |
+| `jvm/runtime-minestom`                                     | Minestom sessions, scoped resources, player admission and tick scheduling   |
 | `jvm/backend-client-kotlin`, `jvm/runtime-minestom-kotlin` | Owned coroutine scopes, suspending hooks and Flow adapters                  |
-| `jvm/proto`                                       | Generated Java protobuf and asynchronous gRPC bindings                      |
-| `jvm/gradle-plugin`                               | App discovery, explicit JVM toolchains, generation and artifact descriptors |
+| `jvm/proto`                                                | Generated Java protobuf and asynchronous gRPC bindings                      |
+| `jvm/gradle-plugin`                                        | App discovery, explicit JVM toolchains, generation and artifact descriptors |
 
 Java apps require no Kotlin production dependencies. Generated Java records, sealed unions and typed references are
 shared by both languages. The optional `CoroutineBackendClient` facade uses those same Java models and an owned
@@ -100,12 +100,14 @@ compilation and emits one shared Java bindings JAR, plus a separate Kotlin facad
 lists each app executable with its own dependencies. An installed or configured CLI supplies the compiler; consumer
 plugins do not build Rust tools or install Node packages.
 
-Each app JAR contains `META-INF/chunk/app.json`, a generated catalog of annotated `@SessionType` factories. Each public
+Each app JAR contains a local Java service registry generated from annotated `@SessionType` factories. Each public
 provider implements `Session create()` and creates fresh state for each session. The app owns its main function and
-includes the runtime libraries in its executable JAR. Control binds app identity, machine profile, artifact digest and
-deployment before launch; registration must match that identity and manifest digest. JVMs contain one app, and separate
-machine profiles require separate JVMs. Annotation declarations provide profile and capacity overrides. Dependency
-injection remains deferred.
+includes the runtime libraries in its executable JAR. Gradle exports session type IDs separately for release assembly;
+provider class names remain internal to the JVM. The external release manifest binds artifacts to resolved deployment
+requirements from `[runtime]` and `[sessions.<id>]` in app TOML. Control selects the app and machine profile, verifies
+the artifact digest, and supplies launch identity and session commands with admission limits. Registration authenticates
+that launch identity. The JVM loads no deployment manifest. JVMs contain one app, and separate machine profiles require
+separate JVMs. Dependency injection remains deferred.
 
 The CLI publishes `dist/<id>/` and a matching `dist/<id>.tar.gz` containing backend code/contracts, normalized release
 metadata, content-named JARs and explicit assets. One digest identifies the release and backend deployment. Generated

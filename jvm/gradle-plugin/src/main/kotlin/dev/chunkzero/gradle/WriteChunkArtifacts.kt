@@ -45,9 +45,17 @@ abstract class WriteChunkArtifacts : DefaultTask() {
         output.writeText(
             gson.toJson(
                 mapOf(
-                    "version" to 2,
+                    "version" to 3,
                     "java" to mapOf("version" to java.javaVersion, "executable" to java.javaExecutable),
-                    "apps" to apps.map { mapOf("id" to it.app, "jar" to it.jar, "java_version" to it.javaVersion) },
+                    "apps" to
+                        apps.map {
+                            mapOf(
+                                "id" to it.app,
+                                "jar" to it.jar,
+                                "java_version" to it.javaVersion,
+                                "sessions" to it.sessions,
+                            )
+                        },
                 ),
             ) + "\n",
         )

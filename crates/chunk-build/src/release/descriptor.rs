@@ -1,6 +1,7 @@
 use crate::read_limited;
 use serde::Deserialize;
 use std::{
+    collections::BTreeSet,
     io,
     path::{Path, PathBuf},
 };
@@ -26,6 +27,7 @@ pub(super) struct App {
     pub id: String,
     pub jar: PathBuf,
     pub java_version: u32,
+    pub sessions: Vec<String>,
 }
 
 /// Reads the executable app inventory without running application code.
@@ -34,16 +36,24 @@ pub(super) struct App {
 pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
     let descriptor: JvmDescriptor =
         serde_json::from_slice(&read_limited(path, 2 * 1024 * 1024)?).map_err(io::Error::other)?;
-    if descriptor.version != 2
+    if descriptor.version != 3
         || !(25..=100).contains(&descriptor.java.version)
         || !descriptor.java.executable.is_absolute()
     {
-        return Err(io::Error::other("JVM descriptor requires version 2, Java 25–100 and an absolute executable path"));
+        return Err(io::Error::other("JVM descriptor requires version 3, Java 25–100 and an absolute executable path"));
     }
     if descriptor.apps.is_empty() || descriptor.apps.len() > 128 {
         return Err(io::Error::other("JVM descriptor requires 1–128 apps"));
     }
     for app in &descriptor.apps {
+        let sessions: BTreeSet<_> = app.sessions.iter().collect();
+        if sessions.is_empty()
+            || sessions.len() > 128
+            || sessions.len() != app.sessions.len()
+            || sessions.iter().any(|id| !crate::project::valid_id(id))
+        {
+            return Err(io::Error::other("JVM descriptor requires 1–128 unique session type IDs per app"));
+        }
         if !(25..=descriptor.java.version).contains(&app.java_version)
             || !app.jar.is_absolute()
             || app.jar.extension().is_none_or(|ext| ext != "jar")

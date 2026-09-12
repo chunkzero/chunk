@@ -17,7 +17,6 @@ INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
     "buildSrc", "jvm", "proto", "examples/java", "examples/local",
 )
-APP_MANIFEST = "META-INF/chunk/app.json"
 PROVIDER = "META-INF/services/dev.chunkzero.runtime.SessionProvider"
 
 
@@ -43,7 +42,7 @@ def read_json(path):
 
 def verify_release(project, package, app_ids, kotlin):
     descriptor = read_json(project / ".chunk/build/jvm/artifacts.json")
-    require(descriptor["version"] == 2, "Unsupported JVM descriptor")
+    require(descriptor["version"] == 3, "Unsupported JVM descriptor")
     require({app["id"] for app in descriptor["apps"]} == app_ids, "Unexpected descriptor apps")
     compiled_apps = {app["id"]: Path(app["jar"]) for app in descriptor["apps"]}
     require(all(path.is_file() for path in compiled_apps.values()), "Missing compiled app JAR")
@@ -52,7 +51,7 @@ def verify_release(project, package, app_ids, kotlin):
     archive = archives[0]
     release = archive.with_name(archive.name.removesuffix(".tar.gz"))
     manifest = read_json(release / "release.json")
-    require(manifest["version"] == 2 and manifest["id"] == release.name, "Invalid release identity")
+    require(manifest["version"] == 3 and manifest["id"] == release.name, "Invalid release identity")
     require(read_json(release / "backend.json")["id"] == release.name, "Backend identity differs from release")
     require(manifest["java_version"] == descriptor["java"]["version"], "Java requirement differs from descriptor")
     require({app["id"] for app in manifest["apps"]} == app_ids, "Unexpected release apps")
@@ -68,7 +67,6 @@ def verify_release(project, package, app_ids, kotlin):
                 expected = hashlib.sha256((release / member.name).read_bytes()).digest()
                 require(hashlib.sha256(source.read()).digest() == expected, f"Archive differs: {member.name}")
 
-    jars = {}
     for app in manifest["apps"]:
         path = release / app["jar"]
         require(hashlib.sha256(path.read_bytes()).hexdigest() == app["sha256"], "App JAR hash differs")
@@ -77,14 +75,21 @@ def verify_release(project, package, app_ids, kotlin):
         with ZipFile(path) as jar:
             names = jar.namelist()
             require(len(names) == len(set(names)), "Executable contains duplicate ZIP entries")
-            require(names.count(APP_MANIFEST) == 1 and PROVIDER not in names, "Generated app catalog missing or repeated")
-            catalog = json.loads(jar.read(APP_MANIFEST))
-            require(catalog == app["manifest"] and catalog["id"] == app["id"], "Wrong app catalog")
-            require(hashlib.sha256(jar.read(APP_MANIFEST)).hexdigest() == app["manifest_digest"], "Manifest digest differs")
-            require(catalog["main_class"].replace(".", "/") + ".class" in names, "Main class missing")
-            require("Main-Class: " + catalog["main_class"] in jar.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", ""), "Executable entrypoint differs")
-            for session in catalog["sessions"].values():
-                require(session["provider"].replace(".", "/") + ".class" in names, "Session factory missing")
+            require("META-INF/chunk/app.json" not in names and names.count(PROVIDER) == 1,
+                    "Executable must contain a local service registry without a deployment manifest")
+            compiled = next(item for item in descriptor["apps"] if item["id"] == app["id"])
+            require(set(app["sessions"]) == set(compiled["sessions"]), "Session types differ from the descriptor")
+            require("manifest" not in app and "manifest_digest" not in app, "Embedded app metadata remains")
+            require(all(set(session) == {"machine_profile", "capacity"} for session in app["sessions"].values()),
+                    "Release session declarations contain JVM implementation details")
+            attributes = jar.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", "")
+            mains = [line.split(":", 1)[1].strip() for line in attributes.splitlines()
+                     if line.lower().startswith("main-class:")]
+            require(len(mains) == 1 and mains[0].replace(".", "/") + ".class" in names, "Main class missing")
+            providers = [line.strip() for line in jar.read(PROVIDER).decode().splitlines() if line.strip()]
+            require(len(providers) == len(app["sessions"]), "Session registry differs from deployment capabilities")
+            for provider in providers:
+                require(provider.replace(".", "/") + ".class" in names, "Session factory missing")
             for entry in ("dev/chunkzero/runtime/ChunkProcess.class", "dev/chunkzero/runtime/ChunkMinestom.class",
                           "net/minestom/server/MinecraftServer.class", package.replace(".", "/") + "/BackendTypes.class",
                           package.replace(".", "/") + "/BackendClient.class"):

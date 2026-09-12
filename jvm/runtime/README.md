@@ -3,8 +3,8 @@
 `jvm:runtime` is the engine-independent Java 25 library. `ChunkProcess` owns immutable deployment identity, backend
 binding, registration, explicit readiness, health reporting and shutdown notification. It has no Minestom or Kotlin
 production dependency. `jvm:runtime-minestom` supplies `ChunkMinestom`, sessions, players, worlds, tick scheduling and
-Minecraft admission. `jvm:runtime-minestom-kotlin` adds coroutine conveniences to the Minestom integration. Hytale integration is
-future work.
+Minecraft admission. `jvm:runtime-minestom-kotlin` adds coroutine conveniences to the Minestom integration. Hytale
+integration is future work.
 
 Each app is an executable JAR containing its own dependencies. Configure `application.mainClass` in the app's Gradle
 build:
@@ -26,12 +26,16 @@ public final class Lobby implements SessionProvider {
 }
 ```
 
-The build plugin scans compiled `@SessionType` factory classes and generates `META-INF/chunk/app.json`. Factories must
-implement `SessionProvider` and have a public no-argument constructor. A factory may override deployment defaults with
-`@SessionType(value = "large", machineProfile = "large", capacity = 32)`. Control addresses that session as
-`appId/large` and places it only in a JVM assigned to that app and profile. Main functions do not advertise sessions or
-choose a deployment. There is exactly one app catalog per executable; JAR and manifest digests are checked during launch
-and registration. Changing a factory, profile or main class requires a new release.
+The build plugin scans compiled `@SessionType` factories and generates the local Java service registry at
+`META-INF/services/dev.chunkzero.runtime.SessionProvider`. Factories implement `SessionProvider` with a public
+no-argument constructor and create fresh state for every session. The JVM resolves its factories through `ServiceLoader`
+and binds their caller identity to the app assigned at launch.
+
+Deployment requirements live in `app.toml`: `[runtime]` supplies app defaults and `[sessions.large]` can override
+`machine_profile` and `capacity` for `@SessionType("large")`. The release manifest contains the resolved requirements
+and artifact hashes; control uses it to select the app and profile, verify the JAR, and send session creation commands
+with the chosen capacity. The JVM enforces those commands without loading a deployment manifest. Changing deployment
+requirements creates a new release while preserving the executable bytes.
 
 The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_ENVIRONMENT`, `CHUNK_DEPLOYMENT`, `CHUNK_CONTROL_ENDPOINT`,
 `CHUNK_INSTANCE_ID`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST`,
@@ -53,8 +57,8 @@ authorize native login. There is no per-server Rust process or intermediate TCP 
 socket buffering, player creation and worlds. The current host and engine adapter are local; hosted networking/providers
 require additional implementations. Use `just local` to run the example.
 
-The `dev.chunkzero.runtime` package retains the public app/session API. Generic process wiring lives in `bootstrap`
-and `control`; Minestom wiring lives in `minestom.internal`. Cross-package implementation APIs are marked
+The `dev.chunkzero.runtime` package retains the public app/session API. Generic process wiring lives in `bootstrap` and
+`control`; Minestom wiring lives in `minestom.internal`. Cross-package implementation APIs are marked
 `@ApiStatus.Internal`. Health reports active sessions; completed and failed sessions remain in inventory for replay.
 
 Session implementations extend `Session`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>`
@@ -111,5 +115,5 @@ Put final result mutations in `finish()`: the manager awaits that hook before cl
 termination with `scope.finish()` without awaiting it from work that the same termination will cancel. Slow Flow
 collectors fail at 64 queued updates instead of dropping stale transitions. Both languages use the same
 `SessionProvider.create()` registration contract. The [Java consumer](../../examples/java/README.md) demonstrates the
-Java lifecycle and generated client without Kotlin dependencies. The coroutine adapters live in `jvm:runtime-minestom-kotlin`;
-backend-only Java consumers use `jvm:backend-client`.
+Java lifecycle and generated client without Kotlin dependencies. The coroutine adapters live in
+`jvm:runtime-minestom-kotlin`; backend-only Java consumers use `jvm:backend-client`.

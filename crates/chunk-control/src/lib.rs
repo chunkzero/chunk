@@ -70,11 +70,11 @@ impl Config {
         }
         let mut expected = BTreeMap::new();
         for (id, app) in &self.apps {
-            app.manifest.validate().map_err(|_| Error::Invalid("invalid app manifest"))?;
-            if *id != app.id || *id != app.manifest.id {
+            app.validate().map_err(|_| Error::Invalid("invalid app manifest"))?;
+            if *id != app.id {
                 return Err(Error::Invalid("app identity mismatch"));
             }
-            for (session, spec) in &app.manifest.sessions {
+            for (session, spec) in &app.sessions {
                 expected.insert(
                     format!("{id}/{session}"),
                     SessionType {

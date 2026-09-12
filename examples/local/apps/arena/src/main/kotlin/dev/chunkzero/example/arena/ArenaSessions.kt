@@ -12,7 +12,7 @@ class ArenaSessions : SessionProvider {
     override fun create() = ExampleSessions.arena()
 }
 
-@SessionType(value = "large", machineProfile = "large", capacity = 32)
+@SessionType("large")
 class LargeArenaSessions : SessionProvider {
     override fun create() = ExampleSessions.arena()
 }

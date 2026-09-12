@@ -82,7 +82,7 @@ fn control_config(
     let session_types = apps
         .iter()
         .flat_map(|app| {
-            app.manifest.sessions.iter().map(|(id, session)| {
+            app.sessions.iter().map(|(id, session)| {
                 (
                     format!("{}/{id}", app.id),
                     chunk_control::SessionType {

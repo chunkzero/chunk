@@ -4,13 +4,16 @@
 with `cargo build -p chunk-control`. Required environment variables:
 
 - `CHUNK_STATE`, `CHUNK_CONNECTION`: durable state directory and discovery record.
-- `CHUNK_CONFIG`: JSON `chunk_control::Config` with deployment, executable app manifests, profiles and session types.
+- `CHUNK_CONFIG`: JSON `chunk_control::Config` with deployment, external app manifests, profiles and session types.
 - `CHUNK_DISTRIBUTION`, `CHUNK_JAVA`: release directory and Java 25 executable.
 - `CHUNK_BACKEND_FILE`: backend connection bound to the same deployment.
 - Optional `CHUNK_BIND` (default `127.0.0.1:25567`).
 
 `chunk dev` and standalone control use `ProcessHost` to launch each app with `java -jar`. It owns the child handle and
-waits for exit; there is no per-server sidecar. Future container/machine providers implement the same `Host` boundary.
+waits for exit; there is no per-server sidecar. External app manifests supply session type IDs, placement and capacity
+requirements, and JAR hashes. Control verifies the selected artifact and sends the JVM session creation instructions;
+the JVM resolves factories locally and enforces the supplied capacity. Future container/machine providers implement the
+same `Host` boundary.
 
 The private `.chunk/control.json` connection file authorizes gRPC calls. `Claim` accepts authenticated identity, proxy
 incarnation, connection identity and a session demand key/type/profile. It reserves capacity, starts an app JVM if

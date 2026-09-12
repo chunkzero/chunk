@@ -134,7 +134,7 @@ class SessionManagerTest {
             .build()
         try {
             val first = command("first", "delayed")
-            val second = command("second", "flat")
+            val second = command("second", "flat").toBuilder().setCapacity(32).build()
             assertEquals(0, manager.activeCount())
             val pending = manager.create(first)
             val independent = manager.create(second)
@@ -142,6 +142,7 @@ class SessionManagerTest {
             assertFalse(pending.isDone)
             assertEquals(2, manager.activeCount())
             assertEquals(SessionPhase.SESSION_PHASE_READY, independent.join().phase)
+            assertEquals(32, independent.join().capacity)
             assertEquals(3, MinecraftServer.getInstanceManager().instances.size)
             created.complete(null)
             repeat(4) { ticks.flush() }

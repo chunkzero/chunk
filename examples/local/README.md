@@ -78,10 +78,11 @@ this paragraph are relative to `examples/local`. `examples/local/gradlew generat
 standalone example uses the public Chunk settings and project plugins with repository composite builds for local
 framework dependencies. Its explicit `shared` project contains the common session implementation and backend boundary
 test. The discovered `apps/lobby` and `apps/arena` projects each package annotated `SessionProvider` factories that
-creates fresh session state. The plugin scans annotated factories into `META-INF/chunk/app.json`, including their
-profile and capacity. `chunkArtifacts` builds independent executable app JARs containing the generated backend client
-and runtime libraries. Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom,
-explicitly calls `ready()` and waits for shutdown.
+create fresh session state. The plugin generates a local Java service registry from those annotations. Deployment
+requirements stay in TOML; `apps/arena/app.toml` configures `[sessions.large]` with its profile and capacity.
+`chunkArtifacts` builds independent executable app JARs containing the generated backend client and runtime libraries.
+Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom, explicitly calls `ready()` and
+waits for shutdown.
 
 Shared descriptors use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`. The initial
 managed caller's `app` identifies its registered app ID. Multiple session instances may belong to the same app. Session

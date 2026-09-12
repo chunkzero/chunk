@@ -4,12 +4,14 @@ import com.google.gson.Gson
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.CacheableTask
 import org.gradle.api.tasks.Classpath
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
@@ -21,14 +23,8 @@ import org.objectweb.asm.Opcodes
 import java.util.jar.JarFile
 
 @CacheableTask
-abstract class WriteAppManifest : DefaultTask() {
-    @get:Input abstract val app: Property<String>
-
+abstract class WriteSessionRegistry : DefaultTask() {
     @get:Input abstract val mainClass: Property<String>
-
-    @get:Input abstract val machineProfile: Property<String>
-
-    @get:Input abstract val capacity: Property<Int>
 
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
@@ -37,6 +33,8 @@ abstract class WriteAppManifest : DefaultTask() {
     @get:Classpath abstract val dependencies: ConfigurableFileCollection
 
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    @get:OutputFile abstract val catalogFile: RegularFileProperty
 
     @TaskAction
     fun write() {
@@ -80,45 +78,22 @@ abstract class WriteAppManifest : DefaultTask() {
             val type = lookup(name) ?: return false
             return type.parents.any { provider(it, seen) }
         }
-        val sessions = sortedMapOf<String, Map<String, Any>>()
+        val sessions = sortedMapOf<String, String>()
         for (type in found.values.filter { it.session != null }) {
-            val annotation = requireNotNull(type.session)
-            val id = annotation["value"] as? String ?: ""
-            val profile = (annotation["machineProfile"] as? String).orEmpty().ifEmpty { machineProfile.get() }
-            val slots = (annotation["capacity"] as? Int)?.takeUnless { it == 0 } ?: capacity.get()
+            val id = requireNotNull(type.session)
             require(id.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}"))) { "Invalid session type ID: $id" }
-            require(
-                profile.matches(Regex("[A-Za-z0-9_-]{1,128}")) && slots in 1..128,
-            ) { "Invalid requirements for session $id" }
             require(type.constructible && provider(type.name)) {
                 "Session $id requires a public concrete SessionProvider with a public no-argument constructor"
             }
-            require(
-                sessions.put(
-                    id,
-                    mapOf(
-                        "provider" to type.name.replace('/', '.'),
-                        "machine_profile" to profile,
-                        "capacity" to slots,
-                    ),
-                ) ==
-                    null,
-            ) { "Duplicate session type: $id" }
+            require(sessions.put(id, type.name.replace('/', '.')) == null) { "Duplicate session type: $id" }
         }
         require(sessions.size in 1..128) { "App requires 1–128 @SessionType declarations" }
-        val output = outputDirectory.file("META-INF/chunk/app.json").get().asFile
+        val output = outputDirectory.file("META-INF/services/dev.chunkzero.runtime.SessionProvider").get().asFile
         output.parentFile.mkdirs()
-        output.writeText(
-            Gson().toJson(
-                mapOf(
-                    "version" to 2,
-                    "id" to app.get(),
-                    "main_class" to mainClass.get(),
-                    "sessions" to sessions,
-                ),
-            ) +
-                "\n",
-        )
+        output.writeText(sessions.values.joinToString("\n", postfix = "\n"))
+        val catalog = catalogFile.get().asFile
+        catalog.parentFile.mkdirs()
+        catalog.writeText(Gson().toJson(sessions.keys) + "\n")
     }
 }
 
@@ -128,7 +103,7 @@ private class CompiledClass {
     var publicConcrete = false
     var constructor = false
     var main = false
-    var session: MutableMap<String, Any>? = null
+    var session: String? = null
     val constructible get() = publicConcrete && constructor
 }
 
@@ -156,14 +131,13 @@ private fun inspect(bytes: ByteArray): CompiledClass {
                 visible: Boolean,
             ): AnnotationVisitor? {
                 if (descriptor != "Ldev/chunkzero/runtime/SessionType;") return null
-                val values = mutableMapOf<String, Any>()
-                type.session = values
+                type.session = ""
                 return object : AnnotationVisitor(Opcodes.ASM9) {
                     override fun visit(
                         name: String,
                         value: Any,
                     ) {
-                        values[name] = value
+                        if (name == "value") type.session = value as? String ?: ""
                     }
                 }
             }

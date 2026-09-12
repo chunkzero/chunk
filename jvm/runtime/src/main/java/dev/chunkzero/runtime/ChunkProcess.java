@@ -5,9 +5,7 @@ import chunk.v1.NodeControlGrpc;
 import chunk.v1.Supervision.ProcessIdentity;
 import chunk.v1.Supervision.ProcessRegistration;
 
-import dev.chunkzero.backend.api.BackendJson;
 import dev.chunkzero.backend.client.BackendSession;
-import dev.chunkzero.runtime.bootstrap.AppManifest;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.bootstrap.SessionBackend;
 import dev.chunkzero.runtime.control.ProcessAuthentication;
@@ -23,10 +21,6 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Collections;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -37,8 +31,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ChunkProcess implements AutoCloseable {
     private final RuntimeEnvironment environment;
     private final ProcessIdentity identity;
-    private final AppManifest manifest;
-    private final String manifestDigest;
     private final SessionBackend backend;
     private final AtomicLong ticks = new AtomicLong();
     private final ProcessHealth health = new ProcessHealth(ticks);
@@ -48,25 +40,11 @@ public final class ChunkProcess implements AutoCloseable {
     private String playerEndpoint = "";
     private boolean closed;
 
-    ChunkProcess(RuntimeEnvironment environment, ClassLoader loader) throws IOException {
+    ChunkProcess(RuntimeEnvironment environment) throws IOException {
         this.environment = environment;
-        var resources = Collections.list(loader.getResources("META-INF/chunk/app.json"));
-        if (resources.size() != 1)
-            throw new IllegalArgumentException("Executable requires exactly one app manifest");
-        byte[] bytes;
-        try (var input = resources.getFirst().openStream()) {
-            bytes = input.readNBytes(65_537);
-            if (bytes.length > 65_536) throw new IllegalArgumentException("App manifest too large");
-        }
-        manifest = BackendJson.mapper().readValue(bytes, AppManifest.class);
-        if (!manifest.id().equals(environment.appId()) || environment.processGeneration() < 1)
-            throw new IllegalArgumentException("App or process identity mismatch");
-        try {
-            manifestDigest =
-                    HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException error) {
-            throw new AssertionError(error);
-        }
+        if (!environment.appId().matches("[A-Za-z_][A-Za-z0-9_]{0,127}")
+                || environment.processGeneration() < 1)
+            throw new IllegalArgumentException("Invalid app or process identity");
         var deployment =
                 DeploymentRef.newBuilder()
                         .setEnvironment(environment.environment())
@@ -88,8 +66,7 @@ public final class ChunkProcess implements AutoCloseable {
     }
 
     public static ChunkProcess connect() throws IOException {
-        return new ChunkProcess(
-                RuntimeEnvironment.load(), Thread.currentThread().getContextClassLoader());
+        return new ChunkProcess(RuntimeEnvironment.load());
     }
 
     public CompletionStage<Void> shutdownRequested() {
@@ -104,16 +81,12 @@ public final class ChunkProcess implements AutoCloseable {
         }
     }
 
-    AppManifest manifest() {
-        return manifest;
-    }
-
     ProcessIdentity identity() {
         return identity;
     }
 
     BackendSession backend(String session) {
-        return backend.client(session, manifest.id());
+        return backend.client(session, environment.appId());
     }
 
     long tickCount() {
@@ -199,7 +172,6 @@ public final class ChunkProcess implements AutoCloseable {
                             environment.processToken(),
                             ProcessRegistration.newBuilder()
                                     .setIdentity(identity)
-                                    .setManifestDigest(manifestDigest)
                                     .setControlEndpoint("http://127.0.0.1:" + control.getPort())
                                     .setPlayerEndpoint(playerEndpoint)
                                     .build());

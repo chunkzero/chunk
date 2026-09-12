@@ -1,11 +1,13 @@
 package dev.chunkzero.gradle
 
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -30,6 +32,11 @@ abstract class WriteChunkModule : DefaultTask() {
     @get:PathSensitive(PathSensitivity.ABSOLUTE)
     abstract val jarFile: RegularFileProperty
 
+    @get:Optional
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sessionCatalog: RegularFileProperty
+
     @get:OutputFile
     abstract val outputFile: RegularFileProperty
 
@@ -46,6 +53,11 @@ abstract class WriteChunkModule : DefaultTask() {
                     jarFile.get().asFile.absolutePath,
                     javaVersion.get(),
                     javaExecutable.get(),
+                    sessionCatalog.orNull
+                        ?.asFile
+                        ?.let {
+                            JsonParser.parseString(it.readText()).asJsonArray.map { session -> session.asString }
+                        }.orEmpty(),
                 ),
             ),
         )

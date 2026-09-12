@@ -28,10 +28,11 @@ JVM or replace an app's toolchain.
 The root project compiles one `chunk-backend` JAR containing the generated Java models, references and asynchronous
 client. Apps depend on that shared JAR and the Chunk runtime. A Java app has no Kotlin runtime dependency.
 
-Each app supplies one public `SessionProvider` with a no-argument constructor and `Session create()` method. Add its
-class name to `src/main/resources/META-INF/services/dev.chunkzero.runtime.SessionProvider`. The plugin writes
-`META-INF/chunk/app.json` into that app's JAR using the discovered ID. Shared libraries have no app manifest. The
-runtime validates provider origin against the app JAR and creates separate session state for each instance.
+Each app supplies public `SessionProvider` factories with no-argument constructors and `Session create()` methods.
+Annotate them with `@SessionType("default")`. The plugin validates the compiled factories and generates
+`META-INF/services/dev.chunkzero.runtime.SessionProvider` for the JVM's local factory registry, plus a separate session
+ID catalog for release assembly. App JARs carry no Chunk deployment manifest. Placement and capacity settings belong in
+`app.toml`, with app defaults under `[runtime]` and optional overrides under `[sessions.<id>]`.
 
 For Kotlin, put its standard plugin declaration in the settings `plugins` block:
 
@@ -74,15 +75,15 @@ compilation. Backend outputs go to `.chunk/build/backend`, and JVM source output
 That directory has `java/` models/references, `java-client/` asynchronous clients, and an optional `kotlin/` facade
 source root. The plugin wires those roots into their owning projects; applications depend on compiled shared artifacts.
 
-`chunkArtifacts` builds every discovered app and writes `.chunk/build/jvm/artifacts.json`. This versioned build
-descriptor includes each app JAR and Java requirement, the complete resolved runtime classpath with module or Gradle
-project identities, and the selected Java executable. Its file paths are local build inputs for release assembly. App
-JARs are listed separately from the shared classpath. Every discovered app must apply a Chunk project plugin.
+`chunkArtifacts` builds every discovered app and writes `.chunk/build/jvm/artifacts.json`. The version-3 descriptor
+includes each executable app JAR, its session type IDs and Java requirement, plus the selected Java executable. Provider
+class names remain in the local service registry. Descriptor file paths are local inputs for release assembly. Every
+discovered app must apply a Chunk project plugin.
 
 `chunk build PROJECT` invokes this root task and publishes a complete release directory and archive under
 `PROJECT/dist`. It passes its own executable to Gradle, so inspection and generation use the same CLI installation. The
-release keeps Java requirements and dependency identities while excluding machine-local file paths and the selected Java
-executable. `chunk dev PROJECT` uses that executable locally unless `--java PATH` overrides it.
+release keeps Java requirements and resolved deployment settings while excluding machine-local paths and the selected
+Java executable. `chunk dev PROJECT` uses that executable locally unless `--java PATH` overrides it.
 
 The [standalone example](../../examples/local/settings.gradle.kts) uses included builds for the plugin and framework
 libraries while they are developed together. Run `./gradlew -p jvm/gradle-plugin test` from the repository root to

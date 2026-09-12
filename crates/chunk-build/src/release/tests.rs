@@ -43,10 +43,10 @@ impl Fixture {
         fs::create_dir_all(backend.join(".sdk")).unwrap();
         fs::write(backend.join(".sdk/cache"), b"build cache").unwrap();
         let descriptor = json!({
-            "version":2, "java":{"version":25,"executable":root.path().join("jdk/bin/java")},
+            "version":3, "java":{"version":25,"executable":root.path().join("jdk/bin/java")},
             "apps":[
-                {"id":"lobby","jar":root.path().join("lobby.jar"),"java_version":25},
-                {"id":"arena","jar":root.path().join("arena.jar"),"java_version":25}
+                {"id":"lobby","jar":root.path().join("lobby.jar"),"java_version":25,"sessions":["default"]},
+                {"id":"arena","jar":root.path().join("arena.jar"),"java_version":25,"sessions":["default"]}
             ]
         });
         let jvm_descriptor = root.path().join("artifacts.json");
@@ -83,7 +83,6 @@ fn write_app_jar(path: &Path, app: &str, marker: &[u8]) {
     write_jar(
         path,
         &[
-            ("META-INF/chunk/app.json", serde_json::to_vec(&json!({"version":2,"id":app,"main_class":format!("sample.{app}.Provider"),"sessions":{"default":{"provider":format!("sample.{app}.Provider"),"machine_profile":"small","capacity":if app == "arena" {8} else {16}}}})).unwrap()),
             (
                 "META-INF/MANIFEST.MF",
                 format!("Manifest-Version: 1.0\r\nMain-Class: sample.{app}.Provider\r\n\r\n").into_bytes(),
@@ -156,8 +155,8 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     assert_eq!(manifest["id"], a.id);
     assert_eq!(backend["id"], a.id);
     assert_eq!(manifest["apps"][0]["id"], "arena");
-    assert_eq!(manifest["apps"][0]["manifest"]["sessions"]["default"]["capacity"], 8);
-    assert_eq!(manifest["apps"][1]["manifest"]["sessions"]["default"]["capacity"], 16);
+    assert_eq!(manifest["apps"][0]["sessions"]["default"]["capacity"], 8);
+    assert_eq!(manifest["apps"][1]["sessions"]["default"]["capacity"], 16);
     assert_eq!(manifest["profiles"]["small"]["memory_mib"], 512);
     for app in manifest["apps"].as_array().unwrap() {
         assert!(archived.contains_key(app["jar"].as_str().unwrap()));
@@ -166,6 +165,34 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     let encoded = manifest.to_string();
     assert!(!encoded.contains(first.root.path().to_str().unwrap()));
     assert!(!encoded.contains("executable") && !encoded.contains("environment") && !encoded.contains("max_processes"));
+}
+
+#[test]
+fn deployment_requirements_change_the_release_without_changing_the_jar() {
+    let fixture = Fixture::new();
+    let initial = fixture.publish().unwrap();
+    let config = fixture.inputs.project.join("chunk.toml");
+    let mut source = fs::read_to_string(&config).unwrap();
+    source.push_str("\n[local.profiles.large]\nmemory_mib=1024\nmax_sessions=1\n");
+    fs::write(config, source).unwrap();
+    let app = fixture.inputs.project.join("apps/lobby/app.toml");
+    fs::write(&app, "[sessions.default]\nmachine_profile='large'\ncapacity=32\n").unwrap();
+    let changed = fixture.publish().unwrap();
+    assert_ne!(initial.id, changed.id);
+    for (before, after) in initial.apps.iter().zip(&changed.apps) {
+        assert_eq!(before.sha256, after.sha256);
+        assert_eq!(before.jar, after.jar);
+    }
+    let lobby = changed.apps.iter().find(|app| app.id == "lobby").unwrap();
+    assert_eq!(lobby.sessions["default"].machine_profile, "large");
+    assert_eq!(lobby.sessions["default"].capacity, 32);
+    fs::write(&app, "[sessions.default]\ncapacity=8\n").unwrap();
+    let inherited = fixture.publish().unwrap();
+    let lobby = inherited.apps.iter().find(|app| app.id == "lobby").unwrap();
+    assert_eq!(lobby.sessions["default"].machine_profile, "small");
+    assert_eq!(lobby.sessions["default"].capacity, 8);
+    fs::write(app, "[sessions.unknown]\ncapacity=8\n").unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("unknown session type"));
 }
 
 #[test]
@@ -236,14 +263,17 @@ fn descriptors_reject_missing_fields_wrong_apps_and_incompatible_java() {
 }
 
 #[test]
-fn releases_reject_incompatible_bytecode_and_wrong_app_identity() {
+fn releases_reject_incompatible_bytecode_and_missing_main_classes() {
     let fixture = Fixture::new();
-    write_app_jar(&fixture.root.path().join("lobby.jar"), "wrong", b"first");
-    assert!(fixture.publish().err().unwrap().to_string().contains("identity does not match"));
+    write_jar(
+        &fixture.root.path().join("lobby.jar"),
+        &[("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMain-Class: missing.Main\r\n\r\n".to_vec())],
+    );
+    assert!(fixture.publish().err().unwrap().to_string().contains("Main-Class"));
     write_jar(&fixture.root.path().join("library.jar"), &[("sample/Library.class", class(26, 1))]);
     let bytes = fs::read(fixture.root.path().join("library.jar")).unwrap();
     assert!(
-        jars::Classpath::default().add(&bytes, "library", 25, None).unwrap_err().to_string().contains("incompatible")
+        jars::Classpath::default().add(&bytes, "library", 25, false).unwrap_err().to_string().contains("incompatible")
     );
 }
 
@@ -265,12 +295,12 @@ fn class_conflicts_use_the_effective_multi_release_definition() {
         &[("sample/Library.class", class(23, 2)), ("module-info.class", class(21, 2))],
     );
     let mut classes = jars::Classpath::default();
-    classes.add(&fs::read(fixture.root.path().join("library.jar")).unwrap(), "library", 25, None).unwrap();
-    classes.add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, None).unwrap();
+    classes.add(&fs::read(fixture.root.path().join("library.jar")).unwrap(), "library", 25, false).unwrap();
+    classes.add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, false).unwrap();
     write_jar(&fixture.root.path().join("generated.jar"), &[("sample/Library.class", class(21, 1))]);
     assert!(
         classes
-            .add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, None)
+            .add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, false)
             .unwrap_err()
             .to_string()
             .contains("conflicting class")

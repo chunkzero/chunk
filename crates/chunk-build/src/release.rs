@@ -65,7 +65,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     }
     let mut files = Files::new();
     let mut metadata = Metadata {
-        version: 2,
+        version: 3,
         java_version: jvm.java.version,
         apps: Vec::new(),
         profiles: BTreeMap::new(),
@@ -74,28 +74,38 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     for app in &project.apps {
         let input = descriptor_apps[app.id.as_str()];
         let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
-        jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, Some(&app.id))?;
+        jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
-        let (manifest, manifest_digest) = jars::app_manifest(&bytes)?;
-        for session in manifest.sessions.values() {
+        if app.sessions.keys().any(|id| !input.sessions.contains(id)) {
+            return Err(io::Error::other(format!("app {} configures an unknown session type", app.id)));
+        }
+        let mut sessions = BTreeMap::new();
+        for id in &input.sessions {
+            let requirements = app.sessions.get(id).unwrap_or(&app.runtime);
+            let machine_profile = requirements
+                .machine_profile
+                .as_ref()
+                .or(app.runtime.machine_profile.as_ref())
+                .map_or("default", String::as_str);
+            let capacity = requirements.capacity.or(app.runtime.capacity).unwrap_or(16);
             if let Some(local) = &project.local {
                 let profile = local
                     .profiles
-                    .get(&session.machine_profile)
-                    .ok_or_else(|| io::Error::other(format!("unknown machine profile {}", session.machine_profile)))?;
-                metadata.profiles.insert(session.machine_profile.clone(), profile);
+                    .get(machine_profile)
+                    .ok_or_else(|| io::Error::other(format!("unknown machine profile {machine_profile}")))?;
+                metadata.profiles.insert(machine_profile.into(), profile);
             }
+            sessions.insert(
+                id.clone(),
+                chunk_contract::SessionDeclaration { machine_profile: machine_profile.into(), capacity },
+            );
         }
         insert(&mut files, jar.clone(), bytes)?;
-        metadata.apps.push(chunk_contract::AppArtifact {
-            id: app.id.clone(),
-            jar,
-            sha256,
-            java_version: input.java_version,
-            manifest_digest,
-            manifest,
-        });
+        let artifact =
+            chunk_contract::AppArtifact { id: app.id.clone(), jar, sha256, java_version: input.java_version, sessions };
+        artifact.validate().map_err(io::Error::other)?;
+        metadata.apps.push(artifact);
     }
     assets(&inputs.project.join("assets"), "assets", &mut files, &mut metadata.assets)?;
     for app in &project.apps {

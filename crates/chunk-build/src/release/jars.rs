@@ -4,11 +4,8 @@ use std::{
     path::Path,
 };
 
-use chunk_contract::AppManifest;
 use sha2::{Digest, Sha256};
 use zip::{ZipArchive, read::ZipFile};
-
-const APP_METADATA: &str = "META-INF/chunk/app.json";
 
 #[derive(Default)]
 pub(super) struct Classpath {
@@ -18,7 +15,7 @@ pub(super) struct Classpath {
 }
 
 impl Classpath {
-    pub fn add(&mut self, bytes: &[u8], label: &str, java: u32, app: Option<&str>) -> io::Result<()> {
+    pub fn add(&mut self, bytes: &[u8], label: &str, java: u32, executable: bool) -> io::Result<()> {
         let mut jar = ZipArchive::new(Cursor::new(bytes)).map_err(io::Error::other)?;
         self.entries += jar.len();
         if self.entries > 200_000 {
@@ -31,7 +28,6 @@ impl Classpath {
         };
         let mut names = BTreeSet::new();
         let mut classes = BTreeMap::<String, (u32, [u8; 32])>::new();
-        let mut metadata = None;
         let mut executable_manifest = None;
         for index in 0..jar.len() {
             let file = jar.by_index(index).map_err(io::Error::other)?;
@@ -46,7 +42,6 @@ impl Classpath {
                 return Err(io::Error::other("JAR symlinks are unsupported"));
             }
             match name.as_str() {
-                APP_METADATA => metadata = Some(read_entry(file, 65_536)?),
                 "META-INF/MANIFEST.MF" => executable_manifest = Some(read_entry(file, 65_536)?),
                 _ => {
                     if let Some((version, class)) = effective_class(&name, multi_release, java)? {
@@ -67,7 +62,9 @@ impl Classpath {
                 }
             }
         }
-        validate_registration(app, metadata.as_deref(), executable_manifest.as_deref(), &names)?;
+        if executable {
+            validate_main(executable_manifest.as_deref(), &names)?;
+        }
         for (name, (_, hash)) in classes {
             if let Some((previous, owner)) = self.classes.get(&name) {
                 if previous != &hash {
@@ -150,22 +147,7 @@ fn validate_bytecode(bytes: &[u8], java: u32, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_registration(
-    app: Option<&str>,
-    metadata: Option<&[u8]>,
-    executable: Option<&[u8]>,
-    names: &BTreeSet<String>,
-) -> io::Result<()> {
-    let Some(app) = app else {
-        return Ok(());
-    };
-    let metadata: AppManifest =
-        serde_json::from_slice(metadata.ok_or_else(|| io::Error::other("app JAR is missing META-INF/chunk/app.json"))?)
-            .map_err(io::Error::other)?;
-    metadata.validate().map_err(io::Error::other)?;
-    if metadata.id != app {
-        return Err(io::Error::other(format!("app JAR identity does not match {app:?}")));
-    }
+fn validate_main(executable: Option<&[u8]>, names: &BTreeSet<String>) -> io::Result<()> {
     let manifest = std::str::from_utf8(executable.ok_or_else(|| io::Error::other("executable JAR manifest missing"))?)
         .map_err(io::Error::other)?;
     let mut lines = Vec::<String>::new();
@@ -184,23 +166,11 @@ fn validate_registration(
         .filter(|(key, _)| key.eq_ignore_ascii_case("Main-Class"))
         .map(|(_, value)| value.trim())
         .collect();
-    if mains != [metadata.main_class.as_str()]
-        || !names.contains(&format!("{}.class", metadata.main_class.replace('.', "/")))
+    if mains.len() != 1
+        || !chunk_contract::class_name(mains[0])
+        || !names.contains(&format!("{}.class", mains[0].replace('.', "/")))
     {
-        return Err(io::Error::other("executable main class differs from app manifest"));
-    }
-    for session in metadata.sessions.values() {
-        if !names.contains(&format!("{}.class", session.provider.replace('.', "/"))) {
-            return Err(io::Error::other("declared session provider missing from executable"));
-        }
+        return Err(io::Error::other("executable requires one valid Main-Class present in the JAR"));
     }
     Ok(())
-}
-
-pub(super) fn app_manifest(bytes: &[u8]) -> io::Result<(AppManifest, String)> {
-    let mut jar = ZipArchive::new(Cursor::new(bytes)).map_err(io::Error::other)?;
-    let bytes = read_entry(jar.by_name(APP_METADATA).map_err(io::Error::other)?, 65_536)?;
-    let manifest: AppManifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    manifest.validate().map_err(io::Error::other)?;
-    Ok((manifest, format!("{:x}", Sha256::digest(&bytes))))
 }

@@ -28,7 +28,6 @@ pub struct ProcessHost {
 struct Process {
     identity: ProcessIdentity,
     token: String,
-    manifest_digest: String,
     registration: Mutex<Option<ProcessRegistration>>,
     stop: CancellationToken,
     stopped: AtomicBool,
@@ -76,7 +75,7 @@ impl ProcessHost {
         let endpoint = self.endpoint.get().ok_or(Error::Unresolved("control not listening"))?;
         let artifact = self.config.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
         let size = self.config.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
-        if !artifact.manifest.sessions.values().any(|session| session.machine_profile == profile) {
+        if !artifact.sessions.values().any(|session| session.machine_profile == profile) {
             return Err(Error::Invalid("app does not declare this profile"));
         }
         let backend = &self.config.backend;
@@ -110,7 +109,6 @@ impl ProcessHost {
                 app_id: app.into(),
             },
             token: format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()),
-            manifest_digest: artifact.manifest_digest.clone(),
             registration: Mutex::default(),
             stop: CancellationToken::new(),
             stopped: AtomicBool::new(false),
@@ -207,8 +205,8 @@ impl Host for ProcessHost {
         if token != format!("Bearer {}", process.token) {
             return Err(Error::Invalid("invalid process credential"));
         }
-        if *identity != process.identity || registration.manifest_digest != process.manifest_digest {
-            return Err(Error::Invalid("process manifest or identity mismatch"));
+        if *identity != process.identity {
+            return Err(Error::Invalid("process identity mismatch"));
         }
         if process.stop.is_cancelled() || process.stopped.load(Ordering::Acquire) {
             return Err(Error::Stopped);
@@ -337,14 +335,19 @@ mod tests {
             identity: Some(process.identity.clone()),
             control_endpoint: "http://127.0.0.1:1".into(),
             player_endpoint: "127.0.0.1:2".into(),
-            manifest_digest: "manifest".into(),
         };
         let token = format!("Bearer {}", process.token);
         assert!(host.connection(&id).is_none());
         assert!(host.register("wrong-token", registration.clone()).is_err());
         assert!(
-            host.register(&token, ProcessRegistration { manifest_digest: "changed".into(), ..registration.clone() })
-                .is_err()
+            host.register(
+                &token,
+                ProcessRegistration {
+                    identity: Some(ProcessIdentity { app_id: "changed".into(), ..process.identity.clone() }),
+                    ..registration.clone()
+                }
+            )
+            .is_err()
         );
         assert_eq!(host.register(&token, registration.clone()).unwrap(), process.identity);
         assert_eq!(host.register(&token, registration.clone()).unwrap(), process.identity);

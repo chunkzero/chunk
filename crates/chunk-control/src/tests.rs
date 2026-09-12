@@ -576,8 +576,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
 
 pub(crate) fn test_app() -> chunk_contract::AppArtifact {
     serde_json::from_value(serde_json::json!({"id":"bridge","jar":"app.jar","sha256":"artifact","java_version":25,
-        "manifest_digest":"manifest", "manifest":{"version":2,"id":"bridge","main_class":"test.Main",
-        "sessions":{"default":{"provider":"test.Factory","machine_profile":"local","capacity":2}}}}))
+        "sessions":{"default":{"machine_profile":"local","capacity":2}}}))
     .unwrap()
 }
 

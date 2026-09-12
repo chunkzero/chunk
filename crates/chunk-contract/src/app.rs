@@ -4,35 +4,29 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionDeclaration {
-    pub provider: String,
     pub machine_profile: String,
     pub capacity: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AppManifest {
-    pub version: u32,
+pub struct AppArtifact {
     pub id: String,
-    pub main_class: String,
+    pub jar: String,
+    pub sha256: String,
+    pub java_version: u32,
     pub sessions: BTreeMap<String, SessionDeclaration>,
 }
 
-impl AppManifest {
+impl AppArtifact {
     /// # Errors
-    /// Rejects malformed executable and session declarations.
+    /// Rejects malformed app identities and session deployment requirements.
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 2
-            || !name(&self.id)
-            || !class_name(&self.main_class)
-            || self.sessions.is_empty()
-            || self.sessions.len() > 128
-        {
+        if !name(&self.id) || self.sessions.is_empty() || self.sessions.len() > 128 {
             return Err("invalid app manifest".into());
         }
         for (id, session) in &self.sessions {
             if !name(id)
-                || !class_name(&session.provider)
                 || !(1..=128).contains(&session.capacity)
                 || session.machine_profile.is_empty()
                 || session.machine_profile.len() > 128
@@ -43,17 +37,6 @@ impl AppManifest {
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AppArtifact {
-    pub id: String,
-    pub jar: String,
-    pub sha256: String,
-    pub java_version: u32,
-    pub manifest_digest: String,
-    pub manifest: AppManifest,
 }
 
 fn name(value: &str) -> bool {

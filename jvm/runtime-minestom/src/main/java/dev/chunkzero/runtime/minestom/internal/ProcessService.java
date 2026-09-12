@@ -14,8 +14,6 @@ import io.grpc.stub.StreamObserver;
 
 import org.jetbrains.annotations.ApiStatus;
 
-import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -27,21 +25,18 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
     private final SessionManager sessions;
     private final LongSupplier ticks;
     private final ChunkProcess process;
-    private final Map<String, Integer> capacities;
 
     public ProcessService(
             ProcessIdentity identity,
             GameplayService gameplay,
             SessionManager sessions,
             LongSupplier ticks,
-            ChunkProcess process,
-            Map<String, Integer> capacities) {
+            ChunkProcess process) {
         this.identity = identity;
         this.gameplay = gameplay;
         this.sessions = sessions;
         this.ticks = ticks;
         this.process = process;
-        this.capacities = Map.copyOf(capacities);
     }
 
     @Override
@@ -66,13 +61,6 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
 
     @Override
     public void createSession(SessionCommand request, StreamObserver<SessionInventory> response) {
-        if (!Objects.equals(capacities.get(request.getSessionType()), request.getCapacity())) {
-            response.onError(
-                    Status.FAILED_PRECONDITION
-                            .withDescription("Session declaration mismatch")
-                            .asRuntimeException());
-            return;
-        }
         if (!process.isReady()) {
             response.onError(
                     Status.UNAVAILABLE.withDescription("Server not ready").asRuntimeException());

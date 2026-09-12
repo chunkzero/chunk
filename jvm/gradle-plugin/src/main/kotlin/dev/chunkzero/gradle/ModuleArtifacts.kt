@@ -13,50 +13,56 @@ internal fun configureModule(
     project: Project,
     appId: String,
 ) {
-    if (appId.isNotEmpty()) {
-        project.pluginManager.apply("application")
-        project.pluginManager.apply("com.gradleup.shadow")
-        val app = project.configuration().apps.single { it.id == appId }
-        val application = project.extensions.getByType(JavaApplication::class.java)
-        val sources = project.extensions.getByType(SourceSetContainer::class.java).named("main")
-        val manifest =
-            project.tasks.register("generateChunkAppManifest", WriteAppManifest::class.java) {
-                this.app.set(appId)
-                mainClass.set(application.mainClass)
-                machineProfile.set(app.machineProfile)
-                capacity.set(app.capacity)
-                classes.from(sources.map { it.output.classesDirs })
-                dependencies.from(project.configurations.named("compileClasspath"))
-                dependsOn(project.tasks.named("compileJava"))
-                project.plugins.withId("org.jetbrains.kotlin.jvm") { dependsOn(project.tasks.named("compileKotlin")) }
-                outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/app-resources"))
+    val registry =
+        if (appId.isNotEmpty()) {
+            project.pluginManager.apply("application")
+            project.pluginManager.apply("com.gradleup.shadow")
+            val application = project.extensions.getByType(JavaApplication::class.java)
+            val sources = project.extensions.getByType(SourceSetContainer::class.java).named("main")
+            val registry =
+                project.tasks.register(
+                    "generateChunkSessionRegistry",
+                    WriteSessionRegistry::class.java,
+                ) {
+                    mainClass.set(application.mainClass)
+                    classes.from(sources.map { it.output.classesDirs })
+                    dependencies.from(project.configurations.named("compileClasspath"))
+                    dependsOn(project.tasks.named("compileJava"))
+                    project.plugins.withId(
+                        "org.jetbrains.kotlin.jvm",
+                    ) { dependsOn(project.tasks.named("compileKotlin")) }
+                    outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/session-resources"))
+                    catalogFile.set(project.layout.buildDirectory.file("chunk/sessions.json"))
+                }
+            sources.configure { resources.srcDir(registry.flatMap { it.outputDirectory }) }
+            project.tasks.named("shadowJar", ShadowJar::class.java) {
+                mergeServiceFiles()
+                filesMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
+                    duplicatesStrategy =
+                        DuplicatesStrategy.INCLUDE
+                }
+                filesMatching("**/*.class") {
+                    duplicatesStrategy =
+                        DuplicatesStrategy.FAIL
+                }
+                exclude(
+                    "module-info.class",
+                    "META-INF/versions/*/module-info.class",
+                )
+                isPreserveFileTimestamps = false
+                isReproducibleFileOrder = true
+                failOnDuplicateEntries.set(true)
             }
-        sources.configure { resources.srcDir(manifest.flatMap { it.outputDirectory }) }
-        project.tasks.named("shadowJar", ShadowJar::class.java) {
-            mergeServiceFiles()
-            filesMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
-                duplicatesStrategy =
-                    DuplicatesStrategy.INCLUDE
-            }
-            filesMatching(listOf("**/*.class", "META-INF/chunk/app.json")) {
-                duplicatesStrategy =
-                    DuplicatesStrategy.FAIL
-            }
-            exclude(
-                "META-INF/services/dev.chunkzero.runtime.SessionProvider",
-                "module-info.class",
-                "META-INF/versions/*/module-info.class",
-            )
-            isPreserveFileTimestamps = false
-            isReproducibleFileOrder = true
-            failOnDuplicateEntries.set(true)
+            registry
+        } else {
+            null
         }
-    }
     val java = project.extensions.getByType(JavaPluginExtension::class.java)
     val launcher = project.extensions.getByType(JavaToolchainService::class.java).launcherFor(java.toolchain)
     val descriptor =
         project.tasks.register("chunkModule", WriteChunkModule::class.java) {
             app.set(appId)
+            registry?.let { sessionCatalog.set(it.flatMap { task -> task.catalogFile }) }
             projectPath.set(project.path)
             javaVersion.set(java.toolchain.languageVersion.map { it.asInt() })
             javaExecutable.set(launcher.map { it.executablePath.asFile.absolutePath })
@@ -79,4 +85,5 @@ internal data class ModuleArtifact(
     val jar: String,
     val javaVersion: Int,
     val javaExecutable: String,
+    val sessions: List<String>,
 )

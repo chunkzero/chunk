@@ -51,7 +51,6 @@ async fn java_executable_must_meet_the_descriptor_requirement() {
 
 pub(super) fn app(id: &str, profile: &str, capacity: u32) -> chunk_contract::AppArtifact {
     serde_json::from_value(serde_json::json!({"id":id,"jar":"app.jar","sha256":"artifact","java_version":25,
-        "manifest_digest":"manifest", "manifest":{"version":2,"id":id,"main_class":"test.Main",
-        "sessions":{"default":{"provider":"test.Factory","machine_profile":profile,"capacity":capacity}}}}))
+        "sessions":{"default":{"machine_profile":profile,"capacity":capacity}}}))
     .unwrap()
 }

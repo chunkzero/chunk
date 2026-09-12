@@ -14,7 +14,6 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Integrates an app-owned Minestom server with Chunk's generic process lifecycle. */
@@ -33,22 +32,10 @@ public final class ChunkMinestom implements AutoCloseable {
     private ChunkMinestom(ChunkProcess process, MinecraftServer minecraft) {
         this.process = process;
         this.minecraft = minecraft;
-        var app = process.manifest();
-        var registered = AppRegistry.load(app, Thread.currentThread().getContextClassLoader());
-        var factories = new TreeMap<String, SessionRegistration>();
-        var capacities = new TreeMap<String, Integer>();
-        app.sessions()
-                .forEach(
-                        (id, spec) -> {
-                            if (spec.machineProfile()
-                                    .equals(process.identity().getMachineProfile())) {
-                                var key = app.id() + "/" + id;
-                                factories.put(key, registered.get(key));
-                                capacities.put(key, spec.capacity());
-                            }
-                        });
-        if (factories.isEmpty())
-            throw new IllegalArgumentException("No sessions for assigned profile");
+        var factories =
+                AppRegistry.load(
+                        process.identity().getAppId(),
+                        Thread.currentThread().getContextClassLoader());
         sessions =
                 new SessionManager(ticks, factories, (session, appId) -> process.backend(session));
         MinecraftServer.setCompressionThreshold(0);
@@ -62,9 +49,7 @@ public final class ChunkMinestom implements AutoCloseable {
                         System::nanoTime,
                         identity.getRuntimeId(),
                         process::isReady);
-        service =
-                new ProcessService(
-                        identity, gameplay, sessions, process::tickCount, process, capacities);
+        service = new ProcessService(identity, gameplay, sessions, process::tickCount, process);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
