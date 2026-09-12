@@ -1,4 +1,5 @@
 plugins {
+    id("chunk.publishing-conventions")
     id("chunk.java-conventions")
     id("org.jetbrains.kotlin.jvm")
 }

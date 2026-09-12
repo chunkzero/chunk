@@ -1,0 +1,149 @@
+name: SDK distribution
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sdk.yml
+      - .github/actions/rust-cache/**
+      - scripts/package-sdk.py
+      - scripts/check-sdk.py
+      - scripts/install.sh
+      - scripts/install-typescript.mjs
+      - scripts/publish-maven.py
+      - scripts/test-publish-maven.py
+      - buildSrc/**
+      - build.gradle.kts
+      - jvm/**/build.gradle.kts
+      - gradle/**
+      - Cargo.toml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish this SDK version publicly to Maven and GitHub Releases
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_BUILD_JOBS: 2
+  GRADLE_OPTS: -Dorg.gradle.workers.max=2
+
+jobs:
+  package:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read coordinated SDK version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as source:
+              version = tomllib.load(source)['workspace']['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'value={version}\n')
+          PY
+      - run: rustup toolchain install --no-self-update
+      - uses: ./.github/actions/rust-cache
+        with:
+          profile: release
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+      - run: python3 scripts/test-publish-maven.py
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build --release --locked -p chunk-cli
+      - run: python3 scripts/package-sdk.py
+      - name: Verify installed Java and Kotlin consumers
+        env:
+          SDK_VERSION: ${{ steps.version.outputs.value }}
+        run: python3 scripts/check-sdk.py "target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-sdk-linux-x64
+          path: |
+            target/dist/*.tar.gz
+            target/dist/*.sha256
+            scripts/install.sh
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    environment: sdk-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: chunk-sdk-linux-x64
+          path: artifact
+      - name: Prepare draft release and publish matching Maven artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_VERSION: ${{ needs.package.outputs.version }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_MAVEN_BUCKET: ${{ vars.R2_MAVEN_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          : "${CLOUDFLARE_ACCOUNT_ID:?Set the Cloudflare account variable}"
+          : "${R2_MAVEN_BUCKET:?Set the Maven bucket variable}"
+          : "${AWS_ACCESS_KEY_ID:?Set the R2 access key secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?Set the R2 secret access key}"
+          name="chunk-$SDK_VERSION-linux-x64"
+          archive="artifact/target/dist/$name.tar.gz"
+          (cd artifact/target/dist && sha256sum --check "$name.tar.gz.sha256")
+          git fetch --tags --quiet origin
+          tag_commit=$(git rev-parse --verify --quiet "refs/tags/v$SDK_VERSION^{commit}" || true)
+          if [ -n "$tag_commit" ]; then test "$tag_commit" = "$GITHUB_SHA"; fi
+          if gh release view "v$SDK_VERSION" --json isDraft,targetCommitish > release-state.json; then
+            python3 - <<'PYTHON'
+          import json, os
+          with open('release-state.json') as source:
+              release = json.load(source)
+          assert release['isDraft'] and release['targetCommitish'] == os.environ['GITHUB_SHA'], 'Release version already belongs to another commit or is public'
+          PYTHON
+          else
+            gh release create "v$SDK_VERSION" --draft --target "$GITHUB_SHA" --title "Chunk $SDK_VERSION" --generate-notes
+          fi
+          gh release upload "v$SDK_VERSION" "$archive" "$archive.sha256" artifact/scripts/install.sh --clobber
+          mkdir extracted
+          tar -xzf "$archive" -C extracted
+          python3 scripts/publish-maven.py "extracted/$name"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
+            "https://maven.chunkzero.com/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
+            -o published.pom
+          cmp published.pom "extracted/$name/sdk/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
+          if [[ "$SDK_VERSION" == *-* ]]; then
+            gh release edit "v$SDK_VERSION" --draft=false --prerelease --latest=false
+          else
+            gh release edit "v$SDK_VERSION" --draft=false --prerelease=false --latest
+          fi

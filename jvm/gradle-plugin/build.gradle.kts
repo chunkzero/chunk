@@ -43,9 +43,20 @@ gradlePlugin {
     }
 }
 
+java { withSourcesJar() }
+
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 tasks.jar { manifest.attributes("Implementation-Version" to project.version) }
 publishing {
     repositories {
+        maven {
+            name = "sdk"
+            url = uri(providers.gradleProperty("chunk.sdkRepository").orElse("../../build/sdk/maven"))
+        }
         maven {
             name = "functionalTest"
             url = uri(layout.buildDirectory.dir("functional-test-repository"))

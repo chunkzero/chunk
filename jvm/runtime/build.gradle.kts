@@ -1,4 +1,7 @@
-plugins { id("chunk.java-conventions") }
+plugins {
+    id("chunk.java-conventions")
+    id("chunk.publishing-conventions")
+}
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 tasks.withType<JavaCompile>().configureEach { options.release = 25 }
 dependencies {

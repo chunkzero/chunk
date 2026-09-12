@@ -2,6 +2,7 @@ import com.google.protobuf.gradle.id
 
 plugins {
     id("chunk.java-conventions")
+    id("chunk.publishing-conventions")
     alias(libs.plugins.protobuf)
 }
 
