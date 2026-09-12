@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
@@ -75,6 +76,28 @@ class SessionExtensionsTest {
         assertFalse(rejected.isAlive)
         assertEquals(0, playerRuns)
         assertEquals(1, sessionRuns)
+    }
+
+    @Test
+    fun `larger scopes retain instances and resources until their owner ends`() {
+        val instances = List(32) { scope.createInstance() }
+        val sessionResources = List(1025) { scope.own(Counter()) }
+        val admitted = player("admitted")
+        scope.players.add(admitted)
+        val playerResources = List(1025) { scope.own(admitted, Counter()) }
+        assertEquals(instances, scope.instances)
+
+        scope.players.remove(admitted)
+        scope.releasePlayer(admitted)
+        assertTrue(playerResources.all { it.closed == 1 })
+        assertTrue(sessionResources.all { it.closed == 0 })
+        assertTrue(MinecraftServer.getInstanceManager().instances.containsAll(instances))
+
+        scope.dispose()
+        scope.dispose()
+        assertTrue(playerResources.all { it.closed == 1 })
+        assertTrue(sessionResources.all { it.closed == 1 })
+        assertTrue(MinecraftServer.getInstanceManager().instances.isEmpty())
     }
 
     private class Counter : AutoCloseable {

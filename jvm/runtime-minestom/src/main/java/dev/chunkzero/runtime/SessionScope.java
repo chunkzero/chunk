@@ -104,8 +104,6 @@ public final class SessionScope {
     public InstanceContainer createInstance() {
         ticks.checkThread();
         checkActive();
-        if (ownedInstances.size() >= 16)
-            throw new IllegalStateException("Session instance limit reached");
         var instance = MinecraftServer.getInstanceManager().createInstanceContainer();
         ownedInstances.add(instance);
         return instance;
@@ -115,7 +113,6 @@ public final class SessionScope {
     public <T extends AutoCloseable> T own(T resource) {
         ticks.checkThread();
         if (disposed) reject(resource, "Session disposed");
-        if (resourceCount() >= 1024) reject(resource, "Session resource limit reached");
         resources.add(resource);
         return resource;
     }
@@ -123,7 +120,7 @@ public final class SessionScope {
     /** Player resources are keyed by the admitted object, keeping replacements independent. */
     public <T extends AutoCloseable> T own(Player player, T resource) {
         ticks.checkThread();
-        if (disposed || !players.contains(player) || resourceCount() >= 1024) {
+        if (disposed || !players.contains(player)) {
             reject(resource, "Player scope unavailable");
         }
         playerResources.computeIfAbsent(player, ignored -> new ArrayList<>()).add(resource);
@@ -214,10 +211,6 @@ public final class SessionScope {
 
     private void checkActive() {
         if (disposed) throw new IllegalStateException("Session disposed");
-    }
-
-    private int resourceCount() {
-        return resources.size() + playerResources.values().stream().mapToInt(List::size).sum();
     }
 
     private static void reject(AutoCloseable resource, String message) {
