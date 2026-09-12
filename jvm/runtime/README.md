@@ -67,12 +67,12 @@ and begin on the process tick thread. Do not block that thread. Resume asynchron
 completes and at least one instance exists. `scope.finish()` requests ending; do not await it from a lifecycle hook
 whose own completion ending must await.
 
-`SessionScope` owns up to 16 instances, session/player-filtered events, repeating tasks and registered `AutoCloseable`
-resources such as subscriptions. Instance event nodes remain available for instance-local events. Direct global
-registrations require explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then removes only
-that scope's listeners, tasks, resources and instances. A process retains at most 256 session identities and 4096
-delivery operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a
-host deadline terminates the process; they never produce a false withdrawal acknowledgment.
+`SessionScope` owns instances, session/player-filtered events, repeating tasks and registered `AutoCloseable` resources
+such as subscriptions. Instance event nodes remain available for instance-local events. Direct global registrations
+require explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then removes only that scope's
+listeners, tasks, resources and instances. A process retains at most 256 session identities and 4096 delivery
+operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a host
+deadline terminates the process; they never produce a false withdrawal acknowledgment.
 
 Lifecycle notifications live in `dev.chunkzero.runtime.minestom.event`. `SessionEvent` exposes `getSession()`, the
 owning `SessionScope` with its ID and generation. `SessionJoinEvent` and `SessionLeaveEvent` also implement Minestom's
