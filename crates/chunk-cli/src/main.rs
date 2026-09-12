@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use std::{io, path::PathBuf, process::ExitCode};
 mod building;
+mod creation;
 mod generation;
 mod local;
 mod nodes;
@@ -16,6 +17,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create a Java or Kotlin project using a local Chunk source checkout.
+    Create(creation::Options),
     /// Run the local dev server.
     #[command(visible_alias = "local")]
     Dev(local::Options),
@@ -80,6 +83,7 @@ async fn main() -> ExitCode {
 }
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
+        Command::Create(options) => creation::run(&options),
         Command::Dev(options) => local::run(options).await,
         Command::Build(options) => building::run(options).await,
         Command::Gen(options) => {
@@ -119,6 +123,14 @@ mod tests {
     #[test]
     fn command_structure_is_valid() {
         Cli::command().debug_assert();
+        assert!(Cli::try_parse_from(["chunk", "create", "demo", "--chunk-source", "source"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["chunk", "create", "demo", "--chunk-source", "source", "--language", "java"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["chunk", "create", "demo", "--chunk-source", "source", "--language", "scala"])
+                .is_err()
+        );
         assert!(Cli::try_parse_from(["chunk", "gen"]).is_err());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "java"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());

@@ -89,9 +89,9 @@ Save**. Those switches live in IntelliJ's local `workspace.xml`, so they must be
 formatting and plugin settings are tracked under `.idea/` and `.vscode/`.
 
 Root Gradle `test` and `assemble` tasks cover the framework modules and plugin. The local example is a separate Gradle
-build. `just consumers` builds the real [Java consumer](examples/java/README.md) and Kotlin example from scratch source
-copies using the prepared CLI, then checks their release archives and executable app contents. It starts no gameplay or
-backend services and also runs in CI and `just ready`.
+build. `just consumers` creates Java and Kotlin projects outside the repository, runs `codegen` and `build`, and builds
+the Kotlin example from a scratch source copy. It checks their release archives and executable app contents, starts no
+gameplay or backend services, and also runs in CI and `just ready`.
 
 ```sh
 just local
@@ -104,6 +104,11 @@ managed delivery, timeouts, feature selection and standalone hosting.
 
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
+- `chunk create DIRECTORY --chunk-source CHECKOUT [--language kotlin|java]` creates a new project with a lobby app,
+  TypeScript backend, local routing and a Gradle wrapper. Kotlin is the default; `CHUNK_SOURCE` can supply the checkout.
+  The directory must not already exist. The local checkout supplies the Gradle plugin and runtime libraries until SDK
+  publishing is available. Its path and the CLI path are recorded in `gradle.properties`; update them when moving the
+  project to another machine.
 - `chunk codegen PROJECT` prepares the schema-aware TypeScript SDK for editors without building or starting services.
 - `chunk inspect PROJECT` reads project and app metadata as JSON without building.
 - `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
@@ -138,6 +143,19 @@ Consumer builds need their project Gradle wrapper and an explicit Java toolchain
 To package the example without starting services, run `just toolchain`, then `target/debug/chunk build examples/local`.
 Its releases appear in `examples/local/dist`; `just local` builds and runs the same project with state under
 `examples/local/.chunk/local`.
+
+To start a project from this checkout:
+
+```sh
+just toolchain
+target/debug/chunk create ../my-server --chunk-source .
+target/debug/chunk codegen ../my-server
+target/debug/chunk build ../my-server
+target/debug/chunk dev ../my-server
+```
+
+Connect with Minecraft Java Edition 26.1 at `localhost:25565`. The generated README explains the app layout and local
+toolchain paths. Restart `chunk dev` to apply source changes; automatic reload remains deferred.
 
 Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
 libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted by edge.

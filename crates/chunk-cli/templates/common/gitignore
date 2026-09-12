@@ -1,0 +1,6 @@
+.chunk/
+.gradle/
+.kotlin/
+**/build/
+dist/
+node_modules/
