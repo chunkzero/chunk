@@ -44,6 +44,8 @@ class GeneratedContractsTest {
                     + "\"ratio\":0.5,\"flag\":true,\"exact\":42,\"fraction\":0.125,\"nothing\":null}";
         var type = BackendTypes.Proto.read.arguments();
         assertEquals(json(input), json(type.write(type.read(input))));
+        for (var ratio : List.of("9007199254740991.0", "-9007199254740991.0", "0.125"))
+            assertEquals(Double.parseDouble(ratio), type.read(input.replace("0.5", ratio)).ratio());
         var result = "{\"_id\":\"profiles:p1\",\"wins\":3}";
         assertEquals(
                 json(result),
@@ -60,7 +62,11 @@ class GeneratedContractsTest {
                 List.of(
                         input.replace("42", "43"),
                         input.replace("[null]", "[1]"),
-                        input.replace("0.5", "\"0.5\"")))
+                        input.replace("0.5", "\"0.5\""),
+                        input.replace("0.5", "9007199254740992.0"),
+                        input.replace("0.5", "-9007199254740992.0"),
+                        input.replace("0.5", "1e20"),
+                        input.replace("0.5", "-1e20")))
             assertThrows(RuntimeException.class, () -> type.read(invalid));
     }
 

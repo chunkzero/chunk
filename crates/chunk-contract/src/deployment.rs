@@ -80,8 +80,6 @@ impl Deployment {
             }
             function.arguments.validate(0)?;
             function.result.validate(0)?;
-            validate_literals(&function.arguments)?;
-            validate_literals(&function.result)?;
         }
         for path in &paths {
             for (offset, _) in path.match_indices('/') {
@@ -101,18 +99,8 @@ fn identifier(value: &str) -> bool {
         && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn validate_literals(schema: &Schema) -> Result<(), &'static str> {
-    match schema {
-        Schema::Literal { value } => validate_wire_value(value),
-        Schema::Nullable { value } => validate_literals(value),
-        Schema::Array { items } => validate_literals(items),
-        Schema::Object { fields } => fields.values().try_for_each(|f| validate_literals(&f.schema)),
-        Schema::Union { variants } => variants.values().try_for_each(validate_literals),
-        _ => Ok(()),
-    }
-}
-
-/// Wire values use JSON, finite numbers, and exactly representable integers.
+/// Wire values use JSON and finite numbers. All integral numbers, including
+/// floating-point values, must be within ±(2^53 - 1); larger values use strings.
 /// IDs are opaque strings. Missing optional properties and explicit null remain
 /// distinct; deletion is an operation, never an undefined JSON sentinel.
 /// # Errors
@@ -187,10 +175,23 @@ mod tests {
 
     #[test]
     fn wire_values_preserve_optional_null_and_integer_boundaries() {
-        for value in [json!(9_007_199_254_740_991_i64), json!(-9_007_199_254_740_991_i64), json!(0.125)] {
+        for value in [
+            json!(9_007_199_254_740_991_i64),
+            json!(-9_007_199_254_740_991_i64),
+            json!(9_007_199_254_740_991_f64),
+            json!(0.125),
+            json!("100000000000000000000"),
+        ] {
             validate_wire_value(&value).unwrap();
         }
-        for value in [json!(9_007_199_254_740_992_i64), json!(i64::MIN), json!({"nested": [u64::MAX]})] {
+        for value in [
+            json!(9_007_199_254_740_992_i64),
+            json!(9_007_199_254_740_992_f64),
+            json!(1e20),
+            json!(-1e20),
+            json!(i64::MIN),
+            json!({"nested": [u64::MAX]}),
+        ] {
             assert!(validate_wire_value(&value).is_err());
         }
         let schema = Schema::Object {
@@ -202,5 +203,52 @@ mod tests {
         let mut invalid = deployment();
         invalid.functions.values_mut().next().unwrap().result = Schema::Union { variants: BTreeMap::new() };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn nested_literal_schemas_share_wire_limits_in_tables_arguments_and_results() {
+        for (value, valid) in [
+            (json!(9_007_199_254_740_991_i64), true),
+            (json!(-9_007_199_254_740_991_f64), true),
+            (json!(0.125), true),
+            (json!("100000000000000000000"), true),
+            (json!(9_007_199_254_740_992_i64), false),
+            (json!(9_007_199_254_740_992_f64), false),
+            (json!(1e20), false),
+            (json!(-1e20), false),
+        ] {
+            let schema = Schema::Nullable {
+                value: Box::new(Schema::Array {
+                    items: Box::new(Schema::Union {
+                        variants: [(
+                            "exact".into(),
+                            Schema::Object {
+                                fields: [(
+                                    "value".into(),
+                                    crate::Field { schema: Schema::Literal { value: value.clone() }, optional: true },
+                                )]
+                                .into(),
+                            },
+                        )]
+                        .into(),
+                    }),
+                }),
+            };
+            let mut table = deployment();
+            table.tables.insert(
+                "values".into(),
+                crate::TableSchema {
+                    fields: [("nested".into(), crate::Field { schema: schema.clone(), optional: false })].into(),
+                    ..Default::default()
+                },
+            );
+            let mut arguments = deployment();
+            arguments.functions.values_mut().next().unwrap().arguments = schema.clone();
+            let mut result = deployment();
+            result.functions.values_mut().next().unwrap().result = schema;
+            for (location, contract) in [("table", table), ("arguments", arguments), ("result", result)] {
+                assert_eq!(contract.validate().is_ok(), valid, "{location}: {value}");
+            }
+        }
     }
 }

@@ -65,9 +65,13 @@ Result validators are required. `v.optional` allows an absent object property; `
 At the API boundary, optional properties normalize explicit null to omission. Database values and patches retain
 explicit presence semantics. Use `v.enum("allow", "deny")` for string choices and
 `v.union({ready: v.object({}), waiting: v.object({reason: v.string()})})` for tagged unions with a `type` discriminator.
-Numbers must be finite, and integer values must fit JavaScript's safe range. IDs are branded strings: document IDs carry
-their table prefix; player/session IDs have distinct contract types. IDs describe values and never confer caller
-authority.
+Numbers must be finite. All integral values must lie between `-(2^53 - 1)` and `2^53 - 1`, including values declared
+with `v.number()` or represented as floating-point JSON numbers. For example, `1e20` is rejected even though it is a
+finite JavaScript number. Use decimal strings for larger integral values, such as `"100000000000000000000"`. The same
+rule applies to numeric literals in table fields, function arguments and results, and generated Java/Kotlin clients.
+
+IDs are branded strings: document IDs carry their table prefix; player/session IDs have distinct contract types. IDs
+describe values and never confer caller authority.
 
 `internalQuery` and `internalMutation` are excluded from public clients. Helpers may receive the current context to
 share its transaction. Module initialization must be pure and context-independent; mutable globals are not database
