@@ -1,11 +1,8 @@
-use chunk_proto::v1::{
-    ClaimRequest, DrainRequest, DrainStatus, MovePlayerRequest, process_control_client::ProcessControlClient,
-};
+use chunk_proto::v1::{ClaimRequest, DrainRequest, DrainStatus, MovePlayerRequest};
 use prost::Message;
 
 use crate::{
     Control, Error, Result,
-    placement::{auth, channel},
     state::{Drain, Phase},
 };
 
@@ -79,24 +76,8 @@ impl Control {
                 .filter(|c| c.phase != Phase::Released && state.sessions[&c.session].host == drain.host)
                 .collect();
             if claims.is_empty() || crate::now_ms() >= drain.deadline_ms {
-                // Runtime StopProcess bounds JVM shutdown and force-kills an unresponsive child.
-                let stop = async {
-                    let runtime = self.runtime(&state, &drain.host).await?;
-                    ProcessControlClient::new(channel(&runtime).await?)
-                        .stop_process(auth(&runtime, runtime.identity.clone(), 15)?)
-                        .await?;
-                    Ok::<_, Error>(())
-                }
-                .await;
-                if let Err(error) = stop {
-                    if crate::now_ms() >= drain.deadline_ms {
-                        tracing::warn!(%error, host = %drain.host, "drain deadline reached; terminating host");
-                        if let Err(error) = self.host.terminate(&drain.host).await {
-                            tracing::warn!(%error, host = %drain.host, "drain termination unresolved; retaining ownership");
-                        }
-                    } else {
-                        tracing::warn!(%error, "drain shutdown unresolved; retaining ownership");
-                    }
+                if let Err(error) = self.host.terminate(&drain.host).await {
+                    tracing::warn!(%error, host = %drain.host, "drain termination unresolved; retaining ownership");
                 }
             } else {
                 for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {

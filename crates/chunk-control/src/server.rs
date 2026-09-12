@@ -23,6 +23,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     }
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
+    config.host.configure(format!("http://{address}")).map_err(io::Error::other)?;
     let path = config.connection;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
@@ -47,9 +48,12 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         let _ = ready.send(connection);
         let server = tonic::transport::Server::builder()
             .add_service(
-                LocalControlServer::new(service)
+                LocalControlServer::new(service.clone())
                     .max_decoding_message_size(65_536)
                     .max_encoding_message_size(8 * 1024 * 1024),
+            )
+            .add_service(
+                chunk_proto::v1::supervisor_server::SupervisorServer::new(service).max_decoding_message_size(65_536),
             )
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop.clone().cancelled_owned());
         tokio::pin!(server);
@@ -63,8 +67,19 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
             }
         };
         tokio::pin!(reconcile);
+        let health = async {
+            let mut timer = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
+                if let Err(error) = control.poll_health().await {
+                    tracing::warn!(%error, "node health poll failed");
+                }
+            }
+        };
+        tokio::pin!(health);
         tracing::info!(%address, "control ready");
         let result = tokio::select! {
+            () = &mut health => Ok(()),
             result = &mut server => result.map_err(io::Error::other),
             () = &mut reconcile => {
                 return match tokio::time::timeout(Duration::from_secs(5), &mut server).await {

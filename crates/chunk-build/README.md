@@ -56,9 +56,10 @@ max_sessions = 2
 ```
 
 An app can override `machine_profile` or `capacity` in `[runtime]`. Inspection resolves root defaults into each app's
-runtime metadata and validates profile references. Local capacity is 1–128 players, process count is 1–32, and profiles
-allow 128–8192 MiB and 1–16 sessions. No second app list is needed. Unknown fields, including domains and redundant app
-names, are rejected.
+runtime metadata and validates profile references. Optional `[sessions.<id>]` tables override the app defaults for
+individual session types; release assembly rejects IDs absent from the compiled session catalog. Local capacity is 1–128
+players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. No second app list is needed. Unknown
+fields, including domains and redundant app names, are rejected.
 
 The backend compiler can discover apps without a root `chunk.toml`. Public CLI commands require the root manifest.
 `chunk dev PROJECT` uses its local settings and each discovered app’s resolved requirements for session placement.
@@ -74,20 +75,20 @@ followed by `target/debug/chunk build examples/local` builds the two-app example
 and release directory appear under `examples/local/dist`.
 
 `publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)` combines separately built backend and JVM
-outputs into `dist/<id>/` and `dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-1 JSON
-descriptor. Every discovered app must have exactly one descriptor entry, an app JAR containing matching
-`META-INF/chunk/app.json` metadata, and one `dev.chunkzero.runtime.SessionProvider` service registration. Publication
-never runs Java or Gradle. The descriptor’s selected Java executable is used by `chunk dev` unless `--java PATH`
-overrides it; the executable must satisfy the release’s Java version requirement. Local state defaults to
-`PROJECT/.chunk/local`.
+outputs into `dist/<id>/` and `dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-3 JSON
+descriptor. Every discovered app must have exactly one descriptor entry containing its session type IDs and an
+executable JAR with a valid `Main-Class`. Publication never runs Java or Gradle. The descriptor’s selected Java
+executable is used by `chunk dev` unless `--java PATH` overrides it; the executable must satisfy the release’s Java
+version requirement. Local state defaults to `PROJECT/.chunk/local`.
 
 The release includes `source.mjs`, `contract.json`, an optional source map, `backend.json`, `release.json`, and
-content-named JARs under `gameplay/lib`. Root `assets/` and discovered apps' `apps/<id>/assets/` retain their paths.
-`release.json` records app identities, JAR hashes, resolved dependency coordinates, Java requirements, app
-capacity/profile requirements, referenced profile definitions and asset hashes. Original dependency artifact names
-distinguish classifier JARs. All JARs share one classpath: conflicting module versions, component/artifact bytes or
-effective class definitions fail publication. Multi-release JARs are checked against the selected Java version;
-unsupported and preview bytecode is rejected.
+content-named executable JARs under `apps/<id>/`. Root `assets/` and discovered apps' `apps/<id>/assets/` retain their
+paths. `release.json` records app identities, JAR hashes, Java requirements, session type IDs with resolved profile and
+capacity settings, referenced profile definitions and asset hashes. It is the deployment manifest consumed by control;
+JARs contain only executable code, dependencies and their local factory registries. Each app carries its own
+dependencies and may use different dependency versions. Publication validates executable entrypoints and effective
+multi-release bytecode against the declared Java version. Descriptor and release metadata use version 3; older artifacts
+must be rebuilt.
 
 The descriptor's absolute file paths and Java executable are local build inputs. They are excluded from the release,
 along with environment names, local process limits, `.sdk` caches, generated sources, project build files and unrelated

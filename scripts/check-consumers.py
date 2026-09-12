@@ -17,7 +17,6 @@ INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
     "buildSrc", "jvm", "proto", "examples/java", "examples/local",
 )
-APP_MANIFEST = "META-INF/chunk/app.json"
 PROVIDER = "META-INF/services/dev.chunkzero.runtime.SessionProvider"
 
 
@@ -43,7 +42,7 @@ def read_json(path):
 
 def verify_release(project, package, app_ids, kotlin):
     descriptor = read_json(project / ".chunk/build/jvm/artifacts.json")
-    require(descriptor["version"] == 1, "Unsupported JVM descriptor")
+    require(descriptor["version"] == 3, "Unsupported JVM descriptor")
     require({app["id"] for app in descriptor["apps"]} == app_ids, "Unexpected descriptor apps")
     compiled_apps = {app["id"]: Path(app["jar"]) for app in descriptor["apps"]}
     require(all(path.is_file() for path in compiled_apps.values()), "Missing compiled app JAR")
@@ -52,7 +51,7 @@ def verify_release(project, package, app_ids, kotlin):
     archive = archives[0]
     release = archive.with_name(archive.name.removesuffix(".tar.gz"))
     manifest = read_json(release / "release.json")
-    require(manifest["version"] == 1 and manifest["id"] == release.name, "Invalid release identity")
+    require(manifest["version"] == 3 and manifest["id"] == release.name, "Invalid release identity")
     require(read_json(release / "backend.json")["id"] == release.name, "Backend identity differs from release")
     require(manifest["java_version"] == descriptor["java"]["version"], "Java requirement differs from descriptor")
     require({app["id"] for app in manifest["apps"]} == app_ids, "Unexpected release apps")
@@ -68,7 +67,6 @@ def verify_release(project, package, app_ids, kotlin):
                 expected = hashlib.sha256((release / member.name).read_bytes()).digest()
                 require(hashlib.sha256(source.read()).digest() == expected, f"Archive differs: {member.name}")
 
-    jars = {}
     for app in manifest["apps"]:
         path = release / app["jar"]
         require(hashlib.sha256(path.read_bytes()).hexdigest() == app["sha256"], "App JAR hash differs")
@@ -76,44 +74,33 @@ def verify_release(project, package, app_ids, kotlin):
                 "Release app differs from the compiled descriptor input")
         with ZipFile(path) as jar:
             names = jar.namelist()
-            require(names.count(APP_MANIFEST) == 1 and names.count(PROVIDER) == 1, "App registration missing or repeated")
-            require(json.loads(jar.read(APP_MANIFEST)) == {"version": 1, "id": app["id"]}, "Wrong app JAR identity")
-            providers = [line.split("#", 1)[0].strip() for line in jar.read(PROVIDER).decode().splitlines()]
-            providers = [name for name in providers if name]
-            require(len(providers) == 1, "Expected one provider per app")
-            require(providers[0].replace(".", "/") + ".class" in names, "Provider belongs to another JAR")
-            jars[app["jar"]] = set(names)
-    for dependency in manifest["classpath"]:
-        path = release / dependency["file"]
-        require(hashlib.sha256(path.read_bytes()).hexdigest() == dependency["sha256"], "Dependency JAR hash differs")
-        with ZipFile(path) as jar:
-            names = set(jar.namelist())
-            require(APP_MANIFEST not in names and PROVIDER not in names, "Shared JAR registers an app")
-            jars[dependency["file"]] = names
-
-    require(sum("dev/chunkzero/runtime/BridgeMain.class" in entries for entries in jars.values()) == 1,
-            "Release must contain the gameplay runtime")
-    types = package.replace(".", "/") + "/BackendTypes"
-    bindings = [name for name, entries in jars.items() if types + ".class" in entries]
-    require(len(bindings) == 1, "Expected one Java model JAR")
-    shared = [entry for entry in manifest["classpath"] if entry["artifact"] == "chunk-backend.jar"]
-    require(len(shared) == 1 and shared[0]["file"] == bindings[0], "Models must belong to the shared bindings JAR")
-    require(package.replace(".", "/") + "/BackendClient.class" in jars[bindings[0]], "Java client missing from bindings JAR")
-    require(all(not any(name.startswith(types) for name in entries) for jar, entries in jars.items() if jar != bindings[0]),
-            "Java models were duplicated outside the shared bindings JAR")
-    facade = package.replace(".", "/") + "/CoroutineBackendClient.class"
-    facades = [name for name, entries in jars.items() if facade in entries]
-    require(len(facades) == int(kotlin), "Unexpected Kotlin facade JAR count")
-    if kotlin:
-        require(facades[0] != bindings[0], "Kotlin facade must be separate from Java models")
-        require(any(entry["component"].get("path") == ":shared" for entry in manifest["classpath"]),
-                "Kotlin apps must use the standalone shared example module")
-    else:
-        require(not any(name.startswith(("kotlin/", "kotlinx/")) for entries in jars.values() for name in entries),
-                "Java consumer has Kotlin production classes")
-        require(not any("kotlin" in entry["artifact"].lower() for entry in manifest["classpath"]),
-                "Java consumer has Kotlin production dependencies")
-    print(f"Verified {project.name}: {len(app_ids)} app(s), one Java bindings JAR, {len(facades)} Kotlin facade(s)", flush=True)
+            require(len(names) == len(set(names)), "Executable contains duplicate ZIP entries")
+            require("META-INF/chunk/app.json" not in names and names.count(PROVIDER) == 1,
+                    "Executable must contain a local service registry without a deployment manifest")
+            compiled = next(item for item in descriptor["apps"] if item["id"] == app["id"])
+            require(set(app["sessions"]) == set(compiled["sessions"]), "Session types differ from the descriptor")
+            require("manifest" not in app and "manifest_digest" not in app, "Embedded app metadata remains")
+            require(all(set(session) == {"machine_profile", "capacity"} for session in app["sessions"].values()),
+                    "Release session declarations contain JVM implementation details")
+            attributes = jar.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", "")
+            mains = [line.split(":", 1)[1].strip() for line in attributes.splitlines()
+                     if line.lower().startswith("main-class:")]
+            require(len(mains) == 1 and mains[0].replace(".", "/") + ".class" in names, "Main class missing")
+            providers = [line.strip() for line in jar.read(PROVIDER).decode().splitlines() if line.strip()]
+            require(len(providers) == len(app["sessions"]), "Session registry differs from deployment capabilities")
+            for provider in providers:
+                require(provider.replace(".", "/") + ".class" in names, "Session factory missing")
+            for entry in ("dev/chunkzero/runtime/ChunkProcess.class", "dev/chunkzero/runtime/ChunkMinestom.class",
+                          "net/minestom/server/MinecraftServer.class", package.replace(".", "/") + "/BackendTypes.class",
+                          package.replace(".", "/") + "/BackendClient.class"):
+                require(entry in names, f"App executable missing {entry}")
+            require("dev/chunkzero/runtime/BridgeMain.class" not in names, "Legacy runtime launcher remains")
+            facade = package.replace(".", "/") + "/CoroutineBackendClient.class"
+            require((facade in names) == kotlin, "Unexpected Kotlin facade")
+            if not kotlin:
+                require(not any(name.startswith(("kotlin/", "kotlinx/")) for name in names), "Java app contains Kotlin production classes")
+    require("classpath" not in manifest, "Apps must carry their own dependencies")
+    print(f"Verified {project.name}: {len(app_ids)} independent executable app(s) with generated session catalogs", flush=True)
 
 
 def main():

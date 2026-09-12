@@ -44,7 +44,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
 
 async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
     let project = building::prepare(&options.build)?;
-    let mut control = control_config(&project.metadata, "building")?;
+
     let state = options.state.unwrap_or_else(|| project.root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;
@@ -56,8 +56,7 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
         () = stop.cancelled() => return building::cancelled(&stop),
         result = java_version(&java, built.java.version) => result?,
     }
-    control.deployment.deployment.clone_from(&built.release.id);
-    control.artifact_digest.clone_from(&built.release.id);
+    let control = control_config(&project.metadata, &built.release.id, &built.release.apps)?;
     fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
     tracing::info!(deployment = %built.release.id, "local project packaged");
     let settings = Settings {
@@ -70,26 +69,33 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
     services::run(&settings, &control, &built.release, stop).await
 }
 
-fn control_config(project: &ProjectMetadata, deployment: &str) -> io::Result<chunk_control::Config> {
+fn control_config(
+    project: &ProjectMetadata,
+    deployment: &str,
+    apps: &[chunk_contract::AppArtifact],
+) -> io::Result<chunk_control::Config> {
     let local =
         project.local.as_ref().ok_or_else(|| io::Error::other("chunk dev requires [local] settings in chunk.toml"))?;
     if project.apps.is_empty() {
         return Err(io::Error::other("chunk dev requires at least one discovered app"));
     }
-    let session_types = project
-        .apps
+    let session_types = apps
         .iter()
-        .map(|app| {
-            let machine_profile = app
-                .runtime
-                .machine_profile
-                .clone()
-                .ok_or_else(|| io::Error::other("app machine profile is unresolved"))?;
-            let capacity = app.runtime.capacity.ok_or_else(|| io::Error::other("app capacity is unresolved"))?;
-            Ok((app.id.clone(), chunk_control::SessionType { machine_profile, capacity }))
+        .flat_map(|app| {
+            app.sessions.iter().map(|(id, session)| {
+                (
+                    format!("{}/{id}", app.id),
+                    chunk_control::SessionType {
+                        app: app.id.clone(),
+                        machine_profile: session.machine_profile.clone(),
+                        capacity: session.capacity,
+                    },
+                )
+            })
         })
-        .collect::<io::Result<_>>()?;
+        .collect();
     Ok(chunk_control::Config {
+        apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
         deployment: chunk_proto::v1::DeploymentRef {
             environment: local.environment.clone(),
             deployment: deployment.into(),

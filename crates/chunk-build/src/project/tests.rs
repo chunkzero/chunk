@@ -103,8 +103,11 @@ fn local_defaults_and_app_overrides_are_validated_against_profiles_and_limits() 
     fs::write(root.join("chunk.toml"), LOCAL).unwrap();
     for (manifest, expected) in [
         ("[runtime]\nmachine_profile = 'missing'", "unknown profile"),
-        ("[runtime]\ncapacity = 0", "runtime.capacity"),
-        ("[runtime]\ncapacity = 129", "runtime.capacity"),
+        ("[runtime]\ncapacity = 0", "capacity"),
+        ("[runtime]\ncapacity = 129", "capacity"),
+        ("[sessions.default]\nmachine_profile = 'missing'", "unknown profile"),
+        ("[sessions.default]\ncapacity = 0", "capacity"),
+        ("[sessions.invalid-name]\ncapacity = 8", "session type IDs"),
     ] {
         fs::write(root.join("apps/lobby/app.toml"), manifest).unwrap();
         let error = inspect(root).unwrap_err().to_string();

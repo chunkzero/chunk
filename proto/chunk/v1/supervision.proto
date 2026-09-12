@@ -11,12 +11,16 @@ service Supervisor {
   rpc RegisterProcess(ProcessRegistration) returns (ProcessIdentity);
 }
 
-// Exposed by the JVM and its runtime facade with different scoped credentials.
+// Engine session operations exposed by the app JVM.
 service ProcessControl {
   rpc Inventory(ProcessIdentity) returns (ProcessInventory);
-  rpc StopProcess(ProcessIdentity) returns (ProcessIdentity);
   rpc CreateSession(SessionCommand) returns (SessionInventory);
   rpc FinishSession(SessionCommand) returns (SessionInventory);
+}
+
+service NodeControl {
+  rpc Health(ProcessIdentity) returns (ProcessHealth);
+  rpc StopProcess(ProcessIdentity) returns (ProcessIdentity);
 }
 
 message SessionCommand {
@@ -35,13 +39,30 @@ message ProcessIdentity {
   uint64 generation = 4;
   string machine_profile = 5;
   string artifact_digest = 6;
+  string app_id = 7;
 }
 
 message ProcessRegistration {
   ProcessIdentity identity = 1;
   string control_endpoint = 2;
   string player_endpoint = 3;
-  ConfigurationResponse configuration = 4;
+  reserved 4, 5;
+  reserved "configuration", "manifest_digest";
+}
+
+message ProcessHealth {
+  ProcessIdentity identity = 1;
+  bool ready = 2;
+  bool draining = 3;
+  uint64 tick_count = 4;
+  uint64 last_tick_age_millis = 5;
+  uint64 heap_used_bytes = 6;
+  uint64 heap_max_bytes = 7;
+  uint64 gc_count = 8;
+  uint64 gc_time_millis = 9;
+  double process_cpu_load = 10;
+  uint32 sessions = 11;
+  uint32 players = 12;
 }
 
 enum DeliveryPhase {

@@ -1,27 +1,10 @@
-plugins {
-    id("chunk.java-conventions")
-    id("org.jetbrains.kotlin.jvm")
-    application
-}
-
-kotlin {
-    jvmToolchain(25)
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25
-        allWarningsAsErrors = true
-    }
-}
-
+plugins { id("chunk.java-conventions") }
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 tasks.withType<JavaCompile>().configureEach { options.release = 25 }
-
 dependencies {
-    implementation(project(":jvm:proto"))
-    api(libs.minestom)
     api(project(":jvm:backend-client"))
+    implementation(project(":jvm:proto"))
     implementation(libs.grpc.netty)
-    runtimeOnly(libs.slf4j.simple)
-    testImplementation(kotlin("stdlib"))
+    compileOnly(libs.jetbrains.annotations)
+    testImplementation(libs.grpc.netty)
 }
-
-application { mainClass = "dev.chunkzero.runtime.BridgeMain" }

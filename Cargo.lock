@@ -484,7 +484,6 @@ dependencies = [
  "chunk-control",
  "chunk-edge",
  "chunk-proto",
- "chunk-runtime",
  "chunk-service",
  "clap",
  "cliclack",
@@ -516,7 +515,6 @@ version = "0.1.0"
 dependencies = [
  "chunk-contract",
  "chunk-proto",
- "chunk-runtime",
  "chunk-service",
  "chunk-store",
  "prost",
@@ -623,26 +621,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "chunk-runtime"
-version = "0.1.0"
-dependencies = [
- "chunk-contract",
- "chunk-proto",
- "chunk-protocol",
- "chunk-service",
- "prost",
- "serde",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "uuid",
 ]
 
 [[package]]

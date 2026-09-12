@@ -33,20 +33,30 @@ public final class Registration implements AutoCloseable {
                 NettyChannelBuilder.forAddress(address.getHost(), address.getPort())
                         .usePlaintext()
                         .build();
+        try {
+            if (!client(token).registerProcess(registration).equals(registration.getIdentity()))
+                throw new IllegalStateException("Control returned a different process identity");
+        } catch (RuntimeException error) {
+            channel.shutdownNow();
+            throw error;
+        }
         worker = Thread.startVirtualThread(() -> register(token, registration));
     }
 
-    private void register(String token, ProcessRegistration registration) {
+    private chunk.v1.SupervisorGrpc.SupervisorBlockingStub client(String token) {
         var metadata = new Metadata();
         metadata.put(
                 Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
                 "Bearer " + token);
-        var client =
-                SupervisorGrpc.newBlockingStub(channel)
-                        .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
+        return SupervisorGrpc.newBlockingStub(channel)
+                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata))
+                .withDeadlineAfter(3, TimeUnit.SECONDS);
+    }
+
+    private void register(String token, ProcessRegistration registration) {
         while (!closed.get()) {
             try {
-                if (!client.withDeadlineAfter(3, TimeUnit.SECONDS)
+                if (!client(token)
                         .registerProcess(registration)
                         .equals(registration.getIdentity())) {
                     throw new IllegalStateException(

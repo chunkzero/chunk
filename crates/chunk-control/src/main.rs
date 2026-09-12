@@ -5,17 +5,16 @@ async fn main() -> io::Result<()> {
     chunk_service::logging();
     let state: PathBuf = required("CHUNK_STATE")?;
     let control: chunk_control::Config = chunk_service::read(&required::<PathBuf>("CHUNK_CONFIG")?)?;
-    let backend = optional::<PathBuf>("CHUNK_BACKEND_FILE")?.map(|path| chunk_service::read(&path)).transpose()?;
-    let host = Arc::new(chunk_control::ProcessHost {
-        program: required("CHUNK_RUNTIME_EXECUTABLE")?,
+    let backend = chunk_service::read(&required::<PathBuf>("CHUNK_BACKEND_FILE")?)?;
+    let host = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
         distribution: required("CHUNK_DISTRIBUTION")?,
         java: required("CHUNK_JAVA")?,
-        directory: state.join("runtimes"),
+        directory: state.join("nodes"),
         deployment: control.deployment.clone(),
-        artifact_digest: control.artifact_digest.clone(),
+        apps: control.apps.clone(),
         profiles: control.profiles.clone(),
         backend,
-    });
+    }));
     let config = chunk_control::server::Config {
         state,
         connection: required("CHUNK_CONNECTION")?,

@@ -15,7 +15,6 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.MetadataUtils;
 
 import org.jetbrains.annotations.ApiStatus;
-import org.jetbrains.annotations.Nullable;
 
 import java.net.InetAddress;
 import java.net.URI;
@@ -61,15 +60,9 @@ public final class SessionBackend implements AutoCloseable {
         }
     }
 
-    public static @Nullable SessionBackend fromEnvironment(
-            DeploymentRef deployment, RuntimeEnvironment environment, boolean hasApps)
-            throws UnknownHostException {
+    public static SessionBackend fromEnvironment(
+            DeploymentRef deployment, RuntimeEnvironment environment) throws UnknownHostException {
         var endpoint = environment.backendEndpoint();
-        if (endpoint == null) {
-            if (hasApps || !environment.bootstrapSession())
-                throw new IllegalArgumentException("CHUNK_BACKEND_ENDPOINT is required");
-            return null;
-        }
         var credential = environment.backendToken();
         if (credential == null)
             throw new IllegalArgumentException("CHUNK_BACKEND_TOKEN is required");

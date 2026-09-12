@@ -40,20 +40,21 @@ from `#chunk`; schema modules use `#chunk/schema`. Both resolve through `example
 The player's UUID appears beside `player=` in the service console logs. In another terminal, substitute that UUID below:
 
 ```sh
-just players --player <uuid> move --session-type arena --key arena
-just players --player <uuid> move --session-type arena --key arena-2
+just players --player <uuid> move --session-type arena/default --key arena
+just players --player <uuid> move --session-type arena/default --key arena-2
 just players --player <uuid> drain --timeout-seconds 60
 ```
 
-The example allows two sessions per JVM: the first arena shares the lobby's JVM; the second arena needs another. Moves
-preserve the public connection. Drain stops new reservations on the selected runtime, moves its players, and shuts it
-down when empty or at the deadline. Operator commands print an operation ID; supply `--operation <id>` when retrying an
-uncertain command.
+The example allows two sessions per JVM. Lobby and arena use separate JVMs; two default arenas can share one arena JVM.
+`arena/large` requests a separate 1024 MiB JVM and 32-player sessions (`--machine-profile large`). Moves preserve the
+public connection. Drain stops new reservations on the selected runtime, moves its players, and shuts it down when empty
+or at the deadline. Operator commands print an operation ID; supply `--operation <id>` when retrying an uncertain
+command.
 
 ## Lifecycle
 
 Backend, control and edge run as tasks in one development process. The backend retains its dedicated JavaScript and
-storage threads. Runtime supervisors are embedded; each gameplay JVM is still a child process.
+storage threads. Control owns each gameplay JVM directly as a child process.
 
 Ctrl-C closes player connections, drains control operations, stops owned JVMs, and joins backend workers. An unexpected
 service exit stops the local stack; there is no independent process restart in this mode. Use the standalone service
@@ -67,22 +68,25 @@ an error.
 
 `chunk.toml` selects the local environment and default runtime requirements: 16 players per session, two sessions per
 512 MiB JVM, and at most four JVMs. The `apps/lobby/app.toml` and `apps/arena/app.toml` manifests discover the two apps;
-their IDs also identify session types. There is no separate session-type list. Java 25 remains explicit in the Gradle
-builds. The local runner uses Gradle's selected executable, with an optional `--java PATH` override.
+their annotated default sessions are addressed as `lobby/default` and `arena/default`. There is no separate session-type
+list. Java 25 remains explicit in the Gradle builds. The local runner uses Gradle's selected executable, with an
+optional `--java PATH` override.
 
 `server/schema/index.ts` composes the physical schema; `server/*.ts` exports validated function descriptors. Paths in
 this paragraph are relative to `examples/local`. `examples/local/gradlew generateChunkBackend` emits the backend under
 `examples/local/.chunk/build/backend` and shared JVM bindings under `examples/local/.chunk/generated/jvm`. The
 standalone example uses the public Chunk settings and project plugins with repository composite builds for local
 framework dependencies. Its explicit `shared` project contains the common session implementation and backend boundary
-test. The discovered `apps/lobby` and `apps/arena` projects each package one `SessionProvider` service that creates
-fresh session state. The plugin generates `META-INF/chunk/app.json` in each app JAR, and the runtime verifies that its
-provider belongs to that same JAR. `chunkArtifacts` describes both app JARs and their shared runtime classpath for the
-Rust release publisher.
+test. The discovered `apps/lobby` and `apps/arena` projects each package annotated `SessionProvider` factories that
+create fresh session state. The plugin generates a local Java service registry from those annotations. Deployment
+requirements stay in TOML; `apps/arena/app.toml` configures `[sessions.large]` with its profile and capacity.
+`chunkArtifacts` builds independent executable app JARs containing the generated backend client and runtime libraries.
+Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom, explicitly calls `ready()` and
+waits for shutdown.
 
 Shared descriptors use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`. The initial
-managed caller's `app` identifies its registered app ID. Multiple session instances may belong to the same app.
-Annotation-driven registration remains deferred.
+managed caller's `app` identifies its registered app ID. Multiple session instances may belong to the same app. Session
+factories use `@SessionType("default")`; there are no handwritten service registration resources.
 
 Releases under `examples/local/dist/<id>` include JARs, the backend bundle, normalized release metadata and explicitly
 supplied assets. Each release also has a sibling `.tar.gz` archive. Content changes produce a new deployment; existing
@@ -103,3 +107,8 @@ client, then calls the actual TypeScript coin/stat handlers over authenticated l
 operation recovery, stale/fresh watch transitions across backend restart, shared data between retained deployments and
 independent player identities. Its processes, channels and executors are closed on completion. This complements the
 official-client scenario above; it does not simulate Minecraft login or player movement.
+
+Inspect nodes with `chunk nodes --control-file examples/local/.chunk/local/control.json list`. Request a node shutdown
+with the same prefix followed by `shutdown HOST --operation UUID --timeout-seconds 60`; retain the operation ID for
+retries. The response means shutdown was queued. Poll `list` for confirmed `Stopped` state. This rework requires
+rebuilding releases; old local control state is incompatible.

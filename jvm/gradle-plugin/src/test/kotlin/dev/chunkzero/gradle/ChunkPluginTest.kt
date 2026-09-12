@@ -17,7 +17,7 @@ class ChunkPluginTest {
     lateinit var directory: Path
 
     @Test
-    fun `discovers apps without generation and builds one shared Java artifact with configuration cache`() {
+    fun `builds independent executable apps with generated catalogs and configuration cache`() {
         fixture()
         app("lobby")
         library("fixture", "shared", "1.0")
@@ -33,16 +33,17 @@ class ChunkPluginTest {
         assertEquals(listOf("inspect"), calls())
         run("chunkArtifacts")
         val first = descriptor()
-        assertAppManifests(first)
+        assertSessionRegistries(first)
         assertEquals(listOf("lobby"), first.getAsJsonArray("apps").map { it.asJsonObject["id"].asString })
         assertFalse(first.toString().contains("kotlin"))
-        val classpath = first.getAsJsonArray("classpath").map { it.asJsonObject }
-        assertEquals(1, classpath.count { it["artifact"].asString == "chunk-backend.jar" })
-        assertEquals(
-            listOf("shared-2.0.jar"),
-            classpath.map { it["artifact"].asString }.filter { it.startsWith("shared-") },
-        )
-        assertTrue(classpath.all { Path.of(it["file"].asString).toFile().isFile })
+        assertFalse(first.has("classpath"))
+        JarFile(first.getAsJsonArray("apps")[0].asJsonObject["jar"].asString).use {
+            assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
+            assertEquals(
+                "2.0",
+                it.getInputStream(it.getEntry("fixture/shared-version.txt")).bufferedReader().readText(),
+            )
+        }
         JarFile(directory.resolve("build/libs/chunk-backend.jar").toFile()).use {
             assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
             assertTrue(it.getEntry("META-INF/chunk/app.json") == null)
@@ -52,19 +53,20 @@ class ChunkPluginTest {
         assertEquals(2, calls().count { it == "gen java" })
         app("arena")
         run("chunkArtifacts")
-        assertAppManifests(descriptor())
+        assertSessionRegistries(descriptor())
         assertEquals(
             listOf("arena", "lobby"),
             descriptor().getAsJsonArray("apps").map { it.asJsonObject["id"].asString },
         )
-        assertEquals(
-            listOf("shared-1.0.jar", "shared-2.0.jar"),
-            descriptor()
-                .getAsJsonArray("classpath")
-                .map { it.asJsonObject["artifact"].asString }
-                .filter { it.startsWith("shared-") }
-                .sorted(),
-        )
+        descriptor().getAsJsonArray("apps").forEach { app ->
+            JarFile(app.asJsonObject["jar"].asString).use { jar ->
+                val expected = if (app.asJsonObject["id"].asString == "lobby") "2.0" else "1.0"
+                assertEquals(
+                    expected,
+                    jar.getInputStream(jar.getEntry("fixture/shared-version.txt")).bufferedReader().readText(),
+                )
+            }
+        }
     }
 
     @Test
@@ -72,15 +74,12 @@ class ChunkPluginTest {
         fixture(kotlin = true)
         app("lobby", kotlin = true)
         run("chunkArtifacts")
-        assertAppManifests(descriptor())
-        val classpath = descriptor().getAsJsonArray("classpath").map { it.asJsonObject }
-        val facade = classpath.single { it["artifact"].asString == "chunk-backend-kotlin.jar" }
-        JarFile(facade["file"].asString).use {
+        assertSessionRegistries(descriptor())
+        val executable = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(executable).use {
             assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null)
-            assertTrue(it.getEntry("fixture/generated/Bindings.class") == null)
-            assertTrue(it.getEntry("META-INF/chunk/app.json") == null)
+            assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
         }
-        assertEquals(1, classpath.count { it["artifact"].asString == "chunk-backend.jar" })
         assertTrue(calls().contains("gen kotlin"))
         val reused = run("chunkArtifacts")
         assertTrue(reused.output.contains("Reusing configuration cache"), reused.output)
@@ -104,6 +103,32 @@ class ChunkPluginTest {
                 ":apps:lobby:validateChunkJvm",
             ).output.contains("targets Java 21 but the selected toolchain is 25"),
         )
+    }
+
+    @Test
+    fun `session registry ignores deployment settings and rejects duplicate IDs`() {
+        fixture()
+        app("lobby")
+        run("chunkArtifacts")
+        val executable =
+            directory.fileSystem
+                .getPath(
+                    descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString,
+                ).toFile()
+        val before = executable.readBytes().toList()
+        write("apps/lobby/app.toml", "[sessions.default]\nmachine_profile = 'large'\ncapacity = 32")
+        run("chunkArtifacts")
+        assertEquals(before, executable.readBytes().toList())
+        assertSessionRegistries(descriptor())
+        write(
+            "apps/lobby/src/main/java/Duplicate.java",
+            """
+            package fixture.lobby;
+            @dev.chunkzero.runtime.SessionType("default")
+            public final class Duplicate implements dev.chunkzero.runtime.SessionProvider {}
+        """,
+        )
+        assertTrue(runFailure(":apps:lobby:generateChunkSessionRegistry").output.contains("Duplicate session type"))
     }
 
     private fun fixture(kotlin: Boolean = false) {
@@ -153,7 +178,12 @@ class ChunkPluginTest {
         """,
         )
         write("chunk.toml", "")
-        listOf("backend-client", "runtime", "backend-client-kotlin", "runtime-kotlin").forEach(::module)
+        listOf(
+            "backend-client",
+            "runtime-minestom",
+            "backend-client-kotlin",
+            "runtime-minestom-kotlin",
+        ).forEach(::module)
         write(
             "chunk-fixture",
             """
@@ -167,7 +197,9 @@ class ChunkPluginTest {
             if command == 'inspect':
                 apps = sorted(path.parent.name for path in root.glob('apps/*/app.toml'))
                 print(json.dumps({'version': 1, 'apps': [
-                    {'id': app, 'directory': 'apps/' + app, 'gradle_project': ':apps:' + app, 'runtime': {}}
+                    {'id': app, 'directory': 'apps/' + app, 'gradle_project': ':apps:' + app,
+                     'sessions': {'default': {'machine_profile': 'large', 'capacity': 32}}
+                     if (root / 'apps' / app / 'app.toml').read_text().strip() else {}}
                     for app in apps]}))
             elif command == 'gen':
                 output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
@@ -203,6 +235,25 @@ class ChunkPluginTest {
             """
             plugins { id("$plugin") }
             $toolchain
+            application { mainClass = "fixture.$id.App${if (kotlin) "Kt" else ""}" }
+        """,
+        )
+        write(
+            "apps/$id/src/main/java/dev/chunkzero/runtime/SessionType.java",
+            """
+            package dev.chunkzero.runtime;
+            @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+            @java.lang.annotation.Target(java.lang.annotation.ElementType.TYPE)
+            public @interface SessionType {
+                String value();
+            }
+        """,
+        )
+        write(
+            "apps/$id/src/main/java/dev/chunkzero/runtime/SessionProvider.java",
+            """
+            package dev.chunkzero.runtime;
+            public interface SessionProvider {}
         """,
         )
         if (kotlin) {
@@ -210,6 +261,9 @@ class ChunkPluginTest {
                 "apps/$id/src/main/kotlin/App.kt",
                 """
                 package fixture.$id
+                @dev.chunkzero.runtime.SessionType("default")
+                class Factory : dev.chunkzero.runtime.SessionProvider
+                fun main(args: Array<String>) {}
                 suspend fun result(): fixture.generated.Bindings = fixture.generated.value()
             """,
             )
@@ -218,7 +272,9 @@ class ChunkPluginTest {
                 "apps/$id/src/main/java/App.java",
                 """
                 package fixture.$id;
-                public final class App {
+                @dev.chunkzero.runtime.SessionType("default")
+                public final class App implements dev.chunkzero.runtime.SessionProvider {
+                    public static void main(String[] args) {}
                     public fixture.generated.Bindings value() { return fixture.generated.Client.value(); }
                 }
             """,
@@ -244,7 +300,13 @@ class ChunkPluginTest {
             <artifactId>$name</artifactId><version>$version</version></project>
         """,
         )
-        JarOutputStream(directory.resolve("$path.jar").toFile().outputStream()).close()
+        JarOutputStream(directory.resolve("$path.jar").toFile().outputStream()).use { jar ->
+            if (group == "fixture" && name == "shared") {
+                jar.putNextEntry(java.util.jar.JarEntry("fixture/shared-version.txt"))
+                jar.write(version.toByteArray())
+                jar.closeEntry()
+            }
+        }
     }
 
     private fun write(
@@ -268,19 +330,18 @@ class ChunkPluginTest {
 
     private fun calls() = directory.resolve("calls.txt").toFile().readLines()
 
-    private fun assertAppManifests(artifacts: JsonObject) {
+    private fun assertSessionRegistries(artifacts: JsonObject) {
+        assertEquals(3, artifacts["version"].asInt)
         artifacts.getAsJsonArray("apps").forEach { app ->
+            assertEquals(listOf("default"), app.asJsonObject.getAsJsonArray("sessions").map { it.asString })
             JarFile(app.asJsonObject["jar"].asString).use { jar ->
-                val entry = requireNotNull(jar.getJarEntry("META-INF/chunk/app.json"))
-                val manifest =
-                    jar
-                        .getInputStream(
-                            entry,
-                        ).bufferedReader()
-                        .use { JsonParser.parseReader(it).asJsonObject }
-                assertEquals(setOf("version", "id"), manifest.keySet())
-                assertEquals(1, manifest["version"].asInt)
-                assertEquals(app.asJsonObject["id"].asString, manifest["id"].asString)
+                assertTrue(jar.getJarEntry("META-INF/chunk/app.json") == null)
+                val entry = requireNotNull(jar.getJarEntry("META-INF/services/dev.chunkzero.runtime.SessionProvider"))
+                val providers = jar.getInputStream(entry).bufferedReader().use { it.readLines() }
+                assertEquals(1, providers.size)
+                assertTrue(jar.getJarEntry(providers.single().replace('.', '/') + ".class") != null)
+                val main = requireNotNull(jar.manifest.mainAttributes.getValue("Main-Class"))
+                assertTrue(jar.getJarEntry(main.replace('.', '/') + ".class") != null)
             }
         }
     }

@@ -62,7 +62,11 @@ internal fun readApps(
             val projectPath = requireNotNull(app["gradle_project"]?.asString) { "Gradle project missing: $id" }
             require(path == "apps/$id" && projectPath == ":apps:$id") { "App inventory mapping mismatch: $id" }
             require(directory.resolve(path).isDirectory) { "App directory missing: $path" }
-            AppMetadata(id, path, projectPath)
+            AppMetadata(
+                id,
+                path,
+                projectPath,
+            )
         }
     require(apps.map { it.id.lowercase() }.distinct().size == apps.size) { "Duplicate app IDs in chunk inspect" }
     return apps.sortedBy { it.id }

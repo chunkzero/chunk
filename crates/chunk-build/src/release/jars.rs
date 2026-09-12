@@ -4,12 +4,8 @@ use std::{
     path::Path,
 };
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zip::{ZipArchive, read::ZipFile};
-
-const APP_METADATA: &str = "META-INF/chunk/app.json";
-const PROVIDER: &str = "META-INF/services/dev.chunkzero.runtime.SessionProvider";
 
 #[derive(Default)]
 pub(super) struct Classpath {
@@ -19,7 +15,7 @@ pub(super) struct Classpath {
 }
 
 impl Classpath {
-    pub fn add(&mut self, bytes: &[u8], label: &str, java: u32, app: Option<&str>) -> io::Result<()> {
+    pub fn add(&mut self, bytes: &[u8], label: &str, java: u32, executable: bool) -> io::Result<()> {
         let mut jar = ZipArchive::new(Cursor::new(bytes)).map_err(io::Error::other)?;
         self.entries += jar.len();
         if self.entries > 200_000 {
@@ -32,8 +28,7 @@ impl Classpath {
         };
         let mut names = BTreeSet::new();
         let mut classes = BTreeMap::<String, (u32, [u8; 32])>::new();
-        let mut metadata = None;
-        let mut provider = None;
+        let mut executable_manifest = None;
         for index in 0..jar.len() {
             let file = jar.by_index(index).map_err(io::Error::other)?;
             let name = file.name().to_owned();
@@ -47,8 +42,7 @@ impl Classpath {
                 return Err(io::Error::other("JAR symlinks are unsupported"));
             }
             match name.as_str() {
-                APP_METADATA => metadata = Some(read_entry(file, 65_536)?),
-                PROVIDER => provider = Some(read_entry(file, 65_536)?),
+                "META-INF/MANIFEST.MF" => executable_manifest = Some(read_entry(file, 65_536)?),
                 _ => {
                     if let Some((version, class)) = effective_class(&name, multi_release, java)? {
                         self.expanded_bytes += file.size();
@@ -68,7 +62,9 @@ impl Classpath {
                 }
             }
         }
-        validate_registration(app, metadata.as_deref(), provider.as_deref(), &names)?;
+        if executable {
+            validate_main(executable_manifest.as_deref(), &names)?;
+        }
         for (name, (_, hash)) in classes {
             if let Some((previous, owner)) = self.classes.get(&name) {
                 if previous != &hash {
@@ -151,52 +147,30 @@ fn validate_bytecode(bytes: &[u8], java: u32, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppMetadata {
-    version: u32,
-    id: String,
-}
-
-fn validate_registration(
-    app: Option<&str>,
-    metadata: Option<&[u8]>,
-    provider: Option<&[u8]>,
-    names: &BTreeSet<String>,
-) -> io::Result<()> {
-    let Some(app) = app else {
-        if metadata.is_some() || provider.is_some() {
-            return Err(io::Error::other("dependency JAR contains an undeclared app registration"));
+fn validate_main(executable: Option<&[u8]>, names: &BTreeSet<String>) -> io::Result<()> {
+    let manifest = std::str::from_utf8(executable.ok_or_else(|| io::Error::other("executable JAR manifest missing"))?)
+        .map_err(io::Error::other)?;
+    let mut lines = Vec::<String>::new();
+    for line in manifest.lines().take_while(|line| !line.is_empty()) {
+        if let Some(rest) = line.strip_prefix(' ') {
+            if let Some(previous) = lines.last_mut() {
+                previous.push_str(rest);
+            }
+        } else {
+            lines.push(line.into());
         }
-        return Ok(());
-    };
-    let metadata: AppMetadata =
-        serde_json::from_slice(metadata.ok_or_else(|| io::Error::other("app JAR is missing META-INF/chunk/app.json"))?)
-            .map_err(io::Error::other)?;
-    if metadata.version != 1 || metadata.id != app {
-        return Err(io::Error::other(format!("app JAR identity does not match {app:?}")));
     }
-    let provider = std::str::from_utf8(
-        provider.ok_or_else(|| io::Error::other("app JAR is missing its SessionProvider service entry"))?,
-    )
-    .map_err(io::Error::other)?;
-    let providers: Vec<_> = provider
-        .lines()
-        .map(|line| line.split('#').next().unwrap_or_default().trim())
-        .filter(|line| !line.is_empty())
+    let mains: Vec<_> = lines
+        .iter()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(key, _)| key.eq_ignore_ascii_case("Main-Class"))
+        .map(|(_, value)| value.trim())
         .collect();
-    if providers.len() != 1
-        || !class_name(providers[0])
-        || !names.contains(&format!("{}.class", providers[0].replace('.', "/")))
+    if mains.len() != 1
+        || !chunk_contract::class_name(mains[0])
+        || !names.contains(&format!("{}.class", mains[0].replace('.', "/")))
     {
-        return Err(io::Error::other("app JAR requires one SessionProvider class in that JAR"));
+        return Err(io::Error::other("executable requires one valid Main-Class present in the JAR"));
     }
     Ok(())
-}
-
-fn class_name(name: &str) -> bool {
-    name.split('.').all(|part| {
-        part.chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_' || ch == '$')
-            && part.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
-    })
 }

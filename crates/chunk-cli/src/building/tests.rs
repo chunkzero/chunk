@@ -21,6 +21,7 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("consumer with spaces");
         fs::create_dir_all(root.join("apps/lobby")).unwrap();
+        let root = root.canonicalize().unwrap();
         fs::create_dir(root.join("fixture")).unwrap();
         for name in ["chunk.toml", "apps/lobby/app.toml", "apps/lobby/build.gradle.kts"] {
             fs::write(root.join(name), "").unwrap();
@@ -28,8 +29,7 @@ impl Fixture {
         let mut jar = ZipWriter::new(Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default();
         for (name, bytes) in [
-            ("META-INF/chunk/app.json", br#"{"version":1,"id":"lobby"}"#.as_slice()),
-            ("META-INF/services/dev.chunkzero.runtime.SessionProvider", b"sample.Provider\n".as_slice()),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMain-Class: sample.Provider\r\n\r\n".as_slice()),
             ("sample/Provider.class", [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69].as_slice()),
         ] {
             jar.start_file(name, options).unwrap();
@@ -45,8 +45,8 @@ impl Fixture {
         fs::write(
             root.join("fixture/artifacts.json"),
             serde_json::to_vec(&json!({
-                "version":1,"java":{"version":25,"executable":root.join("jdk/bin/java")},
-                "apps":[{"id":"lobby","jar":root.join("fixture/lobby.jar"),"java_version":25}],"classpath":[]
+                "version":3,"java":{"version":25,"executable":root.join("jdk/bin/java")},
+                "apps":[{"id":"lobby","jar":root.join("fixture/lobby.jar"),"java_version":25,"sessions":["default"]}]
             }))
             .unwrap(),
         )

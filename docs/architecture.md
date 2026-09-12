@@ -8,20 +8,21 @@ Proposed domains, hosted APIs and rollout features below remain separate from th
 
 A project contains apps and has environments such as `prod` and `beta`. Each environment owns its database and one
 authoritative backend with an embedded JavaScript runtime. An immutable release identifies backend functions, schema,
-app JARs, shared dependencies and assets. The backend can retain multiple deployments against the same database. Session
+self-contained app JARs and assets. The backend can retain multiple deployments against the same database. Session
 clients pin their deployment and caller identity across calls and watch reconnects. The local development runner runs
 one release at a time; overlapping deployment rollouts remain deferred.
 
 Chunk provisions sessions from server-owned admission and routing policies. App metadata supplies capacity and optional
 machine-profile requirements; queues and matchmaking remain server-owned policy. A gameplay JVM belongs to one
-environment, deployment and profile, and can host multiple sessions. Each app supplies one factory, while each session
-owns its instances, players, tasks, subscriptions and cleanup independently. App code requests session completion
-through its scope; control owns placement and process creation.
+environment, deployment, app and profile, and can host multiple sessions. Each app declares session factories, while
+each session owns its instances, players, tasks, subscriptions and cleanup independently. App code requests session
+completion through its scope; control owns placement and process creation.
 
-Local control persists reservations, activation intent and ownership generations. Rust runtimes supervise gameplay JVMs,
-report health and reconcile authenticated process inventory. Player moves withdraw the old delivery before activating
-its replacement. Drain stops new placement and moves players before shutdown; unresolved ownership is retained until
-cleanup is confirmed. Hosted capacity, suspension, promotion and rollout reconciliation remain future work.
+Local control persists reservations, activation intent and ownership generations. Control hosts supervise app-owned JVMs
+directly, report health and reconcile authenticated process inventory. Player moves withdraw the old delivery before
+activating its replacement. Drain stops new placement and moves players before shutdown; unresolved ownership is
+retained until cleanup is confirmed. Hosted capacity, suspension, promotion and rollout reconciliation remain future
+work.
 
 The proxy owns public Minecraft connections, online authentication, encryption, compression and routing. Players can
 move between sessions and JVMs on the same public connection. The development runner embeds backend, control and edge
@@ -42,7 +43,6 @@ This is a responsibility map, not a dependency policy.
 | `chunk-backend`                                                     | Environment sync engine, retained deployments, transactions, subscriptions and authenticated backend RPCs |
 | `chunk-contract`                                                    | Validated deployment, function, document and schema contracts                                             |
 | `chunk-control`                                                     | Durable local placement, reservations, ownership and process reconciliation                               |
-| `chunk-runtime`                                                     | JVM supervision, process registration and native Minecraft delivery relays                                |
 | `chunk-build`                                                       | App inventory, TypeScript checking/bundling, client generation and portable release publication           |
 | `chunk-proto`                                                       | Generated Rust protobuf and gRPC bindings                                                                 |
 | `chunk-service`                                                     | Service lifecycle, cancellation and logging helpers                                                       |
@@ -64,14 +64,15 @@ self-hosted storage adapters are proposals.
 
 The JVM has a Java core and optional Kotlin adapters:
 
-| Module                                            | Responsibility                                                               |
-| ------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `jvm/backend-api`                                 | Java codecs, typed references and document identifiers                       |
-| `jvm/backend-client`                              | Asynchronous Java calls, mutation operation IDs and watch state              |
-| `jvm/runtime`                                     | Java session lifecycle, scoped resources and Minestom integration on Java 25 |
-| `jvm/backend-client-kotlin`, `jvm/runtime-kotlin` | Owned coroutine scopes, suspending hooks and Flow adapters                   |
-| `jvm/proto`                                       | Generated Java protobuf and asynchronous gRPC bindings                       |
-| `jvm/gradle-plugin`                               | App discovery, explicit JVM toolchains, generation and artifact descriptors  |
+| Module                                                     | Responsibility                                                              |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `jvm/backend-api`                                          | Java codecs, typed references and document identifiers                      |
+| `jvm/backend-client`                                       | Asynchronous Java calls, mutation operation IDs and watch state             |
+| `jvm/runtime`                                              | Generic Java 25 process lifecycle, deployment binding, readiness and health |
+| `jvm/runtime-minestom`                                     | Minestom sessions, scoped resources, player admission and tick scheduling   |
+| `jvm/backend-client-kotlin`, `jvm/runtime-minestom-kotlin` | Owned coroutine scopes, suspending hooks and Flow adapters                  |
+| `jvm/proto`                                                | Generated Java protobuf and asynchronous gRPC bindings                      |
+| `jvm/gradle-plugin`                                        | App discovery, explicit JVM toolchains, generation and artifact descriptors |
 
 Java apps require no Kotlin production dependencies. Generated Java records, sealed unions and typed references are
 shared by both languages. The optional `CoroutineBackendClient` facade uses those same Java models and an owned
@@ -96,14 +97,17 @@ Shared gameplay can be an ordinary Gradle project, as in `examples/local/shared`
 The settings plugin calls `chunk inspect` and includes the discovered app projects without generating code.
 `chunk build PROJECT` invokes the project's wrapper with `chunkArtifacts`. That task graph runs `chunk gen` before JVM
 compilation and emits one shared Java bindings JAR, plus a separate Kotlin facade JAR when requested. The descriptor
-lists each app and its complete resolved runtime classpath. An installed or configured CLI supplies the compiler;
-consumer plugins do not build Rust tools or install Node packages.
+lists each app executable with its own dependencies. An installed or configured CLI supplies the compiler; consumer
+plugins do not build Rust tools or install Node packages.
 
-Each app JAR contains generated `META-INF/chunk/app.json` metadata and one authored
-`META-INF/services/dev.chunkzero.runtime.SessionProvider` entry. Its public provider implements `Session create()` and
-creates fresh state for each session. The runtime checks metadata and provider origin against the same JAR, then binds
-the registered app ID into backend caller identity. All apps share one gameplay classpath. Constructor discovery,
-annotation registration and dependency injection remain deferred.
+Each app JAR contains a local Java service registry generated from annotated `@SessionType` factories. Each public
+provider implements `Session create()` and creates fresh state for each session. The app owns its main function and
+includes the runtime libraries in its executable JAR. Gradle exports session type IDs separately for release assembly;
+provider class names remain internal to the JVM. The external release manifest binds artifacts to resolved deployment
+requirements from `[runtime]` and `[sessions.<id>]` in app TOML. Control selects the app and machine profile, verifies
+the artifact digest, and supplies launch identity and session commands with admission limits. Registration authenticates
+that launch identity. The JVM loads no deployment manifest. JVMs contain one app, and separate machine profiles require
+separate JVMs. Dependency injection remains deferred.
 
 The CLI publishes `dist/<id>/` and a matching `dist/<id>.tar.gz` containing backend code/contracts, normalized release
 metadata, content-named JARs and explicit assets. One digest identifies the release and backend deployment. Generated
@@ -142,9 +146,9 @@ the separate `feat/self-hosted-dashboard-assets` branch and is not part of this 
 ## Transport status
 
 `proto/chunk/v1` generates matching Rust and Java bindings. `Backend`, `LocalControl`, `Gameplay`, `Supervisor`,
-`ProcessControl` and `Players` have implementations. These internal RPCs cover backend calls/watches, placement,
-process/session lifecycle, delivery preparation and player operations. The remaining `Directory`, `Runtime` and
-`EdgeCall` services remain proposals. Application code uses session and typed backend APIs instead of issuing
+`NodeControl`, `ProcessControl` and `Players` have implementations. These internal RPCs cover backend calls/watches,
+placement, process/session lifecycle, delivery preparation and player operations. The remaining `Directory`, `Runtime`
+and `EdgeCall` services remain proposals. Application code uses session and typed backend APIs instead of issuing
 provisioning commands directly.
 
 Service credentials authenticate trusted platform processes. Deployment, process/session generations and player
@@ -152,7 +156,6 @@ ownership accompany version-sensitive operations and are checked against registe
 watch staleness and complete subscription groups are implemented. Reconciliation retains unresolved ownership rather
 than treating a missing reply as cleanup.
 
-Player traffic uses dedicated native Minecraft TCP connections through the Rust runtime to Minestom. Single-use delivery
-capabilities pass through login plugin messages; configuration and play then use the normal Minecraft protocol. gRPC
-carries control and backend traffic, while the proxy owns the public connection's authentication, encryption and
-compression.
+Player traffic uses dedicated native Minecraft TCP connections directly to Minestom. Single-use delivery capabilities
+pass through login plugin messages; configuration and play then use the normal Minecraft protocol. gRPC carries control
+and backend traffic, while the proxy owns the public connection's authentication, encryption and compression.

@@ -1,39 +1,35 @@
 package dev.chunkzero.runtime.bootstrap;
 
 import org.jetbrains.annotations.ApiStatus;
-import org.jetbrains.annotations.Nullable;
 
 @ApiStatus.Internal
 public record RuntimeEnvironment(
         String processToken,
         String environment,
         String deployment,
-        @Nullable String supervisor,
+        String controlEndpoint,
         String runtimeId,
         String processId,
         long processGeneration,
         String machineProfile,
         String artifactDigest,
-        boolean bootstrapSession,
-        @Nullable String backendEndpoint,
-        @Nullable String backendToken) {
+        String appId,
+        String backendEndpoint,
+        String backendToken) {
     public static RuntimeEnvironment load() {
-        var token = System.getenv("CHUNK_PROCESS_TOKEN");
-        if (token == null) throw new IllegalArgumentException("CHUNK_PROCESS_TOKEN is required");
-        var generation = System.getenv("CHUNK_PROCESS_GENERATION");
         return new RuntimeEnvironment(
-                token,
+                required("CHUNK_PROCESS_TOKEN"),
                 required("CHUNK_ENVIRONMENT"),
                 required("CHUNK_DEPLOYMENT"),
-                System.getenv("CHUNK_SUPERVISOR"),
-                valueOrDefault("CHUNK_RUNTIME_ID", "bridge"),
-                valueOrDefault("CHUNK_PROCESS_ID", "bridge"),
-                generation == null ? 1 : Long.parseLong(generation),
-                valueOrDefault("CHUNK_MACHINE_PROFILE", "local"),
-                valueOrDefault("CHUNK_ARTIFACT_DIGEST", "fixture"),
-                !"".equals(System.getenv("CHUNK_BOOTSTRAP_SESSION")),
-                System.getenv("CHUNK_BACKEND_ENDPOINT"),
-                System.getenv("CHUNK_BACKEND_TOKEN"));
+                required("CHUNK_CONTROL_ENDPOINT"),
+                required("CHUNK_INSTANCE_ID"),
+                required("CHUNK_PROCESS_ID"),
+                Long.parseLong(required("CHUNK_PROCESS_GENERATION")),
+                required("CHUNK_MACHINE_PROFILE"),
+                required("CHUNK_ARTIFACT_DIGEST"),
+                required("CHUNK_APP_ID"),
+                required("CHUNK_BACKEND_ENDPOINT"),
+                required("CHUNK_BACKEND_TOKEN"));
     }
 
     private static String required(String name) {
@@ -41,10 +37,5 @@ public record RuntimeEnvironment(
         if (value == null || value.isBlank())
             throw new IllegalArgumentException(name + " is required");
         return value;
-    }
-
-    private static String valueOrDefault(String name, String fallback) {
-        var value = System.getenv(name);
-        return value == null ? fallback : value;
     }
 }

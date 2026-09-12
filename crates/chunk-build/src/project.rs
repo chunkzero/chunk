@@ -23,6 +23,8 @@ pub struct AppMetadata {
     pub directory: String,
     pub gradle_project: String,
     pub runtime: RuntimeRequirements,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, RuntimeRequirements>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -62,6 +64,8 @@ struct ProjectManifest {
 struct AppManifest {
     #[serde(default)]
     runtime: RuntimeRequirements,
+    #[serde(default)]
+    sessions: BTreeMap<String, RuntimeRequirements>,
 }
 
 /// Reads `chunk.toml` and discovered app manifests without executing project code or build tools.
@@ -76,19 +80,27 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
     if let Some(local) = &manifest.local {
         local.validate(&manifest_path)?;
         for app in &mut apps {
-            let profile = app.runtime.machine_profile.get_or_insert_with(|| local.machine_profile.clone());
-            if !local.profiles.contains_key(profile) {
-                return Err(invalid(
-                    &root.join(&app.directory).join("app.toml"),
-                    format!("runtime.machine_profile references unknown profile {profile:?}"),
-                ));
-            }
+            app.runtime.machine_profile.get_or_insert_with(|| local.machine_profile.clone());
             app.runtime.capacity.get_or_insert(local.capacity);
+            for requirements in std::iter::once(&app.runtime).chain(app.sessions.values()) {
+                if let Some(profile) = &requirements.machine_profile
+                    && !local.profiles.contains_key(profile)
+                {
+                    return Err(invalid(
+                        &root.join(&app.directory).join("app.toml"),
+                        format!("machine_profile references unknown profile {profile:?}"),
+                    ));
+                }
+            }
         }
-    } else if let Some(app) = apps.iter().find(|app| app.runtime.machine_profile.is_some()) {
+    } else if let Some(app) = apps.iter().find(|app| {
+        std::iter::once(&app.runtime)
+            .chain(app.sessions.values())
+            .any(|requirements| requirements.machine_profile.is_some())
+    }) {
         return Err(invalid(
             &root.join(&app.directory).join("app.toml"),
-            "runtime.machine_profile requires profiles in chunk.toml [local]",
+            "machine_profile requires profiles in chunk.toml [local]",
         ));
     }
     Ok(ProjectMetadata { version: 1, apps, local: manifest.local })
@@ -137,8 +149,13 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
         let manifest: AppManifest = read_manifest(&manifest_path)?;
-        if manifest.runtime.capacity.is_some_and(|capacity| !(1..=128).contains(&capacity)) {
-            return Err(invalid(&manifest_path, "runtime.capacity must be between 1 and 128"));
+        if manifest.sessions.len() > 128 || manifest.sessions.keys().any(|id| !valid_id(id)) {
+            return Err(invalid(&manifest_path, "sessions requires at most 128 valid session type IDs"));
+        }
+        for requirements in std::iter::once(&manifest.runtime).chain(manifest.sessions.values()) {
+            if requirements.capacity.is_some_and(|capacity| !(1..=128).contains(&capacity)) {
+                return Err(invalid(&manifest_path, "capacity must be between 1 and 128"));
+            }
         }
         require_file(&entry.path().join("build.gradle.kts"))?;
         apps.push(AppMetadata {
@@ -146,6 +163,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             gradle_project: format!(":apps:{id}"),
             id,
             runtime: manifest.runtime,
+            sessions: manifest.sessions,
         });
     }
     Ok(apps)
@@ -185,7 +203,7 @@ impl LocalConfig {
     }
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() <= 128
         && id.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')

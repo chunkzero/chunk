@@ -1,10 +1,10 @@
 use std::time::Duration;
 
+use crate::RuntimeConnection;
 use chunk_proto::v1::{
     Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, PlayerDelivery, PlayerRef, SessionCommand,
     SessionPhase, SessionRef, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
 };
-use chunk_runtime::RuntimeConnection;
 use prost::Message;
 use tonic::{Request, transport::Channel};
 
@@ -19,11 +19,12 @@ impl Control {
     /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         validate(&request)?;
+        let unavailable = self.unavailable()?;
         self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Invalid("control draining"));
             }
-            reserve(state, &self.config, &request)
+            reserve(state, &self.config, &request, &unavailable)
         })?;
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
@@ -107,7 +108,10 @@ impl Control {
             runtime_id: runtime.identity.runtime_id.clone(),
         };
         let preparation = gameplay.prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
-        if preparation.operation_id != request.operation_id || preparation.capability.len() != 32 {
+        if preparation.operation_id != request.operation_id
+            || preparation.capability.len() != 32
+            || preparation.endpoint != runtime.player_endpoint
+        {
             return Err(Error::Invalid("invalid preparation"));
         }
         delivery.identity = None;
@@ -142,10 +146,11 @@ impl Control {
 
     pub(crate) async fn runtime(&self, state: &State, id: &str) -> Result<RuntimeConnection> {
         let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
-        let runtime = self.host.ensure(id, &host.profile).await?;
+        let runtime = self.host.ensure(id, &host.app, &host.profile).await?;
         if runtime.identity.deployment.as_ref() != Some(&self.config.deployment)
             || runtime.identity.machine_profile != host.profile
-            || runtime.identity.artifact_digest != self.config.artifact_digest
+            || runtime.identity.artifact_digest != self.config.apps[&host.app].sha256
+            || runtime.identity.app_id != host.app
         {
             return Err(Error::Invalid("host returned incompatible runtime"));
         }
@@ -175,7 +180,12 @@ fn validate(request: &ClaimRequest) -> Result<()> {
     Ok(())
 }
 
-fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result<()> {
+fn reserve(
+    state: &mut State,
+    config: &Config,
+    request: &ClaimRequest,
+    unavailable: &std::collections::BTreeSet<String>,
+) -> Result<()> {
     if let Some(intent) = state.moves.get(&request.operation_id)
         && (intent.canceled || intent.request != request.encode_to_vec())
     {
@@ -205,7 +215,7 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
     } else if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
         return Err(Error::Invalid("player already owned"));
     }
-    let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?)?;
+    let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
     let owner = state.players.entry(player.clone()).or_default();
     if request.source.is_none() {
         owner.membership_generation = owner.membership_generation.checked_add(1).ok_or(Error::Capacity)?;
@@ -232,7 +242,12 @@ fn reserve(state: &mut State, config: &Config, request: &ClaimRequest) -> Result
     Ok(())
 }
 
-fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::SessionDemand) -> Result<String> {
+fn select_session(
+    state: &mut State,
+    config: &Config,
+    demand: &chunk_proto::v1::SessionDemand,
+    unavailable: &std::collections::BTreeSet<String>,
+) -> Result<String> {
     let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
     if !demand.machine_profile.is_empty() && demand.machine_profile != spec.machine_profile {
         return Err(Error::Invalid("session profile mismatch"));
@@ -242,6 +257,7 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
         .iter()
         .find(|(id, session)| {
             !session.retired
+                && !unavailable.contains(&session.host)
                 && session.session_type == demand.session_type
                 && session.demand_key == demand.key
                 && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count()
@@ -260,6 +276,8 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
             .iter()
             .find(|(id, host)| {
                 !host.retired
+                    && !unavailable.contains(*id)
+                    && host.app == spec.app
                     && host.profile == spec.machine_profile
                     && state.sessions.values().filter(|s| s.host == **id && !s.retired).count() < usize::from(limit)
                     && state.sessions.values().filter(|s| s.host == **id && !s.retired).map(|s| s.capacity).sum::<u32>()
@@ -274,7 +292,10 @@ fn select_session(state: &mut State, config: &Config, demand: &chunk_proto::v1::
                 return Err(Error::Capacity);
             }
             let id = uuid::Uuid::new_v4().to_string();
-            state.hosts.insert(id.clone(), HostState { profile: spec.machine_profile.clone(), retired: false });
+            state.hosts.insert(
+                id.clone(),
+                HostState { app: spec.app.clone(), profile: spec.machine_profile.clone(), retired: false },
+            );
             id
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -315,4 +336,73 @@ pub(crate) fn auth<T>(runtime: &RuntimeConnection, body: T, seconds: u64) -> Res
     );
     request.set_timeout(Duration::from_secs(seconds));
     Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn placement_groups_only_matching_apps_and_profiles() {
+        let mut state = State::default();
+        let mut config = Config {
+            apps: BTreeMap::new(),
+            deployment: chunk_proto::v1::DeploymentRef::default(),
+            artifact_digest: "release".into(),
+            profiles: BTreeMap::from([
+                ("small".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 4 }),
+                ("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 4 }),
+            ]),
+            session_types: BTreeMap::new(),
+            max_processes: 4,
+        };
+        for (name, app, profile) in [
+            ("lobby/default", "lobby", "small"),
+            ("arena/default", "arena", "small"),
+            ("arena/large", "arena", "large"),
+        ] {
+            config.session_types.insert(
+                name.into(),
+                crate::SessionType { app: app.into(), machine_profile: profile.into(), capacity: 16 },
+            );
+        }
+        let mut selected = Vec::new();
+        for (key, session_type) in [
+            ("lobby", "lobby/default"),
+            ("arena1", "arena/default"),
+            ("arena2", "arena/default"),
+            ("large", "arena/large"),
+        ] {
+            let session = select_session(
+                &mut state,
+                &config,
+                &chunk_proto::v1::SessionDemand {
+                    key: key.into(),
+                    session_type: session_type.into(),
+                    machine_profile: String::new(),
+                },
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            selected.push(state.sessions[&session].host.clone());
+        }
+        assert_ne!(selected[0], selected[1]);
+        assert_eq!(selected[1], selected[2]);
+        assert_ne!(selected[1], selected[3]);
+        assert_eq!(state.hosts.len(), 3);
+        assert!(
+            select_session(
+                &mut state,
+                &config,
+                &chunk_proto::v1::SessionDemand {
+                    key: "changed".into(),
+                    session_type: "arena/large".into(),
+                    machine_profile: "small".into()
+                },
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+    }
 }

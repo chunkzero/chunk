@@ -1,14 +1,13 @@
 package dev.chunkzero.gradle
 
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import com.google.gson.JsonParser
 import org.gradle.api.DefaultTask
-import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
-import org.gradle.api.tasks.Classpath
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -33,11 +32,10 @@ abstract class WriteChunkModule : DefaultTask() {
     @get:PathSensitive(PathSensitivity.ABSOLUTE)
     abstract val jarFile: RegularFileProperty
 
-    @get:Classpath
-    abstract val classpath: ConfigurableFileCollection
-
-    @get:Input
-    abstract val classpathJson: Property<String>
+    @get:Optional
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sessionCatalog: RegularFileProperty
 
     @get:OutputFile
     abstract val outputFile: RegularFileProperty
@@ -45,12 +43,6 @@ abstract class WriteChunkModule : DefaultTask() {
     @TaskAction
     fun write() {
         val gson = Gson()
-        val dependencies: List<ClasspathEntry> =
-            gson.fromJson(
-                classpathJson.get(),
-                object : TypeToken<List<ClasspathEntry>>() {}.type,
-            )
-        require(dependencies.all { it.file.endsWith(".jar") }) { "JVM runtime dependencies must be JARs" }
         val output = outputFile.get().asFile
         output.parentFile.mkdirs()
         output.writeText(
@@ -61,7 +53,11 @@ abstract class WriteChunkModule : DefaultTask() {
                     jarFile.get().asFile.absolutePath,
                     javaVersion.get(),
                     javaExecutable.get(),
-                    dependencies,
+                    sessionCatalog.orNull
+                        ?.asFile
+                        ?.let {
+                            JsonParser.parseString(it.readText()).asJsonArray.map { session -> session.asString }
+                        }.orEmpty(),
                 ),
             ),
         )

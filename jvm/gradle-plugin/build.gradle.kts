@@ -17,6 +17,8 @@ samWithReceiver { annotation("org.gradle.api.HasImplicitReceiver") }
 
 dependencies {
     implementation(libs.gson)
+    implementation(libs.shadow.gradle.plugin)
+    implementation(libs.asm)
     compileOnly(libs.kotlin.gradle.plugin)
     testImplementation(gradleTestKit())
     testImplementation(platform(libs.junit.bom))

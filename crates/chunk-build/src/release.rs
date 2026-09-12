@@ -29,33 +29,16 @@ pub struct Release {
     pub id: String,
     pub directory: PathBuf,
     pub archive: PathBuf,
+    pub apps: Vec<chunk_contract::AppArtifact>,
 }
 
 #[derive(Serialize)]
 struct Metadata<'a> {
     version: u32,
     java_version: u32,
-    apps: Vec<App<'a>>,
-    classpath: Vec<Dependency>,
-    profiles: BTreeMap<&'a str, &'a project::MachineProfile>,
+    apps: Vec<chunk_contract::AppArtifact>,
+    profiles: BTreeMap<String, &'a project::MachineProfile>,
     assets: BTreeMap<String, String>,
-}
-
-#[derive(Serialize)]
-struct App<'a> {
-    id: &'a str,
-    jar: String,
-    sha256: String,
-    java_version: u32,
-    runtime: &'a project::RuntimeRequirements,
-}
-
-#[derive(Serialize)]
-struct Dependency {
-    file: String,
-    sha256: String,
-    artifact: String,
-    component: descriptor::Component,
 }
 
 #[derive(Serialize)]
@@ -81,30 +64,49 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         return Err(io::Error::other("JVM descriptor apps must exactly match the discovered app inventory"));
     }
     let mut files = Files::new();
-    let mut classes = jars::Classpath::default();
     let mut metadata = Metadata {
-        version: 1,
+        version: 3,
         java_version: jvm.java.version,
         apps: Vec::new(),
-        classpath: Vec::new(),
         profiles: BTreeMap::new(),
         assets: BTreeMap::new(),
     };
     for app in &project.apps {
         let input = descriptor_apps[app.id.as_str()];
         let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
-        classes.add(&bytes, &format!("app {}", app.id), jvm.java.version, Some(&app.id))?;
+        jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
         let sha256 = content_digest(&bytes);
-        let jar = format!("gameplay/lib/{sha256}.jar");
-        insert(&mut files, jar.clone(), bytes)?;
-        metadata.apps.push(App { id: &app.id, jar, sha256, java_version: input.java_version, runtime: &app.runtime });
-        if let Some(profile) = &app.runtime.machine_profile {
-            let local =
-                project.local.as_ref().ok_or_else(|| io::Error::other("missing runtime profile definitions"))?;
-            metadata.profiles.insert(profile, &local.profiles[profile]);
+        let jar = format!("apps/{}/{}.jar", app.id, sha256);
+        if app.sessions.keys().any(|id| !input.sessions.contains(id)) {
+            return Err(io::Error::other(format!("app {} configures an unknown session type", app.id)));
         }
+        let mut sessions = BTreeMap::new();
+        for id in &input.sessions {
+            let requirements = app.sessions.get(id).unwrap_or(&app.runtime);
+            let machine_profile = requirements
+                .machine_profile
+                .as_ref()
+                .or(app.runtime.machine_profile.as_ref())
+                .map_or("default", String::as_str);
+            let capacity = requirements.capacity.or(app.runtime.capacity).unwrap_or(16);
+            if let Some(local) = &project.local {
+                let profile = local
+                    .profiles
+                    .get(machine_profile)
+                    .ok_or_else(|| io::Error::other(format!("unknown machine profile {machine_profile}")))?;
+                metadata.profiles.insert(machine_profile.into(), profile);
+            }
+            sessions.insert(
+                id.clone(),
+                chunk_contract::SessionDeclaration { machine_profile: machine_profile.into(), capacity },
+            );
+        }
+        insert(&mut files, jar.clone(), bytes)?;
+        let artifact =
+            chunk_contract::AppArtifact { id: app.id.clone(), jar, sha256, java_version: input.java_version, sessions };
+        artifact.validate().map_err(io::Error::other)?;
+        metadata.apps.push(artifact);
     }
-    metadata.classpath = classpath(&jvm, &mut classes, &mut files)?;
     assets(&inputs.project.join("assets"), "assets", &mut files, &mut metadata.assets)?;
     for app in &project.apps {
         let directory = format!("{}/assets", app.directory);
@@ -124,7 +126,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     archive::verify_existing(&archive, &archive_path)?;
     let directory = publication::publish_directory(dist, &id, &files)?;
     archive::publish(archive, &archive_path)?;
-    Ok(Release { id, directory, archive: archive_path.canonicalize()? })
+    Ok(Release { id, directory, archive: archive_path.canonicalize()?, apps: metadata.apps })
 }
 
 fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_contract::Deployment> {
@@ -150,38 +152,6 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
         insert(files, "source.mjs.map".into(), read_limited(&source_map, 8 * 1024 * 1024)?)?;
     }
     Ok(backend)
-}
-
-fn classpath(jvm: &JvmDescriptor, classes: &mut jars::Classpath, files: &mut Files) -> io::Result<Vec<Dependency>> {
-    let mut dependencies = BTreeMap::<_, Dependency>::new();
-    let mut versions = BTreeMap::new();
-    let mut inspected = BTreeSet::new();
-    for dependency in &jvm.classpath {
-        if let descriptor::Component::Module { group, name, version } = &dependency.component
-            && versions.insert((group, name), version).is_some_and(|previous| previous != version)
-        {
-            return Err(io::Error::other(format!("conflicting versions of JVM module {group}:{name}")));
-        }
-        let bytes = read_limited(&dependency.file, 128 * 1024 * 1024)?;
-        let sha256 = content_digest(&bytes);
-        let key = (dependency.component.clone(), dependency.artifact.clone());
-        if let Some(previous) = dependencies.get(&key) {
-            if previous.sha256 != sha256 {
-                return Err(io::Error::other(format!("conflicting bytes for JVM artifact {:?}", dependency.artifact)));
-            }
-            continue;
-        }
-        if inspected.insert(sha256.clone()) {
-            classes.add(&bytes, &dependency.artifact, jvm.java.version, None)?;
-        }
-        let file = format!("gameplay/lib/{sha256}.jar");
-        insert(files, file.clone(), bytes)?;
-        dependencies.insert(
-            key,
-            Dependency { file, sha256, artifact: dependency.artifact.clone(), component: dependency.component.clone() },
-        );
-    }
-    Ok(dependencies.into_values().collect())
 }
 
 fn assets(directory: &Path, prefix: &str, files: &mut Files, hashes: &mut BTreeMap<String, String>) -> io::Result<()> {

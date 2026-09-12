@@ -4,7 +4,9 @@ mod delivery;
 mod drain;
 mod host;
 mod moves;
+mod nodes;
 mod placement;
+mod process;
 mod reconcile;
 mod rpc;
 mod state;
@@ -19,15 +21,17 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Host, MachineProfile, ProcessHost, terminate_runtime};
+pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
+pub use process::ProcessHost;
 pub use rpc::Service;
 use state::{Authority, State};
 
 pub use chunk_contract::ControlConnection;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionType {
+    pub app: String,
     pub machine_profile: String,
     pub capacity: u32,
 }
@@ -35,6 +39,7 @@ pub struct SessionType {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
     pub artifact_digest: String,
     pub profiles: BTreeMap<String, MachineProfile>,
@@ -55,12 +60,33 @@ impl Config {
                 .profiles
                 .values()
                 .any(|p| !(128..=8192).contains(&p.memory_mib) || !(1..=16).contains(&p.max_sessions))
-            || self
-                .session_types
-                .values()
-                .any(|s| !(1..=128).contains(&s.capacity) || !self.profiles.contains_key(&s.machine_profile))
+            || self.session_types.values().any(|s| {
+                !self.apps.contains_key(&s.app)
+                    || !(1..=128).contains(&s.capacity)
+                    || !self.profiles.contains_key(&s.machine_profile)
+            })
         {
             return Err(Error::Invalid("invalid local control configuration"));
+        }
+        let mut expected = BTreeMap::new();
+        for (id, app) in &self.apps {
+            app.validate().map_err(|_| Error::Invalid("invalid app manifest"))?;
+            if *id != app.id {
+                return Err(Error::Invalid("app identity mismatch"));
+            }
+            for (session, spec) in &app.sessions {
+                expected.insert(
+                    format!("{id}/{session}"),
+                    SessionType {
+                        app: id.clone(),
+                        machine_profile: spec.machine_profile.clone(),
+                        capacity: spec.capacity,
+                    },
+                );
+            }
+        }
+        if self.session_types != expected {
+            return Err(Error::Invalid("session catalog differs from app manifests"));
         }
         Ok(())
     }
@@ -72,6 +98,7 @@ pub struct Control {
     authority: Mutex<Authority>,
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
+    observations: Mutex<BTreeMap<String, nodes::Observation>>,
 }
 
 impl Control {
@@ -84,6 +111,7 @@ impl Control {
         Ok(Arc::new(Self {
             config,
             host,
+            observations: Mutex::default(),
             authority: Mutex::new(authority),
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
@@ -148,6 +176,3 @@ fn now_ms() -> u64 {
 }
 
 pub mod server;
-
-mod embedded;
-pub use embedded::EmbeddedHost;

@@ -7,3 +7,7 @@ max_processes = 4
 [local.profiles.local]
 memory_mib = 512
 max_sessions = 2
+
+[local.profiles.large]
+memory_mib = 1024
+max_sessions = 2

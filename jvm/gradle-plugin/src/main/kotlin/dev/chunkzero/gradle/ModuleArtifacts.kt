@@ -1,9 +1,9 @@
 package dev.chunkzero.gradle
 
-import com.google.gson.Gson
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.gradle.api.Project
-import org.gradle.api.artifacts.component.ModuleComponentIdentifier
-import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.plugins.JavaApplication
 import org.gradle.api.plugins.JavaPluginExtension
 import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.jvm.tasks.Jar
@@ -13,62 +13,62 @@ internal fun configureModule(
     project: Project,
     appId: String,
 ) {
-    if (appId.isNotEmpty()) {
-        val manifest =
-            project.tasks.register("generateChunkAppManifest", WriteAppManifest::class.java) {
-                app.set(appId)
-                outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/app-resources"))
+    val registry =
+        if (appId.isNotEmpty()) {
+            project.pluginManager.apply("application")
+            project.pluginManager.apply("com.gradleup.shadow")
+            val application = project.extensions.getByType(JavaApplication::class.java)
+            val sources = project.extensions.getByType(SourceSetContainer::class.java).named("main")
+            val registry =
+                project.tasks.register(
+                    "generateChunkSessionRegistry",
+                    WriteSessionRegistry::class.java,
+                ) {
+                    mainClass.set(application.mainClass)
+                    classes.from(sources.map { it.output.classesDirs })
+                    dependencies.from(project.configurations.named("compileClasspath"))
+                    dependsOn(project.tasks.named("compileJava"))
+                    project.plugins.withId(
+                        "org.jetbrains.kotlin.jvm",
+                    ) { dependsOn(project.tasks.named("compileKotlin")) }
+                    outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/session-resources"))
+                    catalogFile.set(project.layout.buildDirectory.file("chunk/sessions.json"))
+                }
+            sources.configure { resources.srcDir(registry.flatMap { it.outputDirectory }) }
+            project.tasks.named("shadowJar", ShadowJar::class.java) {
+                mergeServiceFiles()
+                filesMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
+                    duplicatesStrategy =
+                        DuplicatesStrategy.INCLUDE
+                }
+                filesMatching("**/*.class") {
+                    duplicatesStrategy =
+                        DuplicatesStrategy.FAIL
+                }
+                exclude(
+                    "module-info.class",
+                    "META-INF/versions/*/module-info.class",
+                )
+                isPreserveFileTimestamps = false
+                isReproducibleFileOrder = true
+                failOnDuplicateEntries.set(true)
             }
-        project.extensions.getByType(SourceSetContainer::class.java).named("main") {
-            resources.srcDir(manifest.flatMap { it.outputDirectory })
+            registry
+        } else {
+            null
         }
-    }
     val java = project.extensions.getByType(JavaPluginExtension::class.java)
     val launcher = project.extensions.getByType(JavaToolchainService::class.java).launcherFor(java.toolchain)
-    val runtime = project.configurations.named("runtimeClasspath")
-    val artifacts =
-        runtime
-            .get()
-            .incoming.artifacts.resolvedArtifacts
     val descriptor =
         project.tasks.register("chunkModule", WriteChunkModule::class.java) {
             app.set(appId)
+            registry?.let { sessionCatalog.set(it.flatMap { task -> task.catalogFile }) }
             projectPath.set(project.path)
             javaVersion.set(java.toolchain.languageVersion.map { it.asInt() })
             javaExecutable.set(launcher.map { it.executablePath.asFile.absolutePath })
-            jarFile.set(project.tasks.named("jar", Jar::class.java).flatMap { it.archiveFile })
-            classpath.from(runtime)
-            classpathJson.set(
-                artifacts.map { resolved ->
-                    Gson().toJson(
-                        resolved
-                            .map { artifact ->
-                                val component =
-                                    when (val id = artifact.id.componentIdentifier) {
-                                        is ModuleComponentIdentifier -> {
-                                            mapOf(
-                                                "kind" to "module",
-                                                "group" to id.group,
-                                                "name" to id.module,
-                                                "version" to id.version,
-                                            )
-                                        }
-
-                                        is ProjectComponentIdentifier -> {
-                                            mapOf(
-                                                "kind" to "project",
-                                                "build" to id.build.buildPath,
-                                                "path" to id.projectPath,
-                                            )
-                                        }
-
-                                        else -> {
-                                            error("Unsupported JVM dependency component: $id")
-                                        }
-                                    }
-                                ClasspathEntry(artifact.file.absolutePath, artifact.file.name, component)
-                            }.sortedWith(compareBy({ it.component.toString() }, { it.artifact })),
-                    )
+            jarFile.set(
+                project.tasks.named(if (appId.isEmpty()) "jar" else "shadowJar", Jar::class.java).flatMap {
+                    it.archiveFile
                 },
             )
             outputFile.set(project.layout.buildDirectory.file("chunk/module.json"))
@@ -79,17 +79,11 @@ internal fun configureModule(
     }
 }
 
-internal data class ClasspathEntry(
-    val file: String,
-    val artifact: String,
-    val component: Map<String, String>,
-)
-
 internal data class ModuleArtifact(
     val app: String,
     val projectPath: String,
     val jar: String,
     val javaVersion: Int,
     val javaExecutable: String,
-    val classpath: List<ClasspathEntry>,
+    val sessions: List<String>,
 )

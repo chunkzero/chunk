@@ -7,6 +7,7 @@ import dev.chunkzero.runtime.Session
 import dev.chunkzero.runtime.SessionScope
 import dev.chunkzero.runtime.coroutines
 import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.launch
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
 import net.minestom.server.MinecraftServer
