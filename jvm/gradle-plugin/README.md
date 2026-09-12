@@ -5,13 +5,26 @@
 new app folder to include it on the next build, including with the configuration cache. The project root requires
 `chunk.toml`; an empty file is valid.
 
-For a Java project:
+For a Java project after the SDK version is published (see [distribution](../../docs/distribution.md) for the local
+packaged repository):
 
 ```kotlin
 // settings.gradle.kts
+pluginManagement {
+    repositories {
+        maven("https://maven.chunkzero.com")
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
 plugins { id("dev.chunkzero.chunk.settings") version "0.1.0" }
 rootProject.name = "my-game"
-dependencyResolutionManagement { repositories { mavenCentral() } }
+dependencyResolutionManagement {
+    repositories {
+        maven("https://maven.chunkzero.com")
+        mavenCentral()
+    }
+}
 ```
 
 ```kotlin

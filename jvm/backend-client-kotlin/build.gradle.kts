@@ -1,4 +1,7 @@
-plugins { id("chunk.kotlin-conventions") }
+plugins {
+    id("chunk.kotlin-conventions")
+    id("chunk.publishing-conventions")
+}
 
 dependencies {
     api(project(":jvm:backend-client"))

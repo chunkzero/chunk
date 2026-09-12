@@ -129,11 +129,11 @@ Authentication, `auth whoami`, and `auth logout` remain stubs. Login saves only 
 will use target-scoped OS credential storage, with `CHUNK_API_TOKEN` as a CI override; that variable is currently
 unused.
 
-Run `just toolchain` before using the build command from a checkout. `just package-cli` assembles the CLI and pinned
-native TypeScript compiler under `target/dist`. Consumer builds need their project Gradle wrapper and an explicit Java
-toolchain. `chunk.toml` and immediate `apps/*/app.toml` files define the project; `chunk dev` requires `[local]`
-settings. Local state defaults to `PROJECT/.chunk/local`. Explicit `--output` and `--state` paths are relative to the
-working directory.
+Run `just toolchain` before using the build command from a checkout. `just package-cli` creates a versioned SDK archive
+under `target/dist`; see [SDK distribution](docs/distribution.md) for installation, verification and publishing.
+Consumer builds need their project Gradle wrapper and an explicit Java toolchain. `chunk.toml` and immediate
+`apps/*/app.toml` files define the project; `chunk dev` requires `[local]` settings. Local state defaults to
+`PROJECT/.chunk/local`. Explicit `--output` and `--state` paths are relative to the working directory.
 
 To package the example without starting services, run `just toolchain`, then `target/debug/chunk build examples/local`.
 Its releases appear in `examples/local/dist`; `just local` builds and runs the same project with state under
