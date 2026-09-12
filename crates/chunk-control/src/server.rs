@@ -67,15 +67,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
             }
         };
         tokio::pin!(reconcile);
-        let health = async {
-            let mut timer = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
-                if let Err(error) = control.poll_health().await {
-                    tracing::warn!(%error, "node health poll failed");
-                }
-            }
-        };
+        let health = monitor_health(&control, &stop);
         tokio::pin!(health);
         tracing::info!(%address, "control ready");
         let result = tokio::select! {
@@ -97,4 +89,16 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     operations.wait().await;
     let stopped = control.shutdown().await.map_err(io::Error::other);
     result.and(stopped)
+}
+
+pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationToken) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    // Missed samples must not turn one JVM tick into several failed health checks.
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
+        if let Err(error) = control.poll_health().await {
+            tracing::warn!(%error, "node health poll failed");
+        }
+    }
 }
