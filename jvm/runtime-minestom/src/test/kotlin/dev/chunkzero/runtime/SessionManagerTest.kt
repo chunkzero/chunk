@@ -66,7 +66,7 @@ class SessionManagerTest {
                     GameProfile(UUID.randomUUID(), "test"),
                 )
             val joined = session.join(player)
-            ticks.flush()
+            repeat(2) { ticks.flush() }
             joined.join()
             session.scope.own(player, AutoCloseable { error("Disposal failed") })
             val leavingResult = session.leave(player)
@@ -74,6 +74,7 @@ class SessionManagerTest {
             assertTrue(leaving)
             assertFalse(leavingResult.isDone)
             left.complete(null)
+            ticks.flush()
             assertTrue(leavingResult.isCompletedExceptionally)
             val ended = manager.finish(command)
             repeat(8) { ticks.flush() }

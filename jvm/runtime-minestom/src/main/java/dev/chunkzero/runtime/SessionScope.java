@@ -2,14 +2,19 @@ package dev.chunkzero.runtime;
 
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.OperationId;
+import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent;
+import dev.chunkzero.runtime.minestom.event.SessionEvent;
 
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.entity.Player;
+import net.minestom.server.event.Event;
+import net.minestom.server.event.EventDispatcher;
 import net.minestom.server.event.EventFilter;
 import net.minestom.server.event.EventNode;
 import net.minestom.server.event.trait.PlayerEvent;
 import net.minestom.server.instance.InstanceContainer;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
@@ -40,7 +45,7 @@ public final class SessionScope {
     private final Map<Player, List<AutoCloseable>> playerResources = new IdentityHashMap<>();
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
     private final Set<Player> players = ConcurrentHashMap.newKeySet();
-    private final EventNode<PlayerEvent> events;
+    private final EventNode<Event> events;
     private boolean disposed;
 
     SessionScope(
@@ -55,8 +60,14 @@ public final class SessionScope {
         this.requestFinish = requestFinish;
         this.backend = backend;
         events =
-                EventNode.value(
-                        "session-" + id + "-" + generation, EventFilter.PLAYER, players::contains);
+                EventNode.event(
+                        "session-" + id + "-" + generation,
+                        EventFilter.ALL,
+                        event ->
+                                event instanceof SessionEvent lifecycle
+                                        ? lifecycle.getSession() == this
+                                        : event instanceof PlayerEvent player
+                                                && players.contains(player.getPlayer()));
         MinecraftServer.getGlobalEventHandler().addChild(events);
         if (backend != null) resources.add(backend);
     }
@@ -73,7 +84,8 @@ public final class SessionScope {
         return backend;
     }
 
-    public EventNode<PlayerEvent> getEvents() {
+    /** Receives this scope's lifecycle notifications and its admitted players' Minestom events. */
+    public @NotNull EventNode<Event> getEvents() {
         return events;
     }
 
@@ -185,11 +197,18 @@ public final class SessionScope {
         if (disposed) return;
         if (!players.isEmpty()) throw new IllegalStateException("Session still has players");
         disposed = true;
-        MinecraftServer.getGlobalEventHandler().removeChild(events);
         try {
-            closeResources(resources);
+            try {
+                closeResources(resources);
+            } finally {
+                ownedInstances.forEach(MinecraftServer.getInstanceManager()::unregisterInstance);
+            }
         } finally {
-            ownedInstances.forEach(MinecraftServer.getInstanceManager()::unregisterInstance);
+            try {
+                EventDispatcher.call(new SessionDestroyEvent(this));
+            } finally {
+                MinecraftServer.getGlobalEventHandler().removeChild(events);
+            }
         }
     }
 

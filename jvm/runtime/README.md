@@ -67,12 +67,39 @@ and begin on the process tick thread. Do not block that thread. Resume asynchron
 completes and at least one instance exists. `scope.finish()` requests ending; do not await it from a lifecycle hook
 whose own completion ending must await.
 
-`SessionScope` owns up to 16 instances, player-filtered events, repeating tasks and registered `AutoCloseable` resources
-such as subscriptions. Instance event nodes remain available for instance-local events. Direct global registrations
-require explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then removes only that scope's
-listeners, tasks, resources and instances. A process retains at most 256 session identities and 4096 delivery
-operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a host
-deadline terminates the process; they never produce a false withdrawal acknowledgment.
+`SessionScope` owns up to 16 instances, session/player-filtered events, repeating tasks and registered `AutoCloseable`
+resources such as subscriptions. Instance event nodes remain available for instance-local events. Direct global
+registrations require explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then removes only
+that scope's listeners, tasks, resources and instances. A process retains at most 256 session identities and 4096
+delivery operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a
+host deadline terminates the process; they never produce a false withdrawal acknowledgment.
+
+Lifecycle notifications live in `dev.chunkzero.runtime.minestom.event`. `SessionEvent` exposes `getSession()`, the
+owning `SessionScope` with its ID and generation. `SessionJoinEvent` and `SessionLeaveEvent` also implement Minestom's
+`PlayerEvent`. Subscribe to concrete event classes globally to observe all sessions in the JVM:
+
+```java
+MinecraftServer.getGlobalEventHandler().addListener(SessionJoinEvent.class, event -> {
+    System.out.printf("%s joined session %s%n",
+        event.getPlayer().getUsername(), event.getSession().getId());
+});
+```
+
+Register on `scope.events` during `onCreate` to observe only that session. Its `EventNode<Event>` receives session
+lifecycle events even after player membership has ended, alongside the existing admitted-player Minestom events.
+
+| Event                 | Timing                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| `SessionCreateEvent`  | Creation succeeded and instances are available.                                         |
+| `SessionJoinEvent`    | The player's join hook succeeded, before control confirms arrival.                      |
+| `SessionLeaveEvent`   | A joined player's membership ended and its leave hook settled, including failures.      |
+| `SessionDestroyEvent` | Scope cleanup settled, before its node is detached; also emitted after failed creation. |
+
+Notifications run synchronously on the process tick thread using Minestom's normal exception handling. They are
+non-cancellable and do not replace the awaited lifecycle hooks. Failed admissions emit neither join nor leave events.
+The scope is disposed during a destroy callback: its identity remains readable, but resources and new work are
+unavailable. Minestom listeners target concrete classes; listening to the `SessionEvent` interface does not subscribe to
+every implementation.
 
 Delivery pins session generation as well as process/deployment and player ownership. A prepared delivery reserves
 capacity. Native Minecraft login attaches the player. `onJoin` begins after Minestom spawn completes, so it can send

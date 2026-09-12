@@ -5,14 +5,21 @@ import chunk.v1.Supervision.SessionInventory;
 import chunk.v1.Supervision.SessionPhase;
 
 import dev.chunkzero.backend.client.BackendSession;
+import dev.chunkzero.runtime.minestom.event.SessionCreateEvent;
+import dev.chunkzero.runtime.minestom.event.SessionJoinEvent;
+import dev.chunkzero.runtime.minestom.event.SessionLeaveEvent;
 
 import net.minestom.server.entity.Player;
+import net.minestom.server.event.EventDispatcher;
 
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -143,6 +150,7 @@ public final class SessionManager {
         private final SessionScope scope;
         private final CompletableFuture<Void> ready = new CompletableFuture<>();
         private final CompletableFuture<Void> ended = new CompletableFuture<>();
+        private final Set<Player> joined = Collections.newSetFromMap(new IdentityHashMap<>());
         private volatile SessionPhase phase = SessionPhase.SESSION_PHASE_STARTING;
         private boolean finishing;
         private @Nullable Throwable creationFailure;
@@ -181,6 +189,8 @@ public final class SessionManager {
                                                         && !scope.getInstances().isEmpty()) {
                                                     if (!finishing)
                                                         phase = SessionPhase.SESSION_PHASE_READY;
+                                                    EventDispatcher.call(
+                                                            new SessionCreateEvent(scope));
                                                     ready.complete(null);
                                                 } else {
                                                     phase = SessionPhase.SESSION_PHASE_FAILED;
@@ -205,7 +215,18 @@ public final class SessionManager {
                                 scope.getPlayers().add(player);
                                 return invoke(() -> behavior.onJoin(player));
                             })
-                    .thenCompose(Function.identity());
+                    .thenCompose(Function.identity())
+                    .thenCompose(
+                            ignored ->
+                                    ticks.submit(
+                                            () -> {
+                                                if (scope.getPlayers().contains(player)
+                                                        && joined.add(player)) {
+                                                    EventDispatcher.call(
+                                                            new SessionJoinEvent(scope, player));
+                                                }
+                                                return null;
+                                            }));
         }
 
         public CompletableFuture<Void> leave(Player player) {
@@ -221,19 +242,27 @@ public final class SessionManager {
                                 }
                                 var failure = disposalFailure;
                                 return invoke(() -> behavior.onLeave(player))
-                                        .<Void>handle(
+                                        .handle(
                                                 (ignored, error) -> {
-                                                    if (failure != null) {
-                                                        if (error != null)
-                                                            failure.addSuppressed(error);
-                                                        throw new CompletionException(failure);
-                                                    }
-                                                    if (error != null)
-                                                        throw new CompletionException(error);
-                                                    return null;
-                                                });
+                                                    if (failure != null && error != null)
+                                                        failure.addSuppressed(error);
+                                                    return notifyLeave(
+                                                            player,
+                                                            failure == null ? error : failure);
+                                                })
+                                        .thenCompose(Function.identity());
                             })
                     .thenCompose(Function.identity());
+        }
+
+        private CompletableFuture<Void> notifyLeave(Player player, @Nullable Throwable failure) {
+            return ticks.submit(
+                    () -> {
+                        if (joined.remove(player))
+                            EventDispatcher.call(new SessionLeaveEvent(scope, player));
+                        if (failure != null) throw new CompletionException(failure);
+                        return null;
+                    });
         }
 
         CompletableFuture<Void> finish() {
