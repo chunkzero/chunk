@@ -70,7 +70,7 @@ The JVM has a Java core and optional Kotlin adapters:
 | `jvm/backend-client`                              | Asynchronous Java calls, mutation operation IDs and watch state             |
 | `jvm/runtime`                                     | Generic Java 25 process lifecycle, deployment binding, readiness and health |
 | `jvm/runtime-minestom`                            | Minestom sessions, scoped resources, player admission and tick scheduling   |
-| `jvm/backend-client-kotlin`, `jvm/runtime-kotlin` | Owned coroutine scopes, suspending hooks and Flow adapters                  |
+| `jvm/backend-client-kotlin`, `jvm/runtime-minestom-kotlin` | Owned coroutine scopes, suspending hooks and Flow adapters                  |
 | `jvm/proto`                                       | Generated Java protobuf and asynchronous gRPC bindings                      |
 | `jvm/gradle-plugin`                               | App discovery, explicit JVM toolchains, generation and artifact descriptors |
 

@@ -21,7 +21,7 @@ class ChunkKotlinPlugin : Plugin<Project> {
             }
             applyKotlin(project)
             project.dependencies.add("implementation", project.dependencies.project(mapOf("path" to KOTLIN_BINDINGS)))
-            project.dependencies.add("implementation", framework("runtime-kotlin"))
+            project.dependencies.add("implementation", framework("runtime-minestom-kotlin"))
         }
     }
 }

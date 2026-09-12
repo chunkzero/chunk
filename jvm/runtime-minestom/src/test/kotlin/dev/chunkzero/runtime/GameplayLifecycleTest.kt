@@ -11,7 +11,7 @@ import chunk.v1.GameplayOuterClass.PlayerWithdrawal
 import chunk.v1.Supervision.DeliveryPhase
 import chunk.v1.Supervision.SessionCommand
 import dev.chunkzero.runtime.bootstrap.FlatSession
-import dev.chunkzero.runtime.delivery.GameplayService
+import dev.chunkzero.runtime.minestom.internal.GameplayService
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftServer

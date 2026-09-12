@@ -1,8 +1,10 @@
 package dev.chunkzero.runtime;
 
-import dev.chunkzero.runtime.bootstrap.AppRegistry;
-import dev.chunkzero.runtime.control.ProcessService;
-import dev.chunkzero.runtime.delivery.GameplayService;
+import chunk.v1.Supervision.SessionInventory;
+
+import dev.chunkzero.runtime.minestom.internal.AppRegistry;
+import dev.chunkzero.runtime.minestom.internal.GameplayService;
+import dev.chunkzero.runtime.minestom.internal.ProcessService;
 
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.timer.Task;
@@ -28,22 +30,20 @@ public final class ChunkMinestom implements AutoCloseable {
     private @Nullable Task task;
     private boolean started;
 
-    private ChunkMinestom(ChunkProcess process, MinecraftServer minecraft) throws IOException {
+    private ChunkMinestom(ChunkProcess process, MinecraftServer minecraft) {
         this.process = process;
         this.minecraft = minecraft;
-        var app = AppRegistry.read(Thread.currentThread().getContextClassLoader());
-        if (!app.manifest().equals(process.manifest()))
-            throw new IllegalArgumentException("App contract changed");
+        var app = process.manifest();
+        var registered = AppRegistry.load(app, Thread.currentThread().getContextClassLoader());
         var factories = new TreeMap<String, SessionRegistration>();
         var capacities = new TreeMap<String, Integer>();
-        app.manifest()
-                .sessions()
+        app.sessions()
                 .forEach(
                         (id, spec) -> {
                             if (spec.machineProfile()
                                     .equals(process.identity().getMachineProfile())) {
-                                var key = app.manifest().id() + "/" + id;
-                                factories.put(key, app.factories().get(key));
+                                var key = app.id() + "/" + id;
+                                factories.put(key, registered.get(key));
                                 capacities.put(key, spec.capacity());
                             }
                         });
@@ -70,11 +70,10 @@ public final class ChunkMinestom implements AutoCloseable {
     }
 
     /** Attach before starting the listener. Closing this integration stops Minestom. */
-    public static ChunkMinestom attach(ChunkProcess process, MinecraftServer minecraft)
-            throws IOException {
+    public static ChunkMinestom attach(ChunkProcess process, MinecraftServer minecraft) {
         try {
             return new ChunkMinestom(process, minecraft);
-        } catch (IOException | RuntimeException | Error error) {
+        } catch (RuntimeException | Error error) {
             MinecraftServer.process().stop();
             throw error;
         }
@@ -94,10 +93,7 @@ public final class ChunkMinestom implements AutoCloseable {
                                         process.progress(
                                                 inventory.size(),
                                                 inventory.stream()
-                                                        .mapToInt(
-                                                                chunk.v1.Supervision
-                                                                                .SessionInventory
-                                                                        ::getAttached)
+                                                        .mapToInt(SessionInventory::getAttached)
                                                         .sum());
                                     })
                             .repeat(TaskSchedule.tick(1))

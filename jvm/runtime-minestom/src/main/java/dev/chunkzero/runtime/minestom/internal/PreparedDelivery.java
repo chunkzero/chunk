@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime.delivery;
+package dev.chunkzero.runtime.minestom.internal;
 
 import chunk.v1.Common.Identity;
 import chunk.v1.GameplayOuterClass.PlayerDelivery;

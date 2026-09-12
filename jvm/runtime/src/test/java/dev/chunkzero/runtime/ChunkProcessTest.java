@@ -18,6 +18,7 @@ import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +29,33 @@ import java.util.concurrent.atomic.AtomicReference;
 class ChunkProcessTest {
     @TempDir Path directory;
     private static final String TOKEN = "test-process-credential-with-32-bytes";
+
+    @Test
+    void missingAndDuplicateManifestsAreRejectedBeforeConnecting() throws Exception {
+        var environment = environment(1, 1);
+        try (var loader = new URLClassLoader(new URL[0], getClass().getClassLoader())) {
+            var error =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> new ChunkProcess(environment, loader));
+            assertTrue(error.getMessage().contains("exactly one"), error.toString());
+        }
+        var urls = new URL[2];
+        for (var index = 0; index < urls.length; index++) {
+            var root = directory.resolve("app-" + index);
+            var metadata = root.resolve("META-INF/chunk/app.json");
+            Files.createDirectories(metadata.getParent());
+            Files.writeString(metadata, "{}");
+            urls[index] = root.toUri().toURL();
+        }
+        try (var loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            var error =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> new ChunkProcess(environment, loader));
+            assertTrue(error.getMessage().contains("exactly one"), error.toString());
+        }
+    }
 
     @Test
     void readinessIsExplicitAndShutdownIsAuthenticatedAndIrreversible() throws Exception {
@@ -68,23 +96,10 @@ class ChunkProcessTest {
                 {"version":2,"id":"app","main_class":"test.Main","sessions":{
                     "default":{"provider":"test.Factory","machine_profile":"local","capacity":16}}}
                 """);
-        var environment =
-                new RuntimeEnvironment(
-                        TOKEN,
-                        "test",
-                        "release",
-                        "http://127.0.0.1:" + supervisor.getPort(),
-                        "node",
-                        "process",
-                        1,
-                        "local",
-                        "digest",
-                        "app",
-                        "http://127.0.0.1:" + backend.getPort(),
-                        TOKEN);
+        var environment = environment(supervisor.getPort(), backend.getPort());
         try (var loader =
                         new URLClassLoader(
-                                new java.net.URL[] {directory.toUri().toURL()},
+                                new URL[] {directory.toUri().toURL()},
                                 getClass().getClassLoader());
                 var process = new ChunkProcess(environment, loader)) {
             assertFalse(process.isReady());
@@ -138,5 +153,21 @@ class ChunkProcessTest {
             supervisor.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             backend.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
         }
+    }
+
+    private static RuntimeEnvironment environment(int supervisorPort, int backendPort) {
+        return new RuntimeEnvironment(
+                TOKEN,
+                "test",
+                "release",
+                "http://127.0.0.1:" + supervisorPort,
+                "node",
+                "process",
+                1,
+                "local",
+                "digest",
+                "app",
+                "http://127.0.0.1:" + backendPort,
+                TOKEN);
     }
 }

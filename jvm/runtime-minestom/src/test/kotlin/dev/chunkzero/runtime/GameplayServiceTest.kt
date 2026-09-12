@@ -12,7 +12,7 @@ import chunk.v1.GameplayOuterClass.PlayerSetup
 import com.google.protobuf.ByteString
 import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.control.ProcessAuthentication
-import dev.chunkzero.runtime.delivery.GameplayService
+import dev.chunkzero.runtime.minestom.internal.GameplayService
 import io.grpc.Metadata
 import io.grpc.Status
 import io.grpc.StatusRuntimeException

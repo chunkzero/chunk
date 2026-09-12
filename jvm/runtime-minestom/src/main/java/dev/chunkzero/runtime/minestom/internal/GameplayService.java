@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime.delivery;
+package dev.chunkzero.runtime.minestom.internal;
 
 import chunk.v1.Common.DeploymentRef;
 import chunk.v1.GameplayGrpc;
@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
@@ -51,7 +52,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
     private final ConfigurationResponse configurationArtifact;
     private final EventNode<Event> events = EventNode.all("gameplay-delivery");
     private String endpoint = "";
-    private final java.util.function.BooleanSupplier ready;
+    private final BooleanSupplier ready;
 
     public GameplayService(
             DeploymentRef deployment,
@@ -68,7 +69,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
             SessionManager manager,
             LongSupplier now,
             String runtimeId,
-            java.util.function.BooleanSupplier ready) {
+            BooleanSupplier ready) {
         this.ready = ready;
         this.deployment = deployment;
         this.generation = generation;
@@ -101,10 +102,6 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
         events.addListener(AsyncPlayerPreLoginEvent.class, this::preLogin);
         events.addListener(AsyncPlayerConfigurationEvent.class, this::configure);
         MinecraftServer.getGlobalEventHandler().addChild(events);
-    }
-
-    public ConfigurationResponse getConfigurationArtifact() {
-        return configurationArtifact;
     }
 
     public String getEndpoint() {

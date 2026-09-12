@@ -3,7 +3,7 @@
 `jvm:runtime` is the engine-independent Java 25 library. `ChunkProcess` owns immutable deployment identity, backend
 binding, registration, explicit readiness, health reporting and shutdown notification. It has no Minestom or Kotlin
 production dependency. `jvm:runtime-minestom` supplies `ChunkMinestom`, sessions, players, worlds, tick scheduling and
-Minecraft admission. `jvm:runtime-kotlin` adds coroutine conveniences to the Minestom integration. Hytale integration is
+Minecraft admission. `jvm:runtime-minestom-kotlin` adds coroutine conveniences to the Minestom integration. Hytale integration is
 future work.
 
 Each app is an executable JAR containing its own dependencies. Configure `application.mainClass` in the app's Gradle
@@ -53,8 +53,9 @@ authorize native login. There is no per-server Rust process or intermediate TCP 
 socket buffering, player creation and worlds. The current host and engine adapter are local; hosted networking/providers
 require additional implementations. Use `just local` to run the example.
 
-The `dev.chunkzero.runtime` package retains the public app/session API. `bootstrap`, `control` and `delivery` contain
-internal wiring marked `@ApiStatus.Internal` where cross-package access is required.
+The `dev.chunkzero.runtime` package retains the public app/session API. Generic process wiring lives in `bootstrap`
+and `control`; Minestom wiring lives in `minestom.internal`. Cross-package implementation APIs are marked
+`@ApiStatus.Internal`.
 
 Session implementations extend `Session`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>`
 and begin on the process tick thread. Do not block that thread. Resume asynchronous world changes with
@@ -92,7 +93,7 @@ Session hooks run through the process tick executor. Withdrawal waits for pendin
 player and runs its leave hook before releasing the ownership fence. Arrival is reported after spawn and teleport
 acknowledgment.
 
-Kotlin applications depend on `jvm:runtime-kotlin`, import `dev.chunkzero.runtime.coroutines`, and can extend
+Kotlin applications depend on `jvm:runtime-minestom-kotlin`, import `dev.chunkzero.runtime.coroutines`, and can extend
 `CoroutineSession` and implement suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` is a
 session-owned `CoroutineScope` with the process tick dispatcher as its default. Use standard coroutine extensions such
 as `kotlinx.coroutines.launch`, `async`, `future`, and `Flow.launchIn`; disposal cancels the scope's jobs. Wrap a Java
@@ -110,5 +111,5 @@ Put final result mutations in `finish()`: the manager awaits that hook before cl
 termination with `scope.finish()` without awaiting it from work that the same termination will cancel. Slow Flow
 collectors fail at 64 queued updates instead of dropping stale transitions. Both languages use the same
 `SessionProvider.create()` registration contract. The [Java consumer](../../examples/java/README.md) demonstrates the
-Java lifecycle and generated client without Kotlin dependencies. The coroutine adapters live in `jvm:runtime-kotlin`;
+Java lifecycle and generated client without Kotlin dependencies. The coroutine adapters live in `jvm:runtime-minestom-kotlin`;
 backend-only Java consumers use `jvm:backend-client`.

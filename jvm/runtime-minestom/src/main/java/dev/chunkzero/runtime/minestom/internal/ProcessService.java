@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime.control;
+package dev.chunkzero.runtime.minestom.internal;
 
 import chunk.v1.ProcessControlGrpc;
 import chunk.v1.Supervision.ProcessIdentity;
@@ -8,13 +8,14 @@ import chunk.v1.Supervision.SessionInventory;
 
 import dev.chunkzero.runtime.ChunkProcess;
 import dev.chunkzero.runtime.SessionManager;
-import dev.chunkzero.runtime.delivery.GameplayService;
 
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
 import org.jetbrains.annotations.ApiStatus;
 
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -26,7 +27,7 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
     private final SessionManager sessions;
     private final LongSupplier ticks;
     private final ChunkProcess process;
-    private final java.util.Map<String, Integer> capacities;
+    private final Map<String, Integer> capacities;
 
     public ProcessService(
             ProcessIdentity identity,
@@ -34,13 +35,13 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
             SessionManager sessions,
             LongSupplier ticks,
             ChunkProcess process,
-            java.util.Map<String, Integer> capacities) {
+            Map<String, Integer> capacities) {
         this.identity = identity;
         this.gameplay = gameplay;
         this.sessions = sessions;
         this.ticks = ticks;
         this.process = process;
-        this.capacities = java.util.Map.copyOf(capacities);
+        this.capacities = Map.copyOf(capacities);
     }
 
     @Override
@@ -65,8 +66,7 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
 
     @Override
     public void createSession(SessionCommand request, StreamObserver<SessionInventory> response) {
-        if (!java.util.Objects.equals(
-                capacities.get(request.getSessionType()), request.getCapacity())) {
+        if (!Objects.equals(capacities.get(request.getSessionType()), request.getCapacity())) {
             response.onError(
                     Status.FAILED_PRECONDITION
                             .withDescription("Session declaration mismatch")

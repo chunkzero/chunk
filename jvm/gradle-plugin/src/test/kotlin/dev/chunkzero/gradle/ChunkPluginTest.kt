@@ -184,7 +184,12 @@ class ChunkPluginTest {
         """,
         )
         write("chunk.toml", "")
-        listOf("backend-client", "runtime-minestom", "backend-client-kotlin", "runtime-kotlin").forEach(::module)
+        listOf(
+            "backend-client",
+            "runtime-minestom",
+            "backend-client-kotlin",
+            "runtime-minestom-kotlin",
+        ).forEach(::module)
         write(
             "chunk-fixture",
             """

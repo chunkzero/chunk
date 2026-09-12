@@ -1,9 +1,7 @@
-package dev.chunkzero.runtime.control;
+package dev.chunkzero.runtime;
 
 import chunk.v1.Supervision;
 import chunk.v1.Supervision.ProcessIdentity;
-
-import org.jetbrains.annotations.ApiStatus;
 
 import java.lang.management.ManagementFactory;
 import java.util.concurrent.TimeUnit;
@@ -11,8 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Engine progress is recorded on ticks, independently of the RPC threads. */
-@ApiStatus.Internal
-public final class ProcessHealth {
+final class ProcessHealth {
     private final AtomicLong ticks;
     private volatile long lastTick;
     private volatile int sessions;
@@ -20,30 +17,30 @@ public final class ProcessHealth {
     private final AtomicBoolean ready = new AtomicBoolean();
     private final AtomicBoolean draining = new AtomicBoolean();
 
-    public ProcessHealth(AtomicLong ticks) {
+    ProcessHealth(AtomicLong ticks) {
         this.ticks = ticks;
     }
 
-    public void tick(int sessions, int players) {
+    void tick(int sessions, int players) {
         this.sessions = sessions;
         this.players = players;
         lastTick = System.nanoTime();
         ticks.incrementAndGet();
     }
 
-    public void ready(boolean value) {
+    void ready(boolean value) {
         ready.set(value);
     }
 
-    public void drain() {
+    void drain() {
         draining.set(true);
     }
 
-    public boolean acceptsWork() {
+    boolean acceptsWork() {
         return ready.get() && !draining.get();
     }
 
-    public Supervision.ProcessHealth snapshot(ProcessIdentity identity) {
+    Supervision.ProcessHealth snapshot(ProcessIdentity identity) {
         var memory = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
         long count = 0;
         long millis = 0;

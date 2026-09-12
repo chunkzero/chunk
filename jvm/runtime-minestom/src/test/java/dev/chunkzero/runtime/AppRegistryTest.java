@@ -2,7 +2,8 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import dev.chunkzero.runtime.bootstrap.AppRegistry;
+import dev.chunkzero.runtime.bootstrap.AppManifest;
+import dev.chunkzero.runtime.minestom.internal.AppRegistry;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,17 +26,14 @@ import java.util.jar.JarOutputStream;
 import javax.tools.ToolProvider;
 
 class AppRegistryTest {
-    private static final String APP_MANIFEST = "META-INF/chunk/app.json";
-    private static final String SESSION_PROVIDER =
-            "META-INF/services/dev.chunkzero.runtime.SessionProvider";
     @TempDir Path directory;
 
     @Test
     void generatedCatalogCreatesIndependentSessionsWithFixedCallerIdentity() throws Exception {
         var lobby = compile("lobby");
-        var jar = jar("lobby.jar", lobby.classes(), "lobby", lobby.provider());
+        var jar = jar("lobby.jar", lobby.classes());
         try (var loader = loader(jar)) {
-            var apps = AppRegistry.load(loader);
+            var apps = AppRegistry.load(manifest("lobby", lobby.provider()), loader);
             assertEquals(List.of("lobby/default"), new ArrayList<>(apps.keySet()));
             var factory = apps.get("lobby/default");
             var first = factory.create();
@@ -52,22 +50,16 @@ class AppRegistryTest {
     }
 
     @Test
-    void missingDuplicateAndInvalidDeclarationsFailBeforeCreation() throws Exception {
-        var lobby = compile("lobby");
-        var valid = jar("valid.jar", lobby.classes(), "lobby", lobby.provider());
-        assertInvalid("exactly one", jar("orphan.jar", lobby.classes(), null, null));
-        assertInvalid(
-                "exactly one", valid, jar("duplicate.jar", Map.of(), "other", lobby.provider()));
-        assertInvalid(
-                "Invalid session provider",
-                jar("absent.jar", Map.of(), "lobby", "missing.Provider"));
-    }
-
-    private void assertInvalid(String message, Path... jars) throws Exception {
-        try (var loader = loader(jars)) {
+    void missingAndInvalidProvidersFailBeforeCreation() {
+        for (var provider : List.of("missing.Provider", "java.lang.String")) {
             var error =
-                    assertThrows(IllegalArgumentException.class, () -> AppRegistry.load(loader));
-            assertTrue(error.getMessage().contains(message), error.toString());
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () ->
+                                    AppRegistry.load(
+                                            manifest("lobby", provider),
+                                            getClass().getClassLoader()));
+            assertTrue(error.getMessage().contains("Invalid session provider"), error.toString());
         }
     }
 
@@ -128,16 +120,10 @@ class AppRegistryTest {
         return new Fixture("fixtures." + app + ".Provider", entries);
     }
 
-    private Path jar(String name, Map<String, byte[]> classes, String app, String provider)
-            throws IOException {
-        var entries = new TreeMap<>(classes);
-        if (app != null)
-            entries.put(APP_MANIFEST, manifest(app, provider).getBytes(StandardCharsets.UTF_8));
-        if (provider != null)
-            entries.put(SESSION_PROVIDER, (provider + "\n").getBytes(StandardCharsets.UTF_8));
+    private Path jar(String name, Map<String, byte[]> classes) throws IOException {
         var path = directory.resolve(name);
         try (var output = new JarOutputStream(Files.newOutputStream(path))) {
-            for (var entry : entries.entrySet()) {
+            for (var entry : classes.entrySet()) {
                 output.putNextEntry(new JarEntry(entry.getKey()));
                 output.write(entry.getValue());
                 output.closeEntry();
@@ -146,12 +132,12 @@ class AppRegistryTest {
         return path;
     }
 
-    private static String manifest(String app, String provider) {
-        return """
-        {"version":2,"id":"%s","main_class":"test.Main","sessions":{
-          "default":{"provider":"%s","machine_profile":"small","capacity":16}}}
-        """
-                .formatted(app, provider);
+    private static AppManifest manifest(String app, String provider) {
+        return new AppManifest(
+                2,
+                app,
+                "test.Main",
+                Map.of("default", new AppManifest.Factory(provider, "small", 16)));
     }
 
     private record Fixture(String provider, Map<String, byte[]> classes) {}

@@ -1,4 +1,4 @@
-package dev.chunkzero.runtime.delivery;
+package dev.chunkzero.runtime.minestom.internal;
 
 import java.util.HashMap;
 import java.util.Map;

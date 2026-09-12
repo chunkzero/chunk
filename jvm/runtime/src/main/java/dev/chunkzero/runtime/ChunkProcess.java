@@ -10,7 +10,7 @@ import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.bootstrap.AppManifest;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.bootstrap.SessionBackend;
-import dev.chunkzero.runtime.control.ProcessHealth;
+import dev.chunkzero.runtime.control.ProcessAuthentication;
 import dev.chunkzero.runtime.control.Registration;
 
 import io.grpc.BindableService;
@@ -19,7 +19,6 @@ import io.grpc.Status;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 
-import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
@@ -105,28 +104,23 @@ public final class ChunkProcess implements AutoCloseable {
         }
     }
 
-    @ApiStatus.Internal
-    public AppManifest manifest() {
+    AppManifest manifest() {
         return manifest;
     }
 
-    @ApiStatus.Internal
-    public ProcessIdentity identity() {
+    ProcessIdentity identity() {
         return identity;
     }
 
-    @ApiStatus.Internal
-    public BackendSession backend(String session) {
+    BackendSession backend(String session) {
         return backend.client(session, manifest.id());
     }
 
-    @ApiStatus.Internal
-    public long tickCount() {
+    long tickCount() {
         return ticks.get();
     }
 
-    @ApiStatus.Internal
-    public void progress(int sessions, int players) {
+    void progress(int sessions, int players) {
         health.tick(sessions, players);
     }
 
@@ -141,8 +135,7 @@ public final class ChunkProcess implements AutoCloseable {
     }
 
     /** Engine adapters bind their services once, before application readiness. */
-    @ApiStatus.Internal
-    public synchronized void bind(List<BindableService> services, String playerEndpoint)
+    synchronized void bind(List<BindableService> services, String playerEndpoint)
             throws IOException {
         if (closed || control != null)
             throw new IllegalStateException("Process already bound or closed");
@@ -151,9 +144,7 @@ public final class ChunkProcess implements AutoCloseable {
                 NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                         .maxConcurrentCallsPerConnection(128)
                         .maxInboundMessageSize(65_536)
-                        .intercept(
-                                new dev.chunkzero.runtime.control.ProcessAuthentication(
-                                        environment.processToken()))
+                        .intercept(new ProcessAuthentication(environment.processToken()))
                         .addService(
                                 new NodeControlGrpc.NodeControlImplBase() {
                                     @Override
