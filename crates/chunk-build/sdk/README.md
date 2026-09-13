@@ -57,6 +57,65 @@ Queries receive a typed Reader, mutations a Writer. `MutationContext` can also b
 remains `JsonValue`. Types refer directly to the schema, so schema edits update editor types without regenerating copied
 fields. Use `#chunk/schema` throughout schema modules to keep them independent of the builders that import that schema.
 
+Attach invocation context with `.withContext(provider)`. It returns a new builder, and providers may be synchronous or
+asynchronous. Chained providers run in order and can read fields added by earlier providers. A rejection prevents later
+providers and the handler from running.
+
+For example, with a `profiles` table containing `player` and `rank` and a `by_player` index:
+
+```ts
+import { query, mutation, v } from "#chunk";
+import type { QueryContext } from "#chunk";
+
+const sessionCaller = v.object({
+  session: v.session(),
+  app: v.string(),
+  player: v.optional(v.player()),
+});
+
+function playerContext({ caller, db }: QueryContext) {
+  const { player } = sessionCaller.parse(caller);
+  if (!player) throw new Error("Player context required");
+  const profile = db
+    .query("profiles")
+    .withIndex("by_player", (q) => q.eq("player", player))
+    .unique();
+  if (!profile) throw new Error("Player profile missing");
+  return { player: { id: player, rank: profile.rank } };
+}
+
+const playerQuery = query.withContext(playerContext);
+const playerMutation = mutation.withContext(playerContext);
+
+export const myRank = playerQuery({
+  args: {},
+  returns: v.string(),
+  handler: ({ player }) => player.rank,
+});
+
+const adminQuery = playerQuery.withContext(({ player }) => {
+  if (player.rank !== "admin") throw new Error("Admin required");
+  return {};
+});
+```
+
+Player identity comes from the authenticated invocation's `caller`, supplied by session ownership independently of
+function arguments. The session caller above includes an optional player handle; proxy and other service callers have
+different shapes. Player-required providers reject calls without that context. Ordinary builders and providers that do
+not require a player remain usable for those calls.
+
+Providers share the invocation's reader or writer. Query reads become subscription dependencies; mutation reads and
+writes share the handler's transaction, including rollback on rejection. Every evaluation runs its providers again,
+including query reevaluation after a profile/rank change. Mutation outcome recovery retains its existing deduplication
+semantics. The SDK does not cache enriched context across players or calls; keep invocation data out of module globals.
+
+Providers return a plain object containing new fields. They cannot replace `caller`, `db`, earlier context fields, or
+inherited object members. The context object is frozen, and caller data is recursively frozen; added values retain their
+ordinary application semantics. Argument/result inference, query write restrictions, public/internal visibility and
+generated client contracts are preserved. Enrichment fields are not function arguments or results unless explicitly
+declared. `.withContext()` is also available on raw and internal builders. It uses the current transactional runtime;
+external I/O and admission/join lifecycle hooks remain separate capabilities.
+
 `chunk build` and `chunk dev` generate the SDK before type-checking and building the complete app release. Dev runs that
 release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to
 repair missing or stale SDK files. Unchanged generated files are not rewritten.

@@ -53,26 +53,80 @@ export interface FunctionReference<K extends FunctionKind, A, R> {
   readonly result: Validator<R>;
 }
 
-function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
-  return <const S extends Shape, R>(options: {
+type RawContext<K extends FunctionKind> = K extends "query" ? RawQueryContext : RawMutationContext;
+type Handler<C, A, R> = (ctx: C, args: A) => R | Promise<R>;
+type Wrapper<K extends FunctionKind, C> = <A, R>(handler: Handler<C, A, R>) => Handler<RawContext<K>, A, R>;
+type Addition<C, E> = E & { [P in keyof C]?: never };
+
+export interface FunctionBuilder<K extends FunctionKind, C extends object> {
+  <const S extends Shape, R>(options: {
     args: S | ObjectValidator<S>;
     returns: Validator<R>;
-    handler: (
-      ctx: K extends "query" ? RawQueryContext : RawMutationContext,
-      args: InferObject<S>,
-    ) => NoInfer<R> | Promise<NoInfer<R>>;
+    handler: Handler<C, InferObject<S>, NoInfer<R>>;
+  }): FunctionDefinition<K, InferObject<S>, R>;
+  withContext<E extends object>(
+    provider: (ctx: C) => Addition<C, E> | Promise<Addition<C, E>>,
+  ): FunctionBuilder<K, Readonly<C & E>>;
+}
+
+function builder<K extends FunctionKind, C extends object>(
+  kind: K,
+  visibility: Visibility,
+  wrap: Wrapper<K, C>,
+): FunctionBuilder<K, C> {
+  const build = <const S extends Shape, R>(options: {
+    args: S | ObjectValidator<S>;
+    returns: Validator<R>;
+    handler: Handler<C, InferObject<S>, NoInfer<R>>;
   }): FunctionDefinition<K, InferObject<S>, R> =>
     freeze({
       [definition]: true as const,
       contract: { kind, visibility, arguments: argumentSchema(options.args), result: options.returns.schema },
-      handler: options.handler,
+      handler: wrap(options.handler),
     });
+  return Object.freeze(
+    Object.assign(build, {
+      withContext<E extends object>(
+        provider: (ctx: C) => Addition<C, E> | Promise<Addition<C, E>>,
+      ): FunctionBuilder<K, Readonly<C & E>> {
+        return builder<K, Readonly<C & E>>(kind, visibility, <A, R>(handler: Handler<Readonly<C & E>, A, R>) =>
+          wrap<A, R>(async (ctx, args) => {
+            const extra = await provider(ctx);
+            return handler(extendContext(ctx, extra), args);
+          }),
+        );
+      },
+    }),
+  );
 }
 
-export const query = builder("query", "public");
-export const mutation = builder("mutation", "public");
-export const internalQuery = builder("query", "internal");
-export const internalMutation = builder("mutation", "internal");
+function extendContext<C extends object, E extends object>(ctx: C, extra: E): Readonly<C & E> {
+  if (
+    extra === null ||
+    typeof extra !== "object" ||
+    (Object.getPrototypeOf(extra) !== Object.prototype && Object.getPrototypeOf(extra) !== null)
+  ) {
+    throw new Error("Context providers must return a plain object");
+  }
+  for (const key of Reflect.ownKeys(extra)) {
+    if (key in ctx) throw new Error(`Context field already exists: ${String(key)}`);
+  }
+  return Object.freeze({ ...ctx, ...extra });
+}
+
+function protect<C extends { readonly caller: JsonValue }>(ctx: C): C {
+  freeze(ctx.caller);
+  return Object.freeze(ctx);
+}
+
+function raw<K extends FunctionKind>(kind: K, visibility: Visibility) {
+  return builder<K, RawContext<K>>(kind, visibility, (handler) => (ctx, args) => handler(protect(ctx), args));
+}
+
+export const query = raw("query", "public");
+export const mutation = raw("mutation", "public");
+export const internalQuery = raw("query", "internal");
+export const internalMutation = raw("mutation", "internal");
 
 export function isFunction(value: unknown): value is FunctionDefinition {
   return value !== null && typeof value === "object" && definition in value && value[definition] === true;
@@ -80,28 +134,13 @@ export function isFunction(value: unknown): value is FunctionDefinition {
 
 export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
   function typed<K extends FunctionKind>(kind: K, visibility: Visibility) {
-    return <const S extends Shape, R>(options: {
-      args: S | ObjectValidator<S>;
-      returns: Validator<R>;
-      handler: (
-        ctx: K extends "query" ? QueryContext<T> : MutationContext<T>,
-        args: InferObject<S>,
-      ) => NoInfer<R> | Promise<NoInfer<R>>;
-    }): FunctionDefinition<K, InferObject<S>, R> =>
-      builder(
-        kind,
-        visibility,
-      )({
-        args: options.args,
-        returns: options.returns,
-        handler: (ctx, args) =>
-          options.handler(
-            { caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") } as K extends "query"
-              ? QueryContext<T>
-              : MutationContext<T>,
-            args,
-          ),
-      });
+    type Context = K extends "query" ? QueryContext<T> : MutationContext<T>;
+    return builder<K, Context>(
+      kind,
+      visibility,
+      (handler) => (ctx, args) =>
+        handler(protect({ caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") }) as Context, args),
+    );
   }
   return freeze({
     query: typed("query", "public"),

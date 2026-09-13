@@ -75,6 +75,8 @@ impl Error {
 }
 
 #[cfg(test)]
+mod context_tests;
+#[cfg(test)]
 mod document_tests;
 
 pub mod server;
