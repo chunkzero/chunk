@@ -1,18 +1,23 @@
 # SDK distribution
 
 The initial SDK targets Linux x64 on Ubuntu 24.04 or a compatible system with glibc and OpenSSL 3. It contains the
-`chunk` CLI, native TypeScript compiler, Gradle wrapper and `sdk.json`. Gradle downloads the matching JVM libraries,
-plugin markers, sources and API documentation from `maven.chunkzero.com`; those artifacts are not bundled in the CLI
-archive. Users need Java to run Gradle; projects select their gameplay JDK, with the current Minestom adapter requiring
-Java 25. Building an application does not require Rust, Node, pnpm or the Chunk source repository.
+`chunk` CLI, native TypeScript compiler and license. The CLI embeds the version pins and standard Gradle wrapper files
+used to create projects. Gradle downloads the matching JVM libraries, plugin markers, sources and API documentation from
+`maven.chunkzero.com`; those artifacts are not bundled in the CLI archive. Users need Java to run Gradle; projects
+select their gameplay JDK, with the current Minestom adapter requiring Java 25. Building an application does not require
+Rust, Node, pnpm or the Chunk source repository.
 
 Each JVM library and the Gradle plugin publish `-sources.jar` and `-javadoc.jar` artifacts. The documentation JARs
 contain Dokka HTML for Java and Kotlin; the Gradle plugin markers remain POM-only.
 
 The CLI and JVM versions must match. `Cargo.toml` supplies the release version; packaging checks it against the Gradle
-catalog and the prepared CLI. `sdk.json` carries that version and the Kotlin/Foojay versions for project tooling. All
+catalog and the prepared CLI. The CLI embeds that catalog for the Chunk, Kotlin and Foojay project version pins. All
 Maven dependencies use explicit versions; the repository does not publish mutable version indexes or support snapshots
 and dynamic versions.
+
+Gradle generates the repository's checked-in wrapper files. When updating the pinned Gradle version, regenerate them
+with Gradle's `wrapper` task and rebuild the CLI. Project creation copies the embedded files without invoking Gradle or
+requiring Java. The project's wrapper downloads and caches the selected Gradle distribution on its first build.
 
 ## Build and verify before publishing
 
@@ -55,10 +60,16 @@ curl --fail --location https://github.com/chunkzero/chunk/releases/download/v0.1
 sh install.sh 0.1.0
 ```
 
-The installer verifies the archive checksum and CLI version, stores the complete SDK under
+The installer verifies the archive checksum and CLI version, stores the CLI and native compiler under
 `~/.local/share/chunk/VERSION`, and points `~/.local/bin/chunk` to it. `CHUNK_INSTALL_DIR` overrides the `~/.local`
-prefix. It refuses to replace an existing version or an unrelated executable. Keep the SDK directory together: the CLI
+prefix. It refuses to replace an existing version or an unrelated executable. Keep the installation together: the CLI
 finds its native type checker next to its executable.
+
+Project support is generated inside the project: `.chunk/sdk/` contains the TypeScript SDK, `.chunk/generated/` contains
+its typed bindings, and `.chunk/gradle/` contains Gradle build support. These directories are ignored by Git and
+recreated by the CLI and Gradle plugin. The standard `gradlew`, `gradlew.bat` and `gradle/wrapper/` files are created
+with the project and should be committed. Gradle manages its own distribution and dependency caches in
+`GRADLE_USER_HOME` (normally `~/.gradle`).
 
 Run `chunk create my-server` to generate a Kotlin project, or add `--language java`. The generated Gradle settings pin
 the SDK version and use `https://maven.chunkzero.com`. That version's JVM artifacts must be published before a normal

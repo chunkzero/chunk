@@ -4,7 +4,6 @@
 import argparse
 import gzip
 import hashlib
-import json
 from pathlib import Path
 import platform
 import re
@@ -52,20 +51,6 @@ def main():
             str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",
             "--max-workers=2", "--console=plain", "--no-daemon",
         ], cwd=repository, check=True)
-        for path in ("gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
-                     "gradle/wrapper/gradle-wrapper.properties"):
-            destination = root / "sdk/wrapper" / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(repository / path, destination)
-        metadata = {
-            "schema": 1,
-            "version": version,
-            "platform": "linux-x64",
-            "maven_repository": "https://maven.chunkzero.com",
-            "kotlin_version": versions["kotlin"],
-            "foojay_version": versions["foojay"],
-        }
-        (root / "sdk.json").write_text(json.dumps(metadata, indent=2) + "\n")
         # Exact versions need no mutable repository-level Maven version indexes.
         for path in staged_maven.rglob("maven-metadata.xml*"):
             path.unlink()

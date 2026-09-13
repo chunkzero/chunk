@@ -10,18 +10,20 @@ Run these commands from this directory:
 @CHUNK_COMMAND@ dev
 ```
 
-`codegen` prepares the TypeScript SDK for your editor. `build` generates the JVM clients and packages an immutable
-release under `dist/`. `dev` builds the release and starts the local backend, control and proxy. Connect with an
-official Minecraft Java Edition 26.1 client at `localhost:25565`; the lobby starts automatically on join. Ctrl-C stops
-the services and their gameplay JVMs. Local backend data stays in `.chunk/local` between runs. Restart `dev` to apply
-code changes; automatic reload is not implemented yet.
+`codegen` prepares the TypeScript SDK in `.chunk/sdk/` and typed bindings in `.chunk/generated/` for your editor. Gradle
+build support is generated in `.chunk/gradle/`. These directories are ignored by Git and recreated when needed. `build`
+generates the JVM clients and packages an immutable release under `dist/`. `dev` builds the release and starts the local
+backend, control and proxy. Connect with an official Minecraft Java Edition 26.1 client at `localhost:25565`; the lobby
+starts automatically on join. Ctrl-C stops the services and their gameplay JVMs. Local backend data stays in
+`.chunk/local` between runs. Restart `dev` to apply code changes; automatic reload is not implemented yet.
 
-The Gradle wrapper selects Java 25, downloading that toolchain when needed. A Java installation is required to start
-Gradle. Third-party dependencies also need network access on the first build. No Node installation is needed by this
-project: the prepared Chunk CLI includes its TypeScript toolchain.
+The standard Gradle wrapper downloads and caches Gradle on the first build. The build selects Java 25, downloading that
+toolchain when needed. A Java installation is required to start Gradle. Keep `gradlew`, `gradlew.bat` and
+`gradle/wrapper/` in version control. Third-party dependencies also need network access on the first build. No Node
+installation is needed by this project: the prepared Chunk CLI includes its TypeScript toolchain.
 
 Gradle downloads the pinned Chunk JVM libraries and plugins from `maven.chunkzero.com`. The version pins in
-`settings.gradle.kts` come from the SDK that created this project. Installing a new CLI does not upgrade those pins; use
+`settings.gradle.kts` come from the CLI that created this project. Installing a new CLI does not upgrade those pins; use
 a matching CLI and JVM SDK version.
 
 You can replace the absolute CLI path above with `chunk` once it is on your `PATH`. `gradle.properties` records

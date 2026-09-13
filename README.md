@@ -105,9 +105,9 @@ managed delivery, timeouts, feature selection and standalone hosting.
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
 - `chunk create DIRECTORY [--language kotlin|java]` creates a project with a lobby app, TypeScript backend, local
-  routing and a Gradle wrapper. Kotlin is the default, and the directory must be new or empty. The installed SDK
-  supplies version pins and the wrapper; Gradle resolves JVM libraries from `maven.chunkzero.com`. For framework
-  development, `--chunk-source CHECKOUT` or `CHUNK_SOURCE` explicitly uses a local checkout instead.
+  routing and a Gradle wrapper. Kotlin is the default, and the directory must be new or empty. The CLI embeds the
+  version pins and wrapper files; Gradle resolves JVM libraries from `maven.chunkzero.com`. For framework development,
+  `--chunk-source CHECKOUT` or `CHUNK_SOURCE` explicitly uses a local checkout instead.
 - `chunk codegen PROJECT` prepares the schema-aware TypeScript SDK for editors without building or starting services.
 - `chunk inspect PROJECT` reads project and app metadata as JSON without building.
 - `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.

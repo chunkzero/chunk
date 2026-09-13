@@ -16,6 +16,8 @@ on:
       - crates/**
       - jvm/**/build.gradle.kts
       - gradle/**
+      - gradlew
+      - gradlew.bat
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:

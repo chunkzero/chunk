@@ -16,7 +16,7 @@ pub(crate) struct Options {
     /// Gameplay source language.
     #[arg(long, value_enum, default_value = "kotlin")]
     language: Language,
-    /// Use a Chunk checkout instead of the installed SDK (framework development).
+    /// Use a Chunk checkout instead of the embedded toolchain (framework development).
     #[arg(long, env = "CHUNK_SOURCE")]
     chunk_source: Option<PathBuf>,
 }
@@ -35,8 +35,12 @@ const COMMON: &[(&str, &str)] = &[
     ("server/proxy.ts", include_str!("../templates/common/proxy.ts")),
     ("apps/lobby/app.toml", include_str!("../templates/common/app.toml")),
 ];
-const WRAPPER: &[&str] =
-    &["gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties"];
+const WRAPPER: &[(&str, &[u8])] = &[
+    ("gradlew", include_bytes!("../../../gradlew")),
+    ("gradlew.bat", include_bytes!("../../../gradlew.bat")),
+    ("gradle/wrapper/gradle-wrapper.jar", include_bytes!("../../../gradle/wrapper/gradle-wrapper.jar")),
+    ("gradle/wrapper/gradle-wrapper.properties", include_bytes!("../../../gradle/wrapper/gradle-wrapper.properties")),
+];
 
 pub(crate) fn run(options: &Options) -> io::Result<()> {
     let executable = std::env::current_exe()?;
@@ -51,7 +55,7 @@ pub(crate) fn run(options: &Options) -> io::Result<()> {
 
 fn create(options: &Options, executable: &Path) -> io::Result<()> {
     files::validate(&options.directory)?;
-    let toolchain = toolchain::Toolchain::resolve(options.chunk_source.as_deref(), executable)?;
+    let toolchain = toolchain::Toolchain::resolve(options.chunk_source.as_deref())?;
     let directory = if options.directory.exists() {
         options.directory.canonicalize()?
     } else {
@@ -88,7 +92,6 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
         .replace("\"@CHUNK_VERSION@\"", &kotlin(&toolchain.versions.chunk))
         .replace("\"@KOTLIN_VERSION@\"", &kotlin(&toolchain.versions.kotlin))
         .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
-        .replace("\"@MAVEN_REPOSITORY@\"", &kotlin(&toolchain.repository))
         .replace("\"@PROJECT_NAME@\"", &kotlin(name));
     let readme = include_str!("../templates/common/README.md")
         .replace("@CHUNK_COMMAND@", &shell(executable)?)
@@ -110,10 +113,19 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
         fs::create_dir_all(target.parent().expect("template file has a parent"))?;
         fs::write(target, content)?;
     }
-    for name in WRAPPER {
+    for &(name, contents) in WRAPPER {
         let target = staging.path().join(name);
         fs::create_dir_all(target.parent().expect("wrapper file has a parent"))?;
-        fs::copy(toolchain.wrapper.join(name), target)?;
+        if let Some(source) = &toolchain.source {
+            fs::copy(source.join(name), &target)?;
+        } else {
+            fs::write(&target, contents)?;
+        }
+        #[cfg(unix)]
+        if name == "gradlew" {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        }
     }
     files::install(staging.path(), &directory)
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 
 fn source(root: &Path) -> PathBuf {
     let source = root.join("source checkout");
-    for name in WRAPPER.iter().copied().chain([
+    for name in WRAPPER.iter().map(|(name, _)| *name).chain([
         "settings.gradle.kts",
         "jvm/gradle-plugin/settings.gradle.kts",
         "jvm/runtime-minestom/build.gradle.kts",
@@ -14,39 +14,18 @@ fn source(root: &Path) -> PathBuf {
     }
     fs::write(
         source.join("gradle/libs.versions.toml"),
-        format!("[versions]\nchunk = {:?}\nkotlin = \"2.4.10\"\nfoojay = \"1.0.0\"\n", env!("CARGO_PKG_VERSION")),
+        format!("[versions]\nchunk = {:?}\nkotlin = \"9.8.7\"\nfoojay = \"6.5.4\"\n", env!("CARGO_PKG_VERSION")),
     )
     .unwrap();
     source
 }
 
-fn sdk(root: &Path) -> PathBuf {
-    let sdk = root.join("installed sdk");
-    fs::create_dir(&sdk).unwrap();
-    fs::write(
-        sdk.join("sdk.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schema": 1,
-            "version": env!("CARGO_PKG_VERSION"),
-            "kotlin_version": "9.8.7",
-            "foojay_version": "6.5.4",
-            "maven_repository": "https://maven.chunkzero.com",
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    for name in WRAPPER {
-        let path = sdk.join("sdk/wrapper").join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, name).unwrap();
-    }
-    sdk.join("chunk")
-}
-
 #[test]
-fn installed_sdk_creates_both_languages_with_pinned_versions_and_remote_libraries() {
+fn cli_creates_both_languages_without_adjacent_sdk_files() {
     let root = tempfile::tempdir().unwrap();
-    let executable = sdk(root.path());
+    let executable = root.path().join("chunk");
+    let catalog: toml::Table = toml::from_str(include_str!("../../../../gradle/libs.versions.toml")).unwrap();
+    let versions = &catalog["versions"];
     for (language, name) in [(Language::Java, "new java server"), (Language::Kotlin, "new kotlin server")] {
         let options = Options { directory: root.path().join(name), language, chunk_source: None };
         if matches!(language, Language::Kotlin) {
@@ -59,14 +38,22 @@ fn installed_sdk_creates_both_languages_with_pinned_versions_and_remote_librarie
         let settings = fs::read_to_string(options.directory.join("settings.gradle.kts")).unwrap();
         assert!(settings.contains("https://maven.chunkzero.com"));
         assert!(settings.contains(&format!("version {:?}", env!("CARGO_PKG_VERSION"))));
-        assert!(settings.contains("version \"6.5.4\""));
-        assert_eq!(settings.contains("version \"9.8.7\""), matches!(language, Language::Kotlin));
+        assert!(settings.contains(&format!("version {:?}", versions["foojay"].as_str().unwrap())));
+        assert_eq!(
+            settings.contains(&format!("version {:?}", versions["kotlin"].as_str().unwrap())),
+            matches!(language, Language::Kotlin),
+        );
         assert!(settings.contains(&format!("rootProject.name = {name:?}")));
         let properties = fs::read_to_string(options.directory.join("gradle.properties")).unwrap();
         assert!(!properties.contains("chunk.source="));
         assert!(!properties.contains("sdk/maven"));
-        for name in WRAPPER {
-            assert_eq!(fs::read(options.directory.join(name)).unwrap(), name.as_bytes());
+        for &(name, contents) in WRAPPER {
+            assert_eq!(fs::read(options.directory.join(name)).unwrap(), contents);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(fs::metadata(options.directory.join("gradlew")).unwrap().permissions().mode() & 0o111, 0);
         }
         let readme = fs::read_to_string(options.directory.join("README.md")).unwrap();
         assert!(readme.starts_with(&format!("# {name}\n")));
@@ -87,7 +74,10 @@ fn source_override_has_discoverable_apps_and_refuses_nonempty_directories() {
         assert_eq!(metadata.apps[0].runtime.machine_profile.as_deref(), Some("local"));
         assert!(metadata.local.is_some());
         assert!(!options.directory.join(".chunk").exists());
-        for name in WRAPPER {
+        let settings = fs::read_to_string(options.directory.join("settings.gradle.kts")).unwrap();
+        assert!(settings.contains("version \"6.5.4\""));
+        assert_eq!(settings.contains("version \"9.8.7\""), matches!(language, Language::Kotlin));
+        for &(name, _) in WRAPPER {
             assert_eq!(fs::read(options.directory.join(name)).unwrap(), fs::read(source.join(name)).unwrap());
         }
         fs::write(options.directory.join("server/greetings.ts"), "user code").unwrap();
@@ -118,21 +108,10 @@ fn invalid_toolchain_leaves_no_project_and_paths_are_properties_not_code() {
 }
 
 #[test]
-fn absent_or_mismatched_toolchains_leave_the_destination_untouched() {
+fn mismatched_checkout_leaves_the_destination_untouched() {
     let root = tempfile::tempdir().unwrap();
-    let executable = sdk(root.path());
+    let executable = root.path().join("chunk");
     let options = Options { directory: root.path().join("project"), language: Language::Java, chunk_source: None };
-    let metadata = executable.parent().unwrap().join("sdk.json");
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
-    value["version"] = "999.0.0".into();
-    fs::write(&metadata, serde_json::to_vec(&value).unwrap()).unwrap();
-    assert_eq!(
-        create(&options, &executable).unwrap_err().to_string(),
-        format!("CLI and SDK versions must match: CLI {}, SDK 999.0.0", env!("CARGO_PKG_VERSION")),
-    );
-    fs::remove_file(metadata).unwrap();
-    assert!(create(&options, &executable).unwrap_err().to_string().contains("Install a Chunk SDK"));
-
     let source = source(root.path());
     fs::write(
         source.join("gradle/libs.versions.toml"),
@@ -150,7 +129,7 @@ fn absent_or_mismatched_toolchains_leave_the_destination_untouched() {
 #[test]
 fn invalid_destinations_report_missing_parents_and_symlinks_without_creating_files() {
     let root = tempfile::tempdir().unwrap();
-    let executable = sdk(root.path());
+    let executable = root.path().join("chunk");
     let parent = root.path().join("missing/parent");
     let options = Options { directory: parent.join("project"), language: Language::Java, chunk_source: None };
     let error = create(&options, &executable).unwrap_err();
@@ -180,7 +159,7 @@ fn existing_project_needs_no_write_access_to_its_parent() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
-    let executable = sdk(root.path());
+    let executable = root.path().join("chunk");
     let parent = root.path().join("readonly");
     let project = parent.join("project");
     fs::create_dir_all(&project).unwrap();

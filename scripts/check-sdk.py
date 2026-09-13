@@ -51,9 +51,9 @@ def main():
                        env=environment, check=True)
         sdk = prefix / "share/chunk" / version
         executable = prefix / "bin/chunk"
-        assert [path.relative_to(sdk).as_posix() for path in sdk.rglob("*.jar")] == [
-            "sdk/wrapper/gradle/wrapper/gradle-wrapper.jar"
-        ], "JVM libraries must be resolved from Maven, not shipped inside the CLI archive"
+        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "toolchain"}, \
+            "Only the CLI, native TypeScript toolchain and license should be installed"
+        assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 
         class Repository(SimpleHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
