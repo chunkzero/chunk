@@ -82,3 +82,43 @@ typed.query({
     return doc?.score ?? 0;
   },
 });
+
+const named = v.object({ name: v.string(), note: v.optional(v.string()) });
+const extended = named.extend({ note: v.integer(), active: v.optional(v.boolean()) });
+const extendedValue: Infer<typeof extended> = { name: "Alex", note: 1 };
+// @ts-expect-error extension replaces the optional string with a required number
+const missingNote: Infer<typeof extended> = { name: "Alex" };
+// @ts-expect-error overwritten fields no longer accept their previous type
+const stringNote: Infer<typeof extended> = { name: "Alex", note: "old" };
+// @ts-expect-error optional fields still distinguish absence from explicit undefined
+const undefinedActive: Infer<typeof extended> = { name: "Alex", note: 1, active: undefined };
+query({
+  args: extended,
+  returns: v.integer(),
+  handler: (ctx, { name, note, active }) => {
+    const optionalBoolean: boolean | undefined = active;
+    // @ts-expect-error object arguments do not grant write capabilities to queries
+    ctx.db.put("profiles", "p", {});
+    // @ts-expect-error object argument fields retain their inferred types
+    note.toUpperCase();
+    return name.length + note + Number(optionalBoolean);
+  },
+});
+typed.mutation({
+  args: v.object({ player: v.player() }),
+  returns: v.id("profiles"),
+  handler: ({ db }, { player }) => db.insert("profiles", { player, wins: 0 }),
+});
+query({
+  // @ts-expect-error argument validators must describe objects
+  args: v.string(),
+  returns: v.null(),
+  handler: () => null,
+});
+query({
+  args: named,
+  returns: v.integer(),
+  // @ts-expect-error reusable arguments preserve the explicit return constraint
+  handler: () => "wrong",
+});
+void [extendedValue, missingNote, stringNote, undefinedActive];
