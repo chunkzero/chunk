@@ -11,6 +11,24 @@ import shutil
 import subprocess
 import tempfile
 from threading import Thread
+from zipfile import ZipFile
+
+
+def verify_documentation(repository):
+    for module_file in repository.rglob("*.module"):
+        module = json.loads(module_file.read_text())
+        component = module["component"]
+        for classifier in ("sources", "javadoc"):
+            name = f'{component["module"]}-{component["version"]}-{classifier}.jar'
+            variants = [variant for variant in module["variants"]
+                        if variant["attributes"].get("org.gradle.docstype") == classifier]
+            assert any(file["name"] == name for variant in variants for file in variant["files"]), name
+            with ZipFile(module_file.with_name(name)) as jar:
+                entries = jar.namelist()
+                if classifier == "sources":
+                    assert any(entry.endswith((".java", ".kt")) for entry in entries), name
+                else:
+                    assert "index.html" in entries, name
 
 
 def main():
@@ -31,6 +49,7 @@ def main():
         sdk = prefix / "share/chunk" / version
         metadata = json.loads((sdk / "sdk.json").read_text())
         executable = prefix / "bin/chunk"
+        verify_documentation(sdk / "sdk/maven")
 
         class Repository(SimpleHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
@@ -91,7 +110,7 @@ java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
             server.shutdown()
             thread.join()
             server.server_close()
-    print("Verified installed SDK: HTTP Maven resolution, Java and Kotlin consumers", flush=True)
+    print("Verified installed SDK: sources, API docs, HTTP Maven resolution, Java and Kotlin consumers", flush=True)
 
 
 if __name__ == "__main__":

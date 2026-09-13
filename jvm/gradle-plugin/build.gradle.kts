@@ -1,6 +1,9 @@
+import org.jetbrains.dokka.gradle.tasks.DokkaGeneratePublicationTask
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.sam.receiver)
+    alias(libs.plugins.dokka)
     `java-gradle-plugin`
     `maven-publish`
 }
@@ -43,7 +46,15 @@ gradlePlugin {
     }
 }
 
-java { withSourcesJar() }
+tasks.register<Jar>("javadocJar") {
+    archiveClassifier.set("javadoc")
+    from(tasks.named<DokkaGeneratePublicationTask>("dokkaGeneratePublicationHtml").flatMap { it.outputDirectory })
+}
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
 
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false

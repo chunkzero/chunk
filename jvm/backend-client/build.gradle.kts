@@ -5,7 +5,8 @@ plugins {
 
 dependencies {
     api(project(":jvm:backend-api"))
-    api(libs.grpc.stub)
+    api(libs.grpc.api)
+    implementation(libs.grpc.stub)
     implementation(project(":jvm:proto"))
     testImplementation(project(":jvm:proto"))
     testImplementation(libs.grpc.netty)

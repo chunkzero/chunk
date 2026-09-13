@@ -1,9 +1,13 @@
 # SDK distribution
 
 The initial SDK targets Linux x64 on Ubuntu 24.04 or a compatible system with glibc and OpenSSL 3. It contains the
-`chunk` CLI, native TypeScript compiler, Gradle wrapper, prebuilt JVM libraries, Gradle plugin markers, sources JARs and
-`sdk.json`. Users need Java to run Gradle; projects select their gameplay JDK, with the current Minestom adapter
-requiring Java 25. Building an application does not require Rust, Node, pnpm or the Chunk source repository.
+`chunk` CLI, native TypeScript compiler, Gradle wrapper, prebuilt JVM libraries, Gradle plugin markers, sources and API
+documentation JARs, and `sdk.json`. Users need Java to run Gradle; projects select their gameplay JDK, with the current
+Minestom adapter requiring Java 25. Building an application does not require Rust, Node, pnpm or the Chunk source
+repository.
+
+Each JVM library and the Gradle plugin publish `-sources.jar` and `-javadoc.jar` artifacts. The documentation JARs
+contain Dokka HTML for Java and Kotlin; the Gradle plugin markers remain POM-only.
 
 The CLI and JVM versions must match. `Cargo.toml` supplies the release version; packaging checks it against the Gradle
 catalog and the prepared CLI. `sdk.json` carries that version and the Kotlin/Foojay versions for project tooling. All
@@ -24,7 +28,8 @@ checksum. It does not publish externally.
 
 The verification script installs into a temporary prefix and builds the real Java and Kotlin example sources against the
 archive's Maven repository served over HTTP. Neither consumer includes the Chunk build or accesses its source tree. It
-checks the resulting executable JARs and release archives, then removes the installation and stops the HTTP server.
+checks the sources and documentation artifacts, resulting executable JARs and release archives, then removes the
+installation and stops the HTTP server.
 
 The `SDK distribution` workflow performs the same build and verification on a 2-vCPU Blacksmith runner. Pull requests
 that change distribution inputs run it automatically. A manual run with `publish` disabled produces downloadable
