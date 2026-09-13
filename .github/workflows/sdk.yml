@@ -13,9 +13,11 @@ on:
       - scripts/test-publish-maven.py
       - buildSrc/**
       - build.gradle.kts
+      - crates/**
       - jvm/**/build.gradle.kts
       - gradle/**
       - Cargo.toml
+      - Cargo.lock
   workflow_dispatch:
     inputs:
       publish:
@@ -75,10 +77,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: cargo build --release --locked -p chunk-cli
       - run: python3 scripts/package-sdk.py
-      - name: Verify installed Java and Kotlin consumers
-        env:
-          SDK_VERSION: ${{ steps.version.outputs.value }}
-        run: python3 scripts/check-sdk.py "target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: chunk-sdk-linux-x64
@@ -89,9 +87,42 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  verify:
+    needs: package
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    container: ubuntu:24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install consumer prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates curl git python3
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/check-sdk.py
+            /scripts/check-consumers.py
+            /scripts/install.sh
+            /gradle/libs.versions.toml
+            /examples/java/
+            /examples/local/
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/download-artifact@v4
+        with:
+          name: chunk-sdk-linux-x64
+          path: artifact
+      - name: Verify installed SDK without build-machine sources or caches
+        env:
+          SDK_VERSION: ${{ needs.package.outputs.version }}
+        run: python3 scripts/check-sdk.py "artifact/target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
+
   publish:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
-    needs: package
+    needs: [package, verify]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: sdk-release

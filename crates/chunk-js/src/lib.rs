@@ -7,6 +7,7 @@ mod capabilities;
 mod deadline;
 
 mod engine;
+mod extensions;
 mod isolate;
 mod model;
 mod profile;

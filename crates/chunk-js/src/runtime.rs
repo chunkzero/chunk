@@ -8,6 +8,10 @@ use crate::{
     termination::{Reason, Termination},
 };
 
+mod snapshot_sources {
+    include!(concat!(env!("OUT_DIR"), "/snapshot_sources.rs"));
+}
+
 pub(crate) struct Prepared {
     pub export: String,
     pub caller: Json,
@@ -59,18 +63,13 @@ impl State {
 
     pub(crate) fn new(limits: Limits) -> Self {
         let termination = Termination::default();
+        let mut extensions = crate::extensions::web();
+        extensions.extend([chunk_capabilities::init(), crate::profile::chunk_profile::init()]);
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![
-                deno_webidl::deno_webidl::init(),
-                deno_web::deno_web::init(
-                    deno_web::BlobStore::default_arc(),
-                    None,
-                    false,
-                    deno_web::InMemoryBroadcastChannel::default(),
-                ),
-                chunk_capabilities::init(),
-                crate::profile::chunk_profile::init(),
-            ],
+            extensions,
+            startup_snapshot: Some(include_bytes!(concat!(env!("OUT_DIR"), "/snapshot.bin"))),
+            residual_lazy_js_sources: snapshot_sources::JS,
+            residual_lazy_esm_sources: snapshot_sources::ESM,
             create_params: Some(
                 v8::Isolate::create_params()
                     .heap_limits(0, limits.heap_bytes)

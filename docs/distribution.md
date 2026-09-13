@@ -31,9 +31,11 @@ archive's Maven repository served over HTTP. Neither consumer includes the Chunk
 checks the sources and documentation artifacts, resulting executable JARs and release archives, then removes the
 installation and stops the HTTP server.
 
-The `SDK distribution` workflow performs the same build and verification on a 2-vCPU Blacksmith runner. Pull requests
-that change distribution inputs run it automatically. A manual run with `publish` disabled produces downloadable
-workflow artifacts without creating a release or uploading to R2.
+The `SDK distribution` workflow builds on a 2-vCPU Blacksmith runner, then verifies the archive in a separate Ubuntu
+24.04 container with Java and only the consumer fixtures. The container has no build-machine Cargo cache or Chunk
+implementation sources. Publishing requires this check to pass. Pull requests that change distribution inputs run it
+automatically. A manual run with `publish` disabled produces downloadable workflow artifacts without creating a release
+or uploading to R2.
 
 ## Install
 
