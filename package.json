@@ -1,11 +1,13 @@
 {
   "name": "chunk-monorepo",
   "private": true,
+  "type": "module",
   "scripts": {
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "tsc --project crates/chunk-build/sdk/tsconfig.json",
+    "test": "node --test crates/chunk-build/sdk/test/*.test.mjs"
   },
   "devDependencies": {
     "oxfmt": "0.67.0",

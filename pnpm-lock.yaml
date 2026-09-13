@@ -18,12 +18,6 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
-  packages/server:
-    devDependencies:
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
-
 packages:
 
   '@oxfmt/binding-android-arm-eabi@0.67.0':

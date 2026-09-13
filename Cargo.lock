@@ -494,6 +494,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml",
  "tonic",
  "tracing",
  "url",

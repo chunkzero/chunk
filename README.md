@@ -31,15 +31,15 @@ branch; dashboard integration and asset uploads remain deferred.
 
 ## Repository
 
-| Path                   | Contents                                                                                 |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| `crates/`              | Rust proxy, protocol, platform and toolchain crates                                      |
-| `jvm/`                 | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
-| `packages/server`      | Embedded TypeScript SDK sources and internal tests                                       |
-| `proto/`               | Generated lifecycle/backend/control contracts and remaining transport proposals          |
-| `examples/local/`      | App modules, shared gameplay, TypeScript backend and project configuration               |
-| `examples/java/`       | Java consumer using the runtime and generated typed backend API                          |
-| `docs/architecture.md` | Implemented boundaries and deferred platform design                                      |
+| Path                      | Contents                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------- |
+| `crates/`                 | Rust proxy, protocol, platform and toolchain crates                                      |
+| `jvm/`                    | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
+| `crates/chunk-build/sdk/` | Embedded TypeScript SDK sources and internal tests                                       |
+| `proto/`                  | Generated lifecycle/backend/control contracts and remaining transport proposals          |
+| `examples/local/`         | App modules, shared gameplay, TypeScript backend and project configuration               |
+| `examples/java/`          | Java consumer using the runtime and generated typed backend API                          |
+| `docs/architecture.md`    | Implemented boundaries and deferred platform design                                      |
 
 The intended platform design lives in the [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase). The
 [repository architecture](docs/architecture.md) maps the implementation and identifies the remaining proposals.
@@ -89,9 +89,9 @@ Save**. Those switches live in IntelliJ's local `workspace.xml`, so they must be
 formatting and plugin settings are tracked under `.idea/` and `.vscode/`.
 
 Root Gradle `test` and `assemble` tasks cover the framework modules and plugin. The local example is a separate Gradle
-build. `just consumers` builds the real [Java consumer](examples/java/README.md) and Kotlin example from scratch source
-copies using the prepared CLI, then checks their release archives and executable app contents. It starts no gameplay or
-backend services and also runs in CI and `just ready`.
+build. `just consumers` creates Java and Kotlin projects outside the repository, runs `codegen` and `build`, and builds
+both the Java and Kotlin examples from scratch source copies. It checks their release archives and executable app
+contents, starts no gameplay or backend services, and also runs in CI and `just ready`.
 
 ```sh
 just local
@@ -104,6 +104,10 @@ managed delivery, timeouts, feature selection and standalone hosting.
 
 `chunk` is the developer CLI (`crates/chunk-cli`):
 
+- `chunk create DIRECTORY [--language kotlin|java]` creates a project with a lobby app, TypeScript backend, local
+  routing and a Gradle wrapper. Kotlin is the default, and the directory must be new or empty. The CLI embeds the
+  version pins and wrapper files; Gradle resolves JVM libraries from `maven.chunkzero.com`. For framework development,
+  `--chunk-source CHECKOUT` or `CHUNK_SOURCE` explicitly uses a local checkout instead.
 - `chunk codegen PROJECT` prepares the schema-aware TypeScript SDK for editors without building or starting services.
 - `chunk inspect PROJECT` reads project and app metadata as JSON without building.
 - `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
@@ -138,6 +142,21 @@ Consumer builds need their project Gradle wrapper and an explicit Java toolchain
 To package the example without starting services, run `just toolchain`, then `target/debug/chunk build examples/local`.
 Its releases appear in `examples/local/dist`; `just local` builds and runs the same project with state under
 `examples/local/.chunk/local`.
+
+To start a project with an installed SDK and its published JVM libraries:
+
+```sh
+chunk create my-server
+cd my-server
+chunk codegen
+chunk build
+chunk dev
+```
+
+For framework development from this checkout, run `just toolchain`, then
+`target/debug/chunk create ../my-server --chunk-source .`. Creation prints exact commands using that CLI and includes
+them in the generated README. Connect with Minecraft Java Edition 26.1 at `localhost:25565`. Restart `chunk dev` to
+apply source changes; automatic reload remains deferred.
 
 Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
 libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted by edge.

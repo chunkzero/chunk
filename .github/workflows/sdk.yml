@@ -16,6 +16,8 @@ on:
       - crates/**
       - jvm/**/build.gradle.kts
       - gradle/**
+      - gradlew
+      - gradlew.bat
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:
@@ -76,13 +78,14 @@ jobs:
       - run: python3 scripts/test-publish-maven.py
       - run: pnpm install --frozen-lockfile
       - run: cargo build --release --locked -p chunk-cli
-      - run: python3 scripts/package-sdk.py
+      - run: python3 scripts/package-sdk.py --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: chunk-sdk-linux-x64
           path: |
-            target/dist/*.tar.gz
-            target/dist/*.sha256
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/maven/**
             scripts/install.sh
           if-no-files-found: error
           retention-days: 7
@@ -104,9 +107,6 @@ jobs:
             /scripts/check-sdk.py
             /scripts/check-consumers.py
             /scripts/install.sh
-            /gradle/libs.versions.toml
-            /examples/java/
-            /examples/local/
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -118,7 +118,7 @@ jobs:
       - name: Verify installed SDK without build-machine sources or caches
         env:
           SDK_VERSION: ${{ needs.package.outputs.version }}
-        run: python3 scripts/check-sdk.py "artifact/target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
+        run: python3 scripts/check-sdk.py "artifact/dist/chunk-$SDK_VERSION-linux-x64.tar.gz" artifact/dist/maven
 
   publish:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
@@ -150,8 +150,8 @@ jobs:
           : "${AWS_ACCESS_KEY_ID:?Set the R2 access key secret}"
           : "${AWS_SECRET_ACCESS_KEY:?Set the R2 secret access key}"
           name="chunk-$SDK_VERSION-linux-x64"
-          archive="artifact/target/dist/$name.tar.gz"
-          (cd artifact/target/dist && sha256sum --check "$name.tar.gz.sha256")
+          archive="artifact/dist/$name.tar.gz"
+          (cd artifact/dist && sha256sum --check "$name.tar.gz.sha256")
           git fetch --tags --quiet origin
           tag_commit=$(git rev-parse --verify --quiet "refs/tags/v$SDK_VERSION^{commit}" || true)
           if [ -n "$tag_commit" ]; then test "$tag_commit" = "$GITHUB_SHA"; fi
@@ -166,13 +166,11 @@ jobs:
             gh release create "v$SDK_VERSION" --draft --target "$GITHUB_SHA" --title "Chunk $SDK_VERSION" --generate-notes
           fi
           gh release upload "v$SDK_VERSION" "$archive" "$archive.sha256" artifact/scripts/install.sh --clobber
-          mkdir extracted
-          tar -xzf "$archive" -C extracted
-          python3 scripts/publish-maven.py "extracted/$name"
+          python3 scripts/publish-maven.py artifact/dist/maven "$SDK_VERSION"
           curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
             "https://maven.chunkzero.com/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
             -o published.pom
-          cmp published.pom "extracted/$name/sdk/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
+          cmp published.pom "artifact/dist/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
           if [[ "$SDK_VERSION" == *-* ]]; then
             gh release edit "v$SDK_VERSION" --draft=false --prerelease --latest=false
           else

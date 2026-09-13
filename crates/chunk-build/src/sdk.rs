@@ -7,12 +7,12 @@ use std::{
 use serde_json::{Value, json};
 
 const SOURCES: &[(&str, &str)] = &[
-    ("index.ts", include_str!("../../../packages/server/src/index.ts")),
-    ("functions.ts", include_str!("../../../packages/server/src/functions.ts")),
-    ("validators.ts", include_str!("../../../packages/server/src/validators.ts")),
-    ("documents.ts", include_str!("../../../packages/server/src/documents.ts")),
-    ("schema.ts", include_str!("../../../packages/server/src/schema.ts")),
-    ("web.d.ts", include_str!("../../../packages/server/src/web.d.ts")),
+    ("index.ts", include_str!("../sdk/src/index.ts")),
+    ("functions.ts", include_str!("../sdk/src/functions.ts")),
+    ("validators.ts", include_str!("../sdk/src/validators.ts")),
+    ("documents.ts", include_str!("../sdk/src/documents.ts")),
+    ("schema.ts", include_str!("../sdk/src/schema.ts")),
+    ("web.d.ts", include_str!("../sdk/src/web.d.ts")),
 ];
 
 /// Materializes the embedded SDK and schema-bound declarations for editor use.

@@ -115,6 +115,14 @@ def main():
         copy_sources(repository, checkout)
         subprocess.run([str(checkout / "gradlew"), "assemble", "--no-daemon", "--max-workers=2", "--console=plain"],
                        cwd=checkout, check=True)
+        for language in ("java", "kotlin"):
+            project = Path(temporary) / f"new {language} server"
+            subprocess.run([str(executable), "create", str(project), "--language", language,
+                            "--chunk-source", str(checkout)], check=True)
+            require(not (project / ".chunk").exists(), "Scaffolding should not depend on generated output")
+            subprocess.run([str(executable), "codegen", str(project)], check=True)
+            subprocess.run([str(executable), "build", str(project)], check=True)
+            verify_release(project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
         for name, package, apps, kotlin in (
             ("java", "dev.chunkzero.generated", {"lobby"}, False),
             ("local", "dev.chunkzero.example.generated", {"arena", "lobby"}, True),

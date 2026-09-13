@@ -14,14 +14,13 @@ class PublishingTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.sdk = Path(self.temporary.name)
-        (self.sdk / "sdk.json").write_text(json.dumps({"schema": 1, "version": "0.1.0"}))
-        self.artifact = self.sdk / "sdk/maven/dev/chunkzero/runtime/0.1.0/runtime-0.1.0.jar"
+        self.repository = Path(self.temporary.name)
+        self.artifact = self.repository / "dev/chunkzero/runtime/0.1.0/runtime-0.1.0.jar"
         self.artifact.parent.mkdir(parents=True)
         self.artifact.write_bytes(b"published jar")
 
     def publish(self):
-        publisher["publish"](self.sdk, "a" * 32, "chunk-maven")
+        publisher["publish"](self.repository, "0.1.0", "a" * 32, "chunk-maven")
 
     @patch("subprocess.run")
     def test_existing_version_is_immutable(self, run):

@@ -14,7 +14,7 @@
   },
   "overrides": [
     {
-      "files": ["packages/server/src/index.ts"],
+      "files": ["crates/chunk-build/sdk/src/index.ts"],
       "rules": {
         "typescript/triple-slash-reference": ["error", { "path": "always" }]
       }

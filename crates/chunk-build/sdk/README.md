@@ -1,7 +1,7 @@
 # Server declarations
 
-The shared SDK is maintained here as ordinary TypeScript and embedded in the CLI. This private workspace package is only
-for internal checks; applications need no SDK dependency.
+The shared SDK is maintained here as ordinary TypeScript and embedded in the CLI by `chunk-build`. Applications need no
+SDK dependency. Run `pnpm typecheck` and `pnpm test` from the repository root to check the SDK types and behavior.
 
 Run `chunk codegen PROJECT` after checkout to prepare your editor. It creates `.chunk/sdk/` (shared implementation),
 `.chunk/generated/` (schema-bound builders and types), and these `package.json` imports:

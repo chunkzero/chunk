@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import runpy
-import shutil
 import subprocess
 import tempfile
 from threading import Thread
@@ -34,8 +33,11 @@ def verify_documentation(repository):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
+    parser.add_argument("maven_repository", type=Path, help="Unpublished JVM artifacts to serve over HTTP")
     args = parser.parse_args()
     archive = args.archive.resolve(strict=True)
+    maven = args.maven_repository.resolve(strict=True)
+    verify_documentation(maven)
     repository = Path(__file__).resolve().parent.parent
     consumers = runpy.run_path(str(repository / "scripts/check-consumers.py"))
     with tempfile.TemporaryDirectory(prefix="chunk installed sdk ") as temporary:
@@ -44,16 +46,18 @@ def main():
         prefix = root / "installation"
         environment = dict(os.environ, CHUNK_INSTALL_DIR=str(prefix))
         environment.pop("CHUNK_TYPESCRIPT", None)
+        environment.pop("CHUNK_SOURCE", None)
         subprocess.run(["sh", str(repository / "scripts/install.sh"), version, str(archive)],
                        env=environment, check=True)
         sdk = prefix / "share/chunk" / version
-        metadata = json.loads((sdk / "sdk.json").read_text())
         executable = prefix / "bin/chunk"
-        verify_documentation(sdk / "sdk/maven")
+        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "toolchain"}, \
+            "Only the CLI, native TypeScript toolchain and license should be installed"
+        assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 
         class Repository(SimpleHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
-                super().__init__(*args, directory=str(sdk / "sdk/maven"), **kwargs)
+                super().__init__(*args, directory=str(maven), **kwargs)
 
             def log_message(self, *_args):
                 pass
@@ -63,54 +67,20 @@ def main():
         thread.start()
         try:
             url = f"http://127.0.0.1:{server.server_port}"
-            for name, package, apps, kotlin in (
-                ("java", "dev.chunkzero.generated", {"lobby"}, False),
-                ("local", "dev.chunkzero.example.generated", {"lobby", "arena"}, True),
-            ):
-                project = root / name
-                shutil.copytree(repository / "examples" / name, project,
-                                ignore=shutil.ignore_patterns(*consumers["EXCLUDED"]))
-                shutil.copytree(sdk / "sdk/wrapper", project, dirs_exist_ok=True)
-                shutil.copy2(repository / "gradle/libs.versions.toml", project / "gradle/libs.versions.toml")
-                kotlin_plugin = (f'id("org.jetbrains.kotlin.jvm") version "{metadata["kotlin_version"]}" apply false'
-                                 if kotlin else "")
-                settings = f'''import dev.chunkzero.gradle.ChunkSettingsExtension
-pluginManagement {{
-    repositories {{
-        maven {{ url = uri("{url}"); isAllowInsecureProtocol = true }}
-        gradlePluginPortal()
-        mavenCentral()
-    }}
-}}
-plugins {{
-    {kotlin_plugin}
-    id("dev.chunkzero.chunk.settings") version "{version}"
-    id("org.gradle.toolchains.foojay-resolver-convention") version "{metadata["foojay_version"]}"
-}}
-extensions.configure<ChunkSettingsExtension> {{ javaPackage.set("{package}") }}
-dependencyResolutionManagement {{
-    repositories {{
-        maven {{ url = uri("{url}"); isAllowInsecureProtocol = true }}
-        mavenCentral()
-    }}
-}}
-rootProject.name = "{name}"
-'''
-                if kotlin:
-                    settings += 'include(":shared")\n'
-                    # The fixture's shared module has source-checkout-only backend integration tests.
-                    (project / "shared/build.gradle.kts").write_text('''plugins { id("dev.chunkzero.chunk.kotlin") }
-java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
-''')
-                (project / "settings.gradle.kts").write_text(settings)
+            for language in ("java", "kotlin"):
+                project = root / f"new {language} server"
+                subprocess.run([str(executable), "create", str(project), "--language", language],
+                               cwd=root, env=environment, check=True)
+                with (project / "gradle.properties").open("a") as properties:
+                    properties.write(f"\nchunk.mavenRepository={url}\n")
                 subprocess.run([str(executable), "codegen", str(project)], cwd=root, env=environment, check=True)
                 subprocess.run([str(executable), "build", str(project)], cwd=root, env=environment, check=True)
-                consumers["verify_release"](project, package, apps, kotlin)
+                consumers["verify_release"](project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
         finally:
             server.shutdown()
             thread.join()
             server.server_close()
-    print("Verified installed SDK: sources, API docs, HTTP Maven resolution, Java and Kotlin consumers", flush=True)
+    print("Verified installed SDK: HTTP Maven artifacts and Java/Kotlin create → codegen → build", flush=True)
 
 
 if __name__ == "__main__":

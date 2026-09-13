@@ -1,0 +1,11 @@
+# Local development admits players into the lobby using this process pool.
+[local]
+environment = "local"
+machine_profile = "local"
+capacity = 16
+max_processes = 2
+
+# Each gameplay JVM has this memory budget and may host up to two sessions.
+[local.profiles.local]
+memory_mib = 512
+max_sessions = 2

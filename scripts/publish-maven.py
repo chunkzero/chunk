@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish immutable Maven artifacts from an extracted SDK to Cloudflare R2."""
+"""Publish a versioned Maven repository to Cloudflare R2."""
 
 import argparse
 import hashlib
@@ -15,17 +15,14 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def publish(sdk, account, bucket):
-    metadata = json.loads((sdk / "sdk.json").read_text())
-    version = metadata["version"]
-    if metadata["schema"] != 1 or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
-        raise ValueError("Invalid SDK metadata")
+def publish(repository, version, account, bucket):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+        raise ValueError("Invalid SDK version")
     if not re.fullmatch(r"[a-f0-9]{32}", account):
         raise ValueError("Invalid Cloudflare account ID")
-    repository = sdk / "sdk/maven"
     paths = sorted(path for path in repository.rglob("*") if path.is_file())
     if not paths:
-        raise ValueError("SDK contains no Maven artifacts")
+        raise ValueError("Repository contains no Maven artifacts")
     command = ["aws", "s3api", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
                "--region", "auto", "--no-cli-pager"]
     pending = []
@@ -57,9 +54,11 @@ def publish(sdk, account, bucket):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("sdk", type=Path)
+    parser.add_argument("repository", type=Path)
+    parser.add_argument("version")
     args = parser.parse_args()
-    publish(args.sdk.resolve(strict=True), os.environ["CLOUDFLARE_ACCOUNT_ID"], os.environ["R2_MAVEN_BUCKET"])
+    publish(args.repository.resolve(strict=True), args.version,
+            os.environ["CLOUDFLARE_ACCOUNT_ID"], os.environ["R2_MAVEN_BUCKET"])
 
 
 if __name__ == "__main__":
