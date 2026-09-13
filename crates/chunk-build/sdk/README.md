@@ -89,6 +89,36 @@ with `v.number()` or represented as floating-point JSON numbers. For example, `1
 finite JavaScript number. Use decimal strings for larger integral values, such as `"100000000000000000000"`. The same
 rule applies to numeric literals in table fields, function arguments and results, and generated Java/Kotlin clients.
 
+Chunk provides reusable schemas for its proxy contracts:
+
+| Validator             | Inferred type     | Fields                                   |
+| --------------------- | ----------------- | ---------------------------------------- |
+| `v.playerIdentity()`  | `PlayerIdentity`  | `uuid`, `username`                       |
+| `v.destination()`     | `Destination`     | `key`, `session_type`, `machine_profile` |
+| `v.admissionResult()` | `AdmissionResult` | `allow`, optional `reason`               |
+| `v.serverStatus()`    | `ServerStatus`    | `motd`, integer `online` and `max`       |
+
+The validators and types are exported from both `#chunk` and `#chunk/schema`. They compose ordinary object validators,
+so they can be nested, extended, or used directly as function arguments and results:
+
+```ts
+export const route = query({
+  args: v.playerIdentity(),
+  returns: v.destination(),
+  handler: () => ({
+    key: "lobby",
+    session_type: "lobby/default",
+    machine_profile: "local",
+  }),
+});
+
+const moveArgs = v.playerIdentity().extend({ destination: v.destination() });
+```
+
+These schemas describe values; handlers still decide admission and allowed destinations. Player identity is the proxy's
+UUID/username payload, separate from the branded player handle used for backend session callers. Status counts use the
+existing integer contract; the proxy additionally requires unsigned 32-bit counts.
+
 IDs are branded strings: document IDs carry their table prefix; player/session IDs have distinct contract types. IDs
 describe values and never confer caller authority.
 

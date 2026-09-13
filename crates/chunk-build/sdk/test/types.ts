@@ -122,3 +122,30 @@ query({
   handler: () => "wrong",
 });
 void [extendedValue, missingNote, stringNote, undefinedActive];
+
+const destination: import("../src/index.ts").Destination = v.destination().parse({
+  key: "lobby",
+  session_type: "lobby/default",
+  machine_profile: "local",
+});
+const identity: import("../src/schema.ts").PlayerIdentity = { uuid: "player-uuid", username: "Alex" };
+const admission: import("../src/index.ts").AdmissionResult = { allow: true };
+const status: import("../src/index.ts").ServerStatus = { motd: "Server", online: 0, max: 16 };
+query({
+  args: v.playerIdentity().extend({ destination: v.destination() }),
+  returns: v.destination(),
+  handler: (_, { uuid, username, destination }) => {
+    const names: string[] = [uuid, username, destination.key, destination.session_type, destination.machine_profile];
+    // @ts-expect-error identity UUIDs are not branded player handles
+    const player: PlayerId = uuid;
+    void [names, player];
+    return destination;
+  },
+});
+query({
+  args: {},
+  returns: v.admissionResult(),
+  // @ts-expect-error an admission result requires allow
+  handler: () => ({ reason: "Denied" }),
+});
+void [destination, identity, admission, status];
