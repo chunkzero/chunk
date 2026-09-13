@@ -69,12 +69,13 @@ fn installed_sdk_creates_both_languages_with_pinned_versions_and_remote_librarie
             assert_eq!(fs::read(options.directory.join(name)).unwrap(), name.as_bytes());
         }
         let readme = fs::read_to_string(options.directory.join("README.md")).unwrap();
+        assert!(readme.starts_with(&format!("# {name}\n")));
         assert!(readme.contains(&format!("{} dev", shell(&executable).unwrap())));
     }
 }
 
 #[test]
-fn source_override_has_discoverable_apps_and_preserves_existing_files() {
+fn source_override_has_discoverable_apps_and_refuses_nonempty_directories() {
     let root = tempfile::tempdir().unwrap();
     let source = source(root.path());
     for (language, name) in [(Language::Java, "java"), (Language::Kotlin, "kotlin")] {
@@ -117,7 +118,7 @@ fn invalid_toolchain_leaves_no_project_and_paths_are_properties_not_code() {
 }
 
 #[test]
-fn absent_or_mismatched_sdk_metadata_leaves_the_destination_untouched() {
+fn absent_or_mismatched_toolchains_leave_the_destination_untouched() {
     let root = tempfile::tempdir().unwrap();
     let executable = sdk(root.path());
     let options = Options { directory: root.path().join("project"), language: Language::Java, chunk_source: None };
@@ -125,8 +126,70 @@ fn absent_or_mismatched_sdk_metadata_leaves_the_destination_untouched() {
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
     value["version"] = "999.0.0".into();
     fs::write(&metadata, serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(create(&options, &executable).unwrap_err().to_string().contains("versions must match"));
+    assert_eq!(
+        create(&options, &executable).unwrap_err().to_string(),
+        format!("CLI and SDK versions must match: CLI {}, SDK 999.0.0", env!("CARGO_PKG_VERSION")),
+    );
     fs::remove_file(metadata).unwrap();
     assert!(create(&options, &executable).unwrap_err().to_string().contains("Install a Chunk SDK"));
+
+    let source = source(root.path());
+    fs::write(
+        source.join("gradle/libs.versions.toml"),
+        "[versions]\nchunk = \"999.0.0\"\nkotlin = \"2.4.10\"\nfoojay = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let options = Options { chunk_source: Some(source), ..options };
+    assert_eq!(
+        create(&options, &executable).unwrap_err().to_string(),
+        format!("CLI and checkout versions must match: CLI {}, checkout 999.0.0", env!("CARGO_PKG_VERSION")),
+    );
     assert!(!options.directory.exists());
+}
+
+#[test]
+fn invalid_destinations_report_missing_parents_and_symlinks_without_creating_files() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = sdk(root.path());
+    let parent = root.path().join("missing/parent");
+    let options = Options { directory: parent.join("project"), language: Language::Java, chunk_source: None };
+    let error = create(&options, &executable).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert_eq!(error.to_string(), format!("project parent directory does not exist: {}", parent.display()));
+    assert!(!root.path().join("missing").exists());
+
+    #[cfg(unix)]
+    {
+        let empty = root.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        let link = root.path().join("linked");
+        std::os::unix::fs::symlink(&empty, &link).unwrap();
+        let options = Options { directory: link.clone(), ..options };
+        assert_eq!(
+            create(&options, &executable).unwrap_err().to_string(),
+            format!("project directory must not be a symlink: {}", link.display()),
+        );
+        assert_eq!(fs::read_link(link).unwrap(), empty);
+        assert!(fs::read_dir(empty).unwrap().next().is_none());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_project_needs_no_write_access_to_its_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let executable = sdk(root.path());
+    let parent = root.path().join("readonly");
+    let project = parent.join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o755)).unwrap();
+    let permissions = fs::metadata(&parent).unwrap().permissions();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let options = Options { directory: project.join("."), language: Language::Kotlin, chunk_source: None };
+    let result = create(&options, &executable);
+    fs::set_permissions(&parent, permissions).unwrap();
+    result.unwrap();
+    assert!(project.join("settings.gradle.kts").is_file());
 }

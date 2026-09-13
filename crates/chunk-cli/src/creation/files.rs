@@ -5,12 +5,26 @@ use std::{
 
 pub(super) fn validate(directory: &Path) -> io::Result<()> {
     match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("project directory must not be a symlink: {}", directory.display()),
+        )),
         Ok(metadata) if metadata.is_dir() && fs::read_dir(directory)?.next().is_none() => Ok(()),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("project directory must be new or empty: {}", directory.display()),
         )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = directory.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            if parent.try_exists()? {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("project parent directory does not exist: {}", parent.display()),
+                ))
+            }
+        }
         Err(error) => Err(error),
     }
 }

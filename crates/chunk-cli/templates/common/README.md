@@ -1,4 +1,4 @@
-# My Chunk server
+# @PROJECT_NAME@
 
 A lobby app with Java or Kotlin gameplay and a typed TypeScript backend greeting.
 

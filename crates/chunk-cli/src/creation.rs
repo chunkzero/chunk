@@ -11,7 +11,7 @@ mod toolchain;
 
 #[derive(Args)]
 pub(crate) struct Options {
-    /// New or empty project directory.
+    /// New or empty project directory; symlinks are unsupported.
     directory: PathBuf,
     /// Gameplay source language.
     #[arg(long, value_enum, default_value = "kotlin")]
@@ -90,12 +90,14 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
         .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
         .replace("\"@MAVEN_REPOSITORY@\"", &kotlin(&toolchain.repository))
         .replace("\"@PROJECT_NAME@\"", &kotlin(name));
-    let readme = include_str!("../templates/common/README.md").replace("@CHUNK_COMMAND@", &shell(executable)?);
+    let readme = include_str!("../templates/common/README.md")
+        .replace("@CHUNK_COMMAND@", &shell(executable)?)
+        .replace("@PROJECT_NAME@", name);
     let root_build = format!(
         "plugins {{\n    id(\"{plugin}\")\n}}\n\njava {{ toolchain.languageVersion = JavaLanguageVersion.of(25) }}\n"
     );
 
-    let staging = tempfile::tempdir_in(directory.parent().expect("project directory has a parent"))?;
+    let staging = tempfile::tempdir()?;
     for (name, content) in COMMON.iter().copied().chain([
         ("settings.gradle.kts", settings.as_str()),
         ("README.md", &readme),

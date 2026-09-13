@@ -70,8 +70,16 @@ impl Toolchain {
                 repository: sdk.maven_repository,
             }
         };
-        if toolchain.versions.chunk != env!("CARGO_PKG_VERSION") {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "CLI and SDK versions must match"));
+        let cli_version = env!("CARGO_PKG_VERSION");
+        if toolchain.versions.chunk != cli_version {
+            let origin = if toolchain.source.is_some() { "checkout" } else { "SDK" };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "CLI and {origin} versions must match: CLI {cli_version}, {origin} {}",
+                    toolchain.versions.chunk,
+                ),
+            ));
         }
         for name in super::WRAPPER {
             if !toolchain.wrapper.join(name).is_file() {
