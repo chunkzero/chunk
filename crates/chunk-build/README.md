@@ -21,9 +21,8 @@ schema-bound builders. Missing/stale files are repaired, unchanged files retain 
 directories are excluded from source discovery. The default `.chunk/build/` output contains deployment artifacts only.
 
 Generation preserves existing project configuration and merges only its two owned imports. It creates a suitable
-`tsconfig.json` if missing. See the [SDK guide](../../packages/server/README.md) for setup and typed helper examples.
-The Java, Kotlin and TypeScript client generators remain separate; `#chunk/api` and a TypeScript transport client are
-deferred.
+`tsconfig.json` if missing. See the [SDK guide](sdk/README.md) for setup and typed helper examples. The Java, Kotlin and
+TypeScript client generators remain separate; `#chunk/api` and a TypeScript transport client are deferred.
 
 `just toolchain` installs native TypeScript 7.0.2 and its library declarations under
 `target/debug/toolchain/typescript/7.0.2`. Compilation calls that executable directly, without Node. `CHUNK_TYPESCRIPT`

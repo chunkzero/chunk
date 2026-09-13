@@ -31,15 +31,15 @@ branch; dashboard integration and asset uploads remain deferred.
 
 ## Repository
 
-| Path                   | Contents                                                                                 |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| `crates/`              | Rust proxy, protocol, platform and toolchain crates                                      |
-| `jvm/`                 | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
-| `packages/server`      | Embedded TypeScript SDK sources and internal tests                                       |
-| `proto/`               | Generated lifecycle/backend/control contracts and remaining transport proposals          |
-| `examples/local/`      | App modules, shared gameplay, TypeScript backend and project configuration               |
-| `examples/java/`       | Java consumer using the runtime and generated typed backend API                          |
-| `docs/architecture.md` | Implemented boundaries and deferred platform design                                      |
+| Path                      | Contents                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------- |
+| `crates/`                 | Rust proxy, protocol, platform and toolchain crates                                      |
+| `jvm/`                    | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
+| `crates/chunk-build/sdk/` | Embedded TypeScript SDK sources and internal tests                                       |
+| `proto/`                  | Generated lifecycle/backend/control contracts and remaining transport proposals          |
+| `examples/local/`         | App modules, shared gameplay, TypeScript backend and project configuration               |
+| `examples/java/`          | Java consumer using the runtime and generated typed backend API                          |
+| `docs/architecture.md`    | Implemented boundaries and deferred platform design                                      |
 
 The intended platform design lives in the [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase). The
 [repository architecture](docs/architecture.md) maps the implementation and identifies the remaining proposals.

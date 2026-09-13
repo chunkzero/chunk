@@ -27,13 +27,14 @@ lint:
     buf lint proto
     pnpm lint
 
-# Type-check the TypeScript packages.
+# Type-check the embedded TypeScript SDK.
 typecheck:
     pnpm install --frozen-lockfile
     pnpm typecheck
 
 # Run the test suites.
 test: toolchain
+    pnpm test
     cargo test --workspace
     cargo test -p chunk-proxy --no-default-features
     ./gradlew test
