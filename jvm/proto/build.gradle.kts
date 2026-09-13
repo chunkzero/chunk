@@ -16,6 +16,10 @@ sourceSets.main {
     proto.srcDir(rootProject.file("proto"))
 }
 
+dokka {
+    dokkaSourceSets.configureEach { suppressGeneratedFiles.set(false) }
+}
+
 protobuf {
     protoc { artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.get()}" }
     plugins {

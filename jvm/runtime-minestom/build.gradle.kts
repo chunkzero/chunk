@@ -14,9 +14,20 @@ java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 tasks.withType<JavaCompile>().configureEach { options.release = 25 }
 dependencies {
     api(project(":jvm:runtime"))
+    api(project(":jvm:backend-client"))
     api(libs.minestom)
     implementation(project(":jvm:proto"))
     implementation(libs.grpc.netty)
     runtimeOnly(libs.slf4j.simple)
     testImplementation(kotlin("stdlib"))
+}
+
+dokka {
+    dokkaSourceSets.configureEach {
+        suppressedFiles.from(
+            fileTree("src/main/java/dev/chunkzero/runtime") {
+                include("ManagedPlayer.java", "SessionManager.java", "SessionRegistration.java", "TickExecutor.java")
+            },
+        )
+    }
 }
