@@ -8,6 +8,11 @@ edition = "2024"
 rust-version = "1.98"
 license = "FSL-1.1-MIT"
 
+[workspace.dependencies]
+deno_core = "0.411.0"
+deno_web = "0.289.0"
+deno_webidl = "0.258.0"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
