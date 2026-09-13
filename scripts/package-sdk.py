@@ -38,16 +38,18 @@ def main():
     name = f"chunk-{version}-linux-x64"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{name}.tar.gz"
-    if archive.exists():
-        raise FileExistsError(f"Refusing to replace {archive}; use a fresh output directory")
+    maven = output / "maven"
+    if archive.exists() or maven.exists():
+        raise FileExistsError(f"Refusing to replace SDK outputs in {output}; use a fresh output directory")
     with tempfile.TemporaryDirectory(prefix=".sdk-", dir=output) as temporary:
         root = Path(temporary) / name
+        staged_maven = Path(temporary) / "maven"
         root.mkdir()
         shutil.copy2(executable, root / "chunk")
         shutil.copy2(repository / "LICENSE.md", root / "LICENSE.md")
         subprocess.run(["node", "scripts/install-typescript.mjs", str(root)], cwd=repository, check=True)
         subprocess.run([
-            str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={root / 'sdk/maven'}",
+            str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",
             "--max-workers=2", "--console=plain", "--no-daemon",
         ], cwd=repository, check=True)
         for path in ("gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
@@ -65,7 +67,7 @@ def main():
         }
         (root / "sdk.json").write_text(json.dumps(metadata, indent=2) + "\n")
         # Exact versions need no mutable repository-level Maven version indexes.
-        for path in (root / "sdk/maven").rglob("maven-metadata.xml*"):
+        for path in staged_maven.rglob("maven-metadata.xml*"):
             path.unlink()
         staged_archive = Path(temporary) / archive.name
         with staged_archive.open("xb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as compressed:
@@ -78,6 +80,7 @@ def main():
                     info.uname = info.gname = ""
                     with path.open("rb") as source:
                         tar.addfile(info, source)
+        staged_maven.rename(maven)
         staged_archive.rename(archive)
     with archive.open("rb") as source:
         checksum = hashlib.file_digest(source, "sha256").hexdigest()

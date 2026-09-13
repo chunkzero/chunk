@@ -15,7 +15,7 @@ from zipfile import ZipFile
 EXCLUDED = (".git", "build", ".chunk", ".gradle", ".kotlin", "target", "dist", "node_modules")
 INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
-    "buildSrc", "jvm", "proto", "examples/local",
+    "buildSrc", "jvm", "proto", "examples/java", "examples/local",
 )
 PROVIDER = "META-INF/services/dev.chunkzero.runtime.SessionProvider"
 
@@ -123,10 +123,14 @@ def main():
             subprocess.run([str(executable), "codegen", str(project)], check=True)
             subprocess.run([str(executable), "build", str(project)], check=True)
             verify_release(project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
-        project = checkout / "examples/local"
-        require(not (project / ".chunk").exists() and not (project / "dist").exists(), "Consumer outputs were copied")
-        subprocess.run([str(executable), "build", str(project)], cwd=checkout, check=True)
-        verify_release(project, "dev.chunkzero.example.generated", {"arena", "lobby"}, True)
+        for name, package, apps, kotlin in (
+            ("java", "dev.chunkzero.generated", {"lobby"}, False),
+            ("local", "dev.chunkzero.example.generated", {"arena", "lobby"}, True),
+        ):
+            project = checkout / "examples" / name
+            require(not (project / ".chunk").exists() and not (project / "dist").exists(), "Consumer outputs were copied")
+            subprocess.run([str(executable), "build", str(project)], cwd=checkout, check=True)
+            verify_release(project, package, apps, kotlin)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 # SDK distribution
 
 The initial SDK targets Linux x64 on Ubuntu 24.04 or a compatible system with glibc and OpenSSL 3. It contains the
-`chunk` CLI, native TypeScript compiler, Gradle wrapper, prebuilt JVM libraries, Gradle plugin markers, sources and API
-documentation JARs, and `sdk.json`. Users need Java to run Gradle; projects select their gameplay JDK, with the current
-Minestom adapter requiring Java 25. Building an application does not require Rust, Node, pnpm or the Chunk source
-repository.
+`chunk` CLI, native TypeScript compiler, Gradle wrapper and `sdk.json`. Gradle downloads the matching JVM libraries,
+plugin markers, sources and API documentation from `maven.chunkzero.com`; those artifacts are not bundled in the CLI
+archive. Users need Java to run Gradle; projects select their gameplay JDK, with the current Minestom adapter requiring
+Java 25. Building an application does not require Rust, Node, pnpm or the Chunk source repository.
 
 Each JVM library and the Gradle plugin publish `-sources.jar` and `-javadoc.jar` artifacts. The documentation JARs
 contain Dokka HTML for Java and Kotlin; the Gradle plugin markers remain POM-only.
@@ -18,21 +18,22 @@ and dynamic versions.
 
 ```sh
 just package-cli
-python3 scripts/check-sdk.py target/dist/chunk-0.1.0-linux-x64.tar.gz
+python3 scripts/check-sdk.py target/dist/chunk-0.1.0-linux-x64.tar.gz target/dist/maven
 ```
 
-Packaging refuses to replace an existing archive. Use a fresh `--output DIRECTORY` with `scripts/package-sdk.py` when
+Packaging refuses to replace existing outputs. Use a fresh `--output DIRECTORY` with `scripts/package-sdk.py` when
 assembling another candidate of the same version. The script accepts `--chunk PATH` for a prepared CLI. It publishes the
-JVM modules and all three plugin markers to a fresh local Maven repository, then creates the archive and its SHA-256
-checksum. It does not publish externally.
+JVM modules and all three plugin markers to `maven/` beside the CLI archive and its SHA-256 checksum. The workflow keeps
+these Maven files as separate publication inputs; they are never installed with the CLI. Packaging does not publish
+externally.
 
-The verification script installs into a temporary prefix and builds the real Java and Kotlin example sources against the
-archive's Maven repository served over HTTP. Neither consumer includes the Chunk build or accesses its source tree. It
-checks the sources and documentation artifacts, resulting executable JARs and release archives, then removes the
-installation and stops the HTTP server.
+The verification script installs into a temporary prefix and runs `create`, `codegen` and `build` for Java and Kotlin.
+It serves the unpublished Maven artifacts over HTTP and explicitly overrides the test projects' repository. Neither
+consumer includes the Chunk build or accesses its source tree. It checks sources and documentation artifacts, resulting
+executable JARs and release archives, then removes the installation and stops the HTTP server.
 
 The `SDK distribution` workflow builds on a 2-vCPU Blacksmith runner, then verifies the archive in a separate Ubuntu
-24.04 container with Java and only the consumer fixtures. The container has no build-machine Cargo cache or Chunk
+24.04 container with Java and only the verification scripts. The container has no build-machine Cargo cache or Chunk
 implementation sources. Publishing requires this check to pass. Pull requests that change distribution inputs run it
 automatically. A manual run with `publish` disabled produces downloadable workflow artifacts without creating a release
 or uploading to R2.
@@ -59,11 +60,12 @@ The installer verifies the archive checksum and CLI version, stores the complete
 prefix. It refuses to replace an existing version or an unrelated executable. Keep the SDK directory together: the CLI
 finds its native type checker next to its executable.
 
-For a consumer build before publication, use `file:///absolute/path/to/SDK/sdk/maven` in both Gradle's
-`pluginManagement.repositories` and `dependencyResolutionManagement.repositories`, alongside the plugin portal and Maven
-Central. After publication, use `https://maven.chunkzero.com` in both places. Pin the Chunk settings plugin to the SDK
-version; it resolves matching runtime libraries. The [Gradle plugin guide](../jvm/gradle-plugin/README.md) shows the
-complete repository declarations. Project creation is handled separately from SDK distribution.
+Run `chunk create my-server` to generate a Kotlin project, or add `--language java`. The generated Gradle settings pin
+the SDK version and use `https://maven.chunkzero.com`. That version's JVM artifacts must be published before a normal
+consumer build can resolve them. For local validation of an unpublished candidate, set the generated project's
+`chunk.mavenRepository` Gradle property to `file:///absolute/path/to/target/dist/maven`. This uses the separate
+publication output; it does not require rebuilding the framework. The
+[Gradle plugin guide](../jvm/gradle-plugin/README.md) shows the complete repository declarations.
 
 ## Configure publishing once
 

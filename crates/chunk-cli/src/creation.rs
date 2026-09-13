@@ -1,17 +1,24 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fmt::Write,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, ValueEnum};
 
+mod files;
+mod toolchain;
+
 #[derive(Args)]
 pub(crate) struct Options {
-    /// New project directory (must not already exist).
+    /// New or empty project directory.
     directory: PathBuf,
     /// Gameplay source language.
     #[arg(long, value_enum, default_value = "kotlin")]
     language: Language,
-    /// Chunk checkout supplying the Gradle wrapper, plugin and runtime libraries.
+    /// Use a Chunk checkout instead of the installed SDK (framework development).
     #[arg(long, env = "CHUNK_SOURCE")]
-    chunk_source: PathBuf,
+    chunk_source: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -23,11 +30,10 @@ enum Language {
 const COMMON: &[(&str, &str)] = &[
     ("chunk.toml", include_str!("../templates/common/chunk.toml")),
     (".gitignore", include_str!("../templates/common/gitignore")),
-    ("README.md", include_str!("../templates/common/README.md")),
     ("server/schema/index.ts", include_str!("../templates/common/schema.ts")),
     ("server/greetings.ts", include_str!("../templates/common/greetings.ts")),
     ("server/proxy.ts", include_str!("../templates/common/proxy.ts")),
-    ("apps/lobby/app.toml", ""),
+    ("apps/lobby/app.toml", include_str!("../templates/common/app.toml")),
 ];
 const WRAPPER: &[&str] =
     &["gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties"];
@@ -36,23 +42,25 @@ pub(crate) fn run(options: &Options) -> io::Result<()> {
     let executable = std::env::current_exe()?;
     create(options, &executable)?;
     cliclack::log::success(format!("Created project → {}", options.directory.display()))?;
-    cliclack::log::info("Next: run chunk codegen, chunk build, then chunk dev in the project directory")
+    let executable = shell(&executable)?;
+    cliclack::log::info(format!(
+        "Next:\n  cd {}\n  {executable} codegen\n  {executable} build\n  {executable} dev",
+        shell(&options.directory.canonicalize()?)?,
+    ))
 }
 
-fn create(options: &Options, executable: &std::path::Path) -> io::Result<()> {
-    let source = options.chunk_source.canonicalize()?;
-    for name in WRAPPER.iter().copied().chain([
-        "settings.gradle.kts",
-        "jvm/gradle-plugin/settings.gradle.kts",
-        "jvm/runtime-minestom/build.gradle.kts",
-    ]) {
-        if !source.join(name).is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Chunk source checkout is missing {name}: {}", source.display()),
-            ));
-        }
-    }
+fn create(options: &Options, executable: &Path) -> io::Result<()> {
+    files::validate(&options.directory)?;
+    let toolchain = toolchain::Toolchain::resolve(options.chunk_source.as_deref(), executable)?;
+    let directory = if options.directory.exists() {
+        options.directory.canonicalize()?
+    } else {
+        std::path::absolute(&options.directory)?
+    };
+    let name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "project directory must have a UTF-8 name"))?;
     let (plugin, settings, app_build, gameplay, gameplay_path) = match options.language {
         Language::Java => (
             "dev.chunkzero.chunk",
@@ -69,42 +77,56 @@ fn create(options: &Options, executable: &std::path::Path) -> io::Result<()> {
             "apps/lobby/src/main/kotlin/example/Lobby.kt",
         ),
     };
-    let properties = format!(
-        "chunk.source={}\nchunk.executable={}\norg.gradle.caching=true\norg.gradle.configuration-cache=true\norg.gradle.jvmargs=-Xmx2g\n",
-        property(&source)?,
+    let mut properties = format!(
+        "chunk.executable={}\norg.gradle.caching=true\norg.gradle.configuration-cache=true\norg.gradle.jvmargs=-Xmx2g\n",
         property(executable)?,
     );
+    if let Some(source) = &toolchain.source {
+        writeln!(properties, "chunk.source={}", property(source)?).expect("writing to String cannot fail");
+    }
+    let settings = settings
+        .replace("\"@CHUNK_VERSION@\"", &kotlin(&toolchain.versions.chunk))
+        .replace("\"@KOTLIN_VERSION@\"", &kotlin(&toolchain.versions.kotlin))
+        .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
+        .replace("\"@MAVEN_REPOSITORY@\"", &kotlin(&toolchain.repository))
+        .replace("\"@PROJECT_NAME@\"", &kotlin(name));
+    let readme = include_str!("../templates/common/README.md").replace("@CHUNK_COMMAND@", &shell(executable)?);
     let root_build = format!(
         "plugins {{\n    id(\"{plugin}\")\n}}\n\njava {{ toolchain.languageVersion = JavaLanguageVersion.of(25) }}\n"
     );
 
-    // Reserve a new directory before writing any files; existing projects are never merged or replaced.
-    fs::create_dir(&options.directory).map_err(|error| {
-        io::Error::new(error.kind(), format!("cannot create project {}: {error}", options.directory.display()))
-    })?;
+    let staging = tempfile::tempdir_in(directory.parent().expect("project directory has a parent"))?;
     for (name, content) in COMMON.iter().copied().chain([
-        ("settings.gradle.kts", settings),
+        ("settings.gradle.kts", settings.as_str()),
+        ("README.md", &readme),
         ("build.gradle.kts", &root_build),
         ("gradle.properties", &properties),
         ("apps/lobby/build.gradle.kts", app_build),
         (gameplay_path, gameplay),
     ]) {
-        let target = options.directory.join(name);
+        let target = staging.path().join(name);
         fs::create_dir_all(target.parent().expect("template file has a parent"))?;
         fs::write(target, content)?;
     }
     for name in WRAPPER {
-        let target = options.directory.join(name);
+        let target = staging.path().join(name);
         fs::create_dir_all(target.parent().expect("wrapper file has a parent"))?;
-        fs::copy(source.join(name), target)?;
+        fs::copy(toolchain.wrapper.join(name), target)?;
     }
-    Ok(())
+    files::install(staging.path(), &directory)
+}
+
+fn kotlin(value: &str) -> String {
+    serde_json::to_string(value).expect("a string can be encoded as JSON").replace('$', "\\$")
+}
+
+fn shell(path: &Path) -> io::Result<String> {
+    let path = path.to_str().ok_or_else(|| io::Error::other("project toolchain paths must be UTF-8"))?;
+    Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
 }
 
 // Gradle reads Java properties as ISO-8859-1, with backslash escapes and UTF-16 Unicode escapes.
-fn property(path: &std::path::Path) -> io::Result<String> {
-    use std::fmt::Write;
-
+fn property(path: &Path) -> io::Result<String> {
     let path = path.to_str().ok_or_else(|| io::Error::other("project toolchain paths must be UTF-8"))?;
     let mut result = String::new();
     for unit in path.encode_utf16() {

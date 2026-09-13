@@ -1,22 +1,34 @@
 pluginManagement {
-    includeBuild("${providers.gradleProperty("chunk.source").get()}/jvm/gradle-plugin") {
-        name = "chunk-gradle-plugin"
+    providers.gradleProperty("chunk.source").orNull?.let { source ->
+        includeBuild("$source/jvm/gradle-plugin") { name = "chunk-gradle-plugin" }
     }
     repositories {
+        maven {
+            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("@MAVEN_REPOSITORY@").get())
+            isAllowInsecureProtocol = url.scheme == "http"
+        }
         gradlePluginPortal()
         mavenCentral()
     }
 }
 
 plugins {
-    id("org.jetbrains.kotlin.jvm") version "2.4.10" apply false
-    id("dev.chunkzero.chunk.settings")
-    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+    id("org.jetbrains.kotlin.jvm") version "@KOTLIN_VERSION@" apply false
+    id("dev.chunkzero.chunk.settings") version "@CHUNK_VERSION@"
+    id("org.gradle.toolchains.foojay-resolver-convention") version "@FOOJAY_VERSION@"
 }
 
 dependencyResolutionManagement {
-    repositories { mavenCentral() }
+    repositories {
+        maven {
+            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("@MAVEN_REPOSITORY@").get())
+            isAllowInsecureProtocol = url.scheme == "http"
+        }
+        mavenCentral()
+    }
 }
 
-includeBuild(providers.gradleProperty("chunk.source").get()) { name = "chunk-platform" }
-rootProject.name = rootDir.name
+providers.gradleProperty("chunk.source").orNull?.let { source ->
+    includeBuild(source) { name = "chunk-platform" }
+}
+rootProject.name = "@PROJECT_NAME@"

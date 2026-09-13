@@ -25,7 +25,6 @@ private class GreetingSession : CoroutineSession() {
 
     override suspend fun create(scope: SessionScope) {
         this.scope = scope
-        requireNotNull(scope.backend)
         scope.createInstance().setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
     }
 

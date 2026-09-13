@@ -83,6 +83,7 @@ jobs:
           path: |
             target/dist/*.tar.gz
             target/dist/*.sha256
+            target/dist/maven/**
             scripts/install.sh
           if-no-files-found: error
           retention-days: 7
@@ -104,9 +105,6 @@ jobs:
             /scripts/check-sdk.py
             /scripts/check-consumers.py
             /scripts/install.sh
-            /gradle/libs.versions.toml
-            /examples/java/
-            /examples/local/
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -118,7 +116,9 @@ jobs:
       - name: Verify installed SDK without build-machine sources or caches
         env:
           SDK_VERSION: ${{ needs.package.outputs.version }}
-        run: python3 scripts/check-sdk.py "artifact/target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
+        run:
+          python3 scripts/check-sdk.py "artifact/target/dist/chunk-$SDK_VERSION-linux-x64.tar.gz"
+          artifact/target/dist/maven
 
   publish:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
@@ -166,13 +166,11 @@ jobs:
             gh release create "v$SDK_VERSION" --draft --target "$GITHUB_SHA" --title "Chunk $SDK_VERSION" --generate-notes
           fi
           gh release upload "v$SDK_VERSION" "$archive" "$archive.sha256" artifact/scripts/install.sh --clobber
-          mkdir extracted
-          tar -xzf "$archive" -C extracted
-          python3 scripts/publish-maven.py "extracted/$name"
+          python3 scripts/publish-maven.py artifact/target/dist/maven "$SDK_VERSION"
           curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
             "https://maven.chunkzero.com/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
             -o published.pom
-          cmp published.pom "extracted/$name/sdk/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
+          cmp published.pom "artifact/target/dist/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
           if [[ "$SDK_VERSION" == *-* ]]; then
             gh release edit "v$SDK_VERSION" --draft=false --prerelease --latest=false
           else

@@ -17,7 +17,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Create a Java or Kotlin project using a local Chunk source checkout.
+    /// Create a Java or Kotlin project using the installed SDK.
     Create(creation::Options),
     /// Run the local dev server.
     #[command(visible_alias = "local")]
@@ -123,6 +123,7 @@ mod tests {
     #[test]
     fn command_structure_is_valid() {
         Cli::command().debug_assert();
+        assert!(Cli::try_parse_from(["chunk", "create", "demo"]).is_ok());
         assert!(Cli::try_parse_from(["chunk", "create", "demo", "--chunk-source", "source"]).is_ok());
         assert!(
             Cli::try_parse_from(["chunk", "create", "demo", "--chunk-source", "source", "--language", "java"]).is_ok()
