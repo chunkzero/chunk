@@ -1,5 +1,6 @@
 import { query, mutation, internalQuery, internalMutation, unset, v } from "#chunk";
-import type { QueryContext, MutationContext, Doc, Id, JsonValue, ObjectValidator } from "#chunk";
+import type { QueryContext, MutationContext, Doc, Id, JsonValue } from "#chunk";
+import type { ObjectValidator } from "#chunk/schema";
 
 export function getProfile(ctx: QueryContext, id: Id<"profiles">): Doc<"profiles"> | null {
   return ctx.db.get("profiles", id);
