@@ -149,3 +149,55 @@ query({
   handler: () => ({ reason: "Denied" }),
 });
 void [destination, identity, admission, status];
+
+const playerQuery = typed.query.withContext(({ db, caller }) => {
+  // @ts-expect-error query providers cannot write
+  db.insert("profiles", { player: v.player().parse("alex"), wins: 0 });
+  return { player: { id: v.player().parse("alex"), rank: "member" as const }, callerPresent: caller !== null };
+});
+playerQuery.withContext(({ player }) => ({ allowed: player.rank === "member" }))({
+  args: v.object({ name: v.string() }),
+  returns: v.string(),
+  handler: ({ player, allowed, db, callerPresent }, { name }) => {
+    const id: PlayerId = player.id;
+    const rank: "member" = player.rank;
+    const permission: boolean = allowed && callerPresent;
+    // @ts-expect-error enriched queries still cannot write
+    db.delete("profiles:alex");
+    // @ts-expect-error argument inference survives context composition
+    name.toFixed();
+    return `${id}:${rank}:${permission}:${name}`;
+  },
+});
+typed.mutation.withContext(({ db }) => ({ id: db.insert("profiles", { player: v.player().parse("alex"), wins: 0 }) }))({
+  args: {},
+  returns: v.id("profiles"),
+  handler: ({ id }) => id,
+});
+// @ts-expect-error providers cannot replace the trusted caller
+query.withContext(() => ({ caller: null }));
+// @ts-expect-error providers cannot replace database capabilities
+query.withContext(() => ({ db: {} }));
+// @ts-expect-error existing enrichment fields cannot be overwritten
+playerQuery.withContext(() => ({ player: "other" }));
+playerQuery({
+  args: {},
+  returns: v.integer(),
+  // @ts-expect-error enriched builders retain result constraints
+  handler: () => "wrong",
+});
+typed.query({
+  args: {},
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error enriching a builder does not modify the original
+    void ctx.player;
+    return null;
+  },
+});
+
+interface RankContext {
+  rank: string;
+}
+const rankContext = (): RankContext => ({ rank: "member" });
+query.withContext(rankContext)({ args: {}, returns: v.string(), handler: ({ rank }) => rank });

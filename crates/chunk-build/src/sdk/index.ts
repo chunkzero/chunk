@@ -21,6 +21,7 @@ export type {
   SessionId,
   JsonValue,
   FunctionDefinition,
+  FunctionBuilder,
   FunctionReference,
   Selection,
 } from "../sdk/index.ts";
