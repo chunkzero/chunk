@@ -9,7 +9,7 @@ export const status = query({
 export const admit = query({
   args: v.playerIdentity(),
   returns: v.admissionResult(),
-  handler: () => ({ allow: true, reason: "" }),
+  handler: () => ({ allow: true }),
 });
 
 export const route = query({
