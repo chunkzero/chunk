@@ -109,12 +109,13 @@ writes share the handler's transaction, including rollback on rejection. Every e
 including query reevaluation after a profile/rank change. Mutation outcome recovery retains its existing deduplication
 semantics. The SDK does not cache enriched context across players or calls; keep invocation data out of module globals.
 
-Providers return a plain object containing new fields. They cannot replace `caller`, `db`, earlier context fields, or
-inherited object members. The context object is frozen, and caller data is recursively frozen; added values retain their
-ordinary application semantics. Argument/result inference, query write restrictions, public/internal visibility and
-generated client contracts are preserved. Enrichment fields are not function arguments or results unless explicitly
-declared. `.withContext()` is also available on raw and internal builders. It uses the current transactional runtime;
-external I/O and admission/join lifecycle hooks remain separate capabilities.
+Providers return a plain object containing new fields. They cannot replace `caller`, `db`, or earlier context fields.
+Names inherited from `Object.prototype`, such as `toString`, can be added. The context object is frozen, and caller data
+is recursively frozen; added values retain their ordinary application semantics. Argument/result inference, query write
+restrictions, public/internal visibility and generated client contracts are preserved. Enrichment fields are not
+function arguments or results unless explicitly declared. `.withContext()` is also available on raw and internal
+builders. It uses the current transactional runtime; external I/O and admission/join lifecycle hooks remain separate
+capabilities.
 
 `chunk build` and `chunk dev` generate the SDK before type-checking and building the complete app release. Dev runs that
 release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to

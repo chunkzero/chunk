@@ -109,7 +109,7 @@ function extendContext<C extends object, E extends object>(ctx: C, extra: E): Re
     throw new Error("Context providers must return a plain object");
   }
   for (const key of Reflect.ownKeys(extra)) {
-    if (key in ctx) throw new Error(`Context field already exists: ${String(key)}`);
+    if (Object.hasOwn(ctx, key)) throw new Error(`Context field already exists: ${String(key)}`);
   }
   return Object.freeze({ ...ctx, ...extra });
 }

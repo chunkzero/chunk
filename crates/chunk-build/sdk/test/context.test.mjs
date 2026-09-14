@@ -45,6 +45,14 @@ test("context enrichment cannot overwrite existing fields or change caller ident
     const read = query.withContext(() => extra)(options);
     await assert.rejects(read.handler(context, {}), /Context/);
   }
+  for (const key of ["toString", "constructor"]) {
+    const read = query.withContext(() => ({ [key]: "custom" }))({
+      args: {},
+      returns: v.string(),
+      handler: (ctx) => ctx[key],
+    });
+    assert.equal(await read.handler(context, {}), "custom");
+  }
   await assert.rejects(
     query
       .withContext(({ caller }) => {
