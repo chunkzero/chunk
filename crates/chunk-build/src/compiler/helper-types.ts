@@ -1,5 +1,6 @@
 import { query, mutation, internalQuery, internalMutation, unset, v } from "#chunk";
 import type { QueryContext, MutationContext, Doc, Id, JsonValue } from "#chunk";
+import type { ObjectValidator } from "#chunk/schema";
 
 export function getProfile(ctx: QueryContext, id: Id<"profiles">): Doc<"profiles"> | null {
   return ctx.db.get("profiles", id);
@@ -9,14 +10,17 @@ function addProfile(ctx: MutationContext): Id<"profiles"> {
   return ctx.db.insert("profiles", { wins: 1 });
 }
 
+const profileArgs = v.object({ id: v.id("profiles") });
+const reusable: ObjectValidator<{ id: ReturnType<typeof v.id<"profiles">> }> = profileArgs;
+
 export const wins = query({
-  args: { id: v.id("profiles") },
+  args: reusable,
   returns: v.integer(),
   handler: (ctx, { id }) => getProfile(ctx, id)?.wins ?? 0,
 });
 export const create = mutation({ args: {}, returns: v.id("profiles"), handler: addProfile });
 export const internalWins = internalQuery({
-  args: { id: v.id("profiles") },
+  args: profileArgs.extend({}),
   returns: v.integer(),
   handler: (ctx, { id }) => getProfile(ctx, id)?.wins ?? 0,
 });

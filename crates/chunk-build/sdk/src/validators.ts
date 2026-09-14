@@ -30,6 +30,34 @@ export type InferObject<S extends Shape> = {
   [K in keyof S as S[K]["optional"] extends true ? never : K]: Infer<S[K]>;
 } & { [K in keyof S as S[K]["optional"] extends true ? K : never]?: Infer<S[K]> };
 
+export interface ObjectValidator<S extends Shape> extends Validator<InferObject<S>> {
+  readonly schema: Extract<Schema, { type: "object" }>;
+  extend<const E extends Shape>(shape: E): ObjectValidator<Omit<S, keyof E> & E>;
+}
+
+function object<const S extends Shape>(shape: S): ObjectValidator<S> {
+  const snapshot = { ...shape };
+  const schema = { type: "object" as const, fields: fields(snapshot) };
+  return freeze({
+    ...validator<InferObject<S>>(schema),
+    schema,
+    extend: <const E extends Shape>(extension: E) => object<Omit<S, keyof E> & E>({ ...snapshot, ...extension }),
+  });
+}
+
+export function argumentSchema(args: Shape | Validator<unknown>): Schema {
+  if (isValidator(args)) {
+    if (args.optional !== false || args.schema.type !== "object")
+      throw new Error("Function arguments must be an object");
+    return args.schema;
+  }
+  return object(args).schema;
+}
+
+function isValidator(value: Shape | Validator<unknown>): value is Validator<unknown> {
+  return typeof value.parse === "function";
+}
+
 export function identifier(name: string): void {
   if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) || name.toLowerCase().startsWith("sqlite_")) {
     throw new Error(`Invalid schema identifier: ${name}`);
@@ -195,8 +223,7 @@ export const v = Object.freeze({
   nullable: <T>(value: Validator<T>): Validator<T | null> => validator({ type: "nullable", value: value.schema }),
   optional: <T>(value: Validator<T>): OptionalValidator<T> => freeze({ ...value, optional: true as const }),
   array: <T>(items: Validator<T>): Validator<T[]> => validator({ type: "array", items: items.schema }),
-  object: <const S extends Shape>(shape: S): Validator<InferObject<S>> =>
-    validator({ type: "object", fields: fields(shape) }),
+  object,
   union: <const V extends Record<string, Validator<object>>>(
     variants: V,
   ): Validator<

@@ -61,6 +61,25 @@ fields. Use `#chunk/schema` throughout schema modules to keep them independent o
 release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to
 repair missing or stale SDK files. Unchanged generated files are not rewritten.
 
+Function arguments accept either a field map or a reusable object validator. Object validators can also be nested or
+used as results:
+
+```ts
+const named = v.object({ name: v.string() });
+
+export const greeting = query({
+  args: named,
+  returns: v.string(),
+  handler: (_, { name }) => `Hello, ${name}!`,
+});
+
+const withNickname = named.extend({ nickname: v.optional(v.string()) });
+```
+
+`.extend()` returns a new validator. Exact field names replace their previous validators, including required/optional
+status; differently cased collisions are rejected. The original validator and existing field-map declarations remain
+unchanged. Function arguments must describe an object; arrays, nullable objects and primitive validators are rejected.
+
 Result validators are required. `v.optional` allows an absent object property; `v.nullable(...)` allows explicit null.
 At the API boundary, optional properties normalize explicit null to omission. Database values and patches retain
 explicit presence semantics. Use `v.enum("allow", "deny")` for string choices and

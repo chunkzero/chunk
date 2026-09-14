@@ -1,8 +1,8 @@
 import { documents } from "./documents.ts";
 import type { Reader, Writer, Tables } from "./documents.ts";
 import type { SchemaDefinition } from "./schema.ts";
-import { freeze, v } from "./validators.ts";
-import type { InferObject, JsonValue, Schema, Shape, Validator } from "./validators.ts";
+import { argumentSchema, freeze } from "./validators.ts";
+import type { InferObject, JsonValue, ObjectValidator, Schema, Shape, Validator } from "./validators.ts";
 
 export interface RawReader {
   scanIndex(query: {
@@ -55,7 +55,7 @@ export interface FunctionReference<K extends FunctionKind, A, R> {
 
 function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
   return <const S extends Shape, R>(options: {
-    args: S;
+    args: S | ObjectValidator<S>;
     returns: Validator<R>;
     handler: (
       ctx: K extends "query" ? RawQueryContext : RawMutationContext,
@@ -64,7 +64,7 @@ function builder<K extends FunctionKind>(kind: K, visibility: Visibility) {
   }): FunctionDefinition<K, InferObject<S>, R> =>
     freeze({
       [definition]: true as const,
-      contract: { kind, visibility, arguments: v.object(options.args).schema, result: options.returns.schema },
+      contract: { kind, visibility, arguments: argumentSchema(options.args), result: options.returns.schema },
       handler: options.handler,
     });
 }
@@ -81,7 +81,7 @@ export function isFunction(value: unknown): value is FunctionDefinition {
 export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
   function typed<K extends FunctionKind>(kind: K, visibility: Visibility) {
     return <const S extends Shape, R>(options: {
-      args: S;
+      args: S | ObjectValidator<S>;
       returns: Validator<R>;
       handler: (
         ctx: K extends "query" ? QueryContext<T> : MutationContext<T>,

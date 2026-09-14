@@ -2,6 +2,7 @@
 export { v } from "./validators.ts";
 export type {
   Validator,
+  ObjectValidator,
   OptionalValidator,
   Shape,
   Infer,

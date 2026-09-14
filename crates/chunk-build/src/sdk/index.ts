@@ -8,6 +8,7 @@ import type { Id as TableId } from "../sdk/validators.ts";
 export { v, unset } from "../sdk/index.ts";
 export type {
   Validator,
+  ObjectValidator,
   OptionalValidator,
   Shape,
   Infer,

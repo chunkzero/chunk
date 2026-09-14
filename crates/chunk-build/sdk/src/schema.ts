@@ -74,6 +74,7 @@ export function defineSchema<const T extends Record<string, TableDefinition>>(ta
 export { v, apiValidator } from "./validators.ts";
 export type {
   Validator,
+  ObjectValidator,
   OptionalValidator,
   Shape,
   Infer,
