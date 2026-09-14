@@ -184,7 +184,7 @@ export function fields(shape: Shape): Record<string, { schema: Schema; optional:
   );
 }
 
-export const v = Object.freeze({
+const primitives = Object.freeze({
   document: <const T extends string, const S extends Shape>(
     table: T,
     shape: S,
@@ -243,4 +243,36 @@ export const v = Object.freeze({
       variants: Object.fromEntries(entries.map(([key, value]) => [key, value.schema])),
     });
   },
+});
+
+const playerIdentity = object({
+  uuid: primitives.string(),
+  username: primitives.string(),
+});
+const destination = object({
+  key: primitives.string(),
+  session_type: primitives.string(),
+  machine_profile: primitives.string(),
+});
+const admissionResult = object({
+  allow: primitives.boolean(),
+  reason: primitives.optional(primitives.string()),
+});
+const serverStatus = object({
+  motd: primitives.string(),
+  online: primitives.integer(),
+  max: primitives.integer(),
+});
+
+export type PlayerIdentity = Infer<typeof playerIdentity>;
+export type Destination = Infer<typeof destination>;
+export type AdmissionResult = Infer<typeof admissionResult>;
+export type ServerStatus = Infer<typeof serverStatus>;
+
+export const v = Object.freeze({
+  ...primitives,
+  playerIdentity: () => playerIdentity,
+  destination: () => destination,
+  admissionResult: () => admissionResult,
+  serverStatus: () => serverStatus,
 });
