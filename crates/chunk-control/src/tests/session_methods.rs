@@ -62,7 +62,8 @@ impl SessionMethods for RuntimeService {
 
 #[tokio::test]
 async fn captured_methods_require_live_authority_and_keep_operation_identity_across_retries() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
+    fixture.config.session_methods = Some(method_contract());
     let control = fixture.control();
     let claim = request("method-caller", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(claim.clone()).await.unwrap();
@@ -74,22 +75,16 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     let mut wrong = identity.clone();
     wrong.membership_generation += 1;
     assert!(control.capture_session(&wrong).is_err());
-    let deployment: chunk_contract::Deployment = serde_json::from_value(json!({
-        "id": fixture.config.deployment.deployment, "source":"// fixture", "contract_version":2, "runtime_profile":"transactional_v1", "tables":{}, "functions":{},
-        "session_methods":{"version":1,"methods":[{"app":"bridge","session":"default","name":"score","arguments":{"type":"object","fields":{}},"result":{"type":"integer"}}]}
-    })).unwrap();
     let timeout = Duration::from_secs(10);
-    assert!(control.prepare_session_method(&captured, &deployment, "hidden", json!({}), timeout).is_err());
-    assert!(
-        control.prepare_session_method(&captured, &deployment, "score", json!({"authority":"admin"}), timeout).is_err()
-    );
-    let operation = control.prepare_session_method(&captured, &deployment, "score", json!({}), timeout).unwrap();
+    assert!(control.prepare_session_method(&captured, "hidden", json!({}), timeout).is_err());
+    assert!(control.prepare_session_method(&captured, "score", json!({"authority":"admin"}), timeout).is_err());
+    let operation = control.prepare_session_method(&captured, "score", json!({}), timeout).unwrap();
     let result = control.call_session_method(&operation, &CancellationToken::new()).await.unwrap();
     assert_eq!(result.phase, SessionMethodPhase::Completed as i32);
     assert_eq!(result.result_json, "7");
     assert_eq!(result, control.call_session_method(&operation, &CancellationToken::new()).await.unwrap());
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 1);
-    let lost = control.prepare_session_method(&captured, &deployment, "score", json!({}), timeout).unwrap();
+    let lost = control.prepare_session_method(&captured, "score", json!({}), timeout).unwrap();
     fixture.runtime.lost_reply.store(true, Ordering::Release);
     assert_eq!(
         control.call_session_method(&lost, &CancellationToken::new()).await.unwrap().phase,
@@ -99,7 +94,7 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 2);
     drop(control);
     let control = fixture.control();
-    let next = control.prepare_session_method(&captured, &deployment, "score", json!({}), timeout).unwrap();
+    let next = control.prepare_session_method(&captured, "score", json!({}), timeout).unwrap();
     assert_ne!(next.operation_id(), operation.operation_id());
     assert_ne!(next.operation_id(), lost.operation_id());
     let cancelled = CancellationToken::new();
@@ -111,6 +106,10 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 2);
     control.cancel(claim).await.unwrap();
     assert!(control.capture_session(&identity).is_err());
-    assert!(control.prepare_session_method(&captured, &deployment, "score", json!({}), timeout).is_err());
+    assert!(control.prepare_session_method(&captured, "score", json!({}), timeout).is_err());
     fixture.close().await;
+}
+
+pub(super) fn method_contract() -> chunk_contract::SessionMethods {
+    serde_json::from_value(json!({"version":1,"methods":[{"app":"bridge","session":"default","name":"score","arguments":{"type":"object","fields":{}},"result":{"type":"integer"}}]})).unwrap()
 }

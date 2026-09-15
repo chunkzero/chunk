@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use chunk_contract::{Deployment, Schema, validate_wire_value};
+use chunk_contract::{Schema, validate_wire_value};
 use chunk_proto::v1::{
     Assignment, ClaimIdentity, PlayerDelivery, ProcessIdentity, SessionMethodCaller, SessionMethodPhase,
     SessionMethodRequest, SessionMethodResult, session_methods_client::SessionMethodsClient,
@@ -34,7 +34,27 @@ pub struct PreparedSessionMethod {
     result: Schema,
 }
 
+impl CapturedSession {
+    pub(crate) fn matches_declaration(&self, app: &str, session: &str) -> bool {
+        self.identity.app_id == app && self.session_type == format!("{app}/{session}")
+    }
+}
+
 impl PreparedSessionMethod {
+    pub(crate) fn target(&self) -> &CapturedSession {
+        &self.target
+    }
+    pub(crate) fn deadline_ms(&self) -> u64 {
+        self.request.deadline_ms
+    }
+    pub(crate) fn retained_bytes(&self) -> Result<usize> {
+        Ok(self.request.encoded_len()
+            + self.target.delivery.encoded_len()
+            + self.target.claim.encoded_len()
+            + self.target.identity.encoded_len()
+            + self.target.session_type.len()
+            + serde_json::to_vec(&self.result)?.len())
+    }
     #[must_use]
     pub fn operation_id(&self) -> &str {
         &self.request.operation_id
@@ -93,17 +113,13 @@ impl Control {
     pub fn prepare_session_method(
         &self,
         target: &CapturedSession,
-        deployment: &Deployment,
         name: &str,
         mut arguments: Value,
         timeout: Duration,
     ) -> Result<PreparedSessionMethod> {
         self.method_runtime(target)?;
-        if deployment.id != self.config.deployment.deployment {
-            return Err(Error::Invalid("method deployment mismatch"));
-        }
-        deployment.validate().map_err(Error::Invalid)?;
-        let method = deployment
+        let method = self
+            .config
             .session_methods
             .as_ref()
             .and_then(|methods| {
@@ -200,7 +216,7 @@ impl Control {
         }
     }
 
-    fn method_runtime(&self, target: &CapturedSession) -> Result<RuntimeConnection> {
+    pub(crate) fn method_runtime(&self, target: &CapturedSession) -> Result<RuntimeConnection> {
         let current = self.capture_session(&target.claim)?;
         if current.identity != target.identity
             || current.delivery != target.delivery

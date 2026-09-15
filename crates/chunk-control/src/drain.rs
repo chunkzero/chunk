@@ -83,6 +83,8 @@ impl Control {
                 for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {
                     let source = ClaimRequest::decode(claim.request.as_slice())?;
                     let result = self.move_player(MovePlayerRequest {
+                        expected_source: None,
+                        expected_connection_id: String::new(),
                         operation_id: uuid::Uuid::new_v4().to_string(),
                         player_id: claim.player.clone(),
                         demand: source.demand,

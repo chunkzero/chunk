@@ -26,6 +26,7 @@ struct Binding {
     phase: DeliveryPhase,
 }
 
+mod prepared_methods;
 mod session_methods;
 
 struct FakeRuntime {
@@ -340,6 +341,7 @@ impl Fixture {
         });
         let config = Config {
             destinations: None,
+            session_methods: None,
             apps: BTreeMap::from([("bridge".into(), test_app())]),
             deployment,
             artifact_digest: "artifact".into(),
@@ -492,6 +494,8 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
     fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
     control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
     let command = chunk_proto::v1::MovePlayerRequest {
+        expected_source: None,
+        expected_connection_id: String::new(),
         operation_id: "move".into(),
         player_id: uuid.clone(),
         demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
@@ -553,6 +557,8 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
     for (operation, prepare) in [("queued", false), ("prepared", true)] {
         let destination = control
             .move_player(chunk_proto::v1::MovePlayerRequest {
+                expected_source: None,
+                expected_connection_id: String::new(),
                 operation_id: operation.into(),
                 player_id: uuid.clone(),
                 demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
@@ -770,6 +776,8 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
     let destination = control
         .move_player(chunk_proto::v1::MovePlayerRequest {
+            expected_source: None,
+            expected_connection_id: String::new(),
             operation_id: "move".into(),
             player_id: uuid.clone(),
             demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),

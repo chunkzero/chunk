@@ -53,7 +53,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
                     .max_encoding_message_size(8 * 1024 * 1024),
             )
             .add_service(
-                chunk_proto::v1::supervisor_server::SupervisorServer::new(service).max_decoding_message_size(65_536),
+                chunk_proto::v1::supervisor_server::SupervisorServer::new(service.clone())
+                    .max_decoding_message_size(65_536),
             )
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop.clone().cancelled_owned());
         tokio::pin!(server);
@@ -85,6 +86,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         result
     }
     .await;
+    service.close_methods();
     operations.close();
     operations.wait().await;
     let stopped = control.shutdown().await.map_err(io::Error::other);

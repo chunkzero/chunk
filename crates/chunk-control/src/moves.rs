@@ -11,15 +11,38 @@ impl Control {
     /// # Errors
     /// Rejects changed operations, concurrent moves and players without an arrived delivery.
     pub fn move_player(&self, request: MovePlayerRequest) -> Result<ClaimRequest> {
-        if request.operation_id.is_empty() || request.operation_id.len() > 128 || request.demand.is_none() {
+        if request.operation_id.is_empty()
+            || request.operation_id.len() > 128
+            || request.demand.is_none()
+            || request.expected_source.is_some() == request.expected_connection_id.is_empty()
+            || request.expected_connection_id.len() > 128
+        {
             return Err(Error::Invalid("invalid move request"));
         }
         self.update(|state| {
-            // A retry must recover the original source even after arrival in the destination.
+            if let Some(expected) = &request.expected_source {
+                let claim =
+                    state.claims.get(&expected.operation_id).ok_or(Error::Invalid("unknown captured move source"))?;
+                let original = ClaimRequest::decode(claim.request.as_slice())?;
+                if claim.identity(&expected.operation_id) != *expected
+                    || claim.player != request.player_id
+                    || claim.phase != Phase::Arrived
+                    || state.players.get(&claim.player).and_then(|owner| owner.current.as_ref())
+                        != Some(&expected.operation_id)
+                    || original.connection_id != request.expected_connection_id
+                {
+                    return Err(Error::Invalid("stale captured move source"));
+                }
+            }
+            // Trusted unbound retries can recover the source after arrival in the destination.
             if let Some(intent) = state.moves.get(&request.operation_id) {
                 let previous = ClaimRequest::decode(intent.request.as_slice())?;
                 if previous.identity.as_ref().map(|i| &i.uuid) != Some(&request.player_id)
                     || previous.demand != request.demand
+                    || request.expected_source.as_ref().is_some_and(|expected| {
+                        previous.source.as_ref() != Some(expected)
+                            || previous.connection_id != request.expected_connection_id
+                    })
                 {
                     return Err(Error::Invalid("move operation changed"));
                 }

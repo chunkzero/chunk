@@ -57,10 +57,10 @@ Focused tests: `cargo test -p chunk-control`.
 
 ## Captured session methods
 
-`capture_session` accepts an exact arrived `ClaimIdentity`. `prepare_session_method` checks the immutable deployment's
-method contract and freezes the target, arguments, deadline and a new operation ID. `call_session_method` sends or polls
-that prepared operation through the authenticated process endpoint. These are trusted Rust APIs; an authored TypeScript
-method reference supplies no player authority.
+`capture_session` accepts an exact arrived `ClaimIdentity`. `prepare_session_method` checks control's pinned optional
+`session_methods` contract and freezes the target, arguments, deadline and a new operation ID. `call_session_method`
+sends or polls that prepared operation through the authenticated process endpoint. These are trusted Rust APIs; an
+authored TypeScript method reference supplies no player authority.
 
 The operation sequence is allocated durably by control. Retries must reuse the same `PreparedSessionMethod`; preparing
 again creates a new operation. The JVM caches exact requests/results for up to five minutes, subject to 4096 records and
@@ -85,3 +85,21 @@ A synchronous method already running on the tick thread cannot be forcibly inter
 deadline then returns unknown, and a later poll may retrieve the completed result. Neither failure nor unknown implies
 rollback. These calls are transient gameplay effects. A durable job integration will need a persisted invocation record
 and recovery for outcomes that remain unknown; the current prepared-operation API is in memory.
+
+The authenticated `LocalControl` proxy credential can prepare a captured method and receive an opaque handle before any
+gameplay executes. `StartPreparedMethod` starts that retained handle once; `PollPreparedMethod` observes it and
+`CancelPreparedMethod` cancels its exact token. JVM registration and application/backend credentials cannot use these
+RPCs. The authored app, unqualified session and method must match the captured live target and pinned declaration.
+`chunk dev` projects these declarations from the published, content-addressed backend contract into control config.
+
+Prepared handles are local to one control service lifetime. Losing a prepare reply is safe because preparation never
+executes; an unknown, expired or evicted handle cannot be recreated by starting or polling it. Up to 128 pending
+handles, 4096 completed records and 16 MiB of serialized requests/schemas/results are retained. Admission reserves space
+for each pending result. Results expire after five minutes or earlier under capacity pressure. Service shutdown cancels
+method tokens before awaiting tracked tasks. Accepted means the control task was queued; it does not promise gameplay
+has started. Unstarted cancellation is definitive; started cancellation reports unknown until its outcome is resolved.
+
+Proxy-initiated moves also provide the expected source claim and public connection ID together. Control checks both
+against the exact current arrived owner in the same durable update that accepts or returns the move. Trusted
+administrative moves may omit both fields. Replacing a public connection prevents old captured effects from moving its
+new owner.

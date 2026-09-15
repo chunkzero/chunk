@@ -5,21 +5,28 @@ use tonic::{Request, Response, Status};
 
 use crate::{Control, Error};
 
+mod methods;
+
 #[derive(Clone)]
 pub struct Service {
     control: Arc<Control>,
     token: String,
     operations: tokio_util::task::TaskTracker,
+    methods: Arc<methods::Methods>,
 }
 
 impl Service {
     /// # Errors
-    /// Rejects an empty/short process credential.
+    /// Rejects an empty/short control credential.
     pub fn new(control: Arc<Control>, token: String) -> crate::Result<Self> {
         if token.len() < 32 {
             return Err(Error::Invalid("control credential too short"));
         }
-        Ok(Self { control, token, operations: tokio_util::task::TaskTracker::new() })
+        Ok(Self { control, token, operations: tokio_util::task::TaskTracker::new(), methods: Arc::default() })
+    }
+
+    pub(crate) fn close_methods(&self) {
+        self.methods.close();
     }
 
     pub(crate) fn operations(&self) -> tokio_util::task::TaskTracker {
@@ -52,6 +59,41 @@ fn status(error: Error) -> Status {
 
 #[tonic::async_trait]
 impl LocalControl for Service {
+    async fn prepare_session_method(
+        &self,
+        request: Request<chunk_proto::v1::PrepareSessionMethodRequest>,
+    ) -> Result<Response<chunk_proto::v1::PreparedMethodHandle>, Status> {
+        self.authorize(&request)?;
+        self.methods.prepare(&self.control, request.get_ref()).map(Response::new).map_err(status)
+    }
+
+    async fn start_prepared_method(
+        &self,
+        request: Request<chunk_proto::v1::PreparedMethodRequest>,
+    ) -> Result<Response<chunk_proto::v1::SessionMethodResult>, Status> {
+        self.authorize(&request)?;
+        self.methods
+            .start(&self.control, &self.operations, &request.get_ref().operation_id)
+            .map(Response::new)
+            .map_err(status)
+    }
+
+    async fn poll_prepared_method(
+        &self,
+        request: Request<chunk_proto::v1::PreparedMethodRequest>,
+    ) -> Result<Response<chunk_proto::v1::SessionMethodResult>, Status> {
+        self.authorize(&request)?;
+        self.methods.poll(&request.get_ref().operation_id, false).map(Response::new).map_err(status)
+    }
+
+    async fn cancel_prepared_method(
+        &self,
+        request: Request<chunk_proto::v1::PreparedMethodRequest>,
+    ) -> Result<Response<chunk_proto::v1::SessionMethodResult>, Status> {
+        self.authorize(&request)?;
+        self.methods.poll(&request.get_ref().operation_id, true).map(Response::new).map_err(status)
+    }
+
     async fn nodes(
         &self,
         request: Request<chunk_proto::v1::NodesRequest>,

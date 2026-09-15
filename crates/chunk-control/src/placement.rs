@@ -368,6 +368,7 @@ mod tests {
         let mut state = State::default();
         let mut config = Config {
             destinations: None,
+            session_methods: None,
             apps: BTreeMap::new(),
             deployment: chunk_proto::v1::DeploymentRef::default(),
             artifact_digest: "release".into(),

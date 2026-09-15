@@ -58,9 +58,11 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
     }
     let mut control = control_config(&project.metadata, &built.release.id, &built.release.apps)?;
     let backend: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
+    backend.validate().map_err(io::Error::other)?;
     if backend.id != built.release.id {
-        return Err(io::Error::other("backend release identity mismatch"));
+        return Err(io::Error::other("published backend deployment differs from release"));
     }
+    control.session_methods = backend.session_methods;
     control.destinations = backend.destinations;
     fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
     tracing::info!(deployment = %built.release.id, "local project packaged");
@@ -101,6 +103,7 @@ fn control_config(
         .collect();
     Ok(chunk_control::Config {
         destinations: None,
+        session_methods: None,
         apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
         deployment: chunk_proto::v1::DeploymentRef {
             environment: local.environment.clone(),

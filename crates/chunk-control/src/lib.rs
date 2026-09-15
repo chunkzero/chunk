@@ -50,6 +50,8 @@ pub struct Config {
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
     pub max_processes: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_methods: Option<chunk_contract::SessionMethods>,
 }
 
 impl Config {
@@ -95,6 +97,18 @@ impl Config {
         }
         if self.session_types != expected {
             return Err(Error::Invalid("session catalog differs from app manifests"));
+        }
+        if let Some(methods) = &self.session_methods {
+            methods.validate().map_err(Error::Invalid)?;
+            if serde_json::to_vec(methods)?.len() > 2 * 1024 * 1024
+                || methods.methods.iter().any(|method| {
+                    self.session_types
+                        .get(&format!("{}/{}", method.app, method.session))
+                        .is_none_or(|session| session.app != method.app)
+                })
+            {
+                return Err(Error::Invalid("session method catalog differs from app manifests"));
+            }
         }
         Ok(())
     }
