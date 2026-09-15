@@ -239,12 +239,15 @@ trusted context; loaded values are local to that handler. Subsequent hooks and t
 cached context. Queries/mutations can use the existing `.withContext` provider and must revalidate current permissions.
 
 After confirmed arrival, connect notifications run once and enter notifications run ancestor-first. Successful moves
-emit only changed scopes: leave deepest-first, then enter ancestor-first. Handlers run independently and do not promise
-completion order. Default background work cancels at session cutover; `followPlayer` retains its originating deployment,
-domain, and caller generations until connection loss. Notifications are ephemeral, bounded to five seconds, and may fail
-without undoing admission. Persistent writes should deduplicate using `eventId` and handler identity when needed.
-Logical disconnect follows affirmative control ownership reconciliation; an old connection cannot disconnect a newer
-membership. Disconnect cleanup has a separate bounded scope and no live socket capability.
+emit only changed scopes: leave deepest-first, then enter ancestor-first. Each transition runs its handlers sequentially
+within one five-second notification budget. Default background work cancels at session cutover; `followPlayer` retains
+its originating deployment, domain, and caller generations until connection loss. Notifications are ephemeral, bounded
+to five seconds, and may fail without undoing admission. Persistent writes should deduplicate using `eventId` and
+handler identity when needed. Logical disconnect follows affirmative control ownership reconciliation; an old connection
+cannot disconnect a newer membership. Disconnect cleanup has a separate bounded scope and no live socket capability.
+
+The source stays active while admission and destination preparation run. Once the client acknowledges the configuration
+boundary, an ownership change or failed cutover can require disconnecting the client.
 
 Ping has read-only transaction authority and never provisions gameplay. Native hooks require the platform credential,
 which is separate from the application credential delivered to JVM processes. Missing authority or native hook failures

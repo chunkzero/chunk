@@ -147,7 +147,8 @@ async fn move_cancels_default_notifications_but_follow_player_retains_its_captur
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let trace = fixture.trace().await;
-            if trace.contains("follow-start") && trace.contains("enter-start") {
+            if trace.contains("enter-start") {
+                assert!(!trace.contains("follow-start"), "{trace}");
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -160,6 +161,30 @@ async fn move_cancels_default_notifications_but_follow_player_retains_its_captur
     let trace = fixture.trace().await;
     assert!(trace.contains("follow-end"), "{trace}");
     assert!(!trace.contains("enter-end"), "{trace}");
+    drop(lifecycle);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn notification_execution_preserves_the_order_of_domain_transitions() {
+    let fixture = Fixture::new().await;
+    let mut source = claim("login");
+    source.demand = Some(fixture.platform.route_claim(&source).await.unwrap());
+    let mut lifecycle = Lifecycle::new(fixture.platform.clone());
+    lifecycle
+        .arrived(
+            &source,
+            &ClaimIdentity {
+                operation_id: "login".into(),
+                proxy_id: "proxy".into(),
+                membership_generation: 1,
+                delivery_generation: 1,
+            },
+        )
+        .unwrap();
+    fixture.platform.cleanup.close();
+    tokio::time::timeout(Duration::from_secs(3), fixture.platform.cleanup.wait()).await.unwrap();
+    assert_eq!(fixture.trace().await, "root,route,parent,lobby,enter-start,enter-end,follow-start,follow-end,");
     drop(lifecycle);
     fixture.close().await;
 }
@@ -184,8 +209,8 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         ("games/arena", HookEvent::PlayerLogin, "arena"),
         ("games", HookEvent::PlayerBeforeMove, "before"),
         ("", HookEvent::ServerPing, "ping"),
-        ("", HookEvent::PlayerConnect, "follow"),
-        ("games/lobby", HookEvent::DomainEnter, "enter"),
+        ("", HookEvent::PlayerConnect, "enter"),
+        ("games/lobby", HookEvent::DomainEnter, "follow"),
     ]
     .into_iter()
     .enumerate()
