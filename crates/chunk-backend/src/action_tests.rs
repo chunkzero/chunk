@@ -9,6 +9,7 @@ use crate::{ActionStatus, Backend, Call, Error};
 
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
+        session_methods: None,
         domains: None,
         destinations: None,
         contract_version: 2,

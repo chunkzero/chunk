@@ -104,6 +104,7 @@ fn deployment(id: &str) -> Deployment {
         .map(|name| (name.into(), Field { schema: Schema::String, optional: name == "body" || name == "method" }))
         .collect();
     Deployment {
+        destinations: None,
         domains: None,
         session_methods: None,
         contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:id.into(),tables:BTreeMap::new(),
