@@ -21,6 +21,7 @@ use crate::{
     service::{Call, Command, Event, GroupUpdate, Request, Update},
 };
 
+mod actions;
 mod deployments;
 mod pipeline;
 mod subscriptions;
@@ -60,6 +61,7 @@ struct Reevaluation {
 }
 
 pub(crate) struct Actor {
+    actions: actions::Actions,
     recovering: bool,
     next_subscription: u64,
     reevaluations: VecDeque<Reevaluation>,
@@ -79,8 +81,8 @@ pub(crate) struct Actor {
 }
 
 impl Actor {
-    pub fn new(store: Box<dyn Storage>, events: mpsc::Sender<Event>) -> Result<Self> {
-        let (committer, snapshot, deployments) = Committer::new(store, events)?;
+    pub fn new(store: Box<dyn Storage>, events: mpsc::Sender<Event>, incarnation: String) -> Result<Self> {
+        let (committer, snapshot, deployments) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
         for deployment in deployments {
@@ -91,6 +93,7 @@ impl Actor {
             versions.insert(id, Some(Arc::new(deployment)));
         }
         Ok(Self {
+            actions: actions::Actions::new(events, incarnation),
             recovering: false,
             next_subscription: 0,
             reevaluations: VecDeque::new(),
@@ -132,6 +135,14 @@ impl Actor {
             };
             self.subscriptions.retain(|subscription| !subscription.sender.is_closed());
             match event {
+                Event::ActionFinished { id, result } => self.finish_action(&id, result),
+                Event::ActionTransaction { id, sequence, mode, function, arguments, reply } => {
+                    if stopped.load(Ordering::Acquire) || self.failure.is_some() {
+                        reply.finish(Err(Error::Closed));
+                    } else {
+                        self.action_transaction(&id, sequence, mode, function, arguments, reply);
+                    }
+                }
                 Event::Request(command) => {
                     if stopped.load(Ordering::Acquire) {
                         command.reject(Error::Closed);
@@ -174,6 +185,8 @@ impl Actor {
 
     fn request(&mut self, command: Command) {
         match command {
+            Command::StartAction { id, call, reply } => self.start_action(id, call, reply),
+            Command::ActionStatus { id, caller, reply } => reply.finish(self.actions.status(&id, &caller)),
             Command::Deploy { deployment, reply } => {
                 if reply.cancellation.is_cancelled() {
                     reply.finish(Err(Error::Cancelled));
@@ -208,22 +221,7 @@ impl Actor {
                     reply.finish(Err(error));
                     return;
                 }
-                let result = self.evaluate(&call, Mode::Query, self.view.clone(), &reply.cancellation);
-                match result {
-                    Ok((execution, dependencies)) => {
-                        let independent = self.pending.iter().all(|pending| !dependencies.affected(&pending.changes));
-                        let update = Update {
-                            revision: if independent { self.view.base.revision } else { self.view.revision },
-                            json: execution.value.into(),
-                        };
-                        if update.revision <= self.view.base.revision {
-                            reply.finish(Ok(update));
-                        } else {
-                            self.deferred.push_back((update, reply));
-                        }
-                    }
-                    Err(error) => reply.finish(Err(error)),
-                }
+                self.query(&call, reply);
             }
             Command::Mutate { operation, mut call, reply } => match self.normalize_call(&mut call) {
                 Ok(()) => self.mutate(operation, call, reply),
@@ -238,6 +236,25 @@ impl Actor {
         }
     }
 
+    fn query(&mut self, call: &Call, reply: Request<Update>) {
+        let result = self.evaluate(call, Mode::Query, self.view.clone(), &reply.cancellation);
+        match result {
+            Ok((execution, dependencies)) => {
+                let independent = self.pending.iter().all(|pending| !dependencies.affected(&pending.changes));
+                let update = Update {
+                    revision: if independent { self.view.base.revision } else { self.view.revision },
+                    json: execution.value.into(),
+                };
+                if update.revision <= self.view.base.revision {
+                    reply.finish(Ok(update));
+                } else {
+                    self.deferred.push_back((update, reply));
+                }
+            }
+            Err(error) => reply.finish(Err(error)),
+        }
+    }
+
     fn check_deployment(&self, id: &DeploymentId) -> Result<()> {
         if self.releasing.as_ref().is_some_and(|(releasing, _)| releasing == id) {
             return Err(Error::Busy);
@@ -246,10 +263,14 @@ impl Actor {
     }
 
     fn normalize_call(&self, call: &mut Call) -> Result<()> {
+        self.normalize_scoped_call(call, false)
+    }
+
+    fn normalize_scoped_call(&self, call: &mut Call, internal: bool) -> Result<()> {
         self.check_deployment(&call.deployment)?;
         if let Some(Some(deployment)) = self.versions.get(&call.deployment) {
             let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?;
-            if function.visibility != Visibility::Public {
+            if !internal && function.visibility != Visibility::Public {
                 return Err(Error::Unknown);
             }
             let mut arguments = serde_json::from_str(call.arguments.as_str())?;
@@ -271,9 +292,6 @@ impl Actor {
             return Ok(None);
         };
         let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?;
-        if function.visibility != Visibility::Public {
-            return Err(Error::Unknown);
-        }
         let kind = match mode {
             Mode::Query => FunctionKind::Query,
             Mode::Mutation => FunctionKind::Mutation,
@@ -377,6 +395,7 @@ impl Actor {
     }
 
     fn fail(&mut self, error: &Error) {
+        self.actions.cancel();
         self.failure = Some(error.clone());
         self.reset_pending(error);
         self.reevaluations.clear();

@@ -87,7 +87,7 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
     }
     let mut root = Node::default();
     for (path, function) in &contract.functions {
-        if function.visibility != Visibility::Public {
+        if function.visibility != Visibility::Public || function.kind == FunctionKind::Action {
             continue;
         }
         validate_literals(&function.arguments)?;
@@ -184,6 +184,7 @@ fn model_body(namespace: &Namespace) -> String {
         let kind = match function.kind {
             FunctionKind::Query => "Query",
             FunctionKind::Mutation => "Mutation",
+            FunctionKind::Action => unreachable!("actions are not JVM transaction bindings"),
         };
         // The reference's Java namespace is independent of its persisted backend path.
         declarations.push(format!(

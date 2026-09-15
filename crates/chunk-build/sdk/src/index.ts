@@ -18,8 +18,19 @@ export type {
 } from "./validators.ts";
 export { defineTable, defineSchema } from "./schema.ts";
 export type { TableDefinition, SchemaDefinition } from "./schema.ts";
-export { query, mutation, internalQuery, internalMutation, isFunction, defineFunctions } from "./functions.ts";
+export {
+  action,
+  internalAction,
+  query,
+  mutation,
+  internalQuery,
+  internalMutation,
+  isFunction,
+  defineFunctions,
+} from "./functions.ts";
 export type {
+  AsyncContext,
+  ActionContext,
   FunctionDefinition,
   FunctionBuilder,
   QueryContext,

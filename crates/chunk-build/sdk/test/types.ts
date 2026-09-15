@@ -201,3 +201,26 @@ interface RankContext {
 }
 const rankContext = (): RankContext => ({ rank: "member" });
 query.withContext(rankContext)({ args: {}, returns: v.string(), handler: ({ rank }) => rank });
+
+const { action } = await import("../src/index.ts");
+const countReference = {
+  path: "counts/read",
+  kind: "query" as const,
+  arguments: v.object({ count: v.integer() }),
+  result: v.integer(),
+};
+action({
+  args: {},
+  returns: v.integer(),
+  handler: async (ctx) => {
+    // @ts-expect-error actions cannot retain database transactions
+    void ctx.db;
+    // @ts-expect-error query references cannot invoke mutations
+    await ctx.runMutation(countReference, { count: 1 });
+    // @ts-expect-error argument types come from the reference
+    await ctx.runQuery(countReference, { count: "wrong" });
+    const result: number = await ctx.runQuery(countReference, { count: 1 });
+    await ctx.sleep(10);
+    return result;
+  },
+});

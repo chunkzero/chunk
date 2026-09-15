@@ -134,3 +134,36 @@ fn kotlin_target_reuses_java_sources_and_removes_its_facade_when_disabled() {
     generate(&fixture(), root.path(), target).unwrap();
     assert!(!kotlin.exists());
 }
+
+#[test]
+fn action_references_are_generated_for_typescript_without_becoming_jvm_mutations() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    contract["functions"]["shared/tasks/work"] = json!({
+        "kind":"action", "visibility":"public", "export":"actionWork",
+        "arguments":{"type":"null"}, "result":{"type":"integer"}
+    });
+    contract["functions"]["shared/tasks/read"] = json!({
+        "kind":"query", "visibility":"internal", "export":"actionRead",
+        "arguments":{"type":"null"}, "result":{"type":"integer"}
+    });
+    let path = root.path().join("contract.json");
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let output = root.path().join("generated");
+    generate(&path, &output, GenerationTarget::TypeScript).unwrap();
+    let source = fs::read_to_string(output.join("api.ts")).unwrap();
+    assert!(source.contains("kind: \"action\""));
+    assert!(source.contains("export const internal ="));
+    assert!(source.contains("shared/tasks/read"));
+    generate(&path, &output, GenerationTarget::Kotlin { package: "example" }).unwrap();
+    for file in [
+        "java/example/BackendTypes.java",
+        "java-client/example/BackendClient.java",
+        "kotlin/example/CoroutineBackendClient.kt",
+    ] {
+        let source = fs::read_to_string(output.join(file)).unwrap();
+        assert!(!source.contains("shared/tasks/work"));
+        assert!(!source.contains("shared/tasks/read"));
+    }
+}

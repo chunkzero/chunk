@@ -1,12 +1,14 @@
 //! One environment engine thread owns JS execution and speculative state. Durable
 //! storage runs on a commit thread; replies and updates wait for its ordered acks.
 
+mod actions;
 mod actor;
 mod commit;
 mod reads;
 mod service;
 mod transport;
 
+pub use actions::{ActionHandle, ActionId, ActionStatus};
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
 pub use transport::Service;
 
@@ -18,6 +20,8 @@ pub enum Error {
     Busy,
     #[error("commit rejected; retry the operation")]
     Retry,
+    #[error("action outcome unknown; do not retry under a new invocation identity")]
+    ActionOutcomeUnknown,
     #[error("backend stopped")]
     Closed,
     #[error("request cancelled")]
@@ -80,3 +84,6 @@ mod context_tests;
 mod document_tests;
 
 pub mod server;
+
+#[cfg(test)]
+mod action_tests;

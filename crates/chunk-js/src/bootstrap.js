@@ -1,5 +1,7 @@
 (() => {
   "use strict";
+  const action = Deno.core.ops.op_chunk_action;
+  const actionId = Deno.core.ops.op_chunk_action_id;
   const read = Deno.core.ops.op_chunk_read;
   const write = Deno.core.ops.op_chunk_write;
   const now = Deno.core.ops.op_chunk_now;
@@ -70,17 +72,32 @@
     }
   }
   return async (handler, callerJson, generation, argsJson) => {
-    const context = freeze({
-      caller: parse(callerJson),
-      db: freeze({
-        get: (table, id) => parse(read(generation, stringify({ kind: "get", table, id }))),
-        scan: (table, start = null, end = null) =>
-          parse(read(generation, stringify({ kind: "scan", table, start, end }))),
-        scanIndex: (query) => parse(read(generation, stringify({ kind: "index", query }))),
-        put: (table, id, value) => write(generation, stringify({ kind: "put", key: { table, id }, value })),
-        delete: (table, id) => write(generation, stringify({ kind: "delete", key: { table, id } })),
-      }),
-    });
+    const invocationId = actionId();
+    const context =
+      typeof invocationId === "string"
+        ? freeze({
+            caller: parse(callerJson),
+            invocationId,
+            runQuery: async (functionPath, argumentsValue) =>
+              parse(await action(stringify({ kind: "query", function: functionPath, arguments: argumentsValue }))),
+            runMutation: async (functionPath, argumentsValue) =>
+              parse(await action(stringify({ kind: "mutation", function: functionPath, arguments: argumentsValue }))),
+            sleep: async (milliseconds) => {
+              if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) throw new Error("Invalid sleep duration");
+              await action(stringify({ kind: "sleep", milliseconds }));
+            },
+          })
+        : freeze({
+            caller: parse(callerJson),
+            db: freeze({
+              get: (table, id) => parse(read(generation, stringify({ kind: "get", table, id }))),
+              scan: (table, start = null, end = null) =>
+                parse(read(generation, stringify({ kind: "scan", table, start, end }))),
+              scanIndex: (query) => parse(read(generation, stringify({ kind: "index", query }))),
+              put: (table, id, value) => write(generation, stringify({ kind: "put", key: { table, id }, value })),
+              delete: (table, id) => write(generation, stringify({ kind: "delete", key: { table, id } })),
+            }),
+          });
     return serialize(await handler(context, parse(argsJson)));
   };
 })();
