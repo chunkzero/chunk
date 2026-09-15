@@ -21,6 +21,8 @@ internal fun configureModule(
             project.pluginManager.apply("com.gradleup.shadow")
             val application = project.extensions.getByType(JavaApplication::class.java)
             val sources = project.extensions.getByType(SourceSetContainer::class.java).named("main")
+            val generate = project.rootProject.tasks.named("generateChunkBackend", GenerateChunkBackend::class.java)
+            sources.configure { java.srcDir(generate.flatMap { it.generatedDirectory.dir("java-session/$appId") }) }
             val registry =
                 project.tasks.register(
                     "generateChunkSessionRegistry",
@@ -32,6 +34,9 @@ internal fun configureModule(
                         project.rootProject.tasks
                             .named("generateChunkBackend", GenerateChunkBackend::class.java)
                             .flatMap { it.generatedDirectory.file("session-methods.json") },
+                    )
+                    configurationContracts.from(
+                        generate.flatMap { it.generatedDirectory.file("session-configurations.json") },
                     )
                     classes.from(sources.map { it.output.classesDirs })
                     dependencies.from(project.configurations.named("compileClasspath"))

@@ -405,3 +405,63 @@ fn destination_policies_are_pinned_to_the_published_session_catalog() {
         assert!(fixture.publish().is_err());
     }
 }
+
+#[test]
+fn session_configurations_require_matching_packaged_schemas_and_registered_providers() {
+    let fixture = Fixture::new();
+    let path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let configuration = json!({"app":"lobby","session":"default","configuration":{"type":"object","fields":{
+        "map":{"schema":{"type":"string"}}
+    }}});
+    contract["session_configurations"] = json!({"version":1,"configurations":[configuration]});
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("missing session configuration manifest"));
+    let mut packaged = configuration;
+    packaged["interface"] = json!("sample.ConfigProvider");
+    packaged["binary_interface"] = json!("sample.ConfigProvider");
+    packaged["provider"] = json!("sample.lobby.Provider");
+    let entries = |configuration: Value, provider: &str| {
+        vec![
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMain-Class: sample.lobby.Provider\r\n\r\n".to_vec()),
+            ("sample/lobby/Provider.class", class(25, 1)),
+            ("sample/ConfigProvider.class", class(25, 1)),
+            ("META-INF/services/dev.chunkzero.runtime.SessionProvider", provider.as_bytes().to_vec()),
+            (
+                "META-INF/chunk/session-configurations.json",
+                serde_json::to_vec(&json!({"version":1,"app":"lobby","configurations":[configuration]})).unwrap(),
+            ),
+        ]
+    };
+    write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged.clone(), "sample.lobby.Provider\n"));
+    let release = fixture.publish().unwrap();
+    let deployment: chunk_contract::Deployment =
+        serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
+    assert_eq!(deployment.session_configurations.unwrap().configurations[0].session, "default");
+    write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged.clone(), ""));
+    assert!(fixture.publish().err().unwrap().to_string().contains("unregistered configured session provider"));
+    packaged["configuration"]["fields"]["map"]["schema"] = json!({"type":"integer"});
+    write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged, "sample.lobby.Provider\n"));
+    assert!(fixture.publish().err().unwrap().to_string().contains("differ from backend contract"));
+}
+
+#[test]
+fn destination_only_profiles_are_validated_and_participate_in_release_identity() {
+    let fixture = Fixture::new();
+    let path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    contract["destinations"] = json!({"version":1,"entries":{"apps/lobby/destinations/large":{
+        "destination":{"key":"large","session_type":"lobby/default","machine_profile":"large"},
+        "overflow":"replicate","empty_timeout_seconds":60,"creation":{"capacity":32,"configuration":{}}
+    }}});
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("unknown destination machine profile large"));
+    let manifest = fixture.inputs.project.join("chunk.toml");
+    let original = fs::read_to_string(&manifest).unwrap();
+    fs::write(&manifest, format!("{original}\n[local.profiles.large]\nmemory_mib=1024\nmax_sessions=1\n")).unwrap();
+    let first = fixture.publish().unwrap();
+    let release: Value = serde_json::from_slice(&fs::read(first.directory.join("release.json")).unwrap()).unwrap();
+    assert_eq!(release["profiles"]["large"]["memory_mib"], 1024);
+    fs::write(&manifest, format!("{original}\n[local.profiles.large]\nmemory_mib=2048\nmax_sessions=1\n")).unwrap();
+    assert_ne!(first.id, fixture.publish().unwrap().id);
+}

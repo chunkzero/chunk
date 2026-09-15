@@ -4,6 +4,7 @@ import chunk.v1.Supervision.SessionCommand;
 import chunk.v1.Supervision.SessionInventory;
 import chunk.v1.Supervision.SessionPhase;
 
+import dev.chunkzero.backend.api.BackendJson;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.minestom.event.SessionCreateEvent;
 import dev.chunkzero.runtime.minestom.event.SessionJoinEvent;
@@ -15,6 +16,8 @@ import net.minestom.server.event.EventDispatcher;
 
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
+
+import tools.jackson.databind.JsonNode;
 
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -93,9 +96,17 @@ public final class SessionManager {
                                     || command.getCapacity() > 128) {
                                 throw new IllegalArgumentException("Invalid session command");
                             }
+                            var configuration = configuration(command);
                             var previous = sessions.get(command.getSession().getId());
                             if (previous != null) {
-                                if (!previous.command.equals(command))
+                                if (!previous.command.toBuilder()
+                                                .clearConfigurationJson()
+                                                .build()
+                                                .equals(
+                                                        command.toBuilder()
+                                                                .clearConfigurationJson()
+                                                                .build())
+                                        || !configuration(previous.command).equals(configuration))
                                     throw new IllegalArgumentException("Session creation changed");
                                 return previous;
                             }
@@ -104,12 +115,23 @@ public final class SessionManager {
                             var factory = factories.get(command.getSessionType());
                             if (factory == null)
                                 throw new IllegalArgumentException("Unknown session type");
-                            var session = new ManagedSession(command, factory);
+                            var session =
+                                    new ManagedSession(command, factory, configuration.toString());
                             sessions.put(command.getSession().getId(), session);
                             session.start();
                             return session;
                         })
                 .thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
+    }
+
+    private static JsonNode configuration(SessionCommand command) {
+        var bytes = command.getConfigurationJson();
+        if (bytes.size() > 64 * 1024 || !bytes.isValidUtf8())
+            throw new IllegalArgumentException("Invalid session configuration encoding or size");
+        var config = BackendJson.mapper().readTree(bytes.isEmpty() ? "{}" : bytes.toStringUtf8());
+        if (config == null || !config.isObject())
+            throw new IllegalArgumentException("Session configuration must be an object");
+        return config;
     }
 
     public CompletableFuture<SessionInventory> finish(SessionCommand command) {
@@ -170,9 +192,10 @@ public final class SessionManager {
         private volatile boolean methodsClosed;
         private @Nullable Throwable creationFailure;
 
-        ManagedSession(SessionCommand command, SessionRegistration registration) {
+        ManagedSession(
+                SessionCommand command, SessionRegistration registration, String configuration) {
             this.command = command;
-            behavior = registration.create();
+            behavior = registration.create(command.getCapacity(), configuration);
             scope =
                     new SessionScope(
                             command.getSession().getId(),

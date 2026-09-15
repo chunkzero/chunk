@@ -156,6 +156,53 @@ class ChunkPluginTest {
     }
 
     @Test
+    fun `Java configured providers compile from app sources and require the exact declared interface`() {
+        configurationFixture(kotlin = false)
+        run("chunkArtifacts")
+        assertMethodExecution()
+        val jar = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(jar).use {
+            val metadata =
+                JsonParser
+                    .parseString(
+                        it
+                            .getInputStream(
+                                it.getEntry("META-INF/chunk/session-configurations.json"),
+                            ).bufferedReader()
+                            .readText(),
+                    ).asJsonObject
+            assertEquals(
+                "fixture.lobby.App",
+                metadata.getAsJsonArray("configurations")[0].asJsonObject["provider"].asString,
+            )
+        }
+        val source = directory.resolve("apps/lobby/src/main/java/App.java").toFile()
+        source.writeText(
+            source
+                .readText()
+                .replace(
+                    "fixture.generated.LobbySessionProviders.Default",
+                    "dev.chunkzero.runtime.ConfiguredSessionProvider<fixture.generated.Bindings>",
+                ).replace(
+                    "public Game create",
+                    "public dev.chunkzero.backend.api.JsonType<fixture.generated.Bindings> configurationType() { return null; } public Game create",
+                ),
+        )
+        assertTrue(
+            runFailure(
+                "chunkArtifacts",
+            ).output.contains("must implement fixture.generated.LobbySessionProviders.Default"),
+        )
+    }
+
+    @Test
+    fun `Kotlin configured providers retain concrete session methods and immutable typed creation input`() {
+        configurationFixture(kotlin = true)
+        run("chunkArtifacts")
+        assertMethodExecution()
+    }
+
+    @Test
     fun `Java components link shared module indexes after clean compilation and reject duplicate identities`() {
         componentFixture(kotlin = false)
         run("chunkArtifacts")
@@ -307,6 +354,54 @@ class ChunkPluginTest {
         val output = process.inputStream.bufferedReader().use { it.readText() }
         assertEquals(0, process.waitFor(), output)
         assertEquals("shared:app", output.trim())
+    }
+
+    private fun configurationFixture(kotlin: Boolean) {
+        methodFixture(kotlin)
+        write("configuration-fixture", "")
+        val repository = File(System.getProperty("chunk.test.repository"))
+        for (name in listOf("SessionCreation", "ConfiguredSessionProvider", "SessionProvider")) {
+            write(
+                "apps/lobby/src/main/java/dev/chunkzero/runtime/$name.java",
+                repository.resolve("jvm/runtime-minestom/src/main/java/dev/chunkzero/runtime/$name.java").readText(),
+            )
+        }
+        write(
+            "src/main/java/dev/chunkzero/backend/api/JsonType.java",
+            "package dev.chunkzero.backend.api; public final class JsonType<T> {}",
+        )
+        if (kotlin) {
+            write(
+                "apps/lobby/src/main/kotlin/App.kt",
+                """
+                package fixture.lobby
+                import dev.chunkzero.runtime.SessionCreation
+                import fixture.generated.Bindings
+                @dev.chunkzero.runtime.SessionType("default")
+                class Factory : fixture.generated.LobbySessionProviders.Default {
+                    override fun create(creation: SessionCreation<Bindings>) = Game()
+                }
+                class Game : dev.chunkzero.runtime.Session(), fixture.generated.Ping {
+                    override fun ping(args: Bindings): String = "echo:" + args.value()
+                }
+                fun main() { Verify.run(Factory().create(SessionCreation(32, Bindings("ok")))) }
+                """,
+            )
+        } else {
+            write(
+                "apps/lobby/src/main/java/App.java",
+                """
+                package fixture.lobby;
+                @dev.chunkzero.runtime.SessionType("default")
+                public final class App implements fixture.generated.LobbySessionProviders.Default {
+                    public Game create(dev.chunkzero.runtime.SessionCreation<fixture.generated.Bindings> creation) { return new Game(); }
+                    public static void main(String[] args) {
+                        Verify.run(new App().create(new dev.chunkzero.runtime.SessionCreation<>(32, new fixture.generated.Bindings("ok"))));
+                    }
+                }
+                """,
+            )
+        }
     }
 
     private fun methodFixture(kotlin: Boolean) {
@@ -489,9 +584,13 @@ class ChunkPluginTest {
                 if target == 'kotlin':
                     files['kotlin/fixture/generated/Facade.kt'] = 'package fixture.generated\nsuspend fun value(): Bindings = Client.value()\n'
                 methods = []
+                configurations = []
                 if (root / 'method-fixture').is_file():
                     files['java/fixture/generated/Ping.java'] = 'package fixture.generated; public interface Ping { String ping(Bindings args); record Ref<A,R>() {} Ref<Bindings,String> REF = new Ref<>(); }'
                     methods = [{'app':'lobby','session':'default','name':'ping','interface':'fixture.generated.Ping','binary_interface':'fixture.generated.Ping','function':'ping','arguments':{'type':'object','fields':{}},'result':{'type':'string'}}]
+                if (root / 'configuration-fixture').is_file():
+                    files['java-session/lobby/fixture/generated/LobbySessionProviders.java'] = 'package fixture.generated; public final class LobbySessionProviders { public interface Default extends dev.chunkzero.runtime.ConfiguredSessionProvider<Bindings> { default dev.chunkzero.backend.api.JsonType<Bindings> configurationType() { return null; } } }'
+                    configurations = [{'app':'lobby','session':'default','interface':'fixture.generated.LobbySessionProviders.Default','binary_interface':'fixture.generated.LobbySessionProviders${'$'}Default','configuration':{'type':'object','fields':{'value':{'schema':{'type':'string'}}}}}]
                 for name, content in files.items():
                     path = output / name
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -499,6 +598,7 @@ class ChunkPluginTest {
                 backend.mkdir(parents=True, exist_ok=True)
                 (backend / 'contract.json').write_text('{}')
                 (output / 'session-methods.json').write_text(json.dumps({'version': 1, 'methods': methods}))
+                (output / 'session-configurations.json').write_text(json.dumps({'version': 1, 'configurations': configurations}))
             else:
                 raise SystemExit('Unexpected command: ' + command)
         """,

@@ -5,6 +5,7 @@ use chunk_contract::{Field, FunctionKind, Schema, Visibility};
 use super::{BackendMetadata, quote, validate_literals};
 
 mod client;
+mod configurations;
 mod names;
 mod schema;
 mod sessions;
@@ -57,6 +58,7 @@ pub(super) struct Bindings {
     pub root: Namespace,
     declarations: String,
     sessions: Option<chunk_contract::SessionMethods>,
+    configurations: Option<chunk_contract::SessionConfigurations>,
 }
 
 impl Bindings {
@@ -74,6 +76,7 @@ impl Bindings {
             (format!("java-client/{package_path}/BackendClient.java"), client::source(package, &self.root)),
         ]);
         files.extend(sessions::sources(self.sessions.as_ref(), package)?);
+        files.extend(configurations::sources(self.configurations.as_ref(), package)?);
         Ok(files)
     }
 }
@@ -122,7 +125,12 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
         model_body(&root),
     ]
     .join("\n");
-    Ok(Bindings { root, declarations, sessions: contract.session_methods.clone() })
+    Ok(Bindings {
+        root,
+        declarations,
+        sessions: contract.session_methods.clone(),
+        configurations: contract.session_configurations.clone(),
+    })
 }
 
 fn describe(

@@ -97,6 +97,7 @@ const SUPPORT_NAMES: &[&str] = &[
     "MutationRef",
     "SessionMethodRef",
     "SessionMethods",
+    "SessionConfigs",
     "Objects",
     "List",
     "Set",

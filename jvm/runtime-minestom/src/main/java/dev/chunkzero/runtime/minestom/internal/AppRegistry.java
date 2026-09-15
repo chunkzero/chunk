@@ -27,8 +27,7 @@ public final class AppRegistry {
                     throw new IllegalArgumentException(
                             "Session provider requires a valid @SessionType");
                 var key = app + "/" + declaration.value();
-                if (factories.put(key, new SessionRegistration(app, () -> provider.get().create()))
-                        != null)
+                if (factories.put(key, SessionRegistration.provider(app, provider::get)) != null)
                     throw new IllegalArgumentException("Duplicate session type: " + key);
             }
         } catch (ServiceConfigurationError error) {

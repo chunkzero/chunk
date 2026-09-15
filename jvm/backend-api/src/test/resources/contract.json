@@ -473,5 +473,80 @@
         }
       }
     ]
+  },
+  "session_configurations": {
+    "version": 1,
+    "configurations": [
+      {
+        "app": "duels",
+        "session": "default",
+        "configuration": {
+          "type": "object",
+          "fields": {
+            "player": {
+              "schema": {
+                "type": "player"
+              },
+              "optional": false
+            },
+            "id": {
+              "schema": {
+                "type": "id",
+                "table": "profiles"
+              },
+              "optional": false
+            },
+            "note": {
+              "schema": {
+                "type": "string"
+              },
+              "optional": true
+            },
+            "count": {
+              "schema": {
+                "type": "integer"
+              },
+              "optional": false
+            },
+            "labels": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "optional": false
+            },
+            "state": {
+              "schema": {
+                "type": "union",
+                "variants": {
+                  "ready": {
+                    "type": "object",
+                    "fields": {}
+                  },
+                  "true": {
+                    "type": "object",
+                    "fields": {}
+                  },
+                  "waiting": {
+                    "type": "object",
+                    "fields": {
+                      "reason": {
+                        "schema": {
+                          "type": "string"
+                        },
+                        "optional": false
+                      }
+                    }
+                  }
+                }
+              },
+              "optional": false
+            }
+          }
+        }
+      }
+    ]
   }
 }

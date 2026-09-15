@@ -16,6 +16,7 @@ use crate::{
 mod archive;
 mod descriptor;
 mod jars;
+mod session_configurations;
 mod session_methods;
 pub use descriptor::{JavaRuntime, JvmDescriptor, read_jvm_descriptor};
 
@@ -78,6 +79,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
         jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
         session_methods::validate(&bytes, &app.id, &input.sessions, backend.session_methods.as_ref())?;
+        session_configurations::validate(&bytes, &app.id, &input.sessions, backend.session_configurations.as_ref())?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
         if app.sessions.keys().any(|id| !input.sessions.contains(id)) {
@@ -115,11 +117,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let directory = format!("{}/assets", app.directory);
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
-    if let Some(destinations) = &backend.destinations {
-        destinations
-            .validate_apps(&metadata.apps.iter().map(|app| (app.id.clone(), app.clone())).collect())
-            .map_err(io::Error::other)?;
-    }
+    validate_app_contracts(&backend, project.local.as_ref(), &mut metadata)?;
     let domains = project::domains::discover(&inputs.project)?;
     if let Some(compiled) = &backend.domains {
         let bindings = project.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect();
@@ -130,13 +128,6 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         }
     } else if inputs.project.join("server/domains").exists() {
         return Err(io::Error::other("backend is missing the project's domain manifest; recompile the backend"));
-    }
-    if let Some(methods) = &backend.session_methods
-        && methods.methods.iter().any(|method| {
-            !metadata.apps.iter().any(|app| app.id == method.app && app.sessions.contains_key(&method.session))
-        })
-    {
-        return Err(io::Error::other("session method references unknown release app or session"));
     }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
     let id = publication::digest(&files);
@@ -152,6 +143,38 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     let directory = publication::publish_directory(dist, &id, &files)?;
     archive::publish(archive, &archive_path)?;
     Ok(Release { id, directory, archive: archive_path.canonicalize()?, apps: metadata.apps })
+}
+
+fn validate_app_contracts<'a>(
+    backend: &chunk_contract::Deployment,
+    local: Option<&'a project::LocalConfig>,
+    metadata: &mut Metadata<'a>,
+) -> io::Result<()> {
+    let apps = metadata.apps.iter().map(|app| (app.id.clone(), app.clone())).collect();
+    if let Some(destinations) = &backend.destinations {
+        destinations.validate_apps(&apps).map_err(io::Error::other)?;
+        if let Some(local) = local {
+            for policy in destinations.entries.values() {
+                let name = &policy.destination.machine_profile;
+                let profile = local
+                    .profiles
+                    .get(name)
+                    .ok_or_else(|| io::Error::other(format!("unknown destination machine profile {name}")))?;
+                metadata.profiles.insert(name.clone(), profile);
+            }
+        }
+    }
+    if let Some(configurations) = &backend.session_configurations {
+        configurations.validate_apps(&apps).map_err(io::Error::other)?;
+    }
+    if let Some(methods) = &backend.session_methods
+        && methods.methods.iter().any(|method| {
+            !metadata.apps.iter().any(|app| app.id == method.app && app.sessions.contains_key(&method.session))
+        })
+    {
+        return Err(io::Error::other("session method references unknown release app or session"));
+    }
+    Ok(())
 }
 
 fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_contract::Deployment> {
