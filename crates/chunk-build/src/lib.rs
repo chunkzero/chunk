@@ -31,6 +31,8 @@ struct BackendMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_methods: Option<chunk_contract::SessionMethods>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_configurations: Option<chunk_contract::SessionConfigurations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     destinations: Option<chunk_contract::DestinationManifest>,
 }
 
