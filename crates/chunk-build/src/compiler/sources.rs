@@ -6,6 +6,7 @@ use std::{
 pub(super) struct Source {
     pub path: PathBuf,
     pub namespace: String,
+    pub authoring: Option<crate::project::authoring::Module>,
 }
 
 pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
@@ -13,6 +14,12 @@ pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
     collect(&root.join("server"), "shared", &mut files, 0)?;
     for app in crate::project::discover_apps(root)? {
         collect(&root.join(&app.directory).join("server"), &format!("apps/{}", app.id), &mut files, 0)?;
+    }
+    for module in crate::project::authoring::discover(root)?.modules {
+        files.push(Source { path: module.path.clone(), namespace: module.namespace.clone(), authoring: Some(module) });
+    }
+    if files.len() > 512 {
+        return Err(io::Error::other("too many backend source files"));
     }
     if files.iter().try_fold(0_u64, |total, source| Ok::<_, io::Error>(total + fs::metadata(&source.path)?.len()))?
         > 8 * 1024 * 1024
@@ -53,7 +60,7 @@ fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: us
         } else if kind.is_file()
             && let Some(stem) = name.strip_suffix(".ts").or_else(|| name.strip_suffix(".mts"))
         {
-            files.push(Source { path: entry.path(), namespace: format!("{namespace}/{stem}") });
+            files.push(Source { path: entry.path(), namespace: format!("{namespace}/{stem}"), authoring: None });
             if files.len() > 512 {
                 return Err(io::Error::other("too many backend source files"));
             }

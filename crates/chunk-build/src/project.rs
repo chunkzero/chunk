@@ -8,6 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub(crate) mod authoring;
 pub(crate) mod domains;
 
 #[derive(Debug, Serialize)]
@@ -93,7 +94,7 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
                     && !local.profiles.contains_key(profile)
                 {
                     return Err(invalid(
-                        &root.join(&app.directory).join("app.toml"),
+                        &app_manifest_path(root, app),
                         format!("machine_profile references unknown profile {profile:?}"),
                     ));
                 }
@@ -104,15 +105,12 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
             .chain(app.sessions.values())
             .any(|requirements| requirements.machine_profile.is_some())
     }) {
-        return Err(invalid(
-            &root.join(&app.directory).join("app.toml"),
-            "machine_profile requires profiles in chunk.toml [local]",
-        ));
+        return Err(invalid(&app_manifest_path(root, app), "machine_profile requires profiles in chunk.toml [local]"));
     }
     Ok(ProjectMetadata { version: 1, apps, local: manifest.local })
 }
 
-/// Discovers sorted immediate `apps/*/app.toml` children using their directory names as app IDs.
+/// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children.
 /// Unmanifested directories are ignored. This inventory does not require a root project manifest.
 /// # Errors
 /// Rejects symlinks, malformed manifests, invalid or case-colliding IDs and missing app build files.
@@ -177,7 +175,20 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             sessions: manifest.sessions,
         });
     }
+    apps.extend(authoring::discover(root)?.apps);
+    apps.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut names = BTreeSet::new();
+    for app in &apps {
+        if !names.insert(app.id.to_ascii_lowercase()) {
+            return Err(invalid(&root.join(&app.directory), "app IDs must be unique and must not differ only by case"));
+        }
+    }
     Ok(apps)
+}
+
+fn app_manifest_path(root: &Path, app: &AppMetadata) -> std::path::PathBuf {
+    let directory = root.join(&app.directory);
+    if directory.join("app.ts").exists() { directory.join("app.ts") } else { directory.join("app.toml") }
 }
 
 impl LocalConfig {

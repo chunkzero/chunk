@@ -3,12 +3,12 @@
 Run `chunk codegen PROJECT` to prepare the schema-aware TypeScript SDK for editors without a build or running services.
 `chunk gen PROJECT --target java` compiles backend code and generates a Java client. The repository-only
 `chunk-compile PROJECT OUTPUT` helper compiles backend artifacts without client generation. Compilation prepares the
-SDK, type-checks the project's `server/**/*.ts` and discovered apps' `server/**/*.ts`, then bundles them directly with
-the Rust Rolldown API. The explicitly composed default export in `server/schema/index.ts` supplies the database schema.
+SDK, type-checks shared/app-local backend sources and discovered `app.ts`/`scope.ts` modules, then bundles them with the
+Rust Rolldown API. The explicitly composed default export in `server/schema/index.ts` supplies the database schema.
 
 Named function declarations become paths such as `shared/profile/get` and `apps/duels/match/score`. Helpers remain
-ordinary TypeScript exports; SDK function declarations enter the function contract. Named `defineDestination` exports in
-`server/destinations.ts` add immutable placement policies, validated against the JVM session catalog during publication.
+ordinary TypeScript exports; SDK function declarations enter the function contract. App-owned destination declarations
+add immutable placement policies and typed creation configuration, validated against the JVM catalog during publication.
 Declarations are evaluated in the bounded transactional engine, without executing project code in Node. Node builtins,
 remote imports and native modules are unsupported.
 
@@ -16,12 +16,13 @@ Successful compilation writes `source.mjs`, `source.mjs.map`, and `contract.json
 Gradle or build JVM apps. `chunk_build::publish_release` combines the backend output with app JARs, shared dependencies,
 assets and project metadata into an immutable content-addressed release. Shared SDK sources are embedded in
 `chunk-build` and materialized in `PROJECT/.chunk/sdk/`. `PROJECT/.chunk/generated/` contains builders and named
-context/document/ID types derived from the project's schema. `package.json` maps `#chunk` and `#chunk/schema` to those
+context/document/ID types derived from the project's schema. `#chunk/apps` exposes app, implementation, and destination
+references discovered without importing executable app modules. `package.json` maps these generated imports to local
 sources; both TypeScript and Rolldown resolve the mappings directly. Schema helpers have no dependency on the
 schema-bound builders. Missing/stale files are repaired, unchanged files retain their timestamps, and generated
 directories are excluded from source discovery. The default `.chunk/build/` output contains deployment artifacts only.
 
-Generation preserves existing project configuration and merges only its two owned imports. It creates a suitable
+Generation preserves existing project configuration and merges only its owned imports. It creates a suitable
 `tsconfig.json` if missing. See the [SDK guide](sdk/README.md) for setup and typed helper examples. The Java, Kotlin and
 TypeScript client generators remain separate; `#chunk/api` and a TypeScript transport client are deferred.
 
@@ -33,33 +34,59 @@ and license files. Node/pnpm are needed to assemble this distribution, not to ru
 
 ## Project inspection
 
-`chunk inspect PROJECT` reads `chunk.toml` and sorted immediate `apps/*/app.toml` children, then prints JSON with
-`version: 1`, `apps`, and optional `local` settings. Each app entry contains its directory-derived `id`,
-project-relative `directory`, Gradle project path such as `:apps:lobby`, and `runtime` requirements. Inspection does not
-compile backend sources or run Gradle. App discovery is shared with the backend compiler; unmanifested directories and
-nested apps are not included.
+`chunk inspect PROJECT` reads `chunk.toml` and recursive `apps/**/app.ts` declarations, then prints JSON with
+`version: 1`, `apps`, and optional `local` settings. Every app declares a stable `id`; its physical path supplies the
+Gradle project path and scope ancestry. `apps/games/arena/app.ts` can declare `id: "duels"` while Gradle uses
+`:apps:games:arena`. Each app needs a regular `build.gradle.kts` beside its declaration; toolchains and dependencies
+stay in Gradle.
 
-Every app needs a regular `build.gradle.kts` beside its `app.toml`. Empty app and project manifests are valid. JVM
-toolchains remain explicit in Gradle. For local placement, the root manifest can supply defaults and named machine
-profiles:
+```ts
+import { defineApp, v } from "#chunk";
+
+export default defineApp({
+  id: "arena",
+  runtime: { machineProfile: "small", maxPlayers: 16 },
+  implementations: { default: { config: v.object({ label: v.string() }) } },
+  destinations: {
+    standard: { implementation: "default", key: "standard", config: { label: "Standard" } },
+    large: { implementation: "default", key: "large", maxPlayers: 32, config: { label: "Large" } },
+  },
+});
+```
+
+Inspection parses TypeScript syntax without executing declarations or resolving imports. The default export must be a
+direct `defineApp({...})` or `defineScope({...})` call. IDs, runtime requirements, implementation keys, and destination
+identities use literals. Hook/command maps have literal keys and can reference imported descriptors. Configuration
+validators and creation values are evaluated later during bounded backend compilation. Spreads, computed keys, and
+computed runtime requirements cannot participate in static metadata.
+
+`apps/scope.ts` supplies root policy. Descendant `scope.ts` files and app-local `hooks`/`commands` compose policy by
+physical directory ancestry; intermediate directories are implicit scopes. Apps do not repeat a domain backlink.
+`server/schema/index.ts` still explicitly composes database schemas, and app-local backend functions remain under each
+app's `server/` directory. Generated `#chunk/apps` references exist before backend and JVM compilation.
+
+Root local defaults remain in `chunk.toml`:
 
 ```toml
 [local]
 environment = "local"
-machine_profile = "local"
+machine_profile = "small"
 capacity = 16
 max_processes = 4
 
-[local.profiles.local]
+[local.profiles.small]
 memory_mib = 512
 max_sessions = 2
 ```
 
-An app can override `machine_profile` or `capacity` in `[runtime]`. Inspection resolves root defaults into each app's
-runtime metadata and validates profile references. Optional `[sessions.<id>]` tables override the app defaults for
-individual session types; release assembly rejects IDs absent from the compiled session catalog. Local capacity is 1–128
-players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. No second app list is needed. Unknown
-fields and redundant app names are rejected. Optional `domain` binds an app to a static `server/domains/` scope.
+App runtime defaults and optional implementation `runtime` overrides use `machineProfile` and `maxPlayers`. Inspection
+emits the existing `machine_profile`/`capacity` fields for build and placement tools. Destinations can override those
+defaults while retaining the same implementation. Omitted `implementations` means the ordinary `default` provider;
+omitted implementation `config` accepts only `{}` and requires no generated configuration provider interface.
+
+Local capacity is 1–128 players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. Legacy
+immediate `apps/*/app.toml` projects and `server/domains` declarations remain supported during migration. An app cannot
+contain both `app.ts` and `app.toml`, and authored scopes cannot collide with legacy scopes.
 
 The backend compiler can discover apps without a root `chunk.toml`. Public CLI commands require the root manifest.
 `chunk dev PROJECT` uses its local settings and each discovered app’s resolved requirements for session placement.

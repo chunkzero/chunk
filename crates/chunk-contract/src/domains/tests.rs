@@ -143,3 +143,33 @@ fn command_metadata_preserves_legacy_encoding_and_rejects_invalid_identity_or_ex
         Err("command suggestions require input/cursor query arguments and string array results")
     );
 }
+
+#[test]
+fn authored_descriptor_identities_require_exact_scope_and_app_ownership() {
+    let valid = serde_json::json!({
+        "version":1,
+        "scopes":{"":{"parent":null},"games":{"parent":""},"games/arena":{"parent":"games"}},
+        "apps":{"arena":"games/arena"},
+        "hooks":{
+            "scopes/hooks/route":{"domain":"","event":"player.route","export":"route"},
+            "scopes/games/hooks/gate":{"domain":"games","event":"player.login","export":"gate"},
+            "apps/arena/app/hooks/entered":{"domain":"games/arena","event":"domain.enter","export":"entered"}
+        },
+        "commands":{}
+    });
+    let manifest: DomainManifest = serde_json::from_value(valid.clone()).unwrap();
+    manifest.validate().unwrap();
+    for (original, wrong) in [
+        ("scopes/games/hooks/gate", "scopes/hooks/gate"),
+        ("apps/arena/app/hooks/entered", "apps/other/app/hooks/entered"),
+        ("apps/arena/app/hooks/entered", "apps/arena/app/commands/entered"),
+        ("apps/arena/app/hooks/entered", "apps/arena/app/hooks/nested/entered"),
+    ] {
+        let mut invalid = valid.clone();
+        let hooks = invalid["hooks"].as_object_mut().unwrap();
+        let hook = hooks.remove(original).unwrap();
+        hooks.insert(wrong.into(), hook);
+        let manifest: DomainManifest = serde_json::from_value(invalid).unwrap();
+        assert!(manifest.validate().is_err(), "{wrong}");
+    }
+}

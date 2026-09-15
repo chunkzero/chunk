@@ -180,6 +180,18 @@ fn entry_source(
         quote(sdk.join("sessions.ts").to_string_lossy()),
         quote(sdk.join("destinations.ts").to_string_lossy()),
     );
+    writeln!(
+        source,
+        "import {{isApp,isScope,appConfigurations,appDestinations}} from {};",
+        quote(sdk.join("apps.ts").to_string_lossy())
+    )
+    .map_err(error)?;
+    let apps = if root.join("chunk.toml").exists() {
+        crate::project::inspect(root)?.apps
+    } else {
+        crate::project::discover_apps(root)?
+    };
+    let mut configurations = Vec::new();
     let mut domains = super::domains::DomainEntries::new(root)?;
     let mut destination_metadata = Vec::new();
     let mut destination_module = false;
@@ -188,6 +200,26 @@ fn entry_source(
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         domains.add_module(entry)?;
+        if let Some(module) = &entry.authoring {
+            let value = format!("m{index}.default");
+            domains.add_authored(module, &value, &mut source)?;
+            if module.app {
+                let app = apps
+                    .iter()
+                    .find(|app| entry.namespace == format!("apps/{}/app", app.id))
+                    .ok_or_else(|| error("missing authored app metadata"))?;
+                writeln!(
+                    source,
+                    "if({value}.id !== {}) throw new Error('App id differs from statically discovered metadata');",
+                    quote(&app.id)
+                )
+                .map_err(error)?;
+                configurations.push(format!("...appConfigurations({value})"));
+                let defaults =
+                    serde_json::json!({"machineProfile":app.runtime.machine_profile,"maxPlayers":app.runtime.capacity});
+                destination_metadata.push(format!("...appDestinations({value},{defaults})"));
+            }
+        }
         let destination_scope = entry.namespace == "shared/destinations";
         if destination_scope && std::mem::replace(&mut destination_module, true) {
             return Err(error("multiple server/destinations.ts or destinations.mts modules"));
@@ -230,6 +262,6 @@ fn entry_source(
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
     let domain_metadata = domains.metadata()?;
     writeln!(source, "const destinationEntries = [{}];", destination_metadata.join(",")).map_err(error)?;
-    write!(source, "export function __chunk_contract() {{ const methods = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}})}}; }}", methods.join(","), metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{}]; const configurations = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}", methods.join(","), configurations.join(","), metadata.join(",")).map_err(error)?;
     Ok(source)
 }

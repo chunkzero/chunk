@@ -55,6 +55,7 @@ fn generation_preserves_project_configuration_and_repairs_owned_imports() {
     assert_eq!(generated["imports"]["#chunk"], "./.chunk/generated/index.ts");
     assert_eq!(generated["imports"]["#chunk/schema"], "./.chunk/sdk/schema.ts");
     generated["imports"].as_object_mut().unwrap().remove("#chunk/schema");
+    generated["imports"].as_object_mut().unwrap().remove("#chunk/apps");
     generated["imports"]["#chunk"] = json!("./old.ts");
     assert_eq!(serde_json::to_string(&generated).unwrap(), serde_json::to_string(&package).unwrap());
     assert_eq!(fs::read_to_string(project.path().join("tsconfig.json")).unwrap(), config);

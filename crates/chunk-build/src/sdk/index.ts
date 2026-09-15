@@ -6,6 +6,8 @@ import type { QueryContext as SchemaQueryContext, MutationContext as SchemaMutat
 import type { Id as TableId } from "../sdk/validators.ts";
 
 export {
+  defineApp,
+  defineScope,
   v,
   unset,
   createHook,
@@ -20,6 +22,11 @@ export type {
   SessionMethodReference,
   DestinationDefinition,
   DestinationOptions,
+  AppDefinition,
+  AppRuntime,
+  ImplementationOptions,
+  ScopeDefinition,
+  ScopeOptions,
   Validator,
   ObjectValidator,
   OptionalValidator,

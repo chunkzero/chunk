@@ -21,6 +21,7 @@ struct Descriptors {
 
 pub(super) struct DomainEntries {
     manifest: Option<DomainManifest>,
+    authored: bool,
     descriptors: [Descriptors; 2],
 }
 
@@ -28,7 +29,8 @@ impl DomainEntries {
     pub(super) fn new(root: &Path) -> io::Result<Self> {
         let scopes = crate::project::domains::discover(root)?;
         let apps = crate::project::discover_apps(root)?.into_iter().map(|app| (app.id, app.domain)).collect();
-        let manifest = root.join("server/domains").exists().then_some(DomainManifest {
+        let authored = !crate::project::authoring::discover(root)?.modules.is_empty();
+        let manifest = (authored || root.join("server/domains").exists()).then_some(DomainManifest {
             version: DOMAIN_MANIFEST_VERSION,
             scopes,
             apps,
@@ -37,6 +39,7 @@ impl DomainEntries {
         });
         Ok(Self {
             manifest,
+            authored,
             descriptors: [("Hook", "hooks"), ("Command", "commands")].map(|(kind, module)| Descriptors {
                 kind,
                 module,
@@ -84,7 +87,52 @@ impl DomainEntries {
                     entry.namespace
                 )
             };
-            writeln!(source, "if(is{kind}({value})) throw new Error({});", quote(failure)).map_err(error)?;
+            if !self.authored {
+                writeln!(source, "if(is{kind}({value})) throw new Error({});", quote(failure)).map_err(error)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn add_authored(
+        &mut self,
+        module: &crate::project::authoring::Module,
+        value: &str,
+        source: &mut String,
+    ) -> io::Result<()> {
+        let predicate = if module.app { "isApp" } else { "isScope" };
+        writeln!(
+            source,
+            "if(!{predicate}({value})) throw new Error({});",
+            quote(format!("{} requires a {predicate} declaration", module.path.display()))
+        )
+        .map_err(error)?;
+        for descriptors in &mut self.descriptors {
+            let names = if descriptors.module == "hooks" { &module.hooks } else { &module.commands };
+            for name in names {
+                let id = format!("{}/{}/{}", module.namespace, descriptors.module, name);
+                let binding = format!(
+                    "a{}_{}",
+                    if descriptors.module == "hooks" { "h" } else { "c" },
+                    descriptors.metadata.len()
+                );
+                let descriptor = format!("{value}.{}[{}]", descriptors.module, quote(name));
+                let kind = descriptors.kind;
+                writeln!(
+                    source,
+                    "if(!is{kind}({descriptor})) throw new Error({});",
+                    quote(format!("{id} requires a {kind} descriptor"))
+                )
+                .map_err(error)?;
+                writeln!(source, "export const {binding} = (ctx,args) => invoke{kind}({descriptor},ctx,args);")
+                    .map_err(error)?;
+                descriptors.metadata.push(format!(
+                    "[{}, {{...{descriptor}.contract, domain:{}, export:{}}}]",
+                    quote(id),
+                    quote(&module.scope),
+                    quote(binding)
+                ));
+            }
         }
         Ok(())
     }

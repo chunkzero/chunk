@@ -10,6 +10,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["server/**/*.ts", "apps/*/server/**/*.ts"],
+  "include": ["server/**/*.ts", "apps/**/*.ts"],
   "exclude": ["**/node_modules", "**/.chunk", "**/_generated"]
 }

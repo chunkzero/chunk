@@ -374,3 +374,22 @@ action({
     return null;
   },
 });
+
+import { defineApp, defineScope } from "../src/index.ts";
+
+defineScope({ hooks: { ping: createHook("server.ping", () => ({ motd: "Hi", online: 0, max: 16 })) } });
+defineApp({
+  id: "arena",
+  implementations: { default: { config: v.object({ label: v.string() }) } },
+  destinations: {
+    small: { implementation: "default", key: "small", maxPlayers: 16, config: { label: "Small" } },
+    large: { implementation: "default", key: "large", maxPlayers: 32, config: { label: "Large" } },
+    // @ts-expect-error creation configuration is derived from the implementation's validator
+    invalid: { implementation: "default", key: "invalid", config: { label: 7 } },
+    // @ts-expect-error unknown implementations cannot become destinations
+    unknown: { implementation: "missing", key: "missing", config: { label: "Missing" } },
+    // @ts-expect-error required configuration cannot be omitted
+    absent: { implementation: "default", key: "absent" },
+  },
+});
+defineApp({ id: "lobby", destinations: { main: { implementation: "default", key: "lobby" } } });

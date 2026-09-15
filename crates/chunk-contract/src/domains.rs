@@ -108,17 +108,27 @@ impl DomainManifest {
         self.validate_handlers()
     }
 
+    fn handler_identity(&self, identity: &str, domain: &str, kind: &str) -> bool {
+        let suffix = if domain.is_empty() { format!("{kind}/") } else { format!("{domain}/{kind}/") };
+        if ["shared/domains/", "scopes/"]
+            .iter()
+            .any(|prefix| identity.strip_prefix(&format!("{prefix}{suffix}")).is_some_and(identifier))
+        {
+            return true;
+        }
+        let Some((app, path)) = identity.strip_prefix("apps/").and_then(|path| path.split_once('/')) else {
+            return false;
+        };
+        self.apps.get(app).is_some_and(|owner| owner == domain)
+            && path.strip_prefix(&format!("app/{kind}/")).is_some_and(identifier)
+    }
+
     fn validate_handlers(&self) -> Result<(), &'static str> {
         let mut identities = BTreeSet::new();
         let mut exports = BTreeSet::new();
         let mut groups: BTreeMap<_, Vec<&Hook>> = BTreeMap::new();
         for (identity, hook) in &self.hooks {
-            let prefix = if hook.domain.is_empty() {
-                "shared/domains/hooks/".into()
-            } else {
-                format!("shared/domains/{}/hooks/", hook.domain)
-            };
-            if !identity.strip_prefix(&prefix).is_some_and(identifier)
+            if !self.handler_identity(identity, &hook.domain, "hooks")
                 || !identities.insert(identity.to_ascii_lowercase())
                 || !identifier(&hook.export)
                 || !exports.insert(&hook.export)
@@ -149,12 +159,7 @@ impl DomainManifest {
             }
         }
         for (identity, command) in &self.commands {
-            let prefix = if command.domain.is_empty() {
-                "shared/domains/commands/".into()
-            } else {
-                format!("shared/domains/{}/commands/", command.domain)
-            };
-            if !identity.strip_prefix(&prefix).is_some_and(identifier)
+            if !self.handler_identity(identity, &command.domain, "commands")
                 || !identities.insert(identity.to_ascii_lowercase())
                 || !identifier(&command.export)
                 || !exports.insert(&command.export)

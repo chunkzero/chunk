@@ -179,3 +179,31 @@ fn app_domains_resolve_static_directories_with_implicit_root_and_ancestors() {
     fs::create_dir_all(root.join("server/domains/[game]")).unwrap();
     assert!(discover_apps(root).unwrap_err().to_string().contains("static domain path"));
 }
+
+#[test]
+fn app_ts_discovery_uses_stable_ids_and_never_loads_imported_behavior() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::write(root.join("chunk.toml"), LOCAL).unwrap();
+    let directory = root.join("apps/games/renamable");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("build.gradle.kts"), "error(\"never run\")").unwrap();
+    fs::write(directory.join("app.ts"), "import {defineApp} from '#chunk'; import {schema,entered} from './missing-generated.ts'; throw new Error('must not execute'); export default defineApp({id:'arena',runtime:{maxPlayers:24},implementations:{default:{config:schema}},hooks:{entered}});").unwrap();
+    let metadata = inspect(root).unwrap();
+    assert_eq!(metadata.apps[0].id, "arena");
+    assert_eq!(metadata.apps[0].gradle_project, ":apps:games:renamable");
+    assert_eq!(metadata.apps[0].domain, "games/renamable");
+    assert_eq!(metadata.apps[0].runtime.capacity, Some(24));
+    assert_eq!(metadata.apps[0].runtime.machine_profile.as_deref(), Some("small"));
+    assert!(!root.join(".chunk").exists());
+    let original = fs::read_to_string(directory.join("app.ts")).unwrap();
+    for (from, to, diagnostic) in [
+        ("id:'arena'", "id:computedId", "literal strings"),
+        ("maxPlayers:24", "maxPlayers:12*2", "literal integer"),
+        ("hooks:{entered}", "hooks:{...imported}", "spreads"),
+    ] {
+        fs::write(directory.join("app.ts"), original.replace(from, to)).unwrap();
+        let error = inspect(root).unwrap_err().to_string();
+        assert!(error.contains("app.ts") && error.contains(diagnostic), "{error}");
+    }
+}

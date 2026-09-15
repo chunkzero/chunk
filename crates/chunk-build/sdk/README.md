@@ -200,26 +200,30 @@ Use `unset` to remove optional fields in `patch`; `undefined` is not a deletion 
 removed. Fields unknown to a retained deployment are preserved by the backend when it writes. Ordinary helper calls
 share the handler's transaction; any failure discards all its writes.
 
-## Static domains and named hooks
+## Apps, scopes, and named hooks
 
-Directories under `server/domains/` define scopes. Root is the empty path; nested scopes inherit their directory parent.
-Paths use ASCII identifier segments, without route parameters, groups, aliases, or case-only duplicates. Bind an app to
-an existing scope in `apps/<app>/app.toml`:
-
-```toml
-domain = "games/duels"
-```
-
-Omitting `domain` uses root. Several apps may share a scope. Named hook descriptors are discovered in each scope's
-`hooks.ts` or `hooks.mts`:
+App folders contain an `app.ts` default export with a stable `id`, runtime defaults, optional implementations, and local
+behavior. `scope.ts` files apply policy to descendant apps; `apps/scope.ts` is root. Directory names determine scope
+ancestry and Gradle paths, while app IDs remain explicit. Paths use ASCII identifier segments without case-only
+duplicates. There is no separate domain directory or app backlink in this authoring model.
 
 ```ts
-import { createHook } from "#chunk";
+// apps/scope.ts
+import { defineScope, createHook } from "#chunk";
+import { apps } from "#chunk/apps";
 
-export const checkEntry = createHook("player.login", (ctx) => ({ allow: ctx.player.username !== "blocked" }), {
-  order: 10,
+export default defineScope({
+  hooks: {
+    route: createHook("player.route", () => apps.lobby.destinations.main),
+    checkEntry: createHook("player.login", (ctx) => ({ allow: ctx.player.username !== "blocked" })),
+  },
 });
 ```
+
+`defineApp` accepts the same `hooks` and `commands` maps for app-local behavior. Map keys identify declarations; values
+can be inline descriptors or imported helpers. Only bound descriptors enter the app/scope contract. Root ping and
+routing responders belong in `apps/scope.ts`. Legacy `server/domains/**/hooks.ts` and `.mts` named exports remain
+supported for existing projects.
 
 `player.login` and `player.beforeMove` return `AdmissionResult`. Multiple admission hooks for the same event and scope
 need distinct explicit integer `order` values. `server.ping` returns `ServerStatus`; `player.route` returns
@@ -258,11 +262,12 @@ Helper exports remain ordinary code. Hook descriptors require named exports in h
 descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client
 paths. Hook names identify handlers within a deployment, so renaming an export changes its identity.
 
-## Domain commands
+## Scope commands
 
-Named `command` descriptors in `server/domains/**/commands.ts` or `commands.mts` contribute backend command roots.
-Ancestors apply to descendant domains. A visible root or alias has one owner; siblings may independently use the same
-names. Runtime registration also checks these names against the connected app's JVM commands.
+Bind `command` descriptors in the `commands` map of `defineScope` or `defineApp` to contribute backend command roots.
+Legacy named exports in `server/domains/**/commands.ts` or `commands.mts` remain supported. Ancestors apply to
+descendant domains. A visible root or alias has one owner; siblings may independently use the same names. Runtime
+registration also checks these names against the connected app's JVM commands.
 
 ```ts
 import { command, commandArg, commandRoute } from "#chunk";
@@ -341,24 +346,45 @@ intercept signed chat.
 
 ## Declarative destinations
 
-Named exports in `server/destinations.ts` (or `.mts`) declare a capacity pool. They do not create a process or session:
+App-owned destinations declare capacity pools and immutable typed creation values. They do not create a process or
+session until a player needs admission:
 
 ```ts
-import { defineDestination } from "#chunk";
+// apps/games/arena/app.ts
+import { defineApp, v } from "#chunk";
 
-export const lobby = defineDestination({
-  key: "main",
-  session_type: "lobby/default",
-  machine_profile: "local",
-  overflow: "replicate",
-  emptyTimeoutSeconds: 60,
+export default defineApp({
+  id: "arena",
+  runtime: { machineProfile: "small", maxPlayers: 16 },
+  implementations: { default: { config: v.object({ label: v.string() }) } },
+  destinations: {
+    standard: { implementation: "default", key: "standard", config: { label: "Standard" } },
+    large: {
+      implementation: "default",
+      key: "large",
+      maxPlayers: 32,
+      config: { label: "Large" },
+      overflow: "replicate",
+      emptyTimeoutSeconds: 60,
+    },
+  },
 });
 ```
 
-A `player.route` hook returns `lobby.destination`. It is the existing `{ key, session_type, machine_profile }` value;
-commands can pass the same value to the routing API. A declaration does not grant permission to move or finish players.
+Both destinations use one JVM implementation with different creation configuration and capacity. TypeScript checks each
+`config` against the selected implementation's object validator. The published contract validates it again before
+placement. App runtime defaults inherit root local defaults; implementation runtime defaults and destination options can
+override `machineProfile` and `maxPlayers`. The JVM receives the resolved immutable creation values.
+
+Omit `implementations` for a simple default provider. An implementation without a `config` validator accepts only `{}`.
+A `player.route` hook returns `apps.arena.destinations.standard` imported from `#chunk/apps`; commands pass that same
+reference to routing APIs. Generated references contain the existing `{ key, session_type, machine_profile }` identity
+and never import executable app modules. Configuration stays in the deployment's destination policy, so clients cannot
+substitute arbitrary creation values. Implementation refs are available as `apps.arena.implementations.default`.
+
 The session type and machine profile must match the release's JVM catalog. The default policy is `replicate` with a
-60-second idle timeout; explicit timeouts range from 1 to 86400 seconds.
+60-second idle timeout; explicit timeouts range from 1 to 86400 seconds. Legacy named `defineDestination` exports in
+`server/destinations.ts` or `.mts` remain supported without creation configuration.
 
 The identity is `(environment, deployment, session_type, key)`. The declaration, profile, capacity and code are
 immutable within that deployment. Duplicate declarations for the same session type/key are errors, even under different
@@ -371,9 +397,9 @@ one unfinished instance for that identity and rejects excess demand, including w
 unknown. A key is neither unlimited capacity nor an instruction to create a new machine for every player. Unregistered
 raw destinations keep the existing placement behavior and remain warm until gameplay finishes or the host stops.
 
-Claims reserve one authenticated player atomically. Groups, rosters, matching parameters and mutable per-key
-configuration are explicitly unsupported and rejected by `defineDestination`; no queue, team or match declaration is
-required for a lobby or general session. Use a different immutable key for a different logical intent.
+Claims reserve one authenticated player atomically. Group admission, rosters, and matchmaking remain separate component
+follow-ons. Creation configuration is immutable within a destination policy; use a different key for a different
+configured pool. No queue, team, or match declaration is required for a lobby.
 
 Idle time starts only when every reservation and delivery is released. Expiry retires admission before calling JVM
 finish; capacity stays occupied until cleanup is affirmatively ended and ownership is reconciled. Gameplay can call the
