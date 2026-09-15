@@ -2,6 +2,7 @@ package dev.chunkzero.example
 
 import dev.chunkzero.backend.client.QueryResult
 import dev.chunkzero.example.generated.CoroutineBackendClient
+import dev.chunkzero.example.generated.SessionMethods
 import dev.chunkzero.runtime.CoroutineSession
 import dev.chunkzero.runtime.Session
 import dev.chunkzero.runtime.SessionScope
@@ -28,17 +29,25 @@ object ExampleSessions {
         )
     }
 
-    fun lobby(): Session = ExampleSession("Lobby", Block.GRASS_BLOCK)
+    fun lobby() = LobbySession()
 
     fun arena(): Session = ExampleSession("Arena", Block.SANDSTONE)
 }
 
-private class ExampleSession(
+class LobbySession :
+    ExampleSession("Lobby", Block.GRASS_BLOCK),
+    SessionMethods.Lobby.Default.Population {
+    override fun population(args: SessionMethods.Lobby.Default.Population.Args): Long = playerCount().toLong()
+}
+
+open class ExampleSession(
     private val label: String,
     private val floor: Block,
 ) : CoroutineSession() {
     private lateinit var scope: SessionScope
     private val players = mutableMapOf<Player, PlayerData>()
+
+    protected fun playerCount() = players.size
 
     override suspend fun create(scope: SessionScope) {
         this.scope = scope

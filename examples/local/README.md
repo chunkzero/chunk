@@ -26,6 +26,14 @@ The grass lobby and sandstone arenas share persistent coins and visit counts. Us
 the action bar reflect subscriptions. A join explicitly reads saved coins and increments visits. Nothing saves world
 simulation state across JVM shutdown.
 
+The backend owns `/hello <message>` and `/travel lobby|arena` in every domain. Travel uses the same admission and
+capacity policy as operator moves. In the lobby, `/population` calls the generated JVM method on the session captured
+when the command starts. After moving to an arena, that command disappears from the client tree. `/coin` remains a JVM
+command. Tab completion suggests the declared destinations; `/hello` sends plain-text message and title effects.
+
+These commands are exercised by automated protocol and dispatch checks. Display and movement with an official client
+still need the manual scenario above.
+
 For editor setup without starting services, run:
 
 ```sh
