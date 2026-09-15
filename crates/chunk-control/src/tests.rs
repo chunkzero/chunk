@@ -29,6 +29,12 @@ struct Binding {
 struct FakeRuntime {
     identity: ProcessIdentity,
     sessions: Mutex<BTreeMap<String, SessionCommand>>,
+    ended_sessions: Mutex<BTreeSet<String>>,
+    failed_creation: AtomicBool,
+    lost_creation: AtomicBool,
+    lost_preparation: AtomicBool,
+    lost_finish: AtomicBool,
+    finishes: AtomicUsize,
     bindings: Mutex<BTreeMap<String, Binding>>,
     available: AtomicBool,
     lost_reply: AtomicBool,
@@ -75,10 +81,23 @@ impl ProcessControl for RuntimeService {
         if self.lost_reply.swap(false, Ordering::AcqRel) {
             return Err(Status::deadline_exceeded("lost inventory reply"));
         }
+        let ended = self.ended_sessions.lock().unwrap().clone();
         Ok(Response::new(ProcessInventory {
             identity: Some(self.identity.clone()),
             tick_count: 100,
-            sessions: self.sessions.lock().unwrap().values().map(session_inventory).collect(),
+            sessions: self
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|session| {
+                    let mut inventory = session_inventory(session);
+                    if ended.contains(&session.session.as_ref().unwrap().id) {
+                        inventory.phase = SessionPhase::Ended as i32;
+                    }
+                    inventory
+                })
+                .collect(),
             deliveries: self
                 .bindings
                 .lock()
@@ -96,6 +115,9 @@ impl ProcessControl for RuntimeService {
         self.check(&request)?;
         tokio::time::sleep(Duration::from_millis(30)).await;
         let command = request.into_inner();
+        if self.failed_creation.load(Ordering::Acquire) {
+            return Err(Status::failed_precondition("failed creation"));
+        }
         let id = command.session.as_ref().unwrap().id.clone();
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(previous) = sessions.get(&id)
@@ -104,6 +126,9 @@ impl ProcessControl for RuntimeService {
             return Err(Status::failed_precondition("changed creation"));
         }
         sessions.insert(id, command.clone());
+        if self.lost_creation.swap(false, Ordering::AcqRel) {
+            return Err(Status::deadline_exceeded("lost creation reply"));
+        }
         Ok(Response::new(session_inventory(&command)))
     }
     async fn finish_session(
@@ -111,7 +136,27 @@ impl ProcessControl for RuntimeService {
         request: Request<SessionCommand>,
     ) -> std::result::Result<Response<SessionInventory>, Status> {
         self.check(&request)?;
-        let mut result = session_inventory(request.get_ref());
+        let command = request.get_ref();
+        let id = &command.session.as_ref().unwrap().id;
+        if !self.sessions.lock().unwrap().contains_key(id) {
+            return Err(Status::not_found("unknown session"));
+        }
+        if self.ended_sessions.lock().unwrap().insert(id.clone()) {
+            self.finishes.fetch_add(1, Ordering::AcqRel);
+        }
+        for binding in self
+            .bindings
+            .lock()
+            .unwrap()
+            .values_mut()
+            .filter(|binding| binding.delivery.session.as_ref().is_some_and(|session| &session.id == id))
+        {
+            binding.phase = DeliveryPhase::Closed;
+        }
+        if self.lost_finish.swap(false, Ordering::AcqRel) {
+            return Err(Status::deadline_exceeded("lost finish reply"));
+        }
+        let mut result = session_inventory(command);
         result.phase = SessionPhase::Ended as i32;
         Ok(Response::new(result))
     }
@@ -159,6 +204,9 @@ impl Gameplay for RuntimeService {
                 delivery.operation_id.clone(),
                 Binding { delivery: delivery.clone(), phase: DeliveryPhase::Prepared },
             );
+        }
+        if self.lost_preparation.swap(false, Ordering::AcqRel) {
+            return Err(Status::deadline_exceeded("lost preparation reply"));
         }
         Ok(Response::new(PlayerPreparation {
             operation_id: delivery.operation_id,
@@ -249,6 +297,12 @@ impl Fixture {
                 artifact_digest: "artifact".into(),
             },
             sessions: Mutex::default(),
+            ended_sessions: Mutex::default(),
+            failed_creation: AtomicBool::new(false),
+            lost_creation: AtomicBool::new(false),
+            lost_preparation: AtomicBool::new(false),
+            lost_finish: AtomicBool::new(false),
+            finishes: AtomicUsize::new(0),
             bindings: Mutex::default(),
             available: AtomicBool::new(true),
             lost_reply: AtomicBool::new(false),
@@ -280,6 +334,7 @@ impl Fixture {
             terminated: Mutex::default(),
         });
         let config = Config {
+            destinations: None,
             apps: BTreeMap::from([("bridge".into(), test_app())]),
             deployment,
             artifact_digest: "artifact".into(),
@@ -729,3 +784,5 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     assert!(control.reconcile_departure(replacement).await.unwrap().departed);
     fixture.close().await;
 }
+
+mod destinations;

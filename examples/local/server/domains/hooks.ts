@@ -1,5 +1,7 @@
 import { createHook, v } from "#chunk";
 
+import { lobby } from "../destinations.ts";
+
 // Function references keep decisions in their own fresh query transaction.
 const admission = {
   kind: "query" as const,
@@ -16,11 +18,7 @@ const status = {
 
 export const checkEntry = createHook("player.login", (ctx) => ctx.runQuery(admission, ctx.player));
 export const ping = createHook("server.ping", (ctx) => ctx.runQuery(status, { host: ctx.host }));
-export const route = createHook("player.route", () => ({
-  key: "lobby",
-  session_type: "lobby/default",
-  machine_profile: "local",
-}));
+export const route = createHook("player.route", () => lobby.destination);
 export const beforeMove = createHook("player.beforeMove", ({ destination }) => ({
   allow: ["lobby/default", "arena/default", "arena/large"].includes(destination.session_type),
   reason: "Unknown destination",

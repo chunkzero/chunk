@@ -346,3 +346,27 @@ fn domains_are_pinned_in_release_identity_and_stale_bindings_require_recompilati
     fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
     assert_ne!(release.id, fixture.publish().unwrap().id);
 }
+
+#[test]
+fn destination_policies_are_pinned_to_the_published_session_catalog() {
+    let fixture = Fixture::new();
+    let path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    contract["destinations"] = json!({"version":1,"entries":{"shared/destinations/lobby":{
+        "destination":{"key":"main","session_type":"lobby/default","machine_profile":"small"},
+        "overflow":"replicate","empty_timeout_seconds":60
+    }}});
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let release = fixture.publish().unwrap();
+    let bundle: Value = serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
+    assert_eq!(bundle["destinations"], contract["destinations"]);
+    contract["destinations"]["entries"]["shared/destinations/lobby"]["empty_timeout_seconds"] = json!(120);
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert_ne!(fixture.publish().unwrap().id, release.id);
+    for (field, value) in [("session_type", "lobby/missing"), ("machine_profile", "large")] {
+        let mut invalid = contract.clone();
+        invalid["destinations"]["entries"]["shared/destinations/lobby"]["destination"][field] = json!(value);
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(fixture.publish().is_err());
+    }
+}

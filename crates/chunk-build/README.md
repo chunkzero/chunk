@@ -7,9 +7,10 @@ SDK, type-checks the project's `server/**/*.ts` and discovered apps' `server/**/
 the Rust Rolldown API. The explicitly composed default export in `server/schema/index.ts` supplies the database schema.
 
 Named function declarations become paths such as `shared/profile/get` and `apps/duels/match/score`. Helpers remain
-ordinary TypeScript exports; only SDK query/mutation declarations enter the contract. Declarations are evaluated in the
-bounded transactional engine, without executing project code in Node. Node builtins, remote imports and native modules
-are unsupported.
+ordinary TypeScript exports; SDK function declarations enter the function contract. Named `defineDestination` exports in
+`server/destinations.ts` add immutable placement policies, validated against the JVM session catalog during publication.
+Declarations are evaluated in the bounded transactional engine, without executing project code in Node. Node builtins,
+remote imports and native modules are unsupported.
 
 Successful compilation writes `source.mjs`, `source.mjs.map`, and `contract.json`. Backend compilation does not run
 Gradle or build JVM apps. `chunk_build::publish_release` combines the backend output with app JARs, shared dependencies,

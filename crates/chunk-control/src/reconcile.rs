@@ -20,6 +20,7 @@ impl Control {
                     }
                     for session in state.sessions.values_mut().filter(|session| &session.host == id) {
                         session.retired = true;
+                        session.finished = true;
                     }
                 }
                 Ok(())
@@ -57,6 +58,7 @@ impl Control {
                 _ = drains.tick() => self.progress_drains().await?,
             }
         }
+        self.reconcile_sessions().await?;
         self.progress_drains().await?;
         Ok(())
     }
