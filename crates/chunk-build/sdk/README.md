@@ -380,7 +380,9 @@ Omit `implementations` for a simple default provider. An implementation without 
 A `player.route` hook returns `apps.arena.destinations.standard` imported from `#chunk/apps`; commands pass that same
 reference to routing APIs. Generated references contain the existing `{ key, session_type, machine_profile }` identity
 and never import executable app modules. Configuration stays in the deployment's destination policy, so clients cannot
-substitute arbitrary creation values. Implementation refs are available as `apps.arena.implementations.default`.
+substitute arbitrary creation values. Implementation refs are available as `apps.arena.implementations.default`. Legacy
+TOML apps expose their app ID with an empty implementation map: TOML session overrides do not declare the JVM provider
+catalog. Migrate to `app.ts` to generate implementation references before JVM compilation.
 
 The session type and machine profile must match the release's JVM catalog. The default policy is `replicate` with a
 60-second idle timeout; explicit timeouts range from 1 to 86400 seconds. Legacy named `defineDestination` exports in

@@ -75,3 +75,29 @@ fn generation_reports_missing_schema_and_invalid_configuration_without_overwriti
         assert!(!project.path().join(".chunk").exists());
     }
 }
+
+#[test]
+fn generated_implementation_refs_require_an_authored_catalog() {
+    let project = project();
+    let root = project.path();
+    for (id, manifest, source) in [
+        ("overrides", "app.toml", "[sessions.large]\ncapacity = 32"),
+        ("unspecified", "app.toml", ""),
+        ("authored", "app.ts", "export default defineApp({id:'authored'});"),
+    ] {
+        let directory = root.join("apps").join(id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(manifest), source).unwrap();
+        fs::write(directory.join("build.gradle.kts"), "").unwrap();
+    }
+    generate_sdk(root).unwrap();
+    let source = fs::read_to_string(root.join(".chunk/generated/apps.ts")).unwrap();
+    for legacy in ["overrides", "unspecified"] {
+        assert!(
+            source.contains(&format!("[\"{legacy}\"]:{{[\"id\"]:\"{legacy}\",\n[\"implementations\"]:{{}}")),
+            "{source}"
+        );
+    }
+    assert!(!source.contains("[\"large\"]"), "{source}");
+    assert!(source.contains("[\"default\"]:{[\"app\"]:\"authored\",\n[\"session\"]:\"default\"}"), "{source}");
+}

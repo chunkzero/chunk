@@ -72,12 +72,16 @@ fn app_references(project: &Path) -> io::Result<String> {
     let inventory = crate::project::authoring::discover(project)?;
     let mut references = serde_json::Map::new();
     for app in apps {
-        let implementations =
-            if app.sessions.is_empty() { vec!["default".to_string()] } else { app.sessions.keys().cloned().collect() };
+        let mut implementations = Vec::new();
         let mut destinations = serde_json::Map::new();
         if let Some(module) =
             inventory.modules.iter().find(|module| module.app && module.namespace == format!("apps/{}/app", app.id))
         {
+            implementations = if app.sessions.is_empty() {
+                vec!["default".to_string()]
+            } else {
+                app.sessions.keys().cloned().collect()
+            };
             for (name, destination) in &module.destinations {
                 let profile = destination
                     .machine_profile
