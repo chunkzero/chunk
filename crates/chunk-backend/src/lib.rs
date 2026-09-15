@@ -4,11 +4,14 @@
 mod actions;
 mod actor;
 mod commit;
+mod effects;
 mod reads;
 mod service;
 mod transport;
 
 pub use actions::{ActionHandle, ActionId, ActionStatus};
+pub use chunk_js::HttpMethod;
+pub use effects::{ActionEffects, ActionGrants, HttpBinding};
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
 pub use transport::Service;
 
@@ -87,3 +90,6 @@ pub mod server;
 
 #[cfg(test)]
 mod action_tests;
+
+#[cfg(test)]
+mod effect_tests;

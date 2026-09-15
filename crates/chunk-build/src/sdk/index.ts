@@ -22,6 +22,8 @@ export type {
   JsonValue,
   AsyncContext,
   ActionContext,
+  HttpRequest,
+  HttpOutcome,
   FunctionDefinition,
   FunctionBuilder,
   FunctionReference,

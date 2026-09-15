@@ -78,6 +78,7 @@ pub(crate) struct Host {
     pub events: mpsc::Sender<Event>,
     pub slots: Arc<Semaphore>,
     pub cancellation: Cancellation,
+    pub effects: Arc<crate::effects::ScopedEffects>,
 }
 
 struct CancelEffect(Cancellation);
@@ -88,6 +89,22 @@ impl Drop for CancelEffect {
 }
 
 impl chunk_js::ActionHost for Host {
+    fn http(
+        &self,
+        sequence: u32,
+        request: chunk_js::HttpRequest,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<chunk_js::HttpOutcome, String>>>> {
+        let effects = self.effects.clone();
+        Box::pin(async move { Ok(effects.http(sequence, request).await) })
+    }
+
+    fn secret(&self, name: &str) -> std::result::Result<String, String> {
+        if self.cancellation.is_cancelled() || std::time::Instant::now() >= self.effects.deadline {
+            return Err("Secret capability expired".into());
+        }
+        self.effects.grants.secret(name)
+    }
+
     fn call(
         &self,
         sequence: u32,

@@ -9,6 +9,7 @@ mod deadline;
 
 mod engine;
 mod extensions;
+mod http;
 mod isolate;
 mod model;
 mod profile;
@@ -17,6 +18,7 @@ mod termination;
 
 pub use actions::{ActionHost, ActionInvocation};
 pub use engine::{DeploymentId, Engine};
+pub use http::{HttpMethod, HttpOutcome, HttpRequest};
 pub use model::{
     Cancellation, Error, Execution, IndexRows, Invocation, Json, Key, Limits, Log, Mode, Read, ReadHost, Write,
 };

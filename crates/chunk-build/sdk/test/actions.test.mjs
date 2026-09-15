@@ -55,3 +55,34 @@ test("action references validate kind, arguments and results before application 
   await assert.rejects(invoke(reference, { count: "wrong" }, "okay"));
   await assert.rejects(invoke(reference, { count: 1 }, 12));
 });
+
+test("actions forward named HTTP and secret capabilities without adding authority fields", async () => {
+  const calls = [];
+  const work = action({
+    args: {},
+    returns: v.string(),
+    handler: async (ctx) => {
+      const token = await ctx.secret("token");
+      const result = await ctx.http("payments", { path: "status", headers: { authorization: token } });
+      if (result.state !== "completed") return result.state;
+      return result.body;
+    },
+  });
+  const result = await work.handler(
+    {
+      caller: null,
+      invocationId: "one",
+      secret: async (name) => {
+        calls.push(name);
+        return "fixture-token";
+      },
+      http: async (binding, request) => {
+        calls.push([binding, request]);
+        return { state: "completed", effectId: "one/http/2", status: 200, headers: {}, body: "paid" };
+      },
+    },
+    {},
+  );
+  assert.equal(result, "paid");
+  assert.deepEqual(calls, ["token", ["payments", { path: "status", headers: { authorization: "fixture-token" } }]]);
+});

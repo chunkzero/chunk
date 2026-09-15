@@ -31,6 +31,8 @@ export {
 export type {
   AsyncContext,
   ActionContext,
+  HttpRequest,
+  HttpOutcome,
   FunctionDefinition,
   FunctionBuilder,
   QueryContext,

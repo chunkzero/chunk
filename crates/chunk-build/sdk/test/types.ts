@@ -224,3 +224,29 @@ action({
     return result;
   },
 });
+
+action({
+  args: {},
+  returns: v.string(),
+  handler: async (ctx) => {
+    const secret: string = await ctx.secret("api-token");
+    const result = await ctx.http("api", { path: "status", headers: { authorization: secret } });
+    if (result.state === "completed") return result.body;
+    // @ts-expect-error rejected and uncertain effects have no completed response body
+    void result.body;
+    // @ts-expect-error HTTP methods are a finite supported set
+    await ctx.http("api", { path: "status", method: "CONNECT" });
+    return result.reason;
+  },
+});
+query({
+  args: {},
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error transactions cannot access HTTP
+    void ctx.http;
+    // @ts-expect-error transactions cannot read secrets
+    void ctx.secret;
+    return null;
+  },
+});

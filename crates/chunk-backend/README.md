@@ -112,4 +112,49 @@ while an action references it.
 Cancellation, failure, backend loss or a missing reply can follow a committed mutation. They do not roll back earlier
 effects. After process loss the action outcome is explicitly unknown, while completed mutations retain their ordinary
 durable outcomes. Recover those outcomes under their derived operation IDs where necessary; do not restart the action
-with a new ID to resolve uncertainty. Durable job scheduling and external I/O are separate layers.
+with a new ID to resolve uncertainty. Durable job scheduling is a separate layer; external effects require the host
+grants described below.
+
+### Scoped HTTP and secrets
+
+`Backend::new` denies all external capabilities. An embedder can configure immutable grants with
+`Backend::with_action_effects(environment, store, effects)`:
+
+```rust,ignore
+let grants = ActionGrants::default()
+    .with_http("billing".into(), HttpBinding::new("https://billing.example/api/", [HttpMethod::Get, HttpMethod::Post])?)?
+    .with_secret("billing-token".into(), std::env::var("BILLING_TOKEN")?)?;
+let effects = ActionEffects::new(environment.clone())?
+    .with_deployment(deployment_id, grants)?;
+```
+
+Grants apply only to the exact environment and deployment. They are held in host memory, never serialized into a bundle,
+release or database. Restart requires the host to supply them again. At most 16 deployments can have grants; each has at
+most 16 HTTP bindings and 16 secrets, each secret at most 8 KiB. The embedding host resolves environment variables or
+its own secret source; JavaScript cannot enumerate environment variables or access arbitrary files.
+
+Actions call `ctx.http("billing", {path: "invoices", method: "POST", body: "..."})` and
+`await ctx.secret("billing-token")`. HTTP paths must be relative and remain under the configured base path and origin.
+Path segments use unreserved ASCII characters; query parameters may use percent encoding. Absolute paths, userinfo,
+fragments, traversal, matrix parameters and encoded path escapes are rejected. Bindings grant explicit methods.
+Redirects, inherited proxies, automatic retries, automatic decompression and cookies are disabled. The API supports
+UTF-8 text bodies, up to 64 KiB for requests and 128 KiB for responses, 32 headers / 8 KiB in each direction, 2 KiB
+paths, and eight simultaneous HTTP requests across the environment. The binding timeout defaults to ten seconds and can
+be lowered; the action's overall deadline also applies. Response bodies are read incrementally within their bound.
+
+HTTP outcomes have `state: "completed" | "rejected" | "unknown"` and a stable `effectId` formed from the invocation ID
+and effect sequence. `completed` contains `status`, `headers` and `body`; applications still need to interpret the HTTP
+status. `rejected` means no dispatch occurred. Once dispatch begins, transport failure, response truncation, size limits
+or timeout return `unknown`, because the remote operation may already have happened. No failed request is retried.
+
+Cancellation or backend loss can terminate the action before JavaScript receives an HTTP outcome. Such a lost/cancelled
+action leaves its dispatched effects uncertain; it does not guarantee delivery of an `unknown` result. Reusing the
+action ID never restarts a retained or stale invocation. Reconcile with the remote service or an application idempotency
+key before deciding to issue another business request. Action status is ephemeral and does not replace a durable job
+record.
+
+Automatic host HTTP errors contain no URL, body, headers or transport error text. Action diagnostics containing a
+granted secret value or its JSON-escaped form are replaced with a generic redacted message. Secret reads intentionally
+hand the value to authorized application code; transformed values and deliberate application publication are outside
+literal redaction. Queries and mutations retain their pure capability profile. Deployment configuration, secret rotation
+and hosted secret management remain separate platform work.

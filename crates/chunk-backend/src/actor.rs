@@ -81,7 +81,12 @@ pub(crate) struct Actor {
 }
 
 impl Actor {
-    pub fn new(store: Box<dyn Storage>, events: mpsc::Sender<Event>, incarnation: String) -> Result<Self> {
+    pub fn new(
+        store: Box<dyn Storage>,
+        events: mpsc::Sender<Event>,
+        incarnation: String,
+        effects: crate::ActionEffects,
+    ) -> Result<Self> {
         let (committer, snapshot, deployments) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
@@ -93,7 +98,7 @@ impl Actor {
             versions.insert(id, Some(Arc::new(deployment)));
         }
         Ok(Self {
-            actions: actions::Actions::new(events, incarnation),
+            actions: actions::Actions::new(events, incarnation, effects),
             recovering: false,
             next_subscription: 0,
             reevaluations: VecDeque::new(),

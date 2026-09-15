@@ -36,11 +36,21 @@ pub(super) struct Actions {
     records: BTreeMap<ActionId, Record>,
     events: mpsc::Sender<Event>,
     slots: Arc<Semaphore>,
+    external_slots: Arc<Semaphore>,
+    effects: crate::ActionEffects,
 }
 
 impl Actions {
-    pub fn new(events: mpsc::Sender<Event>, incarnation: String) -> Self {
-        Self { incarnation, retired: 0, records: BTreeMap::new(), events, slots: Arc::new(Semaphore::new(32)) }
+    pub fn new(events: mpsc::Sender<Event>, incarnation: String, effects: crate::ActionEffects) -> Self {
+        Self {
+            incarnation,
+            retired: 0,
+            records: BTreeMap::new(),
+            events,
+            slots: Arc::new(Semaphore::new(32)),
+            external_slots: Arc::new(Semaphore::new(8)),
+            effects,
+        }
     }
 
     pub fn status(&self, id: &ActionId, caller: &Json) -> Result<ActionStatus> {
@@ -130,7 +140,16 @@ impl Actor {
             let scope = Arc::new(Scope(cancellation.clone()));
             let (status, receiver) = watch::channel(ActionStatus::Running);
             let events = self.actions.events.clone();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let grants = self.actions.effects.grants(&call.deployment);
             let host = Host {
+                effects: Arc::new(crate::effects::ScopedEffects {
+                    invocation: id.to_string(),
+                    grants: grants.clone(),
+                    slots: self.actions.external_slots.clone(),
+                    cancellation: cancellation.clone(),
+                    deadline,
+                }),
                 id: id.clone(),
                 events: events.clone(),
                 slots: self.actions.slots.clone(),
@@ -143,7 +162,7 @@ impl Actor {
                 caller: call.caller.clone(),
                 timestamp: self.view.base.timestamp,
                 seed: id.sequence,
-                deadline: std::time::Instant::now() + Duration::from_secs(30),
+                deadline,
             };
             let worker_id = id.clone();
             let worker_cancellation = cancellation.clone();
@@ -154,7 +173,7 @@ impl Actor {
                     engine.register(deployment_id.clone(), deployment.source.clone(), Limits::default())?;
                     let execution = engine.execute_action(&deployment_id, invocation, Rc::new(host), &worker_cancellation)?;
                     for log in execution.logs {
-                        tracing::info!(target: "chunk_backend::console", invocation = %worker_id, level = log.level, message = log.message);
+                        tracing::info!(target: "chunk_backend::console", invocation = %worker_id, level = log.level, message = grants.redact(log.message));
                     }
                     let mut value = serde_json::from_str(&execution.value)?;
                     function.result.normalize_api(&mut value);
@@ -162,6 +181,13 @@ impl Actor {
                     if !function.result.accepts(&value) { return Err(Error::Contract); }
                     Ok(serde_json::to_string(&value)?.into())
                 })).unwrap_or(Err(Error::ActionOutcomeUnknown));
+                let result = result.map_err(|error| match error {
+                    Error::JavaScript(ref inner) => match inner.as_ref() {
+                        chunk_js::Error::JavaScript(message) => Error::from(chunk_js::Error::JavaScript(grants.redact(message.clone()))),
+                        _ => error,
+                    },
+                    _ => error,
+                });
                 worker_cancellation.cancel();
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });
             })?;

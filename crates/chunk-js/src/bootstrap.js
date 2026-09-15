@@ -78,6 +78,9 @@
         ? freeze({
             caller: parse(callerJson),
             invocationId,
+            http: async (binding, request) =>
+              parse(await action(stringify({ kind: "http", request: { ...request, binding } }))),
+            secret: async (name) => parse(await action(stringify({ kind: "secret", name }))),
             runQuery: async (functionPath, argumentsValue) =>
               parse(await action(stringify({ kind: "query", function: functionPath, arguments: argumentsValue }))),
             runMutation: async (functionPath, argumentsValue) =>

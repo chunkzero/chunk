@@ -441,6 +441,7 @@ dependencies = [
  "chunk-proto",
  "chunk-service",
  "chunk-store",
+ "reqwest",
  "serde_json",
  "sha2",
  "tempfile",

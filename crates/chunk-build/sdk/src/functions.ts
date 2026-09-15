@@ -41,11 +41,30 @@ export interface AsyncContext {
   runQuery<A, R>(reference: FunctionReference<"query", A, R>, args: A): Promise<R>;
   runMutation<A, R>(reference: FunctionReference<"mutation", A, R>, args: A): Promise<R>;
 }
+export interface HttpRequest {
+  readonly path: string;
+  readonly method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly body?: string;
+}
+export type HttpOutcome =
+  | {
+      readonly state: "completed";
+      readonly effectId: string;
+      readonly status: number;
+      readonly headers: Readonly<Record<string, string>>;
+      readonly body: string;
+    }
+  | { readonly state: "rejected" | "unknown"; readonly effectId: string; readonly reason: string };
 export interface ActionContext extends AsyncContext {
+  http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
+  secret(name: string): Promise<string>;
   readonly invocationId: string;
   sleep(milliseconds: number): Promise<void>;
 }
 interface RawActionContext {
+  http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
+  secret(name: string): Promise<string>;
   readonly caller: JsonValue;
   readonly invocationId: string;
   runQuery(path: string, args: unknown): Promise<unknown>;
@@ -159,6 +178,8 @@ function actionBuilder(visibility: Visibility) {
       protect({
         caller: ctx.caller,
         invocationId: ctx.invocationId,
+        http: (binding, request) => ctx.http(binding, request),
+        secret: (name) => ctx.secret(name),
         runQuery: (ref, values) => invoke("query", ref, values),
         runMutation: (ref, values) => invoke("mutation", ref, values),
         sleep: (milliseconds) => ctx.sleep(milliseconds),

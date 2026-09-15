@@ -60,7 +60,7 @@ impl Engine {
         Self::init_platform();
         Ok(Self {
             deployments: BTreeMap::new(),
-            executor: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
+            executor: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
             deadline: Deadline::new()?,
         })
     }

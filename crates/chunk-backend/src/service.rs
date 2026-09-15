@@ -14,7 +14,7 @@ use chunk_js::{Cancellation, DeploymentId, Json};
 use chunk_store::{Revision, Snapshot, Storage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
-use crate::{ActionHandle, ActionId, ActionStatus, Error, Result, actor::Actor};
+use crate::{ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result, actor::Actor};
 
 const REQUESTS: usize = 64;
 
@@ -197,6 +197,15 @@ impl Backend {
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
     pub fn new(environment: String, store: Box<dyn Storage>) -> Result<Self> {
+        Self::with_action_effects(environment.clone(), store, ActionEffects::new(environment)?)
+    }
+
+    /// Construct with immutable host-provided action grants. Grants bind the exact
+    /// environment and deployment; queries and mutations gain no external effects.
+    /// # Errors
+    /// Reports invalid scope, thread, snapshot or JS initialization failures.
+    pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
+        effects.validate_environment(&environment)?;
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("environment identity"));
         }
@@ -209,7 +218,7 @@ impl Backend {
         let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, action_incarnation) {
+            match Actor::new(store, outgoing, action_incarnation, effects) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
