@@ -55,7 +55,13 @@ pub(crate) struct SessionState {
     pub session_type: String,
     pub demand_key: String,
     pub capacity: u32,
+    #[serde(default = "empty_configuration")]
+    pub configuration: serde_json::Value,
     pub retired: bool,
+}
+
+fn empty_configuration() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

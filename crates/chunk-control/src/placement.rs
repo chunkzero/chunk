@@ -54,6 +54,7 @@ impl Control {
                     generation: 1,
                     session_type: session.session_type.clone(),
                     capacity: session.capacity,
+                    configuration_json: serde_json::to_vec(&session.configuration)?,
                 },
                 10,
             )?)
@@ -62,6 +63,8 @@ impl Control {
         if created.phase != SessionPhase::Ready as i32
             || created.generation != 1
             || created.session.as_ref().map(|s| &s.id) != Some(&claim.session)
+            || created.session_type != session.session_type
+            || created.capacity != session.capacity
         {
             self.update(|s| {
                 s.sessions.get_mut(&claim.session).ok_or(Error::Invalid("missing session"))?.retired = true;
@@ -250,13 +253,8 @@ fn select_session(
     unavailable: &std::collections::BTreeSet<String>,
 ) -> Result<String> {
     let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
-    if !demand.machine_profile.is_empty() && demand.machine_profile != spec.machine_profile {
-        return Err(Error::Invalid("session profile mismatch"));
-    }
     let policy = config.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
-    if policy.is_some_and(|policy| policy.destination.machine_profile != demand.machine_profile) {
-        return Err(Error::Invalid("declared destination profile mismatch"));
-    }
+    let creation = resolve_creation(config, demand, spec, policy)?;
     let existing = state
         .sessions
         .iter()
@@ -265,6 +263,9 @@ fn select_session(
                 && !unavailable.contains(&session.host)
                 && session.session_type == demand.session_type
                 && session.demand_key == demand.key
+                && session.capacity == creation.capacity
+                && session.configuration == creation.configuration
+                && state.hosts.get(&session.host).is_some_and(|host| host.profile == creation.profile)
                 && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count()
                     < session.capacity as usize
         })
@@ -282,7 +283,7 @@ fn select_session(
         if state.sessions.len() >= 256 {
             return Err(Error::Capacity);
         }
-        let limit = config.profiles.get(&spec.machine_profile).ok_or(Error::Invalid("missing profile"))?.max_sessions;
+        let limit = config.profiles.get(creation.profile).ok_or(Error::Invalid("missing profile"))?.max_sessions;
         let existing_host = state
             .hosts
             .iter()
@@ -290,7 +291,7 @@ fn select_session(
                 !host.retired
                     && !unavailable.contains(*id)
                     && host.app == spec.app
-                    && host.profile == spec.machine_profile
+                    && host.profile == creation.profile
                     && state.sessions.values().filter(|s| s.host == **id && !s.finished).count() < usize::from(limit)
                     && state
                         .sessions
@@ -298,7 +299,7 @@ fn select_session(
                         .filter(|s| s.host == **id && !s.finished)
                         .map(|s| s.capacity)
                         .sum::<u32>()
-                        + spec.capacity
+                        + creation.capacity
                         <= 128
             })
             .map(|(id, _)| id.clone());
@@ -311,7 +312,7 @@ fn select_session(
             let id = uuid::Uuid::new_v4().to_string();
             state.hosts.insert(
                 id.clone(),
-                HostState { app: spec.app.clone(), profile: spec.machine_profile.clone(), retired: false },
+                HostState { app: spec.app.clone(), profile: creation.profile.into(), retired: false },
             );
             id
         };
@@ -325,13 +326,43 @@ fn select_session(
                 host,
                 session_type: demand.session_type.clone(),
                 demand_key: demand.key.clone(),
-                capacity: spec.capacity,
+                capacity: creation.capacity,
+                configuration: creation.configuration,
                 retired: false,
             },
         );
         id
     };
     Ok(session)
+}
+
+struct Creation<'a> {
+    profile: &'a str,
+    capacity: u32,
+    configuration: serde_json::Value,
+}
+
+fn resolve_creation<'a>(
+    config: &Config,
+    demand: &chunk_proto::v1::SessionDemand,
+    spec: &'a crate::SessionType,
+    policy: Option<&'a chunk_contract::DestinationPolicy>,
+) -> Result<Creation<'a>> {
+    let profile = policy.map_or(spec.machine_profile.as_str(), |policy| policy.destination.machine_profile.as_str());
+    if (policy.is_some() || !demand.machine_profile.is_empty()) && demand.machine_profile != profile {
+        return Err(Error::Invalid("destination profile mismatch"));
+    }
+    let declared = policy.and_then(|policy| policy.creation.as_ref());
+    let capacity = declared.map_or(spec.capacity, |creation| creation.capacity);
+    let mut configuration = declared.map_or_else(|| serde_json::json!({}), |creation| creation.configuration.clone());
+    chunk_contract::validate_session_configuration(
+        config.session_configurations.as_ref(),
+        &demand.session_type,
+        &configuration,
+    )
+    .map_err(Error::Invalid)?;
+    configuration.sort_all_objects();
+    Ok(Creation { profile, capacity, configuration })
 }
 
 pub(crate) async fn channel(runtime: &RuntimeConnection) -> Result<Channel> {
@@ -364,11 +395,58 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
+    fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({
+            "apps":{"arena":{"id":"arena","jar":"arena.jar","sha256":"artifact","java_version":25,
+                "sessions":{"default":{"machine_profile":"small","capacity":16}}}},
+            "deployment":{"environment":"test","deployment":"release"},"artifact_digest":"artifact",
+            "profiles":{"small":{"memory_mib":512,"max_sessions":4},"large":{"memory_mib":1024,"max_sessions":4}},
+            "session_types":{"arena/default":{"app":"arena","machine_profile":"small","capacity":16}},
+            "max_processes":4,
+            "destinations":{"version":1,"entries":{"apps/arena/destinations/main":{
+                "destination":{"key":"public-arena","session_type":"arena/default","machine_profile":"large"},
+                "overflow":"replicate","empty_timeout_seconds":60,"creation":{"capacity":80,"configuration":{}}
+            }}}
+        }))
+        .unwrap();
+        config.validate().unwrap();
+        let demand = chunk_proto::v1::SessionDemand {
+            key: "public-arena".into(),
+            session_type: "arena/default".into(),
+            machine_profile: "large".into(),
+        };
+        let mut state = State::default();
+        let first = select_session(&mut state, &config, &demand, &BTreeSet::new()).unwrap();
+        assert_eq!(state.sessions[&first].capacity, 80);
+        assert_eq!(state.hosts[&state.sessions[&first].host].profile, "large");
+        assert_eq!(select_session(&mut state, &config, &demand, &BTreeSet::new()).unwrap(), first);
+        for field in ["capacity", "configuration", "profile"] {
+            let mut changed = state.clone();
+            match field {
+                "capacity" => changed.sessions.get_mut(&first).unwrap().capacity = 81,
+                "configuration" => {
+                    changed.sessions.get_mut(&first).unwrap().configuration = serde_json::json!({"other":true});
+                }
+                _ => changed.hosts.get_mut(&state.sessions[&first].host).unwrap().profile = "small".into(),
+            }
+            let next = select_session(&mut changed, &config, &demand, &BTreeSet::new()).unwrap();
+            assert_ne!(next, first, "{field}");
+            assert_ne!(changed.sessions[&next].host, changed.sessions[&first].host, "{field}");
+        }
+        let mut wrong_profile = demand.clone();
+        wrong_profile.machine_profile = "small".into();
+        assert!(select_session(&mut state, &config, &wrong_profile, &BTreeSet::new()).is_err());
+        config.destinations.as_mut().unwrap().entries.values_mut().next().unwrap().creation = None;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn placement_groups_only_matching_apps_and_profiles() {
         let mut state = State::default();
         let mut config = Config {
             destinations: None,
             session_methods: None,
+            session_configurations: None,
             apps: BTreeMap::new(),
             deployment: chunk_proto::v1::DeploymentRef::default(),
             artifact_digest: "release".into(),

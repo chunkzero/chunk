@@ -52,6 +52,8 @@ pub struct Config {
     pub max_processes: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_methods: Option<chunk_contract::SessionMethods>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_configurations: Option<chunk_contract::SessionConfigurations>,
 }
 
 impl Config {
@@ -94,6 +96,17 @@ impl Config {
         }
         if let Some(destinations) = &self.destinations {
             destinations.validate_apps(&self.apps).map_err(Error::Invalid)?;
+            destinations.validate_configurations(self.session_configurations.as_ref()).map_err(Error::Invalid)?;
+            if destinations
+                .entries
+                .values()
+                .any(|policy| !self.profiles.contains_key(&policy.destination.machine_profile))
+            {
+                return Err(Error::Invalid("destination references unknown machine profile"));
+            }
+        }
+        if let Some(configurations) = &self.session_configurations {
+            configurations.validate_apps(&self.apps).map_err(Error::Invalid)?;
         }
         if self.session_types != expected {
             return Err(Error::Invalid("session catalog differs from app manifests"));

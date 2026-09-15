@@ -140,6 +140,7 @@ impl Control {
                 generation: 1,
                 session_type: session.session_type.clone(),
                 capacity: session.capacity,
+                configuration_json: serde_json::to_vec(&session.configuration)?,
             };
             match client.finish_session(auth(&runtime, command, 10)?).await {
                 Ok(response) => {
