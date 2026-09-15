@@ -28,6 +28,8 @@ pub(super) fn generate(protocol: &Value) -> Result<TokenStream> {
         let constant = syn::Ident::new(constant, proc_macro2::Span::call_site());
         constants.extend(quote! { pub const #constant: i32 = #id; });
     }
+    let mut shapes = Value::Object(shapes);
+    shapes.sort_all_objects();
     if format!("{:x}", Sha256::digest(serde_json::to_vec(&shapes)?)) != SHAPE {
         return Err("unsupported command packet or parser property schema; review the pinned direct codecs".into());
     }
