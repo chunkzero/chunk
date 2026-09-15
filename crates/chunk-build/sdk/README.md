@@ -251,8 +251,8 @@ boundary, an ownership change or failed cutover can require disconnecting the cl
 
 Ping has read-only transaction authority and never provisions gameplay. Native hooks require the platform credential,
 which is separate from the application credential delivered to JVM processes. Missing authority or native hook failures
-fail closed. Fixed `shared/proxy/*` handlers remain supported for releases without a domain manifest. Typed player
-effects and session calls are added separately.
+fail closed. Fixed `shared/proxy/*` handlers remain supported for releases without a domain manifest. Commands expose
+the typed player effects and captured session calls described below.
 
 Helper exports remain ordinary code. Hook descriptors require named exports in hook modules; default exports and
 descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client
@@ -288,13 +288,57 @@ unsupported and rejected; commands do not rewrite signed chat.
 
 String parsers accept `{ suggestions: ["value"] }` or a typed query reference taking `{ input: string, cursor: number }`
 and returning `string[]`. A command's optional `permission` is a query reference taking `{}` and returning `boolean`.
-Permission and suggestion references must resolve to compatible functions in the same deployment. `followPlayer: true`
-records the intended lifecycle policy.
+Permission and suggestion references must resolve to compatible functions in the same deployment. The proxy refreshes
+permission visibility on arrival and every two seconds, republishing when it changes. Dispatch and privileged effects
+recheck permission against fresh backend state; a visible client command tree does not grant execution authority.
 
-Handlers receive authenticated `caller` and readonly `player` identity, plus typed `runQuery` and `runMutation`.
-Compilation preserves one handler export per command root and keeps commands out of ordinary generated function clients.
-Packet dispatch, permission execution, and lifecycle handling are implemented by the command runtime; these declarations
-alone do not register commands with connected players.
+Handlers receive authenticated `caller`, readonly player identity and the action capabilities (`runQuery`,
+`runMutation`, `http`, `secret`, `sleep`, `invocationId`). They execute outside the packet pump and transaction worker,
+within the bounded action runtime. HTTP and secrets still require explicit deployment grants. Commands remain outside
+ordinary generated function clients and require the proxy's separate platform credential.
+
+`ctx.player.message(text)`, `actionBar(text)` and `title(title, subtitle?)` send plain text to the captured connection.
+Titles use 10/70/20 ticks and clear an omitted subtitle. Effects are rejected during configuration. Text and routing
+calls return `{state: "accepted", operationId}`; acceptance does not prove the client displayed text or reached a
+requested destination. `ctx.routing.enter(destination)` submits a move through normal admission and capacity policy,
+fenced to the source connection and membership.
+
+Declare gameplay method contracts before JVM compilation:
+
+```ts
+import { sessionMethod, v } from "#chunk";
+
+// Export from an ordinary server module and import the reference in commands.ts.
+export const population = sessionMethod({
+  app: "lobby",
+  session: "default",
+  name: "population",
+  args: {},
+  returns: v.integer(),
+});
+```
+
+The generated JVM `SessionMethods` interface describes the method arguments and result. A public concrete gameplay
+session implements that interface; its annotated provider returns the concrete session type. Build-time indexing checks
+the implementation and packages the binding. Methods execute synchronously on the owning session's tick thread; avoid
+blocking I/O in them.
+
+A command can await `ctx.session.call(population, {})` for the typed result, or `ctx.session.send(population, {})` for
+dispatch acceptance. Both capture the exact session and player membership at command dispatch. Moving does not retarget
+the handle. Cancellation before execution may prove that no method ran; lost replies or cancellation after execution
+begins may leave effects unknown. Retrying a recorded operation keeps its original identity; issuing a new command is a
+new invocation. No automatic retry repeats gameplay effects.
+
+Default handlers cancel at session cutover. `followPlayer: true` permits connection-scoped work across moves within the
+same environment, retaining its original deployment, domain and caller. Permission checks continue against that origin;
+it gains no authority from the destination domain. Captured session methods still reject after a move. Disconnect and
+the action deadline cancel outstanding work.
+
+The proxy checks all inherited command roots and aliases against the JVM tree before permission filtering. A denied
+backend-owned root remains owned and cannot fall through to a JVM command. Proxy-owned signed command packets are
+rejected; JVM-owned signed packets pass through unchanged. Supported backend parsers use unsigned commands and do not
+intercept signed chat.
+
 ## Declarative destinations
 
 Named exports in `server/destinations.ts` (or `.mts`) declare a capacity pool. They do not create a process or session:
