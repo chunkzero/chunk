@@ -135,9 +135,10 @@ impl Actor {
             Mode::Mutation,
             snapshot.clone(),
             cancellation,
-            Some((context.timestamp, context.seed)),
+            Some((context.timestamp, context.seed, mutation.operation.id.clone())),
         );
         let execution = execution?;
+        let intents = self.scheduled_intents(&mutation.call, execution.jobs, context.timestamp)?;
         let mut writes = execution
             .writes
             .into_iter()
@@ -192,6 +193,7 @@ impl Actor {
             operation: mutation.operation.clone(),
             writes: writes.clone(),
             result: execution.value.into(),
+            intents,
         })?;
         drop(snapshot);
         std::rc::Rc::make_mut(&mut self.view).apply(revision, &writes);
@@ -200,7 +202,7 @@ impl Actor {
         Ok(())
     }
 
-    pub(super) fn committed(&mut self, id: &str, result: Result<(Update, Snapshot)>) {
+    pub(super) fn committed(&mut self, id: &str, result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>) {
         if self.failure.is_some() {
             return;
         }
@@ -211,7 +213,7 @@ impl Actor {
             self.recovering = self.outstanding != 0;
             return;
         }
-        let (update, snapshot) = match result {
+        let (update, snapshot, jobs) = match result {
             Ok(value) => value,
             Err(error) if error.is_rejected_commit() => {
                 self.reset_pending(&Error::Retry);
@@ -237,6 +239,9 @@ impl Actor {
             view.apply(next.revision, &next.writes);
         }
         self.view = std::rc::Rc::new(view);
+        if let Some(jobs) = jobs {
+            self.scheduled.snapshot = jobs;
+        }
         if let Some(mutation) = self.mutations.remove(id) {
             for reply in mutation.waiters {
                 reply.finish(Ok(update.clone()));

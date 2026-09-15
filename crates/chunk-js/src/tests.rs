@@ -60,7 +60,8 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
         if (!globalThis.old) { globalThis.old = ctx; return null; }
         let denied = 0;
         for (const op of [() => old.db.get('profiles','p'), () => old.db.scan('profiles'),
-            () => old.db.put('profiles','p',{}), () => old.db.delete('profiles','p')]) {
+            () => old.db.put('profiles','p',{}), () => old.db.delete('profiles','p'),
+            () => old.scheduler.cancel('job')]) {
             try { op(); } catch { denied++; }
         }
         return {denied, old:old.caller.player, current:ctx.caller.player, p:ctx.db.get('profiles','p')};
@@ -71,7 +72,7 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
     let mut next = invocation();
     next.caller = json!({"player":"other"}).into();
     let result = engine.execute(next, Box::new(Snapshot), &Cancellation::default()).unwrap();
-    assert_eq!(value(&result), json!({"denied":4,"old":"player","current":"other","p":{"coins":3}}));
+    assert_eq!(value(&result), json!({"denied":5,"old":"player","current":"other","p":{"coins":3}}));
     assert!(result.writes.is_empty());
 }
 

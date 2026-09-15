@@ -199,3 +199,37 @@ writes. Arbitrary filters, descending order and pagination are not part of this 
 Use `unset` to remove optional fields in `patch`; `undefined` is not a deletion value. Required fields cannot be
 removed. Fields unknown to a retained deployment are preserved by the backend when it writes. Ordinary helper calls
 share the handler's transaction; any failure discards all its writes.
+
+## Scheduled actions
+
+A mutation can record delayed work in the same commit as document changes:
+
+```ts
+import { mutation, v } from "#chunk";
+
+const send = {
+  path: "shared/mail/send",
+  kind: "action" as const,
+  arguments: v.object({ name: v.string() }),
+  result: v.null(),
+};
+
+export const enqueue = mutation({
+  args: { at: v.integer(), name: v.string() },
+  returns: v.string(),
+  handler: ({ scheduler }, { at, name }) => scheduler.runAt(at, send, { name }),
+});
+```
+
+The reference must match an `action` or `internalAction` declared at that path. Existing TypeScript client generation
+also supplies action references; `chunk codegen` alone materializes the SDK and does not generate those references.
+`runAt` takes Unix milliseconds, an action reference and its typed arguments, and returns a `JobId`. The backend
+validates the reference and captures caller/deployment identity. A rejected mutation records no job.
+`scheduler.cancel(id)` cancels pending work; running work may have partial effects. An explicit
+`scheduler.retry(id, at, {acknowledgePossibleEffects: true})` creates a new attempt with the same captured target,
+arguments and caller. Retries require a failed, unknown or cancelled job and retained origin code.
+
+Only mutations expose `scheduler`. Queries cannot change scheduling state, and actions must call a mutation to record
+intent. Jobs survive backend restart; interrupted attempts become unknown and are never retried automatically. The local
+backend dispatches due jobs while running. A hosted environment needs an external alarm adapter to wake from suspension;
+the in-process timer cannot do that.

@@ -1,5 +1,6 @@
 (() => {
   "use strict";
+  const schedule = Deno.core.ops.op_chunk_schedule;
   const action = Deno.core.ops.op_chunk_action;
   const actionId = Deno.core.ops.op_chunk_action_id;
   const read = Deno.core.ops.op_chunk_read;
@@ -92,6 +93,24 @@
           })
         : freeze({
             caller: parse(callerJson),
+            scheduler: freeze({
+              runAt: (at, functionPath, argumentsValue) =>
+                parse(
+                  schedule(
+                    generation,
+                    stringify({ kind: "run_at", at, function: functionPath, arguments: argumentsValue }),
+                  ),
+                ),
+              cancel: (id) => {
+                schedule(generation, stringify({ kind: "cancel", id }));
+              },
+              retry: (id, at, acknowledgePossibleEffects) => {
+                schedule(
+                  generation,
+                  stringify({ kind: "retry", id, at, acknowledge_possible_effects: acknowledgePossibleEffects }),
+                );
+              },
+            }),
             db: freeze({
               get: (table, id) => parse(read(generation, stringify({ kind: "get", table, id }))),
               scan: (table, start = null, end = null) =>

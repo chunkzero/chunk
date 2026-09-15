@@ -93,3 +93,6 @@ mod action_tests;
 
 #[cfg(test)]
 mod effect_tests;
+
+#[cfg(test)]
+mod job_tests;

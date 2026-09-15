@@ -11,6 +11,7 @@ use crate::{Commit, DatabaseSchema, Error, Operation, Outcome, Result, RetryCont
 mod bootstrap;
 mod codec;
 mod deployments;
+mod jobs;
 mod operations;
 mod read;
 mod revision;
@@ -92,7 +93,19 @@ impl Storage for SqliteStore {
         write::outcome(&self.connection, operation)
     }
 
+    fn jobs(&self) -> Result<crate::Jobs> {
+        jobs::load(&self.connection)
+    }
+
+    fn job_command(&mut self, command: crate::JobCommand) -> Result<crate::Jobs> {
+        jobs::command(&mut self.connection, command)
+    }
+
     fn commit(&mut self, commit: Commit) -> Result<Outcome> {
+        self.commit_with_jobs(commit, Vec::new())
+    }
+
+    fn commit_with_jobs(&mut self, commit: Commit, intents: Vec<crate::JobIntent>) -> Result<Outcome> {
         if let Some(outcome) = write::outcome(&self.connection, &commit.operation)? {
             return Ok(outcome);
         }
@@ -104,6 +117,7 @@ impl Storage for SqliteStore {
         }
         let next = revision::next(current)?;
         prepared.apply(&transaction, next)?;
+        jobs::apply(&transaction, &intents)?;
         transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
         transaction.execute(
             "INSERT INTO _chunk_operations VALUES (?1, ?2, ?3, ?4)",

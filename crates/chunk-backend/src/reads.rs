@@ -161,6 +161,7 @@ impl Dependencies {
 }
 
 pub(crate) struct Host {
+    pub operation: Option<String>,
     pub view: Rc<View>,
     pub trace: Rc<RefCell<Dependencies>>,
     pub contract: Option<Arc<chunk_contract::Deployment>>,
@@ -203,6 +204,12 @@ impl Host {
 }
 
 impl ReadHost for Host {
+    fn schedule_id(&self, sequence: u32) -> std::result::Result<String, String> {
+        use sha2::Digest;
+        let operation = self.operation.as_ref().ok_or("Scheduled jobs require a mutation operation")?;
+        Ok(format!("{:x}-{sequence}", sha2::Sha256::digest(operation.as_bytes())))
+    }
+
     fn get(&mut self, key: &Key) -> std::result::Result<Option<Value>, String> {
         let key = DocumentKey::new(&key.table, &key.id).map_err(|error| error.to_string())?;
         self.table(&key.table)?;

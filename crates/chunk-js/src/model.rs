@@ -38,6 +38,13 @@ pub struct Write {
 /// A snapshot capability that records dependencies and performs no external effects.
 /// The engine merges this invocation's writes into returned snapshot data.
 pub trait ReadHost: 'static {
+    /// Derives an opaque stable job identity from the durable mutation operation.
+    /// # Errors
+    /// Rejects hosts without a durable mutation operation binding.
+    fn schedule_id(&self, _sequence: u32) -> Result<String, String> {
+        Err("Scheduled jobs require a durable mutation host".into())
+    }
+
     /// # Errors
     /// Reports invalid keys or snapshot limits without publishing effects.
     fn get(&mut self, key: &Key) -> Result<Option<Value>, String>;
@@ -146,6 +153,7 @@ pub struct Execution {
     pub value: String,
     /// Published only on success; the backend still validates and commits these.
     pub writes: Vec<Write>,
+    pub jobs: Vec<crate::ScheduleIntent>,
 }
 
 #[derive(Debug, thiserror::Error)]

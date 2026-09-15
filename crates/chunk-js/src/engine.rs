@@ -144,6 +144,7 @@ impl Engine {
                 mode: invocation.mode,
                 cancellation: cancellation.clone(),
                 writes: BTreeMap::new(),
+                jobs: Vec::new(),
                 calls: 0,
                 write_bytes: 0,
             }),

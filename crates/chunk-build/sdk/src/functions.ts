@@ -1,5 +1,7 @@
 import { documents } from "./documents.ts";
 import type { Reader, Writer, Tables } from "./documents.ts";
+import { scheduler } from "./jobs.ts";
+import type { RawScheduler, Scheduler } from "./jobs.ts";
 import type { SchemaDefinition } from "./schema.ts";
 import { argumentSchema, freeze } from "./validators.ts";
 import type { InferObject, JsonValue, ObjectValidator, Schema, Shape, Validator } from "./validators.ts";
@@ -25,6 +27,7 @@ interface RawQueryContext {
   readonly db: RawReader;
 }
 interface RawMutationContext {
+  readonly scheduler: RawScheduler;
   readonly caller: JsonValue;
   readonly db: RawWriter;
 }
@@ -33,6 +36,7 @@ export interface QueryContext<T extends Tables> {
   readonly db: Reader<T>;
 }
 export interface MutationContext<T extends Tables> {
+  readonly scheduler: Scheduler;
   readonly caller: JsonValue;
   readonly db: Writer<T>;
 }
@@ -158,8 +162,21 @@ function protect<C extends { readonly caller: JsonValue }>(ctx: C): C {
   return Object.freeze(ctx);
 }
 
-function raw<K extends FunctionKind>(kind: K, visibility: Visibility) {
-  return builder<K, RawContext<K>>(kind, visibility, (handler) => (ctx, args) => handler(protect(ctx), args));
+function raw<K extends "query" | "mutation">(kind: K, visibility: Visibility) {
+  type Context = K extends "query"
+    ? RawQueryContext
+    : Omit<RawMutationContext, "scheduler"> & { readonly scheduler: Scheduler };
+  return builder<K, Context>(
+    kind,
+    visibility,
+    (handler) => (ctx, args) =>
+      handler(
+        protect(
+          kind === "mutation" ? { ...ctx, scheduler: scheduler((ctx as RawMutationContext).scheduler) } : ctx,
+        ) as unknown as Context,
+        args,
+      ),
+  );
 }
 
 function actionBuilder(visibility: Visibility) {
@@ -207,7 +224,14 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
       kind,
       visibility,
       (handler) => (ctx, args) =>
-        handler(protect({ caller: ctx.caller, db: documents(schema, ctx.db, kind === "mutation") }) as Context, args),
+        handler(
+          protect({
+            caller: ctx.caller,
+            db: documents(schema, ctx.db, kind === "mutation"),
+            ...(kind === "mutation" ? { scheduler: scheduler((ctx as RawMutationContext).scheduler) } : {}),
+          }) as Context,
+          args,
+        ),
     );
   }
   return freeze({

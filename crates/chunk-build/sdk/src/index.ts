@@ -41,3 +41,5 @@ export type {
 } from "./functions.ts";
 export { unset } from "./documents.ts";
 export type { Document, Reader, Writer, Selection } from "./documents.ts";
+
+export type { JobId, Scheduler } from "./jobs.ts";

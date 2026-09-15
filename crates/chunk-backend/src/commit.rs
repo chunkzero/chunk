@@ -12,10 +12,26 @@ use crate::{
 };
 
 pub(crate) enum Job {
-    Prepare { operation: Operation, context: chunk_store::RetryContext },
-    Release { id: String },
-    Activate { deployment: Arc<chunk_contract::Deployment> },
-    Commit { expected: Revision, operation: Operation, writes: Vec<Write>, result: Arc<str> },
+    Prepare {
+        operation: Operation,
+        context: chunk_store::RetryContext,
+    },
+    Release {
+        id: String,
+    },
+    Activate {
+        deployment: Arc<chunk_contract::Deployment>,
+    },
+    Commit {
+        expected: Revision,
+        operation: Operation,
+        writes: Vec<Write>,
+        result: Arc<str>,
+        intents: Vec<chunk_store::JobIntent>,
+    },
+    Scheduling {
+        command: chunk_store::JobCommand,
+    },
 }
 
 pub(crate) struct Committer {
@@ -27,11 +43,13 @@ impl Committer {
     pub fn new(
         mut store: Box<dyn Storage>,
         events: Sender<Event>,
-    ) -> Result<(Self, Snapshot, Vec<chunk_contract::Deployment>)> {
+    ) -> Result<(Self, Snapshot, Vec<chunk_contract::Deployment>, chunk_store::Jobs)> {
         let (jobs, incoming) = mpsc::sync_channel::<Job>(64);
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-commit".into()).spawn(move || {
-            let initial = (|| -> Result<_> { Ok((store.snapshot()?, store.deployments()?)) })();
+            let initial = (|| -> Result<_> {
+                Ok((store.snapshot()?, store.deployments()?, store.job_command(chunk_store::JobCommand::Recover)?))
+            })();
             if ready.send(initial).is_err() {
                 return;
             }
@@ -71,12 +89,21 @@ impl Committer {
                         failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
                         Event::Activated { result }
                     }
-                    Job::Commit { expected, operation, writes, result } => {
+                    Job::Scheduling { command } => {
+                        let result = if failed {
+                            Err(Error::CommitFailed)
+                        } else {
+                            store.job_command(command.clone()).map_err(Error::from)
+                        };
+                        failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                        Event::Scheduled { command, result }
+                    }
+                    Job::Commit { expected, operation, writes, result, intents } => {
                         let id = operation.id.clone();
                         let result = if failed {
                             Err(Error::CommitFailed)
                         } else {
-                            commit(store.as_mut(), expected, operation, writes, result)
+                            commit(store.as_mut(), expected, operation, writes, result, intents)
                         };
                         // A later batch may depend on the failed batch's speculative
                         // writes. Never persist that suffix after an ambiguous failure.
@@ -90,8 +117,8 @@ impl Committer {
             }
         })?;
         let committer = Self { jobs: Some(jobs), thread: Some(thread) };
-        let (snapshot, deployments) = initialized.recv().map_err(|_| Error::Closed)??;
-        Ok((committer, snapshot, deployments))
+        let (snapshot, deployments, scheduled) = initialized.recv().map_err(|_| Error::Closed)??;
+        Ok((committer, snapshot, deployments, scheduled))
     }
 
     pub fn send(&self, job: Job) -> Result<()> {
@@ -108,9 +135,12 @@ fn commit(
     operation: Operation,
     writes: Vec<Write>,
     json: Arc<str>,
-) -> Result<(Update, Snapshot)> {
+    intents: Vec<chunk_store::JobIntent>,
+) -> Result<(Update, Snapshot, Option<chunk_store::Jobs>)> {
     // Storage currently takes Value; only the durable boundary decodes results.
-    let outcome = store.commit(Commit { expected, operation, writes, result: serde_json::from_str(&json)? })?;
+    let has_jobs = !intents.is_empty();
+    let outcome = store
+        .commit_with_jobs(Commit { expected, operation, writes, result: serde_json::from_str(&json)? }, intents)?;
     if expected.0.checked_add(1) != Some(outcome.revision.0) {
         return Err(Error::CommitFailed);
     }
@@ -118,7 +148,8 @@ fn commit(
     if snapshot.revision != outcome.revision {
         return Err(Error::CommitFailed);
     }
-    Ok((Update { revision: outcome.revision, json }, snapshot))
+    let jobs = if has_jobs { Some(store.jobs().map_err(|_| Error::CommitFailed)?) } else { None };
+    Ok((Update { revision: outcome.revision, json }, snapshot, jobs))
 }
 
 impl Drop for Committer {
