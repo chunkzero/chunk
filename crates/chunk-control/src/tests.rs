@@ -342,6 +342,7 @@ impl Fixture {
         let config = Config {
             destinations: None,
             session_methods: None,
+            session_configurations: None,
             apps: BTreeMap::from([("bridge".into(), test_app())]),
             deployment,
             artifact_digest: "artifact".into(),
@@ -798,4 +799,5 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     fixture.close().await;
 }
 
+mod creation;
 mod destinations;
