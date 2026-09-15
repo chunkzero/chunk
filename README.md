@@ -10,9 +10,10 @@ main function and embed the generic Chunk lifecycle library plus the Minestom ad
 JVMs directly, without a per-server sidecar. The initial embedded runtime uses `deno_core`/V8 with language APIs and
 pure-JS packages, without Node compatibility.
 
-Apps keep `app.ts` declarations, their own Gradle builds, and Java or Kotlin gameplay. Ancestor `scope.ts` files supply inherited server policy. Each app JAR registers one
-`SessionProvider` that creates fresh session state. The build generates typed backend clients and packages all apps,
-shared dependencies, backend code and assets into one portable release.
+Apps keep `app.ts` declarations, their own Gradle builds, and Java or Kotlin gameplay. Ancestor `scope.ts` files supply
+inherited server policy. Each app JAR registers one `SessionProvider` that creates fresh session state. The build
+generates typed backend clients and packages all apps, shared dependencies, backend code and assets into one portable
+release.
 
 ## Status
 

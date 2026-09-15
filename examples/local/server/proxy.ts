@@ -26,4 +26,3 @@ export const admit = query({
     reason: "The local example is closed for maintenance.",
   }),
 });
-

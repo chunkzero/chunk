@@ -2,9 +2,9 @@
 
 This build fixture uses the public Java session API and generated typed backend client, with `-Xlint:all -Werror` and no
 Kotlin production dependencies. Its lobby provider implements the generated `LobbySessionProviders.Default` interface
-and receives a typed greeting configuration declared in `apps/lobby/app.ts`. The session join hook queries a typed greeting and sends
-the result on the tick thread. It also implements the generated `Announce` session-method interface from
-`apps/lobby/server/methods.ts`; the generated binding sends a message to that session’s players. Internal control
+and receives a typed greeting configuration declared in `apps/lobby/app.ts`. The session join hook queries a typed
+greeting and sends the result on the tick thread. It also implements the generated `Announce` session-method interface
+from `apps/lobby/server/methods.ts`; the generated binding sends a message to that session’s players. Internal control
 dispatch binds calls to the current player membership and session generation.
 
 From the repository root:

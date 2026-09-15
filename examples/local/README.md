@@ -55,10 +55,9 @@ just players --player <uuid> drain --timeout-seconds 60
 
 The example allows two sessions per JVM. Lobby and arena use separate JVMs; two default arenas can share one arena JVM.
 The `arena-large` destination uses the same `arena/default` implementation with a different typed configuration and
-32-player capacity on a 1024 MiB JVM (`--machine-profile large`). Moves preserve the
-public connection. Drain stops new reservations on the selected runtime, moves its players, and shuts it down when empty
-or at the deadline. Operator commands print an operation ID; supply `--operation <id>` when retrying an uncertain
-command.
+32-player capacity on a 1024 MiB JVM (`--machine-profile large`). Moves preserve the public connection. Drain stops new
+reservations on the selected runtime, moves its players, and shuts it down when empty or at the deadline. Operator
+commands print an operation ID; supply `--operation <id>` when retrying an uncertain command.
 
 ## Lifecycle
 
@@ -77,23 +76,24 @@ an error.
 
 `chunk.toml` selects the local environment and default runtime requirements: 16 players per session, two sessions per
 512 MiB JVM, and at most four JVMs. `apps/lobby/app.ts` and `apps/games/arena/app.ts` declare stable app IDs, runtime
-requirements and destinations. Their implementations are addressed as `lobby/default` and `arena/default`; moving an
-app directory does not change its ID. `apps/scope.ts` supplies inherited hooks/commands and initial routing. Java 25 remains explicit in the Gradle builds. The local runner uses Gradle's selected executable, with an
-optional `--java PATH` override.
+requirements and destinations. Their implementations are addressed as `lobby/default` and `arena/default`; moving an app
+directory does not change its ID. `apps/scope.ts` supplies inherited hooks/commands and initial routing. Java 25 remains
+explicit in the Gradle builds. The local runner uses Gradle's selected executable, with an optional `--java PATH`
+override.
 
 `server/schema/index.ts` composes the physical schema; `server/*.ts` exports validated function descriptors. Paths in
 this paragraph are relative to `examples/local`. `examples/local/gradlew generateChunkBackend` emits the backend under
 `examples/local/.chunk/build/backend` and shared JVM bindings under `examples/local/.chunk/generated/jvm`. The
 standalone example uses the public Chunk settings and project plugins with repository composite builds for local
 framework dependencies. Its explicit `shared` project contains the common session implementation and backend boundary
-test. The discovered `:apps:lobby` and `:apps:games:arena` projects package annotated providers that create fresh session
-state. The plugin generates a local Java service registry from those annotations. The arena implements the generated
-`ArenaSessionProviders.Default` interface and receives a typed `SessionCreation` containing its fixed configuration and
-`maxPlayers`. Standard and large destinations reuse this provider; they do not need separate classes. Destination
-references come from `#chunk/apps` without importing executable app modules. Gradle retains dependency/toolchain settings.
-`chunkArtifacts` builds independent executable app JARs containing the generated backend client and runtime libraries.
-Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom, explicitly calls `ready()` and
-waits for shutdown.
+test. The discovered `:apps:lobby` and `:apps:games:arena` projects package annotated providers that create fresh
+session state. The plugin generates a local Java service registry from those annotations. The arena implements the
+generated `ArenaSessionProviders.Default` interface and receives a typed `SessionCreation` containing its fixed
+configuration and `maxPlayers`. Standard and large destinations reuse this provider; they do not need separate classes.
+Destination references come from `#chunk/apps` without importing executable app modules. Gradle retains
+dependency/toolchain settings. `chunkArtifacts` builds independent executable app JARs containing the generated backend
+client and runtime libraries. Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom,
+explicitly calls `ready()` and waits for shutdown.
 
 Shared descriptors use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`. The initial
 managed caller's `app` identifies its registered app ID. Multiple session instances may belong to the same app. Session
