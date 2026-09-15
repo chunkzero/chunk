@@ -82,9 +82,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         session_configurations::validate(&bytes, &app.id, &input.sessions, backend.session_configurations.as_ref())?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
-        if app.sessions.keys().any(|id| !input.sessions.contains(id)) {
-            return Err(io::Error::other(format!("app {} configures an unknown session type", app.id)));
-        }
+        validate_implementations(&inputs.project, app, &input.sessions)?;
         let mut sessions = BTreeMap::new();
         for id in &input.sessions {
             let requirements = app.sessions.get(id).unwrap_or(&app.runtime);
@@ -126,7 +124,9 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
                 "compiled domain manifest no longer matches the project; recompile the backend",
             ));
         }
-    } else if inputs.project.join("server/domains").exists() {
+    } else if inputs.project.join("server/domains").exists()
+        || !project::authoring::discover(&inputs.project)?.modules.is_empty()
+    {
         return Err(io::Error::other("backend is missing the project's domain manifest; recompile the backend"));
     }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
@@ -143,6 +143,25 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     let directory = publication::publish_directory(dist, &id, &files)?;
     archive::publish(archive, &archive_path)?;
     Ok(Release { id, directory, archive: archive_path.canonicalize()?, apps: metadata.apps })
+}
+
+fn validate_implementations(root: &Path, app: &project::AppMetadata, actual: &[String]) -> io::Result<()> {
+    if root.join(&app.directory).join("app.ts").is_file() {
+        let expected: BTreeSet<_> = if app.sessions.is_empty() {
+            ["default"].into()
+        } else {
+            app.sessions.keys().map(String::as_str).collect()
+        };
+        if expected != actual.iter().map(String::as_str).collect() {
+            return Err(io::Error::other(format!(
+                "app {} implementations must exactly match its packaged session providers",
+                app.id
+            )));
+        }
+    } else if app.sessions.keys().any(|id| !actual.contains(id)) {
+        return Err(io::Error::other(format!("app {} configures an unknown session type", app.id)));
+    }
+    Ok(())
 }
 
 fn validate_app_contracts<'a>(

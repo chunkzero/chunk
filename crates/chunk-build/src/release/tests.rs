@@ -465,3 +465,28 @@ fn destination_only_profiles_are_validated_and_participate_in_release_identity()
     fs::write(&manifest, format!("{original}\n[local.profiles.large]\nmemory_mib=2048\nmax_sessions=1\n")).unwrap();
     assert_ne!(first.id, fixture.publish().unwrap().id);
 }
+
+#[test]
+fn authored_apps_require_compiled_policy_and_an_exact_implementation_catalog() {
+    let mut fixture = Fixture::new();
+    let directory = fixture.inputs.project.join("apps/lobby");
+    fs::remove_file(directory.join("app.toml")).unwrap();
+    let declaration = "import {defineApp} from '#chunk'; export default defineApp({id:'lobby'});";
+    fs::write(directory.join("app.ts"), declaration).unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("missing the project's domain manifest"));
+    let contract_path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
+    contract["domains"] = json!({
+        "version":1,"scopes":{"":{"parent":null},"lobby":{"parent":""}},
+        "apps":{"lobby":"lobby","arena":""},"hooks":{}
+    });
+    fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    fixture.publish().unwrap();
+    fs::write(directory.join("app.ts"), declaration.replace("id:'lobby'", "id:'lobby',implementations:{other:{}}"))
+        .unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("exactly match"));
+    fs::write(directory.join("app.ts"), declaration).unwrap();
+    fixture.descriptor["apps"][0]["sessions"] = json!(["default", "other"]);
+    fixture.save_descriptor();
+    assert!(fixture.publish().err().unwrap().to_string().contains("exactly match"));
+}
