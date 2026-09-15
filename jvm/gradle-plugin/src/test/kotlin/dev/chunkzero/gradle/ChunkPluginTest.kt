@@ -380,6 +380,7 @@ class ChunkPluginTest {
                 @dev.chunkzero.runtime.SessionType("default")
                 class Factory : fixture.generated.LobbySessionProviders.Default {
                     override fun create(creation: SessionCreation<Bindings>) = Game()
+                    override fun create(): dev.chunkzero.runtime.Session = Game()
                 }
                 class Game : dev.chunkzero.runtime.Session(), fixture.generated.Ping {
                     override fun ping(args: Bindings): String = "echo:" + args.value()
@@ -395,6 +396,7 @@ class ChunkPluginTest {
                 @dev.chunkzero.runtime.SessionType("default")
                 public final class App implements fixture.generated.LobbySessionProviders.Default {
                     public Game create(dev.chunkzero.runtime.SessionCreation<fixture.generated.Bindings> creation) { return new Game(); }
+                    public dev.chunkzero.runtime.Session create() { return new Game(); }
                     public static void main(String[] args) {
                         Verify.run(new App().create(new dev.chunkzero.runtime.SessionCreation<>(32, new fixture.generated.Bindings("ok"))));
                     }
