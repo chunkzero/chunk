@@ -24,6 +24,7 @@ const MAX_RECORDS: usize = 32;
 struct Record {
     call: Call,
     fingerprint: [u8; 32],
+    writable: bool,
     status: watch::Sender<ActionStatus>,
     scope: Weak<Scope>,
     cancellation: Cancellation,
@@ -97,21 +98,30 @@ impl Drop for Actions {
 }
 
 impl Actor {
-    pub(super) fn start_action(&mut self, id: ActionId, mut call: Call, reply: Request<ActionHandle>) {
+    pub(super) fn start_action(&mut self, id: ActionId, mut call: Call, hook: bool, reply: Request<ActionHandle>) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
         let result = (|| {
-            self.normalize_call(&mut call)?;
+            if hook {
+                self.check_deployment(&call.deployment)?;
+            } else {
+                self.normalize_call(&mut call)?;
+            }
             let deployment =
                 self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Contract)?.clone();
-            let function = deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone();
+            let (function, writable) = if hook {
+                crate::hooks::resolve(&deployment, &call)?
+            } else {
+                (deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone(), true)
+            };
             if function.kind != FunctionKind::Action {
                 return Err(Error::Contract);
             }
             let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
                 "action-v1",
+                hook,
                 call.deployment.as_str(),
                 &call.function,
                 call.arguments.as_str(),
@@ -143,7 +153,8 @@ impl Actor {
                 caller: call.caller.clone(),
                 timestamp: self.view.base.timestamp,
                 seed: id.sequence,
-                deadline: std::time::Instant::now() + Duration::from_secs(30),
+                deadline: std::time::Instant::now()
+                    + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) },
             };
             let worker_id = id.clone();
             let worker_cancellation = cancellation.clone();
@@ -167,7 +178,15 @@ impl Actor {
             })?;
             self.actions.records.insert(
                 id.clone(),
-                Record { call, fingerprint, status, scope: Arc::downgrade(&scope), cancellation, worker: Some(worker) },
+                Record {
+                    call,
+                    fingerprint,
+                    writable,
+                    status,
+                    scope: Arc::downgrade(&scope),
+                    cancellation,
+                    worker: Some(worker),
+                },
             );
             Ok(ActionHandle { id, status: receiver, scope })
         })();
@@ -199,6 +218,10 @@ impl Actor {
         };
         if record.worker.is_none() || record.cancellation.is_cancelled() || reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
+            return;
+        }
+        if mode == Mode::Mutation && !record.writable {
+            reply.finish(Err(Error::Invalid("hook has read-only transaction capabilities")));
             return;
         }
         let mut call = Call { function, arguments, ..record.call.clone() };

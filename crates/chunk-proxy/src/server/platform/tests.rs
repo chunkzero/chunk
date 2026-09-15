@@ -69,6 +69,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let hooks = Hooks::default();
     let platform = Platform::new(PlatformTarget {
         backend: chunk_contract::BackendConnection {
+            platform_token: None,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
             token: "test-token".into(),
             environment: "local".into(),

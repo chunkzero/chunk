@@ -7,7 +7,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_contract::{Deployment, validate_wire_value};
+use chunk_contract::{Deployment, DomainManifest, validate_wire_value};
 #[cfg(test)]
 use chunk_js::Limits;
 use chunk_js::{Cancellation, DeploymentId, Json};
@@ -28,7 +28,11 @@ pub struct Call {
 
 impl Call {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.function.is_empty() || self.function.len() > 256 {
+        self.validate_limit(256)
+    }
+
+    pub(crate) fn validate_limit(&self, name_limit: usize) -> Result<()> {
+        if self.function.is_empty() || self.function.len() > name_limit {
             return Err(Error::Invalid("function name"));
         }
         for value in [&self.arguments, &self.caller] {
@@ -75,7 +79,12 @@ impl<T> Request<T> {
 }
 
 pub(crate) enum Command {
+    DomainManifest {
+        id: DeploymentId,
+        reply: Request<Option<DomainManifest>>,
+    },
     StartAction {
+        hook: bool,
         id: ActionId,
         call: Call,
         reply: Request<ActionHandle>,
@@ -122,6 +131,7 @@ pub(crate) enum Command {
 impl Command {
     pub fn reject(self, error: Error) {
         match self {
+            Self::DomainManifest { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
@@ -309,7 +319,21 @@ impl Backend {
         if id.incarnation != self.0.incarnation {
             return Err(Error::ActionOutcomeUnknown);
         }
-        self.submit(|reply| Command::StartAction { id, call, reply }).await
+        self.submit(|reply| Command::StartAction { hook: false, id, call, reply }).await
+    }
+
+    /// Looks up native hook descriptors in the exact retained deployment.
+    /// # Errors
+    /// Rejects unknown or releasing deployments.
+    pub async fn domain_manifest(&self, id: DeploymentId) -> Result<Option<DomainManifest>> {
+        self.submit(|reply| Command::DomainManifest { id, reply }).await
+    }
+
+    pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
+        call.validate_limit(512)?;
+        let id = self.allocate_action_id()?;
+        let mut handle = self.submit(|reply| Command::StartAction { hook: true, id, call, reply }).await?;
+        handle.outcome().await
     }
 
     /// Look up retained status using the original caller authority.

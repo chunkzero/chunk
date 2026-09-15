@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 pub struct BackendConnection {
     pub endpoint: String,
     pub token: String,
+    /// Native proxy lifecycle authority; never pass this credential to gameplay JVMs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_token: Option<String>,
     pub environment: String,
     pub deployment: String,
 }

@@ -87,3 +87,6 @@ pub mod server;
 
 #[cfg(test)]
 mod action_tests;
+
+mod hooks;
+pub use hooks::HookService;

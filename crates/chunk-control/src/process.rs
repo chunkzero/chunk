@@ -322,6 +322,7 @@ mod tests {
             apps: BTreeMap::from([("bridge".into(), artifact)]),
             profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
             backend: chunk_contract::BackendConnection {
+                platform_token: None,
                 environment: "test".into(),
                 deployment: "build".into(),
                 endpoint: "http://127.0.0.1:1".into(),

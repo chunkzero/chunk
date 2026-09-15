@@ -15,6 +15,9 @@ use tonic::{Request, transport::Channel};
 use super::transport::invalid_data;
 use crate::PlatformTarget;
 
+mod native;
+pub(in crate::server) use native::Lifecycle;
+
 pub(super) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -26,6 +29,7 @@ pub(super) struct Platform {
     backend: BackendClient<Channel>,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
+    native: native::Native,
 }
 
 impl Platform {
@@ -34,6 +38,7 @@ impl Platform {
             control: LocalControlClient::new(channel(&target.control.endpoint)?)
                 .max_decoding_message_size(8 * 1024 * 1024),
             backend: BackendClient::new(channel(&target.backend.endpoint)?),
+            native: native::Native::new(&target.backend.endpoint)?,
             target,
             cleanup: tokio_util::task::TaskTracker::new(),
             proxy_id: uuid::Uuid::new_v4().to_string(),
@@ -64,7 +69,23 @@ impl Platform {
         serde_json::from_slice(&result.result_json).map_err(invalid_data)
     }
 
+    #[cfg(test)]
     pub async fn route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
+        self.route_claim(&chunk_proto::v1::ClaimRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            proxy_id: self.proxy_id.clone(),
+            connection_id: "test".into(),
+            identity: Some(chunk_proto::v1::Identity {
+                uuid: uuid.into(),
+                username: username.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn legacy_route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
         let arguments = json!({"uuid": uuid, "username": username});
         self.admit(arguments.clone()).await?;
         let route: Route = self.hook("route", arguments).await?;
@@ -80,7 +101,7 @@ impl Platform {
         Ok(())
     }
 
-    pub async fn approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
+    async fn legacy_approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
         let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing move identity"))?;
         let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing move demand"))?;
         self.admit(json!({"uuid": identity.uuid, "username": identity.username})).await?;
@@ -98,7 +119,12 @@ impl Platform {
     }
 
     pub async fn status(&self, host: &str) -> io::Result<Vec<u8>> {
-        let status: Status = self.hook("status", json!({"host": host})).await.unwrap_or_else(|error| {
+        let result = match self.manifest().await {
+            Ok(Some(manifest)) => self.native_status(&manifest, host).await,
+            Ok(None) => self.hook("status", json!({"host": host})).await,
+            Err(error) => Err(error),
+        };
+        let status: Status = result.unwrap_or_else(|error| {
             tracing::debug!(%error, "status hook unavailable");
             Status { motd: "Server temporarily unavailable".into(), online: 0, max: 0 }
         });

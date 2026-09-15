@@ -101,6 +101,22 @@ impl Control {
         Ok(identity)
     }
 
+    /// Withdraws the captured connection and confirms its logical membership has ended.
+    /// # Errors
+    /// An unresolved withdrawal never authorizes a disconnect notification.
+    pub async fn reconcile_departure(&self, request: ClaimRequest) -> Result<chunk_proto::v1::DepartureStatus> {
+        let player = request.identity.as_ref().ok_or(Error::Invalid("missing player identity"))?.uuid.clone();
+        let identity = self.cancel(request).await?;
+        let state = self.state()?;
+        let departed = identity.membership_generation != 0
+            && state.players.get(&player).is_some_and(|player| {
+                player.membership_generation == identity.membership_generation
+                    && player.current.is_none()
+                    && player.pending.is_none()
+            });
+        Ok(chunk_proto::v1::DepartureStatus { claim: Some(identity), departed })
+    }
+
     async fn reconcile(&self, operation: &str) -> Result<Assignment> {
         let state = self.state()?;
         let claim = state.claims.get(operation).ok_or(Error::Invalid("unknown claim"))?;

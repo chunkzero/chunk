@@ -698,3 +698,34 @@ async fn delayed_health_monitor_does_not_retire_a_surviving_runtime() {
     assert!(state.claims["active"].phase == Phase::Arrived);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn departure_fences_only_the_captured_membership_and_waits_for_pending_moves() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let source = request("source", &uuid);
+    let first = control.claim(source.clone()).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
+    let destination = control
+        .move_player(chunk_proto::v1::MovePlayerRequest {
+            operation_id: "move".into(),
+            player_id: uuid.clone(),
+            demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
+        })
+        .unwrap();
+    control.claim(destination.clone()).await.unwrap();
+    fixture.runtime.available.store(false, Ordering::Release);
+    assert!(control.reconcile_departure(source.clone()).await.is_err());
+    fixture.runtime.available.store(true, Ordering::Release);
+    assert!(!control.reconcile_departure(source.clone()).await.unwrap().departed);
+    assert!(control.reconcile_departure(destination).await.unwrap().departed);
+    let replacement = request("replacement", &uuid);
+    let next = control.claim(replacement.clone()).await.unwrap();
+    assert_eq!(next.claim.as_ref().unwrap().membership_generation, 2);
+    assert!(!control.reconcile_departure(source).await.unwrap().departed);
+    assert_eq!(control.state().unwrap().players[&uuid].current.as_deref(), Some("replacement"));
+    assert!(control.reconcile_departure(replacement).await.unwrap().departed);
+    fixture.close().await;
+}

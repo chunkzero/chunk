@@ -1,3 +1,5 @@
+domain = "games/arena"
+
 [runtime]
 capacity = 16
 

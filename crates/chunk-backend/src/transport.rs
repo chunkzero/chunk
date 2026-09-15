@@ -61,7 +61,7 @@ impl Service {
         Ok(())
     }
 
-    fn binding<T>(&self, request: &Request<T>) -> Result<chunk_js::DeploymentId, Status> {
+    pub(crate) fn binding<T>(&self, request: &Request<T>) -> Result<chunk_js::DeploymentId, Status> {
         self.authorize(request)?;
         let metadata = request.metadata();
         let environment = metadata
@@ -78,7 +78,7 @@ impl Service {
         chunk_js::DeploymentId::new(deployment).map_err(|_| Status::invalid_argument("deployment"))
     }
 
-    fn decode(
+    pub(crate) fn decode(
         deployment: chunk_js::DeploymentId,
         function: String,
         arguments: &[u8],
@@ -92,7 +92,7 @@ impl Service {
     }
 }
 
-fn status(error: &Error) -> Status {
+pub(crate) fn status(error: &Error) -> Status {
     match error {
         Error::Invalid(_) | Error::Contract | Error::Json(_) => Status::invalid_argument(error.to_string()),
         Error::Unknown => Status::not_found(error.to_string()),

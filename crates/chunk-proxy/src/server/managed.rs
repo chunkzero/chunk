@@ -11,7 +11,7 @@ use tokio::{
 use super::{
     authentication::Authenticated,
     configuration, gameplay,
-    platform::{Platform, request},
+    platform::{Lifecycle, Platform, request},
     transport::{Transport, invalid_data},
 };
 
@@ -58,8 +58,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let claim = login_claim(&authenticated.profile, platform);
     let destination = async {
         let mut claim = claim;
-        let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing authenticated identity"))?;
-        claim.demand = Some(platform.route(&identity.uuid, &identity.username).await?);
+        claim.demand = Some(platform.route_claim(&claim).await?);
         // Construct before sending: cancellation must cover a claim whose reply was lost.
         let guard = ClaimGuard { platform: platform.clone(), claim, armed: true };
         let mut message = request(guard.claim.clone(), &platform.target.control.token)?;
@@ -70,6 +69,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     };
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
+    let mut lifecycle = Lifecycle::new(platform.clone());
     loop {
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
@@ -94,6 +94,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 configuration::disconnect(&mut authenticated.transport, 0x20, "Server temporarily unavailable").await;
             return Err(error);
         }
+        lifecycle.arrived(&guard.claim, &identity)?;
         tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.identity.as_ref().map_or("", |identity| identity.uuid.as_str()), "player arrived in managed session");
         let next = relay::until(
             &mut authenticated.transport,
@@ -109,11 +110,13 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         )
         .await
         .map_err(io::Error::other)??;
+        check_move(&guard, &next.0.claim).await?;
         // The client's acknowledgment fences all remaining source PLAY input.
         if let Err(error) = withdraw(&guard, &identity).await {
             let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
             return Err(error);
         }
+        lifecycle.cutover(&next.0.claim);
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
@@ -180,7 +183,8 @@ async fn next_move(
         }
         let guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true };
         let prepare = async {
-            guard.platform.approve_move(&guard.claim).await?;
+            guard.platform.approve_move(&source.claim, &guard.claim).await?;
+            check_move(source, &guard.claim).await?;
             let mut message = request(guard.claim.clone(), &guard.platform.target.control.token)?;
             message.set_timeout(WAIT_TIMEOUT);
             let assignment =
@@ -189,6 +193,7 @@ async fn next_move(
             if assignment.configuration.as_ref().is_none_or(|c| c.protocol != protocol) {
                 return Err(invalid_data("destination protocol differs from client"));
             }
+            check_move(source, &guard.claim).await?;
             Ok::<_, io::Error>(assignment)
         };
         match timeout(WAIT_TIMEOUT, prepare).await {
@@ -197,6 +202,21 @@ async fn next_move(
             Err(_) => tracing::warn!("move preparation timed out; source remains active"),
         }
     }
+}
+
+async fn check_move(source: &ClaimGuard, destination: &ClaimRequest) -> io::Result<()> {
+    let pending = source
+        .platform
+        .control
+        .clone()
+        .poll_move(request(source.claim.clone(), &source.platform.target.control.token)?)
+        .await
+        .map_err(io::Error::other)?
+        .into_inner();
+    if pending.claim.as_ref() != Some(destination) {
+        return Err(invalid_data("move canceled or source ownership changed"));
+    }
+    Ok(())
 }
 
 async fn withdraw(source: &ClaimGuard, identity: &ClaimIdentity) -> io::Result<()> {

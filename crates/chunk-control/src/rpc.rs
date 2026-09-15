@@ -118,6 +118,20 @@ impl LocalControl for Service {
             .map_err(status)
     }
 
+    async fn reconcile_departure(
+        &self,
+        request: Request<ClaimRequest>,
+    ) -> Result<Response<chunk_proto::v1::DepartureStatus>, Status> {
+        self.authorize(&request)?;
+        let control = self.control.clone();
+        self.operations
+            .spawn(async move { control.reconcile_departure(request.into_inner()).await })
+            .await
+            .map_err(|_| Status::internal("departure task failed"))?
+            .map(Response::new)
+            .map_err(status)
+    }
+
     async fn cancel(&self, request: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
         self.authorize(&request)?;
         let control = self.control.clone();

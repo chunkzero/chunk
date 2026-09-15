@@ -30,6 +30,10 @@ tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "sync", "
 tracing = "0.1"
 
 [dev-dependencies]
+chunk-backend = { path = "../chunk-backend" }
+chunk-store = { path = "../chunk-store" }
+chunk-js = { path = "../chunk-js" }
+tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio = { version = "1", features = ["test-util"] }
 
