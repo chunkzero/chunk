@@ -30,6 +30,8 @@ message SessionCommand {
   uint64 generation = 4;
   string session_type = 5;
   uint32 capacity = 6;
+  // Immutable creation configuration; an absent payload means the legacy empty object.
+  bytes configuration_json = 7;
 }
 
 message ProcessIdentity {

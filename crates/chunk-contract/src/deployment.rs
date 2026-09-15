@@ -56,6 +56,8 @@ pub struct Deployment {
     pub domains: Option<DomainManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_methods: Option<crate::SessionMethods>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_configurations: Option<crate::SessionConfigurations>,
 }
 
 impl Deployment {
@@ -77,6 +79,9 @@ impl Deployment {
         crate::validate(&self.tables)?;
         if let Some(methods) = &self.session_methods {
             methods.validate()?;
+        }
+        if let Some(configurations) = &self.session_configurations {
+            configurations.validate()?;
         }
         let mut paths = BTreeSet::new();
         let mut exports = BTreeSet::new();
@@ -100,6 +105,7 @@ impl Deployment {
         }
         if let Some(destinations) = &self.destinations {
             destinations.validate()?;
+            destinations.validate_configurations(self.session_configurations.as_ref())?;
         }
         if let Some(domains) = &self.domains {
             domains.validate()?;
@@ -163,6 +169,7 @@ mod tests {
         Deployment {
             domains: None,
             session_methods: None,
+            session_configurations: None,
             destinations: None,
             contract_version: CONTRACT_VERSION,
             runtime_profile: RuntimeProfile::TransactionalV1,

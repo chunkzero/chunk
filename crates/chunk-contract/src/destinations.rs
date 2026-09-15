@@ -41,10 +41,19 @@ pub enum DestinationOverflow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionCreation {
+    pub capacity: u32,
+    pub configuration: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DestinationPolicy {
     pub destination: Destination,
     pub overflow: DestinationOverflow,
     pub empty_timeout_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<SessionCreation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,12 +73,24 @@ impl DestinationManifest {
         let mut names = BTreeSet::new();
         let mut keys = BTreeSet::new();
         for (id, policy) in &self.entries {
-            if !id.strip_prefix("shared/destinations/").is_some_and(identifier)
-                || !names.insert(id.to_ascii_lowercase())
-            {
+            let legacy = id.strip_prefix("shared/destinations/").is_some_and(identifier);
+            let local = id.strip_prefix("apps/").and_then(|path| path.split_once("/destinations/")).is_some_and(
+                |(app, key)| {
+                    identifier(app)
+                        && identifier(key)
+                        && policy.destination.session_type.split_once('/').is_some_and(|(owner, _)| owner == app)
+                },
+            );
+            if !(legacy || local) || !names.insert(id.to_ascii_lowercase()) {
                 return Err("invalid destination declaration identity");
             }
             policy.destination.validate()?;
+            if let Some(creation) = &policy.creation {
+                if !(1..=128).contains(&creation.capacity) {
+                    return Err("destination creation capacity must be between 1 and 128");
+                }
+                crate::session_configurations::validate_configuration_value(&creation.configuration)?;
+            }
             if !keys.insert((&policy.destination.session_type, &policy.destination.key)) {
                 return Err("destination key already declared for this session type");
             }
@@ -81,7 +102,7 @@ impl DestinationManifest {
     }
 
     /// # Errors
-    /// Rejects references outside the exact release's app/session catalog or a different profile.
+    /// Rejects unknown implementations and implicit changes to their default hosting profile.
     pub fn validate_apps(&self, apps: &BTreeMap<String, AppArtifact>) -> Result<(), &'static str> {
         self.validate()?;
         for policy in self.entries.values() {
@@ -90,9 +111,23 @@ impl DestinationManifest {
                 .get(app)
                 .and_then(|app| app.sessions.get(session))
                 .ok_or("destination references unknown app session")?;
-            if declaration.machine_profile != policy.destination.machine_profile {
+            if policy.creation.is_none() && declaration.machine_profile != policy.destination.machine_profile {
                 return Err("destination profile differs from its immutable app session");
             }
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    /// Rejects creation values that differ from the exact implementation schema.
+    pub fn validate_configurations(
+        &self,
+        configurations: Option<&crate::SessionConfigurations>,
+    ) -> Result<(), &'static str> {
+        for policy in self.entries.values() {
+            let empty = serde_json::json!({});
+            let value = policy.creation.as_ref().map_or(&empty, |creation| &creation.configuration);
+            crate::validate_session_configuration(configurations, &policy.destination.session_type, value)?;
         }
         Ok(())
     }
