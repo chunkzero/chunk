@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import dev.chunkzero.generated.BackendTypes;
 import dev.chunkzero.generated.BackendTypes.Shared.Profile.RecordArgs.State;
+import dev.chunkzero.generated.SessionConfigs;
 import dev.chunkzero.generated.SessionMethods;
 
 import org.junit.jupiter.api.Test;
@@ -197,6 +198,18 @@ class GeneratedContractsTest {
         assertEquals(new SessionMethods.Ids.Profiles("profiles:p1"), arguments.id());
         assertThrows(RuntimeException.class, () -> ref.arguments().read("{}"));
         assertThrows(RuntimeException.class, () -> ref.result().read("1"));
+    }
+
+    @Test
+    void creationConfigsDecodeToImmutableNestedRecordsWithTheDeclaredSchema() throws IOException {
+        var type = SessionConfigs.Duels.Default.TYPE;
+        var config = type.read(fixtures().get(0).toString());
+        assertEquals(new SessionConfigs.Ids.Profiles("profiles:p1"), config.id());
+        assertEquals(BackendValues.MAX_SAFE_INTEGER, config.count());
+        assertThrows(UnsupportedOperationException.class, () -> config.labels().add("another"));
+        assertThrows(RuntimeException.class, () -> type.read("{}"));
+        assertThrows(RuntimeException.class, () -> type.read("null"));
+        assertEquals(json(type.write(config)), json(type.write(type.read(type.write(config)))));
     }
 
     private JsonNode fixtures() throws IOException {

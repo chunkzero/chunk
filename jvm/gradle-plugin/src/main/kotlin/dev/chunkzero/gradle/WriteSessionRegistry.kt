@@ -41,6 +41,10 @@ abstract class WriteSessionRegistry : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val methodContracts: ConfigurableFileCollection
 
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val configurationContracts: ConfigurableFileCollection
+
     @get:OutputDirectory abstract val bindingSourceDirectory: DirectoryProperty
 
     @get:OutputFile abstract val catalogFile: RegularFileProperty
@@ -99,6 +103,13 @@ abstract class WriteSessionRegistry : DefaultTask() {
             require(sessions.put(id, type.name.replace('/', '.')) == null) { "Duplicate session type: $id" }
         }
         require(sessions.size in 1..128) { "App requires 1–128 @SessionType declarations" }
+        writeSessionConfigurations(
+            app.get(),
+            sessions,
+            configurationContracts.singleFile,
+            ::lookup,
+            outputDirectory.get().asFile,
+        )
         writeSessionMethods(
             app.get(),
             sessions,
@@ -169,7 +180,10 @@ private fun inspect(bytes: ByteArray): CompiledClass {
                 signature: String?,
                 exceptions: Array<out String>?,
             ): MethodVisitor? {
-                if (name == "create" && Type.getArgumentTypes(descriptor).isEmpty() &&
+                val arguments = Type.getArgumentTypes(descriptor)
+                val creation =
+                    arguments.size == 1 && arguments[0].descriptor == "Ldev/chunkzero/runtime/SessionCreation;"
+                if (name == "create" && (arguments.isEmpty() || creation) &&
                     access and Opcodes.ACC_PUBLIC != 0 &&
                     access and (Opcodes.ACC_STATIC or Opcodes.ACC_BRIDGE) == 0 &&
                     Type.getReturnType(descriptor).sort == Type.OBJECT

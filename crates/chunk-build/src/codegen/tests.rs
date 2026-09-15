@@ -200,3 +200,29 @@ fn session_methods_reject_invalid_versions_identities_and_java_collisions() {
         assert!(error.to_string().contains(expected), "{error}");
     }
 }
+
+#[test]
+fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_collisions() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("generated");
+    generate(&fixture(), &output, GenerationTarget::Java { package: "example" }).unwrap();
+    let provider = fs::read_to_string(output.join("java-session/duels/example/DuelsSessionProviders.java")).unwrap();
+    assert!(provider.contains("ConfiguredSessionProvider<SessionConfigs.Duels.Default.Config>"));
+    assert!(provider.contains("return SessionConfigs.Duels.Default.TYPE;"));
+    let models = fs::read_to_string(output.join("java/example/SessionConfigs.java")).unwrap();
+    assert!(!models.contains("dev.chunkzero.runtime"));
+    let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    let mut other = contract["session_configurations"]["configurations"][0].clone();
+    other["session"] = json!("some_name");
+    contract["session_configurations"]["configurations"][0]["session"] = json!("someName");
+    contract["session_configurations"]["configurations"].as_array_mut().unwrap().push(other);
+    let path = root.path().join("contract.json");
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert!(
+        generate(&path, &output, GenerationTarget::Java { package: "example" })
+            .unwrap_err()
+            .to_string()
+            .contains("collides")
+    );
+}
