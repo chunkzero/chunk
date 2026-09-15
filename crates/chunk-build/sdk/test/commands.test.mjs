@@ -73,3 +73,13 @@ test("compiled command adapters preserve authenticated context and route identit
   assert.deepEqual(captured, [["shared/invite", { target: "Alex", from: "id" }]]);
   await assert.rejects(invokeCommand(descriptor, raw, { ...payload, route: 1 }), /Unknown command route/);
 });
+
+test("literal and argument children need distinct names at the same route prefix", () => {
+  const handler = () => {};
+  const route = commandRoute(["admin"], { args: { list: commandArg.word() }, handler });
+  assert.throws(
+    () => command("travel", { routes: [route, commandRoute(["admin", "list"], { handler })] }),
+    /argument name conflicts/,
+  );
+  assert.doesNotThrow(() => command("travel", { routes: [route, commandRoute(["public", "list"], { handler })] }));
+});

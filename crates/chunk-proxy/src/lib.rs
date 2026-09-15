@@ -1,6 +1,9 @@
 //! Owns player sockets, serves status, authenticates login, and hosts a packet-simulated limbo.
 
 #[cfg(feature = "mc-26-1")]
+pub mod command_tree;
+
+#[cfg(feature = "mc-26-1")]
 mod server;
 #[cfg(feature = "mc-26-1")]
 pub use server::Proxy;

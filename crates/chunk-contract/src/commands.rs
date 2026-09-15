@@ -98,6 +98,14 @@ impl Command {
             {
                 return Err("invalid, duplicate or excessive command route");
             }
+            if let Some(argument) = route.arguments.first()
+                && self.routes.iter().any(|other| {
+                    other.literals.starts_with(&route.literals)
+                        && other.literals.get(route.literals.len()) == Some(&argument.name)
+                })
+            {
+                return Err("command argument name conflicts with literal child");
+            }
             let mut arguments = BTreeSet::new();
             for (index, argument) in route.arguments.iter().enumerate() {
                 if !identifier(&argument.name) || !arguments.insert(argument.name.to_ascii_lowercase()) {
@@ -235,6 +243,27 @@ mod tests {
         commands.get_mut("duels").unwrap().aliases.push("hub".into());
         assert!(visible_commands(&commands, "minigames/duels", &[]).is_err());
         assert!(visible_commands(&commands, "minigames/races", &[]).is_ok());
+    }
+
+    #[test]
+    fn command_child_names_cannot_alias_literal_and_argument_nodes() {
+        let mut grammar = command("", "travel");
+        grammar.routes = vec![
+            CommandRoute {
+                literals: vec!["admin".into()],
+                arguments: vec![CommandArgument {
+                    name: "list".into(),
+                    parser: CommandParser::Word,
+                    min: None,
+                    max: None,
+                    suggestions: None,
+                }],
+            },
+            CommandRoute { literals: vec!["admin".into(), "list".into()], arguments: vec![] },
+        ];
+        assert!(grammar.validate(&BTreeMap::new()).is_err());
+        grammar.routes[1].literals[0] = "public".into();
+        assert!(grammar.validate(&BTreeMap::new()).is_ok());
     }
 
     #[test]
