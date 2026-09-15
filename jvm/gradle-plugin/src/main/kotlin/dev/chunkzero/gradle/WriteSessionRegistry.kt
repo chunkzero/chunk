@@ -135,6 +135,7 @@ internal class CompiledClass {
     var main = false
     var session: String? = null
     var creates: String? = null
+    var createsConfigured: String? = null
     val constructible get() = publicConcrete && constructor
 }
 
@@ -188,7 +189,8 @@ private fun inspect(bytes: ByteArray): CompiledClass {
                     access and (Opcodes.ACC_STATIC or Opcodes.ACC_BRIDGE) == 0 &&
                     Type.getReturnType(descriptor).sort == Type.OBJECT
                 ) {
-                    type.creates = Type.getReturnType(descriptor).internalName
+                    val result = Type.getReturnType(descriptor).internalName
+                    if (creation) type.createsConfigured = result else type.creates = result
                 }
                 if (name == "<init>" && descriptor == "()V" &&
                     access and Opcodes.ACC_PUBLIC != 0

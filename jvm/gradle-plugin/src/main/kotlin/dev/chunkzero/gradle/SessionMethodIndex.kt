@@ -26,14 +26,20 @@ internal fun writeSessionMethods(
 
     fun creates(
         name: String,
+        configured: Boolean,
         seen: MutableSet<String> = mutableSetOf(),
     ): String? {
         if (!seen.add(name)) return null
         val type = lookup(name) ?: return null
-        return type.creates ?: type.parents.firstNotNullOfOrNull { creates(it, seen) }
+        val result = if (configured) type.createsConfigured else type.creates
+        return result ?: type.parents.firstNotNullOfOrNull { creates(it, configured, seen) }
     }
 
-    val implementations = providers.mapValues { (_, provider) -> creates(provider.replace('.', '/')) }
+    val implementations =
+        providers.mapValues { (_, provider) ->
+            val type = provider.replace('.', '/')
+            creates(type, inherits(type, "dev/chunkzero/runtime/ConfiguredSessionProvider"))
+        }
     val bindings =
         declarations.map { method ->
             val session = method["session"].asString
@@ -43,7 +49,7 @@ internal fun writeSessionMethods(
                 implementation != null && lookup(implementation)?.publicConcrete == true &&
                     inherits(implementation, "dev/chunkzero/runtime/Session"),
             ) {
-                "Session $app/$session method $name requires a provider create() with a public concrete Session return type"
+                "Session $app/$session method $name requires a provider creation method with a public concrete Session return type"
             }
             val contractInterface = method["binary_interface"].asString.replace('.', '/')
             require(inherits(implementation, contractInterface)) {
