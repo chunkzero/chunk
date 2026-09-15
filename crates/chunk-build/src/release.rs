@@ -164,6 +164,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
         source,
         tables: contract.tables,
         functions: contract.functions,
+        domains: contract.domains,
     };
     backend.validate().map_err(io::Error::other)?;
     insert(files, "source.mjs".into(), backend.source.as_bytes().to_vec())?;
