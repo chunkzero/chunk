@@ -172,11 +172,13 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\n",
+        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isSessionMethod }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
-        quote(sdk.join("functions.ts").to_string_lossy())
+        quote(sdk.join("functions.ts").to_string_lossy()),
+        quote(sdk.join("sessions.ts").to_string_lossy())
     );
     let mut metadata = Vec::new();
+    let mut methods = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         let key = entry.path.to_string_lossy();
@@ -194,6 +196,7 @@ fn entry_source(
             let binding = format!("f{}", metadata.len());
             let value = format!("m{index}[{}]", quote(exported));
             writeln!(source, "export const {binding} = (ctx,args) => {value}.handler(ctx,args);").map_err(error)?;
+            methods.push(format!("...(isSessionMethod({value}) ? [{value}.contract] : [])"));
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)
@@ -201,6 +204,6 @@ fn entry_source(
         }
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
-    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}])}}; }}", metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]),session_methods:{{version:1,methods:[{}]}}}}; }}", metadata.join(","), methods.join(",")).map_err(error)?;
     Ok(source)
 }

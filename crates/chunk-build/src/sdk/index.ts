@@ -5,7 +5,7 @@ import { defineFunctions } from "../sdk/functions.ts";
 import type { QueryContext as SchemaQueryContext, MutationContext as SchemaMutationContext } from "../sdk/functions.ts";
 import type { Id as TableId } from "../sdk/validators.ts";
 
-export { v, unset } from "../sdk/index.ts";
+export { v, unset, sessionMethod } from "../sdk/index.ts";
 export type {
   Validator,
   ObjectValidator,
@@ -24,6 +24,8 @@ export type {
   FunctionBuilder,
   FunctionReference,
   Selection,
+  SessionMethodDeclaration,
+  SessionMethodReference,
 } from "../sdk/index.ts";
 
 type Tables = typeof schema.tables;

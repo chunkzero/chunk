@@ -28,3 +28,6 @@ export type {
 } from "./functions.ts";
 export { unset } from "./documents.ts";
 export type { Document, Reader, Writer, Selection } from "./documents.ts";
+
+export { sessionMethod } from "./sessions.ts";
+export type { SessionMethodDeclaration, SessionMethodReference } from "./sessions.ts";

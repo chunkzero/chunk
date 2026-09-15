@@ -6,6 +6,7 @@ import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.plugins.JavaApplication
 import org.gradle.api.plugins.JavaPluginExtension
 import org.gradle.api.tasks.SourceSetContainer
+import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.jvm.tasks.Jar
 import org.gradle.jvm.toolchain.JavaToolchainService
 
@@ -24,7 +25,13 @@ internal fun configureModule(
                     "generateChunkSessionRegistry",
                     WriteSessionRegistry::class.java,
                 ) {
+                    app.set(appId)
                     mainClass.set(application.mainClass)
+                    methodContracts.from(
+                        project.rootProject.tasks
+                            .named("generateChunkBackend", GenerateChunkBackend::class.java)
+                            .flatMap { it.generatedDirectory.file("session-methods.json") },
+                    )
                     classes.from(sources.map { it.output.classesDirs })
                     dependencies.from(project.configurations.named("compileClasspath"))
                     dependsOn(project.tasks.named("compileJava"))
@@ -33,7 +40,24 @@ internal fun configureModule(
                     ) { dependsOn(project.tasks.named("compileKotlin")) }
                     outputDirectory.set(project.layout.buildDirectory.dir("generated/chunk/session-resources"))
                     catalogFile.set(project.layout.buildDirectory.file("chunk/sessions.json"))
+                    bindingSourceDirectory.set(project.layout.buildDirectory.dir("generated/chunk/session-methods"))
                 }
+            val compileBindings =
+                project.tasks.register("compileChunkSessionMethods", JavaCompile::class.java) {
+                    source(registry.flatMap { it.bindingSourceDirectory })
+                    classpath =
+                        project.files(
+                            sources.map { it.output.classesDirs },
+                            project.configurations.named("compileClasspath"),
+                        )
+                    destinationDirectory.set(project.layout.buildDirectory.dir("classes/chunkSessionMethods/main"))
+                    javaCompiler.set(
+                        project.tasks.named("compileJava", JavaCompile::class.java).flatMap { it.javaCompiler },
+                    )
+                }
+            sources.configure {
+                output.dir(mapOf("builtBy" to compileBindings), compileBindings.flatMap { it.destinationDirectory })
+            }
             sources.configure { resources.srcDir(registry.flatMap { it.outputDirectory }) }
             project.tasks.named("shadowJar", ShadowJar::class.java) {
                 mergeServiceFiles()

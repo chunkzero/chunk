@@ -26,6 +26,8 @@ struct BackendMetadata {
     runtime_profile: RuntimeProfile,
     tables: DatabaseSchema,
     functions: BTreeMap<String, Function>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_methods: Option<chunk_contract::SessionMethods>,
 }
 
 #[cfg(test)]

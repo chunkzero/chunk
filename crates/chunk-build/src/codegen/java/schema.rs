@@ -29,9 +29,15 @@ impl Scope {
     }
 }
 
-#[derive(Default)]
 pub(super) struct Generator {
+    pub root: String,
     pub ids: BTreeMap<String, String>,
+}
+
+impl Default for Generator {
+    fn default() -> Self {
+        Self { root: "BackendTypes".into(), ids: BTreeMap::new() }
+    }
 }
 
 pub(super) enum Validation {
@@ -101,8 +107,8 @@ impl Generator {
                 let name = self
                     .ids
                     .entry(table.clone())
-                    .or_insert_with(|| names::type_name(table, &["BackendTypes".into(), "Ids".into()]));
-                (format!("BackendTypes.Ids.{name}"), Validation::Required)
+                    .or_insert_with(|| names::type_name(table, &[self.root.clone(), "Ids".into()]));
+                (format!("{}.Ids.{name}", self.root), Validation::Required)
             }
             Schema::Literal { value } => {
                 let ty = match value {

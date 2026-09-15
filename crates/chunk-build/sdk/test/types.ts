@@ -1,5 +1,5 @@
-import { defineSchema, defineTable, mutation, query, v } from "../src/index.ts";
-import type { FunctionDefinition, Id, Infer, PlayerId } from "../src/index.ts";
+import { defineSchema, defineTable, mutation, query, sessionMethod, v } from "../src/index.ts";
+import type { FunctionDefinition, Id, Infer, PlayerId, SessionMethodReference } from "../src/index.ts";
 
 const profiles = defineTable({ player: v.player(), wins: v.integer() }).index("by_player", ["player"]);
 defineSchema({ profiles });
@@ -201,3 +201,16 @@ interface RankContext {
 }
 const rankContext = (): RankContext => ({ rank: "member" });
 query.withContext(rankContext)({ args: {}, returns: v.string(), handler: ({ rank }) => rank });
+
+const forfeit = sessionMethod({
+  app: "duels",
+  session: "default",
+  name: "forfeit",
+  args: { player: v.player() },
+  returns: v.boolean(),
+});
+const typedMethod: SessionMethodReference<{ player: PlayerId }, boolean> = forfeit;
+// @ts-expect-error Method arguments retain their wire types.
+const wrongMethod: SessionMethodReference<{ player: number }, boolean> = forfeit;
+void typedMethod;
+void wrongMethod;

@@ -131,6 +131,129 @@ class ChunkPluginTest {
         assertTrue(runFailure(":apps:lobby:generateChunkSessionRegistry").output.contains("Duplicate session type"))
     }
 
+    @Test
+    fun `Java methods compile after clean prerequisites and reject mismatched session contracts`() {
+        methodFixture(kotlin = false)
+        run("chunkArtifacts")
+        assertMethodExecution()
+        write(
+            "apps/lobby/src/main/java/Game.java",
+            """
+            package fixture.lobby;
+            public final class Game extends dev.chunkzero.runtime.Session {}
+        """,
+        )
+        assertTrue(runFailure("chunkArtifacts").output.contains("must implement fixture.generated.Ping"))
+    }
+
+    @Test
+    fun `Kotlin implements generated Java method contracts from a clean build`() {
+        methodFixture(kotlin = true)
+        run("chunkArtifacts")
+        assertMethodExecution()
+        assertTrue(run("chunkArtifacts").output.contains("Reusing configuration cache"))
+    }
+
+    private fun methodFixture(kotlin: Boolean) {
+        fixture(kotlin)
+        app("lobby", kotlin)
+        write("method-fixture", "")
+        write(
+            "apps/lobby/src/main/java/dev/chunkzero/runtime/Session.java",
+            """
+            package dev.chunkzero.runtime;
+            public abstract class Session {}
+        """,
+        )
+        write(
+            "apps/lobby/src/main/java/dev/chunkzero/runtime/SessionMethodBinding.java",
+            """
+            package dev.chunkzero.runtime;
+            public final class SessionMethodBinding<A, R> {
+                private final java.util.function.BiFunction<Session,A,R> body;
+                public SessionMethodBinding(fixture.generated.Ping.Ref<A,R> ref, java.util.function.BiFunction<Session,A,R> body) { this.body=body; }
+                public R invoke(Session session, A args) { return body.apply(session,args); }
+            }
+        """,
+        )
+        write(
+            "apps/lobby/src/main/java/dev/chunkzero/runtime/SessionMethodProvider.java",
+            """
+            package dev.chunkzero.runtime;
+            public interface SessionMethodProvider {
+                java.util.Collection<SessionMethodBinding<?,?>> methods();
+            }
+        """,
+        )
+        write(
+            "apps/lobby/src/main/java/Verify.java",
+            """
+            package fixture.lobby;
+            public final class Verify {
+                @SuppressWarnings("unchecked")
+                public static void run(dev.chunkzero.runtime.Session session) {
+                    var provider=java.util.ServiceLoader.load(dev.chunkzero.runtime.SessionMethodProvider.class).findFirst().orElseThrow();
+                    var method=(dev.chunkzero.runtime.SessionMethodBinding<fixture.generated.Bindings,String>) provider.methods().iterator().next();
+                    System.out.println(method.invoke(session,new fixture.generated.Bindings("ok")));
+                }
+            }
+        """,
+        )
+        if (kotlin) {
+            write(
+                "apps/lobby/src/main/kotlin/App.kt",
+                """
+                package fixture.lobby
+                @dev.chunkzero.runtime.SessionType("default")
+                class Factory : dev.chunkzero.runtime.SessionProvider {
+                    fun create() = Game()
+                }
+                class Game : dev.chunkzero.runtime.Session(), fixture.generated.Ping {
+                    override fun ping(args: fixture.generated.Bindings): String = "echo:" + args.value()
+                }
+                fun main() { Verify.run(Factory().create()) }
+            """,
+            )
+        } else {
+            write(
+                "apps/lobby/src/main/java/App.java",
+                """
+                package fixture.lobby;
+                @dev.chunkzero.runtime.SessionType("default")
+                public final class App implements dev.chunkzero.runtime.SessionProvider {
+                    public Game create() { return new Game(); }
+                    public static void main(String[] args) { Verify.run(new App().create()); }
+                }
+            """,
+            )
+            write(
+                "apps/lobby/src/main/java/Game.java",
+                """
+                package fixture.lobby;
+                public final class Game extends dev.chunkzero.runtime.Session implements fixture.generated.Ping {
+                    public String ping(fixture.generated.Bindings args) { return "echo:" + args.value(); }
+                }
+            """,
+            )
+        }
+    }
+
+    private fun assertMethodExecution() {
+        val jar = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(jar).use {
+            val manifest = requireNotNull(it.getEntry("META-INF/chunk/session-methods.json"))
+            val metadata = JsonParser.parseString(it.getInputStream(manifest).bufferedReader().readText()).asJsonObject
+            assertEquals("ping", metadata.getAsJsonArray("methods")[0].asJsonObject["name"].asString)
+        }
+        val process =
+            ProcessBuilder("${System.getProperty("chunk.test.java.home")}/bin/java", "-jar", jar)
+                .redirectErrorStream(true)
+                .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertEquals(0, process.waitFor(), output)
+        assertEquals("echo:ok", output.trim())
+    }
+
     private fun fixture(kotlin: Boolean = false) {
         val kotlinVersion = System.getProperty("chunk.kotlin.version")
         val pluginVersion = System.getProperty("chunk.plugin.version")
@@ -210,12 +333,17 @@ class ChunkPluginTest {
                 }
                 if target == 'kotlin':
                     files['kotlin/fixture/generated/Facade.kt'] = 'package fixture.generated\nsuspend fun value(): Bindings = Client.value()\n'
+                methods = []
+                if (root / 'method-fixture').is_file():
+                    files['java/fixture/generated/Ping.java'] = 'package fixture.generated; public interface Ping { String ping(Bindings args); record Ref<A,R>() {} Ref<Bindings,String> REF = new Ref<>(); }'
+                    methods = [{'app':'lobby','session':'default','name':'ping','interface':'fixture.generated.Ping','binary_interface':'fixture.generated.Ping','function':'ping','arguments':{'type':'object','fields':{}},'result':{'type':'string'}}]
                 for name, content in files.items():
                     path = output / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content)
                 backend.mkdir(parents=True, exist_ok=True)
                 (backend / 'contract.json').write_text('{}')
+                (output / 'session-methods.json').write_text(json.dumps({'version': 1, 'methods': methods}))
             else:
                 raise SystemExit('Unexpected command: ' + command)
         """,

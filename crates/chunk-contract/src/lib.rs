@@ -10,6 +10,8 @@ mod connections;
 mod deployment;
 mod index;
 mod schema;
+mod session_methods;
+pub use session_methods::{SessionMethodDeclaration, SessionMethods};
 
 pub use connections::{BackendConnection, ControlConnection};
 
