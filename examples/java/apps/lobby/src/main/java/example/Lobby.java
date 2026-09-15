@@ -3,9 +3,9 @@ package example;
 import dev.chunkzero.generated.BackendClient;
 import dev.chunkzero.generated.BackendTypes.Shared.Greetings.MessageArgs;
 import dev.chunkzero.generated.BackendTypes.Shared.Greetings.MessageResult;
-import dev.chunkzero.generated.SessionMethods;
 import dev.chunkzero.generated.LobbySessionProviders;
 import dev.chunkzero.generated.SessionConfigs;
+import dev.chunkzero.generated.SessionMethods;
 import dev.chunkzero.runtime.ChunkMinestom;
 import dev.chunkzero.runtime.ChunkProcess;
 import dev.chunkzero.runtime.Session;
@@ -72,7 +72,10 @@ public final class Lobby implements LobbySessionProviders.Default {
             return message.thenCompose(
                     result ->
                             scope.onTick(
-                                    () -> player.sendMessage(Component.text(greeting + " " + result.message()))));
+                                    () ->
+                                            player.sendMessage(
+                                                    Component.text(
+                                                            greeting + " " + result.message()))));
         }
     }
 }
