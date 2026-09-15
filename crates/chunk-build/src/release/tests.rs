@@ -320,3 +320,38 @@ fn assets_reject_symlinks_and_nonportable_paths() {
     assert!(fixture.publish().is_err());
     assert!(!fixture.root.path().join("dist").exists());
 }
+
+#[test]
+fn session_methods_publish_with_the_runtime_contract_and_reject_stale_jars() {
+    let fixture = Fixture::new();
+    let path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let method = json!({"app":"lobby","session":"default","name":"announce","arguments":{"type":"object","fields":{}},"result":{"type":"integer"}});
+    contract["session_methods"] = json!({"version":1,"methods":[method]});
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("missing session method manifest"));
+    let mut packaged = method;
+    packaged["interface"] = json!("sample.Method");
+    packaged["binary_interface"] = json!("sample.Method");
+    packaged["function"] = json!("announce");
+    let entries = |method: Value| {
+        vec![
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMain-Class: sample.lobby.Provider\r\n\r\n".to_vec()),
+            ("sample/lobby/Provider.class", class(25, 1)),
+            ("sample/Method.class", class(25, 1)),
+            ("META-INF/services/dev.chunkzero.runtime.SessionMethodProvider", b"sample.lobby.Provider\n".to_vec()),
+            (
+                "META-INF/chunk/session-methods.json",
+                serde_json::to_vec(&json!({"version":1,"app":"lobby","methods":[method]})).unwrap(),
+            ),
+        ]
+    };
+    write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged.clone()));
+    let release = fixture.publish().unwrap();
+    let deployment: chunk_contract::Deployment =
+        serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
+    assert_eq!(deployment.session_methods.unwrap().methods[0].name, "announce");
+    packaged["result"] = json!({"type":"string"});
+    write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged));
+    assert!(fixture.publish().err().unwrap().to_string().contains("differ from backend contract"));
+}

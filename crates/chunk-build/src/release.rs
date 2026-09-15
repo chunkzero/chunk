@@ -16,6 +16,7 @@ use crate::{
 mod archive;
 mod descriptor;
 mod jars;
+mod session_methods;
 pub use descriptor::{JavaRuntime, JvmDescriptor, read_jvm_descriptor};
 
 /// Separate build outputs consumed by the complete release publisher.
@@ -64,6 +65,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         return Err(io::Error::other("JVM descriptor apps must exactly match the discovered app inventory"));
     }
     let mut files = Files::new();
+    let mut backend = assemble_backend(&inputs.backend, &mut files)?;
     let mut metadata = Metadata {
         version: 3,
         java_version: jvm.java.version,
@@ -75,6 +77,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let input = descriptor_apps[app.id.as_str()];
         let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
         jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
+        session_methods::validate(&bytes, &app.id, &input.sessions, backend.session_methods.as_ref())?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
         if app.sessions.keys().any(|id| !input.sessions.contains(id)) {
@@ -112,7 +115,13 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let directory = format!("{}/assets", app.directory);
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
-    let mut backend = assemble_backend(&inputs.backend, &mut files)?;
+    if let Some(methods) = &backend.session_methods
+        && methods.methods.iter().any(|method| {
+            !metadata.apps.iter().any(|app| app.id == method.app && app.sessions.contains_key(&method.session))
+        })
+    {
+        return Err(io::Error::other("session method references unknown release app or session"));
+    }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
     let id = publication::digest(&files);
     backend.id.clone_from(&id);
@@ -137,6 +146,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
             .map_err(io::Error::other)?;
     let encoded_contract = serde_json::to_vec(&contract).map_err(io::Error::other)?;
     let backend = chunk_contract::Deployment {
+        session_methods: contract.session_methods,
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "validation".into(),

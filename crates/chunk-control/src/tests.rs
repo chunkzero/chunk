@@ -26,8 +26,11 @@ struct Binding {
     phase: DeliveryPhase,
 }
 
+mod session_methods;
+
 struct FakeRuntime {
     identity: ProcessIdentity,
+    method_requests: Mutex<BTreeMap<String, chunk_proto::v1::SessionMethodRequest>>,
     sessions: Mutex<BTreeMap<String, SessionCommand>>,
     bindings: Mutex<BTreeMap<String, Binding>>,
     available: AtomicBool,
@@ -248,6 +251,7 @@ impl Fixture {
                 machine_profile: "local".into(),
                 artifact_digest: "artifact".into(),
             },
+            method_requests: Mutex::default(),
             sessions: Mutex::default(),
             bindings: Mutex::default(),
             available: AtomicBool::new(true),
@@ -266,6 +270,7 @@ impl Fixture {
             tonic::transport::Server::builder()
                 .add_service(GameplayServer::new(service.clone()))
                 .add_service(chunk_proto::v1::node_control_server::NodeControlServer::new(service.clone()))
+                .add_service(chunk_proto::v1::session_methods_server::SessionMethodsServer::new(service.clone()))
                 .add_service(ProcessControlServer::new(service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = stopped.await;

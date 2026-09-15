@@ -102,6 +102,9 @@ public final class SessionManager {
     }
 
     public CompletableFuture<SessionInventory> finish(SessionCommand command) {
+        var current = sessions.get(command.getSession().getId());
+        if (current != null && current.command.getGeneration() == command.getGeneration())
+            current.methodsClosed = true;
         return ticks.submit(
                         () -> {
                             var session = sessions.get(command.getSession().getId());
@@ -153,6 +156,7 @@ public final class SessionManager {
         private final Set<Player> joined = Collections.newSetFromMap(new IdentityHashMap<>());
         private volatile SessionPhase phase = SessionPhase.SESSION_PHASE_STARTING;
         private boolean finishing;
+        private volatile boolean methodsClosed;
         private @Nullable Throwable creationFailure;
 
         ManagedSession(SessionCommand command, SessionRegistration registration) {
@@ -177,6 +181,17 @@ public final class SessionManager {
 
         public SessionScope getScope() {
             return scope;
+        }
+
+        public String invokeMethod(SessionMethodBinding<?, ?> binding, String arguments) {
+            ticks.checkThread();
+            requireMethodReady();
+            return binding.invoke(behavior, arguments);
+        }
+
+        public void requireMethodReady() {
+            if (methodsClosed || phase != SessionPhase.SESSION_PHASE_READY)
+                throw new IllegalStateException("Session unavailable");
         }
 
         void start() {
@@ -266,6 +281,7 @@ public final class SessionManager {
         }
 
         CompletableFuture<Void> finish() {
+            methodsClosed = true;
             ticks.submit(
                     () -> {
                         if (!finishing) {

@@ -5,6 +5,8 @@ import chunk.v1.Supervision.SessionInventory;
 import dev.chunkzero.runtime.minestom.internal.AppRegistry;
 import dev.chunkzero.runtime.minestom.internal.GameplayService;
 import dev.chunkzero.runtime.minestom.internal.ProcessService;
+import dev.chunkzero.runtime.minestom.internal.SessionMethodRegistry;
+import dev.chunkzero.runtime.minestom.internal.SessionMethodService;
 
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.timer.Task;
@@ -24,6 +26,7 @@ public final class ChunkMinestom implements AutoCloseable {
     private final SessionManager sessions;
     private final GameplayService gameplay;
     private final ProcessService service;
+    private final SessionMethodService methods;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread shutdownHook;
     private @Nullable Task task;
@@ -49,6 +52,16 @@ public final class ChunkMinestom implements AutoCloseable {
                         System::nanoTime,
                         identity.getRuntimeId(),
                         process::isReady);
+        methods =
+                new SessionMethodService(
+                        identity,
+                        sessions,
+                        SessionMethodRegistry.load(
+                                identity.getAppId(),
+                                factories.keySet(),
+                                Thread.currentThread().getContextClassLoader()),
+                        gameplay::authorizeMethodCaller,
+                        System::currentTimeMillis);
         service = new ProcessService(identity, gameplay, sessions, process::tickCount, process);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
@@ -72,6 +85,7 @@ public final class ChunkMinestom implements AutoCloseable {
                     MinecraftServer.getSchedulerManager()
                             .buildTask(
                                     () -> {
+                                        methods.flush();
                                         ticks.flush();
                                         gameplay.flush();
                                         var inventory = sessions.inventory();
@@ -85,7 +99,7 @@ public final class ChunkMinestom implements AutoCloseable {
                             .schedule();
             minecraft.start("127.0.0.1", 0);
             gameplay.setEndpoint("127.0.0.1:" + MinecraftServer.process().server().getPort());
-            process.bind(List.of(gameplay, service), gameplay.getEndpoint());
+            process.bind(List.of(gameplay, service, methods), gameplay.getEndpoint());
             started = true;
         } catch (IOException | RuntimeException error) {
             close();
@@ -98,6 +112,7 @@ public final class ChunkMinestom implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) return;
         MinecraftServer.process().stop();
         if (task != null) task.cancel();
+        methods.close();
         gameplay.close();
         if (Thread.currentThread() != shutdownHook) {
             try {

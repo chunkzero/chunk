@@ -44,6 +44,7 @@ fn read_contract(contract: &Path) -> io::Result<BackendMetadata> {
     let contract: BackendMetadata =
         serde_json::from_slice(&super::read_limited(contract, 2 * 1024 * 1024)?).map_err(io::Error::other)?;
     Deployment {
+        session_methods: contract.session_methods.clone(),
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "codegen".into(),
