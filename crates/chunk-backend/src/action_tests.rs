@@ -19,10 +19,13 @@ fn deployment(id: &str, increment: i32) -> Deployment {
             r"
 export function read(ctx) {{ return ctx.db.get('counts',ctx.caller.player)?.value ?? 0; }}
 export function increment(ctx) {{ const value=read(ctx)+{increment}; ctx.db.put('counts',ctx.caller.player,{{value}}); return value; }}
+export function canFinish(ctx) {{ return (ctx.db.get('counts','release-'+ctx.caller.player)?.value ?? 0) > 0; }}
 export async function flow(ctx, delay) {{
   if ('db' in ctx || typeof fetch !== 'undefined' || typeof setTimeout !== 'undefined') throw Error('ambient capability');
   await ctx.runMutation('increment', null);
-  await ctx.sleep(delay);
+  if (delay < 0) {{
+    while (!await ctx.runQuery('canFinish', null)) await ctx.sleep(100);
+  }} else await ctx.sleep(delay);
   await ctx.runMutation('increment', null);
   return ctx.runQuery('privateRead', null);
 }}
@@ -39,6 +42,7 @@ export async function spin(ctx) {{ await ctx.runMutation('increment', null); whi
             ("flow", "flow", FunctionKind::Action, Visibility::Public),
             ("tooMany", "tooMany", FunctionKind::Action, Visibility::Public),
             ("spin", "spin", FunctionKind::Action, Visibility::Public),
+            ("canFinish", "canFinish", FunctionKind::Query, Visibility::Internal),
         ]
         .into_iter()
         .enumerate()
@@ -51,13 +55,15 @@ export async function spin(ctx) {{ await ctx.runMutation('increment', null); whi
                     visibility,
                     export: format!("f{index}"),
                     arguments: if name == "flow" { Schema::Integer } else { Schema::Null },
-                    result: Schema::Integer,
+                    result: if name == "canFinish" { Schema::Boolean } else { Schema::Integer },
                 },
             )
         })
         .collect(),
     };
-    for (index, export) in ["read", "read", "increment", "increment", "flow", "tooMany", "spin"].iter().enumerate() {
+    for (index, export) in
+        ["read", "read", "increment", "increment", "flow", "tooMany", "spin", "canFinish"].iter().enumerate()
+    {
         write!(deployment.source, "\nexport const f{index} = {export};").unwrap();
     }
     deployment
@@ -85,14 +91,14 @@ async fn sleeping_actions_yield_to_transactions_and_retain_caller_deployment_and
     let mut alice = backend.subscribe(call("old", "read", "alice", json!(null))).await.unwrap();
     alice.next().await.unwrap();
     let id = backend.allocate_action_id().unwrap();
-    let request = call("old", "flow", "alice", json!(500));
+    let request = call("old", "flow", "alice", json!(-1));
     let mut action = backend.start_action(id.clone(), request.clone()).await.unwrap();
-    let update = tokio::time::timeout(Duration::from_secs(2), alice.next()).await.unwrap().unwrap();
+    let update = tokio::time::timeout(Duration::from_secs(5), alice.next()).await.unwrap().unwrap();
     assert_eq!(&*update.json, "1");
     assert!(matches!(backend.release(DeploymentId::new("old").unwrap()).await, Err(Error::Busy)));
     backend.deploy(deployment("new", 10)).await.unwrap();
     let foreground = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(5),
         backend.mutate("foreground".into(), call("new", "publicIncrement", "bob", json!(null))),
     )
     .await
@@ -102,13 +108,14 @@ async fn sleeping_actions_yield_to_transactions_and_retain_caller_deployment_and
     assert!(matches!(action.status(), ActionStatus::Running));
     let mut duplicate = backend.start_action(id.clone(), request).await.unwrap();
     assert!(matches!(
-        backend.start_action(id.clone(), call("old", "flow", "mallory", json!(500))).await,
+        backend.start_action(id.clone(), call("old", "flow", "mallory", json!(-1))).await,
         Err(Error::OperationMismatch)
     ));
     assert!(matches!(
         backend.action_status(id.clone(), json!({"player":"mallory"}).into()).await,
         Err(Error::ActionOutcomeUnknown)
     ));
+    backend.mutate("release-flow".into(), call("old", "publicIncrement", "release-alice", json!(null))).await.unwrap();
     assert_eq!(&*action.outcome().await.unwrap(), "2");
     assert_eq!(&*duplicate.outcome().await.unwrap(), "2");
     assert_eq!(&*backend.query(call("new", "read", "alice", json!(null))).await.unwrap().json, "2");
