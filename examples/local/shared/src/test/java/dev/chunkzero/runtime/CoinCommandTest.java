@@ -115,7 +115,8 @@ class CoinCommandTest {
                                                 "lobby", ExampleSessions.INSTANCE::lobby),
                                 "arena",
                                         new SessionRegistration(
-                                                "arena", ExampleSessions.INSTANCE::arena)),
+                                                "arena",
+                                                () -> ExampleSessions.INSTANCE.arena("Arena"))),
                         (session, app) ->
                                 new BackendSession(
                                         channel,
