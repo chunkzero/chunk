@@ -157,7 +157,8 @@ async fn move_cancels_default_notifications_but_follow_player_retains_its_captur
     .await
     .unwrap();
     lifecycle.cutover(&claim("move"));
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    fixture.platform.cleanup.close();
+    tokio::time::timeout(Duration::from_secs(3), fixture.platform.cleanup.wait()).await.unwrap();
     let trace = fixture.trace().await;
     assert!(trace.contains("follow-end"), "{trace}");
     assert!(!trace.contains("enter-end"), "{trace}");
