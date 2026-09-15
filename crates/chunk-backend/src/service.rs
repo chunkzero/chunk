@@ -79,6 +79,23 @@ impl<T> Request<T> {
 }
 
 pub(crate) enum Command {
+    Catalog {
+        id: DeploymentId,
+        scope: chunk_proto::v1::CommandScope,
+        reply: Request<chunk_proto::v1::CommandCatalog>,
+    },
+    Suggest {
+        id: DeploymentId,
+        request: chunk_proto::v1::CommandSuggestionRequest,
+        reply: Request<chunk_proto::v1::CommandSuggestionResult>,
+    },
+    Prepare {
+        id: DeploymentId,
+        scope: chunk_proto::v1::CommandScope,
+        command: String,
+        input: String,
+        reply: Request<crate::commands::Prepared>,
+    },
     DomainManifest {
         id: DeploymentId,
         reply: Request<Option<DomainManifest>>,
@@ -96,7 +113,7 @@ pub(crate) enum Command {
         reply: Request<chunk_store::Jobs>,
     },
     StartAction {
-        hook: bool,
+        purpose: crate::commands::Purpose,
         id: ActionId,
         call: Call,
         reply: Request<ActionHandle>,
@@ -143,6 +160,9 @@ pub(crate) enum Command {
 impl Command {
     pub fn reject(self, error: Error) {
         match self {
+            Self::Catalog { reply, .. } => reply.finish(Err(error)),
+            Self::Suggest { reply, .. } => reply.finish(Err(error)),
+            Self::Prepare { reply, .. } => reply.finish(Err(error)),
             Self::DomainManifest { reply, .. } => reply.finish(Err(error)),
 
             Self::JobStatus { reply, .. } => reply.finish(Err(error)),
@@ -165,6 +185,12 @@ pub(crate) enum Event {
     Scheduled {
         command: chunk_store::JobCommand,
         result: Result<chunk_store::Jobs>,
+    },
+    ActionPlatform {
+        id: ActionId,
+        sequence: u32,
+        request: Json,
+        reply: Request<Arc<str>>,
     },
     ActionFinished {
         id: ActionId,
@@ -287,7 +313,7 @@ impl Backend {
         self.submit(|reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
     }
 
-    async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
+    pub(crate) async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
         if self.0.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
@@ -349,7 +375,7 @@ impl Backend {
         if id.incarnation != self.0.incarnation {
             return Err(Error::ActionOutcomeUnknown);
         }
-        self.submit(|reply| Command::StartAction { hook: false, id, call, reply }).await
+        self.submit(|reply| Command::StartAction { purpose: crate::commands::Purpose::Function, id, call, reply }).await
     }
 
     /// Looks up native hook descriptors in the exact retained deployment.
@@ -362,7 +388,9 @@ impl Backend {
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
         call.validate_limit(512)?;
         let id = self.allocate_action_id()?;
-        let mut handle = self.submit(|reply| Command::StartAction { hook: true, id, call, reply }).await?;
+        let mut handle = self
+            .submit(|reply| Command::StartAction { purpose: crate::commands::Purpose::Hook, id, call, reply })
+            .await?;
         handle.outcome().await
     }
 

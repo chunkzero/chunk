@@ -2,6 +2,8 @@
 //! storage runs on a commit thread; replies and updates wait for its ordered acks.
 
 mod actions;
+mod commands;
+pub use commands::CommandService;
 mod actor;
 mod commit;
 mod effects;

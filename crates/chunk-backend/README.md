@@ -214,3 +214,42 @@ and reconcile the latest handoff with the external alarm. Before suspension, the
 foreground requests and action scopes, wait for `running` to be zero, and reconcile until the latest generation is
 acknowledged. Retain the external alarm independently of the suspended process. This API defines the durable handoff
 contract; installing an alarm and resuming a machine are the hosting adapter's job.
+
+## Platform commands
+
+`CommandService::new(backend, application_credential, platform_credential)` exposes `BackendCommands` using the distinct
+platform credential. The local backend server registers it alongside queries and hooks. Requests bind the environment
+and deployment through metadata. Trusted proxy code supplies the captured player, connection, claim, session, app and
+generation scope; the backend verifies the app's manifest membership/domain and reconstructs `caller`. Generation fields
+in caller JSON are decimal strings. Command input cannot supply caller identity, an export or a different effect target.
+The proxy verifies that the captured runtime assignment has arrived and remains eligible before dispatching effects.
+
+`Catalog` returns inherited command descriptors, including denied roots, plus the currently allowed IDs. Keeping denied
+roots in the ownership catalog prevents accidental forwarding to a native command with the same name. `Suggest` executes
+only a suggestion query declared on the selected command. Permission and suggestion queries may be internal; neither
+becomes callable through public query ingress. Authorization calls have a two-second aggregate deadline. Permission
+checks use a durable view and fail with `Busy` while commits are outstanding.
+
+`Prepare` validates permission and reparses input with the fixed descriptor, then allocates an invocation ID without
+running its handler. `Run` begins with that ID and repeats permission/parser checks immediately before acceptance. Only
+the first stream owns effects. Concurrent or later streams for that ID observe status and never replay the handler or
+its effects. A lost `Prepare` reply is safe to prepare again because it has not executed code; after attempting `Run`,
+keep the same ID. Missing/expired IDs mean an unknown outcome, never permission to retry the command under a new ID.
+Prepared identities expire after 60 seconds; at most 64 prepared/retained entries and 16 streams are kept. Capacity can
+evict unstarted or terminal entries earlier. Process restart loses this ephemeral history. Preparation alone does not
+retain a deployment; accepted execution retains it until its worker exits.
+
+Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, eight live actions and
+256 total effects. Each platform stream has at most eight pending effects. The backend checks the original command's
+permission again before every nested transaction and platform effect. Functions and hooks have no platform capability;
+hooks also retain their read-only rules and default denial of HTTP/secrets. `followPlayer` changes eligible proxy effect
+delivery only; it never changes the backend's original caller, permission, deployment or domain binding. Session calls
+remain bound to the original app/session and declared session-method argument/result schemas.
+
+Platform requests/replies are at most 64 KiB. Text is at most 4,096 UTF-16 units; suggestions contain at most 64 strings
+of 256 units each. Effects have stable IDs `action/<invocationId>/platform/<effect-sequence>`. Text, routing and session
+send receipts contain `{state: "accepted", operationId}`; this acknowledges downstream acceptance, not completion of
+player delivery or gameplay work. Session calls return the declared result. No handler or external effect is retried
+automatically. Cancellation, owner disconnect, deadline or process loss can leave earlier mutations and dispatched
+effects completed even when the command outcome is unknown. Disconnect and shutdown cancel the action, resolve pending
+effect waits and close the stream. A duplicate observer disconnect only detaches; its explicit cancel cancels the owner.

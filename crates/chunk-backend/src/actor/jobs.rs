@@ -229,7 +229,8 @@ impl Actor {
                         caller: job.caller.clone().into(),
                     },
                     Some(job.invocation_id()),
-                    false,
+                    crate::commands::Purpose::Function,
+                    &chunk_js::Cancellation::default(),
                 )
             });
             match result {

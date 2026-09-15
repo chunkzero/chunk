@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod actions;
+mod commands;
 mod deployments;
 mod jobs;
 mod pipeline;
@@ -148,6 +149,13 @@ impl Actor {
                     self.scheduled(command, result);
                     self.recovering &= self.outstanding != 0;
                 }
+                Event::ActionPlatform { id, sequence, request, reply } => {
+                    if stopped.load(Ordering::Acquire) || self.failure.is_some() {
+                        reply.finish(Err(Error::Closed));
+                    } else {
+                        self.action_platform(&id, sequence, &request, reply);
+                    }
+                }
                 Event::ActionFinished { id, result } => self.finish_action(&id, result),
                 Event::ActionTransaction { id, sequence, mode, function, arguments, reply } => {
                     if stopped.load(Ordering::Acquire) || self.failure.is_some() {
@@ -201,6 +209,18 @@ impl Actor {
 
     fn request(&mut self, command: Command) {
         match command {
+            Command::Catalog { id, scope, reply } => {
+                let result = self.command_catalog(&id, &scope, &reply.cancellation);
+                reply.finish(result);
+            }
+            Command::Suggest { id, request, reply } => {
+                let result = self.command_suggest(&id, request, &reply.cancellation);
+                reply.finish(result);
+            }
+            Command::Prepare { id, scope, command, input, reply } => {
+                let result = self.prepare_command(id, scope, command, input, &reply.cancellation);
+                reply.finish(result);
+            }
             Command::DomainManifest { id, reply } => reply.finish(self.check_deployment(&id).and_then(|()| {
                 self.versions
                     .get(&id)
@@ -208,7 +228,7 @@ impl Actor {
                     .map(|deployment| deployment.domains.clone())
                     .ok_or(Error::Contract)
             })),
-            Command::StartAction { hook, id, call, reply } => self.start_action(id, call, hook, reply),
+            Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),
             Command::JobControl { command, reply } => self.job_control(command, reply),

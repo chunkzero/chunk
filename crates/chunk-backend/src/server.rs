@@ -1,5 +1,5 @@
 //! Embeddable backend transport and storage lifecycle.
-use crate::{Backend, HookService, Service};
+use crate::{Backend, CommandService, HookService, Service};
 use chunk_contract::{BackendConnection, Deployment};
 use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
@@ -55,6 +55,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
                 return Err(io::Error::other("connection file belongs to another backend"));
             }
         }
+        let commands = CommandService::new(backend.clone(), &token, &platform_token).map_err(io::Error::other)?;
+        let command_workers = commands.workers();
+        let command_shutdown = commands.shutdown();
         let hooks = HookService::new(backend.clone(), &token, &platform_token).map_err(io::Error::other)?;
         let service = Service::new(backend.clone(), &token).map_err(io::Error::other)?;
         let workers = service.workers();
@@ -68,6 +71,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
         let server = tonic::transport::Server::builder()
             .add_service(service.into_server())
             .add_service(hooks.into_server())
+            .add_service(commands.into_server())
             .serve_with_incoming_shutdown(incoming, stop.clone().cancelled_owned());
         let _ = ready.send(connection);
         tracing::info!(%address, "backend ready");
@@ -76,6 +80,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
             result = &mut server => result.map_err(io::Error::other),
             () = stop.cancelled() => {
                 shutdown.cancel();
+                command_shutdown.cancel();
                 match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
                     Ok(result) => result.map_err(io::Error::other),
                     Err(_) => Err(io::Error::other("backend transport shutdown timed out")),
@@ -83,6 +88,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
             }
         };
         shutdown.cancel();
+        command_shutdown.cancel();
+        command_workers.close();
+        command_workers.wait().await;
         workers.close();
         workers.wait().await;
         drop(record);

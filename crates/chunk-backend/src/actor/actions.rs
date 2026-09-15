@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use chunk_contract::{FunctionKind, validate_wire_value};
+use chunk_contract::{Deployment, Function, FunctionKind, validate_wire_value};
 use chunk_js::{ActionInvocation, Cancellation, DeploymentId, Engine, Json, Limits, Mode};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -23,6 +23,7 @@ const MAX_RECORDS: usize = 32;
 
 struct Record {
     operation_prefix: String,
+    command: Option<Arc<crate::commands::CommandBinding>>,
     call: Call,
     fingerprint: [u8; 32],
     writable: bool,
@@ -119,12 +120,18 @@ impl Drop for Actions {
 }
 
 impl Actor {
-    pub(super) fn start_action(&mut self, id: ActionId, call: Call, hook: bool, reply: Request<ActionHandle>) {
+    pub(super) fn start_action(
+        &mut self,
+        id: ActionId,
+        call: Call,
+        purpose: crate::commands::Purpose,
+        reply: Request<ActionHandle>,
+    ) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        let result = self.launch_action(id, call, None, hook);
+        let result = self.launch_action(id, call, None, purpose, &reply.cancellation);
         reply.finish(result);
     }
 
@@ -133,25 +140,15 @@ impl Actor {
         id: ActionId,
         mut call: Call,
         durable_identity: Option<String>,
-        hook: bool,
+        purpose: crate::commands::Purpose,
+        request_cancellation: &Cancellation,
     ) -> Result<ActionHandle> {
-        if hook {
-            self.check_deployment(&call.deployment)?;
-        } else {
-            self.normalize_scoped_call(&mut call, durable_identity.is_some())?;
-        }
-        let deployment = self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Contract)?.clone();
-        let (function, writable) = if hook {
-            crate::hooks::resolve(&deployment, &call)?
-        } else {
-            (deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone(), true)
-        };
-        if function.kind != FunctionKind::Action {
-            return Err(Error::Contract);
-        }
+        let hook = matches!(purpose, crate::commands::Purpose::Hook);
+        let (deployment, function, writable) =
+            self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
         let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
             "action-v1",
-            hook,
+            purpose.name(),
             call.deployment.as_str(),
             &call.function,
             call.arguments.as_str(),
@@ -231,6 +228,7 @@ impl Actor {
             id.clone(),
             Record {
                 operation_prefix,
+                command: purpose.command(),
                 writable,
                 call,
                 fingerprint,
@@ -243,6 +241,34 @@ impl Actor {
         Ok(ActionHandle { id, status: receiver, scope })
     }
 
+    fn action_contract(
+        &mut self,
+        call: &mut Call,
+        purpose: &crate::commands::Purpose,
+        trusted: bool,
+        cancellation: &Cancellation,
+    ) -> Result<(Arc<Deployment>, Function, bool)> {
+        if matches!(purpose, crate::commands::Purpose::Function) {
+            self.normalize_scoped_call(call, trusted)?;
+        } else {
+            self.check_deployment(&call.deployment)?;
+        }
+        let deployment = self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Contract)?.clone();
+        let (function, writable) = match purpose {
+            crate::commands::Purpose::Hook => crate::hooks::resolve(&deployment, call)?,
+            crate::commands::Purpose::Function => {
+                (deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone(), true)
+            }
+            crate::commands::Purpose::Command(binding) => {
+                (self.resolve_command(&deployment, call, binding, cancellation)?, true)
+            }
+        };
+        if function.kind != FunctionKind::Action {
+            return Err(Error::Contract);
+        }
+        Ok((deployment, function, writable))
+    }
+
     pub(super) fn finish_action(&mut self, id: &ActionId, result: Result<Arc<str>>) {
         if let Some(record) = self.actions.records.get_mut(id) {
             record.cancellation.cancel();
@@ -250,6 +276,31 @@ impl Actor {
             if let Some(worker) = record.worker.take() {
                 let _ = worker.join();
             }
+        }
+    }
+
+    pub(super) fn action_platform(&mut self, id: &ActionId, sequence: u32, request: &Json, reply: Request<Arc<str>>) {
+        let prepared = (|| {
+            let record = self.actions.records.get(id).ok_or(Error::ActionOutcomeUnknown)?;
+            if record.worker.is_none() || record.cancellation.is_cancelled() || reply.cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let binding = record.command.clone().ok_or(Error::Invalid("platform capability unavailable"))?;
+            let call = record.call.clone();
+            let deployment =
+                self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Unknown)?.clone();
+            self.command_permission(&deployment, &binding.scope, &call.function, &reply.cancellation)?;
+            let (request, result, receipt) = crate::commands::validate_effect(&deployment, &binding, request)?;
+            Ok((binding.effects.clone(), request, result, receipt))
+        })();
+        match prepared {
+            Ok((effects, request, result, receipt)) => {
+                let effect = crate::commands::PlatformEffect { sequence, request, result, receipt, reply };
+                if let Err(error) = effects.try_send(effect) {
+                    error.into_inner().reply.finish(Err(Error::Cancelled));
+                }
+            }
+            Err(error) => reply.finish(Err(error)),
         }
     }
 
@@ -275,7 +326,23 @@ impl Actor {
             return;
         }
         let operation = format!("{}/{sequence}", record.operation_prefix);
-        let mut call = Call { function, arguments, ..record.call.clone() };
+        let command = record.command.clone();
+        let original = record.call.clone();
+        let mut call = Call { function, arguments, ..original.clone() };
+        if let Some(binding) = command {
+            let deployment = self
+                .versions
+                .get(&original.deployment)
+                .and_then(Option::as_ref)
+                .expect("retained action deployment")
+                .clone();
+            if let Err(error) =
+                self.command_permission(&deployment, &binding.scope, &original.function, &reply.cancellation)
+            {
+                reply.finish(Err(error));
+                return;
+            }
+        }
         if let Err(error) = call.validate().and_then(|()| self.normalize_scoped_call(&mut call, true)) {
             reply.finish(Err(error));
             return;

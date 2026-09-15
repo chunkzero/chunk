@@ -89,6 +89,35 @@ impl Drop for CancelEffect {
 }
 
 impl chunk_js::ActionHost for Host {
+    fn platform(
+        &self,
+        sequence: u32,
+        request: Json,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>>>> {
+        let id = self.id.clone();
+        let events = self.events.clone();
+        let cancellation = self.cancellation.clone();
+        let permit = self.slots.clone().try_acquire_owned();
+        Box::pin(async move {
+            let permit = permit.map_err(|_| Error::Busy.to_string())?;
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled.to_string());
+            }
+            let effect_cancellation = Cancellation::default();
+            let _cancel = CancelEffect(effect_cancellation.clone());
+            let (reply, response) = oneshot::channel();
+            let reply = Request::new(effect_cancellation, reply, permit);
+            events
+                .try_send(Event::ActionPlatform { id, sequence, request, reply })
+                .map_err(|_| Error::Busy.to_string())?;
+            let result: Arc<str> = response
+                .await
+                .map_err(|_| Error::ActionOutcomeUnknown.to_string())?
+                .map_err(|error| error.to_string())?;
+            Ok(result.to_string())
+        })
+    }
+
     fn http(
         &self,
         sequence: u32,
