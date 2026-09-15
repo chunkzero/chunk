@@ -8,6 +8,8 @@ pub use app::{AppArtifact, SessionDeclaration, class_name};
 
 mod connections;
 mod deployment;
+mod domains;
+pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
 mod index;
 mod schema;
 

@@ -22,6 +22,7 @@ export function privateRead() { return 123; }
 
 fn deployment(id: &str) -> Deployment {
     Deployment {
+        domains: None,
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),

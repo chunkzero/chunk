@@ -201,3 +201,35 @@ interface RankContext {
 }
 const rankContext = (): RankContext => ({ rank: "member" });
 query.withContext(rankContext)({ args: {}, returns: v.string(), handler: ({ rank }) => rank });
+
+import { createHook } from "../src/index.ts";
+
+createHook(
+  "player.login",
+  async (ctx) => {
+    const identity: string = ctx.player.uuid;
+    const candidate: string | undefined = ctx.destination?.session_type;
+    void [identity, candidate];
+    // @ts-expect-error hooks call transactions rather than capturing a database transaction
+    ctx.db.get("profiles", "alex");
+    return { allow: true };
+  },
+  { order: 10 },
+);
+createHook("server.ping", (ctx) => {
+  // @ts-expect-error ping has no connected player
+  void ctx.player;
+  // @ts-expect-error ping cannot mutate
+  void ctx.runMutation;
+  return { motd: "Hello", online: 0, max: 16 };
+});
+// @ts-expect-error login must return an admission decision
+createHook("player.login", () => ({ motd: "Hello", online: 0, max: 16 }));
+// @ts-expect-error ping has no ordering options
+createHook("server.ping", () => ({ motd: "Hello", online: 0, max: 16 }), { order: 1 });
+// @ts-expect-error admission cannot opt into following a player
+createHook("player.login", () => ({ allow: true }), { followPlayer: true });
+// @ts-expect-error event names determine their contexts and results
+createHook("arbitrary.event", () => null);
+createHook("player.beforeMove", ({ sourceDomain, destination }) => ({ allow: sourceDomain !== destination.key }));
+createHook("domain.enter", () => {}, { followPlayer: true });

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{DatabaseSchema, Schema};
+use crate::{DatabaseSchema, DomainManifest, Schema};
 
 pub const CONTRACT_VERSION: u32 = 2;
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -49,6 +49,8 @@ pub struct Deployment {
     pub source: String,
     pub tables: DatabaseSchema,
     pub functions: BTreeMap<String, Function>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domains: Option<DomainManifest>,
 }
 
 impl Deployment {
@@ -88,11 +90,17 @@ impl Deployment {
                 }
             }
         }
+        if let Some(domains) = &self.domains {
+            domains.validate()?;
+            if domains.hooks.values().any(|hook| exports.contains(&hook.export)) {
+                return Err("hook export collides with function export");
+            }
+        }
         Ok(())
     }
 }
 
-fn identifier(value: &str) -> bool {
+pub(crate) fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
@@ -133,6 +141,7 @@ mod tests {
 
     fn deployment() -> Deployment {
         Deployment {
+            domains: None,
             contract_version: CONTRACT_VERSION,
             runtime_profile: RuntimeProfile::TransactionalV1,
             id: "v1".into(),

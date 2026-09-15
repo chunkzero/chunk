@@ -1,4 +1,5 @@
 mod bundle;
+mod domains;
 mod sources;
 mod typecheck;
 use std::{fs, io, path::Path};
@@ -77,6 +78,7 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
         source: source.into(),
         tables: contract.tables.clone(),
         functions: contract.functions.clone(),
+        domains: contract.domains.clone(),
     }
     .validate()
     .map_err(io::Error::other)?;

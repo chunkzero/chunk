@@ -199,3 +199,40 @@ writes. Arbitrary filters, descending order and pagination are not part of this 
 Use `unset` to remove optional fields in `patch`; `undefined` is not a deletion value. Required fields cannot be
 removed. Fields unknown to a retained deployment are preserved by the backend when it writes. Ordinary helper calls
 share the handler's transaction; any failure discards all its writes.
+
+## Static domains and named hooks
+
+Directories under `server/domains/` define scopes. Root is the empty path; nested scopes inherit their directory parent.
+Paths use ASCII identifier segments, without route parameters, groups, aliases, or case-only duplicates. Bind an app to
+an existing scope in `apps/<app>/app.toml`:
+
+```toml
+domain = "games/duels"
+```
+
+Omitting `domain` uses root. Several apps may share a scope. Named hook descriptors are discovered in each scope's
+`hooks.ts` or `hooks.mts`:
+
+```ts
+import { createHook } from "#chunk";
+
+export const checkEntry = createHook("player.login", (ctx) => ({ allow: ctx.player.username !== "blocked" }), {
+  order: 10,
+});
+```
+
+`player.login` and `player.beforeMove` return `AdmissionResult`. Multiple admission hooks for the same event and scope
+need distinct explicit integer `order` values. `server.ping` returns `ServerStatus`; `player.route` returns
+`Destination`. Both require root scope and permit at most one responder per event. Notification events are
+`player.connect`, `player.disconnect`, `domain.enter`, and `domain.leave`; only connect/enter/leave accept
+`{ followPlayer: true }`.
+
+Contexts expose `eventId`, `domain`, trusted `caller`, and typed `runQuery` calls. Player events also expose `player`
+and `runMutation`. Login receives a nullable `destination` because root admission precedes routing; before-move receives
+`sourceDomain` and `destination`. Disconnect receives `reason`. These declarations compile to a versioned manifest
+pinned with the backend release. Runtime admission and notification dispatch are separate work; this compiler surface
+alone does not activate hooks.
+
+Helper exports remain ordinary code. Hook descriptors require named exports in hook modules; default exports and
+descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client
+paths. Hook names identify handlers within a deployment, so renaming an export changes its identity.

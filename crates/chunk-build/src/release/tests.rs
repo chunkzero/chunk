@@ -320,3 +320,29 @@ fn assets_reject_symlinks_and_nonportable_paths() {
     assert!(fixture.publish().is_err());
     assert!(!fixture.root.path().join("dist").exists());
 }
+
+#[test]
+fn domains_are_pinned_in_release_identity_and_stale_bindings_require_recompilation() {
+    let fixture = Fixture::new();
+    let initial = fixture.publish().unwrap();
+    fs::create_dir_all(fixture.inputs.project.join("server/domains/games")).unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("missing the project's domain manifest"));
+    let contract_path = fixture.inputs.backend.join("contract.json");
+    let mut contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
+    contract["domains"] = json!({
+        "version": 1,
+        "scopes": {"": {"parent": null}, "games": {"parent": ""}},
+        "apps": {"lobby": "", "arena": ""},
+        "hooks": {}
+    });
+    fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let release = fixture.publish().unwrap();
+    assert_ne!(initial.id, release.id);
+    let backend: Value = serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
+    assert_eq!(backend["domains"], contract["domains"]);
+    fs::write(fixture.inputs.project.join("apps/lobby/app.toml"), "domain='games'").unwrap();
+    assert!(fixture.publish().err().unwrap().to_string().contains("no longer matches the project"));
+    contract["domains"]["apps"]["lobby"] = json!("games");
+    fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert_ne!(release.id, fixture.publish().unwrap().id);
+}

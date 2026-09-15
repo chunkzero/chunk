@@ -69,7 +69,7 @@ fn manifest_errors_identify_file_and_reject_unimplemented_fields() {
     for (filename, content, expected) in [
         ("chunk.toml", "[local", "TOML parse error at line 1"),
         ("chunk.toml", "apps = ['lobby']", "unknown field `apps`"),
-        ("apps/lobby/app.toml", "domain = 'games'", "unknown field `domain`"),
+        ("apps/lobby/app.toml", "domain = 'games'", "existing static scope"),
         ("apps/lobby/app.toml", "name = 'lobby'", "unknown field `name`"),
         ("apps/lobby/app.toml", "[runtime]\njava = 25", "unknown field `java`"),
     ] {
@@ -157,4 +157,25 @@ fn discovery_rejects_symlinked_app_inputs() {
     symlink(root.join("apps/lobby"), root.join("apps/linked")).unwrap();
     let error = discover_apps(root).unwrap_err().to_string();
     assert!(error.contains("apps/linked") && error.contains("symlink"), "{error}");
+}
+
+#[test]
+fn app_domains_resolve_static_directories_with_implicit_root_and_ancestors() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir_all(root.join("server/domains/games/duels")).unwrap();
+    app(root, "lobby", "");
+    app(root, "duels", "domain = 'games/duels'");
+    let apps = discover_apps(root).unwrap();
+    assert_eq!(apps[0].domain, "games/duels");
+    assert_eq!(apps[1].domain, "");
+    let scopes = domains::discover(root).unwrap();
+    assert_eq!(scopes["games/duels"].parent.as_deref(), Some("games"));
+    for domain in ["missing", "games/../games", "/games", "games/", "Games"] {
+        fs::write(root.join("apps/duels/app.toml"), format!("domain = '{domain}'")).unwrap();
+        assert!(discover_apps(root).unwrap_err().to_string().contains("existing static scope"));
+    }
+    fs::write(root.join("apps/duels/app.toml"), "").unwrap();
+    fs::create_dir_all(root.join("server/domains/[game]")).unwrap();
+    assert!(discover_apps(root).unwrap_err().to_string().contains("static domain path"));
 }

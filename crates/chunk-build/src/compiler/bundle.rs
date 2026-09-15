@@ -172,14 +172,23 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\n",
+        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
-        quote(sdk.join("functions.ts").to_string_lossy())
+        quote(sdk.join("functions.ts").to_string_lossy()),
+        quote(sdk.join("hooks.ts").to_string_lossy())
     );
+    let domains = super::domains::manifest(root)?;
+    let mut hook_metadata = Vec::new();
+    let mut hook_scopes = std::collections::BTreeSet::new();
     let mut metadata = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
+        let scope = super::domains::hook_scope(entry);
+        if scope.is_some_and(|scope| !hook_scopes.insert(scope)) {
+            return Err(error(format!("multiple hook modules for domain {}", scope.unwrap_or_default())));
+        }
         let key = entry.path.to_string_lossy();
+        let location = entry.path.strip_prefix(root).unwrap_or(&entry.path).to_string_lossy();
         let module = modules.get(key.as_ref()).ok_or_else(|| error(format!("missing module exports: {key}")))?;
         let mut exports = module.clone();
         exports.sort();
@@ -187,13 +196,35 @@ fn entry_source(
             if exported == "*" {
                 return Err(error(format!("Star re-exports are unsupported: {key}")));
             }
+            let value = format!("m{index}[{}]", quote(&exported));
             if exported == "default" {
+                writeln!(
+                    source,
+                    "if(isHook({value})) throw new Error({});",
+                    quote(format!("Hook descriptors require named exports: {location}"))
+                )
+                .map_err(error)?;
                 continue;
             }
             let name = quote(format!("{}/{}", entry.namespace, exported));
             let binding = format!("f{}", metadata.len());
-            let value = format!("m{index}[{}]", quote(exported));
-            writeln!(source, "export const {binding} = (ctx,args) => {value}.handler(ctx,args);").map_err(error)?;
+            writeln!(source, "export const {binding} = (ctx,args) => isHook({value}) ? invokeHook({value},ctx,args) : {value}.handler(ctx,args);").map_err(error)?;
+            if let Some(scope) = scope {
+                hook_metadata.push(format!(
+                    "...(isHook({value}) ? [[{name}, {{...{value}.contract, domain:{}, export:{}}}]] : [])",
+                    quote(scope),
+                    quote(&binding)
+                ));
+            } else {
+                writeln!(
+                    source,
+                    "if(isHook({value})) throw new Error({});",
+                    quote(format!(
+                        "Hook descriptors must be named exports in server/domains/**/hooks.ts or hooks.mts: {location}"
+                    ))
+                )
+                .map_err(error)?;
+            }
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)
@@ -201,6 +232,15 @@ fn entry_source(
         }
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
-    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}])}}; }}", metadata.join(",")).map_err(error)?;
+    let domain_metadata = if let Some(domains) = domains {
+        format!(
+            ",domains:{{...{},hooks:Object.fromEntries([{}])}}",
+            serde_json::to_string(&domains).map_err(error)?,
+            hook_metadata.join(",")
+        )
+    } else {
+        String::new()
+    };
+    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata}}}; }}", metadata.join(",")).map_err(error)?;
     Ok(source)
 }

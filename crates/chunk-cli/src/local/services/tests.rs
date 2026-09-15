@@ -12,6 +12,7 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     fs::create_dir(&artifact.directory).unwrap();
     let bundle = chunk_contract::Deployment {
+        domains: None,
         contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: artifact.id.clone(),

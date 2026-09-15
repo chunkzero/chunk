@@ -113,6 +113,17 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
     let mut backend = assemble_backend(&inputs.backend, &mut files)?;
+    let domains = project::domains::discover(&inputs.project)?;
+    if let Some(compiled) = &backend.domains {
+        let bindings = project.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect();
+        if compiled.apps != bindings || compiled.scopes != domains {
+            return Err(io::Error::other(
+                "compiled domain manifest no longer matches the project; recompile the backend",
+            ));
+        }
+    } else if inputs.project.join("server/domains").exists() {
+        return Err(io::Error::other("backend is missing the project's domain manifest; recompile the backend"));
+    }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
     let id = publication::digest(&files);
     backend.id.clone_from(&id);
@@ -143,6 +154,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
         source,
         tables: contract.tables,
         functions: contract.functions,
+        domains: contract.domains,
     };
     backend.validate().map_err(io::Error::other)?;
     insert(files, "source.mjs".into(), backend.source.as_bytes().to_vec())?;

@@ -8,6 +8,8 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub(crate) mod domains;
+
 #[derive(Debug, Serialize)]
 pub struct ProjectMetadata {
     pub version: u32,
@@ -22,6 +24,8 @@ pub struct AppMetadata {
     /// Project-relative path with forward slashes.
     pub directory: String,
     pub gradle_project: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub domain: String,
     pub runtime: RuntimeRequirements,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, RuntimeRequirements>,
@@ -62,6 +66,8 @@ struct ProjectManifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppManifest {
+    #[serde(default)]
+    domain: String,
     #[serde(default)]
     runtime: RuntimeRequirements,
     #[serde(default)]
@@ -111,6 +117,7 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
 /// # Errors
 /// Rejects symlinks, malformed manifests, invalid or case-colliding IDs and missing app build files.
 pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
+    let domains = domains::discover(root)?;
     let directory = root.join("apps");
     match fs::symlink_metadata(&directory) {
         Ok(metadata) if !metadata.is_dir() => {
@@ -149,6 +156,9 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
         let manifest: AppManifest = read_manifest(&manifest_path)?;
+        if !domains.contains_key(&manifest.domain) {
+            return Err(invalid(&manifest_path, "domain must name an existing static scope under server/domains"));
+        }
         if manifest.sessions.len() > 128 || manifest.sessions.keys().any(|id| !valid_id(id)) {
             return Err(invalid(&manifest_path, "sessions requires at most 128 valid session type IDs"));
         }
@@ -162,6 +172,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             directory: format!("apps/{id}"),
             gradle_project: format!(":apps:{id}"),
             id,
+            domain: manifest.domain,
             runtime: manifest.runtime,
             sessions: manifest.sessions,
         });

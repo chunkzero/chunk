@@ -15,7 +15,7 @@ pub use sdk::generate_sdk;
 
 use std::collections::BTreeMap;
 
-use chunk_contract::{DatabaseSchema, Function, RuntimeProfile};
+use chunk_contract::{DatabaseSchema, DomainManifest, Function, RuntimeProfile};
 use publication::read_limited;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,8 @@ struct BackendMetadata {
     runtime_profile: RuntimeProfile,
     tables: DatabaseSchema,
     functions: BTreeMap<String, Function>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    domains: Option<DomainManifest>,
 }
 
 #[cfg(test)]
