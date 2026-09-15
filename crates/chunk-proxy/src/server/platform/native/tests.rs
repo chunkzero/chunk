@@ -238,6 +238,7 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
     }
     Deployment {
         session_methods: None,
+        session_configurations: None,
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: "candidate".into(),

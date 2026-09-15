@@ -31,6 +31,7 @@ fn deployment(id: &str, increment: i32) -> Deployment {
     Deployment {
         domains: None,
         session_methods: None,
+        session_configurations: None,
         destinations: None,
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
