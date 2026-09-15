@@ -204,6 +204,7 @@ impl Control {
 fn release(state: &mut State, operation: &str) -> Result<()> {
     let claim = state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?;
     set_phase(claim, Phase::Released)?;
+    let session_id = claim.session.clone();
     if let Some(player) = state.players.get_mut(&claim.player) {
         if player.current.as_deref() == Some(operation) {
             player.current = None;
@@ -211,6 +212,11 @@ fn release(state: &mut State, operation: &str) -> Result<()> {
         if player.pending.as_deref() == Some(operation) {
             player.pending = None;
         }
+    }
+    if !state.claims.values().any(|claim| claim.session == session_id && claim.phase != Phase::Released)
+        && let Some(session) = state.sessions.get_mut(&session_id)
+    {
+        session.empty_since_ms.get_or_insert(crate::now_ms());
     }
     Ok(())
 }

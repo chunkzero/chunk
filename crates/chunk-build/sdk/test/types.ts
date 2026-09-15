@@ -1,5 +1,5 @@
 import { sessionMethod, type SessionMethodReference } from "../src/index.ts";
-import { defineSchema, defineTable, mutation, query, v } from "../src/index.ts";
+import { defineDestination, defineSchema, defineTable, mutation, query, v } from "../src/index.ts";
 import type { FunctionDefinition, Id, Infer, PlayerId } from "../src/index.ts";
 
 const profiles = defineTable({ player: v.player(), wins: v.integer() }).index("by_player", ["player"]);
@@ -333,3 +333,11 @@ const typedMethod: SessionMethodReference<{ player: PlayerId }, boolean> = forfe
 const wrongMethod: SessionMethodReference<{ player: number }, boolean> = forfeit;
 void typedMethod;
 void wrongMethod;
+const destinationPool = defineDestination({ key: "main", session_type: "lobby/default", machine_profile: "local" });
+query({ args: {}, returns: v.destination(), handler: () => destinationPool.destination });
+// @ts-expect-error destination identity is immutable
+destinationPool.destination.key = "replacement";
+// @ts-expect-error groups are not an atomic destination contract
+defineDestination({ key: "main", session_type: "lobby/default", machine_profile: "local", group: ["player"] });
+// @ts-expect-error supported overflow policies are explicit
+defineDestination({ key: "main", session_type: "lobby/default", machine_profile: "local", overflow: "replace" });

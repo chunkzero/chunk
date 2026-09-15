@@ -52,6 +52,7 @@ fn read_contract(contract: &Path) -> io::Result<BackendMetadata> {
         tables: contract.tables.clone(),
         functions: contract.functions.clone(),
         domains: contract.domains.clone(),
+        destinations: contract.destinations.clone(),
     }
     .validate()
     .map_err(io::Error::other)?;

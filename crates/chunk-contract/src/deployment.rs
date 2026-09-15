@@ -44,6 +44,8 @@ pub struct Function {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<crate::DestinationManifest>,
     pub contract_version: u32,
     pub runtime_profile: RuntimeProfile,
     pub id: String,
@@ -95,6 +97,9 @@ impl Deployment {
                     return Err("function path collides with namespace");
                 }
             }
+        }
+        if let Some(destinations) = &self.destinations {
+            destinations.validate()?;
         }
         if let Some(domains) = &self.domains {
             domains.validate()?;
@@ -158,6 +163,7 @@ mod tests {
         Deployment {
             domains: None,
             session_methods: None,
+            destinations: None,
             contract_version: CONTRACT_VERSION,
             runtime_profile: RuntimeProfile::TransactionalV1,
             id: "v1".into(),

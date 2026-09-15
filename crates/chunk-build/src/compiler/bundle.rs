@@ -172,19 +172,26 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\nimport {{ isSessionMethod }} from {};\n",
+        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\nimport {{ isSessionMethod }} from {};\nimport {{ isDestination }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
         quote(sdk.join("functions.ts").to_string_lossy()),
         quote(sdk.join("hooks.ts").to_string_lossy()),
         quote(sdk.join("commands.ts").to_string_lossy()),
         quote(sdk.join("sessions.ts").to_string_lossy()),
+        quote(sdk.join("destinations.ts").to_string_lossy()),
     );
     let mut domains = super::domains::DomainEntries::new(root)?;
+    let mut destination_metadata = Vec::new();
+    let mut destination_module = false;
     let mut metadata = Vec::new();
     let mut methods = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         domains.add_module(entry)?;
+        let destination_scope = entry.namespace == "shared/destinations";
+        if destination_scope && std::mem::replace(&mut destination_module, true) {
+            return Err(error("multiple server/destinations.ts or destinations.mts modules"));
+        }
         let key = entry.path.to_string_lossy();
         let module = modules.get(key.as_ref()).ok_or_else(|| error(format!("missing module exports: {key}")))?;
         let mut exports = module.clone();
@@ -197,11 +204,22 @@ fn entry_source(
             let binding = format!("f{}", metadata.len());
             domains.add_export(entry, &exported, &value, &binding, &mut source)?;
             if exported == "default" {
+                writeln!(
+                    source,
+                    "if(isDestination({value})) throw new Error({});",
+                    quote(format!("Destination descriptors require named exports: {key}"))
+                )
+                .map_err(error)?;
                 continue;
             }
             let name = quote(format!("{}/{}", entry.namespace, exported));
             writeln!(source, "export const {binding} = (ctx,args) => isHook({value}) ? invokeHook({value},ctx,args) : isCommand({value}) ? invokeCommand({value},ctx,args) : {value}.handler(ctx,args);").map_err(error)?;
             methods.push(format!("...(isSessionMethod({value}) ? [{value}.contract] : [])"));
+            if destination_scope {
+                destination_metadata.push(format!("...(isDestination({value}) ? [[{name}, {value}.contract]] : [])"));
+            } else {
+                writeln!(source, "if(isDestination({value})) throw new Error({});", quote(format!("Destination descriptors require named exports in server/destinations.ts or destinations.mts: {key}"))).map_err(error)?;
+            }
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)
@@ -210,6 +228,7 @@ fn entry_source(
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
     let domain_metadata = domains.metadata()?;
-    write!(source, "export function __chunk_contract() {{ const methods = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}})}}; }}", methods.join(","), metadata.join(",")).map_err(error)?;
+    writeln!(source, "const destinationEntries = [{}];", destination_metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}})}}; }}", methods.join(","), metadata.join(",")).map_err(error)?;
     Ok(source)
 }

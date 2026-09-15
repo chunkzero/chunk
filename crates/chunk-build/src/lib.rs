@@ -30,6 +30,8 @@ struct BackendMetadata {
     domains: Option<DomainManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_methods: Option<chunk_contract::SessionMethods>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destinations: Option<chunk_contract::DestinationManifest>,
 }
 
 #[cfg(test)]

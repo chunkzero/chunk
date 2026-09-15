@@ -1,4 +1,6 @@
 mod bundle;
+#[cfg(test)]
+mod destinations;
 mod domains;
 mod sources;
 mod typecheck;
@@ -51,6 +53,15 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
             }
         }
     }
+    if let Some(destinations) = &contract.destinations {
+        let apps = crate::project::discover_apps(&project)?;
+        if destinations.entries.values().any(|policy| {
+            let app = policy.destination.session_type.split('/').next().unwrap_or_default();
+            !apps.iter().any(|candidate| candidate.id == app)
+        }) {
+            return Err(io::Error::other("destination references an undiscovered app"));
+        }
+    }
     fs::write(staging.path().join("contract.json"), serde_json::to_vec(&contract).map_err(io::Error::other)?)?;
     for name in ["source.mjs", "source.mjs.map", "contract.json"] {
         fs::rename(staging.path().join(name), output.join(name))?;
@@ -88,6 +99,7 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
         tables: contract.tables.clone(),
         functions: contract.functions.clone(),
         domains: contract.domains.clone(),
+        destinations: contract.destinations.clone(),
     }
     .validate()
     .map_err(io::Error::other)?;

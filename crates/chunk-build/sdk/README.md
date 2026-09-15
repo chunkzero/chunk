@@ -295,3 +295,52 @@ Handlers receive authenticated `caller` and readonly `player` identity, plus typ
 Compilation preserves one handler export per command root and keeps commands out of ordinary generated function clients.
 Packet dispatch, permission execution, and lifecycle handling are implemented by the command runtime; these declarations
 alone do not register commands with connected players.
+## Declarative destinations
+
+Named exports in `server/destinations.ts` (or `.mts`) declare a capacity pool. They do not create a process or session:
+
+```ts
+import { defineDestination } from "#chunk";
+
+export const lobby = defineDestination({
+  key: "main",
+  session_type: "lobby/default",
+  machine_profile: "local",
+  overflow: "replicate",
+  emptyTimeoutSeconds: 60,
+});
+```
+
+A `player.route` hook returns `lobby.destination`. It is the existing `{ key, session_type, machine_profile }` value;
+commands can pass the same value to the routing API. A declaration does not grant permission to move or finish players.
+The session type and machine profile must match the release's JVM catalog. The default policy is `replicate` with a
+60-second idle timeout; explicit timeouts range from 1 to 86400 seconds.
+
+The identity is `(environment, deployment, session_type, key)`. The declaration, profile, capacity and code are
+immutable within that deployment. Duplicate declarations for the same session type/key are errors, even under different
+export names. Separate deployments never reuse or retarget one another's session instances; changing a running local
+control configuration is rejected. Cross-version reconnect/overlapping rollout policy remains separate work.
+
+`replicate` first reuses an available instance, counting every unreleased reservation and delivery against its capacity.
+When full, control allocates another compatible instance within the existing machine/session budgets. `reject` allows
+one unfinished instance for that identity and rejects excess demand, including while its ownership or finish outcome is
+unknown. A key is neither unlimited capacity nor an instruction to create a new machine for every player. Unregistered
+raw destinations keep the existing placement behavior and remain warm until gameplay finishes or the host stops.
+
+Claims reserve one authenticated player atomically. Groups, rosters, matching parameters and mutable per-key
+configuration are explicitly unsupported and rejected by `defineDestination`; no queue, team or match declaration is
+required for a lobby or general session. Use a different immutable key for a different logical intent.
+
+Idle time starts only when every reservation and delivery is released. Expiry retires admission before calling JVM
+finish; capacity stays occupied until cleanup is affirmatively ended and ownership is reconciled. Gameplay can call the
+existing `SessionScope.finish()`; control observes its state and stops admitting new players. Trusted Rust platform code
+can request `Control::finish_destination(&ClaimIdentity)` using an exact currently arrived membership/delivery
+generation. It exposes no arbitrary-session RPC to application credentials. Finishing withdraws deliveries and runs
+normal JVM cleanup.
+
+Failed or lost preparation keeps the original operation, reservation and session identity. Retrying that claim
+reconciles the same placement; canceling it fences that exact delivery. Unactivated reservations keep their existing
+60-second expiry; an uncertain withdrawal retains ownership. Unknown create/finish results, missing inventory entries
+and failed cleanup never imply free capacity. They remain reserved until affirmative reconciliation or confirmed host
+death. A JVM `FAILED` phase alone cannot prove cleanup completed. Session and operation histories retain their existing
+bounded limits; sustained environments require the later retirement/rollout lifecycle beyond those limits.

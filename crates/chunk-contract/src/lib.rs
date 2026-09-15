@@ -13,6 +13,10 @@ pub use commands::{
     SuggestionQuery, visible_commands,
 };
 mod deployment;
+mod destinations;
+pub use destinations::{
+    DESTINATION_MANIFEST_VERSION, Destination, DestinationManifest, DestinationOverflow, DestinationPolicy,
+};
 mod domains;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
 mod index;

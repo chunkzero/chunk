@@ -115,6 +115,11 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let directory = format!("{}/assets", app.directory);
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
+    if let Some(destinations) = &backend.destinations {
+        destinations
+            .validate_apps(&metadata.apps.iter().map(|app| (app.id.clone(), app.clone())).collect())
+            .map_err(io::Error::other)?;
+    }
     let domains = project::domains::discover(&inputs.project)?;
     if let Some(compiled) = &backend.domains {
         let bindings = project.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect();
@@ -165,6 +170,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
         tables: contract.tables,
         functions: contract.functions,
         domains: contract.domains,
+        destinations: contract.destinations,
     };
     backend.validate().map_err(io::Error::other)?;
     insert(files, "source.mjs".into(), backend.source.as_bytes().to_vec())?;
