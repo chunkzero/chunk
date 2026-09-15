@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Function, FunctionKind, Schema};
 
+mod input;
+pub use input::{MAX_COMMAND_INPUT, ParsedCommand};
+
 /// A backend-owned command root and its literal/argument routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
