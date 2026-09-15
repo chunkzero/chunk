@@ -19,6 +19,7 @@ pub(crate) struct Capabilities {
     pub mode: Mode,
     pub cancellation: Cancellation,
     pub writes: BTreeMap<Key, Buffered>,
+    pub jobs: Vec<crate::ScheduleIntent>,
     pub calls: usize,
     pub write_bytes: usize,
 }

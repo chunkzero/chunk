@@ -59,6 +59,14 @@ pub(super) fn insert(transaction: &rusqlite::Transaction<'_>, deployment: &Deplo
 
 pub(super) fn release(connection: &mut Connection, id: &str) -> Result<bool> {
     let transaction = connection.transaction()?;
+    let referenced: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _chunk_jobs WHERE deployment=?1 AND state IN ('pending','running'))",
+        [id],
+        |row| row.get(0),
+    )?;
+    if referenced {
+        return Err(Error::Invalid("deployment has unfinished jobs"));
+    }
     let removed = transaction.execute("DELETE FROM _chunk_deployments WHERE id = ?1", [id])? != 0;
     if removed {
         transaction.execute("INSERT INTO _chunk_retired_deployments VALUES (?1)", [id])?;

@@ -47,11 +47,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod jobs;
 mod model;
 mod snapshot;
 mod sqlite;
 
 pub use chunk_contract::DatabaseSchema;
+pub use jobs::{Job, JobCommand, JobIntent, JobState, Jobs, WakeHandoff};
 pub use model::{
     Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, RetryContext, Revision, Write,
 };
@@ -101,6 +103,33 @@ pub trait Storage: Send {
     /// # Errors
     /// Rejects reuse of an ID for a different request and reports storage failures.
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>>;
+
+    /// Loads bounded durable scheduling state.
+    /// # Errors
+    /// Reports storage failures or corrupt job metadata.
+    fn jobs(&self) -> Result<Jobs> {
+        Ok(Jobs::default())
+    }
+
+    /// Changes host-owned scheduling state without changing document revisions.
+    /// # Errors
+    /// Rejects invalid transitions, stale alarm acknowledgements or unsupported scheduling.
+    fn job_command(&mut self, command: JobCommand) -> Result<Jobs> {
+        if matches!(command, JobCommand::Recover) {
+            return self.jobs();
+        }
+        Err(Error::Invalid("durable scheduling unsupported"))
+    }
+
+    /// Commits scheduling intents with document writes and operation outcome.
+    /// # Errors
+    /// Nonempty intents fail closed unless the adapter implements atomic scheduling.
+    fn commit_with_jobs(&mut self, commit: Commit, intents: Vec<JobIntent>) -> Result<Outcome> {
+        if !intents.is_empty() {
+            return Err(Error::Invalid("durable scheduling unsupported"));
+        }
+        self.commit(commit)
+    }
 
     /// Atomically applies changes and records their outcome, or changes nothing.
     /// An already committed operation returns its original outcome before checking

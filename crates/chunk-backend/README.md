@@ -1,13 +1,13 @@
 # Environment backend
 
-`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread and one commit thread. Supply a store
-with exclusive writer authority. `deploy` validates and initializes a versioned `chunk_contract::Deployment`, then
-atomically installs its additive schema/indexes and retains the bundle before enabling public functions. Bundles and
-contracts reload after restart. Use async `query`, `mutate`, `subscribe`, or `subscribe_group` from transport tasks.
-`Service` exposes authenticated gRPC; only trusted platform processes may supply caller identity. Internal functions are
-inaccessible through this ingress. Activation waits for the commit pipeline to drain; it returns `Busy` while work is
-outstanding. Queries can use existing deployments during activation. Schema changes advance the revision; every
-successful activation reevaluates existing subscriptions.
+`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread and a local job
+timer. Supply a store with exclusive writer authority. `deploy` validates and initializes a versioned
+`chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains the bundle before
+enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`, `subscribe`, or
+`subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform processes may supply
+caller identity. Internal functions are inaccessible through this ingress. Activation waits for the commit pipeline to
+drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during activation. Schema
+changes advance the revision; every successful activation reevaluates existing subscriptions.
 
 The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription dependencies. Each
 mutation executes against the latest view, validates its writes against the snapshot's schema, and applies them to a
@@ -67,9 +67,9 @@ writes participate in ordering and limiting. Dependencies include old/new index 
 are parsed on the commit thread because `chunk_store::Commit` currently takes `Value`; query/subscription responses
 remain JSON text. Durable retries preserve the JSON value but may normalize its formatting and object key order.
 
-Construction waits for initialization. Dropping the last backend handle drains accepted commits and joins both threads;
-use a blocking task for construction and final drop from async code. Persistent module state is disposable: handlers
-must derive transactional results from arguments, caller and tracked reads, as described in `chunk-js`.
+Construction waits for initialization. Dropping the last backend handle drains accepted commits and joins its owned
+threads; use a blocking task for construction and final drop from async code. Persistent module state is disposable:
+handlers must derive transactional results from arguments, caller and tracked reads, as described in `chunk-js`.
 
 Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
 `cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
@@ -158,3 +158,59 @@ granted secret value or its JSON-escaped form are replaced with a generic redact
 hand the value to authorized application code; transformed values and deliberate application publication are outside
 literal redaction. Queries and mutations retain their pure capability profile. Deployment configuration, secret rotation
 and hosted secret management remain separate platform work.
+
+## Durable scheduled jobs
+
+Mutations can atomically record `ctx.scheduler.runAt(unixMilliseconds, actionReference, args)`, `cancel(jobId)`, and
+`retry(jobId, unixMilliseconds, {acknowledgePossibleEffects: true})` with their document writes and operation outcome.
+`runAt` returns a stable job ID derived from the mutation operation and intent position. Arguments and action kind are
+validated against the captured deployment before commit, including `internalAction` references. The server captures the
+full originating caller; job arguments cannot select a caller, environment or deployment. Cancellation, retry,
+`Backend::job` and `forget_job` require that same caller. Queries and actions cannot schedule directly; an action can
+call a mutation to record intent.
+
+`Backend` starts a local timer and dispatches due jobs automatically, checking at most every 100 milliseconds when the
+actor is available. At most two scheduled jobs run within the existing eight-action limit. Busy action capacity leaves
+jobs pending, or retains an already-durable claim until a worker is available. The commit thread durably changes
+`pending` to `running` before any action starts. SQLite keeps job metadata and wake state in private tables, separate
+from application schema. Other storage adapters must implement atomic scheduling; nonempty intents fail closed by
+default.
+
+A successful action records `succeeded` and a result up to 64 KiB; an oversized result or exhausted result retention
+capacity records `failed` without that result. Observed application or contract errors also record `failed`; this does
+not undo prior effects. Interrupted execution (cancellation, deadline, resource termination or backend loss) records
+`unknown`, since nested mutations or external requests may already have effects. Startup turns every recovered `running`
+attempt into `unknown` and never starts it again automatically. This also covers a crash between claim and dispatch.
+`pending` jobs resume normally. Cancelling pending work prevents dispatch; cancelling running work records `unknown` and
+expires its action scope. Effects already accepted elsewhere can still complete.
+
+`invocationId` is `job/<jobId>/attempt/<number>`. Nested mutations use that prefix plus `/<effect-sequence>`; HTTP
+outcomes use that prefix plus `/http/<effect-sequence>`. These identities survive restart and let trusted reconciliation
+recover earlier mutation outcomes or correlate remote requests. They do not make an external service idempotent. A retry
+is an explicit new attempt, allowed only for failed, unknown or cancelled jobs with acknowledgement of possible earlier
+effects. Its captured caller, arguments and originating deployment remain fixed. Earlier attempt numbers remain usable
+for reconciliation; the job record retains only the latest attempt's state and result.
+
+Pending/running jobs retain their originating bundle across restart. Terminal records remain until their owner calls
+`forget_job`; forgetting live work is rejected. Terminal records do not pin code: releasing their deployment makes later
+retries fail. The queue retains at most 256 jobs / 8 MiB, with 16 intents per mutation, 64 KiB per encoded intent and 64
+KiB for captured caller data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's
+captured time; times already due become immediately eligible. Queue overflow rejects the whole mutation. There is no
+automatic pruning, recurring schedule, or automatic action retry. Host HTTP/secret grants must be supplied again after
+restart; grants and secret values are never part of a job record unless application code explicitly puts such values in
+its arguments/result.
+
+### Host alarm handoff
+
+The local timer runs only while the backend process runs. It cannot wake a suspended host. A hosting adapter reads
+`Backend::wake_handoff()` to obtain durable `{generation, due_at, acknowledged, running}` state. Every scheduling change
+advances the generation and recomputes the earliest pending due time atomically. The adapter must durably install or
+clear its external alarm for that exact generation and time **before** calling `acknowledge_wake(generation, due_at)`. A
+changed generation or time rejects the acknowledgement; read and reconcile again. `acknowledged` reports persisted
+adapter handoff, not proof that a provider fired its alarm.
+
+After resume/restart, construct the backend first so interrupted attempts recover and due work can dispatch, then read
+and reconcile the latest handoff with the external alarm. Before suspension, the host must coordinate admission, drain
+foreground requests and action scopes, wait for `running` to be zero, and reconcile until the latest generation is
+acknowledged. Retain the external alarm independently of the suspended process. This API defines the durable handoff
+contract; installing an alarm and resuming a machine are the hosting adapter's job.

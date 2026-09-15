@@ -57,12 +57,13 @@ impl State {
         let capabilities = self.runtime.op_state().borrow_mut().borrow_mut::<Option<Capabilities>>().take();
         self.runtime.op_state().borrow_mut().borrow_mut::<Option<crate::actions::ActionCapabilities>>().take();
         let value = result?;
+        let jobs = capabilities.as_ref().map_or_else(Vec::new, |capabilities| capabilities.jobs.clone());
         let writes = capabilities
             .into_iter()
             .flat_map(|capabilities| capabilities.writes)
             .map(|(key, write)| Write { key, value: write.value })
             .collect();
-        Ok(Execution { logs, value, writes })
+        Ok(Execution { logs, value, writes, jobs })
     }
 
     pub(crate) fn new(limits: Limits) -> Self {
@@ -72,6 +73,7 @@ impl State {
             chunk_capabilities::init(),
             crate::profile::chunk_profile::init(),
             crate::actions::chunk_actions::init(),
+            crate::jobs::chunk_scheduler::init(),
         ]);
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions,

@@ -165,6 +165,62 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_internal_actions_compile_from_a_fresh_project_without_generated_references() {
+        struct Host;
+        impl ReadHost for Host {
+            fn schedule_id(&self, sequence: u32) -> Result<String, String> {
+                Ok(format!("schedule-{sequence}"))
+            }
+            fn get(&mut self, _: &Key) -> Result<Option<Value>, String> {
+                Err("unexpected read".into())
+            }
+            fn scan(&mut self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<Vec<(String, Value)>, String> {
+                Err("unexpected scan".into())
+            }
+        }
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        fs::write(
+            project.path().join("server/schema/index.ts"),
+            "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
+        )
+        .unwrap();
+        fs::write(project.path().join("server/tasks.ts"),r"import {internalAction,mutation,v} from '#chunk';
+            const args=v.object({name:v.string()});
+            const reference={path:'shared/tasks/work',kind:'action' as const,arguments:args,result:v.null()};
+            export const work=internalAction({args,returns:v.null(),handler:()=>null});
+            export const enqueue=mutation({args:{at:v.integer()},returns:v.string(),handler:({scheduler},{at})=>scheduler.runAt(at,reference,{name:'alice'})});").unwrap();
+        compile(project.path(), output.path()).unwrap();
+        let contract: BackendMetadata =
+            serde_json::from_slice(&fs::read(output.path().join("contract.json")).unwrap()).unwrap();
+        let mut engine = Engine::new().unwrap();
+        let id = DeploymentId::new("schedule-test").unwrap();
+        engine
+            .register(id.clone(), fs::read_to_string(output.path().join("source.mjs")).unwrap(), Limits::default())
+            .unwrap();
+        let result = engine
+            .execute(
+                &id,
+                Invocation {
+                    export: contract.functions["shared/tasks/enqueue"].export.clone(),
+                    arguments: json!({"at":10}).into(),
+                    caller: json!(null).into(),
+                    mode: Mode::Mutation,
+                    timestamp: 1,
+                    seed: 1,
+                },
+                Box::new(Host),
+                &Cancellation::default(),
+            )
+            .unwrap();
+        assert_eq!(result.value, r#""schedule-0""#);
+        assert!(
+            matches!(&result.jobs[..],[chunk_js::ScheduleIntent::RunAt {id:Some(id),at:10,function,arguments}] if id=="schedule-0" && function=="shared/tasks/work" && arguments==&json!({"name":"alice"}))
+        );
+    }
+
+    #[test]
     fn compilation_diagnostics_identify_invalid_schema_and_deployment() {
         let project = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();

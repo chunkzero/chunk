@@ -341,3 +341,36 @@ destinationPool.destination.key = "replacement";
 defineDestination({ key: "main", session_type: "lobby/default", machine_profile: "local", group: ["player"] });
 // @ts-expect-error supported overflow policies are explicit
 defineDestination({ key: "main", session_type: "lobby/default", machine_profile: "local", overflow: "replace" });
+
+const scheduledAction = { ...countReference, kind: "action" as const };
+mutation({
+  args: {},
+  returns: v.string(),
+  handler: ({ scheduler }) => {
+    // @ts-expect-error only actions can be scheduled
+    scheduler.runAt(1, countReference, { count: 1 });
+    // @ts-expect-error scheduled arguments retain their reference type
+    scheduler.runAt(1, scheduledAction, { count: "wrong" });
+    // @ts-expect-error retries must acknowledge possible earlier effects
+    scheduler.retry("job", 1, { acknowledgePossibleEffects: false });
+    return scheduler.runAt(1, scheduledAction, { count: 1 });
+  },
+});
+query({
+  args: {},
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error queries cannot schedule or cancel jobs
+    void ctx.scheduler;
+    return null;
+  },
+});
+action({
+  args: {},
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error actions must call a mutation to record scheduling intent
+    void ctx.scheduler;
+    return null;
+  },
+});

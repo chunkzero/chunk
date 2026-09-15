@@ -83,6 +83,18 @@ pub(crate) enum Command {
         id: DeploymentId,
         reply: Request<Option<DomainManifest>>,
     },
+    JobStatus {
+        id: String,
+        caller: Json,
+        reply: Request<chunk_store::Job>,
+    },
+    WakeHandoff {
+        reply: Request<chunk_store::WakeHandoff>,
+    },
+    JobControl {
+        command: chunk_store::JobCommand,
+        reply: Request<chunk_store::Jobs>,
+    },
     StartAction {
         hook: bool,
         id: ActionId,
@@ -132,6 +144,10 @@ impl Command {
     pub fn reject(self, error: Error) {
         match self {
             Self::DomainManifest { reply, .. } => reply.finish(Err(error)),
+
+            Self::JobStatus { reply, .. } => reply.finish(Err(error)),
+            Self::WakeHandoff { reply } => reply.finish(Err(error)),
+            Self::JobControl { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
@@ -145,6 +161,11 @@ impl Command {
 }
 
 pub(crate) enum Event {
+    SchedulerTick,
+    Scheduled {
+        command: chunk_store::JobCommand,
+        result: Result<chunk_store::Jobs>,
+    },
     ActionFinished {
         id: ActionId,
         result: Result<Arc<str>>,
@@ -164,7 +185,7 @@ pub(crate) enum Event {
     Request(Box<Command>),
     Committed {
         operation: String,
-        result: Result<(Update, Snapshot)>,
+        result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>,
     },
     Activated {
         result: Result<chunk_store::Snapshot>,
@@ -350,6 +371,42 @@ impl Backend {
     /// Returns unknown after restart, retention expiry or a caller mismatch.
     pub async fn action_status(&self, id: ActionId, caller: Json) -> Result<ActionStatus> {
         self.submit(|reply| Command::ActionStatus { id, caller, reply }).await
+    }
+
+    /// Reads a durable job record using its originating caller authority.
+    /// # Errors
+    /// Rejects unknown jobs, caller mismatches and unavailable service.
+    pub async fn job(&self, id: String, caller: Json) -> Result<chunk_store::Job> {
+        self.submit(|reply| Command::JobStatus { id, caller, reply }).await
+    }
+
+    /// Forget a terminal record. This does not reverse earlier effects.
+    /// # Errors
+    /// Rejects live jobs, caller mismatches and persistence failures.
+    pub async fn forget_job(&self, id: String, caller: Json) -> Result<()> {
+        let caller = serde_json::from_str(caller.as_str())?;
+        self.submit(|reply| Command::JobControl { command: chunk_store::JobCommand::Forget { id, caller }, reply })
+            .await
+            .map(|_| ())
+    }
+
+    /// Host-adapter handoff: durably install this exact alarm before acknowledging it.
+    /// # Errors
+    /// Reports unavailable service.
+    pub async fn wake_handoff(&self) -> Result<chunk_store::WakeHandoff> {
+        self.submit(|reply| Command::WakeHandoff { reply }).await
+    }
+
+    /// Acknowledge only after the host adapter durably installed (or cleared) the alarm.
+    /// # Errors
+    /// Rejects stale generation/time, unsupported storage or persistence failures.
+    pub async fn acknowledge_wake(&self, generation: u64, due_at: Option<i64>) -> Result<chunk_store::WakeHandoff> {
+        self.submit(|reply| Command::JobControl {
+            command: chunk_store::JobCommand::AcknowledgeWake { generation, due_at },
+            reply,
+        })
+        .await
+        .map(|jobs| jobs.wake)
     }
 
     /// Reads the current view, waiting for durability if it includes staged writes.

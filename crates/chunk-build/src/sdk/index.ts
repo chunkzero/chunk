@@ -55,3 +55,5 @@ export type Doc<N extends keyof Tables & string> = Document<Tables, N>;
 export type Id<N extends keyof Tables & string> = TableId<N>;
 
 export const { action, internalAction, query, mutation, internalQuery, internalMutation } = defineFunctions(schema);
+
+export type { JobId, Scheduler } from "../sdk/jobs.ts";

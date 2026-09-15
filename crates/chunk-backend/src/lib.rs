@@ -95,3 +95,6 @@ mod action_tests;
 mod effect_tests;
 mod hooks;
 pub use hooks::HookService;
+
+#[cfg(test)]
+mod job_tests;

@@ -62,3 +62,5 @@ export { sessionMethod } from "./sessions.ts";
 export type { SessionMethodDeclaration, SessionMethodReference } from "./sessions.ts";
 export { defineDestination } from "./destinations.ts";
 export type { DestinationDefinition, DestinationOptions } from "./destinations.ts";
+
+export type { JobId, Scheduler } from "./jobs.ts";

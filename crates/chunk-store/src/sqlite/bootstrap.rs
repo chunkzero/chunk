@@ -26,7 +26,7 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 0 | 2 | 3 | 4 | 5) {
+    if !matches!(version, 0 | 2 | 3 | 4 | 5 | 6) {
         return Err(Error::SchemaVersion(version));
     }
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -83,6 +83,14 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
     }
     if version < 5 {
         connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE _chunk_retired_deployments (id TEXT PRIMARY KEY) STRICT; PRAGMA user_version = 5; COMMIT;")?;
+    }
+    if version < 6 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE _chunk_jobs (id TEXT PRIMARY KEY, deployment TEXT NOT NULL, state TEXT NOT NULL, due_at INTEGER NOT NULL, payload TEXT NOT NULL) STRICT;
+            CREATE INDEX _chunk_jobs_due ON _chunk_jobs(state,due_at,id);
+            CREATE TABLE _chunk_job_wake (singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation INTEGER NOT NULL,ack_generation INTEGER NOT NULL,next_due INTEGER) STRICT;
+            INSERT INTO _chunk_job_wake VALUES (1,0,0,NULL);
+            PRAGMA user_version = 6; COMMIT;")?;
     }
     Ok(connection)
 }

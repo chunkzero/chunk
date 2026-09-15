@@ -23,6 +23,7 @@ use crate::{
 
 mod actions;
 mod deployments;
+mod jobs;
 mod pipeline;
 mod subscriptions;
 
@@ -62,6 +63,7 @@ struct Reevaluation {
 
 pub(crate) struct Actor {
     actions: actions::Actions,
+    scheduled: jobs::Scheduled,
     recovering: bool,
     next_subscription: u64,
     reevaluations: VecDeque<Reevaluation>,
@@ -87,7 +89,7 @@ impl Actor {
         incarnation: String,
         effects: crate::ActionEffects,
     ) -> Result<Self> {
-        let (committer, snapshot, deployments) = Committer::new(store, events.clone())?;
+        let (committer, snapshot, deployments, scheduled) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
         for deployment in deployments {
@@ -98,6 +100,7 @@ impl Actor {
             versions.insert(id, Some(Arc::new(deployment)));
         }
         Ok(Self {
+            scheduled: jobs::Scheduled::new(scheduled, events.clone())?,
             actions: actions::Actions::new(events, incarnation, effects),
             recovering: false,
             next_subscription: 0,
@@ -140,6 +143,11 @@ impl Actor {
             };
             self.subscriptions.retain(|subscription| !subscription.sender.is_closed());
             match event {
+                Event::Scheduled { command, result } => {
+                    self.outstanding -= 1;
+                    self.scheduled(command, result);
+                    self.recovering &= self.outstanding != 0;
+                }
                 Event::ActionFinished { id, result } => self.finish_action(&id, result),
                 Event::ActionTransaction { id, sequence, mode, function, arguments, reply } => {
                     if stopped.load(Ordering::Acquire) || self.failure.is_some() {
@@ -173,7 +181,10 @@ impl Actor {
                     self.outstanding -= 1;
                     self.released(result);
                 }
-                Event::Wake => {}
+                Event::SchedulerTick | Event::Wake => {}
+            }
+            if !stopped.load(Ordering::Acquire) {
+                self.dispatch_jobs();
             }
             self.reevaluate_one();
         }
@@ -198,6 +209,9 @@ impl Actor {
                     .ok_or(Error::Contract)
             })),
             Command::StartAction { hook, id, call, reply } => self.start_action(id, call, hook, reply),
+            Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
+            Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),
+            Command::JobControl { command, reply } => self.job_control(command, reply),
             Command::ActionStatus { id, caller, reply } => reply.finish(self.actions.status(&id, &caller)),
             Command::Deploy { deployment, reply } => {
                 if reply.cancellation.is_cancelled() {
@@ -331,19 +345,24 @@ impl Actor {
         mode: Mode,
         view: Rc<View>,
         cancellation: &Cancellation,
-        context: Option<(i64, u64)>,
+        context: Option<(i64, u64, String)>,
     ) -> (Result<Execution>, Dependencies) {
         let function = match self.resolve(call, mode) {
             Ok(function) => function,
             Err(error) => return (Err(error), Dependencies::default()),
         };
         let trace = Rc::new(RefCell::new(Dependencies::default()));
-        let (timestamp, seed) = context.unwrap_or_else(|| {
-            (view.base.timestamp, {
-                u64::from_be_bytes(Sha256::digest(call.function.as_bytes())[..8].try_into().expect("digest prefix"))
-            })
-        });
+        let operation = context.as_ref().map(|(_, _, operation)| operation.clone());
+        let (timestamp, seed) = context.map_or_else(
+            || {
+                (view.base.timestamp, {
+                    u64::from_be_bytes(Sha256::digest(call.function.as_bytes())[..8].try_into().expect("digest prefix"))
+                })
+            },
+            |(timestamp, seed, _)| (timestamp, seed),
+        );
         let host = Host {
+            operation,
             view,
             trace: trace.clone(),
             contract: self.versions.get(&call.deployment).cloned().flatten(),

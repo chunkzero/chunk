@@ -22,6 +22,7 @@ const MAX_LIVE: usize = 8;
 const MAX_RECORDS: usize = 32;
 
 struct Record {
+    operation_prefix: String,
     call: Call,
     fingerprint: [u8; 32],
     writable: bool,
@@ -72,8 +73,16 @@ impl Actions {
         }
     }
 
-    fn admit(&mut self, id: &ActionId) -> Result<()> {
-        if id.incarnation != self.incarnation || id.sequence <= self.retired {
+    pub fn capacity(&self) -> bool {
+        self.records.values().filter(|record| record.worker.is_some()).count() < MAX_LIVE
+    }
+
+    pub fn job_id(&self, job: &chunk_store::Job) -> ActionId {
+        ActionId { incarnation: format!("{}:job:{}", self.incarnation, job.id), sequence: u64::from(job.attempt) }
+    }
+
+    fn admit(&mut self, id: &ActionId, trusted: bool) -> Result<()> {
+        if !trusted && (id.incarnation != self.incarnation || id.sequence <= self.retired) {
             return Err(Error::ActionOutcomeUnknown);
         }
         if self.records.values().filter(|record| record.worker.is_some()).count() >= MAX_LIVE {
@@ -86,10 +95,12 @@ impl Actions {
                 .find(|(_, record)| record.worker.is_none())
                 .map(|(id, _)| id.clone())
                 .ok_or(Error::Busy)?;
-            self.retired = self.retired.max(retired.sequence);
+            if retired.incarnation == self.incarnation {
+                self.retired = self.retired.max(retired.sequence);
+            }
             self.records.remove(&retired);
         }
-        if id.sequence <= self.retired {
+        if !trusted && id.sequence <= self.retired {
             return Err(Error::ActionOutcomeUnknown);
         }
         Ok(())
@@ -108,76 +119,90 @@ impl Drop for Actions {
 }
 
 impl Actor {
-    pub(super) fn start_action(&mut self, id: ActionId, mut call: Call, hook: bool, reply: Request<ActionHandle>) {
+    pub(super) fn start_action(&mut self, id: ActionId, call: Call, hook: bool, reply: Request<ActionHandle>) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        let result = (|| {
-            if hook {
-                self.check_deployment(&call.deployment)?;
-            } else {
-                self.normalize_call(&mut call)?;
+        let result = self.launch_action(id, call, None, hook);
+        reply.finish(result);
+    }
+
+    pub(super) fn launch_action(
+        &mut self,
+        id: ActionId,
+        mut call: Call,
+        durable_identity: Option<String>,
+        hook: bool,
+    ) -> Result<ActionHandle> {
+        if hook {
+            self.check_deployment(&call.deployment)?;
+        } else {
+            self.normalize_scoped_call(&mut call, durable_identity.is_some())?;
+        }
+        let deployment = self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Contract)?.clone();
+        let (function, writable) = if hook {
+            crate::hooks::resolve(&deployment, &call)?
+        } else {
+            (deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone(), true)
+        };
+        if function.kind != FunctionKind::Action {
+            return Err(Error::Contract);
+        }
+        let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
+            "action-v1",
+            hook,
+            call.deployment.as_str(),
+            &call.function,
+            call.arguments.as_str(),
+            call.caller.as_str(),
+        ))?)
+        .into();
+        if let Some(record) = self.actions.records.get(&id) {
+            if record.fingerprint != fingerprint {
+                return Err(Error::OperationMismatch);
             }
-            let deployment =
-                self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Contract)?.clone();
-            let (function, writable) = if hook {
-                crate::hooks::resolve(&deployment, &call)?
-            } else {
-                (deployment.functions.get(&call.function).ok_or(Error::Unknown)?.clone(), true)
-            };
-            if function.kind != FunctionKind::Action {
-                return Err(Error::Contract);
-            }
-            let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
-                "action-v1",
-                hook,
-                call.deployment.as_str(),
-                &call.function,
-                call.arguments.as_str(),
-                call.caller.as_str(),
-            ))?)
-            .into();
-            if let Some(record) = self.actions.records.get(&id) {
-                if record.fingerprint != fingerprint {
-                    return Err(Error::OperationMismatch);
-                }
-                let scope = record.scope.upgrade().unwrap_or_else(|| Arc::new(Scope(record.cancellation.clone())));
-                return Ok(ActionHandle { id, status: record.status.subscribe(), scope });
-            }
-            self.actions.admit(&id)?;
-            let cancellation = Cancellation::default();
-            let scope = Arc::new(Scope(cancellation.clone()));
-            let (status, receiver) = watch::channel(ActionStatus::Running);
-            let events = self.actions.events.clone();
-            let deadline =
-                std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) };
-            let grants = if hook { Arc::default() } else { self.actions.effects.grants(&call.deployment) };
-            let host = Host {
-                effects: Arc::new(crate::effects::ScopedEffects {
-                    invocation: id.to_string(),
-                    grants: grants.clone(),
-                    slots: self.actions.external_slots.clone(),
-                    cancellation: cancellation.clone(),
-                    deadline,
-                }),
-                id: id.clone(),
-                events: events.clone(),
-                slots: self.actions.slots.clone(),
+            let scope = record.scope.upgrade().unwrap_or_else(|| Arc::new(Scope(record.cancellation.clone())));
+            return Ok(ActionHandle { id, status: record.status.subscribe(), scope });
+        }
+        self.actions.admit(&id, durable_identity.is_some())?;
+        let seed = durable_identity.as_ref().map_or(id.sequence, |identity| {
+            u64::from_be_bytes(Sha256::digest(identity.as_bytes())[..8].try_into().expect("digest prefix"))
+        });
+        let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
+        let invocation_identity = durable_identity.unwrap_or_else(|| id.to_string());
+        let cancellation = Cancellation::default();
+        let scope = Arc::new(Scope(cancellation.clone()));
+        let (status, receiver) = watch::channel(ActionStatus::Running);
+        let events = self.actions.events.clone();
+        let deadline =
+            std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) };
+        let grants = if hook { Arc::default() } else { self.actions.effects.grants(&call.deployment) };
+        let host = Host {
+            effects: Arc::new(crate::effects::ScopedEffects {
+                invocation: invocation_identity.clone(),
+                grants: grants.clone(),
+                slots: self.actions.external_slots.clone(),
                 cancellation: cancellation.clone(),
-            };
-            let invocation = ActionInvocation {
-                id: id.to_string(),
-                export: function.export,
-                arguments: call.arguments.clone(),
-                caller: call.caller.clone(),
-                timestamp: self.view.base.timestamp,
-                seed: id.sequence,
                 deadline,
-            };
-            let worker_id = id.clone();
-            let worker_cancellation = cancellation.clone();
-            let worker = std::thread::Builder::new().name("chunk-action".into()).spawn(move || {
+            }),
+            id: id.clone(),
+            events: events.clone(),
+            slots: self.actions.slots.clone(),
+            cancellation: cancellation.clone(),
+        };
+        let invocation = ActionInvocation {
+            id: invocation_identity,
+            export: function.export,
+            arguments: call.arguments.clone(),
+            caller: call.caller.clone(),
+            timestamp: self.view.base.timestamp,
+            seed,
+            deadline,
+        };
+        let worker_id = id.clone();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::Builder::new().name("chunk-action".into()).spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Arc<str>> {
                     let mut engine = Engine::new()?;
                     let deployment_id = DeploymentId::new(&deployment.id)?;
@@ -202,21 +227,20 @@ impl Actor {
                 worker_cancellation.cancel();
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });
             })?;
-            self.actions.records.insert(
-                id.clone(),
-                Record {
-                    call,
-                    fingerprint,
-                    writable,
-                    status,
-                    scope: Arc::downgrade(&scope),
-                    cancellation,
-                    worker: Some(worker),
-                },
-            );
-            Ok(ActionHandle { id, status: receiver, scope })
-        })();
-        reply.finish(result);
+        self.actions.records.insert(
+            id.clone(),
+            Record {
+                operation_prefix,
+                writable,
+                call,
+                fingerprint,
+                status,
+                scope: Arc::downgrade(&scope),
+                cancellation,
+                worker: Some(worker),
+            },
+        );
+        Ok(ActionHandle { id, status: receiver, scope })
     }
 
     pub(super) fn finish_action(&mut self, id: &ActionId, result: Result<Arc<str>>) {
@@ -250,6 +274,7 @@ impl Actor {
             reply.finish(Err(Error::Invalid("hook has read-only transaction capabilities")));
             return;
         }
+        let operation = format!("{}/{sequence}", record.operation_prefix);
         let mut call = Call { function, arguments, ..record.call.clone() };
         if let Err(error) = call.validate().and_then(|()| self.normalize_scoped_call(&mut call, true)) {
             reply.finish(Err(error));
@@ -257,7 +282,7 @@ impl Actor {
         }
         match mode {
             Mode::Query => self.query(&call, reply),
-            Mode::Mutation => self.mutate(format!("action/{id}/{sequence}"), call, reply),
+            Mode::Mutation => self.mutate(operation, call, reply),
         }
     }
 }
