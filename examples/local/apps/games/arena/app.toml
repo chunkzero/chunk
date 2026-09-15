@@ -1,8 +1,0 @@
-domain = "games/arena"
-
-[runtime]
-capacity = 16
-
-[sessions.large]
-machine_profile = "large"
-capacity = 32

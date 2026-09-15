@@ -31,7 +31,7 @@ object ExampleSessions {
 
     fun lobby() = LobbySession()
 
-    fun arena(): Session = ExampleSession("Arena", Block.SANDSTONE)
+    fun arena(label: String): Session = ExampleSession(label, Block.SANDSTONE)
 }
 
 class LobbySession :
