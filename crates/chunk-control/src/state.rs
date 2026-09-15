@@ -16,6 +16,8 @@ pub(crate) struct State {
     pub players: BTreeMap<String, PlayerState>,
     pub claims: BTreeMap<String, Claim>,
     #[serde(default)]
+    pub method_sequence: u64,
+    #[serde(default)]
     pub moves: BTreeMap<String, MoveIntent>,
     #[serde(default)]
     pub drains: BTreeMap<String, Drain>,

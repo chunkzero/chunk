@@ -8,6 +8,8 @@ import chunk.v1.GameplayGrpc
 import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerSetup
 import chunk.v1.GameplayOuterClass.PlayerWithdrawal
+import chunk.v1.SessionMethodsOuterClass.SessionMethodCaller
+import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest
 import chunk.v1.Supervision.DeliveryPhase
 import chunk.v1.Supervision.SessionCommand
 import dev.chunkzero.runtime.bootstrap.FlatSession
@@ -243,6 +245,25 @@ class GameplayLifecycleTest {
             val first = delivery("a", 1)
             val firstSocket = connect(first)
             arrive(firstSocket, first.operationId)
+            val methodCaller =
+                SessionMethodRequest
+                    .newBuilder()
+                    .setSession(first.session)
+                    .setSessionGeneration(1)
+                    .setCaller(
+                        SessionMethodCaller
+                            .newBuilder()
+                            .setDeliveryOperationId(first.operationId)
+                            .setPlayer(first.player)
+                            .setOwnerGeneration(1)
+                            .setMembershipGeneration(1),
+                    ).build()
+            service.authorizeMethodCaller(methodCaller)
+            assertThrows(IllegalArgumentException::class.java) {
+                service.authorizeMethodCaller(
+                    methodCaller.toBuilder().setCaller(methodCaller.caller.toBuilder().setOwnerGeneration(2)).build(),
+                )
+            }
             val oldPlayer = MinecraftServer.getConnectionManager().onlinePlayers.single()
             val destination = delivery("b", 2)
             assertThrows(IllegalStateException::class.java) { connect(destination) }
@@ -255,6 +276,7 @@ class GameplayLifecycleTest {
                     .build()
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
+            assertThrows(IllegalArgumentException::class.java) { service.authorizeMethodCaller(methodCaller) }
             assertTrue(oldPlayer.isRemoved)
             assertTrue(oldPlayer in closedPlayers)
             assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())

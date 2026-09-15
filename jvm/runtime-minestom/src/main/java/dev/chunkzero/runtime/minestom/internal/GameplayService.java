@@ -8,6 +8,7 @@ import chunk.v1.GameplayOuterClass.PlayerDelivery;
 import chunk.v1.GameplayOuterClass.PlayerPreparation;
 import chunk.v1.GameplayOuterClass.PlayerSetup;
 import chunk.v1.GameplayOuterClass.PlayerWithdrawal;
+import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest;
 import chunk.v1.Supervision.DeliveryInventory;
 import chunk.v1.Supervision.DeliveryPhase;
 import chunk.v1.Supervision.SessionInventory;
@@ -213,6 +214,15 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                     Status.FAILED_PRECONDITION
                             .withDescription("Delivery rejected")
                             .asRuntimeException());
+        }
+    }
+
+    public void authorizeMethodCaller(SessionMethodRequest request) {
+        synchronized (preparations) {
+            var prepared = preparations.get(request.getCaller().getDeliveryOperationId());
+            if (prepared == null || !prepared.authorizes(request)) {
+                throw new IllegalArgumentException("Stale session method caller");
+            }
         }
     }
 

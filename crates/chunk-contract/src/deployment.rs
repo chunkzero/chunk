@@ -52,6 +52,8 @@ pub struct Deployment {
     pub functions: BTreeMap<String, Function>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domains: Option<DomainManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_methods: Option<crate::SessionMethods>,
 }
 
 impl Deployment {
@@ -71,6 +73,9 @@ impl Deployment {
             return Err("deployment size limit");
         }
         crate::validate(&self.tables)?;
+        if let Some(methods) = &self.session_methods {
+            methods.validate()?;
+        }
         let mut paths = BTreeSet::new();
         let mut exports = BTreeSet::new();
         for (path, function) in &self.functions {
@@ -152,6 +157,7 @@ mod tests {
     fn deployment() -> Deployment {
         Deployment {
             domains: None,
+            session_methods: None,
             contract_version: CONTRACT_VERSION,
             runtime_profile: RuntimeProfile::TransactionalV1,
             id: "v1".into(),

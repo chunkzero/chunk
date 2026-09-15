@@ -54,3 +54,34 @@ are admission bounds, not a measured memory/tick packing policy. Cross-proxy tra
 rollout and directory replication remain outside this local implementation.
 
 Focused tests: `cargo test -p chunk-control`.
+
+## Captured session methods
+
+`capture_session` accepts an exact arrived `ClaimIdentity`. `prepare_session_method` checks the immutable deployment's
+method contract and freezes the target, arguments, deadline and a new operation ID. `call_session_method` sends or polls
+that prepared operation through the authenticated process endpoint. These are trusted Rust APIs; an authored TypeScript
+method reference supplies no player authority.
+
+The operation sequence is allocated durably by control. Retries must reuse the same `PreparedSessionMethod`; preparing
+again creates a new operation. The JVM caches exact requests/results for up to five minutes, subject to 4096 records and
+a 16 MiB aggregate budget. A monotonic retirement floor prevents evicted operation IDs from running again; late
+out-of-order operations below the floor conservatively return unknown. Process identity and generation fence restarts.
+
+Arguments and results each have a 48 KiB UTF-8 JSON limit. The existing wire rules bound nesting to 32 levels, require
+finite numbers and limit integral values to ±9,007,199,254,740,991. Deadlines range from 1 ms to 30 seconds. At most 128
+method tasks may occupy the tick queue, including canceled work waiting for that queue to drain. Calls recheck exact
+session and player membership before executing; departure, finish or cancellation prevents queued gameplay from
+starting.
+
+| Result    | Meaning                                                                                       |
+| --------- | --------------------------------------------------------------------------------------------- |
+| Accepted  | Queued; gameplay may not have started.                                                        |
+| Completed | The validated result is available.                                                            |
+| Cancelled | Gameplay definitively did not start.                                                          |
+| Failed    | Gameplay threw or returned an invalid result; it may have changed state.                      |
+| Unknown   | Execution or its result cannot be confirmed. Retry the same prepared operation to learn more. |
+
+A synchronous method already running on the tick thread cannot be forcibly interrupted safely. Cancellation or a missed
+deadline then returns unknown, and a later poll may retrieve the completed result. Neither failure nor unknown implies
+rollback. These calls are transient gameplay effects. A durable job integration will need a persisted invocation record
+and recovery for outcomes that remain unknown; the current prepared-operation API is in memory.

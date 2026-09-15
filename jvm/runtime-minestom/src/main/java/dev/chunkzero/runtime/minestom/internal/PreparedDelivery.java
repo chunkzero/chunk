@@ -4,6 +4,7 @@ import chunk.v1.Common.Identity;
 import chunk.v1.GameplayOuterClass.PlayerDelivery;
 import chunk.v1.GameplayOuterClass.PlayerPreparation;
 import chunk.v1.GameplayOuterClass.PlayerSetup;
+import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest;
 import chunk.v1.Supervision.DeliveryInventory;
 import chunk.v1.Supervision.DeliveryPhase;
 import chunk.v1.Supervision.SessionPhase;
@@ -65,6 +66,22 @@ final class PreparedDelivery {
 
     PlayerDelivery getDelivery() {
         return delivery;
+    }
+
+    synchronized boolean authorizes(SessionMethodRequest request) {
+        var caller = request.getCaller();
+        return !closed
+                && arrived
+                && player != null
+                && player.isOnline()
+                && connection != null
+                && connection.isOnline()
+                && session.getPhase() == SessionPhase.SESSION_PHASE_READY
+                && delivery.getSession().equals(request.getSession())
+                && delivery.getSessionGeneration() == request.getSessionGeneration()
+                && delivery.getPlayer().equals(caller.getPlayer())
+                && delivery.getMembershipGeneration() == caller.getMembershipGeneration()
+                && delivery.getOwnerGeneration() == caller.getOwnerGeneration();
     }
 
     synchronized boolean owns(PlayerConnection current) {

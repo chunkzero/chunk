@@ -9,7 +9,9 @@ mod placement;
 mod process;
 mod reconcile;
 mod rpc;
+mod session_methods;
 mod state;
+pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
     collections::BTreeMap,

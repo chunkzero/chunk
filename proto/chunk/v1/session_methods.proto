@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "chunk/v1/common.proto";
+import "chunk/v1/supervision.proto";
+
+// Internal control-authority calls on the authenticated process endpoint.
+service SessionMethods {
+  rpc Call(SessionMethodRequest) returns (SessionMethodResult);
+  rpc Cancel(SessionMethodRequest) returns (SessionMethodResult);
+}
+
+message SessionMethodCaller {
+  string delivery_operation_id = 1;
+  PlayerRef player = 2;
+  uint64 membership_generation = 3;
+  uint64 owner_generation = 4;
+}
+
+message SessionMethodRequest {
+  ProcessIdentity identity = 1;
+  string operation_id = 2;
+  uint64 sequence = 3;
+  SessionRef session = 4;
+  uint64 session_generation = 5;
+  string session_type = 6;
+  string method = 7;
+  string arguments_json = 8;
+  SessionMethodCaller caller = 9;
+  uint64 issued_at_ms = 10;
+  uint64 deadline_ms = 11;
+}
+
+enum SessionMethodPhase {
+  SESSION_METHOD_PHASE_UNSPECIFIED = 0;
+  // Accepted into the queue; gameplay may not have started.
+  SESSION_METHOD_PHASE_ACCEPTED = 1;
+  SESSION_METHOD_PHASE_COMPLETED = 2;
+  // Definitively canceled before gameplay started.
+  SESSION_METHOD_PHASE_CANCELLED = 3;
+  // Gameplay threw or returned an invalid result; it may have changed state.
+  SESSION_METHOD_PHASE_FAILED = 4;
+  // Execution or its outcome cannot be confirmed. Never implies rollback.
+  SESSION_METHOD_PHASE_UNKNOWN = 5;
+}
+
+message SessionMethodResult {
+  string operation_id = 1;
+  SessionMethodPhase phase = 2;
+  string result_json = 3;
+  Error error = 4;
+}
