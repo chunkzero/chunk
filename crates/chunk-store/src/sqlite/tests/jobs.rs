@@ -6,6 +6,9 @@ fn target() -> Deployment {
     Deployment {
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
+        domains: None,
+        session_methods: None,
+        destinations: None,
         id: "v1".into(),
         source: "export function work() { return null; }".into(),
         tables: crate::tests::schema(),
