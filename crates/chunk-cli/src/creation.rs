@@ -32,8 +32,8 @@ const COMMON: &[(&str, &str)] = &[
     (".gitignore", include_str!("../templates/common/gitignore")),
     ("server/schema/index.ts", include_str!("../templates/common/schema.ts")),
     ("server/greetings.ts", include_str!("../templates/common/greetings.ts")),
-    ("server/proxy.ts", include_str!("../templates/common/proxy.ts")),
-    ("apps/lobby/app.toml", include_str!("../templates/common/app.toml")),
+    ("apps/scope.ts", include_str!("../templates/common/scope.ts")),
+    ("apps/lobby/app.ts", include_str!("../templates/common/app.ts")),
 ];
 const WRAPPER: &[(&str, &[u8])] = &[
     ("gradlew", include_bytes!("../../../gradlew")),

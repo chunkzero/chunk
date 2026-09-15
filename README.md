@@ -10,7 +10,7 @@ main function and embed the generic Chunk lifecycle library plus the Minestom ad
 JVMs directly, without a per-server sidecar. The initial embedded runtime uses `deno_core`/V8 with language APIs and
 pure-JS packages, without Node compatibility.
 
-Apps keep `app.toml` metadata, their own Gradle builds, and Java or Kotlin gameplay. Each app JAR registers one
+Apps keep `app.ts` declarations, their own Gradle builds, and Java or Kotlin gameplay. Ancestor `scope.ts` files supply inherited server policy. Each app JAR registers one
 `SessionProvider` that creates fresh session state. The build generates typed backend clients and packages all apps,
 shared dependencies, backend code and assets into one portable release.
 
@@ -136,7 +136,7 @@ unused.
 Run `just toolchain` before using the build command from a checkout. `just package-cli` creates a versioned SDK archive
 under `target/dist`; see [SDK distribution](docs/distribution.md) for installation, verification and publishing.
 Consumer builds need their project Gradle wrapper and an explicit Java toolchain. `chunk.toml` and immediate
-`apps/*/app.toml` files define the project; `chunk dev` requires `[local]` settings. Local state defaults to
+`apps/**/app.ts` files define the project; `chunk dev` requires `[local]` settings. Local state defaults to
 `PROJECT/.chunk/local`. Explicit `--output` and `--state` paths are relative to the working directory.
 
 To package the example without starting services, run `just toolchain`, then `target/debug/chunk build examples/local`.

@@ -60,7 +60,13 @@ internal fun readApps(
             require(id.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}"))) { "Invalid app ID: $id" }
             val path = requireNotNull(app["directory"]?.asString) { "App directory missing: $id" }
             val projectPath = requireNotNull(app["gradle_project"]?.asString) { "Gradle project missing: $id" }
-            require(path == "apps/$id" && projectPath == ":apps:$id") { "App inventory mapping mismatch: $id" }
+            val segments = path.split('/')
+            require(
+                segments.size >= 2 &&
+                    segments.first() == "apps" &&
+                    segments.drop(1).all { it.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}")) } &&
+                    projectPath == segments.joinToString(":", prefix = ":"),
+            ) { "App inventory mapping mismatch: $id" }
             require(directory.resolve(path).isDirectory) { "App directory missing: $path" }
             AppMetadata(
                 id,
@@ -69,5 +75,8 @@ internal fun readApps(
             )
         }
     require(apps.map { it.id.lowercase() }.distinct().size == apps.size) { "Duplicate app IDs in chunk inspect" }
+    require(apps.map { it.projectPath.lowercase() }.distinct().size == apps.size) {
+        "Duplicate app directories in chunk inspect"
+    }
     return apps.sortedBy { it.id }
 }

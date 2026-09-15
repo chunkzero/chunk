@@ -35,7 +35,9 @@ the JVM libraries from that checkout. Use the CLI and checkout from the same rev
 an unpublished SDK can be configured with the `chunk.mavenRepository` Gradle property.
 
 Gameplay lives in `apps/lobby/src/main/`. Each `SessionProvider` creates a fresh session; `@SessionType("default")`
-registers it as `lobby/default`. Edit `server/greetings.ts` to change the typed greeting. `server/proxy.ts` owns
-admission and routing. The root `server/schema/index.ts` explicitly composes backend tables; it starts empty. Add apps
-as immediate `apps/NAME/` directories with `app.toml` and `build.gradle.kts`; the settings plugin discovers them
-automatically.
+registers it as `lobby/default`. Edit `server/greetings.ts` to change the typed greeting. `apps/scope.ts` owns inherited
+server policy and initial routing. `apps/lobby/app.ts` declares the stable app ID, capacity, destinations and optional
+app-local hooks/commands. Import generated references from `#chunk/apps` when selecting a destination. The root
+`server/schema/index.ts` explicitly composes backend tables; it starts empty. Add apps anywhere under `apps/` with an
+`app.ts` and `build.gradle.kts`; ancestor `scope.ts` files supply inherited policy. The settings plugin discovers the
+Gradle projects automatically, independently of the explicit app IDs.

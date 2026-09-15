@@ -63,6 +63,7 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
         return Err(io::Error::other("published backend deployment differs from release"));
     }
     control.session_methods = backend.session_methods;
+    control.session_configurations = backend.session_configurations;
     control.destinations = backend.destinations;
     fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
     tracing::info!(deployment = %built.release.id, "local project packaged");
@@ -104,6 +105,7 @@ fn control_config(
     Ok(chunk_control::Config {
         destinations: None,
         session_methods: None,
+        session_configurations: None,
         apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
         deployment: chunk_proto::v1::DeploymentRef {
             environment: local.environment.clone(),
