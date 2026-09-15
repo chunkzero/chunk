@@ -74,6 +74,41 @@ listeners, tasks, resources and instances. A process retains at most 256 session
 operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a host
 deadline terminates the process; they never produce a false withdrawal acknowledgment.
 
+## Components
+
+Declare app-local dependencies with public static `@Component` factories. The app build generates direct calls and
+validates exact return/parameter types, missing dependencies, duplicates, cycles, and process-to-session captures.
+Factories run lazily on the tick thread; constructor injection, qualifiers, and runtime class scanning are unsupported.
+
+```java
+public final class Services {
+    @Component(Component.Scope.PROCESS)
+    public static Rules rules() {
+        return new Rules();
+    }
+
+    @Component(Component.Scope.SESSION)
+    public static Scores scores(Rules rules, SessionScope scope) {
+        return new Scores(rules, scope.getId());
+    }
+}
+
+// In onCreate, onJoin, or scope.onTick:
+Scores scores = scope.component(Scores.class);
+```
+
+Process components are shared by this app process; session components are cached independently for each session. Session
+factories may request `SessionScope` and its bound `BackendSession` as borrowed parameters. Process factories cannot
+depend on either capability or on session components. Use declared parameters for dependencies: factories and close
+callbacks cannot re-enter component lookup or disposal. Factories must return their own values, never a borrowed session
+capability or an already owned closeable. Do not register returned closeables with `scope.own` again.
+
+The registry closes successful `AutoCloseable` results in reverse construction order. A failed factory rolls back only
+the dependencies created for that lookup, keeping existing shared components available. Session disposal closes its
+components before its backend client; process shutdown closes all remaining session components before shared process
+components. Independent cleanup continues after a close failure, with errors retained as suppressed exceptions.
+Factories should remain synchronous and short; application side effects outside owned resources are not rolled back.
+
 Lifecycle notifications live in `dev.chunkzero.runtime.minestom.event`. `SessionEvent` exposes `getSession()`, the
 owning `SessionScope` with its ID and generation. `SessionJoinEvent` and `SessionLeaveEvent` also implement Minestom's
 `PlayerEvent`. Subscribe to concrete event classes globally to observe all sessions in the JVM:

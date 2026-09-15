@@ -8,6 +8,7 @@ import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.minestom.event.SessionCreateEvent;
 import dev.chunkzero.runtime.minestom.event.SessionJoinEvent;
 import dev.chunkzero.runtime.minestom.event.SessionLeaveEvent;
+import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.EventDispatcher;
@@ -37,6 +38,7 @@ public final class SessionManager {
     private final TickExecutor ticks;
     private final Map<String, SessionRegistration> factories;
     private final @Nullable BiFunction<String, String, BackendSession> backend;
+    private final ComponentRegistry components;
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
@@ -58,9 +60,18 @@ public final class SessionManager {
             TickExecutor ticks,
             Map<String, SessionRegistration> factories,
             @Nullable BiFunction<String, String, BackendSession> backend) {
+        this(ticks, factories, backend, new ComponentRegistry(List.of()));
+    }
+
+    SessionManager(
+            TickExecutor ticks,
+            Map<String, SessionRegistration> factories,
+            @Nullable BiFunction<String, String, BackendSession> backend,
+            ComponentRegistry components) {
         this.ticks = ticks;
         this.factories = Map.copyOf(factories);
         this.backend = backend;
+        this.components = components;
     }
 
     public TickExecutor getTicks() {
@@ -168,7 +179,8 @@ public final class SessionManager {
                             command.getGeneration(),
                             ticks,
                             this::finish,
-                            registration.backend(command.getSession().getId(), backend));
+                            registration.backend(command.getSession().getId(), backend),
+                            components);
         }
 
         public SessionCommand getCommand() {

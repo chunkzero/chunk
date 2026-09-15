@@ -95,4 +95,10 @@ tasks.test {
     )
     systemProperty("chunk.plugin.version", project.version)
     systemProperty("chunk.kotlin.version", libs.versions.kotlin.get())
+    systemProperty(
+        "chunk.test.repository",
+        layout.projectDirectory
+            .dir("../..")
+            .asFile.absolutePath,
+    )
 }

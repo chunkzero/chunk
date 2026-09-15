@@ -4,6 +4,7 @@ import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.OperationId;
 import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent;
 import dev.chunkzero.runtime.minestom.event.SessionEvent;
+import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.entity.Player;
@@ -40,6 +41,7 @@ public final class SessionScope {
     private final TickExecutor ticks;
     private final Supplier<CompletionStage<Void>> requestFinish;
     private final @Nullable BackendSession backend;
+    private final ComponentRegistry components;
     private final List<InstanceContainer> ownedInstances = new CopyOnWriteArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
     private final Map<Player, List<AutoCloseable>> playerResources = new IdentityHashMap<>();
@@ -54,11 +56,22 @@ public final class SessionScope {
             TickExecutor ticks,
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend) {
+        this(id, generation, ticks, requestFinish, backend, new ComponentRegistry(List.of()));
+    }
+
+    SessionScope(
+            String id,
+            long generation,
+            TickExecutor ticks,
+            Supplier<CompletionStage<Void>> requestFinish,
+            @Nullable BackendSession backend,
+            ComponentRegistry components) {
         this.id = id;
         this.generation = generation;
         this.ticks = ticks;
         this.requestFinish = requestFinish;
         this.backend = backend;
+        this.components = components;
         events =
                 EventNode.event(
                         "session-" + id + "-" + generation,
@@ -136,6 +149,16 @@ public final class SessionScope {
         var resource = own(factory.get());
         sharedResources.put(type, resource);
         return resource;
+    }
+
+    /**
+     * Resolves an exact declared component type on the tick thread. Session factories create one
+     * instance per scope; process factories share one instance across this app's sessions.
+     * Closeable results are owned automatically, including rollback of a failed factory graph.
+     */
+    public <T> T component(Class<T> type) {
+        return resource(ComponentRegistry.SessionComponents.class, () -> components.session(this))
+                .get(type);
     }
 
     void releasePlayer(Player player) throws Exception {
