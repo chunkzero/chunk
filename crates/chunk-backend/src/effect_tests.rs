@@ -104,6 +104,8 @@ fn deployment(id: &str) -> Deployment {
         .map(|name| (name.into(), Field { schema: Schema::String, optional: name == "body" || name == "method" }))
         .collect();
     Deployment {
+        domains: None,
+        session_methods: None,
         contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:id.into(),tables:BTreeMap::new(),
         source:r"
 export async function run(ctx,args) { return JSON.stringify(await ctx.http(args.binding,{path:args.path,method:args.method??'GET',body:args.body})); }
