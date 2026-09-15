@@ -79,3 +79,37 @@ evaluation. Definite rejection and restart preserve these inputs; committed retr
 before execution and can cross deployment versions. New operations add a metadata durability step on the commit thread,
 which can queue behind a pending commit. Concurrent prepared operations still use the ordered speculative pipeline.
 Retry contexts are retained with operation history; automatic expiry is not implemented.
+
+## Bounded actions
+
+The embedded SDK declares `action` / `internalAction` separately from transactions. Its `ActionContext` contains
+`caller`, `invocationId`, `runQuery(reference, args)`, `runMutation(reference, args)`, and `sleep(milliseconds)`. It has
+no `db` capability. Generated TypeScript exports `api` and `internal` references; internal functions remain unavailable
+to public ingress. JVM transaction clients omit actions; platform code invokes them through the Rust backend API until
+an action transport is provided.
+
+Call `allocate_action_id()` before `start_action(id, call)` and keep that ID when acceptance is uncertain. Acceptance
+starts at most one invocation per ID and retains its deployment. Repeating an identical request attaches to the same
+scope and result; changing the caller, deployment, function or arguments fails. The returned `ActionHandle` exposes
+status, cancellation, and an async outcome. Dropping its last clone cancels the scope. The backend retains 32 status
+records and rejects retired IDs instead of executing them again; allocating IDs long before submitting them can result
+in retirement. A new backend incarnation makes old IDs unknown. Actions are never automatically retried.
+
+Actions run in separate bounded workers with fresh V8 isolates, so sleep, transaction waits and CPU work do not occupy
+the foreground environment actor. Limits are eight live actions, 32 MiB managed heap and separately 32 MiB ArrayBuffer
+backing storage per action, 30 seconds from acceptance (initialization also has the one-second module budget), 256
+effects per invocation, eight pending effects per invocation, and 32 pending action transaction requests per
+environment. Inputs, effect replies and results are each at most 1 MiB. Status records retain bounded request/result
+payloads. These logical limits exclude V8/native overhead. Shutdown cancels workers and joins them after closing their
+reply path.
+
+Every nested query/mutation goes through the original environment's actor against a fresh snapshot. The host captures
+the original caller and deployment; arguments cannot replace either authority. Internal references are permitted through
+this trusted path. A mutation receives the durable operation ID `action/<invocationId>/<effect-sequence>`; each effect
+has a distinct increasing sequence. No snapshot or transaction is held over a sleep. Deployment release returns `Busy`
+while an action references it.
+
+Cancellation, failure, backend loss or a missing reply can follow a committed mutation. They do not roll back earlier
+effects. After process loss the action outcome is explicitly unknown, while completed mutations retain their ordinary
+durable outcomes. Recover those outcomes under their derived operation IDs where necessary; do not restart the action
+with a new ID to resolve uncertainty. Durable job scheduling and external I/O are separate layers.

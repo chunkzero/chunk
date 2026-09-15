@@ -233,3 +233,25 @@ createHook("player.login", () => ({ allow: true }), { followPlayer: true });
 createHook("arbitrary.event", () => null);
 createHook("player.beforeMove", ({ sourceDomain, destination }) => ({ allow: sourceDomain !== destination.key }));
 createHook("domain.enter", () => {}, { followPlayer: true });
+const { action } = await import("../src/index.ts");
+const countReference = {
+  path: "counts/read",
+  kind: "query" as const,
+  arguments: v.object({ count: v.integer() }),
+  result: v.integer(),
+};
+action({
+  args: {},
+  returns: v.integer(),
+  handler: async (ctx) => {
+    // @ts-expect-error actions cannot retain database transactions
+    void ctx.db;
+    // @ts-expect-error query references cannot invoke mutations
+    await ctx.runMutation(countReference, { count: 1 });
+    // @ts-expect-error argument types come from the reference
+    await ctx.runQuery(countReference, { count: "wrong" });
+    const result: number = await ctx.runQuery(countReference, { count: 1 });
+    await ctx.sleep(10);
+    return result;
+  },
+});

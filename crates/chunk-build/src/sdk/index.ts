@@ -25,6 +25,8 @@ export type {
   HookEvent,
   HookOptions,
   HookDefinition,
+  AsyncContext,
+  ActionContext,
   FunctionDefinition,
   FunctionBuilder,
   FunctionReference,
@@ -37,4 +39,4 @@ export type MutationContext = SchemaMutationContext<Tables>;
 export type Doc<N extends keyof Tables & string> = Document<Tables, N>;
 export type Id<N extends keyof Tables & string> = TableId<N>;
 
-export const { query, mutation, internalQuery, internalMutation } = defineFunctions(schema);
+export const { action, internalAction, query, mutation, internalQuery, internalMutation } = defineFunctions(schema);
