@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "backend",
         "session_methods",
         "hooks",
+        "commands",
     ]
     .map(|name| format!("{root}/chunk/v1/{name}.proto"));
     println!("cargo:rerun-if-changed={root}");
