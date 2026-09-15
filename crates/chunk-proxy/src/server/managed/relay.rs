@@ -26,17 +26,26 @@ pub(super) async fn until<S, I, T>(
     settings: &mut ConfigurationClientInformation,
     ready: impl Future<Output = T>,
     mut receiving: bool,
+    mut commands: Option<&mut super::commands::Commands>,
 ) -> io::Result<T>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     I: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::pin!(ready);
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         tokio::select! {
             result = &mut ready => return Ok(result),
+            _ = refresh.tick() => { if let Some(commands) = &mut commands { commands.refresh(); } }
+            output = async { match &mut commands { Some(commands) => commands.receive().await, None => std::future::pending().await } } => {
+                if let Some(commands) = &mut commands {
+                    timeout(RPC_TIMEOUT, commands.publish(output, public)).await.map_err(io::Error::other)??;
+                }
+            }
             frame = public.read_frame(INPUT_LIMIT), if receiving => {
                 let frame = frame?;
+                if let Some(commands) = &commands && commands.input(&frame)? { continue; }
                 retain_settings(&frame, settings)?;
                 if let Err(error) = timeout(RPC_TIMEOUT, internal.write_body(&frame)).await.map_err(io::Error::other).and_then(|result| result) {
                     let _ = configuration::disconnect(public, 0x20, "Gameplay server unavailable").await;
@@ -51,7 +60,14 @@ where
                         return Err(error);
                     }
                 };
-                timeout(RPC_TIMEOUT, public.write_body(&frame)).await.map_err(io::Error::other)??;
+                let replacement = if VarInt::decode(&mut frame.as_ref()).map_err(invalid_data)?.0 == chunk_protocol::commands::CommandTree::ID {
+                    commands.as_mut().map(|commands| commands.tree(decode_packet(&frame).map_err(invalid_data)?)).transpose()?
+                } else { None };
+                if let Some(replacement) = replacement {
+                    timeout(RPC_TIMEOUT, public.write_encoded(&replacement)).await.map_err(io::Error::other)??;
+                } else {
+                    timeout(RPC_TIMEOUT, public.write_body(&frame)).await.map_err(io::Error::other)??;
+                }
                 receiving = true;
             }
         }
@@ -65,6 +81,7 @@ pub(super) async fn start_configuration<S, I>(
     public: &mut Transport<S>,
     internal: &mut Transport<I>,
     settings: &mut ConfigurationClientInformation,
+    commands: Option<&super::commands::Commands>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -76,6 +93,11 @@ where
         if VarInt::decode(&mut frame.as_ref()).map_err(invalid_data)?.0 == ConfigurationAcknowledged::ID {
             decode_packet::<ConfigurationAcknowledged>(&frame).map_err(invalid_data)?;
             return Ok(());
+        }
+        if let Some(commands) = commands
+            && commands.input(&frame)?
+        {
+            continue;
         }
         // Final source play acknowledgments can precede the configuration boundary.
         retain_settings(&frame, settings)?;

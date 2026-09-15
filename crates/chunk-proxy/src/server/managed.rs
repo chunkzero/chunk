@@ -1,3 +1,4 @@
+mod commands;
 mod relay;
 
 use std::{io, time::Duration};
@@ -70,7 +71,9 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
     let mut lifecycle = Lifecycle::new(platform.clone());
+    let mut commands = commands::Commands::new(platform).await?;
     loop {
+        commands.bind(&guard.claim, &assignment)?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
@@ -87,6 +90,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             &mut settings,
             Box::pin(arrive(&guard, identity.clone())),
             true,
+            Some(&mut commands),
         )
         .await?;
         if let Err(error) = arrival {
@@ -95,6 +99,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             return Err(error);
         }
         lifecycle.arrived(&guard.claim, &identity)?;
+        commands.arrived();
         tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.identity.as_ref().map_or("", |identity| identity.uuid.as_str()), "player arrived in managed session");
         let next = relay::until(
             &mut authenticated.transport,
@@ -102,11 +107,13 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             &mut settings,
             Box::pin(next_move(&guard, &identity, authenticated.protocol_version)),
             true,
+            Some(&mut commands),
         )
         .await??;
+        commands.configuration();
         timeout(
             Duration::from_secs(10),
-            relay::start_configuration(&mut authenticated.transport, &mut internal, &mut settings),
+            relay::start_configuration(&mut authenticated.transport, &mut internal, &mut settings, Some(&commands)),
         )
         .await
         .map_err(io::Error::other)??;

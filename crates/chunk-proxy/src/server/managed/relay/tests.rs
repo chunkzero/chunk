@@ -44,10 +44,10 @@ async fn cutover_discards_late_source_packets_and_eof_and_retains_settings_acros
         let server = tokio::spawn(async move {
             let mut settings = information();
             settings.view_distance = 2;
-            until(&mut public, &mut internal, &mut settings, prepared, true).await.unwrap().unwrap();
+            until(&mut public, &mut internal, &mut settings, prepared, true, None).await.unwrap().unwrap();
             stopped.send(()).unwrap();
             late.await.unwrap();
-            start_configuration(&mut public, &mut internal, &mut settings).await.unwrap();
+            start_configuration(&mut public, &mut internal, &mut settings, None).await.unwrap();
             drop(internal);
             let (destination, backend) = tokio::io::duplex(8192);
             let mut destination = Transport::new(destination);
@@ -113,6 +113,7 @@ async fn active_destination_failure_sends_a_play_disconnect() {
             &mut information(),
             std::future::pending::<()>(),
             true,
+            None,
         )
         .await
     });

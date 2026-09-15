@@ -1,7 +1,8 @@
 use std::{io, sync::Arc, time::Duration};
 
 use chunk_proto::v1::{
-    BackendQuery, SessionDemand, backend_client::BackendClient, local_control_client::LocalControlClient,
+    BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
+    local_control_client::LocalControlClient,
 };
 use chunk_protocol::{
     McString, encode_packet,
@@ -26,6 +27,7 @@ pub(super) struct Platform {
     pub cleanup: tokio_util::task::TaskTracker,
     pub proxy_id: String,
     pub control: LocalControlClient<Channel>,
+    pub commands: BackendCommandsClient<Channel>,
     backend: BackendClient<Channel>,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
@@ -37,6 +39,8 @@ impl Platform {
         Ok(Self {
             control: LocalControlClient::new(channel(&target.control.endpoint)?)
                 .max_decoding_message_size(8 * 1024 * 1024),
+            commands: BackendCommandsClient::new(channel(&target.backend.endpoint)?)
+                .max_decoding_message_size(1024 * 1024),
             backend: BackendClient::new(channel(&target.backend.endpoint)?),
             native: native::Native::new(&target.backend.endpoint)?,
             target,
