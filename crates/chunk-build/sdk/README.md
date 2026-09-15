@@ -229,9 +229,30 @@ need distinct explicit integer `order` values. `server.ping` returns `ServerStat
 
 Contexts expose `eventId`, `domain`, trusted `caller`, and typed `runQuery` calls. Player events also expose `player`
 and `runMutation`. Login receives a nullable `destination` because root admission precedes routing; before-move receives
-`sourceDomain` and `destination`. Disconnect receives `reason`. These declarations compile to a versioned manifest
-pinned with the backend release. Runtime admission and notification dispatch are separate work; this compiler surface
-alone does not activate hooks.
+`sourceDomain` and `destination`. Ping receives `host`; disconnect receives `reason`. Native local proxies resolve these
+handlers from the candidate deployment's immutable manifest. Initial admission runs root login once, root routing, then
+remaining ancestor login hooks. Moves rerun candidate ancestor login and before-move hooks before source withdrawal. A
+denied, failed, canceled, or expired decision cannot authorize delivery. Each admission attempt has a five-second bound.
+
+A hook can await `runQuery` to load profile/rank data before returning its decision. Every invocation receives fresh
+trusted context; loaded values are local to that handler. Subsequent hooks and the JVM callback receive no implicit
+cached context. Queries/mutations can use the existing `.withContext` provider and must revalidate current permissions.
+
+After confirmed arrival, connect notifications run once and enter notifications run ancestor-first. Successful moves
+emit only changed scopes: leave deepest-first, then enter ancestor-first. Each transition runs its handlers sequentially
+within one five-second notification budget. Default background work cancels at session cutover; `followPlayer` retains
+its originating deployment, domain, and caller generations until connection loss. Notifications are ephemeral, bounded
+to five seconds, and may fail without undoing admission. Persistent writes should deduplicate using `eventId` and
+handler identity when needed. Logical disconnect follows affirmative control ownership reconciliation; an old connection
+cannot disconnect a newer membership. Disconnect cleanup has a separate bounded scope and no live socket capability.
+
+The source stays active while admission and destination preparation run. Once the client acknowledges the configuration
+boundary, an ownership change or failed cutover can require disconnecting the client.
+
+Ping has read-only transaction authority and never provisions gameplay. Native hooks require the platform credential,
+which is separate from the application credential delivered to JVM processes. Missing authority or native hook failures
+fail closed. Fixed `shared/proxy/*` handlers remain supported for releases without a domain manifest. Typed player
+effects and session calls are added separately.
 
 Helper exports remain ordinary code. Hook descriptors require named exports in hook modules; default exports and
 descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client

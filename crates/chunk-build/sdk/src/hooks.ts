@@ -13,7 +13,7 @@ interface PlayerHookContext extends ReadHookContext {
   runMutation<A, R>(reference: FunctionReference<"mutation", A, R>, args: A): Promise<R>;
 }
 export interface HookContexts {
-  "server.ping": ReadHookContext;
+  "server.ping": ReadHookContext & { readonly host: string };
   "player.login": PlayerHookContext & { readonly destination: Readonly<Destination> | null };
   "player.route": PlayerHookContext;
   "player.beforeMove": PlayerHookContext & {

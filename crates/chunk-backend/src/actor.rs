@@ -190,7 +190,14 @@ impl Actor {
 
     fn request(&mut self, command: Command) {
         match command {
-            Command::StartAction { id, call, reply } => self.start_action(id, call, reply),
+            Command::DomainManifest { id, reply } => reply.finish(self.check_deployment(&id).and_then(|()| {
+                self.versions
+                    .get(&id)
+                    .and_then(Option::as_ref)
+                    .map(|deployment| deployment.domains.clone())
+                    .ok_or(Error::Contract)
+            })),
+            Command::StartAction { hook, id, call, reply } => self.start_action(id, call, hook, reply),
             Command::ActionStatus { id, caller, reply } => reply.finish(self.actions.status(&id, &caller)),
             Command::Deploy { deployment, reply } => {
                 if reply.cancellation.is_cancelled() {

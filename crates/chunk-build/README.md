@@ -58,7 +58,7 @@ An app can override `machine_profile` or `capacity` in `[runtime]`. Inspection r
 runtime metadata and validates profile references. Optional `[sessions.<id>]` tables override the app defaults for
 individual session types; release assembly rejects IDs absent from the compiled session catalog. Local capacity is 1–128
 players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. No second app list is needed. Unknown
-fields, including domains and redundant app names, are rejected.
+fields and redundant app names are rejected. Optional `domain` binds an app to a static `server/domains/` scope.
 
 The backend compiler can discover apps without a root `chunk.toml`. Public CLI commands require the root manifest.
 `chunk dev PROJECT` uses its local settings and each discovered app’s resolved requirements for session placement.

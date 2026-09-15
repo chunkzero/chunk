@@ -1,2 +1,4 @@
+domain = "games/lobby"
+
 [runtime]
 capacity = 16

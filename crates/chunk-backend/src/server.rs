@@ -1,5 +1,5 @@
 //! Embeddable backend transport and storage lifecycle.
-use crate::{Backend, Service};
+use crate::{Backend, HookService, Service};
 use chunk_contract::{BackendConnection, Deployment};
 use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
@@ -24,7 +24,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let connection_path = config.connection.clone();
-    let (backend, bundle, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+    let (backend, bundle, token, platform_token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let bundle: Deployment = chunk_service::read(&config.bundle)?;
         let database = config.state.join("environment.sqlite");
@@ -32,9 +32,10 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
             chunk_service::private_file(&database)?;
         }
         let token = chunk_service::secret(&config.state.join("token"))?;
+        let platform_token = chunk_service::secret(&config.state.join("platform-token"))?;
         let store = chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?;
         let backend = Backend::new(config.environment, Box::new(store)).map_err(io::Error::other)?;
-        Ok((backend, bundle, token))
+        Ok((backend, bundle, token, platform_token))
     })
     .await
     .map_err(io::Error::other)??;
@@ -44,6 +45,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
         let connection = BackendConnection {
             endpoint: format!("http://{address}"),
             token: token.clone(),
+            platform_token: Some(platform_token.clone()),
             environment: backend.environment().into(),
             deployment,
         };
@@ -53,6 +55,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
                 return Err(io::Error::other("connection file belongs to another backend"));
             }
         }
+        let hooks = HookService::new(backend.clone(), &token, &platform_token).map_err(io::Error::other)?;
         let service = Service::new(backend.clone(), &token).map_err(io::Error::other)?;
         let workers = service.workers();
         let shutdown = service.shutdown();
@@ -64,6 +67,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
         });
         let server = tonic::transport::Server::builder()
             .add_service(service.into_server())
+            .add_service(hooks.into_server())
             .serve_with_incoming_shutdown(incoming, stop.clone().cancelled_owned());
         let _ = ready.send(connection);
         tracing::info!(%address, "backend ready");

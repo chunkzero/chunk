@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package chunk.v1;
+
+import "google/protobuf/empty.proto";
+
+// Native lifecycle dispatch has a separate platform credential from gameplay calls.
+service BackendHooks {
+  rpc Manifest(google.protobuf.Empty) returns (HookManifest);
+  rpc Invoke(InvokeHook) returns (HookResult);
+}
+
+message HookManifest {
+  string deployment = 1;
+  // Empty when this deployment uses legacy fixed proxy functions.
+  bytes manifest_json = 2;
+}
+
+message InvokeHook {
+  // Stable descriptor identity from this deployment, never a JavaScript export.
+  string hook = 1;
+  bytes arguments_json = 2;
+  bytes caller_json = 3;
+}
+
+message HookResult {
+  bytes result_json = 1;
+}

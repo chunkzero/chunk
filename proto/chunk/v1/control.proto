@@ -12,6 +12,7 @@ service LocalControl {
   rpc Inspect(ClaimRequest) returns (Assignment);
   rpc Activate(ActivateClaim) returns (Assignment);
   rpc Cancel(ClaimRequest) returns (ClaimIdentity);
+  rpc ReconcileDeparture(ClaimRequest) returns (DepartureStatus);
   rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
   rpc PollMove(ClaimRequest) returns (PendingMove);
   rpc Drain(DrainRequest) returns (DrainStatus);
@@ -118,4 +119,10 @@ message ShutdownNodeRequest {
   string operation_id = 1;
   string host_id = 2;
   uint32 timeout_seconds = 3;
+}
+
+// Affirmative fencing of the captured membership after connection loss.
+message DepartureStatus {
+  ClaimIdentity claim = 1;
+  bool departed = 2;
 }
