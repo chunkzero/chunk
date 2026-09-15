@@ -83,7 +83,9 @@ export function helper(){return command('ignored',{handler:()=>{}})}
     generate(&output.join("contract.json"), &generated, GenerationTarget::TypeScript).unwrap();
     let api = fs::read_to_string(generated.join("api.ts")).unwrap();
     assert!(api.contains("shared/domains/commands/online"));
-    assert!(!api.contains("shared/domains/commands/allowed"));
+    let (public, internal) = api.split_once("export const internal =").unwrap();
+    assert!(!public.contains("shared/domains/commands/allowed"));
+    assert!(internal.contains("shared/domains/commands/allowed"));
     assert!(!api.contains("shared/domains/commands/network"));
     let mut invalid = serde_json::to_value(&contract).unwrap();
     invalid["id"] = json!("invalid");

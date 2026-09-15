@@ -200,6 +200,7 @@ fn entry_source(
             if exported == "*" {
                 return Err(error(format!("Star re-exports are unsupported: {key}")));
             }
+            let location = &entry.namespace;
             let value = format!("m{index}[{}]", quote(&exported));
             let binding = format!("f{}", metadata.len());
             domains.add_export(entry, &exported, &value, &binding, &mut source)?;
@@ -207,7 +208,7 @@ fn entry_source(
                 writeln!(
                     source,
                     "if(isDestination({value})) throw new Error({});",
-                    quote(format!("Destination descriptors require named exports: {key}"))
+                    quote(format!("Destination descriptors require named exports: {location}"))
                 )
                 .map_err(error)?;
                 continue;
@@ -218,7 +219,7 @@ fn entry_source(
             if destination_scope {
                 destination_metadata.push(format!("...(isDestination({value}) ? [[{name}, {value}.contract]] : [])"));
             } else {
-                writeln!(source, "if(isDestination({value})) throw new Error({});", quote(format!("Destination descriptors require named exports in server/destinations.ts or destinations.mts: {key}"))).map_err(error)?;
+                writeln!(source, "if(isDestination({value})) throw new Error({});", quote(format!("Destination descriptors require named exports in server/destinations.ts or destinations.mts: {location}"))).map_err(error)?;
             }
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
