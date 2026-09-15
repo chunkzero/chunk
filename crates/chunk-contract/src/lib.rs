@@ -16,12 +16,18 @@ mod deployment;
 mod destinations;
 pub use destinations::{
     DESTINATION_MANIFEST_VERSION, Destination, DestinationManifest, DestinationOverflow, DestinationPolicy,
+    SessionCreation,
 };
 mod domains;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
 mod index;
 mod schema;
+mod session_configurations;
 mod session_methods;
+pub use session_configurations::{
+    MAX_SESSION_CONFIGURATION_BYTES, SessionConfigurationDeclaration, SessionConfigurations,
+    validate_session_configuration,
+};
 pub use session_methods::{SessionMethodDeclaration, SessionMethods};
 
 pub use connections::{BackendConnection, ControlConnection};
