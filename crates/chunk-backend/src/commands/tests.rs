@@ -16,6 +16,8 @@ use tonic::Request;
 use super::*;
 use crate::{Backend, Call, Error};
 
+mod compiled;
+
 const APPLICATION: &str = "application-credential-is-not-platform";
 const PLATFORM: &str = "platform-command-credential-is-distinct";
 const COMMAND: &str = "shared/domains/commands/notify";
@@ -81,13 +83,16 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_deployment(deployment()).await
+    }
+    async fn with_deployment(deployment: Deployment) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let backend = Backend::new(
             "test".into(),
             Box::new(SqliteStore::open(directory.path().join("commands.db"), "test").unwrap()),
         )
         .unwrap();
-        backend.deploy(deployment()).await.unwrap();
+        backend.deploy(deployment).await.unwrap();
         let service = CommandService::new(backend.clone(), APPLICATION, PLATFORM).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
