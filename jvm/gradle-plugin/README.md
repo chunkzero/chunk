@@ -88,6 +88,49 @@ generations before invoking these adapters on the tick thread. The trusted Rust 
 command integration. The generated provider calls the existing live session instance; `SessionScope` continues to own
 its resources and cleanup. No additional component or dependency-injection framework is required for method dispatch.
 
+## Explicit scoped components
+
+When several gameplay objects share dependencies, declare public static factories using
+`dev.chunkzero.runtime.Component`. The exact return class identifies a component; parameters identify its dependencies:
+
+```java
+public final class LobbyComponents {
+    @Component(Component.Scope.SESSION)
+    public static BackendClient backend(BackendSession session) {
+        return new BackendClient(session);
+    }
+}
+```
+
+Gameplay obtains this client with `scope.component(BackendClient.class)` on the session tick thread. `SESSION` creates
+one instance per session; `PROCESS` shares one instance within that app runtime. Session factories may depend on
+`SessionScope`, its `BackendSession`, and other declared components. Process factories can depend only on process
+components. A missing backend rejects construction when a factory requests it. A factory must receive dependencies
+through its parameters; recursively calling `scope.component` from a factory is rejected.
+
+Kotlin uses the same annotation on public top-level functions or `@JvmStatic` factories, including companion objects.
+Factories and their parameter/return types must be accessible from generated Java. Generic signatures (including
+`List<Foo>` and type variables), primitive/array identities, field injection and constructor discovery are unsupported.
+An ordinary non-generic wrapper can give a collection a distinct component identity. Factories may return interfaces,
+but binding and lookup use that exact declared interface, without assignability-based selection or qualifiers.
+
+Every module applying the Chunk project plugin writes a bounded factory-class index after Java/Kotlin compilation. Apps
+read their dependency JAR indexes, inspect the actual annotated bytecode, reject missing/duplicate providers, cycles and
+process-to-session dependencies, then generate direct factory calls. `generateChunkComponentIndex`,
+`generateChunkComponentBindings` and `compileChunkComponents` package the index and one app-local service provider.
+Libraries containing factories must apply the plugin and declare the framework dependencies they use. Runtime startup
+loads that generated provider without scanning classpaths. Shared libraries are linked independently into each app. No
+generated source must exist before application compilation, and unused projects emit no component registration.
+
+Returned `AutoCloseable` instances are owned automatically. Failed construction closes only newly created dependencies;
+existing components and other sessions remain available. Normal session disposal closes its components in reverse
+construction order. Process shutdown closes any remaining component scopes after Minestom stops, then process
+components. Cleanup must be synchronous and tolerate shutdown after ticks stop. Component factories must not return an
+already owned resource under another identity. These checks enforce declared dependencies and managed ownership;
+arbitrary handwritten global state is outside the factory graph's guarantees.
+
+## Kotlin consumers
+
 For Kotlin, put its standard plugin declaration in the settings `plugins` block:
 
 ```kotlin

@@ -3,6 +3,7 @@ package dev.chunkzero.runtime;
 import chunk.v1.Supervision.SessionInventory;
 
 import dev.chunkzero.runtime.minestom.internal.AppRegistry;
+import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 import dev.chunkzero.runtime.minestom.internal.GameplayService;
 import dev.chunkzero.runtime.minestom.internal.ProcessService;
 import dev.chunkzero.runtime.minestom.internal.SessionMethodRegistry;
@@ -24,6 +25,7 @@ public final class ChunkMinestom implements AutoCloseable {
     private final MinecraftServer minecraft;
     private final TickExecutor ticks = new TickExecutor();
     private final SessionManager sessions;
+    private final ComponentRegistry components;
     private final GameplayService gameplay;
     private final ProcessService service;
     private final SessionMethodService methods;
@@ -39,8 +41,10 @@ public final class ChunkMinestom implements AutoCloseable {
                 AppRegistry.load(
                         process.identity().getAppId(),
                         Thread.currentThread().getContextClassLoader());
+        components = ComponentRegistry.load(Thread.currentThread().getContextClassLoader());
         sessions =
-                new SessionManager(ticks, factories, (session, appId) -> process.backend(session));
+                new SessionManager(
+                        ticks, factories, (session, appId) -> process.backend(session), components);
         MinecraftServer.setCompressionThreshold(0);
         MinecraftServer.getConnectionManager().setPlayerProvider(ManagedPlayer::new);
         var identity = process.identity();
@@ -110,10 +114,30 @@ public final class ChunkMinestom implements AutoCloseable {
     @Override
     public synchronized void close() {
         if (!closed.compareAndSet(false, true)) return;
-        MinecraftServer.process().stop();
-        if (task != null) task.cancel();
-        methods.close();
-        gameplay.close();
+        Throwable failure = null;
+        List<Runnable> cleanup =
+                List.of(
+                        () -> MinecraftServer.process().stop(),
+                        () -> {
+                            if (task != null) task.cancel();
+                        },
+                        methods::close,
+                        gameplay::close,
+                        components::close,
+                        this::removeShutdownHook);
+        for (var action : cleanup) {
+            try {
+                action.run();
+            } catch (RuntimeException | Error error) {
+                if (failure == null) failure = error;
+                else if (failure != error) failure.addSuppressed(error);
+            }
+        }
+        if (failure instanceof RuntimeException runtime) throw runtime;
+        if (failure instanceof Error fatal) throw fatal;
+    }
+
+    private void removeShutdownHook() {
         if (Thread.currentThread() != shutdownHook) {
             try {
                 Runtime.getRuntime().removeShutdownHook(shutdownHook);

@@ -17,7 +17,6 @@ import net.minestom.server.entity.Player;
 import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.instance.block.Block;
 
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
@@ -46,7 +45,7 @@ public final class Lobby implements SessionProvider {
         @Override
         public CompletionStage<Void> onCreate(SessionScope scope) {
             this.scope = scope;
-            backend = new BackendClient(Objects.requireNonNull(scope.getBackend()));
+            backend = scope.component(BackendClient.class);
             instance = scope.createInstance();
             instance.setGenerator(unit -> unit.modifier().fillHeight(0, 40, Block.GRASS_BLOCK));
             return CompletableFuture.completedFuture(null);

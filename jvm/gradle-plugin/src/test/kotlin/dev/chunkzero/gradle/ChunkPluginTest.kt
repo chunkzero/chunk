@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import java.nio.file.Path
 import java.util.jar.JarFile
 import java.util.jar.JarOutputStream
@@ -152,6 +153,160 @@ class ChunkPluginTest {
         run("chunkArtifacts")
         assertMethodExecution()
         assertTrue(run("chunkArtifacts").output.contains("Reusing configuration cache"))
+    }
+
+    @Test
+    fun `Java components link shared module indexes after clean compilation and reject duplicate identities`() {
+        componentFixture(kotlin = false)
+        run("chunkArtifacts")
+        assertComponentExecution()
+        assertTrue(run("chunkArtifacts").output.contains("Reusing configuration cache"))
+        write(
+            "apps/lobby/src/main/java/Duplicate.java",
+            """
+            package fixture.lobby;
+            public final class Duplicate {
+                @dev.chunkzero.runtime.Component(dev.chunkzero.runtime.Component.Scope.PROCESS)
+                public static fixture.generated.Bindings duplicate() { return new fixture.generated.Bindings("other"); }
+            }
+            """,
+        )
+        assertTrue(runFailure("chunkArtifacts").output.contains("Duplicate component identity"))
+        write(
+            "apps/lobby/src/main/java/Duplicate.java",
+            """
+            package fixture.lobby;
+            public final class Duplicate {
+                private static final class Hidden {
+                    public static final class Factories {
+                        @dev.chunkzero.runtime.Component(dev.chunkzero.runtime.Component.Scope.PROCESS)
+                        public static java.time.Clock clock() { return java.time.Clock.systemUTC(); }
+                    }
+                }
+            }
+            """,
+        )
+        assertTrue(runFailure("chunkArtifacts").output.contains("private access"))
+    }
+
+    @Test
+    fun `Kotlin top level and companion component factories generate real Java calls and reject erased generics`() {
+        componentFixture(kotlin = true)
+        run("chunkArtifacts")
+        assertComponentExecution()
+        assertTrue(run("chunkArtifacts").output.contains("Reusing configuration cache"))
+        write(
+            "apps/lobby/src/main/kotlin/Generic.kt",
+            """
+            package fixture.lobby
+            @dev.chunkzero.runtime.Component(dev.chunkzero.runtime.Component.Scope.SESSION)
+            fun generic(): List<String> = emptyList()
+            """,
+        )
+        assertTrue(runFailure("chunkArtifacts").output.contains("must be public static and non-generic"))
+    }
+
+    private fun componentFixture(kotlin: Boolean) {
+        fixture(kotlin)
+        app("lobby", kotlin)
+        val repository = File(System.getProperty("chunk.test.repository"))
+        for ((module, name) in listOf(
+            "runtime" to "Component",
+            "runtime-minestom" to "ComponentBinding",
+            "runtime-minestom" to "ComponentProvider",
+        )) {
+            write(
+                "src/main/java/dev/chunkzero/runtime/$name.java",
+                repository.resolve("jvm/$module/src/main/java/dev/chunkzero/runtime/$name.java").readText(),
+            )
+        }
+        write(
+            "src/main/java/org/jetbrains/annotations/ApiStatus.java",
+            "package org.jetbrains.annotations; public @interface ApiStatus { @interface Internal {} }",
+        )
+        write(
+            "src/main/java/SharedServices.java",
+            """
+            package fixture;
+            public final class SharedServices {
+                @dev.chunkzero.runtime.Component(dev.chunkzero.runtime.Component.Scope.PROCESS)
+                public static fixture.generated.Bindings backendValue() { return new fixture.generated.Bindings("shared"); }
+            }
+            """,
+        )
+        write(
+            "apps/lobby/src/main/java/Verify.java",
+            """
+            package fixture.lobby;
+            public final class Verify {
+                private static java.util.Map<Class<?>, dev.chunkzero.runtime.ComponentBinding<?>> bindings;
+                public static void run() throws Exception {
+                    bindings = new java.util.HashMap<>();
+                    var providers = java.util.ServiceLoader.load(dev.chunkzero.runtime.ComponentProvider.class).stream().toList();
+                    if (providers.size() != 1) throw new AssertionError("one generated app registry");
+                    for (var binding : providers.getFirst().get().components()) bindings.put(binding.type(),binding);
+                    if (bindings.size() != 3) throw new AssertionError("expected shared and app factories");
+                    System.out.println(((View) create(View.class)).value());
+                }
+                private static Object create(Class<?> type) throws Exception {
+                    var binding = bindings.get(type);
+                    var dependencies = new Object[binding.dependencies().size()];
+                    for (int i=0; i<dependencies.length; i++) dependencies[i] = create(binding.dependencies().get(i));
+                    return binding.factory().create(dependencies);
+                }
+            }
+            """,
+        )
+        write("apps/lobby/src/main/java/View.java", "package fixture.lobby; public record View(String value) {}")
+        write("apps/lobby/src/main/java/Extra.java", "package fixture.lobby; public record Extra(String value) {}")
+        if (kotlin) {
+            write(
+                "apps/lobby/src/main/kotlin/App.kt",
+                """
+                package fixture.lobby
+                import dev.chunkzero.runtime.Component
+                @dev.chunkzero.runtime.SessionType("default")
+                class Factory : dev.chunkzero.runtime.SessionProvider
+                class Services {
+                    companion object {
+                        @JvmStatic
+                        @Component(Component.Scope.PROCESS)
+                        fun extra() = Extra("app")
+                    }
+                }
+                @Component(Component.Scope.SESSION)
+                fun view(value: fixture.generated.Bindings, extra: Extra) = View(value.value() + ":" + extra.value())
+                fun main() { Verify.run() }
+                """,
+            )
+        } else {
+            write(
+                "apps/lobby/src/main/java/App.java",
+                """
+                package fixture.lobby;
+                import dev.chunkzero.runtime.Component;
+                @dev.chunkzero.runtime.SessionType("default")
+                public final class App implements dev.chunkzero.runtime.SessionProvider {
+                    @Component(Component.Scope.PROCESS)
+                    public static Extra extra() { return new Extra("app"); }
+                    @Component(Component.Scope.SESSION)
+                    public static View view(fixture.generated.Bindings value, Extra extra) { return new View(value.value() + ":" + extra.value()); }
+                    public static void main(String[] args) throws Exception { Verify.run(); }
+                }
+                """,
+            )
+        }
+    }
+
+    private fun assertComponentExecution() {
+        val jar = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        val process =
+            ProcessBuilder("${System.getProperty("chunk.test.java.home")}/bin/java", "-jar", jar)
+                .redirectErrorStream(true)
+                .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertEquals(0, process.waitFor(), output)
+        assertEquals("shared:app", output.trim())
     }
 
     private fun methodFixture(kotlin: Boolean) {

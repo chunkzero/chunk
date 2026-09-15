@@ -14,6 +14,7 @@ internal fun configureModule(
     project: Project,
     appId: String,
 ) {
+    configureComponents(project, appId)
     val registry =
         if (appId.isNotEmpty()) {
             project.pluginManager.apply("application")
