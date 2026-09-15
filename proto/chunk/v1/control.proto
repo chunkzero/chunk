@@ -44,6 +44,9 @@ message MovePlayerRequest {
   string operation_id = 1;
   string player_id = 2;
   SessionDemand demand = 3;
+  // Proxy effects supply both fields to fence the exact public connection and current owner.
+  ClaimIdentity expected_source = 4;
+  string expected_connection_id = 5;
 }
 
 message PendingMove {
