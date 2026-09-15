@@ -85,6 +85,7 @@ impl Actor {
             || self.releasing.is_some()
             || self.subscriptions.iter().any(|s| s.calls.iter().any(|c| c.deployment == id))
             || self.mutations.values().any(|m| m.call.deployment == id)
+            || self.actions.references(&id)
         {
             reply.finish(Err(Error::Busy));
             return;

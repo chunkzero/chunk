@@ -79,3 +79,82 @@ evaluation. Definite rejection and restart preserve these inputs; committed retr
 before execution and can cross deployment versions. New operations add a metadata durability step on the commit thread,
 which can queue behind a pending commit. Concurrent prepared operations still use the ordered speculative pipeline.
 Retry contexts are retained with operation history; automatic expiry is not implemented.
+
+## Bounded actions
+
+The embedded SDK declares `action` / `internalAction` separately from transactions. Its `ActionContext` contains
+`caller`, `invocationId`, `runQuery(reference, args)`, `runMutation(reference, args)`, and `sleep(milliseconds)`. It has
+no `db` capability. Generated TypeScript exports `api` and `internal` references; internal functions remain unavailable
+to public ingress. JVM transaction clients omit actions; platform code invokes them through the Rust backend API until
+an action transport is provided.
+
+Call `allocate_action_id()` before `start_action(id, call)` and keep that ID when acceptance is uncertain. Acceptance
+starts at most one invocation per ID and retains its deployment. Repeating an identical request attaches to the same
+scope and result; changing the caller, deployment, function or arguments fails. The returned `ActionHandle` exposes
+status, cancellation, and an async outcome. Dropping its last clone cancels the scope. The backend retains 32 status
+records and rejects retired IDs instead of executing them again; allocating IDs long before submitting them can result
+in retirement. A new backend incarnation makes old IDs unknown. Actions are never automatically retried.
+
+Actions run in separate bounded workers with fresh V8 isolates, so sleep, transaction waits and CPU work do not occupy
+the foreground environment actor. Limits are eight live actions, 32 MiB managed heap and separately 32 MiB ArrayBuffer
+backing storage per action, 30 seconds from acceptance (initialization also has the one-second module budget), 256
+effects per invocation, eight pending effects per invocation, and 32 pending action transaction requests per
+environment. Inputs, effect replies and results are each at most 1 MiB. Status records retain bounded request/result
+payloads. These logical limits exclude V8/native overhead. Shutdown cancels workers and joins them after closing their
+reply path.
+
+Every nested query/mutation goes through the original environment's actor against a fresh snapshot. The host captures
+the original caller and deployment; arguments cannot replace either authority. Internal references are permitted through
+this trusted path. A mutation receives the durable operation ID `action/<invocationId>/<effect-sequence>`; each effect
+has a distinct increasing sequence. No snapshot or transaction is held over a sleep. Deployment release returns `Busy`
+while an action references it.
+
+Cancellation, failure, backend loss or a missing reply can follow a committed mutation. They do not roll back earlier
+effects. After process loss the action outcome is explicitly unknown, while completed mutations retain their ordinary
+durable outcomes. Recover those outcomes under their derived operation IDs where necessary; do not restart the action
+with a new ID to resolve uncertainty. Durable job scheduling is a separate layer; external effects require the host
+grants described below.
+
+### Scoped HTTP and secrets
+
+`Backend::new` denies all external capabilities. An embedder can configure immutable grants with
+`Backend::with_action_effects(environment, store, effects)`:
+
+```rust,ignore
+let grants = ActionGrants::default()
+    .with_http("billing".into(), HttpBinding::new("https://billing.example/api/", [HttpMethod::Get, HttpMethod::Post])?)?
+    .with_secret("billing-token".into(), std::env::var("BILLING_TOKEN")?)?;
+let effects = ActionEffects::new(environment.clone())?
+    .with_deployment(deployment_id, grants)?;
+```
+
+Grants apply only to the exact environment and deployment. They are held in host memory, never serialized into a bundle,
+release or database. Restart requires the host to supply them again. At most 16 deployments can have grants; each has at
+most 16 HTTP bindings and 16 secrets, each secret at most 8 KiB. The embedding host resolves environment variables or
+its own secret source; JavaScript cannot enumerate environment variables or access arbitrary files.
+
+Actions call `ctx.http("billing", {path: "invoices", method: "POST", body: "..."})` and
+`await ctx.secret("billing-token")`. HTTP paths must be relative and remain under the configured base path and origin.
+Path segments use unreserved ASCII characters; query parameters may use percent encoding. Absolute paths, userinfo,
+fragments, traversal, matrix parameters and encoded path escapes are rejected. Bindings grant explicit methods.
+Redirects, inherited proxies, automatic retries, automatic decompression and cookies are disabled. The API supports
+UTF-8 text bodies, up to 64 KiB for requests and 128 KiB for responses, 32 headers / 8 KiB in each direction, 2 KiB
+paths, and eight simultaneous HTTP requests across the environment. The binding timeout defaults to ten seconds and can
+be lowered; the action's overall deadline also applies. Response bodies are read incrementally within their bound.
+
+HTTP outcomes have `state: "completed" | "rejected" | "unknown"` and a stable `effectId` formed from the invocation ID
+and effect sequence. `completed` contains `status`, `headers` and `body`; applications still need to interpret the HTTP
+status. `rejected` means no dispatch occurred. Once dispatch begins, transport failure, response truncation, size limits
+or timeout return `unknown`, because the remote operation may already have happened. No failed request is retried.
+
+Cancellation or backend loss can terminate the action before JavaScript receives an HTTP outcome. Such a lost/cancelled
+action leaves its dispatched effects uncertain; it does not guarantee delivery of an `unknown` result. Reusing the
+action ID never restarts a retained or stale invocation. Reconcile with the remote service or an application idempotency
+key before deciding to issue another business request. Action status is ephemeral and does not replace a durable job
+record.
+
+Automatic host HTTP errors contain no URL, body, headers or transport error text. Action diagnostics containing a
+granted secret value or its JSON-escaped form are replaced with a generic redacted message. Secret reads intentionally
+hand the value to authorized application code; transformed values and deliberate application publication are outside
+literal redaction. Queries and mutations retain their pure capability profile. Deployment configuration, secret rotation
+and hosted secret management remain separate platform work.

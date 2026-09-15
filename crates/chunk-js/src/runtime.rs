@@ -18,7 +18,8 @@ pub(crate) struct Prepared {
     pub arguments: Json,
     pub timestamp: i64,
     pub seed: u64,
-    pub capabilities: Capabilities,
+    pub capabilities: Option<Capabilities>,
+    pub action: Option<crate::actions::ActionCapabilities>,
 }
 
 pub(crate) struct State {
@@ -40,31 +41,38 @@ impl State {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
-        let Prepared { export, caller, arguments, capabilities, timestamp, seed } = prepared;
+        let Prepared { export, caller, arguments, capabilities, action, timestamp, seed } = prepared;
+        let is_action = action.is_some();
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
-        self.runtime.op_state().borrow_mut().put(Some(capabilities));
+        self.runtime.op_state().borrow_mut().put(capabilities);
+        self.runtime.op_state().borrow_mut().put(action);
         let result = self.guarded(deadline, limits, cancellation, |engine| {
             let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str()));
-            executor.block_on(engine.drain())?;
+            if !is_action {
+                executor.block_on(engine.drain())?;
+            }
             result
         });
         let logs = crate::profile::end(&mut self.runtime);
-        let capabilities = self
-            .runtime
-            .op_state()
-            .borrow_mut()
-            .borrow_mut::<Option<Capabilities>>()
-            .take()
-            .expect("active invocation");
+        let capabilities = self.runtime.op_state().borrow_mut().borrow_mut::<Option<Capabilities>>().take();
+        self.runtime.op_state().borrow_mut().borrow_mut::<Option<crate::actions::ActionCapabilities>>().take();
         let value = result?;
-        let writes = capabilities.writes.into_iter().map(|(key, write)| Write { key, value: write.value }).collect();
+        let writes = capabilities
+            .into_iter()
+            .flat_map(|capabilities| capabilities.writes)
+            .map(|(key, write)| Write { key, value: write.value })
+            .collect();
         Ok(Execution { logs, value, writes })
     }
 
     pub(crate) fn new(limits: Limits) -> Self {
         let termination = Termination::default();
         let mut extensions = crate::extensions::web();
-        extensions.extend([chunk_capabilities::init(), crate::profile::chunk_profile::init()]);
+        extensions.extend([
+            chunk_capabilities::init(),
+            crate::profile::chunk_profile::init(),
+            crate::actions::chunk_actions::init(),
+        ]);
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions,
             startup_snapshot: Some(include_bytes!(concat!(env!("OUT_DIR"), "/snapshot.bin"))),
@@ -78,6 +86,7 @@ impl State {
             ..Default::default()
         });
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
+        runtime.op_state().borrow_mut().put(None::<crate::actions::ActionCapabilities>);
         crate::profile::initialize(&mut runtime);
         let heap_signal = termination.clone();
         let handle = runtime.v8_isolate().thread_safe_handle();

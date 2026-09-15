@@ -28,7 +28,6 @@ fn generated_typescript_references_validate_the_cross_language_fixtures() {
     let api = fs::read_to_string(output.path().join("api.ts")).unwrap();
     super::generate(&fixtures.join("contract.json"), output.path(), GenerationTarget::TypeScript).unwrap();
     assert_eq!(api, fs::read_to_string(output.path().join("api.ts")).unwrap());
-    assert!(!api.contains("hidden"));
     fs::create_dir_all(output.path().join("server/schema")).unwrap();
     fs::write(
         output.path().join("server/schema/index.ts"),
@@ -38,7 +37,7 @@ fn generated_typescript_references_validate_the_cross_language_fixtures() {
     super::generate_sdk(output.path()).unwrap();
     let fixtures_json = fs::read_to_string(fixtures.join("values.json")).unwrap();
     let script = format!(
-        "import assert from 'node:assert/strict'; import {{api}} from './api.ts'; const fixtures={fixtures_json}; for(const value of fixtures) {{ const expected = {{...value}}; if(expected.note === null) delete expected.note; assert.deepEqual(api.shared.profile.record.arguments.parse(value),expected); }} assert.throws(()=>api.shared.profile.record.arguments.parse({{...fixtures[0],count:9007199254740992}})); assert(Object.hasOwn(api, '__proto__')); assert.equal(Object.getPrototypeOf(api), Object.prototype); assert.equal(api.__proto__.read.path, '__proto__/read');"
+        "import assert from 'node:assert/strict'; import {{api,internal}} from './api.ts'; assert.equal(Object.hasOwn(api.shared.profile, 'hidden'), false); assert.equal(internal.shared.profile.hidden.path, 'shared/profile/hidden'); const fixtures={fixtures_json}; for(const value of fixtures) {{ const expected = {{...value}}; if(expected.note === null) delete expected.note; assert.deepEqual(api.shared.profile.record.arguments.parse(value),expected); }} assert.throws(()=>api.shared.profile.record.arguments.parse({{...fixtures[0],count:9007199254740992}})); assert(Object.hasOwn(api, '__proto__')); assert.equal(Object.getPrototypeOf(api), Object.prototype); assert.equal(api.__proto__.read.path, '__proto__/read');"
     );
     fs::write(output.path().join("check.mjs"), script).unwrap();
     assert!(std::process::Command::new("node").arg(output.path().join("check.mjs")).status().unwrap().success());

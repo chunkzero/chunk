@@ -91,6 +91,59 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn action_declarations_compile_and_execute_in_the_isolated_runner() {
+        struct Host;
+        impl chunk_js::ActionHost for Host {
+            fn call(
+                &self,
+                _: u32,
+                _: Mode,
+                _: String,
+                _: chunk_js::Json,
+            ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, String>>>> {
+                Box::pin(async { Err("unexpected transaction".into()) })
+            }
+        }
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        fs::write(
+            project.path().join("server/schema/index.ts"),
+            "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
+        )
+        .unwrap();
+        fs::write(project.path().join("server/tasks.ts"), "import {action,v} from '#chunk'; export const work=action({args:{},returns:v.string(),handler:async(ctx)=>{ await ctx.sleep(1); return ctx.invocationId; }});").unwrap();
+        compile(project.path(), output.path()).unwrap();
+        let contract: BackendMetadata =
+            serde_json::from_slice(&fs::read(output.path().join("contract.json")).unwrap()).unwrap();
+        let function = &contract.functions["shared/tasks/work"];
+        assert_eq!(function.kind, chunk_contract::FunctionKind::Action);
+        let mut engine = Engine::new().unwrap();
+        let id = DeploymentId::new("action-test").unwrap();
+        engine
+            .register(id.clone(), fs::read_to_string(output.path().join("source.mjs")).unwrap(), Limits::default())
+            .unwrap();
+        let result = engine
+            .execute_action(
+                &id,
+                chunk_js::ActionInvocation {
+                    id: "accepted-id".into(),
+                    export: function.export.clone(),
+                    arguments: json!({}).into(),
+                    caller: Value::Null.into(),
+                    timestamp: 0,
+                    seed: 0,
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                },
+                std::rc::Rc::new(Host),
+                &Cancellation::default(),
+            )
+            .unwrap();
+        assert_eq!(result.value, "\"accepted-id\"");
+        assert!(result.writes.is_empty());
+    }
+
+    #[test]
     fn compilation_diagnostics_identify_invalid_schema_and_deployment() {
         let project = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();

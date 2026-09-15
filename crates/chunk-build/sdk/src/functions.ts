@@ -36,14 +36,49 @@ export interface MutationContext<T extends Tables> {
   readonly caller: JsonValue;
   readonly db: Writer<T>;
 }
-export type FunctionKind = "query" | "mutation";
+export interface AsyncContext {
+  readonly caller: JsonValue;
+  runQuery<A, R>(reference: FunctionReference<"query", A, R>, args: A): Promise<R>;
+  runMutation<A, R>(reference: FunctionReference<"mutation", A, R>, args: A): Promise<R>;
+}
+export interface HttpRequest {
+  readonly path: string;
+  readonly method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly body?: string;
+}
+export type HttpOutcome =
+  | {
+      readonly state: "completed";
+      readonly effectId: string;
+      readonly status: number;
+      readonly headers: Readonly<Record<string, string>>;
+      readonly body: string;
+    }
+  | { readonly state: "rejected" | "unknown"; readonly effectId: string; readonly reason: string };
+export interface ActionContext extends AsyncContext {
+  http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
+  secret(name: string): Promise<string>;
+  readonly invocationId: string;
+  sleep(milliseconds: number): Promise<void>;
+}
+interface RawActionContext {
+  http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
+  secret(name: string): Promise<string>;
+  readonly caller: JsonValue;
+  readonly invocationId: string;
+  runQuery(path: string, args: unknown): Promise<unknown>;
+  runMutation(path: string, args: unknown): Promise<unknown>;
+  sleep(milliseconds: number): Promise<void>;
+}
+export type FunctionKind = "query" | "mutation" | "action";
 export type Visibility = "public" | "internal";
 const definition = Symbol.for("@chunk/function");
 
 export interface FunctionDefinition<K extends FunctionKind = FunctionKind, A = never, R = unknown> {
   readonly [definition]: true;
   readonly contract: { kind: K; visibility: Visibility; arguments: Schema; result: Schema };
-  readonly handler: (ctx: K extends "query" ? RawQueryContext : RawMutationContext, args: A) => R | Promise<R>;
+  readonly handler: (ctx: RawContext<K>, args: A) => R | Promise<R>;
 }
 
 export interface FunctionReference<K extends FunctionKind, A, R> {
@@ -53,7 +88,11 @@ export interface FunctionReference<K extends FunctionKind, A, R> {
   readonly result: Validator<R>;
 }
 
-type RawContext<K extends FunctionKind> = K extends "query" ? RawQueryContext : RawMutationContext;
+type RawContext<K extends FunctionKind> = K extends "query"
+  ? RawQueryContext
+  : K extends "mutation"
+    ? RawMutationContext
+    : RawActionContext;
 type Handler<C, A, R> = (ctx: C, args: A) => R | Promise<R>;
 type Wrapper<K extends FunctionKind, C> = <A, R>(handler: Handler<C, A, R>) => Handler<RawContext<K>, A, R>;
 type Addition<C, E> = E & { [P in keyof C]?: never };
@@ -123,6 +162,35 @@ function raw<K extends FunctionKind>(kind: K, visibility: Visibility) {
   return builder<K, RawContext<K>>(kind, visibility, (handler) => (ctx, args) => handler(protect(ctx), args));
 }
 
+function actionBuilder(visibility: Visibility) {
+  return builder<"action", ActionContext>("action", visibility, (handler) => (ctx, args) => {
+    const invoke = async <K extends "query" | "mutation", A, R>(
+      kind: K,
+      ref: FunctionReference<K, A, R>,
+      values: A,
+    ): Promise<R> => {
+      if (ref.kind !== kind) throw new Error("Function reference kind mismatch");
+      const input = ref.arguments.parse(values);
+      const result = await (kind === "query" ? ctx.runQuery(ref.path, input) : ctx.runMutation(ref.path, input));
+      return ref.result.parse(result);
+    };
+    return handler(
+      protect({
+        caller: ctx.caller,
+        invocationId: ctx.invocationId,
+        http: (binding, request) => ctx.http(binding, request),
+        secret: (name) => ctx.secret(name),
+        runQuery: (ref, values) => invoke("query", ref, values),
+        runMutation: (ref, values) => invoke("mutation", ref, values),
+        sleep: (milliseconds) => ctx.sleep(milliseconds),
+      } satisfies ActionContext),
+      args,
+    );
+  });
+}
+
+export const action = actionBuilder("public");
+export const internalAction = actionBuilder("internal");
 export const query = raw("query", "public");
 export const mutation = raw("mutation", "public");
 export const internalQuery = raw("query", "internal");
@@ -133,7 +201,7 @@ export function isFunction(value: unknown): value is FunctionDefinition {
 }
 
 export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
-  function typed<K extends FunctionKind>(kind: K, visibility: Visibility) {
+  function typed<K extends "query" | "mutation">(kind: K, visibility: Visibility) {
     type Context = K extends "query" ? QueryContext<T> : MutationContext<T>;
     return builder<K, Context>(
       kind,
@@ -143,6 +211,8 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
     );
   }
   return freeze({
+    action,
+    internalAction,
     query: typed("query", "public"),
     mutation: typed("mutation", "public"),
     internalQuery: typed("query", "internal"),

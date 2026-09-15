@@ -34,6 +34,7 @@ fn methods(function: &Function, indent: &str) -> String {
     let result = function.result.kotlin_type();
     let reference = &function.reference;
     match function.kind {
+        FunctionKind::Action => unreachable!("actions are not JVM transaction bindings"),
         FunctionKind::Mutation => {
             let mut methods = format!(
                 "{indent}suspend fun {name}(args: {args}, operation: OperationId): {result} =\n{indent}    _backend.mutate({reference}, args, operation)"

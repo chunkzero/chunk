@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -14,7 +14,7 @@ use chunk_js::{Cancellation, DeploymentId, Json};
 use chunk_store::{Revision, Snapshot, Storage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
-use crate::{Error, Result, actor::Actor};
+use crate::{ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result, actor::Actor};
 
 const REQUESTS: usize = 64;
 
@@ -27,7 +27,7 @@ pub struct Call {
 }
 
 impl Call {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.function.is_empty() || self.function.len() > 256 {
             return Err(Error::Invalid("function name"));
         }
@@ -61,12 +61,30 @@ pub(crate) struct Request<T> {
 }
 
 impl<T> Request<T> {
+    pub(crate) fn new(
+        cancellation: Cancellation,
+        reply: oneshot::Sender<Result<T>>,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self { cancellation, reply, _permit: permit }
+    }
+
     pub fn finish(self, result: Result<T>) {
         let _ = self.reply.send(result);
     }
 }
 
 pub(crate) enum Command {
+    StartAction {
+        id: ActionId,
+        call: Call,
+        reply: Request<ActionHandle>,
+    },
+    ActionStatus {
+        id: ActionId,
+        caller: Json,
+        reply: Request<ActionStatus>,
+    },
     Deploy {
         deployment: Arc<Deployment>,
         reply: Request<()>,
@@ -104,6 +122,8 @@ pub(crate) enum Command {
 impl Command {
     pub fn reject(self, error: Error) {
         match self {
+            Self::StartAction { reply, .. } => reply.finish(Err(error)),
+            Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
@@ -115,16 +135,40 @@ impl Command {
 }
 
 pub(crate) enum Event {
-    Prepared { operation: String, result: Result<chunk_store::RetryContext> },
+    ActionFinished {
+        id: ActionId,
+        result: Result<Arc<str>>,
+    },
+    ActionTransaction {
+        id: ActionId,
+        sequence: u32,
+        mode: chunk_js::Mode,
+        function: String,
+        arguments: Json,
+        reply: Request<Update>,
+    },
+    Prepared {
+        operation: String,
+        result: Result<chunk_store::RetryContext>,
+    },
     Request(Box<Command>),
-    Committed { operation: String, result: Result<(Update, Snapshot)> },
-    Activated { result: Result<chunk_store::Snapshot> },
-    Released { result: Result<bool> },
+    Committed {
+        operation: String,
+        result: Result<(Update, Snapshot)>,
+    },
+    Activated {
+        result: Result<chunk_store::Snapshot>,
+    },
+    Released {
+        result: Result<bool>,
+    },
     Wake,
 }
 
 struct Owner {
     environment: String,
+    incarnation: String,
+    action_sequence: AtomicU64,
     events: queue::Sender<Event>,
     slots: Arc<Semaphore>,
     stopped: Arc<AtomicBool>,
@@ -153,6 +197,15 @@ impl Backend {
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
     pub fn new(environment: String, store: Box<dyn Storage>) -> Result<Self> {
+        Self::with_action_effects(environment.clone(), store, ActionEffects::new(environment)?)
+    }
+
+    /// Construct with immutable host-provided action grants. Grants bind the exact
+    /// environment and deployment; queries and mutations gain no external effects.
+    /// # Errors
+    /// Reports invalid scope, thread, snapshot or JS initialization failures.
+    pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
+        effects.validate_environment(&environment)?;
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("environment identity"));
         }
@@ -161,9 +214,11 @@ impl Backend {
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let outgoing = events.clone();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing) {
+            match Actor::new(store, outgoing, action_incarnation, effects) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
@@ -176,6 +231,8 @@ impl Backend {
         })?;
         let backend = Self(Arc::new(Owner {
             environment,
+            incarnation,
+            action_sequence: AtomicU64::new(1),
             events,
             slots: Arc::new(Semaphore::new(REQUESTS)),
             stopped,
@@ -236,6 +293,39 @@ impl Backend {
     /// Reports unknown deployments, release in progress or unavailable service.
     pub async fn check_deployment(&self, id: DeploymentId) -> Result<()> {
         self.submit(|reply| Command::CheckDeployment { id, reply }).await
+    }
+
+    /// Allocate once per business invocation and reuse the ID after a lost reply.
+    /// # Errors
+    /// Reports exhausted invocation identities.
+    pub fn allocate_action_id(&self) -> Result<ActionId> {
+        let sequence = self
+            .0
+            .action_sequence
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1))
+            .map_err(|_| Error::Invalid("action identity exhausted"))?;
+        Ok(ActionId { incarnation: self.0.incarnation.clone(), sequence })
+    }
+
+    /// Acceptance retains the deployment and starts at most one action for this
+    /// identity. Duplicate requests attach to the same scope/result. Acceptance
+    /// and results are ephemeral; stale or retired identities are never restarted.
+    /// # Errors
+    /// Rejects unknown identities, mismatched requests, inaccessible functions or
+    /// exhausted capacity. Dropping an acceptance future cancels its scope.
+    pub async fn start_action(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
+        call.validate()?;
+        if id.incarnation != self.0.incarnation {
+            return Err(Error::ActionOutcomeUnknown);
+        }
+        self.submit(|reply| Command::StartAction { id, call, reply }).await
+    }
+
+    /// Look up retained status using the original caller authority.
+    /// # Errors
+    /// Returns unknown after restart, retention expiry or a caller mismatch.
+    pub async fn action_status(&self, id: ActionId, caller: Json) -> Result<ActionStatus> {
+        self.submit(|reply| Command::ActionStatus { id, caller, reply }).await
     }
 
     /// Reads the current view, waiting for durability if it includes staged writes.

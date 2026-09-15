@@ -60,7 +60,7 @@ impl Engine {
         Self::init_platform();
         Ok(Self {
             deployments: BTreeMap::new(),
-            executor: tokio::runtime::Builder::new_current_thread().build()?,
+            executor: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
             deadline: Deadline::new()?,
         })
     }
@@ -137,7 +137,8 @@ impl Engine {
             arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
-            capabilities: Capabilities {
+            action: None,
+            capabilities: Some(Capabilities {
                 generation: runtime.calls() + 1,
                 host,
                 mode: invocation.mode,
@@ -145,13 +146,73 @@ impl Engine {
                 writes: BTreeMap::new(),
                 calls: 0,
                 write_bytes: 0,
-            },
+            }),
         };
         let result = runtime.execute(&self.executor, &self.deadline, prepared, resident.limits, cancellation);
         if !matches!(result, Err(Error::Cancelled | Error::Deadline | Error::Heap)) {
             resident.runtime = Some(runtime);
         }
         result
+    }
+
+    /// Runs an action in a fresh isolate. Call this on a bounded worker thread,
+    /// never the foreground transaction actor. No snapshot capability is installed.
+    /// # Errors
+    /// Reports invalid input, cancellation, resource limits and application failures.
+    pub fn execute_action(
+        &mut self,
+        id: &DeploymentId,
+        invocation: crate::ActionInvocation,
+        host: std::rc::Rc<dyn crate::ActionHost>,
+        cancellation: &Cancellation,
+    ) -> Result<Execution, Error> {
+        let resident = self.deployments.get_mut(id).ok_or(Error::UnknownDeployment)?;
+        if invocation.export.is_empty()
+            || invocation.export.len() > bounds::NAME_BYTES
+            || invocation.id.len() > 256
+            || invocation.arguments.as_str().len() > bounds::JSON_BYTES
+            || invocation.caller.as_str().len() > bounds::JSON_BYTES
+        {
+            return Err(Error::Invalid("action input limit"));
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if resident.runtime.as_ref().is_some_and(|runtime| runtime.calls() != 0) {
+            return Err(Error::Invalid("action requires a fresh worker"));
+        }
+        let deadline = invocation.deadline;
+        let execution = deadline.saturating_duration_since(std::time::Instant::now());
+        if execution.is_zero() {
+            return Err(Error::Deadline);
+        }
+        if execution > bounds::MAX_EXECUTION {
+            return Err(Error::Invalid("action duration limit"));
+        }
+        let limits = Limits { execution, ..resident.limits };
+        let mut runtime = resident.runtime.take().ok_or(Error::Invalid("action worker already used"))?;
+        let prepared = Prepared {
+            export: invocation.export,
+            caller: invocation.caller,
+            arguments: invocation.arguments,
+            timestamp: invocation.timestamp,
+            seed: invocation.seed,
+            capabilities: None,
+            action: Some(crate::actions::ActionCapabilities::new(
+                invocation.id,
+                host,
+                cancellation.clone(),
+                limits.execution,
+            )),
+        };
+        let result = runtime.execute(&self.executor, &self.deadline, prepared, limits, cancellation);
+        if cancellation.is_cancelled() {
+            Err(Error::Cancelled)
+        } else if std::time::Instant::now() >= deadline {
+            Err(Error::Deadline)
+        } else {
+            result
+        }
     }
 
     /// Releases the runtime and retained source immediately, in any registration order.

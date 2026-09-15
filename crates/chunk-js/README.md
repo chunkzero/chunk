@@ -67,3 +67,16 @@ emits successful evaluation logs through its tracing subscriber; logs are diagno
 
 The expanded profile requires at least 16 MiB of managed heap (32 MiB by default). Managed heap and aggregate buffer
 limits remain separate. Encoder and clone allocation exhaustion is tested together with runtime recycling.
+
+## Action execution
+
+`execute_action` accepts a trusted `ActionInvocation` and an `ActionHost`. Use an independent bounded worker thread and
+a fresh registered deployment for each call. Its isolate is discarded after completion, including pending promises;
+action module globals never share state with transactional runtimes. Only action invocations receive `runQuery`,
+`runMutation` and `sleep` host operations. Query/mutation invocations retain the same pure capability profile.
+
+The action host supplies scoped transaction calls without a snapshot. The runner bounds pending and total effects,
+checks cancellation/deadline while awaiting host responses, and uses the same V8/ArrayBuffer limits and CPU watchdog as
+transactions. There is no ambient timer, network, filesystem or secrets API. Time/randomness retain the supplied
+invocation profile. A result ends the scope; unawaited effects cannot acquire further capabilities afterward. Effects
+already accepted by a host may complete even when their response is cancelled.

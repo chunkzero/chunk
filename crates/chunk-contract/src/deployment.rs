@@ -19,6 +19,7 @@ pub enum RuntimeProfile {
 pub enum FunctionKind {
     Query,
     Mutation,
+    Action,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
