@@ -239,8 +239,8 @@ Prepared identities expire after 60 seconds; at most 64 prepared/retained entrie
 evict unstarted or terminal entries earlier. Process restart loses this ephemeral history. Preparation alone does not
 retain a deployment; accepted execution retains it until its worker exits.
 
-Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, eight live actions and
-256 total effects. Each platform stream has at most eight pending effects. The backend checks the original command's
+Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, eight live actions and 256
+total effects. Each platform stream has at most eight pending effects. The backend checks the original command's
 permission again before every nested transaction and platform effect. Functions and hooks have no platform capability;
 hooks also retain their read-only rules and default denial of HTTP/secrets. `followPlayer` changes eligible proxy effect
 delivery only; it never changes the backend's original caller, permission, deployment or domain binding. Session calls
