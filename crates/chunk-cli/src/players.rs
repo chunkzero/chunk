@@ -43,6 +43,8 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
             client
                 .move_player(auth(
                     MovePlayerRequest {
+                        expected_source: None,
+                        expected_connection_id: String::new(),
                         operation_id,
                         player_id: options.player.to_string(),
                         demand: Some(SessionDemand { session_type, key, machine_profile }),
