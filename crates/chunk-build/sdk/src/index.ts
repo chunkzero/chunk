@@ -64,3 +64,4 @@ export { defineDestination } from "./destinations.ts";
 export type { DestinationDefinition, DestinationOptions } from "./destinations.ts";
 
 export type { JobId, Scheduler } from "./jobs.ts";
+export type { CommandEffectReceipt, CommandPlayer, CommandSession, CommandRouting } from "./command-effects.ts";

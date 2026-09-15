@@ -10,6 +10,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("index.ts", include_str!("../sdk/src/index.ts")),
     ("commands.ts", include_str!("../sdk/src/commands.ts")),
     ("destinations.ts", include_str!("../sdk/src/destinations.ts")),
+    ("command-effects.ts", include_str!("../sdk/src/command-effects.ts")),
     ("hooks.ts", include_str!("../sdk/src/hooks.ts")),
     ("jobs.ts", include_str!("../sdk/src/jobs.ts")),
     ("functions.ts", include_str!("../sdk/src/functions.ts")),

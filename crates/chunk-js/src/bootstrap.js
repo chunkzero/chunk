@@ -82,6 +82,7 @@
             http: async (binding, request) =>
               parse(await action(stringify({ kind: "http", request: { ...request, binding } }))),
             secret: async (name) => parse(await action(stringify({ kind: "secret", name }))),
+            platform: async (request) => parse(await action(stringify({ kind: "platform", request }))),
             runQuery: async (functionPath, argumentsValue) =>
               parse(await action(stringify({ kind: "query", function: functionPath, arguments: argumentsValue }))),
             runMutation: async (functionPath, argumentsValue) =>

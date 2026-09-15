@@ -66,7 +66,7 @@ export interface ActionContext extends AsyncContext {
   readonly invocationId: string;
   sleep(milliseconds: number): Promise<void>;
 }
-interface RawActionContext {
+export interface RawActionContext {
   http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
   secret(name: string): Promise<string>;
   readonly caller: JsonValue;
@@ -180,30 +180,34 @@ function raw<K extends "query" | "mutation">(kind: K, visibility: Visibility) {
 }
 
 function actionBuilder(visibility: Visibility) {
-  return builder<"action", ActionContext>("action", visibility, (handler) => (ctx, args) => {
-    const invoke = async <K extends "query" | "mutation", A, R>(
-      kind: K,
-      ref: FunctionReference<K, A, R>,
-      values: A,
-    ): Promise<R> => {
-      if (ref.kind !== kind) throw new Error("Function reference kind mismatch");
-      const input = ref.arguments.parse(values);
-      const result = await (kind === "query" ? ctx.runQuery(ref.path, input) : ctx.runMutation(ref.path, input));
-      return ref.result.parse(result);
-    };
-    return handler(
-      protect({
-        caller: ctx.caller,
-        invocationId: ctx.invocationId,
-        http: (binding, request) => ctx.http(binding, request),
-        secret: (name) => ctx.secret(name),
-        runQuery: (ref, values) => invoke("query", ref, values),
-        runMutation: (ref, values) => invoke("mutation", ref, values),
-        sleep: (milliseconds) => ctx.sleep(milliseconds),
-      } satisfies ActionContext),
-      args,
-    );
-  });
+  return builder<"action", ActionContext>(
+    "action",
+    visibility,
+    (handler) => (ctx, args) => handler(actionContext(ctx), args),
+  );
+}
+
+/** Compiler adapters share the typed transaction boundary of an action. */
+export function actionContext(ctx: RawActionContext): ActionContext {
+  const invoke = async <K extends "query" | "mutation", A, R>(
+    kind: K,
+    ref: FunctionReference<K, A, R>,
+    values: A,
+  ): Promise<R> => {
+    if (ref.kind !== kind) throw new Error("Function reference kind mismatch");
+    const input = ref.arguments.parse(values);
+    const result = await (kind === "query" ? ctx.runQuery(ref.path, input) : ctx.runMutation(ref.path, input));
+    return ref.result.parse(result);
+  };
+  return protect({
+    caller: ctx.caller,
+    invocationId: ctx.invocationId,
+    http: (binding, request) => ctx.http(binding, request),
+    secret: (name) => ctx.secret(name),
+    runQuery: (ref, values) => invoke("query", ref, values),
+    runMutation: (ref, values) => invoke("mutation", ref, values),
+    sleep: (milliseconds) => ctx.sleep(milliseconds),
+  } satisfies ActionContext);
 }
 
 export const action = actionBuilder("public");

@@ -1,16 +1,18 @@
-import type { FunctionReference } from "./functions.ts";
+import { commandEffects } from "./command-effects.ts";
+import type { CommandPlayer, CommandRouting, CommandSession } from "./command-effects.ts";
+import { actionContext } from "./functions.ts";
+import type { ActionContext, FunctionReference, RawActionContext } from "./functions.ts";
 import { freeze } from "./validators.ts";
-import type { JsonValue, PlayerIdentity } from "./validators.ts";
+import type { PlayerIdentity } from "./validators.ts";
 
 const definition = Symbol.for("@chunk/command");
 const routeDefinition = Symbol.for("@chunk/command-route");
 declare const argumentValue: unique symbol;
 
-export interface CommandContext {
-  readonly caller: JsonValue;
-  readonly player: Readonly<PlayerIdentity>;
-  runQuery<A, R>(ref: FunctionReference<"query", A, R>, args: A): Promise<R>;
-  runMutation<A, R>(ref: FunctionReference<"mutation", A, R>, args: A): Promise<R>;
+export interface CommandContext extends ActionContext {
+  readonly player: Readonly<CommandPlayer>;
+  readonly session: CommandSession;
+  readonly routing: CommandRouting;
 }
 
 export type SuggestionQuery = FunctionReference<"query", { input: string; cursor: number }, string[]>;
@@ -189,10 +191,8 @@ export function isCommand(value: unknown): value is CommandDefinition {
   return value !== null && typeof value === "object" && definition in value && value[definition] === true;
 }
 
-interface RawCommandContext {
-  readonly caller: JsonValue;
-  runQuery(path: string, args: unknown): Promise<unknown>;
-  runMutation(path: string, args: unknown): Promise<unknown>;
+interface RawCommandContext extends RawActionContext {
+  platform(request: unknown): Promise<unknown>;
 }
 
 /** Compiler adapter. The platform supplies the authorized route and authenticated player. */
@@ -203,12 +203,12 @@ export async function invokeCommand(
 ): Promise<null> {
   if (!Number.isInteger(payload.route) || payload.route < 0 || payload.route >= descriptor.routes.length)
     throw new Error("Unknown command route");
+  const effects = commandEffects((request) => raw.platform(request));
   const context: CommandContext = Object.freeze({
-    caller: freeze(raw.caller),
-    player: freeze(payload.player),
-    runQuery: <A, R>(ref: FunctionReference<"query", A, R>, args: A) => raw.runQuery(ref.path, args) as Promise<R>,
-    runMutation: <A, R>(ref: FunctionReference<"mutation", A, R>, args: A) =>
-      raw.runMutation(ref.path, args) as Promise<R>,
+    ...actionContext(raw),
+    player: freeze({ ...payload.player, ...effects.player }),
+    session: effects.session,
+    routing: effects.routing,
   });
   const route = descriptor.routes[payload.route] as CommandRoute<Record<string, unknown>>;
   await route.handler(context, freeze(payload.arguments));

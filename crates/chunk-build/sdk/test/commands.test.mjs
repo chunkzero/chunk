@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { command, commandArg, commandRoute, invokeCommand, isCommand } from "../src/commands.ts";
+import { sessionMethod, v } from "../src/index.ts";
 
 test("command routes retain named parser order and independently typed handlers", async () => {
   let observed;
@@ -57,7 +58,15 @@ test("compiled command adapters preserve authenticated context and route identit
         handler: async (ctx, args) => {
           assert.equal(Object.isFrozen(ctx.player), true);
           assert.deepEqual(ctx.caller, { player: "trusted" });
-          await ctx.runMutation({ path: "shared/invite" }, { target: args.target, from: ctx.player.uuid });
+          await ctx.runMutation(
+            {
+              path: "shared/invite",
+              kind: "mutation",
+              arguments: v.object({ target: v.string(), from: v.string() }),
+              result: v.null(),
+            },
+            { target: args.target, from: ctx.player.uuid },
+          );
         },
       }),
     ],
@@ -66,6 +75,7 @@ test("compiled command adapters preserve authenticated context and route identit
     caller: { player: "trusted" },
     runMutation: async (path, args) => {
       captured.push([path, args]);
+      return null;
     },
   };
   const payload = { route: 0, arguments: { target: "Alex" }, player: { uuid: "id", username: "Other" } };
@@ -82,4 +92,52 @@ test("literal and argument children need distinct names at the same route prefix
     /argument name conflicts/,
   );
   assert.doesNotThrow(() => command("travel", { routes: [route, commandRoute(["public", "list"], { handler })] }));
+});
+
+test("command effects keep captured targets and validate typed method calls", async () => {
+  const method = sessionMethod({
+    app: "lobby",
+    session: "default",
+    name: "greet",
+    args: { name: v.string() },
+    returns: v.string(),
+  });
+  const requests = [];
+  const descriptor = command("greet", {
+    handler: async (ctx) => {
+      assert.equal(ctx.invocationId, "command/one");
+      const receipt = await ctx.player.message("Hello");
+      assert.deepEqual(receipt, { state: "accepted", operationId: "effect/1" });
+      assert.equal(await ctx.session.call(method, { name: "Alex" }), "Hello Alex");
+      await ctx.session.send(method, { name: "Other" });
+      await ctx.routing.enter({ key: "main", session_type: "lobby/default", machine_profile: "small" });
+      await assert.rejects(ctx.session.call(method, { name: 1 }));
+      assert.throws(() => ctx.player.title("x".repeat(4097)));
+      assert.equal(Object.isFrozen(ctx.session), true);
+    },
+  });
+  await invokeCommand(
+    descriptor,
+    {
+      caller: { kind: "proxy" },
+      invocationId: "command/one",
+      platform: async (request) => {
+        requests.push(request);
+        return request.kind === "session_call"
+          ? "Hello Alex"
+          : { state: "accepted", operationId: `effect/${requests.length}` };
+      },
+    },
+    { route: 0, arguments: {}, player: { uuid: "trusted-id", username: "Alex" } },
+  );
+  assert.deepEqual(requests[1], {
+    kind: "session_call",
+    method: { app: "lobby", session: "default", name: "greet" },
+    arguments: { name: "Alex" },
+  });
+  assert.equal(requests.length, 4);
+  assert.equal(
+    requests.every((request) => !("player" in request) && !("target" in request)),
+    true,
+  );
 });

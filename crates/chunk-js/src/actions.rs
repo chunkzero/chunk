@@ -36,6 +36,10 @@ pub trait ActionHost: 'static {
     fn secret(&self, _name: &str) -> Result<String, String> {
         Err("Secret capability unavailable".into())
     }
+
+    fn platform(&self, _sequence: u32, _request: Json) -> Pin<Box<dyn Future<Output = Result<String, String>>>> {
+        Box::pin(async { Err("Platform effects unavailable".into()) })
+    }
 }
 
 pub struct ActionInvocation {
@@ -69,6 +73,7 @@ enum Effect {
     Sleep { milliseconds: u64 },
     Http { request: crate::HttpRequest },
     Secret { name: String },
+    Platform { request: serde_json::Value },
     Query { function: String, arguments: serde_json::Value },
     Mutation { function: String, arguments: serde_json::Value },
 }
@@ -120,6 +125,7 @@ async fn op_chunk_action(state: Rc<RefCell<OpState>>, #[string] request: String)
             Effect::Secret { name } => {
                 serde_json::to_string(&host.secret(&name)?).map_err(|_| "Invalid secret value".into())
             }
+            Effect::Platform { request } => host.platform(sequence, request.into()).await,
             Effect::Sleep { milliseconds } => {
                 if milliseconds > 30_000 {
                     return Err("Action sleep exceeds duration limit".into());
