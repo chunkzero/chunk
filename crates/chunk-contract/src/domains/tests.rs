@@ -100,6 +100,8 @@ fn command_metadata_preserves_legacy_encoding_and_rejects_invalid_identity_or_ex
     invalid.commands.insert("wrong/hub".into(), command);
     assert_eq!(invalid.validate(), Err("invalid command identity, export or domain"));
     let mut deployment = crate::Deployment {
+        session_methods: None,
+        destinations: None,
         contract_version: crate::CONTRACT_VERSION,
         runtime_profile: crate::RuntimeProfile::TransactionalV1,
         id: "domain-commands".into(),
