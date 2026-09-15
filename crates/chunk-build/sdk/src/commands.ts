@@ -157,6 +157,19 @@ export function command(
     if (paths.has(path)) throw new Error(`Duplicate command route: ${path}`);
     paths.add(path);
   }
+  for (const route of routes) {
+    const { literals, arguments: args } = route.contract;
+    const first = args[0];
+    if (
+      first &&
+      routes.some(
+        (other) =>
+          literals.every((literal, index) => other.contract.literals[index] === literal) &&
+          other.contract.literals[literals.length] === first.name,
+      )
+    )
+      throw new Error("Command argument name conflicts with literal child");
+  }
   if (options.permission && (options.permission.kind !== "query" || typeof options.permission.path !== "string"))
     throw new Error("Command permission requires a query reference");
   return freeze({

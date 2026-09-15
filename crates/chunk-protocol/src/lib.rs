@@ -46,6 +46,9 @@
 
 extern crate self as chunk_protocol;
 
+#[cfg(feature = "mc-26-1")]
+pub mod commands;
+
 mod codec;
 mod collections;
 mod frame;
@@ -78,6 +81,8 @@ pub enum Error {
     InvalidUtf8,
     #[error("unexpected packet id")]
     UnexpectedPacket,
+    #[error("invalid command packet or tree")]
+    InvalidCommand,
     #[error("trailing bytes in packet")]
     TrailingBytes,
 }

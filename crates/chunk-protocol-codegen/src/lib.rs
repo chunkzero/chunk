@@ -1,5 +1,6 @@
 //! Generates public protocol modules from pinned local `PrismarineJS` datasets.
 
+mod commands;
 mod packets;
 mod registries;
 
@@ -77,6 +78,7 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
     }
     let protocol_id = i32::try_from(version["version"].as_i64().ok_or("missing protocol version")?)?;
     let packets = packets::generate(&protocol)?;
+    let commands = commands::generate(&protocol)?;
     let registries =
         registries::generate(&protocol, inputs.get("loginPacket.json").ok_or("missing loginPacket.json")?)?;
     let module = &invocation.module;
@@ -102,6 +104,7 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
             };
 
             #packets
+            #commands
             #registries
         }
     })

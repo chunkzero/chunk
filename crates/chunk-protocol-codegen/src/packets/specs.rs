@@ -133,6 +133,8 @@ packets![
         "FeatureFlags",
         [bounded("features", 1024), bounded("features[]", 32767)]
     ),
+    ("play", "toServer", "chat_command", "UnsignedCommand", [bounded("command", 1024)]),
+    ("play", "toServer", "tab_complete", "CommandSuggestionsRequest", [bounded("text", 1025)]),
     ("play", "toServer", "settings", "PlayClientInformation", [bounded("locale", 16)]),
     ("play", "toClient", "game_state_change", "GameEvent", [renamed("gameMode", "value", None)]),
     ("play", "toClient", "set_title_time", "TitleTimes", []),
