@@ -24,7 +24,7 @@ fn project() -> tempfile::TempDir {
     .unwrap();
     fs::write(
         root.join("apps/games/arena/app.ts"),
-        r#"import {defineApp,createHook,v} from '#chunk';
+        r"import {defineApp,createHook,v} from '#chunk';
 import {leave} from './server/behavior.ts';
 export default defineApp({
  id:'arena', runtime:{machineProfile:'small',maxPlayers:16},
@@ -34,7 +34,7 @@ export default defineApp({
   large:{implementation:'default',key:'large-arena',machineProfile:'large',maxPlayers:32,config:{label:'Large'}},
  },
  hooks:{entered:createHook('domain.enter',()=>{})},commands:{leave}
-});"#,
+});",
     )
     .unwrap();
     project
