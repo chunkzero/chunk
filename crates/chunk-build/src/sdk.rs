@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 const SOURCES: &[(&str, &str)] = &[
     ("index.ts", include_str!("../sdk/src/index.ts")),
+    ("destinations.ts", include_str!("../sdk/src/destinations.ts")),
     ("hooks.ts", include_str!("../sdk/src/hooks.ts")),
     ("functions.ts", include_str!("../sdk/src/functions.ts")),
     ("validators.ts", include_str!("../sdk/src/validators.ts")),

@@ -1,6 +1,7 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
 mod delivery;
+mod destinations;
 mod drain;
 mod host;
 mod moves;
@@ -39,6 +40,8 @@ pub struct SessionType {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<chunk_contract::DestinationManifest>,
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
     pub artifact_digest: String,
@@ -84,6 +87,9 @@ impl Config {
                     },
                 );
             }
+        }
+        if let Some(destinations) = &self.destinations {
+            destinations.validate_apps(&self.apps).map_err(Error::Invalid)?;
         }
         if self.session_types != expected {
             return Err(Error::Invalid("session catalog differs from app manifests"));

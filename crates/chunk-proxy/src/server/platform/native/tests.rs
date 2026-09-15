@@ -216,6 +216,7 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         id: "candidate".into(),
         source,
         domains: Some(manifest),
+        destinations: None,
         tables: serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"string"}}}}})).unwrap(),
         functions: [
             ("trace", FunctionKind::Query, Schema::Null, Schema::String),

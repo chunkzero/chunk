@@ -5,8 +5,10 @@ import { defineFunctions } from "../sdk/functions.ts";
 import type { QueryContext as SchemaQueryContext, MutationContext as SchemaMutationContext } from "../sdk/functions.ts";
 import type { Id as TableId } from "../sdk/validators.ts";
 
-export { v, unset, createHook } from "../sdk/index.ts";
+export { v, unset, createHook, defineDestination } from "../sdk/index.ts";
 export type {
+  DestinationDefinition,
+  DestinationOptions,
   Validator,
   ObjectValidator,
   OptionalValidator,

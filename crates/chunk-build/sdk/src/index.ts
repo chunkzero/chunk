@@ -42,3 +42,6 @@ export type { Document, Reader, Writer, Selection } from "./documents.ts";
 
 export { createHook } from "./hooks.ts";
 export type { HookContexts, HookResults, HookEvent, HookOptions, HookDefinition } from "./hooks.ts";
+
+export { defineDestination } from "./destinations.ts";
+export type { DestinationDefinition, DestinationOptions } from "./destinations.ts";

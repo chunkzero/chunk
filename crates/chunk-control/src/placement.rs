@@ -216,6 +216,7 @@ fn reserve(
         return Err(Error::Invalid("player already owned"));
     }
     let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
+    state.sessions.get_mut(&session).ok_or(Error::Invalid("missing selected session"))?.empty_since_ms = None;
     let owner = state.players.entry(player.clone()).or_default();
     if request.source.is_none() {
         owner.membership_generation = owner.membership_generation.checked_add(1).ok_or(Error::Capacity)?;
@@ -252,6 +253,10 @@ fn select_session(
     if !demand.machine_profile.is_empty() && demand.machine_profile != spec.machine_profile {
         return Err(Error::Invalid("session profile mismatch"));
     }
+    let policy = config.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    if policy.is_some_and(|policy| policy.destination.machine_profile != demand.machine_profile) {
+        return Err(Error::Invalid("declared destination profile mismatch"));
+    }
     let existing = state
         .sessions
         .iter()
@@ -267,6 +272,13 @@ fn select_session(
     let session = if let Some(id) = existing {
         id
     } else {
+        if policy.is_some_and(|policy| policy.overflow == chunk_contract::DestinationOverflow::Reject)
+            && state.sessions.values().any(|session| {
+                !session.finished && session.session_type == demand.session_type && session.demand_key == demand.key
+            })
+        {
+            return Err(Error::Capacity);
+        }
         if state.sessions.len() >= 256 {
             return Err(Error::Capacity);
         }
@@ -279,8 +291,13 @@ fn select_session(
                     && !unavailable.contains(*id)
                     && host.app == spec.app
                     && host.profile == spec.machine_profile
-                    && state.sessions.values().filter(|s| s.host == **id && !s.retired).count() < usize::from(limit)
-                    && state.sessions.values().filter(|s| s.host == **id && !s.retired).map(|s| s.capacity).sum::<u32>()
+                    && state.sessions.values().filter(|s| s.host == **id && !s.finished).count() < usize::from(limit)
+                    && state
+                        .sessions
+                        .values()
+                        .filter(|s| s.host == **id && !s.finished)
+                        .map(|s| s.capacity)
+                        .sum::<u32>()
                         + spec.capacity
                         <= 128
             })
@@ -302,6 +319,9 @@ fn select_session(
         state.sessions.insert(
             id.clone(),
             SessionState {
+                empty_since_ms: None,
+                finish_requested: false,
+                finished: false,
                 host,
                 session_type: demand.session_type.clone(),
                 demand_key: demand.key.clone(),
@@ -347,6 +367,7 @@ mod tests {
     fn placement_groups_only_matching_apps_and_profiles() {
         let mut state = State::default();
         let mut config = Config {
+            destinations: None,
             apps: BTreeMap::new(),
             deployment: chunk_proto::v1::DeploymentRef::default(),
             artifact_digest: "release".into(),

@@ -10,6 +10,7 @@ use crate::{ActionStatus, Backend, Call, Error};
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
         domains: None,
+        destinations: None,
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),

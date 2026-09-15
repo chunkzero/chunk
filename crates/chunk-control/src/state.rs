@@ -43,6 +43,12 @@ pub(crate) struct HostState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SessionState {
+    #[serde(default)]
+    pub empty_since_ms: Option<u64>,
+    #[serde(default)]
+    pub finish_requested: bool,
+    #[serde(default)]
+    pub finished: bool,
     pub host: String,
     pub session_type: String,
     pub demand_key: String,

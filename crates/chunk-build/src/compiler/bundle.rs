@@ -172,18 +172,25 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\n",
+        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isDestination }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
         quote(sdk.join("functions.ts").to_string_lossy()),
-        quote(sdk.join("hooks.ts").to_string_lossy())
+        quote(sdk.join("hooks.ts").to_string_lossy()),
+        quote(sdk.join("destinations.ts").to_string_lossy())
     );
     let domains = super::domains::manifest(root)?;
+    let mut destination_metadata = Vec::new();
+    let mut destination_module = false;
     let mut hook_metadata = Vec::new();
     let mut hook_scopes = std::collections::BTreeSet::new();
     let mut metadata = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         let scope = super::domains::hook_scope(entry);
+        let destination_scope = entry.namespace == "shared/destinations";
+        if destination_scope && std::mem::replace(&mut destination_module, true) {
+            return Err(error("multiple server/destinations.ts or destinations.mts modules"));
+        }
         if scope.is_some_and(|scope| !hook_scopes.insert(scope)) {
             return Err(error(format!("multiple hook modules for domain {}", scope.unwrap_or_default())));
         }
@@ -200,8 +207,8 @@ fn entry_source(
             if exported == "default" {
                 writeln!(
                     source,
-                    "if(isHook({value})) throw new Error({});",
-                    quote(format!("Hook descriptors require named exports: {location}"))
+                    "if(isHook({value}) || isDestination({value})) throw new Error({});",
+                    quote(format!("Hook and destination descriptors require named exports: {location}"))
                 )
                 .map_err(error)?;
                 continue;
@@ -225,6 +232,11 @@ fn entry_source(
                 )
                 .map_err(error)?;
             }
+            if destination_scope {
+                destination_metadata.push(format!("...(isDestination({value}) ? [[{name}, {value}.contract]] : [])"));
+            } else {
+                writeln!(source, "if(isDestination({value})) throw new Error({});", quote(format!("Destination descriptors require named exports in server/destinations.ts or destinations.mts: {location}"))).map_err(error)?;
+            }
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)
@@ -241,6 +253,7 @@ fn entry_source(
     } else {
         String::new()
     };
-    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata}}}; }}", metadata.join(",")).map_err(error)?;
+    writeln!(source, "const destinationEntries = [{}];", destination_metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}})}}; }}", metadata.join(",")).map_err(error)?;
     Ok(source)
 }

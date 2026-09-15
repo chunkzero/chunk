@@ -19,7 +19,7 @@ fn deployment() -> Deployment {
     }))
     .unwrap();
     Deployment {
-        contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"hooks".into(),domains:Some(domains),
+        contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"hooks".into(),domains:Some(domains),destinations:None,
         source:r"
 export function read(ctx) { return ctx.db.get('counts','value')?.value ?? 0; }
 export function increment(ctx) { const value=read(ctx)+1; ctx.db.put('counts','value',{value}); return value; }
