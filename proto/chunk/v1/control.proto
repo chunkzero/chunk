@@ -4,6 +4,7 @@ package chunk.v1;
 
 import "chunk/v1/common.proto";
 import "chunk/v1/gameplay.proto";
+import "chunk/v1/session_methods.proto";
 import "chunk/v1/supervision.proto";
 
 // One authenticated local proxy group and one durable ownership authority.
@@ -18,6 +19,10 @@ service LocalControl {
   rpc Drain(DrainRequest) returns (DrainStatus);
   rpc Nodes(NodesRequest) returns (NodeList);
   rpc ShutdownNode(ShutdownNodeRequest) returns (NodeStatus);
+  rpc PrepareSessionMethod(PrepareSessionMethodRequest) returns (PreparedMethodHandle);
+  rpc StartPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
+  rpc PollPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
+  rpc CancelPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
 }
 
 message SessionDemand {
@@ -125,4 +130,25 @@ message ShutdownNodeRequest {
 message DepartureStatus {
   ClaimIdentity claim = 1;
   bool departed = 2;
+}
+
+// Preparation never invokes gameplay. App/session/name are declaration identities, not authority.
+message PrepareSessionMethodRequest {
+  ClaimIdentity claim = 1;
+  string app_id = 2;
+  // Unqualified authored session type, e.g. "default" for app "lobby".
+  string session = 3;
+  string method = 4;
+  string arguments_json = 5;
+  uint32 timeout_ms = 6;
+}
+
+// Opaque control-service handle. Only retained handles can start; recreation is never implicit.
+message PreparedMethodHandle {
+  string operation_id = 1;
+  uint64 deadline_ms = 2;
+}
+
+message PreparedMethodRequest {
+  string operation_id = 1;
 }
