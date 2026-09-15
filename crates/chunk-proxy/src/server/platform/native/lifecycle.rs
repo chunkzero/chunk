@@ -46,6 +46,7 @@ impl Lifecycle {
         let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing arrived destination"))?;
         let domain = domain(manifest, demand)?.to_owned();
         let events = transition(self.arrived.as_ref().map(|arrival| arrival.domain.as_str()), &domain);
+        let mut notifications = Vec::new();
         for (event, scope) in events {
             let origin = if event == HookEvent::DomainLeave {
                 self.arrived.as_ref().map(|arrival| (arrival.claim.clone(), arrival.identity.clone()))
@@ -53,8 +54,9 @@ impl Lifecycle {
                 None
             }
             .unwrap_or_else(|| (claim.clone(), identity.clone()));
-            self.platform.notify(manifest, (event, scope), origin, &self.session, &self.connection);
+            notifications.push(((event, scope), origin));
         }
+        self.platform.notify(manifest, notifications, &self.session, &self.connection);
         self.arrived =
             Some(Arrival { manifest: manifest.clone(), domain, claim: claim.clone(), identity: identity.clone() });
         self.cleanup_claim = Some(claim.clone());
@@ -96,15 +98,15 @@ impl Drop for Lifecycle {
                         .map(|scope| (HookEvent::DomainLeave, scope))
                         .chain(scopes.iter().cloned().rev().map(|scope| (HookEvent::PlayerDisconnect, scope)))
                         .collect::<Vec<_>>();
-                    for event in events {
-                        platform.notify(
-                            &arrival.manifest,
-                            event,
-                            (arrival.claim.clone(), arrival.identity.clone()),
-                            &CancellationToken::new(),
-                            &CancellationToken::new(),
-                        );
-                    }
+                    platform.notify(
+                        &arrival.manifest,
+                        events
+                            .into_iter()
+                            .map(|event| (event, (arrival.claim.clone(), arrival.identity.clone())))
+                            .collect(),
+                        &CancellationToken::new(),
+                        &CancellationToken::new(),
+                    );
                 }
                 Ok::<_, io::Error>(())
             }
@@ -137,44 +139,57 @@ fn transition(previous: Option<&str>, next: &str) -> Vec<(HookEvent, String)> {
         .collect()
 }
 
+type Notification = ((HookEvent, String), (ClaimRequest, ClaimIdentity));
+
 impl Platform {
     fn notify(
         &self,
         manifest: &DomainManifest,
-        (event, scope): (HookEvent, String),
-        (claim, identity): (ClaimRequest, ClaimIdentity),
+        notifications: Vec<Notification>,
         session: &CancellationToken,
         connection: &CancellationToken,
     ) {
-        let Ok(mut payload) = payload(&claim) else {
-            return;
-        };
-        payload["domain"] = scope.clone().into();
-        if event == HookEvent::PlayerDisconnect {
-            payload["reason"] = "connection closed".into();
-        }
-        let caller = caller(&claim, Some(&identity));
-        for (id, hook) in &manifest.hooks {
-            if hook.event != event || hook.domain != scope {
+        let mut calls = Vec::new();
+        for ((event, scope), (claim, identity)) in notifications {
+            let Ok(mut payload) = payload(&claim) else {
                 continue;
+            };
+            payload["domain"] = scope.clone().into();
+            if event == HookEvent::PlayerDisconnect {
+                payload["reason"] = "connection closed".into();
             }
-            let platform = self.clone();
-            let id = id.clone();
-            let payload = payload.clone();
-            let caller = caller.clone();
-            let cancellation = if hook.follow_player { connection.clone() } else { session.clone() };
-            let connection = connection.clone();
-            self.cleanup.spawn(async move {
-                tokio::select! {
-                    biased;
-                    () = connection.cancelled() => {},
-                    () = cancellation.cancelled() => {},
-                    result = platform.invoke_hook(&id,event,payload,caller) => {
-                        if let Err(error) = result { tracing::warn!(%error,hook=id,"lifecycle notification failed"); }
+            let caller = caller(&claim, Some(&identity));
+            for (id, hook) in &manifest.hooks {
+                if hook.event == event && hook.domain == scope {
+                    calls.push((id.clone(), event, payload.clone(), caller.clone(), hook.follow_player));
+                }
+            }
+        }
+        if calls.is_empty() {
+            return;
+        }
+        let platform = self.clone();
+        let session = session.clone();
+        let connection = connection.clone();
+        self.cleanup.spawn(async move {
+            // One bounded batch preserves ancestry order without holding a transaction.
+            let batch = async {
+                for (id, event, payload, caller, follow_player) in calls {
+                    let cancellation = if follow_player { &connection } else { &session };
+                    tokio::select! {
+                        biased;
+                        () = connection.cancelled() => return,
+                        () = cancellation.cancelled() => {},
+                        result = platform.invoke_hook(&id, event, payload, caller) => {
+                            if let Err(error) = result { tracing::warn!(%error,hook=id,"lifecycle notification failed"); }
+                        }
                     }
                 }
-            });
-        }
+            };
+            if tokio::time::timeout(super::RPC_TIMEOUT, batch).await.is_err() {
+                tracing::warn!("lifecycle notification batch deadline exceeded");
+            }
+        });
     }
 }
 
