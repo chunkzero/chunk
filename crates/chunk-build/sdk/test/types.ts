@@ -233,3 +233,33 @@ createHook("player.login", () => ({ allow: true }), { followPlayer: true });
 createHook("arbitrary.event", () => null);
 createHook("player.beforeMove", ({ sourceDomain, destination }) => ({ allow: sourceDomain !== destination.key }));
 createHook("domain.enter", () => {}, { followPlayer: true });
+
+const { command, commandArg, commandRoute } = await import("../src/commands.ts");
+command("reward", {
+  args: { amount: commandArg.integer({ min: 1 }), player: commandArg.word() },
+  handler: (ctx, args) => {
+    const amount: number = args.amount;
+    const player: string = args.player;
+    // @ts-expect-error command arguments retain parser types
+    args.amount.toUpperCase();
+    // @ts-expect-error commands do not own a database transaction
+    void ctx.db;
+    void [amount, player];
+  },
+});
+command("party", {
+  routes: [
+    commandRoute(["invite"], {
+      args: { player: commandArg.word() },
+      handler: (_, { player }) => {
+        void player.length;
+      },
+    }),
+    commandRoute(["leave"], {
+      handler: (_, args) => {
+        // @ts-expect-error an argument-free route has no player argument
+        void args.player;
+      },
+    }),
+  ],
+});

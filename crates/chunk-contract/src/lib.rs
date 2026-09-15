@@ -6,7 +6,11 @@
 mod app;
 pub use app::{AppArtifact, SessionDeclaration, class_name};
 
+mod commands;
 mod connections;
+pub use commands::{
+    Command, CommandArgument, CommandParser, CommandRoute, CommandSuggestions, SuggestionQuery, visible_commands,
+};
 mod deployment;
 mod domains;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
