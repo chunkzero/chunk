@@ -14,6 +14,7 @@ async fn failed_edge_start_releases_earlier_services() {
     let bundle = chunk_contract::Deployment {
         domains: None,
         session_methods: None,
+        session_configurations: None,
         destinations: None,
         contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
@@ -26,6 +27,7 @@ async fn failed_edge_start_releases_earlier_services() {
     let control = chunk_control::Config {
         destinations: None,
         session_methods: None,
+        session_configurations: None,
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: artifact.id.clone() },
         artifact_digest: artifact.id.clone(),
@@ -75,6 +77,7 @@ async fn missing_bundle_preserves_startup_error() {
     let control = chunk_control::Config {
         destinations: None,
         session_methods: None,
+        session_configurations: None,
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: "missing".into() },
         artifact_digest: "missing".into(),

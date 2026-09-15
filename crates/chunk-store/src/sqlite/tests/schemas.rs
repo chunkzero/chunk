@@ -103,6 +103,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     let deployment = chunk_contract::Deployment {
         domains: None,
         session_methods: None,
+        session_configurations: None,
         destinations: None,
         contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
@@ -148,6 +149,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let deployment = chunk_contract::Deployment {
             domains: None,
             session_methods: None,
+            session_configurations: None,
             destinations: None,
             contract_version: 2,
             runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,

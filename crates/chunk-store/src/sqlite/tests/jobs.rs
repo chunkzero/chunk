@@ -8,6 +8,7 @@ fn target() -> Deployment {
         runtime_profile: RuntimeProfile::TransactionalV1,
         domains: None,
         session_methods: None,
+        session_configurations: None,
         destinations: None,
         id: "v1".into(),
         source: "export function work() { return null; }".into(),

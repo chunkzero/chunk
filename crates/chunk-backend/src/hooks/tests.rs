@@ -20,6 +20,7 @@ fn deployment() -> Deployment {
     .unwrap();
     Deployment {
         session_methods: None,
+        session_configurations: None,
         contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"hooks".into(),domains:Some(domains),destinations:None,
         source:r"
 export function read(ctx) { return ctx.db.get('counts','value')?.value ?? 0; }

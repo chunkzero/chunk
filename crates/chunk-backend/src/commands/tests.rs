@@ -58,7 +58,7 @@ fn deployment() -> Deployment {
         json!({"type":"object","fields":{"input":{"schema":{"type":"string"}},"cursor":{"schema":{"type":"integer"}}}}),
     )
     .unwrap();
-    Deployment {destinations:None,contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"commands".into(),domains:Some(domains),session_methods:Some(serde_json::from_value(json!({"version":1,"methods":[{"app":"lobby","session":"main","name":"status","arguments":{"type":"object","fields":{"limit":{"schema":{"type":"integer"}}}},"result":{"type":"integer"}}]})).unwrap()),
+    Deployment {destinations:None,session_configurations:None,contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"commands".into(),domains:Some(domains),session_methods:Some(serde_json::from_value(json!({"version":1,"methods":[{"app":"lobby","session":"main","name":"status","arguments":{"type":"object","fields":{"limit":{"schema":{"type":"integer"}}}},"result":{"type":"integer"}}]})).unwrap()),
         tables:serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"integer"}}}}})).unwrap(),
         source:r"
 export function permit(ctx) { return ctx.caller.kind === 'command' && ctx.caller.player === 'alice' && ctx.caller.claimOperationId === 'claim-one' && (ctx.db.get('state','denied')?.value ?? 0)===0; }
