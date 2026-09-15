@@ -92,6 +92,7 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
     let contract: BackendMetadata = serde_json::from_str(&result.value).map_err(io::Error::other)?;
     Deployment {
         session_methods: contract.session_methods.clone(),
+        session_configurations: contract.session_configurations.clone(),
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "validation".into(),

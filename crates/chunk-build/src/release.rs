@@ -163,6 +163,7 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
     let encoded_contract = serde_json::to_vec(&contract).map_err(io::Error::other)?;
     let backend = chunk_contract::Deployment {
         session_methods: contract.session_methods,
+        session_configurations: contract.session_configurations,
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "validation".into(),
