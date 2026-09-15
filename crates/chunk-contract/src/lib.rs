@@ -16,6 +16,8 @@ mod domains;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
 mod index;
 mod schema;
+mod session_methods;
+pub use session_methods::{SessionMethodDeclaration, SessionMethods};
 
 pub use connections::{BackendConnection, ControlConnection};
 

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import dev.chunkzero.generated.BackendTypes;
 import dev.chunkzero.generated.BackendTypes.Shared.Profile.RecordArgs.State;
+import dev.chunkzero.generated.SessionMethods;
 
 import org.junit.jupiter.api.Test;
 
@@ -181,6 +182,21 @@ class GeneratedContractsTest {
         assertNull(BackendTypes.Same.Same_.read.result().read("null"));
         assertThrows(
                 RuntimeException.class, () -> BackendTypes.Same.Same_.read.result().read("{}"));
+    }
+
+    @Test
+    void sessionMethodInterfacesUseTheSameValidatedWireModels() throws IOException {
+        var ref = SessionMethods.Duels.Default.Forfeit.REF;
+        SessionMethods.Duels.Default.Forfeit implementation = args -> args.count() > 0;
+        var input = fixtures().get(0).toString();
+        var arguments = ref.arguments().read(input);
+        assertEquals("duels", ref.app());
+        assertEquals("default", ref.session());
+        assertEquals("forfeit", ref.name());
+        assertEquals("true", ref.result().write(implementation.forfeit(arguments)));
+        assertEquals(new SessionMethods.Ids.Profiles("profiles:p1"), arguments.id());
+        assertThrows(RuntimeException.class, () -> ref.arguments().read("{}"));
+        assertThrows(RuntimeException.class, () -> ref.result().read("1"));
     }
 
     private JsonNode fixtures() throws IOException {

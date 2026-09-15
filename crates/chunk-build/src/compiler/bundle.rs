@@ -172,14 +172,16 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\n",
+        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\nimport {{ isSessionMethod }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
         quote(sdk.join("functions.ts").to_string_lossy()),
         quote(sdk.join("hooks.ts").to_string_lossy()),
         quote(sdk.join("commands.ts").to_string_lossy()),
+        quote(sdk.join("sessions.ts").to_string_lossy()),
     );
     let mut domains = super::domains::DomainEntries::new(root)?;
     let mut metadata = Vec::new();
+    let mut methods = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         domains.add_module(entry)?;
@@ -199,6 +201,7 @@ fn entry_source(
             }
             let name = quote(format!("{}/{}", entry.namespace, exported));
             writeln!(source, "export const {binding} = (ctx,args) => isHook({value}) ? invokeHook({value},ctx,args) : isCommand({value}) ? invokeCommand({value},ctx,args) : {value}.handler(ctx,args);").map_err(error)?;
+            methods.push(format!("...(isSessionMethod({value}) ? [{value}.contract] : [])"));
             metadata.push(format!(
                 "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
                 quote(binding)
@@ -207,6 +210,6 @@ fn entry_source(
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
     let domain_metadata = domains.metadata()?;
-    write!(source, "export function __chunk_contract() {{ return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata}}}; }}", metadata.join(",")).map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}})}}; }}", methods.join(","), metadata.join(",")).map_err(error)?;
     Ok(source)
 }

@@ -2,7 +2,9 @@
 
 This build fixture uses the public Java session API and generated typed backend client, with `-Xlint:all -Werror` and no
 Kotlin production dependencies. Its lobby provider creates a session whose join hook queries a typed greeting and sends
-the result on the tick thread.
+the result on the tick thread. It also implements the generated `Announce` session-method interface from
+`apps/lobby/server/methods.ts`; the generated binding sends a message to that session’s players. Backend dispatch is a
+separate runtime capability.
 
 From the repository root:
 

@@ -167,3 +167,36 @@ fn action_references_are_generated_for_typescript_without_becoming_jvm_mutations
         assert!(!source.contains("shared/tasks/read"));
     }
 }
+
+#[test]
+fn session_methods_reject_invalid_versions_identities_and_java_collisions() {
+    use serde_json::json;
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    let method = json!({"app":"duels","session":"default","name":"forfeit","arguments":{"type":"object","fields":{}},"result":{"type":"boolean"}});
+    let mut contract = original;
+    contract["session_methods"] = json!({"version":1,"methods":[method]});
+    let mut version = contract.clone();
+    version["session_methods"]["version"] = json!(2);
+    let mut duplicate = contract.clone();
+    duplicate["session_methods"]["methods"].as_array_mut().unwrap().push(method.clone());
+    let mut invalid_args = contract.clone();
+    invalid_args["session_methods"]["methods"][0]["arguments"] = json!({"type":"string"});
+    let mut collision = contract;
+    let mut other = method;
+    other["name"] = json!("for_feit");
+    collision["session_methods"]["methods"][0]["name"] = json!("forFeit");
+    collision["session_methods"]["methods"].as_array_mut().unwrap().push(other);
+    for (contract, expected) in [
+        (version, "unsupported session method"),
+        (duplicate, "duplicate session method"),
+        (invalid_args, "arguments must be an object"),
+        (collision, "collides"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contract.json");
+        fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+        let error =
+            generate(&path, &root.path().join("output"), GenerationTarget::Java { package: "example" }).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}

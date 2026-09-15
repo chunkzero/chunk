@@ -57,3 +57,6 @@ export type {
   CommandSuggestions,
   SuggestionQuery,
 } from "./commands.ts";
+
+export { sessionMethod } from "./sessions.ts";
+export type { SessionMethodDeclaration, SessionMethodReference } from "./sessions.ts";

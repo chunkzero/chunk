@@ -20,10 +20,13 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 import java.util.jar.JarFile
 
 @CacheableTask
 abstract class WriteSessionRegistry : DefaultTask() {
+    @get:Input abstract val app: Property<String>
+
     @get:Input abstract val mainClass: Property<String>
 
     @get:InputFiles
@@ -33,6 +36,12 @@ abstract class WriteSessionRegistry : DefaultTask() {
     @get:Classpath abstract val dependencies: ConfigurableFileCollection
 
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val methodContracts: ConfigurableFileCollection
+
+    @get:OutputDirectory abstract val bindingSourceDirectory: DirectoryProperty
 
     @get:OutputFile abstract val catalogFile: RegularFileProperty
 
@@ -58,7 +67,7 @@ abstract class WriteSessionRegistry : DefaultTask() {
                             .takeIf { it.isFile }
                             ?.readBytes()
                             ?.let(::inspect)
-                    } else {
+                    } else if (file.isFile) {
                         JarFile(file).use { jar ->
                             jar.getJarEntry("$name.class")?.let {
                                 jar.getInputStream(it).use { input ->
@@ -66,6 +75,8 @@ abstract class WriteSessionRegistry : DefaultTask() {
                                 }
                             }
                         }
+                    } else {
+                        null
                     }
                 }?.also { cache[name] = it }
 
@@ -88,6 +99,14 @@ abstract class WriteSessionRegistry : DefaultTask() {
             require(sessions.put(id, type.name.replace('/', '.')) == null) { "Duplicate session type: $id" }
         }
         require(sessions.size in 1..128) { "App requires 1–128 @SessionType declarations" }
+        writeSessionMethods(
+            app.get(),
+            sessions,
+            methodContracts.singleFile,
+            ::lookup,
+            outputDirectory.get().asFile,
+            bindingSourceDirectory.get().asFile,
+        )
         val output = outputDirectory.file("META-INF/services/dev.chunkzero.runtime.SessionProvider").get().asFile
         output.parentFile.mkdirs()
         output.writeText(sessions.values.joinToString("\n", postfix = "\n"))
@@ -97,13 +116,14 @@ abstract class WriteSessionRegistry : DefaultTask() {
     }
 }
 
-private class CompiledClass {
+internal class CompiledClass {
     var name = ""
     var parents = emptyList<String>()
     var publicConcrete = false
     var constructor = false
     var main = false
     var session: String? = null
+    var creates: String? = null
     val constructible get() = publicConcrete && constructor
 }
 
@@ -149,6 +169,13 @@ private fun inspect(bytes: ByteArray): CompiledClass {
                 signature: String?,
                 exceptions: Array<out String>?,
             ): MethodVisitor? {
+                if (name == "create" && Type.getArgumentTypes(descriptor).isEmpty() &&
+                    access and Opcodes.ACC_PUBLIC != 0 &&
+                    access and (Opcodes.ACC_STATIC or Opcodes.ACC_BRIDGE) == 0 &&
+                    Type.getReturnType(descriptor).sort == Type.OBJECT
+                ) {
+                    type.creates = Type.getReturnType(descriptor).internalName
+                }
                 if (name == "<init>" && descriptor == "()V" &&
                     access and Opcodes.ACC_PUBLIC != 0
                 ) {

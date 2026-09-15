@@ -28,6 +28,8 @@ struct BackendMetadata {
     functions: BTreeMap<String, Function>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     domains: Option<DomainManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_methods: Option<chunk_contract::SessionMethods>,
 }
 
 #[cfg(test)]

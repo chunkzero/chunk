@@ -1,3 +1,4 @@
+import { sessionMethod, type SessionMethodReference } from "../src/index.ts";
 import { defineSchema, defineTable, mutation, query, v } from "../src/index.ts";
 import type { FunctionDefinition, Id, Infer, PlayerId } from "../src/index.ts";
 
@@ -271,7 +272,6 @@ command("immutable", {
   },
 });
 
-
 const { action } = await import("../src/index.ts");
 const countReference = {
   path: "counts/read",
@@ -320,3 +320,16 @@ query({
     return null;
   },
 });
+
+const forfeit = sessionMethod({
+  app: "duels",
+  session: "default",
+  name: "forfeit",
+  args: { player: v.player() },
+  returns: v.boolean(),
+});
+const typedMethod: SessionMethodReference<{ player: PlayerId }, boolean> = forfeit;
+// @ts-expect-error Method arguments retain their wire types.
+const wrongMethod: SessionMethodReference<{ player: number }, boolean> = forfeit;
+void typedMethod;
+void wrongMethod;

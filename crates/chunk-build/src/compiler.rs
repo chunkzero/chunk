@@ -43,6 +43,14 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
         .map_err(io::Error::other)?;
     let contract = extract(&source)
         .map_err(|error| io::Error::other(format!("Backend deployment at {}: {error}", project.display())))?;
+    if let Some(methods) = &contract.session_methods {
+        let apps = crate::project::discover_apps(&project)?;
+        for method in &methods.methods {
+            if !apps.iter().any(|app| app.id == method.app) {
+                return Err(io::Error::other(format!("Session method references unknown app: {}", method.app)));
+            }
+        }
+    }
     fs::write(staging.path().join("contract.json"), serde_json::to_vec(&contract).map_err(io::Error::other)?)?;
     for name in ["source.mjs", "source.mjs.map", "contract.json"] {
         fs::rename(staging.path().join(name), output.join(name))?;
@@ -291,6 +299,43 @@ mod tests {
         .unwrap();
         typecheck::check(&files, output.path()).unwrap();
         assert_eq!(fs::metadata(generated).unwrap().modified().unwrap(), timestamp);
+    }
+
+    #[test]
+    fn session_contracts_compile_from_authored_refs_before_jvm_outputs_exist() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        fs::create_dir_all(root.join("server/schema")).unwrap();
+        fs::create_dir_all(root.join("apps/duels/server")).unwrap();
+        fs::write(root.join("apps/duels/app.toml"), "").unwrap();
+        fs::write(root.join("apps/duels/build.gradle.kts"), "").unwrap();
+        fs::write(
+            root.join("server/schema/index.ts"),
+            "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
+        )
+        .unwrap();
+        fs::write(root.join("apps/duels/server/methods.ts"), "import {sessionMethod,v} from '#chunk'; export const forfeit=sessionMethod({app:'duels',session:'default',name:'forfeit',args:{player:v.player()},returns:v.boolean()});").unwrap();
+        fs::write(root.join("server/consumer.ts"), "import {forfeit} from '../apps/duels/server/methods.ts'; import type {SessionMethodReference,PlayerId} from '#chunk'; const reference:SessionMethodReference<{player:PlayerId},boolean>=forfeit; export function methodName(){return reference.name;}").unwrap();
+        let output = root.join(".chunk/build/backend");
+        compile(root, &output).unwrap();
+        let contract: BackendMetadata =
+            serde_json::from_slice(&fs::read(output.join("contract.json")).unwrap()).unwrap();
+        assert!(contract.functions.is_empty());
+        let methods = contract.session_methods.unwrap();
+        assert_eq!(methods.methods.len(), 1);
+        assert_eq!(methods.methods[0].app, "duels");
+        crate::generate(
+            &output.join("contract.json"),
+            &root.join(".chunk/generated/jvm"),
+            crate::GenerationTarget::Java { package: "example.generated" },
+        )
+        .unwrap();
+        let source =
+            fs::read_to_string(root.join(".chunk/generated/jvm/java/example/generated/SessionMethods.java")).unwrap();
+        assert!(source.contains("Boolean forfeit(SessionMethods.Duels.Default.Forfeit.Args args)"), "{source}");
+        check_editor(root);
+        fs::write(root.join("server/invalid.ts"), "import {forfeit} from '../apps/duels/server/methods.ts'; import type {SessionMethodReference} from '#chunk'; const reference:SessionMethodReference<{player:number},boolean>=forfeit; export function value(){return reference.name;}").unwrap();
+        assert!(compile(root, &output).unwrap_err().to_string().contains("number"));
     }
 
     fn check_editor(project: &Path) {

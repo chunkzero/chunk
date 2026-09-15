@@ -7,6 +7,7 @@ use super::{BackendMetadata, quote, validate_literals};
 mod client;
 mod names;
 mod schema;
+mod sessions;
 
 pub(super) struct Type {
     pub ty: String,
@@ -55,6 +56,7 @@ struct Node<'a> {
 pub(super) struct Bindings {
     pub root: Namespace,
     declarations: String,
+    sessions: Option<chunk_contract::SessionMethods>,
 }
 
 impl Bindings {
@@ -67,10 +69,12 @@ impl Bindings {
             self.declarations
         );
         let package_path = package.replace('.', "/");
-        Ok(BTreeMap::from([
+        let mut files = BTreeMap::from([
             (format!("java/{package_path}/BackendTypes.java"), source),
             (format!("java-client/{package_path}/BackendClient.java"), client::source(package, &self.root)),
-        ]))
+        ]);
+        files.extend(sessions::sources(self.sessions.as_ref(), package)?);
+        Ok(files)
     }
 }
 
@@ -118,7 +122,7 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
         model_body(&root),
     ]
     .join("\n");
-    Ok(Bindings { root, declarations })
+    Ok(Bindings { root, declarations, sessions: contract.session_methods.clone() })
 }
 
 fn describe(

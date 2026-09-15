@@ -47,6 +47,45 @@ Annotate them with `@SessionType("default")`. The plugin validates the compiled 
 ID catalog for release assembly. App JARs carry no Chunk deployment manifest. Placement and capacity settings belong in
 `app.toml`, with app defaults under `[runtime]` and optional overrides under `[sessions.<id>]`.
 
+## Typed session methods
+
+Declare a method in an app's TypeScript sources and import that authored reference from backend code:
+
+```ts
+import { sessionMethod, v } from "#chunk";
+export const announce = sessionMethod({
+  app: "lobby",
+  session: "default",
+  name: "announce",
+  args: { message: v.string() },
+  returns: v.integer(),
+});
+```
+
+Java or Kotlin gameplay implements the generated single-method interface:
+
+```java
+public final class LobbySession extends Session
+        implements SessionMethods.Lobby.Default.Announce {
+    public Long announce(SessionMethods.Lobby.Default.Announce.Args args) {
+        // Update session state synchronously and return a schema value.
+        return 0L;
+    }
+}
+```
+
+The provider must return the public concrete class (`LobbySession create()`). The compiler generates argument/result
+models and interfaces using the same schema rules as backend clients, including IDs, unions, nullable values and arrays.
+JVM-native objects, futures and Kotlin suspend functions cannot implement this synchronous wire signature. Methods from
+another app or session type are rejected during indexing.
+
+The build order is backend declarations → shared Java models/interfaces → app Java/Kotlin → bytecode index → generated
+method adapters. No generated TypeScript imports or previously compiled JVM classes are needed to bootstrap the build.
+`generateChunkSessionRegistry` writes a version-1 `META-INF/chunk/session-methods.json` and local method provider
+service; `compileChunkSessionMethods` compiles its direct-call adapters into the app JAR. The local bindings validate
+JSON inputs and outputs. Authenticated backend dispatch, tick scheduling and session-generation checks are separate
+runtime work.
+
 For Kotlin, put its standard plugin declaration in the settings `plugins` block:
 
 ```kotlin
