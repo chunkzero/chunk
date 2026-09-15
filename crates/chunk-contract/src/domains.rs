@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::deployment::identifier;
+use crate::{Command, deployment::identifier, visible_commands};
 
 pub const DOMAIN_MANIFEST_VERSION: u32 = 1;
 
@@ -15,6 +15,8 @@ pub struct DomainManifest {
     pub scopes: BTreeMap<String, DomainScope>,
     pub apps: BTreeMap<String, String>,
     pub hooks: BTreeMap<String, Hook>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, Command>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +81,7 @@ impl DomainManifest {
         if self.version != DOMAIN_MANIFEST_VERSION {
             return Err("unsupported domain manifest version");
         }
-        if self.scopes.len() > 256 || self.apps.len() > 256 || self.hooks.len() > 256 {
+        if self.scopes.len() > 256 || self.apps.len() > 256 || self.hooks.len() > 256 || self.commands.len() > 256 {
             return Err("domain manifest size limit");
         }
         if self.scopes.get("") != Some(&DomainScope { parent: None }) {
@@ -103,6 +105,10 @@ impl DomainManifest {
                 return Err("invalid app domain binding");
             }
         }
+        self.validate_handlers()
+    }
+
+    fn validate_handlers(&self) -> Result<(), &'static str> {
         let mut identities = BTreeSet::new();
         let mut exports = BTreeSet::new();
         let mut groups: BTreeMap<_, Vec<&Hook>> = BTreeMap::new();
@@ -141,6 +147,24 @@ impl DomainManifest {
                     return Err("same-scope admission hooks require distinct explicit order values");
                 }
             }
+        }
+        for (identity, command) in &self.commands {
+            let prefix = if command.domain.is_empty() {
+                "shared/domains/commands/".into()
+            } else {
+                format!("shared/domains/{}/commands/", command.domain)
+            };
+            if !identity.strip_prefix(&prefix).is_some_and(identifier)
+                || !identities.insert(identity.to_ascii_lowercase())
+                || !identifier(&command.export)
+                || !exports.insert(&command.export)
+                || !self.scopes.contains_key(&command.domain)
+            {
+                return Err("invalid command identity, export or domain");
+            }
+        }
+        for domain in self.scopes.keys() {
+            visible_commands(&self.commands, domain, &[])?;
         }
         Ok(())
     }

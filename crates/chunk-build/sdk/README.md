@@ -236,3 +236,41 @@ alone does not activate hooks.
 Helper exports remain ordinary code. Hook descriptors require named exports in hook modules; default exports and
 descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client
 paths. Hook names identify handlers within a deployment, so renaming an export changes its identity.
+
+## Domain commands
+
+Named `command` descriptors in `server/domains/**/commands.ts` or `commands.mts` contribute backend command roots.
+Ancestors apply to descendant domains. A visible root or alias has one owner; siblings may independently use the same
+names. Runtime registration also checks these names against the connected app's JVM commands.
+
+```ts
+import { command, commandArg, commandRoute } from "#chunk";
+
+export const party = command("party", {
+  aliases: ["p"],
+  routes: [
+    commandRoute(["invite"], {
+      args: { target: commandArg.word() },
+      handler: async (ctx, { target }) => {
+        // Call a typed query or mutation with ctx.runQuery / ctx.runMutation.
+      },
+    }),
+    commandRoute(["leave"], { handler: (ctx) => {} }),
+  ],
+});
+```
+
+For one route, `command("name", { args, handler })` is shorthand. Each route has a fixed literal prefix followed by
+required named arguments in declaration order. Parsers use unsigned Brigadier command input: `boolean()`, bounded 32-bit
+`integer({ min, max })`, `word()`, quoted `string()`, and trailing `greedy()`. Signed-message argument codecs are
+unsupported and rejected; commands do not rewrite signed chat.
+
+String parsers accept `{ suggestions: ["value"] }` or a typed query reference taking `{ input: string, cursor: number }`
+and returning `string[]`. A command's optional `permission` is a query reference taking `{}` and returning `boolean`.
+Permission and suggestion references must resolve to compatible functions in the same deployment. `followPlayer: true`
+records the intended lifecycle policy.
+
+Handlers receive authenticated `caller` and readonly `player` identity, plus typed `runQuery` and `runMutation`.
+Compilation preserves one handler export per command root and keeps commands out of ordinary generated function clients.
+Packet dispatch, permission execution, and lifecycle handling are implemented by the command runtime; these declarations
+alone do not register commands with connected players.

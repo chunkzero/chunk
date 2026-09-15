@@ -263,3 +263,10 @@ command("party", {
     }),
   ],
 });
+
+command("immutable", {
+  handler: (ctx) => {
+    // @ts-expect-error command player identities cannot be changed by handlers
+    ctx.player.uuid = "other";
+  },
+});

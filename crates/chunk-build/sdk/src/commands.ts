@@ -8,7 +8,7 @@ declare const argumentValue: unique symbol;
 
 export interface CommandContext {
   readonly caller: JsonValue;
-  readonly player: PlayerIdentity;
+  readonly player: Readonly<PlayerIdentity>;
   runQuery<A, R>(ref: FunctionReference<"query", A, R>, args: A): Promise<R>;
   runMutation<A, R>(ref: FunctionReference<"mutation", A, R>, args: A): Promise<R>;
 }
@@ -39,7 +39,7 @@ function suggestions(value: CommandSuggestions | undefined): CommandArgument["su
   if (Array.isArray(value)) {
     if (value.length > 64 || new Set(value).size !== value.length) throw new Error("Invalid command suggestions");
     for (const text of value)
-      if (typeof text !== "string" || text.length === 0 || text.length > 256 || /[\u0000-\u001f]/.test(text))
+      if (typeof text !== "string" || text.length === 0 || text.length > 256 || /\p{Cc}/u.test(text))
         throw new Error("Invalid command suggestion");
     return [...value];
   }
@@ -96,6 +96,7 @@ export function commandRoute<const S extends CommandShape = {}>(
   literals: readonly string[],
   options: RouteOptions<S>,
 ): CommandRoute<CommandArguments<S>> {
+  if (typeof options.handler !== "function") throw new Error("Command routes require a handler");
   if (literals.length > 8) throw new Error("Command literal depth exceeds eight");
   const args = Object.entries(options.args ?? {});
   if (args.length > 16) throw new Error("Too many command arguments");

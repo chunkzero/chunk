@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { command, commandArg, commandRoute, isCommand } from "../src/commands.ts";
+import { command, commandArg, commandRoute, invokeCommand, isCommand } from "../src/commands.ts";
 
 test("command routes retain named parser order and independently typed handlers", async () => {
   let observed;
@@ -44,4 +44,32 @@ test("command grammar rejects ambiguous routes and unsupported parser shapes", (
   assert.throws(() => commandArg.integer({ max: 2 ** 31 }));
   assert.throws(() => commandArg.integer({ min: 3, max: 2 }));
   assert.throws(() => commandArg.word({ suggestions: ["same", "same"] }));
+  assert.throws(() => command("party", { handler: null }));
+  assert.throws(() => command("party", { args: { message: { parser: "minecraft:message" } }, handler }));
+});
+
+test("compiled command adapters preserve authenticated context and route identity", async () => {
+  const captured = [];
+  const descriptor = command("party", {
+    routes: [
+      commandRoute(["invite"], {
+        args: { target: commandArg.word() },
+        handler: async (ctx, args) => {
+          assert.equal(Object.isFrozen(ctx.player), true);
+          assert.deepEqual(ctx.caller, { player: "trusted" });
+          await ctx.runMutation({ path: "shared/invite" }, { target: args.target, from: ctx.player.uuid });
+        },
+      }),
+    ],
+  });
+  const raw = {
+    caller: { player: "trusted" },
+    runMutation: async (path, args) => {
+      captured.push([path, args]);
+    },
+  };
+  const payload = { route: 0, arguments: { target: "Alex" }, player: { uuid: "id", username: "Other" } };
+  assert.equal(await invokeCommand(descriptor, raw, payload), null);
+  assert.deepEqual(captured, [["shared/invite", { target: "Alex", from: "id" }]]);
+  await assert.rejects(invokeCommand(descriptor, raw, { ...payload, route: 1 }), /Unknown command route/);
 });

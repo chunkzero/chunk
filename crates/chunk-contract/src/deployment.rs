@@ -92,8 +92,17 @@ impl Deployment {
         }
         if let Some(domains) = &self.domains {
             domains.validate()?;
-            if domains.hooks.values().any(|hook| exports.contains(&hook.export)) {
-                return Err("hook export collides with function export");
+            for command in domains.commands.values() {
+                command.validate(&self.functions)?;
+            }
+            if domains
+                .hooks
+                .values()
+                .map(|hook| &hook.export)
+                .chain(domains.commands.values().map(|command| &command.export))
+                .any(|export| !exports.insert(export))
+            {
+                return Err("domain handler export collides with function export");
             }
         }
         Ok(())

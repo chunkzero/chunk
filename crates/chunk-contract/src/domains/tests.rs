@@ -11,6 +11,7 @@ fn manifest() -> DomainManifest {
         .into(),
         apps: [("duels".into(), "games/duels".into()), ("lobby".into(), String::new())].into(),
         hooks: BTreeMap::new(),
+        commands: BTreeMap::new(),
     }
 }
 fn hook(domain: &str, event: HookEvent, export: &str, order: Option<i32>) -> Hook {
@@ -75,4 +76,67 @@ fn single_responders_require_root_and_notifications_do_not_imply_order() {
     contract.validate().unwrap();
     contract.hooks.get_mut("shared/domains/games/hooks/route").unwrap().order = Some(1);
     assert_eq!(contract.validate(), Err("only admission hooks accept ordering"));
+}
+
+#[test]
+fn command_metadata_preserves_legacy_encoding_and_rejects_invalid_identity_or_exports() {
+    let mut contract = manifest();
+    let legacy = serde_json::to_value(&contract).unwrap();
+    assert!(legacy.get("commands").is_none());
+    let decoded: DomainManifest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    let command = crate::Command {
+        domain: String::new(),
+        name: "hub".into(),
+        aliases: Vec::new(),
+        export: "sharedExport".into(),
+        permission: None,
+        follow_player: false,
+        routes: vec![crate::CommandRoute { literals: Vec::new(), arguments: Vec::new() }],
+    };
+    contract.commands.insert("shared/domains/commands/hub".into(), command.clone());
+    contract.validate().unwrap();
+    let mut invalid = contract.clone();
+    invalid.commands.insert("wrong/hub".into(), command);
+    assert_eq!(invalid.validate(), Err("invalid command identity, export or domain"));
+    let mut deployment = crate::Deployment {
+        contract_version: crate::CONTRACT_VERSION,
+        runtime_profile: crate::RuntimeProfile::TransactionalV1,
+        id: "domain-commands".into(),
+        source: "unused".into(),
+        tables: BTreeMap::new(),
+        functions: [(
+            "query".into(),
+            crate::Function {
+                kind: crate::FunctionKind::Query,
+                visibility: crate::Visibility::Internal,
+                export: "sharedExport".into(),
+                arguments: crate::Schema::Object { fields: BTreeMap::new() },
+                result: crate::Schema::Boolean,
+            },
+        )]
+        .into(),
+        domains: Some(contract),
+    };
+    assert_eq!(deployment.validate(), Err("domain handler export collides with function export"));
+    deployment.functions.get_mut("query").unwrap().export = "queryExport".into();
+    let domain = deployment.domains.as_mut().unwrap();
+    domain.commands.get_mut("shared/domains/commands/hub").unwrap().permission = Some("query".into());
+    deployment.validate().unwrap();
+    deployment.functions.get_mut("query").unwrap().kind = crate::FunctionKind::Mutation;
+    assert_eq!(deployment.validate(), Err("unknown command query reference"));
+    deployment.functions.get_mut("query").unwrap().kind = crate::FunctionKind::Query;
+    deployment.domains.as_mut().unwrap().commands.get_mut("shared/domains/commands/hub").unwrap().routes[0]
+        .arguments
+        .push(crate::CommandArgument {
+            name: "target".into(),
+            parser: crate::CommandParser::Word,
+            min: None,
+            max: None,
+            suggestions: Some(crate::CommandSuggestions::Query(crate::SuggestionQuery { query: "query".into() })),
+        });
+    assert_eq!(
+        deployment.validate(),
+        Err("command suggestions require input/cursor query arguments and string array results")
+    );
 }
