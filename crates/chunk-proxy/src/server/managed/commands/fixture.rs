@@ -15,6 +15,7 @@ pub(super) struct Service {
     pub assignment: Arc<Mutex<Assignment>>,
     pub commands: BTreeMap<String, Command>,
     pub allowed: Arc<AtomicBool>,
+    pub catalog_unavailable: Arc<AtomicBool>,
     pub pending_method: Arc<AtomicBool>,
     pub cancels: Arc<AtomicUsize>,
     pub waiting: Arc<AtomicUsize>,
@@ -37,6 +38,9 @@ impl backend_commands_server::BackendCommands for Service {
     async fn catalog(&self, request: Request<CommandScope>) -> Result<Response<CommandCatalog>, Status> {
         auth(&request, "platform")?;
         assert_eq!(request.metadata().get("x-chunk-deployment").unwrap(), "deployment");
+        if self.catalog_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("commit pending"));
+        }
         Ok(Response::new(CommandCatalog {
             commands_json: serde_json::to_vec(&self.commands).unwrap(),
             allowed_ids: if self.allowed.load(Ordering::SeqCst) {
@@ -214,6 +218,7 @@ impl Fixture {
             assignment: Arc::new(Mutex::new(assignment.clone())),
             commands,
             allowed: Arc::new(AtomicBool::new(true)),
+            catalog_unavailable: Arc::default(),
             pending_method: Arc::default(),
             cancels: Arc::default(),
             waiting: Arc::default(),

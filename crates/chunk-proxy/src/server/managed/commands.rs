@@ -188,7 +188,13 @@ impl Commands {
                     return Ok(());
                 }
                 self.refreshing = false;
-                let allowed = result.unwrap_or_default();
+                let allowed = match result {
+                    Ok(allowed) => allowed,
+                    Err(error) => {
+                        tracing::debug!(%error, "command permission refresh failed; keeping last permissions");
+                        return Ok(());
+                    }
+                };
                 if self.allowed == allowed {
                     return Ok(());
                 }

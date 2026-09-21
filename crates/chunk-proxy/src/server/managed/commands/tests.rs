@@ -138,6 +138,31 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
 }
 
 #[tokio::test]
+async fn failed_permission_refresh_keeps_last_catalog() {
+    let mut fixture = Fixture::new().await;
+    let (client, public) = tokio::io::duplex(16384);
+    let mut public = Transport::new(public);
+    let mut client = Transport::new(client);
+    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.arrived();
+    output(&mut fixture.commands, &mut public).await;
+    let published = decode_packet::<CommandTree>(&client.read_frame(16384).await.unwrap()).unwrap();
+    assert_eq!(published.nodes[0].children.len(), 4);
+    fixture.service.catalog_unavailable.store(true, Ordering::SeqCst);
+    fixture.commands.refresh();
+    output(&mut fixture.commands, &mut public).await;
+    assert!(!fixture.commands.allowed.is_empty());
+    assert!(tokio::time::timeout(Duration::from_millis(100), client.read_frame(16384)).await.is_err());
+    fixture.service.catalog_unavailable.store(false, Ordering::SeqCst);
+    fixture.service.allowed.store(false, Ordering::SeqCst);
+    fixture.commands.refresh();
+    output(&mut fixture.commands, &mut public).await;
+    let hidden = decode_packet::<CommandTree>(&client.read_frame(16384).await.unwrap()).unwrap();
+    assert!(hidden.nodes[0].children.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_new_claim() {
     let mut fixture = Fixture::new().await;
     let (client, public) = tokio::io::duplex(16384);
