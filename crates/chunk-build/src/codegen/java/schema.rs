@@ -21,7 +21,7 @@ impl Scope {
         self.names.insert(&self.path.join("."), name, origin)
     }
 
-    fn child(&mut self, name: &str, origin: &str) -> io::Result<Self> {
+    pub fn child(&mut self, name: &str, origin: &str) -> io::Result<Self> {
         self.declare(name, origin)?;
         let mut path = self.path.clone();
         path.push(name.into());
