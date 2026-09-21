@@ -46,7 +46,7 @@ fn path(binding: &HttpBinding, relative: &str) -> Result<Url, &'static str> {
     Ok(url)
 }
 
-fn prepare(binding: &HttpBinding, request: HttpRequest) -> Result<(Client, Request), &'static str> {
+fn prepare(binding: &HttpBinding, request: HttpRequest) -> Result<Request, &'static str> {
     if !binding.methods.contains(&request.method) {
         return Err("HTTP method denied");
     }
@@ -57,23 +57,8 @@ fn prepare(binding: &HttpBinding, request: HttpRequest) -> Result<(Client, Reque
         return Err("HTTP request size limit");
     }
     let url = path(binding, &request.path)?;
-    let client = Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .referer(false)
-        .http1_only()
-        .pool_max_idle_per_host(0)
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .timeout(binding.timeout)
-        .connect_timeout(binding.timeout)
-        .build()
-        .map_err(|_| "HTTP client unavailable")?;
     let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes()).map_err(|_| "HTTP method denied")?;
-    let mut builder = client.request(method, url);
+    let mut builder = binding.client.request(method, url).timeout(binding.timeout);
     for (key, value) in request.headers {
         let key = HeaderName::from_bytes(key.as_bytes()).map_err(|_| "Invalid HTTP header")?;
         if matches!(
@@ -89,11 +74,10 @@ fn prepare(binding: &HttpBinding, request: HttpRequest) -> Result<(Client, Reque
     if let Some(body) = request.body {
         builder = builder.body(body);
     }
-    let request = builder.build().map_err(|_| "Invalid HTTP request")?;
-    Ok((client, request))
+    builder.build().map_err(|_| "Invalid HTTP request")
 }
 
-async fn response(client: Client, request: Request) -> Result<(u16, BTreeMap<String, String>, String), &'static str> {
+async fn response(client: &Client, request: Request) -> Result<(u16, BTreeMap<String, String>, String), &'static str> {
     let mut response = client.execute(request).await.map_err(|_| "HTTP response unavailable after dispatch")?;
     if response.content_length().is_some_and(|size| size > RESPONSE_BYTES as u64) {
         return Err("HTTP response size limit after dispatch");
@@ -133,7 +117,7 @@ impl ScopedEffects {
         let Ok(_permit) = self.slots.clone().try_acquire_owned() else {
             return rejected("HTTP concurrency limit");
         };
-        let (client, request) = match prepare(binding, request) {
+        let request = match prepare(binding, request) {
             Ok(request) => request,
             Err(reason) => return rejected(reason),
         };
@@ -151,7 +135,7 @@ impl ScopedEffects {
         let result = tokio::select! {
             biased;
             ()=expired=>Err("Action scope expired after HTTP dispatch"),
-            result=response(client,request)=>result,
+            result=response(&binding.client,request)=>result,
         };
         match result {
             Ok((status, headers, body)) => HttpOutcome::Completed { effect_id, status, headers, body },

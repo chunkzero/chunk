@@ -6,7 +6,7 @@ use std::{
 };
 
 use chunk_js::{DeploymentId, HttpMethod};
-use reqwest::Url;
+use reqwest::{Client, Url};
 
 use crate::{Error, Result};
 
@@ -17,6 +17,7 @@ pub struct HttpBinding {
     pub(crate) base: Url,
     pub(crate) methods: BTreeSet<HttpMethod>,
     pub(crate) timeout: Duration,
+    pub(crate) client: Client,
 }
 
 impl HttpBinding {
@@ -40,7 +41,20 @@ impl HttpBinding {
         {
             return Err(Error::Invalid("HTTP binding origin or method grant"));
         }
-        Ok(Self { base, methods, timeout: Duration::from_secs(10) })
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .referer(false)
+            .http1_only()
+            .pool_max_idle_per_host(0)
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
+            .build()
+            .map_err(|_| Error::Invalid("HTTP client unavailable"))?;
+        Ok(Self { base, methods, timeout: Duration::from_secs(10), client })
     }
 
     /// # Errors
