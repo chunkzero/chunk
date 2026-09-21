@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chunk_contract::{Command, CommandParser, ParsedCommand, visible_commands};
 use chunk_protocol::{
     McString,
-    commands::{ArgumentParser, CommandNode, CommandTree, NodeKind, StringMode},
+    commands::{ArgumentParser, CommandNode, CommandTree, MAX_NODES, NodeKind, StringMode},
 };
 
 mod suggestions;
@@ -67,9 +67,10 @@ impl CommandTreeCatalog {
     }
 
     /// Permission results affect publication only, never ownership. Existing JVM indices stay fixed.
+    /// Returns the encoded clientbound packet frame.
     /// # Errors
     /// Rejects conflicting child names and bounded tree overflow.
-    pub fn merge(&self, visible: impl Fn(&str, &Command) -> bool) -> Result<CommandTree> {
+    pub fn merge(&self, visible: impl Fn(&str, &Command) -> bool) -> Result<Vec<u8>> {
         let mut tree = self.jvm.clone();
         for (id, command) in &self.commands {
             if !visible(id, command) {
@@ -134,16 +135,14 @@ impl CommandTreeCatalog {
             }
         }
         tree.validate().map_err(|_| "merged command tree exceeds limits")?;
-        let mut encoded = Vec::new();
-        chunk_protocol::Encode::encode(&tree, &mut encoded).map_err(|_| "merged command tree exceeds byte limit")?;
-        Ok(tree)
+        chunk_protocol::encode_packet(&tree).map_err(|_| "merged command tree exceeds byte limit")
     }
 }
 fn literal(name: &str) -> Result<NodeKind> {
     Ok(NodeKind::Literal { name: McString::new(name.to_owned()).map_err(|_| "invalid literal name")? })
 }
 fn append(tree: &mut CommandTree, node: CommandNode) -> Result<usize> {
-    if tree.nodes.len() >= 8192 {
+    if tree.nodes.len() >= MAX_NODES {
         return Err("merged command node limit");
     }
     let index = tree.nodes.len();

@@ -166,10 +166,10 @@ impl Commands {
                 return encode_packet(jvm).map_err(invalid_data);
             }
         };
-        let tree = catalog.merge(|id, _| self.allowed.contains(id)).map_err(invalid_data)?;
+        let frame = catalog.merge(|id, _| self.allowed.contains(id)).map_err(invalid_data)?;
         self.catalog = Some(catalog);
         self.tree_received = true;
-        encode_packet(&tree).map_err(invalid_data)
+        Ok(frame)
     }
     pub fn refresh(&mut self) {
         if self.refreshing || self.descriptors.is_empty() {
@@ -223,7 +223,7 @@ impl Commands {
                     && let Some(catalog) = &self.catalog
                 {
                     public
-                        .write_packet(&catalog.merge(|id, _| self.allowed.contains(id)).map_err(invalid_data)?)
+                        .write_encoded(&catalog.merge(|id, _| self.allowed.contains(id)).map_err(invalid_data)?)
                         .await?;
                 }
             }

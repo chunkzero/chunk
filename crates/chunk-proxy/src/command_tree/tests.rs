@@ -1,5 +1,6 @@
 use super::*;
 use chunk_contract::{CommandArgument, CommandRoute, CommandSuggestions, SuggestionQuery};
+use chunk_protocol::{Decode, VarInt, decode_packet};
 
 fn command() -> Command {
     Command {
@@ -25,6 +26,12 @@ fn command() -> Command {
         }],
     }
 }
+fn published(catalog: &CommandTreeCatalog, visible: impl Fn(&str, &Command) -> bool) -> CommandTree {
+    let frame = catalog.merge(visible).unwrap();
+    let mut body = frame.as_slice();
+    VarInt::decode(&mut body).unwrap();
+    decode_packet(body).unwrap()
+}
 fn catalog(command: Command) -> CommandTreeCatalog {
     CommandTreeCatalog::new(CommandTree::empty(), &BTreeMap::from([("travel".into(), command)]), "hub/lobby").unwrap()
 }
@@ -39,9 +46,9 @@ fn ownership_precedes_permissions_and_preserves_jvm_indices_and_redirects() {
     jvm.nodes[0].children.push(1);
     let commands = BTreeMap::from([("travel".into(), command())]);
     let catalog = CommandTreeCatalog::new(jvm.clone(), &commands, "hub/lobby").unwrap();
-    assert_eq!(catalog.merge(|_, _| false).unwrap(), jvm);
+    assert_eq!(published(&catalog, |_, _| false), jvm);
     assert_eq!(catalog.owner("go malformed arguments").unwrap().0, "travel");
-    let published = catalog.merge(|_, _| true).unwrap();
+    let published = published(&catalog, |_, _| true);
     assert_eq!(published.nodes[1], jvm.nodes[1]);
     assert_eq!(published.nodes[0].children[0], 1);
     let alias = published.nodes.iter().find(|node| node.name() == Some("go")).unwrap();
