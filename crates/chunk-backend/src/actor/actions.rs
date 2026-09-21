@@ -78,6 +78,9 @@ impl Actions {
         self.records.values().filter(|record| record.worker.is_some()).count() < MAX_LIVE
     }
 
+    /// The `:job:` suffix keeps job identities outside the client-allocated incarnation, so `admit`
+    /// only accepts them on the trusted durable path and `start_action` can never claim or restart
+    /// one. Nothing parses the suffix back out.
     pub fn job_id(&self, job: &chunk_store::Job) -> ActionId {
         ActionId { incarnation: format!("{}:job:{}", self.incarnation, job.id), sequence: u64::from(job.attempt) }
     }

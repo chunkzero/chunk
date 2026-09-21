@@ -237,6 +237,7 @@ async fn owner_run(
         ()=output.closed()=>Err(Error::Cancelled),
         ()=shutdown.cancelled()=>Err(Error::Cancelled),
         ()=cancel.cancelled()=>Err(Error::Cancelled),
+        // Nothing has started yet, so any client frame, including Cancel, abandons acceptance outright.
         _=incoming.message()=>Err(Error::Cancelled),
         result=acceptance=>result,
         ()=tokio::time::sleep(Duration::from_secs(2))=>Err(Error::Cancelled),
@@ -272,6 +273,7 @@ async fn owner_run(
                             let result=effect_reply(&invocation,&effect,&reply);
                             effect.reply.finish(result);
                         }
+                        // Cancel and any unexpected frame abort the run; the owner reports the outcome as unknown.
                         _=>break unknown(),
                     }
                 }

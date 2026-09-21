@@ -37,6 +37,8 @@ abstract class WriteComponentIndex : DefaultTask() {
         val output = outputDirectory.get().asFile
         output.deleteRecursively()
         output.mkdirs()
+        // Module JARs are merged into the app shadow JAR, which fails on duplicate entries, so each
+        // class gets its own index file rather than one shared name every module would collide on.
         for (declaration in declarations) {
             val index = output.resolve("META-INF/chunk/components/$declaration.json")
             index.parentFile.mkdirs()
