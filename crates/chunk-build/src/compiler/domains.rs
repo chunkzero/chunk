@@ -23,6 +23,8 @@ pub(super) struct DomainEntries {
     manifest: Option<DomainManifest>,
     authored: bool,
     descriptors: [Descriptors; 2],
+    bound: Vec<String>,
+    unbound: Vec<String>,
 }
 
 impl DomainEntries {
@@ -46,6 +48,8 @@ impl DomainEntries {
                 metadata: Vec::new(),
                 scopes: BTreeSet::new(),
             }),
+            bound: Vec::new(),
+            unbound: Vec::new(),
         })
     }
 
@@ -81,15 +85,31 @@ impl DomainEntries {
                     quote(binding),
                 ));
                 continue;
+            } else if self.authored {
+                // Authored modules may export helpers; the check runs once every binding is known.
+                self.unbound.push(format!(
+                    "if(is{kind}({value}) && !boundDescriptors.has({value})) throw new Error({});",
+                    quote(format!(
+                        "{kind} descriptors must be bound in a defineApp or defineScope {module} map: {}/{exported}",
+                        entry.namespace
+                    ))
+                ));
+                continue;
             } else {
                 format!(
                     "{kind} descriptors must be named exports in server/domains/**/{module}.ts or {module}.mts: {}",
                     entry.namespace
                 )
             };
-            if !self.authored {
-                writeln!(source, "if(is{kind}({value})) throw new Error({});", quote(failure)).map_err(error)?;
-            }
+            writeln!(source, "if(is{kind}({value})) throw new Error({});", quote(failure)).map_err(error)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn bindings(&self, source: &mut String) -> io::Result<()> {
+        writeln!(source, "const boundDescriptors = new Set([{}]);", self.bound.join(",")).map_err(error)?;
+        for check in &self.unbound {
+            writeln!(source, "{check}").map_err(error)?;
         }
         Ok(())
     }
@@ -126,6 +146,7 @@ impl DomainEntries {
                 .map_err(error)?;
                 writeln!(source, "export const {binding} = (ctx,args) => invoke{kind}({descriptor},ctx,args);")
                     .map_err(error)?;
+                self.bound.push(descriptor.clone());
                 descriptors.metadata.push(format!(
                     "[{}, {{...{descriptor}.contract, domain:{}, export:{}}}]",
                     quote(id),

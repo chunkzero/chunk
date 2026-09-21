@@ -93,3 +93,16 @@ fn authored_app_rejects_root_only_hooks_and_invalid_creation_values() {
     fs::write(&path, valid.replace("label:'Standard'", "label:123")).unwrap();
     assert!(compile(root, output.path()).unwrap_err().to_string().contains("number"));
 }
+
+#[test]
+fn authored_project_rejects_exported_descriptor_without_binding() {
+    let project = project();
+    let root = project.path();
+    let path = root.join("apps/games/arena/server/behavior.ts");
+    let valid = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{valid} export const stray=command('stray',{{handler:()=>{{}}}});")).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let error = compile(root, output.path()).unwrap_err().to_string();
+    assert!(error.contains("bound in a defineApp or defineScope commands map"), "{error}");
+    assert!(error.contains("behavior/stray"), "{error}");
+}

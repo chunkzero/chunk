@@ -260,6 +260,7 @@ fn entry_source(
         }
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
+    domains.bindings(&mut source)?;
     let domain_metadata = domains.metadata()?;
     writeln!(source, "const destinationEntries = [{}];", destination_metadata.join(",")).map_err(error)?;
     write!(source, "export function __chunk_contract() {{ const methods = [{}]; const configurations = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}", methods.join(","), configurations.join(","), metadata.join(",")).map_err(error)?;
