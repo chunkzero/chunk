@@ -78,8 +78,13 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         let input = descriptor_apps[app.id.as_str()];
         let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
         jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
-        session_methods::validate(&bytes, &app.id, &input.sessions, backend.session_methods.as_ref())?;
-        session_configurations::validate(&bytes, &app.id, &input.sessions, backend.session_configurations.as_ref())?;
+        session_methods::validate(&bytes, &app.id, &input.sessions, backend.contracts.session_methods.as_ref())?;
+        session_configurations::validate(
+            &bytes,
+            &app.id,
+            &input.sessions,
+            backend.contracts.session_configurations.as_ref(),
+        )?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
         validate_implementations(&inputs.project, app, &input.sessions)?;
@@ -116,7 +121,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
     validate_app_contracts(&backend, project.local.as_ref(), &mut metadata)?;
-    if let Some(compiled) = &backend.domains {
+    if let Some(compiled) = &backend.contracts.domains {
         let bindings = project.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect();
         if compiled.apps != bindings || compiled.scopes != project.scopes {
             return Err(io::Error::other(
@@ -167,7 +172,7 @@ fn validate_app_contracts<'a>(
     metadata: &mut Metadata<'a>,
 ) -> io::Result<()> {
     let apps = metadata.apps.iter().map(|app| (app.id.clone(), app.clone())).collect();
-    if let Some(destinations) = &backend.destinations {
+    if let Some(destinations) = &backend.contracts.destinations {
         destinations.validate_apps(&apps).map_err(io::Error::other)?;
         if let Some(local) = local {
             for policy in destinations.entries.values() {
@@ -180,10 +185,10 @@ fn validate_app_contracts<'a>(
             }
         }
     }
-    if let Some(configurations) = &backend.session_configurations {
+    if let Some(configurations) = &backend.contracts.session_configurations {
         configurations.validate_apps(&apps).map_err(io::Error::other)?;
     }
-    if let Some(methods) = &backend.session_methods
+    if let Some(methods) = &backend.contracts.session_methods
         && methods.methods.iter().any(|method| {
             !metadata.apps.iter().any(|app| app.id == method.app && app.sessions.contains_key(&method.session))
         })
@@ -201,16 +206,13 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
             .map_err(io::Error::other)?;
     let encoded_contract = serde_json::to_vec(&contract).map_err(io::Error::other)?;
     let backend = chunk_contract::Deployment {
-        session_methods: contract.session_methods,
-        session_configurations: contract.session_configurations,
+        contracts: contract.contracts,
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "validation".into(),
         source,
         tables: contract.tables,
         functions: contract.functions,
-        domains: contract.domains,
-        destinations: contract.destinations,
     };
     backend.validate().map_err(io::Error::other)?;
     insert(files, "source.mjs".into(), backend.source.as_bytes().to_vec())?;

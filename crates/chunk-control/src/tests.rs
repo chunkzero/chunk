@@ -19,7 +19,7 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::{Config, Control, Error, Host, MachineProfile, Result, SessionType, state::Phase};
+use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Result, SessionType, state::Phase};
 
 struct Binding {
     delivery: PlayerDelivery,
@@ -340,9 +340,7 @@ impl Fixture {
             terminated: Mutex::default(),
         });
         let config = Config {
-            destinations: None,
-            session_methods: None,
-            session_configurations: None,
+            contracts: Contracts::default(),
             apps: BTreeMap::from([("bridge".into(), test_app())]),
             deployment,
             artifact_digest: "artifact".into(),

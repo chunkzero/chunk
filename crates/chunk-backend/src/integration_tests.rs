@@ -1,4 +1,4 @@
-use chunk_contract::{Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_proto::v1::{BackendMutation, BackendQuery, BackendWatchGroup, backend_client::BackendClient};
 use chunk_store::{SqliteStore, Storage};
 use serde_json::json;
@@ -22,10 +22,7 @@ export function privateRead() { return 123; }
 
 fn deployment(id: &str) -> Deployment {
     Deployment {
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: Contracts::default(),
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),

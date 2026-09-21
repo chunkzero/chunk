@@ -47,7 +47,7 @@ export function helper(){return command('ignored',{handler:()=>{}})}
     }
     compile(root, &output).unwrap();
     let contract: BackendMetadata = serde_json::from_slice(&fs::read(output.join("contract.json")).unwrap()).unwrap();
-    let domains = contract.domains.as_ref().unwrap();
+    let domains = contract.contracts.domains.as_ref().unwrap();
     assert_eq!(domains.commands.len(), 3);
     let command = &domains.commands["shared/domains/commands/network"];
     assert_eq!(command.routes[0].literals, ["hello"]);

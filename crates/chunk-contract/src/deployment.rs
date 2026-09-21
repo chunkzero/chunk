@@ -44,20 +44,28 @@ pub struct Function {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destinations: Option<crate::DestinationManifest>,
     pub contract_version: u32,
     pub runtime_profile: RuntimeProfile,
     pub id: String,
     pub source: String,
     pub tables: DatabaseSchema,
     pub functions: BTreeMap<String, Function>,
+    #[serde(flatten)]
+    pub contracts: Contracts,
+}
+
+/// Optional manifests a deployment may declare beyond its functions and tables.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Contracts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domains: Option<DomainManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_methods: Option<crate::SessionMethods>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_configurations: Option<crate::SessionConfigurations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<crate::DestinationManifest>,
 }
 
 impl Deployment {
@@ -77,10 +85,11 @@ impl Deployment {
             return Err("deployment size limit");
         }
         crate::validate(&self.tables)?;
-        if let Some(methods) = &self.session_methods {
+        let contracts = &self.contracts;
+        if let Some(methods) = &contracts.session_methods {
             methods.validate()?;
         }
-        if let Some(configurations) = &self.session_configurations {
+        if let Some(configurations) = &contracts.session_configurations {
             configurations.validate()?;
         }
         let mut paths = BTreeSet::new();
@@ -103,11 +112,11 @@ impl Deployment {
                 }
             }
         }
-        if let Some(destinations) = &self.destinations {
+        if let Some(destinations) = &contracts.destinations {
             destinations.validate()?;
-            destinations.validate_configurations(self.session_configurations.as_ref())?;
+            destinations.validate_configurations(contracts.session_configurations.as_ref())?;
         }
-        if let Some(domains) = &self.domains {
+        if let Some(domains) = &contracts.domains {
             domains.validate()?;
             for command in domains.commands.values() {
                 command.validate(&self.functions)?;
@@ -167,10 +176,7 @@ mod tests {
 
     fn deployment() -> Deployment {
         Deployment {
-            domains: None,
-            session_methods: None,
-            session_configurations: None,
-            destinations: None,
+            contracts: Contracts::default(),
             contract_version: CONTRACT_VERSION,
             runtime_profile: RuntimeProfile::TransactionalV1,
             id: "v1".into(),
@@ -208,6 +214,9 @@ mod tests {
         assert!(invalid.validate().is_err());
         let mut encoded = serde_json::to_value(deployment()).unwrap();
         encoded["runtime_profile"] = json!("unknown");
+        assert!(serde_json::from_value::<Deployment>(encoded).is_err());
+        let mut encoded = serde_json::to_value(deployment()).unwrap();
+        encoded["unknown"] = json!(1);
         assert!(serde_json::from_value::<Deployment>(encoded).is_err());
     }
 

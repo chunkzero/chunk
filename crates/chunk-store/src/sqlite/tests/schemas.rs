@@ -101,10 +101,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
         .insert("name".into(), Field { schema: Schema::String, optional: true });
     expanded.insert("matches".into(), TableSchema::default());
     let deployment = chunk_contract::Deployment {
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: chunk_contract::Contracts::default(),
         contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: "new".into(),
@@ -147,10 +144,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
-            domains: None,
-            session_methods: None,
-            session_configurations: None,
-            destinations: None,
+            contracts: chunk_contract::Contracts::default(),
             contract_version: 2,
             runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
             id: "old".into(),

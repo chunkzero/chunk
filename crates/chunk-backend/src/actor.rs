@@ -234,7 +234,7 @@ impl Actor {
                 self.versions
                     .get(&id)
                     .and_then(Option::as_ref)
-                    .map(|deployment| deployment.domains.clone())
+                    .map(|deployment| deployment.contracts.domains.clone())
                     .ok_or(Error::Contract)
             })),
             Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),

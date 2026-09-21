@@ -100,9 +100,7 @@ fn command_metadata_preserves_legacy_encoding_and_rejects_invalid_identity_or_ex
     invalid.commands.insert("wrong/hub".into(), command);
     assert_eq!(invalid.validate(), Err("invalid command identity, export or domain"));
     let mut deployment = crate::Deployment {
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: crate::Contracts { domains: Some(contract), ..Default::default() },
         contract_version: crate::CONTRACT_VERSION,
         runtime_profile: crate::RuntimeProfile::TransactionalV1,
         id: "domain-commands".into(),
@@ -119,17 +117,16 @@ fn command_metadata_preserves_legacy_encoding_and_rejects_invalid_identity_or_ex
             },
         )]
         .into(),
-        domains: Some(contract),
     };
     assert_eq!(deployment.validate(), Err("domain handler export collides with function export"));
     deployment.functions.get_mut("query").unwrap().export = "queryExport".into();
-    let domain = deployment.domains.as_mut().unwrap();
+    let domain = deployment.contracts.domains.as_mut().unwrap();
     domain.commands.get_mut("shared/domains/commands/hub").unwrap().permission = Some("query".into());
     deployment.validate().unwrap();
     deployment.functions.get_mut("query").unwrap().kind = crate::FunctionKind::Mutation;
     assert_eq!(deployment.validate(), Err("unknown command query reference"));
     deployment.functions.get_mut("query").unwrap().kind = crate::FunctionKind::Query;
-    deployment.domains.as_mut().unwrap().commands.get_mut("shared/domains/commands/hub").unwrap().routes[0]
+    deployment.contracts.domains.as_mut().unwrap().commands.get_mut("shared/domains/commands/hub").unwrap().routes[0]
         .arguments
         .push(crate::CommandArgument {
             name: "target".into(),

@@ -1,7 +1,7 @@
 use super::*;
 
 fn policy(fixture: &mut Fixture, overflow: &str) {
-    fixture.config.destinations = Some(
+    fixture.config.contracts.destinations = Some(
         serde_json::from_value(serde_json::json!({
             "version":1,"entries":{"shared/destinations/lobby":{
                 "destination":{"key":"lobby","session_type":"bridge/default","machine_profile":"local"},
@@ -46,6 +46,7 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
                 "version" => config.deployment.deployment = "next".into(),
                 "profile" => {
                     config
+                        .contracts
                         .destinations
                         .as_mut()
                         .unwrap()
@@ -57,8 +58,16 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
                         .machine_profile = "changed".into();
                 }
                 _ => {
-                    config.destinations.as_mut().unwrap().entries.values_mut().next().unwrap().empty_timeout_seconds =
-                        2;
+                    config
+                        .contracts
+                        .destinations
+                        .as_mut()
+                        .unwrap()
+                        .entries
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .empty_timeout_seconds = 2;
                 }
             }
             assert!(

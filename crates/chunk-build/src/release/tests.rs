@@ -376,7 +376,7 @@ fn session_methods_publish_with_the_runtime_contract_and_reject_stale_jars() {
     let release = fixture.publish().unwrap();
     let deployment: chunk_contract::Deployment =
         serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
-    assert_eq!(deployment.session_methods.unwrap().methods[0].name, "announce");
+    assert_eq!(deployment.contracts.session_methods.unwrap().methods[0].name, "announce");
     packaged["result"] = json!({"type":"string"});
     write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged));
     assert!(fixture.publish().err().unwrap().to_string().contains("differ from backend contract"));
@@ -437,7 +437,7 @@ fn session_configurations_require_matching_packaged_schemas_and_registered_provi
     let release = fixture.publish().unwrap();
     let deployment: chunk_contract::Deployment =
         serde_json::from_slice(&fs::read(release.directory.join("backend.json")).unwrap()).unwrap();
-    assert_eq!(deployment.session_configurations.unwrap().configurations[0].session, "default");
+    assert_eq!(deployment.contracts.session_configurations.unwrap().configurations[0].session, "default");
     write_jar(&fixture.root.path().join("lobby.jar"), &entries(packaged.clone(), ""));
     assert!(fixture.publish().err().unwrap().to_string().contains("unregistered configured session provider"));
     packaged["configuration"]["fields"]["map"]["schema"] = json!({"type":"integer"});

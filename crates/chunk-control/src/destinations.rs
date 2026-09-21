@@ -111,11 +111,9 @@ impl Control {
                         SessionPhase::Unspecified => return Err(Error::Invalid("unknown session phase")),
                     }
                 }
-                let policy = self
-                    .config
-                    .destinations
-                    .as_ref()
-                    .and_then(|policies| policies.policy(&session.session_type, &session.demand_key));
+                let destinations = self.config.contracts.destinations.as_ref();
+                let policy =
+                    destinations.and_then(|policies| policies.policy(&session.session_type, &session.demand_key));
                 let expired = empty
                     && policy.is_some_and(|policy| {
                         session.empty_since_ms.is_some_and(|since| {

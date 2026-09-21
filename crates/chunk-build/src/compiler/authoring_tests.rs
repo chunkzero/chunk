@@ -47,16 +47,16 @@ fn authored_scopes_compile_with_fresh_refs_and_distinct_creation_configs() {
     compile(project.path(), output.path()).unwrap();
     let contract: BackendMetadata =
         serde_json::from_slice(&fs::read(output.path().join("contract.json")).unwrap()).unwrap();
-    let domains = contract.domains.unwrap();
+    let domains = contract.contracts.domains.unwrap();
     assert_eq!(domains.apps["arena"], "games/arena");
     assert_eq!(domains.scopes["games/arena"].parent.as_deref(), Some("games"));
     assert_eq!(domains.hooks["scopes/hooks/route"].domain, "");
     assert_eq!(domains.hooks["scopes/games/hooks/gate"].domain, "games");
     assert_eq!(domains.hooks["apps/arena/app/hooks/entered"].domain, "games/arena");
     assert_eq!(domains.commands["apps/arena/app/commands/leave"].domain, "games/arena");
-    let configurations = contract.session_configurations.unwrap();
+    let configurations = contract.contracts.session_configurations.unwrap();
     assert_eq!(configurations.configurations.len(), 1);
-    let destinations = contract.destinations.unwrap();
+    let destinations = contract.contracts.destinations.unwrap();
     assert_eq!(
         destinations.entries["apps/lobby/destinations/main"].creation.as_ref().unwrap().configuration,
         json!({})

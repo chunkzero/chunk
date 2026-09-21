@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 fn configured_destinations(fixture: &mut Fixture) {
-    fixture.config.session_configurations = Some(
+    fixture.config.contracts.session_configurations = Some(
         serde_json::from_value(json!({
             "version":1,"configurations":[{"app":"bridge","session":"default","configuration":{
                 "type":"object","fields":{"map":{"schema":{"type":"enum","values":["forest","desert"]}}}
@@ -10,7 +10,7 @@ fn configured_destinations(fixture: &mut Fixture) {
         }))
         .unwrap(),
     );
-    fixture.config.destinations = Some(serde_json::from_value(json!({
+    fixture.config.contracts.destinations = Some(serde_json::from_value(json!({
         "version":1,"entries":{
             "apps/bridge/destinations/small":{
                 "destination":{"key":"small","session_type":"bridge/default","machine_profile":"local"},
@@ -69,6 +69,7 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
     drop(control);
     let mut changed = fixture.config.clone();
     changed
+        .contracts
         .destinations
         .as_mut()
         .unwrap()
@@ -90,6 +91,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     for configuration in [json!({}), json!({"map":"ocean"}), json!({"map":"forest","extra":true}), json!([])] {
         let mut config = fixture.config.clone();
         config
+            .contracts
             .destinations
             .as_mut()
             .unwrap()
@@ -106,9 +108,10 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     for field in ["schema", "profile", "capacity"] {
         let mut config = fixture.config.clone();
         match field {
-            "schema" => config.session_configurations = None,
+            "schema" => config.contracts.session_configurations = None,
             "profile" => {
                 config
+                    .contracts
                     .destinations
                     .as_mut()
                     .unwrap()
@@ -121,6 +124,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
             }
             _ => {
                 config
+                    .contracts
                     .destinations
                     .as_mut()
                     .unwrap()

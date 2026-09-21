@@ -1,6 +1,6 @@
 use std::{fmt::Write, time::Duration};
 
-use chunk_contract::{Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_js::DeploymentId;
 use chunk_store::SqliteStore;
 use serde_json::json;
@@ -9,10 +9,7 @@ use crate::{ActionStatus, Backend, Call, Error};
 
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
-        session_methods: None,
-        session_configurations: None,
-        domains: None,
-        destinations: None,
+        contracts: Contracts::default(),
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),

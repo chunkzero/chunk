@@ -1,4 +1,4 @@
-use chunk_contract::{DomainManifest, RuntimeProfile};
+use chunk_contract::{Contracts, DomainManifest, RuntimeProfile};
 use chunk_js::DeploymentId;
 use chunk_proto::v1::backend_hooks_server::BackendHooks;
 use chunk_store::SqliteStore;
@@ -19,9 +19,8 @@ fn deployment() -> Deployment {
     }))
     .unwrap();
     Deployment {
-        session_methods: None,
-        session_configurations: None,
-        contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"hooks".into(),domains:Some(domains),destinations:None,
+        contracts: Contracts { domains: Some(domains), ..Default::default() },
+        contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"hooks".into(),
         source:r"
 export function read(ctx) { return ctx.db.get('counts','value')?.value ?? 0; }
 export function increment(ctx) { const value=read(ctx)+1; ctx.db.put('counts','value',{value}); return value; }

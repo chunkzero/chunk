@@ -80,6 +80,7 @@ pub(super) fn validate(deployment: &Deployment, scope: &CommandScope, request: &
                 return Err(Error::Invalid("command session method scope"));
             }
             let declaration = deployment
+                .contracts
                 .session_methods
                 .as_ref()
                 .and_then(|methods| {

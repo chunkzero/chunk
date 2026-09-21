@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chunk_contract::{Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_js::DeploymentId;
 use chunk_store::{Job, JobState, SqliteStore, Storage};
 use serde_json::json;
@@ -29,10 +29,7 @@ fn deployment(id: &str, increment: i32) -> Deployment {
     .unwrap();
     let retry: Schema = serde_json::from_value(json!({"type":"object","fields":{"at":{"schema":{"type":"integer"}},"id":{"schema":{"type":"string"}},"ack":{"schema":{"type":"boolean"}}}})).unwrap();
     Deployment {
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: Contracts::default(),
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),

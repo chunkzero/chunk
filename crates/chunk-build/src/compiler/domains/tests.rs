@@ -45,7 +45,7 @@ export const arrived = createHook('domain.enter', () => {}, {followPlayer:true})
     .unwrap();
     compile(root, &output).unwrap();
     let contract: BackendMetadata = serde_json::from_slice(&fs::read(output.join("contract.json")).unwrap()).unwrap();
-    let domains = contract.domains.unwrap();
+    let domains = contract.contracts.domains.unwrap();
     assert_eq!(domains.version, 1);
     assert_eq!(domains.scopes["games/duels"].parent.as_deref(), Some("games"));
     assert_eq!(domains.apps["duels"], "games/duels");

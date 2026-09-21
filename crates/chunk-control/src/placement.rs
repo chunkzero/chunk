@@ -253,7 +253,8 @@ fn select_session(
     unavailable: &std::collections::BTreeSet<String>,
 ) -> Result<String> {
     let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
-    let policy = config.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    let policy =
+        config.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
     let creation = resolve_creation(config, demand, spec, policy)?;
     let existing = state
         .sessions
@@ -356,7 +357,7 @@ fn resolve_creation<'a>(
     let capacity = declared.map_or(spec.capacity, |creation| creation.capacity);
     let mut configuration = declared.map_or_else(|| serde_json::json!({}), |creation| creation.configuration.clone());
     chunk_contract::validate_session_configuration(
-        config.session_configurations.as_ref(),
+        config.contracts.session_configurations.as_ref(),
         &demand.session_type,
         &configuration,
     )
@@ -392,6 +393,7 @@ pub(crate) fn auth<T>(runtime: &RuntimeConnection, body: T, seconds: u64) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Contracts;
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
@@ -436,7 +438,7 @@ mod tests {
         let mut wrong_profile = demand.clone();
         wrong_profile.machine_profile = "small".into();
         assert!(select_session(&mut state, &config, &wrong_profile, &BTreeSet::new()).is_err());
-        config.destinations.as_mut().unwrap().entries.values_mut().next().unwrap().creation = None;
+        config.contracts.destinations.as_mut().unwrap().entries.values_mut().next().unwrap().creation = None;
         assert!(config.validate().is_err());
     }
 
@@ -444,9 +446,7 @@ mod tests {
     fn placement_groups_only_matching_apps_and_profiles() {
         let mut state = State::default();
         let mut config = Config {
-            destinations: None,
-            session_methods: None,
-            session_configurations: None,
+            contracts: Contracts::default(),
             apps: BTreeMap::new(),
             deployment: chunk_proto::v1::DeploymentRef::default(),
             artifact_digest: "release".into(),

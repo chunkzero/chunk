@@ -15,7 +15,7 @@ pub use sdk::generate_sdk;
 
 use std::collections::BTreeMap;
 
-use chunk_contract::{DatabaseSchema, DomainManifest, Function, RuntimeProfile};
+use chunk_contract::{Contracts, DatabaseSchema, Function, RuntimeProfile};
 use publication::read_limited;
 use serde::{Deserialize, Serialize};
 
@@ -26,14 +26,8 @@ struct BackendMetadata {
     runtime_profile: RuntimeProfile,
     tables: DatabaseSchema,
     functions: BTreeMap<String, Function>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    domains: Option<DomainManifest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    session_methods: Option<chunk_contract::SessionMethods>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    session_configurations: Option<chunk_contract::SessionConfigurations>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    destinations: Option<chunk_contract::DestinationManifest>,
+    #[serde(flatten)]
+    contracts: Contracts,
 }
 
 #[cfg(test)]

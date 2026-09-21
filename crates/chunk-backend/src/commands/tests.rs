@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, time::Duration};
 
-use chunk_contract::{Deployment, DomainManifest, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{
+    Contracts, Deployment, DomainManifest, Function, FunctionKind, RuntimeProfile, Schema, Visibility,
+};
 use chunk_js::DeploymentId;
 use chunk_proto::v1::{
     self as wire, backend_commands_client::BackendCommandsClient, backend_commands_server::BackendCommands,
@@ -58,7 +60,7 @@ fn deployment() -> Deployment {
         json!({"type":"object","fields":{"input":{"schema":{"type":"string"}},"cursor":{"schema":{"type":"integer"}}}}),
     )
     .unwrap();
-    Deployment {destinations:None,session_configurations:None,contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"commands".into(),domains:Some(domains),session_methods:Some(serde_json::from_value(json!({"version":1,"methods":[{"app":"lobby","session":"main","name":"status","arguments":{"type":"object","fields":{"limit":{"schema":{"type":"integer"}}}},"result":{"type":"integer"}}]})).unwrap()),
+    Deployment {contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"commands".into(),contracts:Contracts{domains:Some(domains),session_methods:Some(serde_json::from_value(json!({"version":1,"methods":[{"app":"lobby","session":"main","name":"status","arguments":{"type":"object","fields":{"limit":{"schema":{"type":"integer"}}}},"result":{"type":"integer"}}]})).unwrap()),..Default::default()},
         tables:serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"integer"}}}}})).unwrap(),
         source:r"
 export function permit(ctx) { return ctx.caller.kind === 'command' && ctx.caller.player === 'alice' && ctx.caller.claimOperationId === 'claim-one' && (ctx.db.get('state','denied')?.value ?? 0)===0; }

@@ -87,7 +87,7 @@ impl Actor {
             return Ok(cached.catalog.clone());
         }
         scope_caller(&deployment, scope)?;
-        let manifest = deployment.domains.as_ref().ok_or(Error::Unknown)?;
+        let manifest = deployment.contracts.domains.as_ref().ok_or(Error::Unknown)?;
         let ids: BTreeSet<_> = visible_commands(&manifest.commands, &scope.domain, &[])
             .map_err(Error::Invalid)?
             .values()
@@ -198,7 +198,7 @@ impl Actor {
 }
 
 fn selected<'a>(deployment: &'a Deployment, scope: &CommandScope, id: &str) -> Result<&'a chunk_contract::Command> {
-    let manifest = deployment.domains.as_ref().ok_or(Error::Unknown)?;
+    let manifest = deployment.contracts.domains.as_ref().ok_or(Error::Unknown)?;
     let command = manifest.commands.get(id).ok_or(Error::Unknown)?;
     if !visible_commands(&manifest.commands, &scope.domain, &[])
         .map_err(Error::Invalid)?
@@ -236,7 +236,7 @@ fn scope_caller(deployment: &Deployment, scope: &CommandScope) -> Result<Json> {
     {
         return Err(Error::Invalid("command session binding"));
     }
-    let manifest = deployment.domains.as_ref().ok_or(Error::Unknown)?;
+    let manifest = deployment.contracts.domains.as_ref().ok_or(Error::Unknown)?;
     if manifest.apps.get(&scope.app).map(String::as_str) != Some(scope.domain.as_str())
         || !manifest.scopes.contains_key(&scope.domain)
     {

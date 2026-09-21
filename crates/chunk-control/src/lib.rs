@@ -42,18 +42,26 @@ pub struct SessionType {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destinations: Option<chunk_contract::DestinationManifest>,
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
     pub artifact_digest: String,
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
     pub max_processes: u16,
+    #[serde(flatten)]
+    pub contracts: Contracts,
+}
+
+/// Optional manifests carried over from the deployment contract.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Contracts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_methods: Option<chunk_contract::SessionMethods>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_configurations: Option<chunk_contract::SessionConfigurations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<chunk_contract::DestinationManifest>,
 }
 
 impl Config {
@@ -94,9 +102,10 @@ impl Config {
                 );
             }
         }
-        if let Some(destinations) = &self.destinations {
+        let contracts = &self.contracts;
+        if let Some(destinations) = &contracts.destinations {
             destinations.validate_apps(&self.apps).map_err(Error::Invalid)?;
-            destinations.validate_configurations(self.session_configurations.as_ref()).map_err(Error::Invalid)?;
+            destinations.validate_configurations(contracts.session_configurations.as_ref()).map_err(Error::Invalid)?;
             if destinations
                 .entries
                 .values()
@@ -105,13 +114,13 @@ impl Config {
                 return Err(Error::Invalid("destination references unknown machine profile"));
             }
         }
-        if let Some(configurations) = &self.session_configurations {
+        if let Some(configurations) = &contracts.session_configurations {
             configurations.validate_apps(&self.apps).map_err(Error::Invalid)?;
         }
         if self.session_types != expected {
             return Err(Error::Invalid("session catalog differs from app manifests"));
         }
-        if let Some(methods) = &self.session_methods {
+        if let Some(methods) = &contracts.session_methods {
             methods.validate().map_err(Error::Invalid)?;
             if serde_json::to_vec(methods)?.len() > 2 * 1024 * 1024
                 || methods.methods.iter().any(|method| {

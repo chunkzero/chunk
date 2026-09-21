@@ -1,15 +1,12 @@
 use super::*;
 use crate::{Job, JobCommand, JobIntent, JobState};
-use chunk_contract::{Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 
 fn target() -> Deployment {
     Deployment {
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: Contracts::default(),
         id: "v1".into(),
         source: "export function work() { return null; }".into(),
         tables: crate::tests::schema(),

@@ -49,19 +49,19 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let contract = extract(&source)
         .map_err(|error| io::Error::other(format!("Backend deployment at {}: {error}", project.display())))?;
     let apps = &inventory.apps;
-    if let Some(methods) = &contract.session_methods {
+    if let Some(methods) = &contract.contracts.session_methods {
         for method in &methods.methods {
             if !apps.iter().any(|app| app.id == method.app) {
                 return Err(io::Error::other(format!("Session method references unknown app: {}", method.app)));
             }
         }
     }
-    if let Some(configurations) = &contract.session_configurations
+    if let Some(configurations) = &contract.contracts.session_configurations
         && configurations.configurations.iter().any(|configuration| !apps.iter().any(|app| app.id == configuration.app))
     {
         return Err(io::Error::other("session configuration references an undiscovered app"));
     }
-    if let Some(destinations) = &contract.destinations
+    if let Some(destinations) = &contract.contracts.destinations
         && destinations.entries.values().any(|policy| {
             let app = policy.destination.session_type.split('/').next().unwrap_or_default();
             !apps.iter().any(|candidate| candidate.id == app)
@@ -98,16 +98,13 @@ fn extract(source: &str) -> io::Result<BackendMetadata> {
         .map_err(io::Error::other)?;
     let contract: BackendMetadata = serde_json::from_str(&result.value).map_err(io::Error::other)?;
     Deployment {
-        session_methods: contract.session_methods.clone(),
-        session_configurations: contract.session_configurations.clone(),
+        contracts: contract.contracts.clone(),
         contract_version: contract.contract_version,
         runtime_profile: contract.runtime_profile,
         id: "validation".into(),
         source: source.into(),
         tables: contract.tables.clone(),
         functions: contract.functions.clone(),
-        domains: contract.domains.clone(),
-        destinations: contract.destinations.clone(),
     }
     .validate()
     .map_err(io::Error::other)?;
@@ -399,7 +396,7 @@ mod tests {
         let contract: BackendMetadata =
             serde_json::from_slice(&fs::read(output.join("contract.json")).unwrap()).unwrap();
         assert!(contract.functions.is_empty());
-        let methods = contract.session_methods.unwrap();
+        let methods = contract.contracts.session_methods.unwrap();
         assert_eq!(methods.methods.len(), 1);
         assert_eq!(methods.methods[0].app, "duels");
         crate::generate(

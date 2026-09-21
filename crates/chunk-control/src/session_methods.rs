@@ -120,6 +120,7 @@ impl Control {
         self.method_runtime(target)?;
         let method = self
             .config
+            .contracts
             .session_methods
             .as_ref()
             .and_then(|methods| {

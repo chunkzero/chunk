@@ -2,7 +2,7 @@ use std::{fmt::Write, time::Duration};
 
 use crate::PlatformTarget;
 use chunk_backend::{Backend, Call, HookService};
-use chunk_contract::{Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_js::DeploymentId;
 use chunk_proto::v1::{ClaimIdentity, Identity};
 use chunk_store::SqliteStore;
@@ -237,14 +237,11 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         write!(source, "\nexport async function {export}(ctx) {{ {body} }}").unwrap();
     }
     Deployment {
-        session_methods: None,
-        session_configurations: None,
+        contracts: Contracts { domains: Some(manifest), ..Default::default() },
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: "candidate".into(),
         source,
-        domains: Some(manifest),
-        destinations: None,
         tables: serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"string"}}}}})).unwrap(),
         functions: [
             ("trace", FunctionKind::Query, Schema::Null, Schema::String),

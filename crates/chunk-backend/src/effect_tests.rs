@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, time::Duration};
 
-use chunk_contract::{Deployment, Field, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
+use chunk_contract::{Contracts, Deployment, Field, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_js::DeploymentId;
 use chunk_store::SqliteStore;
 use serde_json::{Value, json};
@@ -104,10 +104,7 @@ fn deployment(id: &str) -> Deployment {
         .map(|name| (name.into(), Field { schema: Schema::String, optional: name == "body" || name == "method" }))
         .collect();
     Deployment {
-        destinations: None,
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
+        contracts: Contracts::default(),
         contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:id.into(),tables:BTreeMap::new(),
         source:r"
 export async function run(ctx,args) { return JSON.stringify(await ctx.http(args.binding,{path:args.path,method:args.method??'GET',body:args.body})); }

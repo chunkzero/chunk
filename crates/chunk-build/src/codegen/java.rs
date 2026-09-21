@@ -128,8 +128,8 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
     Ok(Bindings {
         root,
         declarations,
-        sessions: contract.session_methods.clone(),
-        configurations: contract.session_configurations.clone(),
+        sessions: contract.contracts.session_methods.clone(),
+        configurations: contract.contracts.session_configurations.clone(),
     })
 }
 

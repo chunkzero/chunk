@@ -12,10 +12,7 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     fs::create_dir(&artifact.directory).unwrap();
     let bundle = chunk_contract::Deployment {
-        domains: None,
-        session_methods: None,
-        session_configurations: None,
-        destinations: None,
+        contracts: chunk_contract::Contracts::default(),
         contract_version: 2,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: artifact.id.clone(),
@@ -25,9 +22,7 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     fs::write(artifact.directory.join("backend.json"), serde_json::to_vec(&bundle).unwrap()).unwrap();
     let control = chunk_control::Config {
-        destinations: None,
-        session_methods: None,
-        session_configurations: None,
+        contracts: chunk_control::Contracts::default(),
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: artifact.id.clone() },
         artifact_digest: artifact.id.clone(),
@@ -75,9 +70,7 @@ async fn missing_bundle_preserves_startup_error() {
         control_bind: "127.0.0.1:0".parse().unwrap(),
     };
     let control = chunk_control::Config {
-        destinations: None,
-        session_methods: None,
-        session_configurations: None,
+        contracts: chunk_control::Contracts::default(),
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: "missing".into() },
         artifact_digest: "missing".into(),

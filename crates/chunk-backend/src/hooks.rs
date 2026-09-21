@@ -66,7 +66,7 @@ impl backend_hooks_server::BackendHooks for HookService {
 }
 
 pub(crate) fn resolve(deployment: &Deployment, call: &Call) -> Result<(Function, bool)> {
-    let manifest = deployment.domains.as_ref().ok_or(Error::Unknown)?;
+    let manifest = deployment.contracts.domains.as_ref().ok_or(Error::Unknown)?;
     let hook = manifest.hooks.get(&call.function).ok_or(Error::Unknown)?;
     let arguments: Value = serde_json::from_str(call.arguments.as_str())?;
     let caller: Value = serde_json::from_str(call.caller.as_str())?;
