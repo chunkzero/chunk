@@ -6,10 +6,20 @@ use std::{
     path::Path,
 };
 
+use chunk_contract::DomainScope;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub(crate) mod authoring;
 pub(crate) mod domains;
+
+/// Apps, domain scopes and authored modules found in one pass over the project tree.
+#[derive(Default)]
+pub(crate) struct Inventory {
+    pub apps: Vec<AppMetadata>,
+    pub scopes: BTreeMap<String, DomainScope>,
+    pub modules: Vec<authoring::Module>,
+    pub local: Option<LocalConfig>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProjectMetadata {
@@ -81,12 +91,18 @@ struct AppManifest {
 /// # Errors
 /// Rejects invalid manifests, missing app build files, unknown profiles and unsupported local limits.
 pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
+    let inventory = inspect_inventory(root)?;
+    Ok(ProjectMetadata { version: 1, apps: inventory.apps, local: inventory.local })
+}
+
+/// `inspect`, keeping the scopes and authored modules discovered along the way.
+pub(crate) fn inspect_inventory(root: &Path) -> io::Result<Inventory> {
     let manifest_path = root.join("chunk.toml");
     let manifest: ProjectManifest = read_manifest(&manifest_path)?;
-    let mut apps = discover_apps(root)?;
+    let mut inventory = discover(root)?;
     if let Some(local) = &manifest.local {
         local.validate(&manifest_path)?;
-        for app in &mut apps {
+        for app in &mut inventory.apps {
             app.runtime.machine_profile.get_or_insert_with(|| local.machine_profile.clone());
             app.runtime.capacity.get_or_insert(local.capacity);
             for requirements in std::iter::once(&app.runtime).chain(app.sessions.values()) {
@@ -100,14 +116,20 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
                 }
             }
         }
-    } else if let Some(app) = apps.iter().find(|app| {
+    } else if let Some(app) = inventory.apps.iter().find(|app| {
         std::iter::once(&app.runtime)
             .chain(app.sessions.values())
             .any(|requirements| requirements.machine_profile.is_some())
     }) {
         return Err(invalid(&app_manifest_path(root, app), "machine_profile requires profiles in chunk.toml [local]"));
     }
-    Ok(ProjectMetadata { version: 1, apps, local: manifest.local })
+    inventory.local = manifest.local;
+    Ok(inventory)
+}
+
+/// Discovers the project, resolving local defaults only when `chunk.toml` exists.
+pub(crate) fn load(root: &Path) -> io::Result<Inventory> {
+    if root.join("chunk.toml").exists() { inspect_inventory(root) } else { discover(root) }
 }
 
 /// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children.
@@ -115,19 +137,29 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
 /// # Errors
 /// Rejects symlinks, malformed manifests, invalid or case-colliding IDs and missing app build files.
 pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
-    let domains = domains::discover(root)?;
+    Ok(discover(root)?.apps)
+}
+
+/// Every `discover_apps` entry plus the static and authored domain scopes and authored modules.
+pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
+    let mut inventory = authoring::discover(root)?;
+    inventory.scopes = domains::discover(root, std::mem::take(&mut inventory.scopes))?;
+    legacy_apps(root, &mut inventory)?;
+    Ok(inventory)
+}
+
+fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
     let directory = root.join("apps");
     match fs::symlink_metadata(&directory) {
         Ok(metadata) if !metadata.is_dir() => {
             return Err(invalid(&directory, "expected a directory, not a symlink or file"));
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(invalid(&directory, error)),
         _ => {}
     }
     let mut entries = fs::read_dir(&directory)?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
-    let mut apps = Vec::new();
     let mut names = BTreeSet::new();
     for entry in entries {
         let kind = entry.file_type()?;
@@ -154,7 +186,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
         let manifest: AppManifest = read_manifest(&manifest_path)?;
-        if !domains.contains_key(&manifest.domain) {
+        if !inventory.scopes.contains_key(&manifest.domain) {
             return Err(invalid(&manifest_path, "domain must name an existing static scope under server/domains"));
         }
         if manifest.sessions.len() > 128 || manifest.sessions.keys().any(|id| !valid_id(id)) {
@@ -166,7 +198,7 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             }
         }
         require_file(&entry.path().join("build.gradle.kts"))?;
-        apps.push(AppMetadata {
+        inventory.apps.push(AppMetadata {
             directory: format!("apps/{id}"),
             gradle_project: format!(":apps:{id}"),
             id,
@@ -175,15 +207,14 @@ pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
             sessions: manifest.sessions,
         });
     }
-    apps.extend(authoring::discover(root)?.apps);
-    apps.sort_by(|left, right| left.id.cmp(&right.id));
+    inventory.apps.sort_by(|left, right| left.id.cmp(&right.id));
     let mut names = BTreeSet::new();
-    for app in &apps {
+    for app in &inventory.apps {
         if !names.insert(app.id.to_ascii_lowercase()) {
             return Err(invalid(&root.join(&app.directory), "app IDs must be unique and must not differ only by case"));
         }
     }
-    Ok(apps)
+    Ok(())
 }
 
 fn app_manifest_path(root: &Path, app: &AppMetadata) -> std::path::PathBuf {

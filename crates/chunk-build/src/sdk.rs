@@ -6,6 +6,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+use crate::project::Inventory;
+
 const SOURCES: &[(&str, &str)] = &[
     ("apps.ts", include_str!("../sdk/src/apps.ts")),
     ("index.ts", include_str!("../sdk/src/index.ts")),
@@ -28,6 +30,10 @@ const SOURCES: &[(&str, &str)] = &[
 /// Reports a missing schema, invalid package configuration, or filesystem errors.
 pub fn generate_sdk(project: &Path) -> io::Result<()> {
     let project = project.canonicalize()?;
+    generate(&project, &crate::project::load(&project)?)
+}
+
+pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> {
     if !project.join("server/schema/index.ts").is_file() {
         return Err(io::Error::other("missing explicitly composed server/schema/index.ts"));
     }
@@ -50,7 +56,7 @@ pub fn generate_sdk(project: &Path) -> io::Result<()> {
         write_changed(&project.join(".chunk/sdk").join(name), source.as_bytes())?;
     }
     write_changed(&project.join(".chunk/generated/index.ts"), include_bytes!("sdk/index.ts"))?;
-    write_changed(&project.join(".chunk/generated/apps.ts"), app_references(&project)?.as_bytes())?;
+    write_changed(&project.join(".chunk/generated/apps.ts"), app_references(inventory)?.as_bytes())?;
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;
         bytes.push(b'\n');
@@ -63,15 +69,9 @@ pub fn generate_sdk(project: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn app_references(project: &Path) -> io::Result<String> {
-    let apps = if project.join("chunk.toml").exists() {
-        crate::project::inspect(project)?.apps
-    } else {
-        crate::project::discover_apps(project)?
-    };
-    let inventory = crate::project::authoring::discover(project)?;
+fn app_references(inventory: &Inventory) -> io::Result<String> {
     let mut references = serde_json::Map::new();
-    for app in apps {
+    for app in &inventory.apps {
         let mut implementations = Vec::new();
         let mut destinations = serde_json::Map::new();
         if let Some(module) =

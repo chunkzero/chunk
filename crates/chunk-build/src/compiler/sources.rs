@@ -3,19 +3,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) struct Source {
+use crate::project::{Inventory, authoring::Module};
+
+pub(super) struct Source<'a> {
     pub path: PathBuf,
     pub namespace: String,
-    pub authoring: Option<crate::project::authoring::Module>,
+    pub authoring: Option<&'a Module>,
 }
 
-pub(super) fn discover(root: &Path) -> io::Result<Vec<Source>> {
+pub(super) fn discover<'a>(root: &Path, inventory: &'a Inventory) -> io::Result<Vec<Source<'a>>> {
     let mut files = Vec::new();
     collect(&root.join("server"), "shared", &mut files, 0)?;
-    for app in crate::project::discover_apps(root)? {
+    for app in &inventory.apps {
         collect(&root.join(&app.directory).join("server"), &format!("apps/{}", app.id), &mut files, 0)?;
     }
-    for module in crate::project::authoring::discover(root)?.modules {
+    for module in &inventory.modules {
         files.push(Source { path: module.path.clone(), namespace: module.namespace.clone(), authoring: Some(module) });
     }
     if files.len() > 512 {
@@ -42,7 +44,7 @@ fn entries(directory: &Path) -> io::Result<Vec<fs::DirEntry>> {
     entries.sort_by_key(fs::DirEntry::file_name);
     Ok(entries)
 }
-fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source>, depth: usize) -> io::Result<()> {
+fn collect(directory: &Path, namespace: &str, files: &mut Vec<Source<'_>>, depth: usize) -> io::Result<()> {
     if depth > 32 {
         return Err(io::Error::other("source nesting limit"));
     }

@@ -23,7 +23,7 @@ pub(super) fn executable() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn check(files: &[Source], output: &Path) -> io::Result<()> {
+pub(super) fn check(files: &[Source<'_>], output: &Path) -> io::Result<()> {
     let compiler = executable()?;
     let version = Command::new(&compiler).arg("--version").output()?;
     if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != format!("Version {VERSION}") {

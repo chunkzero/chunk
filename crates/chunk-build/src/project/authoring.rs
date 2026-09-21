@@ -13,7 +13,7 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use super::{AppMetadata, RuntimeRequirements, invalid, require_file, valid_id};
+use super::{AppMetadata, Inventory, RuntimeRequirements, invalid, require_file, valid_id};
 
 pub(crate) struct Module {
     pub path: PathBuf,
@@ -32,13 +32,7 @@ pub(crate) struct Destination {
     pub machine_profile: Option<String>,
 }
 
-#[derive(Default)]
-pub(crate) struct Inventory {
-    pub apps: Vec<AppMetadata>,
-    pub scopes: BTreeMap<String, DomainScope>,
-    pub modules: Vec<Module>,
-}
-
+/// Parses every `app.ts` and `scope.ts` under `apps/`; the result only carries authored entries.
 pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
     let mut inventory = Inventory::default();
     collect(&root.join("apps"), "", &mut inventory, 0)?;

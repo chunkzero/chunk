@@ -11,6 +11,7 @@ use super::{
     bundle::{error, quote},
     sources::Source,
 };
+use crate::project::Inventory;
 
 struct Descriptors {
     kind: &'static str,
@@ -28,18 +29,16 @@ pub(super) struct DomainEntries {
 }
 
 impl DomainEntries {
-    pub(super) fn new(root: &Path) -> io::Result<Self> {
-        let scopes = crate::project::domains::discover(root)?;
-        let apps = crate::project::discover_apps(root)?.into_iter().map(|app| (app.id, app.domain)).collect();
-        let authored = !crate::project::authoring::discover(root)?.modules.is_empty();
-        let manifest = (authored || root.join("server/domains").exists()).then_some(DomainManifest {
+    pub(super) fn new(root: &Path, inventory: &Inventory) -> Self {
+        let authored = !inventory.modules.is_empty();
+        let manifest = (authored || root.join("server/domains").exists()).then(|| DomainManifest {
             version: DOMAIN_MANIFEST_VERSION,
-            scopes,
-            apps,
+            scopes: inventory.scopes.clone(),
+            apps: inventory.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect(),
             hooks: BTreeMap::new(),
             commands: BTreeMap::new(),
         });
-        Ok(Self {
+        Self {
             manifest,
             authored,
             descriptors: [("Hook", "hooks"), ("Command", "commands")].map(|(kind, module)| Descriptors {
@@ -50,10 +49,10 @@ impl DomainEntries {
             }),
             bound: Vec::new(),
             unbound: Vec::new(),
-        })
+        }
     }
 
-    pub(super) fn add_module(&mut self, entry: &Source) -> io::Result<()> {
+    pub(super) fn add_module(&mut self, entry: &Source<'_>) -> io::Result<()> {
         for descriptors in &mut self.descriptors {
             if let Some(scope) = descriptor_scope(entry, descriptors.module)
                 && !descriptors.scopes.insert(scope.into())
@@ -66,7 +65,7 @@ impl DomainEntries {
 
     pub(super) fn add_export(
         &mut self,
-        entry: &Source,
+        entry: &Source<'_>,
         exported: &str,
         value: &str,
         binding: &str,
@@ -170,7 +169,7 @@ impl DomainEntries {
     }
 }
 
-fn descriptor_scope<'a>(source: &'a Source, module: &str) -> Option<&'a str> {
+fn descriptor_scope<'a>(source: &'a Source<'_>, module: &str) -> Option<&'a str> {
     let path = source.namespace.strip_prefix("shared/domains/")?;
     if path == module { Some("") } else { path.strip_suffix(module)?.strip_suffix('/') }
 }

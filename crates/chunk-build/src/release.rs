@@ -57,7 +57,7 @@ struct Manifest<'a, 'b> {
 /// Rejects inconsistent app/JAR identities, incompatible classpaths, invalid contracts, symlinks,
 /// oversized inputs, nonportable paths and modified published content.
 pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Release> {
-    let project = project::inspect(&inputs.project)?;
+    let project = project::inspect_inventory(&inputs.project)?;
     let jvm = read_jvm_descriptor(&inputs.jvm_descriptor)?;
     let descriptor_apps: BTreeMap<_, _> = jvm.apps.iter().map(|app| (app.id.as_str(), app)).collect();
     let discovered: BTreeSet<_> = project.apps.iter().map(|app| app.id.as_str()).collect();
@@ -116,17 +116,14 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
     validate_app_contracts(&backend, project.local.as_ref(), &mut metadata)?;
-    let domains = project::domains::discover(&inputs.project)?;
     if let Some(compiled) = &backend.domains {
         let bindings = project.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect();
-        if compiled.apps != bindings || compiled.scopes != domains {
+        if compiled.apps != bindings || compiled.scopes != project.scopes {
             return Err(io::Error::other(
                 "compiled domain manifest no longer matches the project; recompile the backend",
             ));
         }
-    } else if inputs.project.join("server/domains").exists()
-        || !project::authoring::discover(&inputs.project)?.modules.is_empty()
-    {
+    } else if inputs.project.join("server/domains").exists() || !project.modules.is_empty() {
         return Err(io::Error::other("backend is missing the project's domain manifest; recompile the backend"));
     }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;

@@ -1,4 +1,5 @@
 use super::sources::Source;
+use crate::project::Inventory;
 use rolldown::plugin::{
     HookBuildEndArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
     HookResolveIdReturn, HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
@@ -97,7 +98,13 @@ fn options(root: &Path, input: Vec<String>) -> BundlerOptions {
     }
 }
 
-pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Source]) -> io::Result<()> {
+pub(super) async fn build(
+    root: &Path,
+    output: &Path,
+    sdk: &Path,
+    files: &[Source<'_>],
+    inventory: &Inventory,
+) -> io::Result<()> {
     let entries: Vec<_> = files.iter().filter(|source| !source.path.to_string_lossy().ends_with(".d.ts")).collect();
     let discovered_exports = Arc::new(Mutex::new(BTreeMap::new()));
     let mut discovery = Bundler::with_plugins(
@@ -112,7 +119,7 @@ pub(super) async fn build(root: &Path, output: &Path, sdk: &Path, files: &[Sourc
         return Err(error(warning));
     }
     let modules = std::mem::take(&mut *discovered_exports.lock().map_err(error)?);
-    let source = entry_source(root, sdk, &entries, &modules)?;
+    let source = entry_source(root, sdk, &entries, &modules, inventory)?;
     let mut config = options(root, vec![ENTRY.into()]);
     config.dir = Some(output.to_string_lossy().into_owned());
     config.entry_filenames = Some("source.mjs".to_string().into());
@@ -167,8 +174,9 @@ fn write_output(assets: &[Output], root: &Path, output: &Path) -> io::Result<()>
 fn entry_source(
     root: &Path,
     sdk: &Path,
-    entries: &[&Source],
+    entries: &[&Source<'_>],
     modules: &BTreeMap<String, Vec<String>>,
+    inventory: &Inventory,
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
@@ -186,13 +194,9 @@ fn entry_source(
         quote(sdk.join("apps.ts").to_string_lossy())
     )
     .map_err(error)?;
-    let apps = if root.join("chunk.toml").exists() {
-        crate::project::inspect(root)?.apps
-    } else {
-        crate::project::discover_apps(root)?
-    };
+    let apps = &inventory.apps;
     let mut configurations = Vec::new();
-    let mut domains = super::domains::DomainEntries::new(root)?;
+    let mut domains = super::domains::DomainEntries::new(root, inventory);
     let mut destination_metadata = Vec::new();
     let mut destination_module = false;
     let mut metadata = Vec::new();
@@ -200,7 +204,7 @@ fn entry_source(
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         domains.add_module(entry)?;
-        if let Some(module) = &entry.authoring {
+        if let Some(module) = entry.authoring {
             let value = format!("m{index}.default");
             domains.add_authored(module, &value, &mut source)?;
             if module.app {

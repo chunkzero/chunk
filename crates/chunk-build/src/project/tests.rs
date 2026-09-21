@@ -169,7 +169,7 @@ fn app_domains_resolve_static_directories_with_implicit_root_and_ancestors() {
     let apps = discover_apps(root).unwrap();
     assert_eq!(apps[0].domain, "games/duels");
     assert_eq!(apps[1].domain, "");
-    let scopes = domains::discover(root).unwrap();
+    let scopes = discover(root).unwrap().scopes;
     assert_eq!(scopes["games/duels"].parent.as_deref(), Some("games"));
     for domain in ["missing", "games/../games", "/games", "games/", "Games"] {
         fs::write(root.join("apps/duels/app.toml"), format!("domain = '{domain}'")).unwrap();

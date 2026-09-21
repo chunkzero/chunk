@@ -4,10 +4,14 @@ use chunk_contract::{DomainScope, domain_path};
 
 use super::invalid;
 
-pub(crate) fn discover(root: &Path) -> io::Result<BTreeMap<String, DomainScope>> {
+/// Merges static `server/domains` scopes with the scopes authored under `apps/`.
+pub(crate) fn discover(
+    root: &Path,
+    authored: BTreeMap<String, DomainScope>,
+) -> io::Result<BTreeMap<String, DomainScope>> {
     let mut scopes = BTreeMap::from([(String::new(), DomainScope { parent: None })]);
     collect(&root.join("server/domains"), "", &mut scopes)?;
-    for (path, scope) in super::authoring::discover(root)?.scopes {
+    for (path, scope) in authored {
         if !path.is_empty() && scopes.contains_key(&path) {
             return Err(invalid(&root.join("apps").join(&path), "scope conflicts with legacy server/domains scope"));
         }
