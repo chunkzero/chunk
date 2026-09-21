@@ -84,20 +84,11 @@ abstract class WriteSessionRegistry : DefaultTask() {
                     }
                 }?.also { cache[name] = it }
 
-        fun provider(
-            name: String,
-            seen: MutableSet<String> = mutableSetOf(),
-        ): Boolean {
-            if (name == "dev/chunkzero/runtime/SessionProvider") return true
-            if (!seen.add(name)) return false
-            val type = lookup(name) ?: return false
-            return type.parents.any { provider(it, seen) }
-        }
         val sessions = sortedMapOf<String, String>()
         for (type in found.values.filter { it.session != null }) {
             val id = requireNotNull(type.session)
             require(id.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}"))) { "Invalid session type ID: $id" }
-            require(type.constructible && provider(type.name)) {
+            require(type.constructible && ::lookup.inherits(type.name, "dev/chunkzero/runtime/SessionProvider")) {
                 "Session $id requires a public concrete SessionProvider with a public no-argument constructor"
             }
             require(sessions.put(id, type.name.replace('/', '.')) == null) { "Duplicate session type: $id" }

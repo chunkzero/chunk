@@ -8,21 +8,16 @@ internal fun writeSessionMethods(
     app: String,
     providers: Map<String, String>,
     contract: File,
-    lookup: (String) -> CompiledClass?,
+    lookup: ClassLookup,
     resources: File,
     sources: File,
 ) {
     val metadata = JsonParser.parseString(contract.readText()).asJsonObject
     require(metadata["version"]?.asInt == 1) { "Unsupported session method metadata version" }
-    val methods = requireNotNull(metadata["methods"]?.asJsonArray) { "Missing session methods" }
-    val declarations = methods.map { it.asJsonObject }.filter { it["app"].asString == app }
-
-    fun inherits(
-        name: String,
-        target: String,
-        seen: MutableSet<String> = mutableSetOf(),
-    ): Boolean =
-        name == target || (seen.add(name) && lookup(name)?.parents.orEmpty().any { inherits(it, target, seen) })
+    val methods =
+        requireNotNull(metadata["methods"]?.asJsonArray) { "Missing session methods" }
+            .map { it.asJsonObject }
+    val declarations = methods.filter { it["app"].asString == app }
 
     fun creates(
         name: String,
@@ -38,7 +33,7 @@ internal fun writeSessionMethods(
     val implementations =
         providers.mapValues { (_, provider) ->
             val type = provider.replace('.', '/')
-            creates(type, inherits(type, "dev/chunkzero/runtime/ConfiguredSessionProvider"))
+            creates(type, lookup.inherits(type, "dev/chunkzero/runtime/ConfiguredSessionProvider"))
         }
     val bindings =
         declarations.map { method ->
@@ -47,12 +42,12 @@ internal fun writeSessionMethods(
             val implementation = implementations[session]
             require(
                 implementation != null && lookup(implementation)?.publicConcrete == true &&
-                    inherits(implementation, "dev/chunkzero/runtime/Session"),
+                    lookup.inherits(implementation, "dev/chunkzero/runtime/Session"),
             ) {
                 "Session $app/$session method $name requires a provider creation method with a public concrete Session return type"
             }
             val contractInterface = method["binary_interface"].asString.replace('.', '/')
-            require(inherits(implementation, contractInterface)) {
+            require(lookup.inherits(implementation, contractInterface)) {
                 "Session $app/$session must implement ${method["interface"].asString} for method $name"
             }
             val type = method["interface"].asString
@@ -61,12 +56,9 @@ internal fun writeSessionMethods(
         }
     for ((session, implementation) in implementations) {
         if (implementation == null) continue
-        val foreign =
-            methods.map { it.asJsonObject }.firstOrNull {
-                (it["app"].asString != app || it["session"].asString != session) &&
-                    inherits(implementation, it["binary_interface"].asString.replace('.', '/'))
-            }
-        require(foreign == null) { "Session $app/$session implements a method belonging to another app or session" }
+        require(!lookup.implementsForeign(implementation, app, session, methods)) {
+            "Session $app/$session implements a method belonging to another app or session"
+        }
     }
     sources.deleteRecursively()
     sources.mkdirs()
