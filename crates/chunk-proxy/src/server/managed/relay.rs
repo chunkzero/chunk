@@ -61,7 +61,7 @@ where
                     }
                 };
                 let replacement = if VarInt::decode(&mut frame.as_ref()).map_err(invalid_data)?.0 == chunk_protocol::commands::CommandTree::ID {
-                    commands.as_mut().map(|commands| commands.tree(decode_packet(&frame).map_err(invalid_data)?)).transpose()?
+                    commands.as_mut().map(|commands| commands.tree(&decode_packet(&frame).map_err(invalid_data)?)).transpose()?
                 } else { None };
                 if let Some(replacement) = replacement {
                     timeout(RPC_TIMEOUT, public.write_encoded(&replacement)).await.map_err(io::Error::other)??;

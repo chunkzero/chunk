@@ -141,11 +141,30 @@ impl Commands {
         }
         self.state.send_replace(None);
     }
-    pub fn tree(&mut self, jvm: CommandTree) -> io::Result<Vec<u8>> {
+    pub fn tree(&mut self, jvm: &CommandTree) -> io::Result<Vec<u8>> {
         let Some(origin) = &self.origin else {
-            return encode_packet(&jvm).map_err(invalid_data);
+            return encode_packet(jvm).map_err(invalid_data);
         };
-        let catalog = CommandTreeCatalog::new(jvm, &self.descriptors, &origin.scope.domain).map_err(invalid_data)?;
+        let catalog = match CommandTreeCatalog::new(jvm.clone(), &self.descriptors, &origin.scope.domain) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let roots: Vec<_> = jvm.nodes[jvm.root]
+                    .children
+                    .iter()
+                    .filter_map(|index| jvm.nodes[*index].name())
+                    .filter(|name| {
+                        self.descriptors.values().any(|command| {
+                            std::iter::once(&command.name)
+                                .chain(&command.aliases)
+                                .any(|root| root.eq_ignore_ascii_case(name))
+                        })
+                    })
+                    .collect();
+                tracing::warn!(%error, ?roots, "JVM command tree conflicts with backend commands; forwarding it unchanged");
+                self.tree_received = false;
+                return encode_packet(jvm).map_err(invalid_data);
+            }
+        };
         let tree = catalog.merge(|id, _| self.allowed.contains(id)).map_err(invalid_data)?;
         self.catalog = Some(catalog);
         self.tree_received = true;

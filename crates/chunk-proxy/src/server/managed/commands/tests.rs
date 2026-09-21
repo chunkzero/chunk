@@ -64,7 +64,7 @@ async fn relay_keeps_pumping_while_owned_commands_await_and_preserves_jvm_signed
     let mut public = Transport::new(public);
     let mut jvm = Transport::new(jvm);
     let mut internal = Transport::new(internal);
-    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     let published = decode_packet::<CommandTree>(&client.read_frame(16384).await.unwrap()).unwrap();
@@ -108,7 +108,7 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);
     let mut client = Transport::new(client);
-    let hidden = fixture.commands.tree(CommandTree::empty()).unwrap();
+    let hidden = fixture.commands.tree(&CommandTree::empty()).unwrap();
     assert!(decode_packet::<CommandTree>(body(&hidden)).unwrap().nodes[0].children.is_empty());
     assert!(fixture.commands.input(&unsigned("echo")).unwrap());
     output(&mut fixture.commands, &mut public).await; // Pre-arrival text rejected, never sent in configuration.
@@ -133,7 +133,8 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
             CommandNode::new(NodeKind::Literal { name: McString::new("echo").unwrap() }),
         ],
     };
-    assert!(fixture.commands.tree(collision).is_err());
+    let forwarded = decode_packet::<CommandTree>(body(&fixture.commands.tree(&collision).unwrap())).unwrap();
+    assert_eq!(forwarded.nodes[0].children, vec![1]);
     fixture.close().await;
 }
 
@@ -143,7 +144,7 @@ async fn failed_permission_refresh_keeps_last_catalog() {
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);
     let mut client = Transport::new(client);
-    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     let published = decode_packet::<CommandTree>(&client.read_frame(16384).await.unwrap()).unwrap();
@@ -168,7 +169,7 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);
     let mut client = Transport::new(client);
-    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
@@ -187,7 +188,7 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     fixture.commands.bind(&fixture.claim, &fixture.assignment).unwrap();
     assert!(origin.cancellation.is_cancelled());
     assert!(fixture.commands.tasks.current(&origin, true).is_err()); // Configuration rejects effects.
-    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
@@ -248,7 +249,7 @@ async fn query_suggestions_use_owned_range_and_current_permission_and_platform_a
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);
     let mut client = Transport::new(client);
-    fixture.commands.tree(CommandTree::empty()).unwrap();
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
