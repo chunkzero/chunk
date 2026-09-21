@@ -16,6 +16,7 @@ use crate::{
 mod archive;
 mod descriptor;
 mod jars;
+mod manifest;
 mod session_configurations;
 mod session_methods;
 pub use descriptor::{JavaRuntime, JvmDescriptor, read_jvm_descriptor};
