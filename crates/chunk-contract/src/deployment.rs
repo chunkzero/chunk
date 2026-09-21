@@ -136,8 +136,13 @@ impl Deployment {
 }
 
 pub(crate) fn identifier(value: &str) -> bool {
+    ascii_identifier(value, 128)
+}
+
+/// ASCII identifier: starts with a letter or underscore, then letters, digits or underscores.
+pub(crate) fn ascii_identifier(value: &str, limit: usize) -> bool {
     !value.is_empty()
-        && value.len() <= 128
+        && value.len() <= limit
         && value.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }

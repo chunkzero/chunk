@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Function, FunctionKind, Schema};
+use crate::{Function, FunctionKind, Schema, deployment::ascii_identifier};
 
 mod input;
 pub use input::{MAX_COMMAND_INPUT, ParsedCommand};
@@ -108,7 +108,7 @@ impl Command {
             }
             let mut arguments = BTreeSet::new();
             for (index, argument) in route.arguments.iter().enumerate() {
-                if !identifier(&argument.name) || !arguments.insert(argument.name.to_ascii_lowercase()) {
+                if !ascii_identifier(&argument.name, 64) || !arguments.insert(argument.name.to_ascii_lowercase()) {
                     return Err("invalid or duplicate command argument name");
                 }
                 if argument.parser == CommandParser::Greedy && index + 1 != route.arguments.len() {
@@ -205,13 +205,6 @@ fn literal(value: &str) -> bool {
         && value.len() <= 64
         && value.as_bytes()[0].is_ascii_lowercase()
         && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
-}
-
-fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && (value.as_bytes()[0].is_ascii_alphabetic() || value.as_bytes()[0] == b'_')
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]

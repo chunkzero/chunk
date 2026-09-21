@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Schema;
+use crate::{Schema, deployment::identifier};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -51,11 +51,7 @@ impl SessionMethods {
         let mut identities = BTreeSet::new();
         for method in &self.methods {
             for part in [&method.app, &method.session, &method.name] {
-                if part.is_empty()
-                    || part.len() > 128
-                    || !part.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
-                    || !part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                {
+                if !identifier(part) {
                     return Err("invalid session method identity");
                 }
             }
