@@ -212,7 +212,8 @@ async fn session_method_lost_start_polls_same_capture_and_never_retargets_after_
     let mut fixture = Fixture::new().await;
     fixture.commands.arrived();
     let origin = fixture.commands.origin.clone().unwrap();
-    let method = || effects::Method { app: "lobby".into(), session: "default".into(), name: "population".into() };
+    let method =
+        || chunk_contract::EffectMethod { app: "lobby".into(), session: "default".into(), name: "population".into() };
     let value =
         session::invoke(&fixture.commands.tasks, &origin, method(), serde_json::json!({}), false).await.unwrap();
     assert_eq!(value, serde_json::json!(42));
@@ -231,7 +232,8 @@ async fn accepted_session_send_outlives_handler_return_but_retains_captured_scop
     fixture.commands.arrived();
     fixture.service.pending_method.store(true, Ordering::SeqCst);
     let origin = fixture.commands.origin.clone().unwrap();
-    let method = effects::Method { app: "lobby".into(), session: "default".into(), name: "population".into() };
+    let method =
+        chunk_contract::EffectMethod { app: "lobby".into(), session: "default".into(), name: "population".into() };
     session::invoke(&fixture.commands.tasks, &origin, method, serde_json::json!({}), true).await.unwrap();
     assert_eq!(fixture.commands.tasks.methods.available_permits(), 7);
     wait_count(&fixture.service.polls, 1).await;

@@ -1,40 +1,14 @@
 use super::super::super::{platform::request, transport::invalid_data};
 use super::{Tasks, scope::Origin, session};
+use chunk_contract::Effect;
 use chunk_proto::v1::{CommandEffect, MovePlayerRequest, SessionDemand};
 use chunk_protocol::{
     commands::{ActionBar, PlainText, SubtitleText, SystemMessage, TitleText},
     encode_packet,
     versions::v26_1::TitleTimes,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io;
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Effect {
-    Message { text: String },
-    ActionBar { text: String },
-    Title { title: String, subtitle: Option<String> },
-    Enter { destination: Destination },
-    SessionCall { method: Method, arguments: Value },
-    SessionSend { method: Method, arguments: Value },
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Destination {
-    key: String,
-    session_type: String,
-    machine_profile: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Method {
-    pub app: String,
-    pub session: String,
-    pub name: String,
-}
 
 pub(super) async fn apply(tasks: &Tasks, origin: &Origin, follow: bool, effect: &CommandEffect) -> io::Result<Value> {
     if effect.request_json.len() > 64 * 1024 {

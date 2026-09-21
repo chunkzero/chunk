@@ -1,51 +1,8 @@
-use chunk_contract::{Deployment, Field, Schema, validate_wire_value};
+use chunk_contract::{Deployment, Effect, Field, Schema, validate_wire_value};
 use chunk_js::Json;
 use chunk_proto::v1::CommandScope;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{Error, Result};
-
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Effect {
-    Message {
-        text: String,
-    },
-    ActionBar {
-        text: String,
-    },
-    Title {
-        title: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        subtitle: Option<String>,
-    },
-    Enter {
-        destination: Destination,
-    },
-    SessionCall {
-        method: Method,
-        arguments: Value,
-    },
-    SessionSend {
-        method: Method,
-        arguments: Value,
-    },
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Method {
-    app: String,
-    session: String,
-    name: String,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Destination {
-    key: String,
-    session_type: String,
-    machine_profile: String,
-}
 
 pub(super) fn validate(deployment: &Deployment, scope: &CommandScope, request: &Json) -> Result<(Json, Schema, bool)> {
     if request.as_str().len() > 64 * 1024 {

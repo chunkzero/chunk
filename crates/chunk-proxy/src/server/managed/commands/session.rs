@@ -2,7 +2,8 @@ use super::super::super::{
     platform::{Platform, request},
     transport::invalid_data,
 };
-use super::{Tasks, effects::Method, scope::Origin};
+use super::{Tasks, scope::Origin};
+use chunk_contract::EffectMethod;
 use chunk_proto::v1::{PrepareSessionMethodRequest, PreparedMethodRequest, SessionMethodPhase, SessionMethodResult};
 use serde_json::Value;
 use std::{io, time::Duration};
@@ -31,7 +32,7 @@ impl Drop for Prepared {
 pub(super) async fn invoke(
     tasks: &Tasks,
     origin: &Origin,
-    method: Method,
+    method: EffectMethod,
     arguments: Value,
     send: bool,
 ) -> io::Result<Value> {
@@ -47,7 +48,7 @@ pub(super) async fn invoke(
 async fn invoke_inner(
     tasks: &Tasks,
     origin: &Origin,
-    method: Method,
+    method: EffectMethod,
     arguments: Value,
     send: bool,
 ) -> io::Result<Value> {

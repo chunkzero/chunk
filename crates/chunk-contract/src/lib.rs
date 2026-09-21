@@ -19,7 +19,9 @@ pub use destinations::{
     SessionCreation,
 };
 mod domains;
+mod effects;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
+pub use effects::{Effect, EffectDestination, EffectMethod};
 mod index;
 mod schema;
 mod session_configurations;
