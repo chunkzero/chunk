@@ -135,6 +135,7 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
     };
     let forwarded = decode_packet::<CommandTree>(body(&fixture.commands.tree(&collision).unwrap())).unwrap();
     assert_eq!(forwarded.nodes[0].children, vec![1]);
+    assert!(!fixture.commands.input(&unsigned("echo")).unwrap());
     fixture.close().await;
 }
 

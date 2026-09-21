@@ -161,6 +161,7 @@ impl Commands {
                     })
                     .collect();
                 tracing::warn!(%error, ?roots, "JVM command tree conflicts with backend commands; forwarding it unchanged");
+                self.catalog = None;
                 self.tree_received = false;
                 return encode_packet(jvm).map_err(invalid_data);
             }
