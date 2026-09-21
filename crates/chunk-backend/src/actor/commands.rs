@@ -8,6 +8,7 @@ use chunk_contract::{
 };
 use chunk_js::{Cancellation, DeploymentId, Json, Mode};
 use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
+use chunk_store::Revision;
 use serde_json::{Value, json};
 
 use super::Actor;
@@ -15,6 +16,17 @@ use crate::{
     Call, Error, Result,
     commands::{CommandBinding, Prepared},
 };
+
+/// A catalog stays valid while the deployment, scope and committed view it was
+/// computed against are unchanged; permission queries are pure over those.
+pub(super) struct CachedCatalog {
+    scope: CommandScope,
+    revision: Revision,
+    deployment: Arc<Deployment>,
+    catalog: CommandCatalog,
+}
+
+const CACHED_CATALOGS: usize = 256;
 
 impl Actor {
     fn command_deployment(&self, id: &DeploymentId) -> Result<Arc<Deployment>> {
@@ -66,6 +78,14 @@ impl Actor {
         cancellation: &Cancellation,
     ) -> Result<CommandCatalog> {
         let deployment = self.command_deployment(id)?;
+        let key = (id.clone(), scope.scope_id.clone());
+        if let Some(cached) = self.catalogs.get(&key)
+            && cached.revision == self.view.revision
+            && Arc::ptr_eq(&cached.deployment, &deployment)
+            && cached.scope == *scope
+        {
+            return Ok(cached.catalog.clone());
+        }
         scope_caller(&deployment, scope)?;
         let manifest = deployment.domains.as_ref().ok_or(Error::Unknown)?;
         let ids: BTreeSet<_> = visible_commands(&manifest.commands, &scope.domain, &[])
@@ -87,7 +107,15 @@ impl Actor {
         if commands_json.len() > 1024 * 1024 {
             return Err(Error::Busy);
         }
-        Ok(CommandCatalog { commands_json, allowed_ids })
+        let catalog = CommandCatalog { commands_json, allowed_ids };
+        if self.catalogs.len() >= CACHED_CATALOGS {
+            self.catalogs.clear();
+        }
+        self.catalogs.insert(
+            key,
+            CachedCatalog { scope: scope.clone(), revision: self.view.revision, deployment, catalog: catalog.clone() },
+        );
+        Ok(catalog)
     }
 
     pub(super) fn prepare_command(

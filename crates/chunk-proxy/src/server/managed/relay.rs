@@ -33,7 +33,9 @@ where
     I: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::pin!(ready);
-    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
+    // Arrival triggers an immediate refresh; this only catches permission
+    // changes for players who stay connected.
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
         tokio::select! {
             result = &mut ready => return Ok(result),
