@@ -10,7 +10,7 @@ mod commands;
 mod connections;
 pub use commands::{
     Command, CommandArgument, CommandParser, CommandRoute, CommandSuggestions, MAX_COMMAND_INPUT, ParsedCommand,
-    SuggestionQuery, visible_commands,
+    Quoted, SuggestionQuery, quoted, unquoted_word, valid_suggestion, visible_commands,
 };
 mod deployment;
 mod destinations;

@@ -117,38 +117,63 @@ impl<'a> Reader<'a> {
 
     fn word(&mut self) -> Result<&'a str, &'static str> {
         let word = self.token();
-        if word.is_empty()
-            || !word.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
-        {
+        if !unquoted_word(word) {
             return Err("expected unquoted command word");
         }
         Ok(word)
     }
 
     fn string(&mut self) -> Result<String, &'static str> {
-        let Some(quote @ ('\'' | '"')) = self.0.chars().next() else {
+        let Some(Quoted { value, end }) = quoted(self.0) else {
             return self.word().map(str::to_owned);
         };
-        let mut value = String::new();
-        let mut escaped = false;
-        for (offset, ch) in self.0[1..].char_indices() {
-            if escaped {
-                if ch != quote && ch != '\\' {
-                    return Err("invalid quoted command escape");
-                }
-                value.push(ch);
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote {
-                self.0 = &self.0[offset + 2..];
-                return Ok(value);
-            } else {
+        let value = value?;
+        self.0 = &self.0[end.ok_or("unterminated quoted command argument")?..];
+        Ok(value)
+    }
+}
+
+/// Whether `value` is a non-empty Brigadier word that needs no quoting.
+#[must_use]
+pub fn unquoted_word(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+}
+
+/// A Brigadier quoted string scanned from the opening quote at the start of the input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quoted {
+    /// The unescaped value, or the first invalid escape.
+    pub value: Result<String, &'static str>,
+    /// Byte offset just past the closing quote, or `None` when unterminated.
+    pub end: Option<usize>,
+}
+
+/// Scans a quoted string, returning `None` unless `input` opens with a quote.
+#[must_use]
+pub fn quoted(input: &str) -> Option<Quoted> {
+    let quote @ ('\'' | '"') = input.chars().next()? else {
+        return None;
+    };
+    let mut value = Ok(String::new());
+    let mut escaped = false;
+    for (offset, ch) in input[1..].char_indices() {
+        if escaped {
+            escaped = false;
+            if ch != quote && ch != '\\' {
+                value = Err("invalid quoted command escape");
+            } else if let Ok(value) = &mut value {
                 value.push(ch);
             }
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some(Quoted { value, end: Some(offset + 2) });
+        } else if let Ok(value) = &mut value {
+            value.push(ch);
         }
-        Err("unterminated quoted command argument")
     }
+    Some(Quoted { value, end: None })
 }
 
 #[cfg(test)]
@@ -218,5 +243,14 @@ mod tests {
         let excess = format!("test {}", "🎮".repeat(MAX_COMMAND_INPUT / 2));
         assert!(grammar.parse(&excess).is_err());
         assert!(grammar.parse("test a\nb").is_err());
+    }
+
+    #[test]
+    fn quoted_scanning_reports_ends_and_escapes_independently() {
+        assert_eq!(quoted("word"), None);
+        assert_eq!(quoted(r#""a\"b" rest"#), Some(Quoted { value: Ok("a\"b".into()), end: Some(6) }));
+        assert_eq!(quoted("'open"), Some(Quoted { value: Ok("open".into()), end: None }));
+        assert_eq!(quoted(r"'a\n' x"), Some(Quoted { value: Err("invalid quoted command escape"), end: Some(5) }));
+        assert_eq!(quoted(r"'a\"), Some(Quoted { value: Ok("a".into()), end: None }));
     }
 }

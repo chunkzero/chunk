@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Function, FunctionKind, Schema, deployment::ascii_identifier};
 
 mod input;
-pub use input::{MAX_COMMAND_INPUT, ParsedCommand};
+pub use input::{MAX_COMMAND_INPUT, ParsedCommand, Quoted, quoted, unquoted_word};
 
 /// A backend-owned command root and its literal/argument routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,15 +135,7 @@ impl CommandArgument {
         match &self.suggestions {
             Some(CommandSuggestions::Static(values)) => {
                 let mut seen = BTreeSet::new();
-                if values.len() > 64
-                    || !values.iter().all(|value| {
-                        !value.is_empty()
-                            && value.len() <= 1024
-                            && value.chars().count() <= 256
-                            && !value.chars().any(char::is_control)
-                            && seen.insert(value)
-                    })
-                {
+                if values.len() > 64 || !values.iter().all(|value| valid_suggestion(value) && seen.insert(value)) {
                     return Err("invalid command suggestions");
                 }
             }
@@ -162,6 +154,12 @@ impl CommandArgument {
         }
         Ok(())
     }
+}
+
+/// Whether a static or query suggestion value fits the command suggestion limits.
+#[must_use]
+pub fn valid_suggestion(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && value.chars().count() <= 256 && !value.chars().any(char::is_control)
 }
 
 /// Selects inherited command roots and rejects conflicts with app-local JVM commands.

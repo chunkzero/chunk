@@ -1,5 +1,7 @@
 use super::{CommandTreeCatalog, Result};
-use chunk_contract::{Command, CommandParser, CommandRoute, CommandSuggestions as Values};
+use chunk_contract::{
+    Command, CommandParser, CommandRoute, CommandSuggestions as Values, quoted, unquoted_word, valid_suggestion,
+};
 use chunk_protocol::{McString, commands::CommandSuggestions};
 use std::collections::BTreeSet;
 
@@ -22,7 +24,7 @@ impl SuggestionPlan {
     /// # Errors
     /// Rejects excessive/malformed query results and strings outside packet limits.
     pub fn finish(&self, transaction_id: i32, query_values: &[String]) -> Result<CommandSuggestions> {
-        if query_values.len() > 64 || query_values.iter().any(|value| !valid_value(value)) {
+        if query_values.len() > 64 || query_values.iter().any(|value| !valid_suggestion(value)) {
             return Err("invalid command suggestion result");
         }
         let prefix = self.prefix.to_lowercase();
@@ -33,7 +35,7 @@ impl SuggestionPlan {
             }
             let rendered = match self.parser {
                 CommandParser::String => {
-                    if self.quote.is_none() && unquoted(value) {
+                    if self.quote.is_none() && unquoted_word(value) {
                         value.clone()
                     } else {
                         let quote = self.quote.unwrap_or('"');
@@ -41,7 +43,7 @@ impl SuggestionPlan {
                         format!("{quote}{escaped}{quote}")
                     }
                 }
-                CommandParser::Word | CommandParser::Boolean if !unquoted(value) => continue,
+                CommandParser::Word | CommandParser::Boolean if !unquoted_word(value) => continue,
                 _ => value.clone(),
             };
             matches.insert(rendered);
@@ -181,29 +183,11 @@ fn plan(
     query: Option<String>,
 ) -> Result<SuggestionPlan> {
     let raw = &input[start..cursor_byte];
-    let quote =
-        if parser == CommandParser::String { raw.chars().next().filter(|ch| matches!(ch, '\'' | '"')) } else { None };
-    let prefix = if let Some(quote) = quote {
-        let mut value = String::new();
-        let mut escaped = false;
-        for ch in raw[1..].chars() {
-            if escaped {
-                if ch != quote && ch != '\\' {
-                    return Err("invalid suggestion escape");
-                }
-                value.push(ch);
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote {
-                break;
-            } else {
-                value.push(ch);
-            }
-        }
-        value
-    } else {
-        raw.to_owned()
+    let quoted = if parser == CommandParser::String { quoted(raw) } else { None };
+    let quote = quoted.as_ref().and_then(|_| raw.chars().next());
+    let prefix = match quoted {
+        Some(quoted) => quoted.value.map_err(|_| "invalid suggestion escape")?,
+        None => raw.to_owned(),
     };
     let end = token_end(input, start, parser).max(cursor_byte);
     let start = u32::try_from(input[..start].encode_utf16().count()).map_err(|_| "suggestion range limit")?;
@@ -236,27 +220,10 @@ fn token_end(input: &str, start: usize, parser: CommandParser) -> usize {
     }
     let rest = &input[start..];
     if matches!(parser, CommandParser::String | CommandParser::Boolean)
-        && let Some(quote @ ('\'' | '"')) = rest.chars().next()
+        && let Some(quoted) = quoted(rest)
     {
-        let mut escaped = false;
-        for (offset, ch) in rest[1..].char_indices() {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote {
-                return start + offset + 2;
-            }
-        }
-        input.len()
+        quoted.end.map_or(input.len(), |end| start + end)
     } else {
         start + rest.find(' ').unwrap_or(rest.len())
     }
-}
-fn unquoted(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
-}
-fn valid_value(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 1024 && value.chars().count() <= 256 && !value.chars().any(char::is_control)
 }
