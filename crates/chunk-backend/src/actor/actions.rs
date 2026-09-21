@@ -330,12 +330,10 @@ impl Actor {
         let original = record.call.clone();
         let mut call = Call { function, arguments, ..original.clone() };
         if let Some(binding) = command {
-            let deployment = self
-                .versions
-                .get(&original.deployment)
-                .and_then(Option::as_ref)
-                .expect("retained action deployment")
-                .clone();
+            let Some(deployment) = self.versions.get(&original.deployment).and_then(Option::as_ref).cloned() else {
+                reply.finish(Err(Error::Unknown));
+                return;
+            };
             if let Err(error) =
                 self.command_permission(&deployment, &binding.scope, &original.function, &reply.cancellation)
             {
