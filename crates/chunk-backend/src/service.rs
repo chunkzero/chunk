@@ -181,7 +181,6 @@ impl Command {
 }
 
 pub(crate) enum Event {
-    SchedulerTick,
     Scheduled {
         command: chunk_store::JobCommand,
         result: Result<chunk_store::Jobs>,

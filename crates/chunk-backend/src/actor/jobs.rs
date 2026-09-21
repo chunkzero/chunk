@@ -1,22 +1,16 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chunk_contract::FunctionKind;
 use chunk_js::{DeploymentId, Json, ScheduleIntent};
 use chunk_store::{Job, JobCommand, JobIntent, JobState, Jobs};
-use tokio::sync::mpsc;
 
 use super::Actor;
 use crate::{
     ActionHandle, ActionStatus, Error, Result,
-    service::{Call, Event, Request},
+    service::{Call, Request},
 };
 
 pub(super) struct Scheduled {
@@ -25,31 +19,25 @@ pub(super) struct Scheduled {
     ready: VecDeque<Job>,
     pending: bool,
     reply: Option<Request<Jobs>>,
-    stop: Arc<AtomicBool>,
-    timer: Option<JoinHandle<()>>,
 }
 
 impl Scheduled {
-    pub fn new(snapshot: Jobs, events: mpsc::Sender<Event>) -> Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let timer = std::thread::Builder::new().name("chunk-job-timer".into()).spawn(move || {
-            while !stopped.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(100));
-                if matches!(events.try_send(Event::SchedulerTick), Err(mpsc::error::TrySendError::Closed(_))) {
-                    break;
-                }
-            }
-        })?;
-        Ok(Self {
-            snapshot,
-            active: BTreeMap::new(),
-            ready: VecDeque::new(),
-            pending: false,
-            reply: None,
-            stop,
-            timer: Some(timer),
-        })
+    pub fn new(snapshot: Jobs) -> Self {
+        Self { snapshot, active: BTreeMap::new(), ready: VecDeque::new(), pending: false, reply: None }
+    }
+
+    /// Time until the earliest pending job becomes due. Jobs already due are
+    /// dispatched as events arrive, so they never shorten the wait.
+    pub fn next_due(&self) -> Option<Duration> {
+        let now = now();
+        self.snapshot
+            .records
+            .iter()
+            .filter(|job| job.state == JobState::Pending && job.due_at > now)
+            .map(|job| job.due_at - now)
+            .min()
+            .and_then(|millis| u64::try_from(millis).ok())
+            .map(Duration::from_millis)
     }
 
     pub fn references(&self, deployment: &DeploymentId) -> bool {
@@ -59,15 +47,6 @@ impl Scheduled {
     pub fn get(&self, id: &str, caller: &Json) -> Result<Job> {
         let caller: serde_json::Value = serde_json::from_str(caller.as_str())?;
         self.snapshot.records.iter().find(|job| job.id == id && job.caller == caller).cloned().ok_or(Error::Unknown)
-    }
-}
-
-impl Drop for Scheduled {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(timer) = self.timer.take() {
-            let _ = timer.join();
-        }
     }
 }
 

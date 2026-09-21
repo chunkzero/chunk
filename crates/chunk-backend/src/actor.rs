@@ -65,6 +65,8 @@ struct Reevaluation {
 pub(crate) struct Actor {
     actions: actions::Actions,
     scheduled: jobs::Scheduled,
+    /// Bounds the idle wait so due jobs dispatch without another event arriving.
+    timer: tokio::runtime::Runtime,
     recovering: bool,
     next_subscription: u64,
     reevaluations: VecDeque<Reevaluation>,
@@ -101,7 +103,8 @@ impl Actor {
             versions.insert(id, Some(Arc::new(deployment)));
         }
         Ok(Self {
-            scheduled: jobs::Scheduled::new(scheduled, events.clone())?,
+            scheduled: jobs::Scheduled::new(scheduled),
+            timer: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
             actions: actions::Actions::new(events, incarnation, effects),
             recovering: false,
             next_subscription: 0,
@@ -127,9 +130,7 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let event = if self.reevaluations.is_empty() {
-                incoming.blocking_recv()
-            } else {
+            let event = if !self.reevaluations.is_empty() {
                 match incoming.try_recv() {
                     Ok(event) => Some(event),
                     Err(mpsc::error::TryRecvError::Empty) => {
@@ -138,6 +139,12 @@ impl Actor {
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => None,
                 }
+            } else if let Some(wait) = self.scheduled.next_due() {
+                self.timer
+                    .block_on(async { tokio::time::timeout(wait, incoming.recv()).await })
+                    .unwrap_or(Some(Event::Wake))
+            } else {
+                incoming.blocking_recv()
             };
             let Some(event) = event else {
                 break;
@@ -189,7 +196,7 @@ impl Actor {
                     self.outstanding -= 1;
                     self.released(result);
                 }
-                Event::SchedulerTick | Event::Wake => {}
+                Event::Wake => {}
             }
             if !stopped.load(Ordering::Acquire) {
                 self.dispatch_jobs();
