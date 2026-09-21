@@ -180,35 +180,30 @@ fn entry_source(
 ) -> io::Result<String> {
     use std::fmt::Write;
     let mut source = format!(
-        "import schema from {};\nimport {{ isFunction }} from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\nimport {{ isSessionMethod }} from {};\nimport {{ isDestination }} from {};\n",
+        "import schema from {};\nimport {{ isHook, invokeHook }} from {};\nimport {{ isCommand, invokeCommand }} from {};\n",
         quote(root.join("server/schema/index.ts").to_string_lossy()),
-        quote(sdk.join("functions.ts").to_string_lossy()),
         quote(sdk.join("hooks.ts").to_string_lossy()),
         quote(sdk.join("commands.ts").to_string_lossy()),
-        quote(sdk.join("sessions.ts").to_string_lossy()),
-        quote(sdk.join("destinations.ts").to_string_lossy()),
     );
+    let mut descriptors = super::descriptors::Descriptors::new(sdk, &mut source)?;
     writeln!(
         source,
         "import {{isApp,isScope,appConfigurations,appDestinations}} from {};",
         quote(sdk.join("apps.ts").to_string_lossy())
     )
     .map_err(error)?;
-    let apps = &inventory.apps;
-    let mut configurations = Vec::new();
     let mut domains = super::domains::DomainEntries::new(root, inventory);
-    let mut destination_metadata = Vec::new();
-    let mut destination_module = false;
-    let mut metadata = Vec::new();
-    let mut methods = Vec::new();
+    let mut bindings = 0;
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
         domains.add_module(entry)?;
+        descriptors.add_module(entry)?;
         if let Some(module) = entry.authoring {
             let value = format!("m{index}.default");
             domains.add_authored(module, &value, &mut source)?;
             if module.app {
-                let app = apps
+                let app = inventory
+                    .apps
                     .iter()
                     .find(|app| entry.namespace == format!("apps/{}/app", app.id))
                     .ok_or_else(|| error("missing authored app metadata"))?;
@@ -218,15 +213,8 @@ fn entry_source(
                     quote(&app.id)
                 )
                 .map_err(error)?;
-                configurations.push(format!("...appConfigurations({value})"));
-                let defaults =
-                    serde_json::json!({"machineProfile":app.runtime.machine_profile,"maxPlayers":app.runtime.capacity});
-                destination_metadata.push(format!("...appDestinations({value},{defaults})"));
+                descriptors.add_app(&value, app);
             }
-        }
-        let destination_scope = entry.namespace == "shared/destinations";
-        if destination_scope && std::mem::replace(&mut destination_module, true) {
-            return Err(error("multiple server/destinations.ts or destinations.mts modules"));
         }
         let key = entry.path.to_string_lossy();
         let module = modules.get(key.as_ref()).ok_or_else(|| error(format!("missing module exports: {key}")))?;
@@ -236,37 +224,23 @@ fn entry_source(
             if exported == "*" {
                 return Err(error(format!("Star re-exports are unsupported: {key}")));
             }
-            let location = &entry.namespace;
             let value = format!("m{index}[{}]", quote(&exported));
-            let binding = format!("f{}", metadata.len());
+            let binding = format!("f{bindings}");
             domains.add_export(entry, &exported, &value, &binding, &mut source)?;
             if exported == "default" {
-                writeln!(
-                    source,
-                    "if(isDestination({value})) throw new Error({});",
-                    quote(format!("Destination descriptors require named exports: {location}"))
-                )
-                .map_err(error)?;
+                descriptors.add_default(entry, &value, &mut source)?;
                 continue;
             }
-            let name = quote(format!("{}/{}", entry.namespace, exported));
             writeln!(source, "export const {binding} = (ctx,args) => isHook({value}) ? invokeHook({value},ctx,args) : isCommand({value}) ? invokeCommand({value},ctx,args) : {value}.handler(ctx,args);").map_err(error)?;
-            methods.push(format!("...(isSessionMethod({value}) ? [{value}.contract] : [])"));
-            if destination_scope {
-                destination_metadata.push(format!("...(isDestination({value}) ? [[{name}, {value}.contract]] : [])"));
-            } else {
-                writeln!(source, "if(isDestination({value})) throw new Error({});", quote(format!("Destination descriptors require named exports in server/destinations.ts or destinations.mts: {location}"))).map_err(error)?;
-            }
-            metadata.push(format!(
-                "...(isFunction({value}) ? [[{name}, {{...{value}.contract, export:{}}}]] : [])",
-                quote(binding)
-            ));
+            bindings += 1;
+            descriptors.add_export(entry, &exported, &value, &binding, &mut source)?;
         }
     }
     source.push_str("if (schema === null || typeof schema !== 'object' || schema.contract === null || typeof schema.contract !== 'object' || Array.isArray(schema.contract)) throw new Error('server/schema/index.ts must default-export a schema created with defineSchema()');\n");
     domains.bindings(&mut source)?;
     let domain_metadata = domains.metadata()?;
-    writeln!(source, "const destinationEntries = [{}];", destination_metadata.join(",")).map_err(error)?;
-    write!(source, "export function __chunk_contract() {{ const methods = [{}]; const configurations = [{}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}", methods.join(","), configurations.join(","), metadata.join(",")).map_err(error)?;
+    let [functions, methods, destinations, configurations] = descriptors.metadata();
+    writeln!(source, "const destinationEntries = [{destinations}];").map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{methods}]; const configurations = [{configurations}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{functions}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}").map_err(error)?;
     Ok(source)
 }

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod authoring_tests;
 mod bundle;
+mod descriptors;
 #[cfg(test)]
 mod destinations;
 mod domains;
