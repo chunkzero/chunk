@@ -29,6 +29,10 @@ public final class ComponentRegistry implements AutoCloseable {
     private boolean closed;
     private boolean changing;
 
+    /**
+     * Providers are generated from build-validated graphs (cycles, missing providers, limits), so
+     * only what several providers or a lifetime bug could still break is checked here.
+     */
     public ComponentRegistry(Collection<ComponentBinding<?>> declarations) {
         if (declarations.size() > 256) throw new IllegalArgumentException("Too many components");
         for (var binding : declarations) {
@@ -37,8 +41,16 @@ public final class ComponentRegistry implements AutoCloseable {
             if (bindings.putIfAbsent(binding.type(), binding) != null)
                 throw new IllegalArgumentException("Duplicate component: " + binding.type());
         }
-        var visited = new HashMap<Class<?>, Boolean>();
-        for (var type : bindings.keySet()) validate(type, visited);
+        for (var binding : bindings.values()) {
+            if (binding.scope() != Component.Scope.PROCESS) continue;
+            for (var dependency : binding.dependencies()) {
+                var target = bindings.get(dependency);
+                if (builtin(dependency)
+                        || target != null && target.scope() == Component.Scope.SESSION)
+                    throw new IllegalArgumentException(
+                            "Process component captures session: " + binding.type().getName());
+            }
+        }
     }
 
     public static ComponentRegistry load(ClassLoader loader) {
@@ -58,28 +70,6 @@ public final class ComponentRegistry implements AutoCloseable {
         var components = new SessionComponents(new Store(scope));
         sessions.add(components);
         return components;
-    }
-
-    private void validate(Class<?> type, Map<Class<?>, Boolean> visited) {
-        var previous = visited.putIfAbsent(type, false);
-        if (Boolean.TRUE.equals(previous)) return;
-        if (Boolean.FALSE.equals(previous))
-            throw new IllegalArgumentException("Component cycle: " + type.getName());
-        var binding = bindings.get(type);
-        if (binding == null)
-            throw new IllegalArgumentException("Missing component: " + type.getName());
-        if (binding.dependencies().size() > 32)
-            throw new IllegalArgumentException("Too many component dependencies");
-        for (var dependency : binding.dependencies()) {
-            var target = bindings.get(dependency);
-            if (binding.scope() == Component.Scope.PROCESS
-                    && (builtin(dependency)
-                            || target != null && target.scope() == Component.Scope.SESSION))
-                throw new IllegalArgumentException(
-                        "Process component captures session: " + type.getName());
-            if (!builtin(dependency)) validate(dependency, visited);
-        }
-        visited.put(type, true);
     }
 
     private Object resolve(Store session, Class<?> type, List<Entry> created) throws Exception {

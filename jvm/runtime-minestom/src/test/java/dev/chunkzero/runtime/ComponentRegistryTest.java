@@ -146,7 +146,7 @@ final class ComponentRegistryTest {
     }
 
     @Test
-    void graphValidationRejectsScopeCaptureCyclesAndMissingExactTypesBeforeAnyFactoryRuns() {
+    void registryRejectsDuplicatesScopeCaptureAndBuiltinIdentitiesBeforeAnyFactoryRuns() {
         var created = new AtomicInteger();
         var shared =
                 binding(
@@ -160,16 +160,6 @@ final class ComponentRegistryTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new ComponentRegistry(List.of(shared, shared)));
-        assertThrows(
-                IllegalArgumentException.class,
-                () ->
-                        new ComponentRegistry(
-                                List.of(
-                                        binding(
-                                                Root.class,
-                                                SESSION,
-                                                List.of(Scoped.class),
-                                                deps -> null))));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
@@ -200,21 +190,6 @@ final class ComponentRegistryTest {
                                                 Shared.class,
                                                 PROCESS,
                                                 List.of(BackendSession.class),
-                                                deps -> null))));
-        assertThrows(
-                IllegalArgumentException.class,
-                () ->
-                        new ComponentRegistry(
-                                List.of(
-                                        binding(
-                                                Shared.class,
-                                                SESSION,
-                                                List.of(Scoped.class),
-                                                deps -> null),
-                                        binding(
-                                                Scoped.class,
-                                                SESSION,
-                                                List.of(Shared.class),
                                                 deps -> null))));
         assertThrows(
                 IllegalArgumentException.class,
