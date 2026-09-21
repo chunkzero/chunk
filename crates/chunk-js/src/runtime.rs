@@ -12,14 +12,18 @@ mod snapshot_sources {
     include!(concat!(env!("OUT_DIR"), "/snapshot_sources.rs"));
 }
 
+pub(crate) enum Runner {
+    Transaction(Capabilities),
+    Action(crate::actions::ActionCapabilities),
+}
+
 pub(crate) struct Prepared {
     pub export: String,
     pub caller: Json,
     pub arguments: Json,
     pub timestamp: i64,
     pub seed: u64,
-    pub capabilities: Option<Capabilities>,
-    pub action: Option<crate::actions::ActionCapabilities>,
+    pub runner: Runner,
 }
 
 pub(crate) struct State {
@@ -41,7 +45,11 @@ impl State {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
-        let Prepared { export, caller, arguments, capabilities, action, timestamp, seed } = prepared;
+        let Prepared { export, caller, arguments, runner, timestamp, seed } = prepared;
+        let (capabilities, action) = match runner {
+            Runner::Transaction(capabilities) => (Some(capabilities), None),
+            Runner::Action(action) => (None, Some(action)),
+        };
         let is_action = action.is_some();
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(capabilities);

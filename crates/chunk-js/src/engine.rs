@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Cancellation, Error, Execution, Invocation, Limits, ReadHost, capabilities::Capabilities, deadline::Deadline,
-    isolate::Runtime, model::bounds, runtime::Prepared,
+    Cancellation, Error, Execution, Invocation, Limits, ReadHost,
+    capabilities::Capabilities,
+    deadline::Deadline,
+    isolate::Runtime,
+    model::bounds,
+    runtime::{Prepared, Runner},
 };
 
 /// An immutable deployment identity within one environment.
@@ -137,8 +141,7 @@ impl Engine {
             arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
-            action: None,
-            capabilities: Some(Capabilities {
+            runner: Runner::Transaction(Capabilities {
                 generation: runtime.calls() + 1,
                 host,
                 mode: invocation.mode,
@@ -198,8 +201,7 @@ impl Engine {
             arguments: invocation.arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
-            capabilities: None,
-            action: Some(crate::actions::ActionCapabilities::new(
+            runner: Runner::Action(crate::actions::ActionCapabilities::new(
                 invocation.id,
                 host,
                 cancellation.clone(),
