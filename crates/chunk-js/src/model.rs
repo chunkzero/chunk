@@ -3,11 +3,12 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -134,15 +135,33 @@ impl Default for Limits {
 }
 
 #[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(Arc<(AtomicBool, Notify)>);
 
 impl Cancellation {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.0.store(true, Ordering::Release);
+        self.0.1.notify_waiters();
     }
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.0.load(Ordering::Acquire)
+    }
+    /// Resolves once cancelled, without polling.
+    pub async fn cancelled(&self) {
+        let notified = self.0.1.notified();
+        tokio::pin!(notified);
+        // Register before checking the flag so a concurrent `cancel` cannot be missed.
+        notified.as_mut().enable();
+        if !self.is_cancelled() {
+            notified.await;
+        }
+    }
+    /// Resolves once cancelled or the deadline passes, whichever comes first.
+    pub async fn expired(&self, deadline: Instant) {
+        tokio::select! {
+            () = self.cancelled() => {}
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+        }
     }
 }
 

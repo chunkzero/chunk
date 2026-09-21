@@ -124,17 +124,9 @@ impl ScopedEffects {
         if self.cancellation.is_cancelled() || Instant::now() >= self.deadline {
             return rejected("Action scope expired");
         }
-        let expired = async {
-            loop {
-                if self.cancellation.is_cancelled() || Instant::now() >= self.deadline {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-        };
         let result = tokio::select! {
             biased;
-            ()=expired=>Err("Action scope expired after HTTP dispatch"),
+            ()=self.cancellation.expired(self.deadline)=>Err("Action scope expired after HTTP dispatch"),
             result=response(&binding.client,request)=>result,
         };
         match result {

@@ -139,17 +139,9 @@ async fn op_chunk_action(state: Rc<RefCell<OpState>>, #[string] request: String)
             }
         }
     };
-    let expired = async {
-        loop {
-            if cancellation.is_cancelled() || Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    };
     tokio::select! {
         biased;
-        () = expired => Err(JsErrorBox::generic("Action capability expired; accepted effects may have completed")),
+        () = cancellation.expired(deadline) => Err(JsErrorBox::generic("Action capability expired; accepted effects may have completed")),
         result = effect => {
             let result = result.map_err(JsErrorBox::generic)?;
             if result.len() > bounds::JSON_BYTES { return Err(JsErrorBox::range_error("Action effect result limit")); }
