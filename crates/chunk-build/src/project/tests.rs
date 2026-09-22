@@ -73,7 +73,7 @@ fn manifest_errors_identify_file_and_reject_unimplemented_fields() {
     for (filename, content, expected) in [
         ("chunk.toml", "[local", "TOML parse error at line 1"),
         ("chunk.toml", "apps = ['lobby']", "unknown field `apps`"),
-        ("apps/lobby/app.toml", "domain = 'games'", "existing static scope"),
+        ("apps/lobby/app.toml", "domain = 'games'", "unknown field `domain`"),
         ("apps/lobby/app.toml", "name = 'lobby'", "unknown field `name`"),
         ("apps/lobby/app.toml", "[runtime]\njava = 25", "unknown field `java`"),
     ] {
@@ -164,24 +164,19 @@ fn discovery_rejects_symlinked_app_inputs() {
 }
 
 #[test]
-fn app_domains_resolve_static_directories_with_implicit_root_and_ancestors() {
+fn scopes_come_from_authored_directories_with_implicit_root_and_ancestors() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
-    fs::create_dir_all(root.join("server/domains/games/duels")).unwrap();
     app(root, "lobby", "");
-    app(root, "duels", "domain = 'games/duels'");
-    let apps = discover_apps(root).unwrap();
-    assert_eq!(apps[0].domain, "games/duels");
-    assert_eq!(apps[1].domain, "");
-    let scopes = discover(root).unwrap().scopes;
-    assert_eq!(scopes["games/duels"].parent.as_deref(), Some("games"));
-    for domain in ["missing", "games/../games", "/games", "games/", "Games"] {
-        fs::write(root.join("apps/duels/app.toml"), format!("domain = '{domain}'")).unwrap();
-        assert!(discover_apps(root).unwrap_err().to_string().contains("existing static scope"));
-    }
-    fs::write(root.join("apps/duels/app.toml"), "").unwrap();
-    fs::create_dir_all(root.join("server/domains/[game]")).unwrap();
-    assert!(discover_apps(root).unwrap_err().to_string().contains("static domain path"));
+    fs::create_dir_all(root.join("apps/games/duels")).unwrap();
+    fs::write(root.join("apps/games/duels/scope.ts"), "export default defineScope({});").unwrap();
+    let inventory = discover(root).unwrap();
+    assert_eq!(inventory.apps[0].domain, "");
+    assert_eq!(inventory.scopes[""].parent, None);
+    assert_eq!(inventory.scopes["games/duels"].parent.as_deref(), Some("games"));
+    fs::create_dir_all(root.join("server/domains")).unwrap();
+    let error = discover(root).err().unwrap().to_string();
+    assert!(error.contains("server/domains is no longer supported"), "{error}");
 }
 
 #[test]

@@ -120,10 +120,11 @@ local state under `PROJECT/.chunk/local`. The project's `[local]` settings and r
 placement. Root framework Gradle workflows and the standalone app build are separate. The consumer acceptance check
 exercises both Java and Kotlin projects from source copies without starting gameplay.
 
-Command domains, `server/domains/`, `createHook`, cross-domain event semantics, typed proxy effects and durable job APIs
-remain proposed. The existing session hooks and scoped Minestom events remain the implemented gameplay APIs. Distributed
-proxy-directory replication and cross-proxy transfers are also deferred; Redis/Upstash has not been selected as an
-ownership authority.
+Scopes, hooks and commands are declared only in `apps/**/scope.ts` and `app.ts`; see the
+[SDK documentation](../crates/chunk-build/sdk/README.md). Cross-domain event semantics, typed proxy effects and durable
+job APIs remain proposed. The existing session hooks and scoped Minestom events remain the implemented gameplay APIs.
+Distributed proxy-directory replication and cross-proxy transfers are also deferred; Redis/Upstash has not been
+selected as an ownership authority.
 
 ## Hosted and self-hosted
 

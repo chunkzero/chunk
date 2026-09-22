@@ -222,8 +222,7 @@ export default defineScope({
 
 `defineApp` accepts the same `hooks` and `commands` maps for app-local behavior. Map keys identify declarations; values
 can be inline descriptors or imported helpers. Only bound descriptors enter the app/scope contract. Root ping and
-routing responders belong in `apps/scope.ts`. Legacy `server/domains/**/hooks.ts` and `.mts` named exports remain
-supported for existing projects.
+routing responders belong in `apps/scope.ts`.
 
 `player.login` and `player.beforeMove` return `AdmissionResult`. Multiple admission hooks for the same event and scope
 need distinct explicit integer `order` values. `server.ping` returns `ServerStatus`; `player.route` returns
@@ -258,16 +257,16 @@ which is separate from the application credential delivered to JVM processes. Mi
 fail closed. Fixed `shared/proxy/*` handlers remain supported for releases without a domain manifest. Commands expose
 the typed player effects and captured session calls described below.
 
-Helper exports remain ordinary code. Hook descriptors require named exports in hook modules; default exports and
-descriptors exported elsewhere are errors. Queries and mutations in these modules retain their existing generated client
-paths. Hook names identify handlers within a deployment, so renaming an export changes its identity.
+Helper exports remain ordinary code. A hook or command descriptor exported from any module must also be bound in a
+`defineScope` or `defineApp` map; unbound and default-exported descriptors are errors. Queries and mutations in those
+modules retain their existing generated client paths. Map keys identify handlers within a deployment, so renaming a key
+changes its identity.
 
 ## Scope commands
 
 Bind `command` descriptors in the `commands` map of `defineScope` or `defineApp` to contribute backend command roots.
-Legacy named exports in `server/domains/**/commands.ts` or `commands.mts` remain supported. Ancestors apply to
-descendant domains. A visible root or alias has one owner; siblings may independently use the same names. Runtime
-registration also checks these names against the connected app's JVM commands.
+Ancestors apply to descendant domains. A visible root or alias has one owner; siblings may independently use the same
+names. Runtime registration also checks these names against the connected app's JVM commands.
 
 ```ts
 import { command, commandArg, commandRoute } from "#chunk";

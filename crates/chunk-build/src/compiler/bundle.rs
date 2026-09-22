@@ -187,11 +187,10 @@ fn entry_source(
         quote(sdk.join("apps.ts").to_string_lossy())
     )
     .map_err(error)?;
-    let mut domains = super::domains::DomainEntries::new(root, inventory);
+    let mut domains = super::domains::DomainEntries::new(inventory);
     let mut bindings = 0;
     for (index, entry) in entries.iter().enumerate() {
         writeln!(source, "import * as m{index} from {};", quote(entry.path.to_string_lossy())).map_err(error)?;
-        domains.add_module(entry)?;
         descriptors.add_module(entry)?;
         if let Some(module) = entry.authoring {
             let value = format!("m{index}.default");
@@ -221,7 +220,7 @@ fn entry_source(
             }
             let value = format!("m{index}[{}]", quote(&exported));
             let binding = format!("f{bindings}");
-            domains.add_export(entry, &exported, &value, &binding, &mut source)?;
+            domains.add_export(entry, &exported, &value, &mut source)?;
             if exported == "default" {
                 descriptors.add_default(entry, &value, &mut source)?;
                 continue;

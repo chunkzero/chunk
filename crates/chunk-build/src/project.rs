@@ -10,7 +10,6 @@ use chunk_contract::DomainScope;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub(crate) mod authoring;
-pub(crate) mod domains;
 
 /// Apps, domain scopes and authored modules found in one pass over the project tree.
 #[derive(Default)]
@@ -78,8 +77,6 @@ struct ProjectManifest {
 #[serde(deny_unknown_fields)]
 struct AppManifest {
     #[serde(default)]
-    domain: String,
-    #[serde(default)]
     runtime: RuntimeRequirements,
     #[serde(default)]
     sessions: BTreeMap<String, RuntimeRequirements>,
@@ -133,10 +130,16 @@ pub(crate) fn load(root: &Path) -> io::Result<Inventory> {
 }
 
 /// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children, plus the
-/// static and authored domain scopes and authored modules. Unmanifested directories are ignored.
+/// scopes and modules authored under `apps/`. Unmanifested directories are ignored.
 pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
+    let domains = root.join("server/domains");
+    if fs::symlink_metadata(&domains).is_ok() {
+        return Err(invalid(
+            &domains,
+            "server/domains is no longer supported; declare scopes in apps/**/scope.ts and bind hooks and commands in defineScope or defineApp",
+        ));
+    }
     let mut inventory = authoring::discover(root)?;
-    inventory.scopes = domains::discover(root, std::mem::take(&mut inventory.scopes))?;
     legacy_apps(root, &mut inventory)?;
     Ok(inventory)
 }
@@ -179,9 +182,6 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
         let manifest: AppManifest = read_manifest(&manifest_path)?;
-        if !inventory.scopes.contains_key(&manifest.domain) {
-            return Err(invalid(&manifest_path, "domain must name an existing static scope under server/domains"));
-        }
         if manifest.sessions.len() > 128 || manifest.sessions.keys().any(|id| !valid_id(id)) {
             return Err(invalid(&manifest_path, "sessions requires at most 128 valid session type IDs"));
         }
@@ -195,7 +195,7 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
             directory: format!("apps/{id}"),
             gradle_project: format!(":apps:{id}"),
             id,
-            domain: manifest.domain,
+            domain: String::new(),
             runtime: manifest.runtime,
             sessions: manifest.sessions,
         });
