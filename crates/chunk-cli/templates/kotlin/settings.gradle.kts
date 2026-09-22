@@ -24,6 +24,7 @@ dependencyResolutionManagement {
             url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("https://maven.chunkzero.com").get())
             isAllowInsecureProtocol = url.scheme == "http"
         }
+        maven("https://maven.chunkzero.com/snapshots")
         mavenCentral()
     }
 }

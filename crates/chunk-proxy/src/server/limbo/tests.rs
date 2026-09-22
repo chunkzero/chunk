@@ -1,12 +1,12 @@
 use chunk_protocol::{
     Decode, VarInt,
-    versions::v26_1::{AcknowledgeConfiguration, KnownPacks},
+    versions::v26_2::{AcknowledgeConfiguration, KnownPacks},
 };
 use std::future::pending;
 
 use chunk_protocol::{
     BoundedArray, McString, Uuid,
-    versions::v26_1::{
+    versions::v26_2::{
         ChunkBatchFinished, ChunkBatchStart, ConfigurationClientInformationParticleStatus, ConfigurationKeepAlive,
         ConfigurationKeepAliveResponse, FeatureFlags, FinishConfiguration, GameEvent, LIMBO_REGISTRIES, LIMBO_TAGS,
         LoginSuccess, MovePosition, PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition, TickEnd,
@@ -25,7 +25,7 @@ fn cache() -> &'static Cache {
 }
 
 fn packets() -> &'static Packets {
-    cache().get(775).unwrap()
+    cache().get(776).unwrap()
 }
 
 async fn wait_for_destination<T>(
@@ -47,9 +47,10 @@ fn connection() -> (Transport<DuplexStream>, Authenticated<DuplexStream>) {
     (
         client,
         Authenticated {
-            protocol_version: 775,
+            protocol_version: 776,
             transport: server,
             profile: LoginSuccess {
+                session_id: Uuid([2; 16]),
                 uuid: Uuid([1; 16]),
                 username: McString::new("Alex").unwrap(),
                 properties: BoundedArray::new(vec![]).unwrap(),
@@ -283,7 +284,7 @@ fn limbo_registries_bind_dimension_and_client_component_dependencies() {
     let registry_count = VarInt::decode(&mut frame).unwrap().0;
     let snapshot: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../chunk-protocol/data/26.1/loginPacket.json"
+        "/../chunk-protocol/data/26.2/loginPacket.json"
     )))
     .unwrap();
     let mut tags = std::collections::BTreeMap::new();

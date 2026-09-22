@@ -1,7 +1,7 @@
 use super::*;
 use chunk_protocol::{
     BoundedArray, Uuid,
-    versions::v26_1::{ConfigurationClientInformationParticleStatus, FinishConfiguration, LoginSuccessPropertiesEntry},
+    versions::v26_2::{ConfigurationClientInformationParticleStatus, FinishConfiguration, LoginSuccessPropertiesEntry},
 };
 
 #[tokio::test]
@@ -13,9 +13,10 @@ async fn native_login_presents_capability_and_preserves_profile_and_settings() {
         capability: vec![7; 32],
     };
     let authenticated = Authenticated {
-        protocol_version: 775,
+        protocol_version: 776,
         transport: Transport::new(tokio::io::empty()),
         profile: LoginSuccess {
+            session_id: Uuid([2; 16]),
             uuid: Uuid([1; 16]),
             username: McString::new("Alex").unwrap(),
             properties: BoundedArray::new(vec![LoginSuccessPropertiesEntry {
@@ -38,12 +39,13 @@ async fn native_login_presents_capability_and_preserves_profile_and_settings() {
         particle_status: ConfigurationClientInformationParticleStatus::All,
     };
     let expected = settings.clone();
-    let profile = authenticated.profile.clone();
+    let mut profile = authenticated.profile.clone();
+    profile.session_id = Uuid([3; 16]);
     let task = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut backend = Transport::new(socket);
         let handshake = decode_packet::<Handshake>(&backend.read_frame(4096).await.unwrap()).unwrap();
-        assert_eq!(handshake.protocol_version, VarInt(775));
+        assert_eq!(handshake.protocol_version, VarInt(776));
         assert_eq!(handshake.next_state, VarInt(2));
         let start = decode_packet::<LoginStart>(&backend.read_frame(4096).await.unwrap()).unwrap();
         assert_eq!(start.player_uuid, profile.uuid);

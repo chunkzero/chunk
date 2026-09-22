@@ -20,7 +20,8 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import io.grpc.stub.MetadataUtils
 import net.kyori.adventure.text.Component
-import net.minestom.server.MinecraftServer
+import net.minestom.server.MinecraftConstants
+import net.minestom.server.ServerProcess
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.NetworkBuffer
 import net.minestom.server.network.packet.PacketVanilla
@@ -41,6 +42,7 @@ import net.minestom.server.network.packet.server.login.LoginPluginRequestPacket
 import net.minestom.server.network.packet.server.login.LoginSuccessPacket
 import net.minestom.server.network.packet.server.play.JoinGamePacket
 import net.minestom.server.network.player.ClientSettings
+import net.minestom.server.registry.Registries
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -54,17 +56,17 @@ import java.util.function.Supplier
 class GameplayServiceTest {
     @Test
     fun `authenticated configuration and delivery reject incompatible or replayed input`() {
-        val minecraft = MinecraftServer.init()
-        MinecraftServer.setCompressionThreshold(0)
+        val minecraft = ServerProcess.create()
+        minecraft.setCompressionThreshold(0)
         val deployment =
             DeploymentRef
                 .newBuilder()
                 .setEnvironment("local")
                 .setDeployment("build-a")
                 .build()
-        MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
+        minecraft.connectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
-        val manager = SessionManager(ticks, mapOf("bridge" to Supplier { FlatSession() }))
+        val manager = SessionManager(minecraft, ticks, mapOf("bridge" to Supplier { FlatSession() }))
         manager.create(
             chunk.v1.Supervision.SessionCommand
                 .newBuilder()
@@ -82,16 +84,16 @@ class GameplayServiceTest {
             java.util.concurrent.atomic
                 .AtomicLong(System.nanoTime())
         val service = GameplayService(deployment, 7, manager, clock::get, "bridge")
-        MinecraftServer
-            .getSchedulerManager()
+        minecraft
+            .schedulerManager()
             .buildTask {
                 ticks.flush()
             }.repeat(
                 net.minestom.server.timer.TaskSchedule
                     .tick(1),
             ).schedule()
-        minecraft.start("127.0.0.1", 0)
-        service.endpoint = "127.0.0.1:${MinecraftServer.process().server().port}"
+        minecraft.start(InetSocketAddress("127.0.0.1", 0))
+        service.endpoint = "127.0.0.1:${minecraft.server().port}"
         val server =
             NettyServerBuilder
                 .forAddress(InetSocketAddress("127.0.0.1", 0))
@@ -117,7 +119,7 @@ class GameplayServiceTest {
             val interceptor = MetadataUtils.newAttachHeadersInterceptor(headers)
             val stub = unauthenticated.withInterceptors(interceptor)
             val configuration = stub.configuration(request)
-            assertEquals(775, configuration.protocol)
+            assertEquals(MinecraftConstants.PROTOCOL_VERSION, configuration.protocol)
             assertEquals(7, configuration.processGeneration)
             assertEquals(deployment, configuration.deployment)
             assertEquals(
@@ -154,11 +156,11 @@ class GameplayServiceTest {
                                     .setValue("value")
                                     .setSignature("signature"),
                             ),
-                    ).setProtocol(775)
+                    ).setProtocol(MinecraftConstants.PROTOCOL_VERSION)
                     .build()
             for (invalid in listOf(
                 delivery.toBuilder().setProcessGeneration(6).build(),
-                delivery.toBuilder().setProtocol(774).build(),
+                delivery.toBuilder().setProtocol(MinecraftConstants.PROTOCOL_VERSION - 1).build(),
                 delivery.toBuilder().setDeployment(deployment.toBuilder().setDeployment("other")).build(),
                 delivery.toBuilder().setProxyId("\u00a0").build(),
             )) {
@@ -189,12 +191,17 @@ class GameplayServiceTest {
                 payload: PlayerSetup,
                 name: String = "player",
             ): Socket {
-                val socket = Socket("127.0.0.1", MinecraftServer.process().server().port)
+                val socket = Socket("127.0.0.1", minecraft.server().port)
                 socket.soTimeout = 5000
                 socket.send(
                     0,
                     ClientHandshakePacket.SERIALIZER,
-                    ClientHandshakePacket(775, "localhost", 25565, ClientHandshakePacket.Intent.LOGIN),
+                    ClientHandshakePacket(
+                        MinecraftConstants.PROTOCOL_VERSION,
+                        "localhost",
+                        25565,
+                        ClientHandshakePacket.Intent.LOGIN,
+                    ),
                 )
                 socket.send(
                     0,
@@ -217,7 +224,7 @@ class GameplayServiceTest {
                 attempt(invalid).use { assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket) }
             }
             attempt(setup, "other").use { assertTrue(it.packet(ConnectionState.LOGIN) is LoginDisconnectPacket) }
-            assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+            assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
             attempt(setup).use { socket ->
                 val success = socket.packet(ConnectionState.LOGIN) as LoginSuccessPacket
                 assertEquals(delivery.identity.uuid, success.gameProfile().uuid().toString())
@@ -259,7 +266,7 @@ class GameplayServiceTest {
                 assertTrue(socket.packet(ConnectionState.PLAY) is JoinGamePacket)
                 val player =
                     requireNotNull(
-                        MinecraftServer.getConnectionManager().getOnlinePlayerByUuid(
+                        minecraft.connectionManager().getOnlinePlayerByUuid(
                             UUID.fromString(delivery.identity.uuid),
                         ),
                     )
@@ -304,7 +311,7 @@ class GameplayServiceTest {
             service.close()
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
-            MinecraftServer.process().stop()
+            minecraft.stop()
         }
     }
 }
@@ -341,6 +348,6 @@ internal fun Socket.packet(state: ConnectionState): ServerPacket {
     require(length in 1..2_097_151)
     val bytes = input.readNBytes(length)
     check(bytes.size == length)
-    val buffer = NetworkBuffer.wrap(bytes, 0, bytes.size, MinecraftServer.process())
+    val buffer = NetworkBuffer.wrap(bytes, 0, bytes.size, Registries.vanilla())
     return PacketVanilla.SERVER_PACKET_PARSER.parse(state, buffer.read(NetworkBuffer.VAR_INT), buffer)
 }

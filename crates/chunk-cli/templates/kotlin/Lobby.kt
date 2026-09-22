@@ -11,7 +11,7 @@ import dev.chunkzero.runtime.SessionScope
 import dev.chunkzero.runtime.SessionType
 import dev.chunkzero.runtime.coroutines
 import net.kyori.adventure.text.Component
-import net.minestom.server.MinecraftServer
+import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.instance.block.Block
 
@@ -37,7 +37,7 @@ private class GreetingSession : CoroutineSession() {
 
 fun main() {
     ChunkProcess.connect().use { chunk ->
-        ChunkMinestom.attach(chunk, MinecraftServer.init()).use { minestom ->
+        ChunkMinestom.attach(chunk, ServerProcess.create()).use { minestom ->
             minestom.start()
             chunk.ready()
             chunk.awaitShutdown()

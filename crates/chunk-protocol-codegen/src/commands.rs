@@ -57,7 +57,7 @@ pub(super) fn generate(protocol: &Value) -> Result<TokenStream> {
         parsers.push(quote! { (#id, #name, ::chunk_protocol::commands::PropertyKind::#kind) });
     }
     Ok(quote! {
-        /// IDs and parser layouts for the bounded 26.1 command codecs.
+        /// IDs and parser layouts for the bounded 26.2 command codecs.
         pub mod commands {
             #constants
             #[doc(hidden)]
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn packet_ids_follow_the_dataset_but_parser_shape_changes_fail_closed() {
         let mut data: Value =
-            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.2/protocol.json")).unwrap();
         let original = generate(&data).unwrap().to_string();
         let mappings =
             data["play"]["toClient"]["types"]["packet"][1][0]["type"][1]["mappings"].as_object_mut().unwrap();

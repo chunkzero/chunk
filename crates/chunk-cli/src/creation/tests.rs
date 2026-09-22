@@ -37,6 +37,7 @@ fn cli_creates_both_languages_without_adjacent_sdk_files() {
         assert_eq!(metadata.apps[0].id, "lobby");
         let settings = fs::read_to_string(options.directory.join("settings.gradle.kts")).unwrap();
         assert!(settings.contains("https://maven.chunkzero.com"));
+        assert!(settings.contains("https://maven.chunkzero.com/snapshots"));
         assert!(settings.contains(&format!("version {:?}", env!("CARGO_PKG_VERSION"))));
         assert!(settings.contains(&format!("version {:?}", versions["foojay"].as_str().unwrap())));
         assert_eq!(

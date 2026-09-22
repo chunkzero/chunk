@@ -5,7 +5,7 @@ use chunk_proto::v1::{CommandEffect, MovePlayerRequest, SessionDemand};
 use chunk_protocol::{
     commands::{ActionBar, PlainText, SubtitleText, SystemMessage, TitleText},
     encode_packet,
-    versions::v26_1::TitleTimes,
+    versions::v26_2::TitleTimes,
 };
 use serde_json::{Value, json};
 use std::io;

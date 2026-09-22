@@ -20,7 +20,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
 import net.kyori.adventure.text.Component;
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.MinecraftConstants;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.event.Event;
 import net.minestom.server.event.EventNode;
@@ -82,7 +82,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                         .setDeployment(deployment)
                         .setProcessGeneration(generation)
                         .setRuntimeId(runtimeId)
-                        .setProtocol(MinecraftServer.PROTOCOL_VERSION)
+                        .setProtocol(MinecraftConstants.PROTOCOL_VERSION)
                         .build();
         manager.setWithdraw(
                 id -> {
@@ -102,7 +102,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                 });
         events.addListener(AsyncPlayerPreLoginEvent.class, this::preLogin);
         events.addListener(AsyncPlayerConfigurationEvent.class, this::configure);
-        MinecraftServer.getGlobalEventHandler().addChild(events);
+        manager.getProcess().eventHandler().addChild(events);
     }
 
     public String getEndpoint() {
@@ -290,7 +290,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
     }
 
     public void close() {
-        MinecraftServer.getGlobalEventHandler().removeChild(events);
+        manager.getProcess().eventHandler().removeChild(events);
         synchronized (preparations) {
             preparations.values().forEach(PreparedDelivery::close);
         }
@@ -304,7 +304,7 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                 || !delivery.getRuntimeId().equals(runtimeId)) {
             throw new IllegalArgumentException("Stale process or deployment");
         }
-        if (delivery.getProtocol() != MinecraftServer.PROTOCOL_VERSION) {
+        if (delivery.getProtocol() != MinecraftConstants.PROTOCOL_VERSION) {
             throw new IllegalArgumentException("Incompatible destination protocol");
         }
         if (isBlank(delivery.getSession().getId())

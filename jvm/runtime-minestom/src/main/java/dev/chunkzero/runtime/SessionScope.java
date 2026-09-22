@@ -6,10 +6,9 @@ import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent;
 import dev.chunkzero.runtime.minestom.event.SessionEvent;
 import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.Event;
-import net.minestom.server.event.EventDispatcher;
 import net.minestom.server.event.EventFilter;
 import net.minestom.server.event.EventNode;
 import net.minestom.server.event.trait.PlayerEvent;
@@ -36,6 +35,7 @@ import java.util.regex.Pattern;
 public final class SessionScope {
     private static final Pattern ACTION = Pattern.compile("[A-Za-z0-9_-]{1,32}");
 
+    private final ServerProcess process;
     private final String id;
     private final long generation;
     private final TickExecutor ticks;
@@ -51,21 +51,31 @@ public final class SessionScope {
     private boolean disposed;
 
     SessionScope(
+            ServerProcess process,
             String id,
             long generation,
             TickExecutor ticks,
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend) {
-        this(id, generation, ticks, requestFinish, backend, new ComponentRegistry(List.of()));
+        this(
+                process,
+                id,
+                generation,
+                ticks,
+                requestFinish,
+                backend,
+                new ComponentRegistry(List.of()));
     }
 
     SessionScope(
+            ServerProcess process,
             String id,
             long generation,
             TickExecutor ticks,
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend,
             ComponentRegistry components) {
+        this.process = process;
         this.id = id;
         this.generation = generation;
         this.ticks = ticks;
@@ -81,7 +91,7 @@ public final class SessionScope {
                                         ? lifecycle.getSession() == this
                                         : event instanceof PlayerEvent player
                                                 && players.contains(player.getPlayer()));
-        MinecraftServer.getGlobalEventHandler().addChild(events);
+        process.eventHandler().addChild(events);
         if (backend != null) resources.add(backend);
     }
 
@@ -95,6 +105,11 @@ public final class SessionScope {
 
     public @Nullable BackendSession getBackend() {
         return backend;
+    }
+
+    /** Minestom process that owns this session's instances, players, events, and tasks. */
+    public ServerProcess getProcess() {
+        return process;
     }
 
     /** Receives this scope's lifecycle notifications and its admitted players' Minestom events. */
@@ -117,7 +132,7 @@ public final class SessionScope {
     public InstanceContainer createInstance() {
         ticks.checkThread();
         checkActive();
-        var instance = MinecraftServer.getInstanceManager().createInstanceContainer();
+        var instance = process.instanceManager().createInstanceContainer();
         ownedInstances.add(instance);
         return instance;
     }
@@ -202,7 +217,7 @@ public final class SessionScope {
         if (interval.isNegative() || interval.isZero())
             throw new IllegalArgumentException("Interval must be positive");
         var task =
-                MinecraftServer.getSchedulerManager()
+                process.schedulerManager()
                         .buildTask(
                                 () -> {
                                     if (!disposed) action.run();
@@ -221,13 +236,13 @@ public final class SessionScope {
             try {
                 closeResources(resources);
             } finally {
-                ownedInstances.forEach(MinecraftServer.getInstanceManager()::unregisterInstance);
+                ownedInstances.forEach(process.instanceManager()::unregisterInstance);
             }
         } finally {
             try {
-                EventDispatcher.call(new SessionDestroyEvent(this));
+                process.eventHandler().call(new SessionDestroyEvent(this));
             } finally {
-                MinecraftServer.getGlobalEventHandler().removeChild(events);
+                process.eventHandler().removeChild(events);
             }
         }
     }

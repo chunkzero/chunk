@@ -24,7 +24,7 @@ import io.grpc.stub.ServerCallStreamObserver
 import io.grpc.stub.StreamObserver
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import net.minestom.server.MinecraftServer
+import net.minestom.server.ServerProcess
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -43,7 +43,7 @@ class SessionCoroutinesTest {
 
     @Test
     fun `tick resumptions and finishing await the result before disposing watches`() {
-        MinecraftServer.init()
+        val minestom = ServerProcess.create()
         val ticks = TickExecutor()
         val mutationStarted = CompletableFuture<Unit>()
         val result = CompletableFuture<Unit>()
@@ -99,6 +99,7 @@ class SessionCoroutinesTest {
         var committed = false
         val manager =
             SessionManager(
+                minestom,
                 ticks,
                 mapOf(
                     "game" to
@@ -200,7 +201,7 @@ class SessionCoroutinesTest {
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS)
             scheduler.shutdownNow()
             scheduler.awaitTermination(2, TimeUnit.SECONDS)
-            MinecraftServer.process().stop()
+            minestom.stop()
         }
     }
 }

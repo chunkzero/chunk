@@ -73,8 +73,8 @@ fn expand(invocation: &Invocation) -> Result<Tokens> {
     let version: Value =
         serde_json::from_slice(inputs.get("version.json").ok_or("version.json must be pinned in source.json")?)?;
     let version_name = string(&version["minecraftVersion"])?;
-    if version_name != "26.1" || string(&version["releaseType"])? != "release" {
-        return Err("this generator's selected packets are validated for release 26.1".into());
+    if version_name != "26.2" || string(&version["releaseType"])? != "release" {
+        return Err("this generator's selected packets are validated for release 26.2".into());
     }
     let protocol_id = i32::try_from(version["version"].as_i64().ok_or("missing protocol version")?)?;
     let packets = packets::generate(&protocol)?;
@@ -120,9 +120,9 @@ mod tests {
 
     #[test]
     fn invocation_requires_a_module_identifier_and_literal_path() {
-        assert!(syn::parse_str::<Invocation>("v26_1, \"data/26.1\"").is_ok());
-        assert!(syn::parse_str::<Invocation>("26_1, \"data/26.1\"").is_err());
-        assert!(syn::parse_str::<Invocation>("v26_1, path").is_err());
-        assert!(syn::parse_str::<Invocation>("v26_1, \"data/26.1\", extra").is_err());
+        assert!(syn::parse_str::<Invocation>("v26_2, \"data/26.2\"").is_ok());
+        assert!(syn::parse_str::<Invocation>("26_2, \"data/26.2\"").is_err());
+        assert!(syn::parse_str::<Invocation>("v26_2, path").is_err());
+        assert!(syn::parse_str::<Invocation>("v26_2, \"data/26.2\", extra").is_err());
     }
 }

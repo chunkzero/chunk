@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
-import net.minestom.server.MinecraftServer
+import net.minestom.server.ServerProcess
 import net.minestom.server.command.builder.Command
 import net.minestom.server.entity.Player
 import net.minestom.server.instance.LightingChunk
@@ -21,8 +21,8 @@ import net.minestom.server.tag.Tag
 object ExampleSessions {
     internal val coinAction: Tag<Runnable> = Tag.Transient("chunk-example-coin")
 
-    init {
-        MinecraftServer.getCommandManager().register(
+    fun register(process: ServerProcess) {
+        process.commandManager().register(
             Command("coin").apply {
                 setDefaultExecutor { sender, _ -> (sender as? Player)?.getTag(coinAction)?.run() }
             },

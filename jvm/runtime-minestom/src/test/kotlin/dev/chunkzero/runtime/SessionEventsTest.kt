@@ -7,10 +7,9 @@ import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent
 import dev.chunkzero.runtime.minestom.event.SessionEvent
 import dev.chunkzero.runtime.minestom.event.SessionJoinEvent
 import dev.chunkzero.runtime.minestom.event.SessionLeaveEvent
-import net.minestom.server.MinecraftServer
+import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.event.Event
-import net.minestom.server.event.EventDispatcher
 import net.minestom.server.event.EventNode
 import net.minestom.server.event.player.PlayerTickEvent
 import net.minestom.server.network.packet.server.SendablePacket
@@ -34,12 +33,13 @@ class SessionEventsTest {
     private val ticks = TickExecutor()
     private val global = mutableListOf<SessionEvent>()
     private val unexpected = mutableListOf<Throwable>()
+    private lateinit var process: ServerProcess
 
     @BeforeEach
     fun start() {
-        MinecraftServer.init()
-        MinecraftServer.getExceptionManager().setExceptionHandler { unexpected.add(it) }
-        listen(MinecraftServer.getGlobalEventHandler(), global)
+        process = ServerProcess.create()
+        process.exceptionManager().setExceptionHandler { unexpected.add(it) }
+        listen(process.eventHandler(), global)
     }
 
     @AfterEach
@@ -47,7 +47,7 @@ class SessionEventsTest {
         try {
             assertTrue(unexpected.isEmpty(), "Unexpected listener failures: $unexpected")
         } finally {
-            MinecraftServer.process().stop()
+            process.stop()
         }
     }
 
@@ -121,7 +121,7 @@ class SessionEventsTest {
 
         var playerTicks = 0
         scope.events.addListener(PlayerTickEvent::class.java) { playerTicks++ }
-        EventDispatcher.call(PlayerTickEvent(player))
+        process.eventHandler().call(PlayerTickEvent(player))
         assertEquals(1, playerTicks)
 
         val leave = session.leave(player)
@@ -132,7 +132,7 @@ class SessionEventsTest {
         await(leave)
         assertSame(player, (local.last() as SessionLeaveEvent).player)
         assertFalse(scope.players.contains(player))
-        EventDispatcher.call(PlayerTickEvent(player))
+        process.eventHandler().call(PlayerTickEvent(player))
         assertEquals(1, playerTicks)
         await(session.leave(player))
 
@@ -152,7 +152,7 @@ class SessionEventsTest {
         )
         assertEquals(local, global.filter { it.session === scope })
         assertEquals(1, other.size)
-        assertFalse(MinecraftServer.getGlobalEventHandler().children.contains(scope.events))
+        assertFalse(process.eventHandler().children.contains(scope.events))
         await(manager.finish(command("first")))
         assertEquals(4, local.size)
         await(otherManager.finish(command("second")))
@@ -201,7 +201,7 @@ class SessionEventsTest {
     fun `listener failures do not fail admission or prevent cleanup and hook failures remain visible`() {
         val listenerFailure = IllegalArgumentException("Listener failed")
         val reported = mutableListOf<Throwable>()
-        MinecraftServer.getExceptionManager().setExceptionHandler { reported.add(it) }
+        process.exceptionManager().setExceptionHandler { reported.add(it) }
         val hookFailure = IllegalStateException("Leave failed")
         val manager =
             manager(
@@ -228,8 +228,8 @@ class SessionEventsTest {
         assertEquals(3, reported.size)
         assertTrue(reported.all { it === listenerFailure })
         assertTrue(global.last() is SessionDestroyEvent)
-        assertFalse(MinecraftServer.getGlobalEventHandler().children.contains(session.scope.events))
-        assertTrue(MinecraftServer.getInstanceManager().instances.isEmpty())
+        assertFalse(process.eventHandler().children.contains(session.scope.events))
+        assertTrue(process.instanceManager().instances.isEmpty())
     }
 
     private fun listen(
@@ -246,7 +246,7 @@ class SessionEventsTest {
         node.addListener(SessionDestroyEvent::class.java, ::record)
     }
 
-    private fun manager(session: Session) = SessionManager(ticks, mapOf("game" to Supplier { session }))
+    private fun manager(session: Session) = SessionManager(process, ticks, mapOf("game" to Supplier { session }))
 
     private fun command(id: String) =
         SessionCommand
@@ -260,7 +260,7 @@ class SessionEventsTest {
 
     private fun player() =
         Player(
-            object : PlayerConnection() {
+            object : PlayerConnection(process) {
                 override fun sendPacket(packet: SendablePacket) {}
 
                 override fun getRemoteAddress() = InetSocketAddress("127.0.0.1", 0)

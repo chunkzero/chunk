@@ -11,7 +11,7 @@ import dev.chunkzero.runtime.SessionScope;
 import dev.chunkzero.runtime.SessionType;
 
 import net.kyori.adventure.text.Component;
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
 import net.minestom.server.instance.block.Block;
 
@@ -23,7 +23,7 @@ import java.util.concurrent.CompletionStage;
 public final class Lobby implements SessionProvider {
     public static void main(String[] args) throws Exception {
         try (var chunk = ChunkProcess.connect();
-                var minestom = ChunkMinestom.attach(chunk, MinecraftServer.init())) {
+                var minestom = ChunkMinestom.attach(chunk, ServerProcess.create())) {
             minestom.start();
             chunk.ready();
             chunk.awaitShutdown();

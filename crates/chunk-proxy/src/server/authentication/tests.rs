@@ -1,5 +1,5 @@
 use super::*;
-use chunk_protocol::versions::v26_1::ConfigurationKeepAliveResponse;
+use chunk_protocol::versions::v26_2::ConfigurationKeepAliveResponse;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -69,7 +69,7 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
             let (client, server) = tokio::io::duplex(8192);
             let mut client = Transport::new(client);
             let server = async {
-                let mut accepted = auth.login(Transport::new(server), 775, compression).await.unwrap();
+                let mut accepted = auth.login(Transport::new(server), 776, compression).await.unwrap();
                 assert_eq!(
                     accepted.profile.uuid,
                     Uuid([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
@@ -118,7 +118,7 @@ async fn rejected_session_receives_an_encrypted_disconnect() {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
         let server = async {
-            assert!(auth.login(Transport::new(server), 775, Some(256)).await.is_err());
+            assert!(auth.login(Transport::new(server), 776, Some(256)).await.is_err());
         };
         let client = async {
             let request = begin_login(&mut client).await;
@@ -205,7 +205,7 @@ fn session_identity_is_validated_and_properties_preserved() {
 #[tokio::test]
 async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
     use super::super::{Responses, connection};
-    use chunk_protocol::versions::v26_1::Handshake;
+    use chunk_protocol::versions::v26_2::Handshake;
 
     let (auth, request_task) = mock_session(http_response("200 OK", &profile_json())).await;
     let responses = Responses::new(&crate::Config::default()).unwrap();
@@ -218,7 +218,7 @@ async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
     let client = async {
         client
             .write_packet(&Handshake {
-                protocol_version: VarInt(775),
+                protocol_version: VarInt(776),
                 server_address: McString::new("localhost").unwrap(),
                 server_port: 25565,
                 next_state: VarInt(2),
@@ -241,7 +241,7 @@ async fn total_login_deadline_includes_acknowledgment_and_closes_the_socket() {
 #[tokio::test]
 async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() {
     use crate::{Config, Proxy};
-    use chunk_protocol::versions::v26_1::{ConfigurationKeepAlive, Handshake};
+    use chunk_protocol::versions::v26_2::{ConfigurationKeepAlive, Handshake};
     use std::sync::Arc;
     use tokio::{net::TcpStream, sync::oneshot};
 
@@ -260,7 +260,7 @@ async fn listener_parks_authenticated_connections_and_closes_them_on_shutdown() 
         let mut client = Transport::new(TcpStream::connect(address).await.unwrap());
         client
             .write_packet(&Handshake {
-                protocol_version: VarInt(775),
+                protocol_version: VarInt(776),
                 server_address: McString::new("localhost").unwrap(),
                 server_port: 25565,
                 next_state: VarInt(2),

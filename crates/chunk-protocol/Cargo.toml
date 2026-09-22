@@ -8,8 +8,8 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["mc-26-1"]
-mc-26-1 = []
+default = ["mc-26-2"]
+mc-26-2 = []
 
 [dependencies]
 bytes = "1"

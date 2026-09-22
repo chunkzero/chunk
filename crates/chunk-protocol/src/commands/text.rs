@@ -1,4 +1,4 @@
-use crate::versions::v26_1::commands::{ACTION_BAR_ID, SUBTITLE_TEXT_ID, SYSTEM_MESSAGE_ID, TITLE_TEXT_ID};
+use crate::versions::v26_2::commands::{ACTION_BAR_ID, SUBTITLE_TEXT_ID, SYSTEM_MESSAGE_ID, TITLE_TEXT_ID};
 use crate::{Encode, Error, McString, Packet, Result};
 
 /// Plain text only: encoded as a network NBT component with one `text` field.

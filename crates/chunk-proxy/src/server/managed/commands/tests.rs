@@ -3,7 +3,7 @@ use chunk_protocol::{
     Decode, Encode, McString, Packet, VarInt,
     commands::{CommandNode, NodeKind, SignedCommand, SystemMessage},
     decode_packet,
-    versions::v26_1::{ConfigurationClientInformation, ConfigurationClientInformationParticleStatus, UnsignedCommand},
+    versions::v26_2::{ConfigurationClientInformation, ConfigurationClientInformationParticleStatus, UnsignedCommand},
 };
 use fixture::Fixture;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -247,7 +247,7 @@ async fn accepted_session_send_outlives_handler_return_but_retains_captured_scop
 
 #[tokio::test]
 async fn query_suggestions_use_owned_range_and_current_permission_and_platform_auth() {
-    use chunk_protocol::{commands::CommandSuggestions, versions::v26_1::CommandSuggestionsRequest};
+    use chunk_protocol::{commands::CommandSuggestions, versions::v26_2::CommandSuggestionsRequest};
     let mut fixture = Fixture::new().await;
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);

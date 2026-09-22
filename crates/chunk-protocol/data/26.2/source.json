@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/PrismarineJS/minecraft-data",
+  "revision": "68ea7b59e7aa318be86cf265be45ee1b79572528",
+  "files": {
+    "protocol.json": {
+      "path": "data/pc/26.2/protocol.json",
+      "sha256": "e19d839857e4fc9faaa829e68736eaab181f21167db1b0449d3abb284b47305d"
+    },
+    "version.json": {
+      "path": "data/pc/26.2/version.json",
+      "sha256": "e4a731efdc228a6dafd61eb842e8eb76f9d6b766979254d743e161b86d7c1d0c"
+    },
+    "UPSTREAM-README.md": {
+      "path": "README.md",
+      "sha256": "1ec84097bae67536ecda5fb9098dc11d4ef8f11f54946f597f827566ef888c5f"
+    },
+    "loginPacket.json": {
+      "path": "data/pc/26.2/loginPacket.json",
+      "sha256": "85a01488a5648ae815baa50e921814df4fb4d92bfb864eb28ba907dbed2b05cf"
+    }
+  }
+}

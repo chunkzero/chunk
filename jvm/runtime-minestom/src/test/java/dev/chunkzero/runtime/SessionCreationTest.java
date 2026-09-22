@@ -10,7 +10,7 @@ import com.google.protobuf.ByteString;
 import dev.chunkzero.backend.api.JsonType;
 import dev.chunkzero.runtime.bootstrap.FlatSession;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 
 import org.junit.jupiter.api.Test;
 
@@ -31,7 +31,7 @@ class SessionCreationTest {
 
     @Test
     void oneProviderReceivesIndependentSettingsAndRejectsChangesBeforeConstruction() {
-        MinecraftServer.init();
+        var process = ServerProcess.create();
         var ticks = new TickExecutor();
         var settings = new ArrayList<SessionCreation<Config>>();
         var provider =
@@ -49,6 +49,7 @@ class SessionCreationTest {
                 };
         var manager =
                 new SessionManager(
+                        process,
                         ticks,
                         Map.of(
                                 "arena/default",
@@ -125,7 +126,7 @@ class SessionCreationTest {
             manager.finish(command("legacy", 16, "{}"));
             flush(ticks);
         } finally {
-            MinecraftServer.process().stop();
+            process.stop();
         }
     }
 

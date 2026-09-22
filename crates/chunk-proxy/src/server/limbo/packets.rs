@@ -2,7 +2,7 @@ use super::super::transport::{PreparedPackets, invalid_data};
 use super::world::{JoinLimbo, LimboChunk, PreparingTitle, SPAWN};
 use chunk_protocol::{
     BoundedArray, McString, VarInt,
-    versions::v26_1::{
+    versions::v26_2::{
         ChunkBatchFinished, ChunkBatchStart, FeatureFlags, FinishConfiguration, GameEvent, GameEventReason,
         LIMBO_REGISTRIES, LIMBO_TAGS, PlayerAbilities, SelectKnownPacks, SetChunkCenter, SynchronizePosition,
         TitleTimes,
@@ -36,7 +36,7 @@ pub(super) struct Packets {
 
 impl Packets {
     fn new(protocol_version: i32, compression: Option<usize>) -> io::Result<Self> {
-        if protocol_version != chunk_protocol::versions::v26_1::VERSION.protocol {
+        if protocol_version != chunk_protocol::versions::v26_2::VERSION.protocol {
             return Err(invalid_data("unsupported limbo packet version"));
         }
         let mut known_packs = PreparedPackets::new(compression);
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn cache_uses_exact_protocol_versions_without_a_fallback() {
         let cache = Cache::new(Some(256)).unwrap();
-        assert!(std::ptr::eq(cache.get(775).unwrap(), cache.get(775).unwrap()));
+        assert!(std::ptr::eq(cache.get(776).unwrap(), cache.get(776).unwrap()));
         assert!(cache.get(774).is_err());
         assert!(Packets::new(774, Some(256)).is_err());
     }

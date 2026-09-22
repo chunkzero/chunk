@@ -110,7 +110,7 @@ fn limbo_tags(protocol: &Value, registries: &serde_json::Map<String, Value>) -> 
     let mut body = Vec::new();
     varint(usize::try_from(super::packets::packet_id(protocol, "configuration", "toClient", "tags")?)?, &mut body)?;
     varint(3, &mut body)?;
-    // Vanilla 26.1 bindings required by dimensions and item component initializers.
+    // Vanilla 26.2 bindings required by dimensions and item component initializers.
     // Nested tags are flattened; registry IDs are resolved from the pinned snapshot.
     append_tags(
         registries,

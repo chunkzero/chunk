@@ -22,10 +22,10 @@ fn varints_match_wire_vectors_and_reject_overflow() {
 }
 
 #[test]
-#[cfg(feature = "mc-26-1")]
+#[cfg(feature = "mc-26-2")]
 fn handshake_matches_wire_and_framing_preserves_partial_input() {
     use bytes::BytesMut;
-    use chunk_protocol::{decode_frame, versions::v26_1::Handshake};
+    use chunk_protocol::{decode_frame, versions::v26_2::Handshake};
 
     // Protocol 47, localhost:25565, status intention. Followed by status request.
     let wire = b"\x0f\x00\x2f\x09localhost\x63\xdd\x01";

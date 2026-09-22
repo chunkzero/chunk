@@ -1,16 +1,16 @@
 //! Owns player sockets, serves status, authenticates login, and hosts a packet-simulated limbo.
 
-#[cfg(feature = "mc-26-1")]
+#[cfg(feature = "mc-26-2")]
 pub mod command_tree;
 
-#[cfg(feature = "mc-26-1")]
+#[cfg(feature = "mc-26-2")]
 mod server;
-#[cfg(feature = "mc-26-1")]
+#[cfg(feature = "mc-26-2")]
 pub use server::Proxy;
 
-#[cfg(not(feature = "mc-26-1"))]
+#[cfg(not(feature = "mc-26-2"))]
 mod disabled;
-#[cfg(not(feature = "mc-26-1"))]
+#[cfg(not(feature = "mc-26-2"))]
 pub use disabled::Proxy;
 
 use std::{num::NonZeroUsize, time::Duration};

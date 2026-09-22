@@ -1,10 +1,10 @@
-//! Bounded 26.1 command and plain text packets. Signed packets are inspected, never rewritten.
+//! Bounded 26.2 command and plain text packets. Signed packets are inspected, never rewritten.
 mod text;
 mod tree;
 pub use text::{ActionBar, PlainText, SubtitleText, SystemMessage, TitleText};
 pub use tree::{ArgumentParser, CommandNode, CommandTree, MAX_NODES, NodeKind, PropertyKind, StringMode};
 
-use crate::versions::v26_1::commands::{COMMAND_SUGGESTIONS_ID, SIGNED_COMMAND_ID};
+use crate::versions::v26_2::commands::{COMMAND_SUGGESTIONS_ID, SIGNED_COMMAND_ID};
 use crate::{Decode, Encode, Error, McString, Packet, Result, VarInt};
 
 /// Validated signed-command envelope. Forward the original frame for JVM-owned roots.

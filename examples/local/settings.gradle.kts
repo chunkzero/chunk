@@ -20,7 +20,10 @@ extensions.configure<ChunkSettingsExtension> {
 }
 
 dependencyResolutionManagement {
-    repositories { mavenCentral() }
+    repositories {
+        maven("https://maven.chunkzero.com/snapshots")
+        mavenCentral()
+    }
     versionCatalogs { create("libs") { from(files("../../gradle/libs.versions.toml")) } }
 }
 

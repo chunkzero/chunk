@@ -2,7 +2,7 @@ use std::{future::Future, io};
 
 use chunk_protocol::{
     Decode, Packet, VarInt, decode_packet,
-    versions::v26_1::{
+    versions::v26_2::{
         ConfigurationAcknowledged, ConfigurationClientInformation, PlayClientInformation, StartConfiguration,
     },
 };

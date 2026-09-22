@@ -189,7 +189,7 @@ impl Gameplay for RuntimeService {
             deployment: self.identity.deployment.clone(),
             process_generation: 1,
             runtime_id: self.identity.runtime_id.clone(),
-            protocol: 775,
+            protocol: 776,
         }))
     }
     async fn prepare_player(

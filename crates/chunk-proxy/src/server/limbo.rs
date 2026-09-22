@@ -8,7 +8,7 @@ use std::{future::Future, io, time::Duration};
 
 use chunk_protocol::{
     Encode, Packet, decode_packet,
-    versions::v26_1::{
+    versions::v26_2::{
         ChunkBatchReceived, ConfigurationClientInformation, ConfigurationClientInformationParticleStatus,
         ConfirmTeleport, PlayClientInformation, PlayClientInformationParticleStatus, PlayKeepAlive,
         PlayKeepAliveResponse, PlayPing, PlayPong, PlayerLoaded,

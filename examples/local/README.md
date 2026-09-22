@@ -8,7 +8,7 @@ just local
 
 This installs pinned JS dependencies, compiles TypeScript declarations and handlers, generates shared JVM clients before
 Kotlin compilation, resolves Java 25, packages an immutable deployment, and starts the backend, control and proxy. Join
-`localhost:25565` with a signed-in official Minecraft Java Edition 26.1 client. Status runs JavaScript without starting
+`localhost:25565` with a signed-in official Minecraft Java Edition 26.2 client. Status runs JavaScript without starting
 gameplay. Login runs admission/routing and automatically creates a lobby session.
 
 To build the complete release without starting services:

@@ -24,7 +24,7 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 import net.minestom.server.command.builder.CommandResult;
 import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.packet.server.SendablePacket;
@@ -49,7 +49,8 @@ import java.util.function.Supplier;
 class CoinCommandTest {
     @Test
     void commandsReachTheBackendFromPlayerThreadsAfterMovesAndRejoins() throws Exception {
-        MinecraftServer.init();
+        var process = ServerProcess.create();
+        ExampleSessions.INSTANCE.register(process);
         var ticks = new TickExecutor();
         var coins = new LinkedBlockingQueue<BackendMutation>();
         var server =
@@ -108,6 +109,7 @@ class CoinCommandTest {
         var scheduler = Executors.newSingleThreadScheduledExecutor();
         var manager =
                 new SessionManager(
+                        process,
                         ticks,
                         Map.of(
                                 "lobby",
@@ -137,7 +139,7 @@ class CoinCommandTest {
             for (var destination : List.of("lobby", "arena", "arena")) {
                 generation++;
                 var connection =
-                        new PlayerConnection() {
+                        new PlayerConnection(process) {
                             @Override
                             public void sendPacket(SendablePacket packet) {}
 
@@ -155,9 +157,7 @@ class CoinCommandTest {
                     await(ticks, managed.join(player));
                     var result =
                             CompletableFuture.supplyAsync(
-                                            () ->
-                                                    MinecraftServer.getCommandManager()
-                                                            .execute(player, "coin"))
+                                            () -> process.commandManager().execute(player, "coin"))
                                     .get(5, TimeUnit.SECONDS);
                     assertEquals(CommandResult.Type.SUCCESS, result.getType());
                     var call = pump(ticks, coins::poll);
@@ -181,7 +181,7 @@ class CoinCommandTest {
                 server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
                 scheduler.shutdownNow();
                 scheduler.awaitTermination(3, TimeUnit.SECONDS);
-                MinecraftServer.process().stop();
+                process.stop();
             }
         }
     }

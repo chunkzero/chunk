@@ -197,12 +197,12 @@ mod tests {
     use super::*;
     use chunk_protocol::{
         decode_packet,
-        versions::v26_1::{ConfigurationKeepAliveResponse, LoginAcknowledged},
+        versions::v26_2::{ConfigurationKeepAliveResponse, LoginAcknowledged},
     };
 
     #[tokio::test]
     async fn prepared_packets_are_reusable_across_connections_and_compression_modes() {
-        use chunk_protocol::{McString, RemainingBytes, versions::v26_1::ConfigurationPluginMessage};
+        use chunk_protocol::{McString, RemainingBytes, versions::v26_2::ConfigurationPluginMessage};
 
         let large = ConfigurationPluginMessage {
             channel: McString::new("minecraft:brand").unwrap(),

@@ -13,7 +13,7 @@ Run these commands from this directory:
 `codegen` prepares the TypeScript SDK in `.chunk/sdk/` and typed bindings in `.chunk/generated/` for your editor. Gradle
 build support is generated in `.chunk/gradle/`. These directories are ignored by Git and recreated when needed. `build`
 generates the JVM clients and packages an immutable release under `dist/`. `dev` builds the release and starts the local
-backend, control and proxy. Connect with an official Minecraft Java Edition 26.1 client at `localhost:25565`; the lobby
+backend, control and proxy. Connect with an official Minecraft Java Edition 26.2 client at `localhost:25565`; the lobby
 starts automatically on join. Ctrl-C stops the services and their gameplay JVMs. Local backend data stays in
 `.chunk/local` between runs. Restart `dev` to apply code changes; automatic reload is not implemented yet.
 

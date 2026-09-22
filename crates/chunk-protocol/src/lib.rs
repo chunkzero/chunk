@@ -15,15 +15,15 @@
 //! Derives support named, tuple and unit structs, including generics. Packet
 //! IDs belong to a state and direction. Packet APIs live in [`versions`],
 //! generated from local datasets and gated by explicit Cargo features.
-//! The default feature is `mc-26-1`. With no version features, wire primitives
+//! The default feature is `mc-26-2`. With no version features, wire primitives
 //! remain usable but no Minecraft version is enabled. There is no gameplay
 //! version translation.
 //!
-//! `chunk_protocol_codegen::protocol_version!(v26_1, "data/26.1")` generates
+//! `chunk_protocol_codegen::protocol_version!(v26_2, "data/26.2")` generates
 //! a module from a directory relative to the invoking crate's manifest.
 //! Snapshots include upstream attribution and a source manifest with revision
 //! and SHA-256 checksums. Generation verifies local inputs and tracks changes;
-//! disabled versions skip dataset loading. Only the pinned 26.1 release has been
+//! disabled versions skip dataset loading. Only the pinned 26.2 release has been
 //! validated, so the generator retains its release guard.
 //!
 //! The selected login packets cover login start, encryption negotiation, profile
@@ -46,7 +46,7 @@
 
 extern crate self as chunk_protocol;
 
-#[cfg(feature = "mc-26-1")]
+#[cfg(feature = "mc-26-2")]
 pub mod commands;
 
 mod codec;

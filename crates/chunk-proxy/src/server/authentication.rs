@@ -2,7 +2,7 @@ use std::{fmt::Write as _, io, time::Duration};
 
 use chunk_protocol::{
     BoundedArray, ByteArray, McString, Uuid, VarInt, decode_packet,
-    versions::v26_1::{
+    versions::v26_2::{
         EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginDisconnect, LoginStart, LoginSuccess,
         LoginSuccessPropertiesEntry, SetCompression,
     },
@@ -200,6 +200,7 @@ fn parse_profile(bytes: &[u8], username: &str) -> io::Result<LoginSuccess> {
         .collect::<chunk_protocol::Result<Vec<_>>>()
         .map_err(invalid_data)?;
     Ok(LoginSuccess {
+        session_id: Uuid(*uuid::Uuid::new_v4().as_bytes()),
         uuid: Uuid(uuid),
         username: McString::new(profile.name).map_err(invalid_data)?,
         properties: BoundedArray::new(properties).map_err(invalid_data)?,

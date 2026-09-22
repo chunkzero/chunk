@@ -4,7 +4,7 @@ use chunk_protocol::{
     decode_packet,
     versions::{
         SUPPORTED,
-        v26_1::{Handshake, Ping, Pong, StatusRequest},
+        v26_2::{Handshake, Ping, Pong, StatusRequest},
     },
 };
 use tokio::{
@@ -83,7 +83,7 @@ mod tests {
         for suffix in [&[][..], &[0x80][..]] {
             let (mut client, server) = tokio::io::duplex(4096);
             let handshake = Handshake {
-                protocol_version: chunk_protocol::VarInt(775),
+                protocol_version: chunk_protocol::VarInt(776),
                 server_address: chunk_protocol::McString::new("localhost").unwrap(),
                 server_port: 25565,
                 next_state: chunk_protocol::VarInt(1),

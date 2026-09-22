@@ -1,8 +1,8 @@
-#![cfg(feature = "mc-26-1")]
+#![cfg(feature = "mc-26-2")]
 
 use chunk_protocol::{
     BoundedArray, ByteArray, Decode, Direction, Encode, Error, McString, Packet, State, Uuid, VarInt, decode_packet,
-    encode_packet, versions::v26_1::*,
+    encode_packet, versions::v26_2::*,
 };
 
 fn check_wire<P: Packet + Encode + Decode + std::fmt::Debug + PartialEq>(packet: &P, body: &[u8]) {
@@ -48,6 +48,7 @@ fn login_start_and_encryption_match_wire() {
 #[test]
 fn login_success_preserves_signed_and_unsigned_profile_properties() {
     let packet = LoginSuccess {
+        session_id: Uuid([0x34; 16]),
         uuid: Uuid([0x12; 16]),
         username: McString::new("Alex").unwrap(),
         properties: BoundedArray::new(vec![
@@ -67,6 +68,7 @@ fn login_success_preserves_signed_and_unsigned_profile_properties() {
     let mut body = vec![2];
     body.extend_from_slice(&[0x12; 16]);
     body.extend_from_slice(b"\x04Alex\x02\x08textures\x03abc\x01\x03sig\x05other\x00\x00");
+    body.extend_from_slice(&[0x34; 16]);
     check_wire(&packet, &body);
 }
 
@@ -99,11 +101,11 @@ fn configuration_settings_keepalives_and_negotiation_match_wire() {
             packs: BoundedArray::new(vec![SelectKnownPacksPacksEntry {
                 namespace: McString::new("minecraft").unwrap(),
                 id: McString::new("core").unwrap(),
-                version: McString::new("26.1").unwrap(),
+                version: McString::new("26.2").unwrap(),
             }])
             .unwrap(),
         },
-        b"\x0e\x01\x09minecraft\x04core\x0426.1",
+        b"\x0e\x01\x09minecraft\x04core\x0426.2",
     );
     check_wire(&KnownPacks { packs: BoundedArray::new(vec![]).unwrap() }, &[7, 0]);
     check_wire(

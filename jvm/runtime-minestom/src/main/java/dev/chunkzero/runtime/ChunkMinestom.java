@@ -9,20 +9,21 @@ import dev.chunkzero.runtime.minestom.internal.ProcessService;
 import dev.chunkzero.runtime.minestom.internal.SessionMethodRegistry;
 import dev.chunkzero.runtime.minestom.internal.SessionMethodService;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 import net.minestom.server.timer.Task;
 import net.minestom.server.timer.TaskSchedule;
 
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Integrates an app-owned Minestom server with Chunk's generic process lifecycle. */
 public final class ChunkMinestom implements AutoCloseable {
-    private final ChunkProcess process;
-    private final MinecraftServer minecraft;
+    private final ChunkProcess chunk;
+    private final ServerProcess server;
     private final TickExecutor ticks = new TickExecutor();
     private final SessionManager sessions;
     private final ComponentRegistry components;
@@ -34,20 +35,24 @@ public final class ChunkMinestom implements AutoCloseable {
     private @Nullable Task task;
     private boolean started;
 
-    private ChunkMinestom(ChunkProcess process, MinecraftServer minecraft) {
-        this.process = process;
-        this.minecraft = minecraft;
+    private ChunkMinestom(ChunkProcess chunk, ServerProcess server) {
+        this.chunk = chunk;
+        this.server = server;
         var factories =
                 AppRegistry.load(
-                        process.identity().getAppId(),
+                        chunk.identity().getAppId(),
                         Thread.currentThread().getContextClassLoader());
         components = ComponentRegistry.load(Thread.currentThread().getContextClassLoader());
         sessions =
                 new SessionManager(
-                        ticks, factories, (session, appId) -> process.backend(session), components);
-        MinecraftServer.setCompressionThreshold(0);
-        MinecraftServer.getConnectionManager().setPlayerProvider(ManagedPlayer::new);
-        var identity = process.identity();
+                        server,
+                        ticks,
+                        factories,
+                        (session, appId) -> chunk.backend(session),
+                        components);
+        server.setCompressionThreshold(0);
+        server.connectionManager().setPlayerProvider(ManagedPlayer::new);
+        var identity = chunk.identity();
         gameplay =
                 new GameplayService(
                         identity.getDeployment(),
@@ -55,7 +60,7 @@ public final class ChunkMinestom implements AutoCloseable {
                         sessions,
                         System::nanoTime,
                         identity.getRuntimeId(),
-                        process::isReady);
+                        chunk::isReady);
         methods =
                 new SessionMethodService(
                         identity,
@@ -66,17 +71,17 @@ public final class ChunkMinestom implements AutoCloseable {
                                 Thread.currentThread().getContextClassLoader()),
                         gameplay::authorizeMethodCaller,
                         System::currentTimeMillis);
-        service = new ProcessService(identity, gameplay, sessions, process::tickCount, process);
+        service = new ProcessService(identity, gameplay, sessions, chunk::tickCount, chunk);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
 
     /** Attach before starting the listener. Closing this integration stops Minestom. */
-    public static ChunkMinestom attach(ChunkProcess process, MinecraftServer minecraft) {
+    public static ChunkMinestom attach(ChunkProcess chunk, ServerProcess server) {
         try {
-            return new ChunkMinestom(process, minecraft);
+            return new ChunkMinestom(chunk, server);
         } catch (RuntimeException | Error error) {
-            MinecraftServer.process().stop();
+            server.stop();
             throw error;
         }
     }
@@ -86,14 +91,14 @@ public final class ChunkMinestom implements AutoCloseable {
             throw new IllegalStateException("Server already started or closed");
         try {
             task =
-                    MinecraftServer.getSchedulerManager()
+                    server.schedulerManager()
                             .buildTask(
                                     () -> {
                                         methods.flush();
                                         ticks.flush();
                                         gameplay.flush();
                                         var inventory = sessions.inventory();
-                                        process.progress(
+                                        chunk.progress(
                                                 sessions.activeCount(),
                                                 inventory.stream()
                                                         .mapToInt(SessionInventory::getAttached)
@@ -101,9 +106,9 @@ public final class ChunkMinestom implements AutoCloseable {
                                     })
                             .repeat(TaskSchedule.tick(1))
                             .schedule();
-            minecraft.start("127.0.0.1", 0);
-            gameplay.setEndpoint("127.0.0.1:" + MinecraftServer.process().server().getPort());
-            process.bind(List.of(gameplay, service, methods), gameplay.getEndpoint());
+            server.start(new InetSocketAddress("127.0.0.1", 0));
+            gameplay.setEndpoint("127.0.0.1:" + server.server().getPort());
+            chunk.bind(List.of(gameplay, service, methods), gameplay.getEndpoint());
             started = true;
         } catch (IOException | RuntimeException error) {
             close();
@@ -117,7 +122,7 @@ public final class ChunkMinestom implements AutoCloseable {
         Throwable failure = null;
         List<Runnable> cleanup =
                 List.of(
-                        () -> MinecraftServer.process().stop(),
+                        server::stop,
                         () -> {
                             if (task != null) task.cancel();
                         },

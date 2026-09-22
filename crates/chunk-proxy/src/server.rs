@@ -14,7 +14,7 @@ use std::{future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 use chunk_protocol::{
     McString, encode_packet,
     versions::SUPPORTED,
-    versions::v26_1::{LoginDisconnect, StatusResponse},
+    versions::v26_2::{LoginDisconnect, StatusResponse},
 };
 use tokio::{
     net::TcpListener,

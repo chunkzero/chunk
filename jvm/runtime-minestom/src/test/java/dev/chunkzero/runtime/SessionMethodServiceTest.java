@@ -25,7 +25,7 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.MetadataUtils;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 
 import org.junit.jupiter.api.Test;
 
@@ -45,11 +45,12 @@ class SessionMethodServiceTest {
 
     @Test
     void authenticatedCallsAreFencedQueuedDeduplicatedAndRetired() throws Exception {
-        MinecraftServer.init();
+        var process = ServerProcess.create();
         var ticks = new TickExecutor();
         var game = new Game();
         var manager =
                 new SessionManager(
+                        process,
                         ticks,
                         Map.of("lobby/default", new SessionRegistration("lobby", () -> game)),
                         null);
@@ -289,7 +290,7 @@ class SessionMethodServiceTest {
             service.close();
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
-            MinecraftServer.process().stop();
+            process.stop();
         }
     }
 

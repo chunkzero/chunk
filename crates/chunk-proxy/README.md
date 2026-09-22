@@ -33,11 +33,11 @@ CHUNK_BACKEND_FILE=.chunk/local/backend.json CHUNK_CONTROL_FILE=.chunk/local/con
 ```
 
 The edge requires backend/control discovery records. Library callers can omit `Config::platform` to use the
-waiting-world fixture. The listener supports Java Edition 26.1 (protocol 775), with online authentication through
+waiting-world fixture. The listener supports Java Edition 26.2 (protocol 776), with online authentication through
 Mojang.
 
-`mc-26-1` is enabled by default and forwarded from the edge to the proxy and protocol. Select it explicitly with
-`cargo run -p chunk-edge --no-default-features --features mc-26-1`.
+`mc-26-2` is enabled by default and forwarded from the edge to the proxy and protocol. Select it explicitly with
+`cargo run -p chunk-edge --no-default-features --features mc-26-2`.
 
 Without version features, protocol primitives remain available but the proxy refuses to start. Features select releases;
 they do not translate versions.
@@ -51,7 +51,7 @@ Set `RUST_LOG=debug` to log individual connection failures.
 
 `Config::configuration_timeout` limits each configuration phase (default: five minutes). The sixty-second total limbo
 cap overrides longer phase limits; shorter configured limits still apply. Clients must send their settings within ten
-seconds. Limbo derives its registries from the pinned 26.1 snapshot, with unused enchantments and dialogs omitted and
+seconds. Limbo derives its registries from the pinned 26.2 snapshot, with unused enchantments and dialogs omitted and
 dimension timeline and client component tags included, then sends a 5×5 area of empty End chunks. The client must
 acknowledge configuration, the chunk batch, and teleports. Loading and teleport acknowledgments have fifteen-second
 deadlines.
@@ -66,7 +66,7 @@ The listener encodes and compresses shared configuration, spawn, and title packe
 using its configured compression threshold. Connections select these buffers by their negotiated protocol version;
 encryption remains specific to each connection.
 
-To verify with a signed-in Java 26.1 client, join `localhost:25565`, confirm the End sky renders with no terrain,
+To verify with a signed-in Java 26.2 client, join `localhost:25565`, confirm the End sky renders with no terrain,
 confirm you float in place, and remain connected for about a minute to verify automatic disconnection.
 
 Packet generation and codec usage are covered in the [protocol crate documentation](../chunk-protocol/src/lib.rs).

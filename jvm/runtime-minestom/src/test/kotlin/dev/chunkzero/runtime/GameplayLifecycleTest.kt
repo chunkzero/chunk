@@ -16,7 +16,8 @@ import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.minestom.internal.GameplayService
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
-import net.minestom.server.MinecraftServer
+import net.minestom.server.MinecraftConstants
+import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.packet.client.common.ClientSettingsPacket
@@ -48,15 +49,16 @@ import java.util.function.Supplier
 class GameplayLifecycleTest {
     @Test
     fun `withdrawal fences UUID reuse and leaves the other session running`() {
-        val minecraft = MinecraftServer.init()
-        MinecraftServer.setCompressionThreshold(0)
-        MinecraftServer.getConnectionManager().setPlayerProvider(::ManagedPlayer)
+        val minecraft = ServerProcess.create()
+        minecraft.setCompressionThreshold(0)
+        minecraft.connectionManager().setPlayerProvider(::ManagedPlayer)
         val ticks = TickExecutor()
         val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
         val joinStarted = CompletableFuture<Unit>()
         val joinFinished = CompletableFuture<Void>()
         val manager =
             SessionManager(
+                minecraft,
                 ticks,
                 mapOf(
                     "flat" to
@@ -103,8 +105,8 @@ class GameplayLifecycleTest {
                 .start()
         val channel = NettyChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
         val sockets = mutableListOf<Socket>()
-        MinecraftServer
-            .getSchedulerManager()
+        minecraft
+            .schedulerManager()
             .buildTask {
                 ticks.flush()
                 service.flush()
@@ -112,8 +114,8 @@ class GameplayLifecycleTest {
                 net.minestom.server.timer.TaskSchedule
                     .tick(1),
             ).schedule()
-        minecraft.start("127.0.0.1", 0)
-        service.endpoint = "127.0.0.1:${MinecraftServer.process().server().port}"
+        minecraft.start(InetSocketAddress("127.0.0.1", 0))
+        service.endpoint = "127.0.0.1:${minecraft.server().port}"
         try {
             fun command(id: String) =
                 SessionCommand
@@ -149,7 +151,7 @@ class GameplayLifecycleTest {
                 .setPlayer(PlayerRef.newBuilder().setId(uuid))
                 .setIdentity(Identity.newBuilder().setUuid(uuid).setUsername("test"))
                 .setProtocol(
-                    MinecraftServer.PROTOCOL_VERSION,
+                    MinecraftConstants.PROTOCOL_VERSION,
                 ).build()
 
             fun connect(request: PlayerDelivery): Socket {
@@ -160,7 +162,12 @@ class GameplayLifecycleTest {
                 socket.send(
                     0,
                     ClientHandshakePacket.SERIALIZER,
-                    ClientHandshakePacket(775, "localhost", 25565, ClientHandshakePacket.Intent.LOGIN),
+                    ClientHandshakePacket(
+                        MinecraftConstants.PROTOCOL_VERSION,
+                        "localhost",
+                        25565,
+                        ClientHandshakePacket.Intent.LOGIN,
+                    ),
                 )
                 socket.send(
                     0,
@@ -231,7 +238,7 @@ class GameplayLifecycleTest {
                 ) {
                     if (readerFailure.isDone) readerFailure.join()
                     check(System.nanoTime() < deadline) {
-                        "Player never arrived: ${MinecraftServer.getConnectionManager().onlinePlayers.map {
+                        "Player never arrived: ${minecraft.connectionManager().onlinePlayers.map {
                             Triple(
                                 it.lastSentTeleportId,
                                 it.lastReceivedTeleportId,
@@ -264,7 +271,7 @@ class GameplayLifecycleTest {
                     methodCaller.toBuilder().setCaller(methodCaller.caller.toBuilder().setOwnerGeneration(2)).build(),
                 )
             }
-            val oldPlayer = MinecraftServer.getConnectionManager().onlinePlayers.single()
+            val oldPlayer = minecraft.connectionManager().onlinePlayers.single()
             val destination = delivery("b", 2)
             assertThrows(IllegalStateException::class.java) { connect(destination) }
             val withdrawal =
@@ -279,12 +286,12 @@ class GameplayLifecycleTest {
             assertThrows(IllegalArgumentException::class.java) { service.authorizeMethodCaller(methodCaller) }
             assertTrue(oldPlayer.isRemoved)
             assertTrue(oldPlayer in closedPlayers)
-            assertTrue(MinecraftServer.getConnectionManager().onlinePlayers.isEmpty())
+            assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
             val next = delivery("b", 3)
             val nextSocket = connect(next)
             arrive(nextSocket, next.operationId)
             manager.finish(command("a")).get(3, TimeUnit.SECONDS)
-            val current = MinecraftServer.getConnectionManager().onlinePlayers.single()
+            val current = minecraft.connectionManager().onlinePlayers.single()
             assertEquals(uuid, current.uuid.toString())
             assertTrue(
                 manager
@@ -341,7 +348,7 @@ class GameplayLifecycleTest {
             service.close()
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
-            MinecraftServer.process().stop()
+            minecraft.stop()
         }
     }
 }

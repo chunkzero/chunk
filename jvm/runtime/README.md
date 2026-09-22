@@ -6,6 +6,10 @@ production dependency. `jvm:runtime-minestom` supplies `ChunkMinestom`, sessions
 Minecraft admission. `jvm:runtime-minestom-kotlin` adds coroutine conveniences to the Minestom integration. Hytale
 integration is future work.
 
+The adapter uses [chunkzero/minestom-me](https://github.com/chunkzero/minestom-me), currently published as
+`net.minestom:minestom:master-SNAPSHOT`. Create an independent `ServerProcess` and pass it to `ChunkMinestom.attach`;
+closing the integration stops only that Minestom process. The current snapshot and Chunk proxy target Minecraft 26.2.
+
 Each app is an executable JAR containing its own dependencies. Configure `application.mainClass` in the app's Gradle
 build:
 
@@ -14,7 +18,7 @@ build:
 public final class Lobby implements SessionProvider {
     public static void main(String[] args) throws Exception {
         try (var chunk = ChunkProcess.connect();
-             var minestom = ChunkMinestom.attach(chunk, MinecraftServer.init())) {
+             var minestom = ChunkMinestom.attach(chunk, ServerProcess.create())) {
             // Initialize application resources here.
             minestom.start();
             chunk.ready();
@@ -68,11 +72,12 @@ completes and at least one instance exists. `scope.finish()` requests ending; do
 whose own completion ending must await.
 
 `SessionScope` owns instances, session/player-filtered events, repeating tasks and registered `AutoCloseable` resources
-such as subscriptions. Instance event nodes remain available for instance-local events. Direct global registrations
-require explicit cleanup. Ending withdraws deliveries, waits for leave/finish hooks, then removes only that scope's
-listeners, tasks, resources and instances. A process retains at most 256 session identities and 4096 delivery
-operations; exhausting history requires a replacement process. Stuck customer futures retain ownership until a host
-deadline terminates the process; they never produce a false withdrawal acknowledgment.
+such as subscriptions. `scope.getProcess()` exposes their owning Minestom `ServerProcess`. Instance event nodes remain
+available for instance-local events. Direct process registrations require explicit cleanup. Ending withdraws deliveries,
+waits for leave/finish hooks, then removes only that scope's listeners, tasks, resources and instances. A process
+retains at most 256 session identities and 4096 delivery operations; exhausting history requires a replacement process.
+Stuck customer futures retain ownership until a host deadline terminates the process; they never produce a false
+withdrawal acknowledgment.
 
 ## Components
 
@@ -111,10 +116,10 @@ Factories should remain synchronous and short; application side effects outside 
 
 Lifecycle notifications live in `dev.chunkzero.runtime.minestom.event`. `SessionEvent` exposes `getSession()`, the
 owning `SessionScope` with its ID and generation. `SessionJoinEvent` and `SessionLeaveEvent` also implement Minestom's
-`PlayerEvent`. Subscribe to concrete event classes globally to observe all sessions in the JVM:
+`PlayerEvent`. Subscribe to concrete event classes on the process to observe all of its sessions:
 
 ```java
-MinecraftServer.getGlobalEventHandler().addListener(SessionJoinEvent.class, event -> {
+server.eventHandler().addListener(SessionJoinEvent.class, event -> {
     System.out.printf("%s joined session %s%n",
         event.getPlayer().getUsername(), event.getSession().getId());
 });

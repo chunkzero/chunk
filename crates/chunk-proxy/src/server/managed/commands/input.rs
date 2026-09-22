@@ -5,7 +5,7 @@ use chunk_protocol::{
     Decode, Packet, VarInt,
     commands::{CommandSuggestions, PlainText, SignedCommand, SystemMessage},
     decode_packet, encode_packet,
-    versions::v26_1::{CommandSuggestionsRequest, UnsignedCommand},
+    versions::v26_2::{CommandSuggestionsRequest, UnsignedCommand},
 };
 use std::{io, time::Duration};
 

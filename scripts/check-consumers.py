@@ -91,7 +91,7 @@ def verify_release(project, package, app_ids, kotlin):
             for provider in providers:
                 require(provider.replace(".", "/") + ".class" in names, "Session factory missing")
             for entry in ("dev/chunkzero/runtime/ChunkProcess.class", "dev/chunkzero/runtime/ChunkMinestom.class",
-                          "net/minestom/server/MinecraftServer.class", package.replace(".", "/") + "/BackendTypes.class",
+                          "net/minestom/server/ServerProcess.class", package.replace(".", "/") + "/BackendTypes.class",
                           package.replace(".", "/") + "/BackendClient.class"):
                 require(entry in names, f"App executable missing {entry}")
             require("dev/chunkzero/runtime/BridgeMain.class" not in names, "Legacy runtime launcher remains")

@@ -1,4 +1,4 @@
-#![cfg(not(feature = "mc-26-1"))]
+#![cfg(not(feature = "mc-26-2"))]
 
 use std::io;
 

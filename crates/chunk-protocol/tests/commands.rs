@@ -1,4 +1,4 @@
-#![cfg(feature = "mc-26-1")]
+#![cfg(feature = "mc-26-2")]
 use bytes::BytesMut;
 use chunk_protocol::{
     Decode, Encode, McString, Packet, VarInt,
@@ -7,7 +7,7 @@ use chunk_protocol::{
         SystemMessage,
     },
     decode_frame, decode_packet, encode_packet,
-    versions::v26_1::{CommandSuggestionsRequest, UnsignedCommand, commands::PARSERS},
+    versions::v26_2::{CommandSuggestionsRequest, UnsignedCommand, commands::PARSERS},
 };
 
 fn roundtrip<T: Packet + Encode + Decode + PartialEq + std::fmt::Debug>(value: &T) {

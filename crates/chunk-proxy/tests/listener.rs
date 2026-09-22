@@ -1,11 +1,11 @@
-#![cfg(feature = "mc-26-1")]
+#![cfg(feature = "mc-26-2")]
 
 use std::{io, time::Duration};
 
 use bytes::BytesMut;
 use chunk_protocol::{
     decode_frame, decode_packet,
-    versions::v26_1::{EncryptionRequest, LoginDisconnect, StatusResponse},
+    versions::v26_2::{EncryptionRequest, LoginDisconnect, StatusResponse},
 };
 use chunk_proxy::{Config, Proxy};
 use tokio::{
@@ -53,8 +53,8 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
         stopped.await.unwrap();
         Ok(())
     }));
-    for version in [&[47][..], &[0x87, 6]] {
-        // 1.8 and 26.1 can query status; only 26.1 is enabled for login.
+    for version in [&[47][..], &[0x88, 6]] {
+        // 1.8 and 26.2 can query status; only 26.2 is enabled for login.
         let mut client = TcpStream::connect(address).await.unwrap();
         let mut handshake = vec![u8::try_from(14 + version.len()).unwrap(), 0];
         handshake.extend_from_slice(version);
@@ -68,8 +68,8 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
         let status = decode_packet::<StatusResponse>(&frame).unwrap();
         let json: serde_json::Value = serde_json::from_str(status.json.as_str()).unwrap();
         assert_eq!(json["description"]["text"], "hello \"player\"\nwelcome");
-        assert_eq!(json["version"]["protocol"], 775);
-        assert_eq!(json["version"]["name"], "26.1");
+        assert_eq!(json["version"]["protocol"], 776);
+        assert_eq!(json["version"]["name"], "26.2");
         assert_eq!(read_frame(&mut client).await, [1, 0x80, 0, 0, 0, 0, 0, 0, 1]);
         closed(&mut client).await;
     }
@@ -95,7 +95,7 @@ async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_
     malformed.write_all(&[0x80, 0x80, 0x80]).await.unwrap();
     closed(&mut malformed).await;
     let mut login = TcpStream::connect(address).await.unwrap();
-    login.write_all(b"\x10\x00\x87\x06\x09localhost\x63\xdd\x02").await.unwrap();
+    login.write_all(b"\x10\x00\x88\x06\x09localhost\x63\xdd\x02").await.unwrap();
     // Login Start is pipelined after the handshake. Claimed UUID is not an identity.
     login.write_all(b"\x16\x00\x04Alex\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").await.unwrap();
     let frame = read_frame(&mut login).await;
@@ -109,7 +109,7 @@ async fn challenges_login_and_rejects_malformed_clients_and_closes_idle_sockets_
     let frame = read_frame(&mut outdated).await;
     let disconnect = decode_packet::<LoginDisconnect>(&frame).unwrap();
     let json: serde_json::Value = serde_json::from_str(disconnect.reason.as_str()).unwrap();
-    assert_eq!(json["text"], "Unsupported Minecraft version. This edge supports 26.1.");
+    assert_eq!(json["text"], "Unsupported Minecraft version. This edge supports 26.2.");
     closed(&mut outdated).await;
     let mut idle = TcpStream::connect(address).await.unwrap();
     // Status response ensures this socket has an active task waiting for ping.

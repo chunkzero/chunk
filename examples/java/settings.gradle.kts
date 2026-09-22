@@ -12,7 +12,10 @@ plugins {
 }
 
 dependencyResolutionManagement {
-    repositories { mavenCentral() }
+    repositories {
+        maven("https://maven.chunkzero.com/snapshots")
+        mavenCentral()
+    }
 }
 
 includeBuild("../..") { name = "chunk-platform" }

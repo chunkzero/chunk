@@ -4,13 +4,15 @@ import chunk.v1.Common.SessionRef
 import chunk.v1.Supervision.SessionCommand
 import chunk.v1.Supervision.SessionPhase
 import dev.chunkzero.runtime.bootstrap.FlatSession
-import net.minestom.server.MinecraftServer
+import dev.chunkzero.runtime.minestom.event.SessionCreateEvent
+import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.network.packet.server.SendablePacket
 import net.minestom.server.network.player.GameProfile
 import net.minestom.server.network.player.PlayerConnection
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
@@ -20,13 +22,57 @@ import java.util.function.Supplier
 
 class SessionManagerTest {
     @Test
+    fun `independent processes keep session events instances and shutdown isolated`() {
+        ServerProcess.create().use { first ->
+            ServerProcess.create().use { second ->
+                val ticks = TickExecutor()
+                val firstManager = SessionManager(first, ticks, mapOf("flat" to Supplier { FlatSession() }))
+                val secondManager = SessionManager(second, ticks, mapOf("flat" to Supplier { FlatSession() }))
+                val firstEvents = mutableListOf<SessionScope>()
+                val secondEvents = mutableListOf<SessionScope>()
+                first.eventHandler().addListener(SessionCreateEvent::class.java) { firstEvents.add(it.session) }
+                second.eventHandler().addListener(SessionCreateEvent::class.java) { secondEvents.add(it.session) }
+                val command =
+                    SessionCommand
+                        .newBuilder()
+                        .setOperationId("create")
+                        .setSession(SessionRef.newBuilder().setId("same-id"))
+                        .setGeneration(1)
+                        .setSessionType("flat")
+                        .setCapacity(2)
+                        .build()
+                val creations = listOf(firstManager.create(command), secondManager.create(command))
+                repeat(4) { ticks.flush() }
+                creations.forEach { it.join() }
+                val firstScope = firstManager.get("same-id", 1).scope
+                val secondScope = secondManager.get("same-id", 1).scope
+                assertEquals(listOf(firstScope), firstEvents)
+                assertEquals(listOf(secondScope), secondEvents)
+                assertSame(first, firstScope.process)
+                assertSame(second, secondScope.instances.single().process())
+                val ended = firstManager.finish(command)
+                repeat(8) { ticks.flush() }
+                ended.join()
+                first.close()
+                var ran = false
+                second.schedulerManager().buildTask { ran = true }.schedule()
+                second.schedulerManager().process()
+                assertTrue(ran)
+                assertEquals(secondScope.instances.toSet(), second.instanceManager().instances)
+                assertEquals(SessionPhase.SESSION_PHASE_READY, secondManager.get("same-id", 1).phase)
+            }
+        }
+    }
+
+    @Test
     fun `resource disposal failure still awaits the leave hook`() {
-        MinecraftServer.init()
+        val process = ServerProcess.create()
         val ticks = TickExecutor()
         val left = CompletableFuture<Void>()
         var leaving = false
         val manager =
             SessionManager(
+                process,
                 ticks,
                 mapOf(
                     "game" to
@@ -58,7 +104,7 @@ class SessionManagerTest {
             val session = manager.get("game", 1)
             val player =
                 Player(
-                    object : PlayerConnection() {
+                    object : PlayerConnection(process) {
                         override fun sendPacket(packet: SendablePacket) {}
 
                         override fun getRemoteAddress() = InetSocketAddress("127.0.0.1", 0)
@@ -81,13 +127,13 @@ class SessionManagerTest {
             ended.join()
         } finally {
             left.complete(null)
-            MinecraftServer.process().stop()
+            process.stop()
         }
     }
 
     @Test
     fun `readiness and ending await hooks and dispose only the owning session`() {
-        MinecraftServer.init()
+        val process = ServerProcess.create()
         val ticks = TickExecutor()
         val created = CompletableFuture<Void>()
         val finished = CompletableFuture<Void>()
@@ -95,6 +141,7 @@ class SessionManagerTest {
         lateinit var ownedScope: SessionScope
         val manager =
             SessionManager(
+                process,
                 ticks,
                 mapOf(
                     "delayed" to
@@ -144,7 +191,7 @@ class SessionManagerTest {
             assertEquals(2, manager.activeCount())
             assertEquals(SessionPhase.SESSION_PHASE_READY, independent.join().phase)
             assertEquals(32, independent.join().capacity)
-            assertEquals(3, MinecraftServer.getInstanceManager().instances.size)
+            assertEquals(3, process.instanceManager().instances.size)
             created.complete(null)
             repeat(4) { ticks.flush() }
             assertEquals(SessionPhase.SESSION_PHASE_READY, pending.join().phase)
@@ -165,8 +212,8 @@ class SessionManagerTest {
             assertEquals(SessionPhase.SESSION_PHASE_ENDED, ending.join().phase)
             assertEquals(1, manager.activeCount())
             assertEquals(1, disposed)
-            assertEquals(1, MinecraftServer.getInstanceManager().instances.size)
-            assertFalse(MinecraftServer.getGlobalEventHandler().children.any { it.name == ownedScope.events.name })
+            assertEquals(1, process.instanceManager().instances.size)
+            assertFalse(process.eventHandler().children.any { it.name == ownedScope.events.name })
             assertEquals(SessionPhase.SESSION_PHASE_READY, manager.get("second", 1).phase)
             val staleTask = ownedScope.onTick { error("Disposed task ran") }
             ticks.flush()
@@ -185,7 +232,7 @@ class SessionManagerTest {
             assertEquals(0, manager.activeCount())
             assertEquals(3, manager.inventory().size)
         } finally {
-            MinecraftServer.process().stop()
+            process.stop()
         }
     }
 }

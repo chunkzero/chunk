@@ -1,4 +1,4 @@
-use chunk_protocol::{Encode, McString, Packet, Result, VarInt, versions::v26_1::END_BIOME_ID};
+use chunk_protocol::{Encode, McString, Packet, Result, VarInt, versions::v26_2::END_BIOME_ID};
 
 pub(super) const SPAWN: [f64; 3] = [8.0, 64.0, 8.0];
 
@@ -28,6 +28,7 @@ impl Encode for JoinLimbo {
         } // Debug, flat, death location.
         VarInt(0).encode(out)?;
         VarInt(63).encode(out)?;
+        true.encode(out)?; // The proxy authenticates players with Mojang.
         false.encode(out)
     }
 }

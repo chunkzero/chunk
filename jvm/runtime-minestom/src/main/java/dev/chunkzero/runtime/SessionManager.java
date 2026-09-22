@@ -11,8 +11,8 @@ import dev.chunkzero.runtime.minestom.event.SessionJoinEvent;
 import dev.chunkzero.runtime.minestom.event.SessionLeaveEvent;
 import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 
+import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
-import net.minestom.server.event.EventDispatcher;
 
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
@@ -38,6 +38,7 @@ import java.util.stream.Collectors;
 public final class SessionManager {
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
 
+    private final ServerProcess process;
     private final TickExecutor ticks;
     private final Map<String, SessionRegistration> factories;
     private final @Nullable BiFunction<String, String, BackendSession> backend;
@@ -46,8 +47,10 @@ public final class SessionManager {
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
 
-    SessionManager(TickExecutor ticks, Map<String, Supplier<Session>> factories) {
+    SessionManager(
+            ServerProcess process, TickExecutor ticks, Map<String, Supplier<Session>> factories) {
         this(
+                process,
                 ticks,
                 factories.entrySet().stream()
                         .collect(
@@ -60,17 +63,20 @@ public final class SessionManager {
     }
 
     SessionManager(
+            ServerProcess process,
             TickExecutor ticks,
             Map<String, SessionRegistration> factories,
             @Nullable BiFunction<String, String, BackendSession> backend) {
-        this(ticks, factories, backend, new ComponentRegistry(List.of()));
+        this(process, ticks, factories, backend, new ComponentRegistry(List.of()));
     }
 
     SessionManager(
+            ServerProcess process,
             TickExecutor ticks,
             Map<String, SessionRegistration> factories,
             @Nullable BiFunction<String, String, BackendSession> backend,
             ComponentRegistry components) {
+        this.process = process;
         this.ticks = ticks;
         this.factories = Map.copyOf(factories);
         this.backend = backend;
@@ -79,6 +85,10 @@ public final class SessionManager {
 
     public TickExecutor getTicks() {
         return ticks;
+    }
+
+    public ServerProcess getProcess() {
+        return process;
     }
 
     public void setWithdraw(Function<String, CompletionStage<Void>> withdraw) {
@@ -198,6 +208,7 @@ public final class SessionManager {
             behavior = registration.create(command.getCapacity(), configuration);
             scope =
                     new SessionScope(
+                            process,
                             command.getSession().getId(),
                             command.getGeneration(),
                             ticks,
@@ -239,8 +250,8 @@ public final class SessionManager {
                                                         && !scope.getInstances().isEmpty()) {
                                                     if (!finishing)
                                                         phase = SessionPhase.SESSION_PHASE_READY;
-                                                    EventDispatcher.call(
-                                                            new SessionCreateEvent(scope));
+                                                    process.eventHandler()
+                                                            .call(new SessionCreateEvent(scope));
                                                     ready.complete(null);
                                                 } else {
                                                     phase = SessionPhase.SESSION_PHASE_FAILED;
@@ -272,8 +283,10 @@ public final class SessionManager {
                                             () -> {
                                                 if (scope.getPlayers().contains(player)
                                                         && joined.add(player)) {
-                                                    EventDispatcher.call(
-                                                            new SessionJoinEvent(scope, player));
+                                                    process.eventHandler()
+                                                            .call(
+                                                                    new SessionJoinEvent(
+                                                                            scope, player));
                                                 }
                                                 return null;
                                             }));
@@ -309,7 +322,7 @@ public final class SessionManager {
             return ticks.submit(
                     () -> {
                         if (joined.remove(player))
-                            EventDispatcher.call(new SessionLeaveEvent(scope, player));
+                            process.eventHandler().call(new SessionLeaveEvent(scope, player));
                         if (failure != null) throw new CompletionException(failure);
                         return null;
                     });

@@ -11,9 +11,9 @@ Each JVM library and the Gradle plugin publish `-sources.jar` and `-javadoc.jar`
 contain Dokka HTML for Java and Kotlin; the Gradle plugin markers remain POM-only.
 
 The CLI and JVM versions must match. `Cargo.toml` supplies the release version; packaging checks it against the Gradle
-catalog and the prepared CLI. The CLI embeds that catalog for the Chunk, Kotlin and Foojay project version pins. All
-Maven dependencies use explicit versions; the repository does not publish mutable version indexes or support snapshots
-and dynamic versions.
+catalog and the prepared CLI. The CLI embeds that catalog for the Chunk, Kotlin and Foojay project version pins. Chunk
+SDK artifacts use explicit release versions. The Minestom integration currently uses
+`net.minestom:minestom:master-SNAPSHOT` from [chunkzero/minestom-me](https://github.com/chunkzero/minestom-me).
 
 Gradle generates the repository's checked-in wrapper files. When updating the pinned Gradle version, regenerate them
 with Gradle's `wrapper` task and rebuild the CLI. Project creation copies the embedded files without invoking Gradle or
@@ -72,7 +72,8 @@ with the project and should be committed. Gradle manages its own distribution an
 `GRADLE_USER_HOME` (normally `~/.gradle`).
 
 Run `chunk create my-server` to generate a Kotlin project, or add `--language java`. The generated Gradle settings pin
-the SDK version and use `https://maven.chunkzero.com`. That version's JVM artifacts must be published before a normal
+the SDK version and use `https://maven.chunkzero.com`; the Minestom fork currently resolves from its
+`https://maven.chunkzero.com/snapshots` repository. That version's JVM artifacts must be published before a normal
 consumer build can resolve them. For local validation of an unpublished candidate, set the generated project's
 `chunk.mavenRepository` Gradle property to `file:///absolute/path/to/target/dist/maven`. This uses the separate
 publication output; it does not require rebuilding the framework. The

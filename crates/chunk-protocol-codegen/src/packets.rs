@@ -99,8 +99,8 @@ mod tests {
     #[test]
     fn registry_generation_uses_dataset_packet_ids() {
         let mut data: Value =
-            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
-        let snapshot = include_bytes!("../../chunk-protocol/data/26.1/loginPacket.json");
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.2/protocol.json")).unwrap();
+        let snapshot = include_bytes!("../../chunk-protocol/data/26.2/loginPacket.json");
         for (old, new, name) in [("0x07", "0x107", "registry_data"), ("0x0d", "0x10d", "tags")] {
             let original = crate::registries::generate(&data, snapshot).unwrap().to_string();
             let mappings = data["configuration"]["toClient"]["types"]["packet"][1][0]["type"][1]["mappings"]
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn unsupported_fields_and_unbounded_strings_fail_generation() {
         let mut data: Value =
-            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.2/protocol.json")).unwrap();
         data["handshaking"]["toServer"]["types"]["packet_set_protocol"][1][0]["type"] = "unknown".into();
         assert!(generate_packet(&data, &PACKETS[0]).unwrap_err().to_string().contains("unsupported wire type"));
         data["handshaking"]["toServer"]["types"]["packet_set_protocol"][1][0]["type"] = "string".into();
@@ -133,7 +133,7 @@ mod tests {
         use serde_json::json;
 
         let original: Value =
-            serde_json::from_str(include_str!("../../chunk-protocol/data/26.1/protocol.json")).unwrap();
+            serde_json::from_str(include_str!("../../chunk-protocol/data/26.2/protocol.json")).unwrap();
         for schema in [
             json!(["buffer", {"countType": "i32"}]),
             json!(["buffer", {"countType": "varint", "count": 8}]),

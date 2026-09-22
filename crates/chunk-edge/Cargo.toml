@@ -8,8 +8,8 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["mc-26-1"]
-mc-26-1 = ["chunk-proxy/mc-26-1"]
+default = ["mc-26-2"]
+mc-26-2 = ["chunk-proxy/mc-26-2"]
 
 [dependencies]
 tokio-util = { version = "0.7", features = ["rt"] }

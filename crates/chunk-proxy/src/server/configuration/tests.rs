@@ -2,7 +2,7 @@ use std::future::{pending, ready};
 
 use chunk_protocol::{
     BoundedArray, McString, RemainingBytes, Uuid,
-    versions::v26_1::{ConfigurationClientInformationParticleStatus, LoginSuccess},
+    versions::v26_2::{ConfigurationClientInformationParticleStatus, LoginSuccess},
 };
 use tokio::{io::DuplexStream, sync::oneshot, task::JoinHandle, time::advance};
 
@@ -37,9 +37,10 @@ fn connection(capacity: usize) -> (Transport<DuplexStream>, Authenticated<Duplex
     (
         client,
         Authenticated {
-            protocol_version: 775,
+            protocol_version: 776,
             transport: server,
             profile: LoginSuccess {
+                session_id: Uuid([2; 16]),
                 uuid: Uuid([1; 16]),
                 username: McString::new("Alex").unwrap(),
                 properties: BoundedArray::new(vec![]).unwrap(),
@@ -147,7 +148,7 @@ async fn wrong_duplicate_and_unsolicited_configuration_responses_are_rejected() 
         assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::InvalidData);
     }
     let (mut client, _ready, server) = start_wait(Duration::from_secs(300));
-    client.write_packet(&chunk_protocol::versions::v26_1::AcknowledgeConfiguration).await.unwrap();
+    client.write_packet(&chunk_protocol::versions::v26_2::AcknowledgeConfiguration).await.unwrap();
     assert_eq!(server.await.unwrap().err().unwrap().kind(), io::ErrorKind::InvalidData);
 }
 
@@ -200,7 +201,7 @@ async fn blocked_writes_are_bounded_and_never_reused() {
 
 #[tokio::test]
 async fn destination_configuration_relays_settings_and_retains_coalesced_play() {
-    use chunk_protocol::versions::v26_1::{FinishConfiguration, PlayPing};
+    use chunk_protocol::versions::v26_2::{FinishConfiguration, PlayPing};
     let (mut client, authenticated) = connection(8192);
     let (internal, backend) = tokio::io::duplex(8192);
     let mut backend = Transport::new(backend);

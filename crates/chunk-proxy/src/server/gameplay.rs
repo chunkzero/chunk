@@ -6,7 +6,7 @@ use chunk_proto::v1::{
 };
 use chunk_protocol::{
     McString, RemainingBytes, VarInt, decode_packet,
-    versions::v26_1::{
+    versions::v26_2::{
         ConfigurationClientInformation, Handshake, LoginAcknowledged, LoginPluginRequest, LoginPluginResponse,
         LoginStart, LoginSuccess,
     },
@@ -184,7 +184,10 @@ pub(super) async fn login<S>(
         .await?;
     let profile =
         decode_packet::<LoginSuccess>(&internal.read_frame(configuration::FRAME_LIMIT).await?).map_err(invalid_data)?;
-    if profile != authenticated.profile {
+    if profile.uuid != authenticated.profile.uuid
+        || profile.username != authenticated.profile.username
+        || profile.properties != authenticated.profile.properties
+    {
         return Err(invalid_data("destination login identity mismatch"));
     }
     internal.write_packet(&LoginAcknowledged).await?;

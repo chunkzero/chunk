@@ -130,7 +130,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-fn login_claim(profile: &chunk_protocol::versions::v26_1::LoginSuccess, platform: &Platform) -> ClaimRequest {
+fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, platform: &Platform) -> ClaimRequest {
     ClaimRequest {
         operation_id: uuid::Uuid::new_v4().to_string(),
         proxy_id: platform.proxy_id.clone(),
@@ -145,7 +145,7 @@ async fn open<S>(
     assignment: &Assignment,
     guard: &ClaimGuard,
     authenticated: &Authenticated<S>,
-    settings: &chunk_protocol::versions::v26_1::ConfigurationClientInformation,
+    settings: &chunk_protocol::versions::v26_2::ConfigurationClientInformation,
 ) -> io::Result<Transport<tokio::net::TcpStream>> {
     validate(assignment, guard)?;
     if assignment.configuration.as_ref().is_none_or(|c| c.protocol != authenticated.protocol_version) {

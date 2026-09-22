@@ -8,8 +8,8 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["mc-26-1"]
-mc-26-1 = ["chunk-protocol/mc-26-1", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
+default = ["mc-26-2"]
+mc-26-2 = ["chunk-protocol/mc-26-2", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
 
 [dependencies]
 tokio-util = { version = "0.7", features = ["rt"] }

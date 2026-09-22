@@ -1,5 +1,5 @@
 use super::{count, take, write_count};
-use crate::versions::v26_1::commands::{COMMAND_TREE_ID, PARSERS};
+use crate::versions::v26_2::commands::{COMMAND_TREE_ID, PARSERS};
 use crate::{Decode, Encode, Error, McString, Packet, Result, VarInt};
 
 pub const MAX_NODES: usize = 8192;

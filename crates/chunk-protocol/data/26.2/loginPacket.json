@@ -26,6 +26,7 @@
     "portalCooldown": 0,
     "seaLevel": -63
   },
+  "onlineMode": false,
   "enforcesSecureChat": false,
   "dimensionCodec": {
     "minecraft:worldgen/biome": {
@@ -3421,6 +3422,78 @@
                   "minecraft:visual/sky_color": {
                     "type": "string",
                     "value": "#7da2ff"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "key": "minecraft:sulfur_caves",
+          "value": {
+            "type": "compound",
+            "value": {
+              "effects": {
+                "type": "compound",
+                "value": {
+                  "grass_color": {
+                    "type": "string",
+                    "value": "#aba64f"
+                  },
+                  "water_color": {
+                    "type": "string",
+                    "value": "#34bf89"
+                  }
+                }
+              },
+              "has_precipitation": {
+                "type": "byte",
+                "value": 1
+              },
+              "temperature": {
+                "type": "float",
+                "value": 0.8
+              },
+              "downfall": {
+                "type": "float",
+                "value": 0.4
+              },
+              "attributes": {
+                "type": "compound",
+                "value": {
+                  "minecraft:audio/background_music": {
+                    "type": "compound",
+                    "value": {
+                      "default": {
+                        "type": "compound",
+                        "value": {
+                          "max_delay": {
+                            "type": "int",
+                            "value": 24000
+                          },
+                          "sound": {
+                            "type": "string",
+                            "value": "minecraft:music.overworld.sulfur_caves"
+                          },
+                          "min_delay": {
+                            "type": "int",
+                            "value": 12000
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "minecraft:visual/fog_color": {
+                    "type": "string",
+                    "value": "#8cb831"
+                  },
+                  "minecraft:visual/sky_color": {
+                    "type": "string",
+                    "value": "#78a7ff"
+                  },
+                  "minecraft:visual/water_fog_color": {
+                    "type": "string",
+                    "value": "#17543c"
                   }
                 }
               }
@@ -17529,7 +17602,7 @@
                                         "value": {
                                           "min": {
                                             "type": "double",
-                                            "value": 0.000009999999747378752
+                                            "value": 9.999999747378752e-06
                                           }
                                         }
                                       }
@@ -17676,7 +17749,7 @@
                                                 "value": {
                                                   "min": {
                                                     "type": "double",
-                                                    "value": 0.000009999999747378752
+                                                    "value": 9.999999747378752e-06
                                                   }
                                                 }
                                               }

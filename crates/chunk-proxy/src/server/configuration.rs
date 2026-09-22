@@ -2,7 +2,7 @@ use std::{future::Future, io, time::Duration};
 
 use chunk_protocol::{
     Decode, Encode, Packet, VarInt, decode_packet,
-    versions::v26_1::{
+    versions::v26_2::{
         AcknowledgeConfiguration, ConfigurationClientInformation, ConfigurationKeepAlive,
         ConfigurationKeepAliveResponse, ConfigurationPluginResponse, KnownPacks,
     },
@@ -196,7 +196,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     D: AsyncRead + AsyncWrite + Unpin,
 {
-    use chunk_protocol::versions::v26_1::FinishConfiguration;
+    use chunk_protocol::versions::v26_2::FinishConfiguration;
     let mut finishing = false;
     loop {
         tokio::select! {

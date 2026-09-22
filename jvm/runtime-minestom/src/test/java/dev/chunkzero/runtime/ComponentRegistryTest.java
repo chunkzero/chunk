@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
 
-import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 
 import org.junit.jupiter.api.Test;
 
@@ -335,6 +335,7 @@ final class ComponentRegistryTest {
 
     private static final class World implements AutoCloseable {
         final ComponentRegistry registry;
+        final ServerProcess process;
         final TickExecutor ticks = new TickExecutor();
 
         World(List<ComponentBinding<?>> bindings) {
@@ -343,13 +344,19 @@ final class ComponentRegistryTest {
 
         World(ComponentRegistry registry) {
             this.registry = registry;
-            MinecraftServer.init();
+            process = ServerProcess.create();
             ticks.flush();
         }
 
         SessionScope scope(String id) {
             return new SessionScope(
-                    id, 1, ticks, () -> CompletableFuture.completedFuture(null), null, registry);
+                    process,
+                    id,
+                    1,
+                    ticks,
+                    () -> CompletableFuture.completedFuture(null),
+                    null,
+                    registry);
         }
 
         @Override
@@ -357,7 +364,7 @@ final class ComponentRegistryTest {
             try {
                 registry.close();
             } finally {
-                MinecraftServer.process().stop();
+                process.stop();
             }
         }
     }

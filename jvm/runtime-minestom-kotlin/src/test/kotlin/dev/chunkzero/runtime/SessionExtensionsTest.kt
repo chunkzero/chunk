@@ -1,6 +1,6 @@
 package dev.chunkzero.runtime
 
-import net.minestom.server.MinecraftServer
+import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.network.packet.server.SendablePacket
 import net.minestom.server.network.player.GameProfile
@@ -20,13 +20,14 @@ import kotlin.time.Duration.Companion.seconds
 
 class SessionExtensionsTest {
     private lateinit var scope: SessionScope
+    private lateinit var process: ServerProcess
 
     @BeforeEach
     fun start() {
-        MinecraftServer.init()
+        process = ServerProcess.create()
         val ticks = TickExecutor()
         ticks.flush()
-        scope = SessionScope("extensions", 1, ticks, { CompletableFuture.completedFuture(null) }, null)
+        scope = SessionScope(process, "extensions", 1, ticks, { CompletableFuture.completedFuture(null) }, null)
     }
 
     @AfterEach
@@ -35,7 +36,7 @@ class SessionExtensionsTest {
             scope.players.clear()
             scope.dispose()
         } finally {
-            MinecraftServer.process().stop()
+            process.stop()
         }
     }
 
@@ -45,7 +46,7 @@ class SessionExtensionsTest {
         assertSame(resource, scope.resource<Counter> { error("Resource created twice") })
         var runs = 0
         scope.repeatEvery(1.seconds) { runs++ }
-        val scheduler = MinecraftServer.getSchedulerManager()
+        val scheduler = process.schedulerManager()
         val task = scheduler.buildTask { runs++ }.schedule()
         assertSame(task, scope.own(task))
 
@@ -61,7 +62,7 @@ class SessionExtensionsTest {
         val admitted = player("admitted")
         val outsider = player("outsider")
         scope.players.add(admitted)
-        val scheduler = MinecraftServer.getSchedulerManager()
+        val scheduler = process.schedulerManager()
         var playerRuns = 0
         var sessionRuns = 0
         val owned = scheduler.buildTask { playerRuns++ }.schedule()
@@ -91,13 +92,13 @@ class SessionExtensionsTest {
         scope.releasePlayer(admitted)
         assertTrue(playerResources.all { it.closed == 1 })
         assertTrue(sessionResources.all { it.closed == 0 })
-        assertTrue(MinecraftServer.getInstanceManager().instances.containsAll(instances))
+        assertTrue(process.instanceManager().instances.containsAll(instances))
 
         scope.dispose()
         scope.dispose()
         assertTrue(playerResources.all { it.closed == 1 })
         assertTrue(sessionResources.all { it.closed == 1 })
-        assertTrue(MinecraftServer.getInstanceManager().instances.isEmpty())
+        assertTrue(process.instanceManager().instances.isEmpty())
     }
 
     private class Counter : AutoCloseable {
@@ -110,7 +111,7 @@ class SessionExtensionsTest {
 
     private fun player(name: String) =
         Player(
-            object : PlayerConnection() {
+            object : PlayerConnection(process) {
                 override fun sendPacket(packet: SendablePacket) {}
 
                 override fun getRemoteAddress() = InetSocketAddress("127.0.0.1", 0)

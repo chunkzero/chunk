@@ -15,7 +15,6 @@ import dev.chunkzero.runtime.ManagedPlayer;
 import dev.chunkzero.runtime.SessionManager;
 import dev.chunkzero.runtime.TickExecutor;
 
-import net.minestom.server.MinecraftServer;
 import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.player.GameProfile;
@@ -205,9 +204,10 @@ final class PreparedDelivery {
                                 ticks.submit(
                                         () -> {
                                             if (player != null) {
-                                                MinecraftServer.getConnectionManager()
-                                                        .removePlayer(
-                                                                Objects.requireNonNull(current));
+                                                Objects.requireNonNull(current)
+                                                        .process()
+                                                        .connectionManager()
+                                                        .removePlayer(current);
                                                 if (player.getInstance() != null
                                                         && !player.isRemoved()) player.remove();
                                             }

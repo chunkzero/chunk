@@ -1,6 +1,6 @@
 use chunk_protocol::{
     BoundedArray, Encode, McString,
-    versions::v26_1::{
+    versions::v26_2::{
         AcknowledgeConfiguration, ConfigurationClientInformationParticleStatus, FinishConfiguration, KnownPacks,
         SelectKnownPacks,
     },

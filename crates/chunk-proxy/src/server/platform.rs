@@ -6,7 +6,7 @@ use chunk_proto::v1::{
 };
 use chunk_protocol::{
     McString, encode_packet,
-    versions::{SUPPORTED, v26_1::StatusResponse},
+    versions::{SUPPORTED, v26_2::StatusResponse},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};

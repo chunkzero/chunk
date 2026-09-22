@@ -98,7 +98,7 @@ contents, starts no gameplay or backend services, and also runs in CI and `just 
 just local
 ```
 
-The proxy supports Java Edition 26.1 (protocol 775). See the [proxy documentation](crates/chunk-proxy/README.md) for
+The proxy supports Java Edition 26.2 (protocol 776). See the [proxy documentation](crates/chunk-proxy/README.md) for
 managed delivery, timeouts, feature selection and standalone hosting.
 
 ## CLI and services
@@ -156,7 +156,7 @@ chunk dev
 
 For framework development from this checkout, run `just toolchain`, then
 `target/debug/chunk create ../my-server --chunk-source .`. Creation prints exact commands using that CLI and includes
-them in the generated README. Connect with Minecraft Java Edition 26.1 at `localhost:25565`. Restart `chunk dev` to
+them in the generated README. Connect with Minecraft Java Edition 26.2 at `localhost:25565`. Restart `chunk dev` to
 apply source changes; automatic reload remains deferred.
 
 Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
