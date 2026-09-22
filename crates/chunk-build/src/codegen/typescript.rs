@@ -68,7 +68,7 @@ pub(super) fn schema(value: &Schema) -> String {
         Schema::Player => "v.player()".into(),
         Schema::Session => "v.session()".into(),
         Schema::Literal { value } => format!("v.literal({value})"),
-        Schema::Enum { values } => format!("v.enum({})", values.iter().map(|v| quote(v)).collect::<Vec<_>>().join(",")),
+        Schema::Enum { values } => format!("v.enum({})", values.iter().map(quote).collect::<Vec<_>>().join(",")),
         Schema::Nullable { value } => format!("v.nullable({})", schema(value)),
         Schema::Array { items } => format!("v.array({})", schema(items)),
         Schema::Object { fields: declarations } => {

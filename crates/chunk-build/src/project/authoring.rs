@@ -13,7 +13,7 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use super::{AppMetadata, Inventory, RuntimeRequirements, invalid, require_file, valid_id};
+use super::{AppMetadata, Inventory, RuntimeRequirements, children, invalid, require_file, valid_id};
 
 pub(crate) struct Module {
     pub path: PathBuf,
@@ -42,14 +42,6 @@ pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
 fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: usize) -> io::Result<()> {
     if depth > 32 {
         return Err(invalid(directory, "app nesting limit"));
-    }
-    match fs::symlink_metadata(directory) {
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(invalid(directory, "app directories cannot be files or symlinks"));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(invalid(directory, error)),
-        _ => {}
     }
     let scope_path = directory.join("scope.ts");
     let app_path = directory.join("app.ts");
@@ -99,24 +91,14 @@ fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: u
     if directory.join("app.toml").exists() {
         return Ok(());
     }
-    let mut entries = fs::read_dir(directory)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-    for entry in entries {
-        let name = entry.file_name().into_string().map_err(|_| invalid(&entry.path(), "app paths must be UTF-8"))?;
-        if ["node_modules", "_generated", ".chunk", ".gradle", "build", "src", "server"].contains(&name.as_str())
-            || name.starts_with('.')
-        {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            return Err(invalid(&entry.path(), "app symlinks are unsupported"));
-        }
-        if !kind.is_dir() {
-            continue;
-        }
-        let child = if relative.is_empty() { name } else { format!("{relative}/{name}") };
-        collect(&entry.path(), &child, inventory, depth + 1)?;
+    for child in children(directory, "app", |name| {
+        ["node_modules", "_generated", "build", "src", "server"].contains(&name) || name.starts_with('.')
+    })?
+    .into_iter()
+    .filter(|child| child.kind.is_dir())
+    {
+        let relative = if relative.is_empty() { child.name } else { format!("{relative}/{}", child.name) };
+        collect(&child.path, &relative, inventory, depth + 1)?;
     }
     Ok(())
 }

@@ -1,10 +1,8 @@
 use std::{fmt::Write, io, path::Path};
 
-use super::{
-    bundle::{error, quote},
-    sources::Source,
-};
+use super::{error, sources::Source};
 use crate::project::AppMetadata;
+use crate::quote;
 
 struct Descriptor {
     kind: &'static str,

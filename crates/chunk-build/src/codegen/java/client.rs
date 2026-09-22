@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use chunk_contract::FunctionKind;
 
 use super::{Function, Namespace};
@@ -58,4 +60,3 @@ fn methods(function: &Function) -> String {
         }
     }
 }
-use std::fmt::Write;

@@ -28,5 +28,10 @@ struct BackendMetadata {
     contracts: Contracts,
 }
 
+/// A JSON string literal, which is also a valid JavaScript and TypeScript string literal.
+fn quote(value: impl AsRef<str>) -> String {
+    serde_json::to_string(value.as_ref()).expect("string serialization")
+}
+
 #[cfg(test)]
 mod tests;

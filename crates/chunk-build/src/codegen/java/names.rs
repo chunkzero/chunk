@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, io};
 
-const KEYWORDS: &[&str] = &[
+/// Java keywords, then Kotlin hard keywords, since both languages consume generated names.
+const RESERVED: &[&str] = &[
     "abstract",
     "assert",
     "boolean",
@@ -60,6 +61,7 @@ const KEYWORDS: &[&str] = &[
     "yield",
     "var",
     "_",
+    // Kotlin
     "as",
     "fun",
     "in",
@@ -123,12 +125,12 @@ pub(super) fn valid_package(package: &str) -> bool {
         && package.split('.').all(|part| {
             part.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
                 && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                && !KEYWORDS.contains(&part)
+                && !RESERVED.contains(&part)
         })
 }
 
 pub(super) fn field_name(name: &str) -> String {
-    if KEYWORDS.contains(&name) || SUPPORT_NAMES.contains(&name) || OBJECT_METHODS.contains(&name) {
+    if RESERVED.contains(&name) || SUPPORT_NAMES.contains(&name) || OBJECT_METHODS.contains(&name) {
         format!("{name}_")
     } else {
         name.into()

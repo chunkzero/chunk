@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use chunk_contract::DomainScope;
@@ -210,7 +210,7 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
     Ok(())
 }
 
-fn app_manifest_path(root: &Path, app: &AppMetadata) -> std::path::PathBuf {
+fn app_manifest_path(root: &Path, app: &AppMetadata) -> PathBuf {
     let directory = root.join(&app.directory);
     if directory.join("app.ts").exists() { directory.join("app.ts") } else { directory.join("app.toml") }
 }
@@ -268,6 +268,45 @@ fn read_manifest<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
     let bytes = super::read_limited(path, 65_536).map_err(|error| invalid(path, error))?;
     let source = std::str::from_utf8(&bytes).map_err(|error| invalid(path, error))?;
     toml::from_str(source).map_err(|error| invalid(path, error))
+}
+
+/// Tool-owned directory names that never hold authored sources.
+pub(crate) const GENERATED: [&str; 3] = ["node_modules", "_generated", ".chunk"];
+
+pub(crate) struct Child {
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: fs::FileType,
+}
+
+/// Name-sorted children of a real directory, without skipped names; a missing directory has none.
+/// `what` names the inputs in errors. Symlinks are rejected rather than followed.
+pub(crate) fn children(directory: &Path, what: &str, skip: impl Fn(&str) -> bool) -> io::Result<Vec<Child>> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(invalid(directory, format!("{what} directories cannot be files or symlinks")));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(invalid(directory, error)),
+        _ => {}
+    }
+    let mut entries = fs::read_dir(directory)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    let mut children = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        let name =
+            entry.file_name().into_string().map_err(|_| invalid(&path, format!("{what} paths must be UTF-8")))?;
+        if skip(&name) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(invalid(&path, format!("{what} symlinks are unsupported")));
+        }
+        children.push(Child { name, path, kind });
+    }
+    Ok(children)
 }
 
 fn invalid(path: &Path, error: impl std::fmt::Display) -> io::Error {

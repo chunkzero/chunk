@@ -93,3 +93,5 @@ fn compilation_rejects_ambiguous_and_misplaced_hook_descriptors() {
     let error = compile(root, &output).unwrap_err().to_string();
     assert!(error.contains("server/domains/**/hooks.ts"), "{error}");
 }
+
+mod commands;
