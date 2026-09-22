@@ -33,8 +33,9 @@ CHUNK_BACKEND_FILE=.chunk/local/backend.json CHUNK_CONTROL_FILE=.chunk/local/con
 ```
 
 The edge requires backend/control discovery records. Library callers can omit `Config::platform` to use the
-waiting-world fixture. The listener supports Java Edition 26.2 (protocol 776), with online authentication through
-Mojang.
+waiting-world fixture, or replace the platform for later connections with `Proxy::retarget`; established connections
+keep the platform they started with. The listener supports Java Edition 26.2 (protocol 776), with online
+authentication through Mojang.
 
 `mc-26-2` is enabled by default and forwarded from the edge to the proxy and protocol. Select it explicitly with
 `cargo run -p chunk-edge --no-default-features --features mc-26-2`.

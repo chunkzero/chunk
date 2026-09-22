@@ -118,8 +118,8 @@ builders. It uses the current transactional runtime; external I/O and admission/
 capabilities.
 
 `chunk build` and `chunk dev` generate the SDK before type-checking and building the complete app release. Dev runs that
-release; it does not watch sources or restart automatically. Rerun dev after runtime changes. Rerun `chunk codegen` to
-repair missing or stale SDK files. Unchanged generated files are not rewritten.
+release and rebuilds it when sources change. Rerun `chunk codegen` to repair missing or stale SDK files. Unchanged
+generated files are not rewritten.
 
 Function arguments accept either a field map or a reusable object validator. Object validators can also be nested or
 used as results:

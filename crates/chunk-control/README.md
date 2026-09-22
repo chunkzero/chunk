@@ -15,7 +15,8 @@ requirements, and JAR hashes. Control verifies the selected artifact and sends t
 the JVM resolves factories locally and enforces the supplied capacity. Future container/machine providers implement the
 same `Host` boundary.
 
-The private `.chunk/local/control.json` connection file authorizes gRPC calls. `Claim` accepts authenticated identity, proxy
+The private `.chunk/local/control.json` connection file authorizes gRPC calls; under `chunk dev` it names the control of
+the current deployment version. `Claim` accepts authenticated identity, proxy
 incarnation, connection identity and a session demand key/type/profile. It reserves capacity, starts an app JVM if
 needed, waits for session readiness, and returns configuration plus a single-use TCP capability. The proxy records
 admission intent with `Activate` and opens the native Minecraft connection using the capability. `Inspect` reconciles
