@@ -81,27 +81,34 @@ publication output; it does not require rebuilding the framework. The
 
 ## Configure publishing once
 
-1. Enable R2 in the Cloudflare dashboard and create a dedicated bucket, such as `chunk-maven`.
-2. Connect the bucket's custom domain to `maven.chunkzero.com` in the `chunkzero.com` zone. The public domain serves the
-   bucket root as the Maven repository. No Worker or registry server is required.
-3. Create an R2 S3 access key restricted to object read/write on that bucket.
-4. Create the GitHub environment `sdk-release`, restrict it to `main`, and configure its release reviewer. Add
-   environment variables `CLOUDFLARE_ACCOUNT_ID` and `R2_MAVEN_BUCKET`, plus secrets `R2_ACCESS_KEY_ID` and
-   `R2_SECRET_ACCESS_KEY`.
+1. Use the hosted service at `https://maven.chunkzero.com`, managed by
+   [maven-r2-deployment](https://github.com/chunkzero/maven-r2-deployment). Its Worker serves Maven downloads; the
+   backing R2 bucket stays private.
+2. Ensure `default/releases` is public and mapped to the origin root so SDK consumers need no credentials.
+3. In the Maven R2 console, create a publishing token restricted to `default/releases`, the `dev/chunkzero/` artifact
+   prefix, and the publishing operations it needs.
+4. Create the GitHub environment `sdk-release`, restrict it to `main`, and configure its release reviewer. Add the
+   environment secret `MAVEN_R2_TOKEN`. No Cloudflare account variables or R2 S3 credentials are needed by this
+   workflow.
 
-Wrangler's local OAuth login does not provide credentials to GitHub Actions. The workflow uses the runner's AWS CLI to
-upload through R2's S3 API. See Cloudflare's
-[custom domain](https://developers.cloudflare.com/r2/buckets/public-buckets/) and
-[S3 credentials](https://developers.cloudflare.com/r2/api/tokens/) instructions.
+The workflow installs Maven R2 CLI `v0.1.0` with its setup action. Keep the CLI version compatible with the deployed
+service; see the [Maven R2 publishing guide](https://github.com/chunkzero/maven-r2#publishing).
 
 ## Publish a version
 
 Update the Cargo workspace version and Gradle catalog together and merge the release changes. Run `SDK distribution`
 from `main` with `publish` enabled when ready to make the SDK public. The workflow verifies the package, prepares a
-draft GitHub release, uploads the versioned Maven files, checks the public Maven endpoint, and then publishes the CLI
-release. It uses the exact archive that passed consumer verification.
+draft GitHub release, stages the versioned Maven files through the Maven R2 CLI, checks the public Maven endpoint, and
+then publishes the CLI release. It uses the exact archive and Maven files that passed consumer verification without
+rebuilding them during publication.
 
-Maven uploads compare SHA-256 metadata before writing and use conditional creation to prevent overwriting existing
-objects. Identical files are skipped on retry; different bytes at an existing version fail. Publication failures leave
-the GitHub release in draft. Re-run the failed publishing job with the same workflow artifact to finish a partial
-upload; do not rebuild or reuse a published version for different artifacts. The workflow never deletes Maven objects.
+The CLI supplies a loopback proxy and temporary credentials to `scripts/publish-maven.py`, validates checksums, and
+commits the publication only after every upload succeeds. Failed upload commands abort the session. The service makes
+the complete publication visible together and enforces immutable releases: identical retries are accepted, but different
+bytes at an existing version fail. Publication failures leave the GitHub release in draft.
+
+Re-run the failed publishing job with the same workflow artifact; do not rebuild or reuse a published version for
+different artifacts. If finalization fails transiently, the CLI leaves the session open and prints its ID. With the same
+server and publishing credentials configured, inspect or finish it with `maven-r2 session status SESSION_ID` or
+`maven-r2 session commit SESSION_ID`; use `maven-r2 session abort SESSION_ID` to discard it. Sessions expire after 24
+hours. The workflow never deletes published Maven artifacts.

@@ -134,21 +134,17 @@ jobs:
         with:
           name: chunk-sdk-linux-x64
           path: artifact
+      - uses: chunkzero/maven-r2@v1
+        with:
+          version: v0.1.0
       - name: Prepare draft release and publish matching Maven artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           SDK_VERSION: ${{ needs.package.outputs.version }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          R2_MAVEN_BUCKET: ${{ vars.R2_MAVEN_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          MAVEN_R2_SERVER: https://maven.chunkzero.com
+          MAVEN_R2_TOKEN: ${{ secrets.MAVEN_R2_TOKEN }}
         run: |
-          : "${CLOUDFLARE_ACCOUNT_ID:?Set the Cloudflare account variable}"
-          : "${R2_MAVEN_BUCKET:?Set the Maven bucket variable}"
-          : "${AWS_ACCESS_KEY_ID:?Set the R2 access key secret}"
-          : "${AWS_SECRET_ACCESS_KEY:?Set the R2 secret access key}"
+          : "${MAVEN_R2_TOKEN:?Set the Maven R2 publishing token secret}"
           name="chunk-$SDK_VERSION-linux-x64"
           archive="artifact/dist/$name.tar.gz"
           (cd artifact/dist && sha256sum --check "$name.tar.gz.sha256")
@@ -166,7 +162,8 @@ jobs:
             gh release create "v$SDK_VERSION" --draft --target "$GITHUB_SHA" --title "Chunk $SDK_VERSION" --generate-notes
           fi
           gh release upload "v$SDK_VERSION" "$archive" "$archive.sha256" artifact/scripts/install.sh --clobber
-          python3 scripts/publish-maven.py artifact/dist/maven "$SDK_VERSION"
+          maven-r2 publish --repository default/releases -- \
+            python3 scripts/publish-maven.py artifact/dist/maven "$SDK_VERSION"
           curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
             "https://maven.chunkzero.com/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
             -o published.pom

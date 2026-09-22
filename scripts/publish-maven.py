@@ -1,55 +1,54 @@
 #!/usr/bin/env python3
-"""Publish a versioned Maven repository to Cloudflare R2."""
+"""Stage verified Maven artifacts through the Maven R2 CLI's local publication proxy."""
 
 import argparse
-import hashlib
-import json
+import base64
+from contextlib import closing
+from http.client import HTTPConnection
 import os
 from pathlib import Path
 import re
-import subprocess
+from urllib.parse import urlsplit
 
 
-def digest(path):
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def publish(repository, version, account, bucket):
+def publish(repository, version, url, username, password):
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
         raise ValueError("Invalid SDK version")
-    if not re.fullmatch(r"[a-f0-9]{32}", account):
-        raise ValueError("Invalid Cloudflare account ID")
-    paths = sorted(path for path in repository.rglob("*") if path.is_file())
+    proxy = urlsplit(url)
+    if (proxy.scheme != "http" or proxy.hostname != "127.0.0.1" or not proxy.port
+            or proxy.username or proxy.password or proxy.path or proxy.query or proxy.fragment):
+        raise ValueError("Expected MAVEN_R2_URL from the local Maven R2 publication proxy")
+    if not username or not password:
+        raise ValueError("Missing Maven R2 proxy credentials")
+    paths = []
+    for path in sorted(repository.rglob("*")):
+        key = path.relative_to(repository).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"Symlink in Maven repository: {key}")
+        if path.is_dir():
+            continue
+        if (not path.is_file() or not key.startswith("dev/chunkzero/") or path.parent.name != version
+                or not all(re.fullmatch(r"[A-Za-z0-9_+.-]+", part) for part in path.relative_to(repository).parts)):
+            raise ValueError(f"Expected an immutable versioned Chunk artifact: {key}")
+        paths.append((path, key))
     if not paths:
         raise ValueError("Repository contains no Maven artifacts")
-    command = ["aws", "s3api", "--endpoint-url", f"https://{account}.r2.cloudflarestorage.com",
-               "--region", "auto", "--no-cli-pager"]
-    pending = []
-    for path in paths:
-        key = path.relative_to(repository).as_posix()
-        if not key.startswith("dev/chunkzero/") or path.parent.name != version or path.is_symlink():
-            raise ValueError(f"Expected an immutable versioned Chunk artifact: {key}")
-        checksum = digest(path)
-        result = subprocess.run(command + ["head-object", "--bucket", bucket, "--key", key],
-                                capture_output=True, text=True, check=False)
-        if result.returncode == 0:
-            if json.loads(result.stdout).get("Metadata", {}).get("sha256") != checksum:
-                raise ValueError(f"Refusing to replace published artifact: {key}")
-        elif "(404)" in result.stderr or "(NotFound)" in result.stderr:
-            pending.append((path, key, checksum))
-        else:
-            raise RuntimeError(result.stderr.strip())
-    for path, key, checksum in pending:
+    authorization = base64.b64encode(f"{username}:{password}".encode()).decode()
+    for path, key in paths:
         content_type = {".pom": "application/xml", ".module": "application/json",
                         ".jar": "application/java-archive"}.get(path.suffix, "text/plain")
-        subprocess.run(command + [
-            "put-object", "--bucket", bucket, "--key", key, "--body", str(path),
-            "--metadata", f"sha256={checksum}", "--if-none-match", "*",
-            "--content-type", content_type, "--cache-control", "public, max-age=31536000, immutable",
-        ], check=True, stdout=subprocess.DEVNULL)
-        print(f"Published {key}", flush=True)
-    print(f"Maven SDK {version}: {len(pending)} uploaded, {len(paths) - len(pending)} already present", flush=True)
+        with closing(HTTPConnection(proxy.hostname, proxy.port, timeout=300)) as connection:
+            with path.open("rb") as source:
+                connection.request("PUT", f"/{key}", body=source, headers={
+                    "Authorization": f"Basic {authorization}",
+                    "Content-Length": str(path.stat().st_size),
+                    "Content-Type": content_type,
+                })
+                response = connection.getresponse()
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(f"Maven R2 rejected {key}: HTTP {response.status}")
+        print(f"Staged {key}", flush=True)
+    print(f"Maven SDK {version}: {len(paths)} files staged; the Maven R2 CLI commits the session", flush=True)
 
 
 def main():
@@ -58,7 +57,7 @@ def main():
     parser.add_argument("version")
     args = parser.parse_args()
     publish(args.repository.resolve(strict=True), args.version,
-            os.environ["CLOUDFLARE_ACCOUNT_ID"], os.environ["R2_MAVEN_BUCKET"])
+            os.environ["MAVEN_R2_URL"], os.environ["MAVEN_R2_USERNAME"], os.environ["MAVEN_R2_PASSWORD"])
 
 
 if __name__ == "__main__":
