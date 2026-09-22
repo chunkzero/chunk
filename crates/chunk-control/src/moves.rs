@@ -21,15 +21,9 @@ impl Control {
         }
         self.update(|state| {
             if let Some(expected) = &request.expected_source {
-                let claim =
-                    state.claims.get(&expected.operation_id).ok_or(Error::Invalid("unknown captured move source"))?;
-                let original = ClaimRequest::decode(claim.request.as_slice())?;
-                if claim.identity(&expected.operation_id) != *expected
-                    || claim.player != request.player_id
-                    || claim.phase != Phase::Arrived
-                    || state.players.get(&claim.player).and_then(|owner| owner.current.as_ref())
-                        != Some(&expected.operation_id)
-                    || original.connection_id != request.expected_connection_id
+                let claim = state.arrived_claim(expected).ok_or(Error::Invalid("stale captured move source"))?;
+                if claim.player != request.player_id
+                    || ClaimRequest::decode(claim.request.as_slice())?.connection_id != request.expected_connection_id
                 {
                     return Err(Error::Invalid("stale captured move source"));
                 }

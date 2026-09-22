@@ -19,15 +19,12 @@ impl Control {
     /// Rejects stale membership, delivery generation, or ownership. A destination key grants no authority.
     pub fn finish_destination(&self, identity: &ClaimIdentity) -> Result<()> {
         self.update(|state| {
-            let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown finish claim"))?;
-            if claim.identity(&identity.operation_id) != *identity
-                || claim.phase != Phase::Arrived
-                || state.players.get(&claim.player).and_then(|owner| owner.current.as_ref())
-                    != Some(&identity.operation_id)
-            {
-                return Err(Error::Invalid("stale destination finish authority"));
-            }
-            let session = state.sessions.get_mut(&claim.session).ok_or(Error::Invalid("missing finish session"))?;
+            let session = state
+                .arrived_claim(identity)
+                .ok_or(Error::Invalid("stale destination finish authority"))?
+                .session
+                .clone();
+            let session = state.sessions.get_mut(&session).ok_or(Error::Invalid("missing finish session"))?;
             session.retired = true;
             session.finish_requested = true;
             Ok(())
@@ -166,11 +163,7 @@ impl Control {
 
     fn validate_session_runtime(&self, state: &State, host: &str, runtime: &RuntimeConnection) -> Result<()> {
         let expected = state.hosts.get(host).ok_or(Error::Invalid("missing host"))?;
-        if runtime.identity.deployment.as_ref() != Some(&self.config.deployment)
-            || runtime.identity.machine_profile != expected.profile
-            || runtime.identity.app_id != expected.app
-            || runtime.identity.artifact_digest != self.config.apps[&expected.app].sha256
-        {
+        if !self.runs_host(runtime, expected) {
             return Err(Error::Invalid("session cleanup runtime mismatch"));
         }
         Ok(())

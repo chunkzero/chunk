@@ -3,8 +3,33 @@ use prost::Message;
 
 use crate::{
     Control, Error, Result,
-    state::{Drain, Phase},
+    state::{Drain, Phase, State},
 };
+
+/// Records a drain once per operation, retiring the resolved host and its sessions until the deadline.
+pub(crate) fn retire_host(
+    state: &mut State,
+    operation: String,
+    request: Vec<u8>,
+    timeout_seconds: u32,
+    host: impl FnOnce(&State) -> Result<String>,
+) -> Result<()> {
+    if let Some(drain) = state.drains.get(&operation) {
+        return if drain.request == request { Ok(()) } else { Err(Error::Invalid("drain changed")) };
+    }
+    if state.drains.len() >= 256 {
+        return Err(Error::Capacity);
+    }
+    let host = host(state)?;
+    state.hosts.get_mut(&host).ok_or(Error::Invalid("unknown host"))?.retired = true;
+    for session in state.sessions.values_mut().filter(|s| s.host == host) {
+        session.retired = true;
+    }
+    state
+        .drains
+        .insert(operation, Drain { request, host, deadline_ms: crate::now_ms() + u64::from(timeout_seconds) * 1000 });
+    Ok(())
+}
 
 impl Control {
     /// Retires a runtime's capacity before queuing moves, retaining a durable shutdown deadline.
@@ -18,37 +43,24 @@ impl Control {
             return Err(Error::Invalid("invalid drain request"));
         }
         self.update(|state| {
-            if let Some(drain) = state.drains.get(&request.operation_id) {
-                if drain.request != request.encode_to_vec() {
-                    return Err(Error::Invalid("drain changed"));
-                }
-                return Ok(());
-            }
-            if state.drains.len() >= 256 {
-                return Err(Error::Capacity);
-            }
-            let owner = state
-                .players
-                .get(&request.player_id)
-                .and_then(|p| p.current.as_ref())
-                .ok_or(Error::Invalid("player has no current runtime"))?;
-            let host = state.sessions[&state.claims[owner].session].host.clone();
-            if state.hosts[&host].retired {
-                return Err(Error::Invalid("runtime already retired"));
-            }
-            state.hosts.get_mut(&host).ok_or(Error::Invalid("missing host"))?.retired = true;
-            for session in state.sessions.values_mut().filter(|s| s.host == host) {
-                session.retired = true;
-            }
-            state.drains.insert(
+            retire_host(
+                state,
                 request.operation_id.clone(),
-                Drain {
-                    request: request.encode_to_vec(),
-                    host,
-                    deadline_ms: crate::now_ms() + u64::from(request.timeout_seconds) * 1000,
+                request.encode_to_vec(),
+                request.timeout_seconds,
+                |state| {
+                    let owner = state
+                        .players
+                        .get(&request.player_id)
+                        .and_then(|p| p.current.as_ref())
+                        .ok_or(Error::Invalid("player has no current runtime"))?;
+                    let host = &state.sessions[&state.claims[owner].session].host;
+                    if state.hosts[host].retired {
+                        return Err(Error::Invalid("runtime already retired"));
+                    }
+                    Ok(host.clone())
                 },
-            );
-            Ok(())
+            )
         })?;
         let state = self.state()?;
         let drain = &state.drains[&request.operation_id];

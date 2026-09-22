@@ -150,14 +150,19 @@ impl Control {
     pub(crate) async fn runtime(&self, state: &State, id: &str) -> Result<RuntimeConnection> {
         let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
         let runtime = self.host.ensure(id, &host.app, &host.profile).await?;
-        if runtime.identity.deployment.as_ref() != Some(&self.config.deployment)
-            || runtime.identity.machine_profile != host.profile
-            || runtime.identity.artifact_digest != self.config.apps[&host.app].sha256
-            || runtime.identity.app_id != host.app
-        {
+        if !self.runs_host(&runtime, host) {
             return Err(Error::Invalid("host returned incompatible runtime"));
         }
         Ok(runtime)
+    }
+
+    /// Whether `runtime` runs this deployment's current artifact for `host`'s app and profile.
+    pub(crate) fn runs_host(&self, runtime: &RuntimeConnection, host: &HostState) -> bool {
+        let identity = &runtime.identity;
+        identity.deployment.as_ref() == Some(&self.config.deployment)
+            && identity.app_id == host.app
+            && identity.machine_profile == host.profile
+            && self.config.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
     }
 }
 

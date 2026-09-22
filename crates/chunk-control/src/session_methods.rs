@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Control, Error, Result, RuntimeConnection,
     placement::{auth, channel},
-    state::Phase,
 };
 
 const MAX_JSON: usize = 48 * 1024;
@@ -67,13 +66,7 @@ impl Control {
     /// Rejects stale membership, departure and an unavailable process.
     pub fn capture_session(&self, identity: &ClaimIdentity) -> Result<CapturedSession> {
         let state = self.state()?;
-        let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown method caller"))?;
-        if claim.identity(&identity.operation_id) != *identity
-            || claim.phase != Phase::Arrived
-            || state.players.get(&claim.player).and_then(|owner| owner.current.as_ref()) != Some(&identity.operation_id)
-        {
-            return Err(Error::Invalid("stale method caller"));
-        }
+        let claim = state.arrived_claim(identity).ok_or(Error::Invalid("stale method caller"))?;
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing method session"))?;
         if session.retired {
             return Err(Error::Invalid("method session retired"));
@@ -85,12 +78,9 @@ impl Control {
         let runtime = self.host.connection(&session.host).ok_or(Error::Unresolved("method process unavailable"))?;
         let assignment = Assignment::decode(claim.assignment.as_deref().ok_or(Error::Invalid("missing assignment"))?)?;
         let delivery = assignment.delivery.ok_or(Error::Invalid("missing delivered identity"))?;
-        if runtime.identity.deployment.as_ref() != Some(&self.config.deployment)
+        if !self.runs_host(&runtime, host)
             || runtime.identity.runtime_id != delivery.runtime_id
             || runtime.identity.generation != delivery.process_generation
-            || runtime.identity.machine_profile != host.profile
-            || runtime.identity.app_id != host.app
-            || self.config.apps.get(&host.app).is_none_or(|app| app.sha256 != runtime.identity.artifact_digest)
             || self
                 .config
                 .session_types
