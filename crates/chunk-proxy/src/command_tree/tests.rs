@@ -95,8 +95,6 @@ fn suggestions_preserve_utf16_ranges_and_apply_one_filter_to_static_and_query_va
         Some(CommandSuggestions::Query(SuggestionQuery { query: "places".into() }));
     let dynamic = super::tests::catalog(command).suggestions(input, cursor, |_, _| true).unwrap().unwrap();
     assert_eq!(dynamic.query.as_deref(), Some("places"));
-    assert_eq!(dynamic.input, input);
-    assert_eq!(dynamic.cursor, cursor);
     assert_eq!(dynamic.finish(4, &["Another world".into(), "Beta".into()]).unwrap(), response);
     assert!(dynamic.finish(4, &vec!["value".into(); 65]).is_err());
     assert!(dynamic.finish(4, &["bad\nvalue".into()]).is_err());

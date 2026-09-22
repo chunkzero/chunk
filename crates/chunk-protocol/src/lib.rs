@@ -55,7 +55,7 @@ mod frame;
 pub mod versions;
 
 pub use chunk_protocol_derive::{Decode, Encode, Packet};
-pub use codec::{Decode, Encode, McString, Uuid, VarInt};
+pub use codec::{Decode, Encode, McString, Uuid, VarInt, modified_utf8};
 pub use collections::{BoundedArray, ByteArray, RemainingBytes};
 pub use frame::{MAX_FRAME_SIZE, decode_frame, decode_packet, encode_packet};
 

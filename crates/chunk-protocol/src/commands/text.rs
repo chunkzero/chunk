@@ -18,20 +18,7 @@ impl PlainText {
 impl Encode for PlainText {
     fn encode(&self, output: &mut Vec<u8>) -> Result<()> {
         output.extend_from_slice(&[10, 8, 0, 4, b't', b'e', b'x', b't']);
-        let mut bytes = Vec::new();
-        // NBT uses Java modified UTF-8: NUL is two bytes, supplementary characters use surrogate pairs.
-        for unit in self.0.as_str().encode_utf16() {
-            if unit != 0 && unit <= 0x7f {
-                bytes.push(u8::try_from(unit).map_err(|_| Error::InvalidUtf8)?);
-            } else if unit <= 0x7ff {
-                bytes.push(0xc0 | u8::try_from(unit >> 6).map_err(|_| Error::InvalidUtf8)?);
-                bytes.push(0x80 | u8::try_from(unit & 0x3f).map_err(|_| Error::InvalidUtf8)?);
-            } else {
-                bytes.push(0xe0 | u8::try_from(unit >> 12).map_err(|_| Error::InvalidUtf8)?);
-                bytes.push(0x80 | u8::try_from((unit >> 6) & 0x3f).map_err(|_| Error::InvalidUtf8)?);
-                bytes.push(0x80 | u8::try_from(unit & 0x3f).map_err(|_| Error::InvalidUtf8)?);
-            }
-        }
+        let bytes = crate::modified_utf8(self.0.as_str());
         u16::try_from(bytes.len()).map_err(|_| Error::StringTooLong)?.encode(output)?;
         output.extend_from_slice(&bytes);
         output.push(0);

@@ -1,7 +1,4 @@
-use super::super::super::{
-    platform::{Platform, request},
-    transport::invalid_data,
-};
+use crate::server::{platform::Platform, transport::invalid_data};
 use chunk_contract::Command;
 use chunk_proto::v1::{CommandScope, backend_commands_client::BackendCommandsClient};
 use std::{
@@ -14,12 +11,13 @@ pub(super) fn client(platform: &Platform) -> BackendCommandsClient<Channel> {
     platform.commands.clone()
 }
 pub(super) fn authenticated<T>(platform: &Platform, body: T) -> io::Result<Request<T>> {
-    let backend = &platform.target.backend;
-    let token = backend.platform_token.as_ref().ok_or_else(|| invalid_data("commands require platform authority"))?;
-    let mut request = request(body, token)?;
-    request.metadata_mut().insert("x-chunk-environment", backend.environment.parse().map_err(invalid_data)?);
-    request.metadata_mut().insert("x-chunk-deployment", backend.deployment.parse().map_err(invalid_data)?);
-    Ok(request)
+    let token = platform
+        .target
+        .backend
+        .platform_token
+        .as_ref()
+        .ok_or_else(|| invalid_data("commands require platform authority"))?;
+    platform.backend_request(body, token)
 }
 pub(super) async fn catalog(
     platform: &Platform,

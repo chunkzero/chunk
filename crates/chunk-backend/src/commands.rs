@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use chunk_contract::{Deployment, Schema};
+use chunk_contract::Schema;
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::v1::CommandScope;
 use tokio::sync::mpsc;
 
-use crate::{Call, Result, service::Request};
+use crate::{Call, service::Request};
 
-mod effects;
+pub(crate) mod effects;
 mod transport;
 pub use transport::CommandService;
 
@@ -64,14 +64,6 @@ impl Prepared {
             caller: serde_json::Value::Null.into(),
         }
     }
-}
-
-pub(crate) fn validate_effect(
-    deployment: &Deployment,
-    binding: &CommandBinding,
-    request: &Json,
-) -> Result<(Json, Schema, bool)> {
-    effects::validate(deployment, &binding.scope, request)
 }
 
 #[cfg(test)]

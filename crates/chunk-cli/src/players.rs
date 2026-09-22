@@ -5,7 +5,7 @@ use tonic::{Request, transport::Channel};
 
 #[derive(clap::Args)]
 pub(crate) struct Options {
-    #[arg(long, default_value = ".chunk/control.json")]
+    #[arg(long, default_value = ".chunk/local/control.json")]
     control_file: PathBuf,
     #[arg(long)]
     player: uuid::Uuid,

@@ -12,7 +12,7 @@ use tokio::{
 use super::{
     authentication::Authenticated,
     configuration, gameplay,
-    platform::{Lifecycle, Platform, request},
+    platform::{Lifecycle, Platform},
     transport::{Transport, invalid_data},
 };
 
@@ -33,7 +33,7 @@ impl Drop for ClaimGuard {
         let claim = self.claim.clone();
         self.platform.cleanup.spawn(async move {
             for attempt in 0..2 {
-                let Ok(message) = request(claim.clone(), &platform.target.control.token) else {
+                let Ok(message) = platform.control_request(claim.clone()) else {
                     return;
                 };
                 match platform.control.clone().cancel(message).await {
@@ -62,7 +62,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         claim.demand = Some(platform.route_claim(&claim).await?);
         // Construct before sending: cancellation must cover a claim whose reply was lost.
         let guard = ClaimGuard { platform: platform.clone(), claim, armed: true };
-        let mut message = request(guard.claim.clone(), &platform.target.control.token)?;
+        let mut message = platform.control_request(guard.claim.clone())?;
         message.set_timeout(WAIT_TIMEOUT);
         let assignment = platform.control.clone().claim(message).await.map_err(claim_error)?.into_inner();
         validate(&assignment, &guard)?;
@@ -155,7 +155,7 @@ async fn open<S>(
         .platform
         .control
         .clone()
-        .activate(request(ActivateClaim { claim: assignment.claim.clone() }, &guard.platform.target.control.token)?)
+        .activate(guard.platform.control_request(ActivateClaim { claim: assignment.claim.clone() })?)
         .await
         .map_err(io::Error::other)?;
     let preparation = assignment.preparation.clone().ok_or_else(|| invalid_data("missing preparation"))?;
@@ -169,12 +169,8 @@ async fn next_move(
 ) -> io::Result<(ClaimGuard, Assignment)> {
     loop {
         sleep(Duration::from_millis(500)).await;
-        let polled = source
-            .platform
-            .control
-            .clone()
-            .poll_move(request(source.claim.clone(), &source.platform.target.control.token)?)
-            .await;
+        let polled =
+            source.platform.control.clone().poll_move(source.platform.control_request(source.claim.clone())?).await;
         let Ok(response) = polled else {
             continue;
         };
@@ -192,7 +188,7 @@ async fn next_move(
         let prepare = async {
             guard.platform.approve_move(&source.claim, &guard.claim).await?;
             check_move(source, &guard.claim).await?;
-            let mut message = request(guard.claim.clone(), &guard.platform.target.control.token)?;
+            let mut message = guard.platform.control_request(guard.claim.clone())?;
             message.set_timeout(WAIT_TIMEOUT);
             let assignment =
                 guard.platform.control.clone().claim(message).await.map_err(io::Error::other)?.into_inner();
@@ -216,7 +212,7 @@ async fn check_move(source: &ClaimGuard, destination: &ClaimRequest) -> io::Resu
         .platform
         .control
         .clone()
-        .poll_move(request(source.claim.clone(), &source.platform.target.control.token)?)
+        .poll_move(source.platform.control_request(source.claim.clone())?)
         .await
         .map_err(io::Error::other)?
         .into_inner();
@@ -229,12 +225,8 @@ async fn check_move(source: &ClaimGuard, destination: &ClaimRequest) -> io::Resu
 async fn withdraw(source: &ClaimGuard, identity: &ClaimIdentity) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        let result = source
-            .platform
-            .control
-            .clone()
-            .cancel(request(source.claim.clone(), &source.platform.target.control.token)?)
-            .await;
+        let result =
+            source.platform.control.clone().cancel(source.platform.control_request(source.claim.clone())?).await;
         match result {
             Ok(response) if response.get_ref() == identity => return Ok(()),
             Ok(_) => return Err(invalid_data("withdrawal identity mismatch")),
@@ -273,7 +265,10 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || claim.proxy_id != guard.claim.proxy_id
         || claim.membership_generation == 0
         || claim.delivery_generation == 0
-        || delivery.operation_id != claim.operation_id
+    {
+        return Err(invalid_data("control assignment claim mismatch"));
+    }
+    if delivery.operation_id != claim.operation_id
         || delivery.proxy_id != claim.proxy_id
         || delivery.connection_id != guard.claim.connection_id
         || delivery.identity.as_ref().is_some_and(|identity| Some(identity) != guard.claim.identity.as_ref())
@@ -283,7 +278,10 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || delivery.session.as_ref().is_none_or(|session| session.id.is_empty())
         || delivery.player.as_ref().map(|player| &player.id)
             != guard.claim.identity.as_ref().map(|identity| &identity.uuid)
-        || config.deployment.as_ref() != Some(&deployment)
+    {
+        return Err(invalid_data("control assignment delivery mismatch"));
+    }
+    if config.deployment.as_ref() != Some(&deployment)
         || delivery.deployment != config.deployment
         || delivery.process_generation != config.process_generation
         || delivery.runtime_id != config.runtime_id
@@ -291,7 +289,7 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || config.runtime_id.is_empty()
         || config.process_generation == 0
     {
-        return Err(invalid_data("control assignment identity mismatch"));
+        return Err(invalid_data("control assignment runtime mismatch"));
     }
     let prepared = assignment.preparation.as_ref().ok_or_else(|| invalid_data("missing preparation"))?;
     let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
@@ -312,9 +310,9 @@ async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
     while Instant::now() < deadline {
         let mut client = guard.platform.control.clone();
         let result = if activated {
-            client.inspect(request(guard.claim.clone(), &guard.platform.target.control.token)?).await
+            client.inspect(guard.platform.control_request(guard.claim.clone())?).await
         } else {
-            client.activate(request(activation.clone(), &guard.platform.target.control.token)?).await
+            client.activate(guard.platform.control_request(activation.clone())?).await
         };
         match result {
             Ok(response) => {

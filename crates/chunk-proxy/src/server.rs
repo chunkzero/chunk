@@ -31,16 +31,7 @@ struct Responses {
 
 impl Responses {
     fn new(config: &Config) -> io::Result<Self> {
-        let version = SUPPORTED.last().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no Minecraft version enabled; enable a version feature")
-        })?;
-        let json = serde_json::json!({
-            "version": { "name": version.name, "protocol": version.protocol },
-            "players": { "max": 0, "online": 0 },
-            "description": { "text": config.motd },
-        });
-        let status = encode_packet(&StatusResponse { json: McString::new(json.to_string()).map_err(invalid_config)? })
-            .map_err(invalid_config)?;
+        let status = status_packet(&config.motd, 0, 0)?;
         let supported_names = SUPPORTED.iter().map(|version| version.name).collect::<Vec<_>>().join(", ");
         let unsupported_version = encode_packet(&LoginDisconnect {
             reason: McString::new(
@@ -54,6 +45,20 @@ impl Responses {
         .map_err(invalid_config)?;
         Ok(Self { status, unsupported_version })
     }
+}
+
+/// A status response advertising the newest supported version.
+fn status_packet(motd: &str, online: u32, max: u32) -> io::Result<Vec<u8>> {
+    let version = SUPPORTED.last().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "no Minecraft version enabled; enable a version feature")
+    })?;
+    let json = serde_json::json!({
+        "version": { "name": version.name, "protocol": version.protocol },
+        "players": { "max": max, "online": online },
+        "description": { "text": motd },
+    });
+    encode_packet(&StatusResponse { json: McString::new(json.to_string()).map_err(invalid_config)? })
+        .map_err(invalid_config)
 }
 
 fn invalid_config(error: chunk_protocol::Error) -> io::Error {

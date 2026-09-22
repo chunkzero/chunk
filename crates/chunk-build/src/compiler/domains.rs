@@ -7,11 +7,9 @@ use std::{
 
 use chunk_contract::{DOMAIN_MANIFEST_VERSION, DomainManifest};
 
-use super::{
-    bundle::{error, quote},
-    sources::Source,
-};
+use super::{error, sources::Source};
 use crate::project::Inventory;
+use crate::quote;
 
 struct Descriptors {
     kind: &'static str,
@@ -176,6 +174,3 @@ fn descriptor_scope<'a>(source: &'a Source<'_>, module: &str) -> Option<&'a str>
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod commands_tests;

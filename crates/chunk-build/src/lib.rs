@@ -1,7 +1,5 @@
 //! Backend compilation, generated clients and immutable application releases.
 
-mod program;
-pub use program::pin_program;
 mod codegen;
 pub use codegen::{GenerationTarget, generate};
 mod compiler;
@@ -28,6 +26,11 @@ struct BackendMetadata {
     functions: BTreeMap<String, Function>,
     #[serde(flatten)]
     contracts: Contracts,
+}
+
+/// A JSON string literal, which is also a valid JavaScript and TypeScript string literal.
+fn quote(value: impl AsRef<str>) -> String {
+    serde_json::to_string(value.as_ref()).expect("string serialization")
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
-use super::sources::Source;
+use super::{error, sources::Source};
 use crate::project::Inventory;
+use crate::quote;
 use rolldown::plugin::{
     HookBuildEndArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
     HookResolveIdReturn, HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
@@ -81,12 +82,6 @@ impl Plugin for Boundary {
             Ok(None)
         })())
     }
-}
-pub(super) fn error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
-}
-pub(super) fn quote(value: impl AsRef<str>) -> String {
-    serde_json::to_string(value.as_ref()).expect("string serialization")
 }
 fn options(root: &Path, input: Vec<String>) -> BundlerOptions {
     BundlerOptions {

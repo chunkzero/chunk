@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, io, path::Path};
 
 use chunk_contract::{Deployment, Schema};
 
-use super::BackendMetadata;
+use crate::{BackendMetadata, quote};
 
 mod java;
 mod kotlin;
@@ -55,10 +55,6 @@ fn read_contract(contract: &Path) -> io::Result<BackendMetadata> {
     .validate()
     .map_err(io::Error::other)?;
     Ok(contract)
-}
-
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).expect("string")
 }
 
 fn validate_literals(schema: &Schema) -> io::Result<()> {

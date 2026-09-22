@@ -115,6 +115,18 @@ impl Claim {
     }
 }
 
+impl State {
+    /// The arrived claim `identity` names, if it is still current and owns its player.
+    pub fn arrived_claim(&self, identity: &ClaimIdentity) -> Option<&Claim> {
+        let operation = &identity.operation_id;
+        self.claims.get(operation).filter(|claim| {
+            claim.identity(operation) == *identity
+                && claim.phase == Phase::Arrived
+                && self.players.get(&claim.player).and_then(|owner| owner.current.as_ref()) == Some(operation)
+        })
+    }
+}
+
 pub(crate) struct Authority {
     store: SqliteStore,
 }

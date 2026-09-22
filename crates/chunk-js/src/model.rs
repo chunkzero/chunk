@@ -113,6 +113,7 @@ pub(crate) mod bounds {
     pub const CAPABILITY_CALLS: usize = 4096;
     pub const TABLE_BYTES: usize = 64;
     pub const DOCUMENT_ID_BYTES: usize = 256;
+    pub const INVOCATION_ID_BYTES: usize = 256;
     pub const WRITES: usize = 256;
     pub const WRITE_BYTES: usize = 8 * 1024 * 1024;
     pub const MIN_HEAP_BYTES: usize = 16 * 1024 * 1024;
@@ -200,13 +201,4 @@ pub struct Log {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Json;
-
-    #[test]
-    fn equivalent_json_has_the_same_encoding_regardless_of_object_key_order() {
-        let first = Json::parse(r#"{"z":0,"a":[{"y":2,"x":1}]}"#).unwrap();
-        let second = Json::parse(r#"{"a":[{"x":1,"y":2}],"z":0}"#).unwrap();
-        assert_eq!(first.as_str(), second.as_str());
-    }
-}
+mod tests;

@@ -76,9 +76,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 pub(super) async fn start_configuration<S, I>(
     public: &mut Transport<S>,
     internal: &mut Transport<I>,
@@ -107,13 +104,12 @@ where
     }
 }
 
-fn retain_settings(mut frame: &[u8], settings: &mut ConfigurationClientInformation) -> io::Result<()> {
-    if VarInt::decode(&mut frame).map_err(invalid_data)?.0 == PlayClientInformation::ID {
-        // Both protocol states use the same settings body; only their packet IDs differ.
-        *settings = ConfigurationClientInformation::decode(&mut frame).map_err(invalid_data)?;
-        if !frame.is_empty() {
-            return Err(invalid_data("trailing client information"));
-        }
+fn retain_settings(frame: &[u8], settings: &mut ConfigurationClientInformation) -> io::Result<()> {
+    if configuration::packet_id(frame)? == PlayClientInformation::ID {
+        *settings = configuration::play_settings(frame)?;
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

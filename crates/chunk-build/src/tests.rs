@@ -1,24 +1,6 @@
 use super::*;
 use std::{fs, path::Path};
 
-#[cfg(unix)]
-#[test]
-fn child_executable_remains_runnable_after_the_original_is_replaced() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let original = root.path().join("program");
-    fs::write(&original, "#!/bin/sh\nexit 7\n").unwrap();
-    fs::set_permissions(&original, fs::Permissions::from_mode(0o755)).unwrap();
-    let pinned = pin_program(&original, &root.path().join("platform")).unwrap();
-    fs::rename(&original, root.path().join("old-program")).unwrap();
-    fs::write(&original, "#!/bin/sh\nexit 8\n").unwrap();
-    fs::set_permissions(&original, fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(std::process::Command::new(&pinned).status().unwrap().code(), Some(7));
-    let next = pin_program(&original, &root.path().join("platform")).unwrap();
-    assert_ne!(pinned, next);
-    assert_eq!(std::process::Command::new(next).status().unwrap().code(), Some(8));
-}
-
 #[test]
 fn generated_typescript_references_validate_the_cross_language_fixtures() {
     let output = tempfile::tempdir().unwrap();

@@ -73,7 +73,7 @@ export function helper(){return command('ignored',{handler:()=>{}})}
                 timestamp: 0,
                 seed: 0,
             },
-            Box::new(super::super::Declarations),
+            Box::new(crate::compiler::Declarations),
             &Cancellation::default(),
         )
         .unwrap();

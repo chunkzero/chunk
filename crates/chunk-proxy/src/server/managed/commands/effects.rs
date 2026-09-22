@@ -1,5 +1,5 @@
-use super::super::super::{platform::request, transport::invalid_data};
 use super::{Tasks, scope::Origin, session};
+use crate::server::transport::invalid_data;
 use chunk_contract::Effect;
 use chunk_proto::v1::{CommandEffect, MovePlayerRequest, SessionDemand};
 use chunk_protocol::{
@@ -63,20 +63,17 @@ pub(super) async fn apply(tasks: &Tasks, origin: &Origin, follow: bool, effect: 
                 .platform
                 .control
                 .clone()
-                .move_player(request(
-                    MovePlayerRequest {
-                        operation_id: effect.operation_id.clone(),
-                        player_id: origin.scope.player_uuid.clone(),
-                        demand: Some(SessionDemand {
-                            key: destination.key,
-                            session_type: destination.session_type,
-                            machine_profile: destination.machine_profile,
-                        }),
-                        expected_source: Some(current.identity),
-                        expected_connection_id: current.claim.connection_id,
-                    },
-                    &tasks.platform.target.control.token,
-                )?)
+                .move_player(tasks.platform.control_request(MovePlayerRequest {
+                    operation_id: effect.operation_id.clone(),
+                    player_id: origin.scope.player_uuid.clone(),
+                    demand: Some(SessionDemand {
+                        key: destination.key,
+                        session_type: destination.session_type,
+                        machine_profile: destination.machine_profile,
+                    }),
+                    expected_source: Some(current.identity),
+                    expected_connection_id: current.claim.connection_id,
+                })?)
                 .await
                 .map_err(io::Error::other)?;
         }

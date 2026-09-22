@@ -2,7 +2,7 @@
 
 Implemented listener behavior and development commands. Run commands from the repository root.
 
-With `CHUNK_BACKEND_FILE=.chunk/backend.json` and `CHUNK_CONTROL_FILE=.chunk/control.json`, the proxy runs live backend
+With `CHUNK_BACKEND_FILE=.chunk/local/backend.json` and `CHUNK_CONTROL_FILE=.chunk/local/control.json`, the proxy runs live backend
 status/admission/routing hooks and waits in configuration while control provisions gameplay. Each delivery uses a
 dedicated authenticated TCP path through the runtime to Minestom. Admission and preparation have a 45-second total
 limit; arrival has a 20-second limit while packets continue flowing.

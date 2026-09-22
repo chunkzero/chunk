@@ -71,17 +71,17 @@ pub(crate) fn resolve(deployment: &Deployment, call: &Call) -> Result<(Function,
     let arguments: Value = serde_json::from_str(call.arguments.as_str())?;
     let caller: Value = serde_json::from_str(call.caller.as_str())?;
     if arguments["domain"].as_str() != Some(&hook.domain)
-        || !text(&arguments["eventId"])
+        || !identifier(&arguments["eventId"])
         || caller["kind"] != "proxy"
-        || !text(&caller["proxyId"])
+        || !identifier(&caller["proxyId"])
     {
         return Err(Error::Invalid("invalid trusted hook context"));
     }
     if hook.event == HookEvent::ServerPing {
-        if arguments.get("player").is_some() || !text(&arguments["host"]) {
+        if arguments.get("player").is_some() || !identifier(&arguments["host"]) {
             return Err(Error::Invalid("invalid ping context"));
         }
-    } else if !text(&arguments["player"]["uuid"]) || !text(&arguments["player"]["username"]) {
+    } else if !identifier(&arguments["player"]["uuid"]) || !identifier(&arguments["player"]["username"]) {
         return Err(Error::Invalid("invalid hook player identity"));
     }
     match hook.event {
@@ -130,7 +130,7 @@ pub(crate) fn resolve(deployment: &Deployment, call: &Call) -> Result<(Function,
     ))
 }
 
-fn text(value: &Value) -> bool {
+fn identifier(value: &Value) -> bool {
     value.as_str().is_some_and(|value| !value.is_empty() && value.len() <= 256 && !value.contains('\0'))
 }
 

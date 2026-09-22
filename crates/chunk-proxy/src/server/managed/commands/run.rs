@@ -1,5 +1,5 @@
-use super::super::super::transport::invalid_data;
 use super::{Tasks, backend, effects, scope::Origin};
+use crate::server::transport::invalid_data;
 use chunk_proto::v1::{
     CommandClientFrame, CommandCompletionState, CommandEffectReply, CommandStart, command_client_frame,
     command_server_frame,

@@ -3,8 +3,9 @@ use std::{future::Future, io, time::Duration};
 use chunk_protocol::{
     Decode, Encode, Packet, VarInt, decode_packet,
     versions::v26_2::{
-        AcknowledgeConfiguration, ConfigurationClientInformation, ConfigurationKeepAlive,
-        ConfigurationKeepAliveResponse, ConfigurationPluginResponse, KnownPacks,
+        AcknowledgeConfiguration, ConfigurationClientInformation, ConfigurationClientInformationParticleStatus,
+        ConfigurationKeepAlive, ConfigurationKeepAliveResponse, ConfigurationPluginResponse, KnownPacks,
+        PlayClientInformation, PlayClientInformationParticleStatus,
     },
 };
 use tokio::{
@@ -14,13 +15,76 @@ use tokio::{
 
 use super::{
     authentication::Authenticated,
-    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, within},
+    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, timed_out, within},
 };
 
 pub(super) const FRAME_LIMIT: usize = 65536;
 const CLIENT_INFORMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// At most one outstanding keepalive; the next is due an interval after the last acknowledgment.
+pub(super) struct KeepAlive {
+    next_id: i64,
+    pending: Option<(i64, Instant)>,
+    due: Instant,
+}
+
+impl KeepAlive {
+    pub fn new() -> Self {
+        Self { next_id: 0, pending: None, due: Instant::now() }
+    }
+
+    pub fn idle(&self) -> bool {
+        self.pending.is_none()
+    }
+
+    /// When the next keepalive is due or, while one is outstanding, when it expires.
+    pub fn deadline(&self) -> Instant {
+        self.pending.map_or(self.due, |(_, expires)| expires)
+    }
+
+    /// At the deadline, returns the ID to send next, or `None` when the outstanding keepalive expired.
+    pub fn start(&mut self) -> Option<i64> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending = Some((id, Instant::now() + KEEP_ALIVE_TIMEOUT));
+        Some(id)
+    }
+
+    /// Accepts only the outstanding ID.
+    pub fn acknowledge(&mut self, id: i64) -> bool {
+        if self.pending.is_none_or(|(pending, _)| pending != id) {
+            return false;
+        }
+        self.pending = None;
+        self.due = Instant::now() + KEEP_ALIVE_INTERVAL;
+        true
+    }
+}
+
+/// Decodes play-state client settings as the configuration-state packet a destination expects.
+pub(super) fn play_settings(frame: &[u8]) -> io::Result<ConfigurationClientInformation> {
+    let information = decode_packet::<PlayClientInformation>(frame).map_err(invalid_data)?;
+    Ok(ConfigurationClientInformation {
+        locale: information.locale,
+        view_distance: information.view_distance,
+        chat_flags: information.chat_flags,
+        chat_colors: information.chat_colors,
+        skin_parts: information.skin_parts,
+        main_hand: information.main_hand,
+        enable_text_filtering: information.enable_text_filtering,
+        enable_server_listing: information.enable_server_listing,
+        particle_status: match information.particle_status {
+            PlayClientInformationParticleStatus::All => ConfigurationClientInformationParticleStatus::All,
+            PlayClientInformationParticleStatus::Decreased => ConfigurationClientInformationParticleStatus::Decreased,
+            PlayClientInformationParticleStatus::Minimal => ConfigurationClientInformationParticleStatus::Minimal,
+        },
+    })
+}
 
 /// Keeps the client in configuration until a destination is ready. The caller
 /// receives the authenticated transport and latest client settings, with no
@@ -40,12 +104,10 @@ where
     let information_deadline = started + CLIENT_INFORMATION_TIMEOUT;
     let mut information = None;
     let mut ready = None;
-    let mut next_keep_alive = started;
-    let mut pending_keep_alive = None;
-    let mut next_id = 0_i64;
+    let mut keep_alive = KeepAlive::new();
 
     loop {
-        if pending_keep_alive.is_none()
+        if keep_alive.idle()
             && let Some(settings) = information.take()
         {
             if let Some(destination) = ready.take() {
@@ -53,7 +115,6 @@ where
             }
             information = Some(settings);
         }
-        let heartbeat_deadline = pending_keep_alive.map_or(next_keep_alive, |(_, deadline)| deadline);
         tokio::select! {
             biased;
             () = sleep_until(expires) => {
@@ -71,17 +132,12 @@ where
                     return Err(error);
                 }
             },
-            () = sleep_until(heartbeat_deadline) => {
-                if pending_keep_alive.is_some() {
-                    return Err(timed_out("configuration keepalive timed out"));
-                }
-                let id = next_id;
-                next_id = next_id.wrapping_add(1);
+            () = sleep_until(keep_alive.deadline()) => {
+                let id = keep_alive.start().ok_or_else(|| timed_out("configuration keepalive timed out"))?;
                 // Never cancel a partially written encrypted packet and then reuse the stream.
                 within(WRITE_TIMEOUT.min(expires.saturating_duration_since(Instant::now())), authenticated.transport.write_packet(
                     &ConfigurationKeepAlive { keep_alive_id: id },
                 )).await?;
-                pending_keep_alive = Some((id, Instant::now() + KEEP_ALIVE_TIMEOUT));
             }
             frame = authenticated.transport.read_frame(FRAME_LIMIT) => {
                 let frame = frame?;
@@ -95,11 +151,9 @@ where
                     }
                     ConfigurationKeepAliveResponse::ID => {
                         let response = decode_packet::<ConfigurationKeepAliveResponse>(&frame).map_err(invalid_data)?;
-                        if pending_keep_alive.is_none_or(|(id, _)| id != response.keep_alive_id) {
+                        if !keep_alive.acknowledge(response.keep_alive_id) {
                             return Err(invalid_data("unexpected configuration keepalive response"));
                         }
-                        pending_keep_alive = None;
-                        next_keep_alive = Instant::now() + KEEP_ALIVE_INTERVAL;
                     }
                     _ => return Err(invalid_data("unexpected packet while waiting in configuration")),
                 }
@@ -113,32 +167,14 @@ pub(super) async fn disconnect<S: AsyncRead + AsyncWrite + Unpin>(
     packet: i32,
     reason: &str,
 ) -> io::Result<()> {
-    // Anonymous NBT string uses Java modified UTF-8, including surrogate pairs.
-    let mut text = Vec::new();
-    for unit in reason.chars().take(256).collect::<String>().encode_utf16() {
-        match unit {
-            1..=127 => text.push(u8::try_from(unit).map_err(invalid_data)?),
-            0..=2047 => {
-                text.push(0xc0 | u8::try_from(unit >> 6).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
-            }
-            _ => {
-                text.push(0xe0 | u8::try_from(unit >> 12).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from((unit >> 6) & 63).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
-            }
-        }
-    }
+    // The reason is an anonymous NBT string tag.
+    let text = chunk_protocol::modified_utf8(&reason.chars().take(256).collect::<String>());
     let mut body = Vec::new();
     VarInt(packet).encode(&mut body).map_err(invalid_data)?;
     body.push(8);
     body.extend(u16::try_from(text.len()).map_err(invalid_data)?.to_be_bytes());
     body.extend(text);
     within(WRITE_TIMEOUT, transport.write_body(&body)).await
-}
-
-fn timed_out(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, message)
 }
 
 pub(super) async fn finish<S: AsyncRead + AsyncWrite + Unpin>(
@@ -177,7 +213,7 @@ fn configuration_message(frame: &[u8], settings: &mut ConfigurationClientInforma
         ConfigurationPluginResponse::ID => {
             decode_packet::<ConfigurationPluginResponse>(frame).map_err(invalid_data)?;
         }
-        _ => return Err(invalid_data("unexpected limbo configuration packet")),
+        _ => return Err(invalid_data("unexpected configuration packet")),
     }
     Ok(())
 }

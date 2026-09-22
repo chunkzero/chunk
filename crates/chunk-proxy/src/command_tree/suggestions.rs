@@ -10,8 +10,6 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestionPlan {
     pub query: Option<String>,
-    pub input: String,
-    pub cursor: u32,
     pub start: u32,
     pub length: u32,
     prefix: String,
@@ -83,7 +81,7 @@ impl CommandTreeCatalog {
                 .filter(|(_, id)| visible(id, &self.commands[*id]))
                 .map(|(root, _)| root.clone())
                 .collect();
-            return Ok(Some(plan(input, cursor, cursor_byte, slash, CommandParser::Word, values, None)?));
+            return Ok(Some(plan(input, cursor_byte, slash, CommandParser::Word, values, None)?));
         };
         let root = &body[..root_end];
         let Some(id) = self.owners.get(root) else {
@@ -120,10 +118,10 @@ impl CommandTreeCatalog {
             };
             let route = candidates.into_iter().find(|route| route.literals.len() == depth);
             if let Some(route) = route {
-                return argument_plan(command, route, input, cursor, cursor_byte, start, literals);
+                return argument_plan(command, route, input, cursor_byte, start, literals);
             }
             if end.is_none() {
-                return Ok(Some(plan(input, cursor, cursor_byte, start, CommandParser::Word, literals, None)?));
+                return Ok(Some(plan(input, cursor_byte, start, CommandParser::Word, literals, None)?));
             }
             return Ok(None);
         }
@@ -134,7 +132,6 @@ fn argument_plan(
     command: &Command,
     route: &CommandRoute,
     input: &str,
-    cursor: u32,
     cursor_byte: usize,
     mut start: usize,
     literals: Vec<String>,
@@ -144,7 +141,7 @@ fn argument_plan(
         return if literals.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(plan(input, cursor, cursor_byte, start, CommandParser::Word, literals, None)?))
+            Ok(Some(plan(input, cursor_byte, start, CommandParser::Word, literals, None)?))
         };
     }
     for (index, argument) in route.arguments.iter().enumerate() {
@@ -168,14 +165,13 @@ fn argument_plan(
         if index == 0 {
             values.extend(literals);
         }
-        return Ok(Some(plan(input, cursor, cursor_byte, start, argument.parser, values, query)?));
+        return Ok(Some(plan(input, cursor_byte, start, argument.parser, values, query)?));
     }
     Ok(None)
 }
 
 fn plan(
     input: &str,
-    cursor: u32,
     cursor_byte: usize,
     start: usize,
     parser: CommandParser,
@@ -192,17 +188,7 @@ fn plan(
     let end = token_end(input, start, parser).max(cursor_byte);
     let start = u32::try_from(input[..start].encode_utf16().count()).map_err(|_| "suggestion range limit")?;
     let end = u32::try_from(input[..end].encode_utf16().count()).map_err(|_| "suggestion range limit")?;
-    Ok(SuggestionPlan {
-        query,
-        input: input.to_owned(),
-        cursor,
-        start,
-        length: end - start,
-        prefix,
-        parser,
-        quote,
-        values,
-    })
+    Ok(SuggestionPlan { query, start, length: end - start, prefix, parser, quote, values })
 }
 fn byte_cursor(input: &str, cursor: u32) -> Result<usize> {
     let mut units = 0;

@@ -345,7 +345,7 @@ async fn abrupt_backend_crash_never_replays_an_observed_http_effect() {
     let mut fixture = Fixture::start().await;
     let directory = tempfile::tempdir().unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "effect_tests::http_crash_worker", "--ignored", "--nocapture"])
+        .args(["--exact", "tests::effects::http_crash_worker", "--ignored", "--nocapture"])
         .env("CHUNK_HTTP_CRASH_STATE", directory.path())
         .env("CHUNK_HTTP_CRASH_ORIGIN", &fixture.origin)
         .stdout(std::process::Stdio::null())

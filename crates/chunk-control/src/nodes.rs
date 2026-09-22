@@ -1,7 +1,7 @@
 use crate::{
     Control, Error, Result,
-    placement::{auth, channel},
-    state::Drain,
+    client::{auth, channel},
+    drain::retire_host,
 };
 use chunk_proto::v1::{
     NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest, node_control_client::NodeControlClient,
@@ -73,29 +73,13 @@ impl Control {
         }
         let operation = format!("node/{}", request.operation_id);
         self.update(|state| {
-            if let Some(drain) = state.drains.get(&operation) {
-                if drain.request != request.encode_to_vec() {
-                    return Err(Error::Invalid("node shutdown changed"));
-                }
-                return Ok(());
-            }
-            if state.drains.len() >= 256 {
-                return Err(Error::Capacity);
-            }
-            let host = state.hosts.get_mut(&request.host_id).ok_or(Error::Invalid("unknown node"))?;
-            host.retired = true;
-            for session in state.sessions.values_mut().filter(|s| s.host == request.host_id) {
-                session.retired = true;
-            }
-            state.drains.insert(
-                operation,
-                Drain {
-                    request: request.encode_to_vec(),
-                    host: request.host_id.clone(),
-                    deadline_ms: crate::now_ms() + u64::from(request.timeout_seconds) * 1000,
-                },
-            );
-            Ok(())
+            retire_host(state, operation, request.encode_to_vec(), request.timeout_seconds, |state| {
+                state
+                    .hosts
+                    .contains_key(&request.host_id)
+                    .then(|| request.host_id.clone())
+                    .ok_or(Error::Invalid("unknown node"))
+            })
         })?;
         self.nodes()?.nodes.into_iter().find(|n| n.host_id == request.host_id).ok_or(Error::Invalid("unknown node"))
     }

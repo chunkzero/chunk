@@ -1,7 +1,7 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
+mod client;
 mod delivery;
-mod destinations;
 mod drain;
 mod host;
 mod moves;
@@ -10,7 +10,9 @@ mod placement;
 mod process;
 mod reconcile;
 mod rpc;
+pub mod server;
 mod session_methods;
+mod sessions;
 mod state;
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
@@ -218,5 +220,3 @@ fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
-
-pub mod server;
