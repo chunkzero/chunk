@@ -147,7 +147,7 @@ impl Platform {
                 let value = self.invoke_hook(id, event, payload, caller.clone()).await?;
                 if event.admission() {
                     let admission: Admission = serde_json::from_value(value.clone()).map_err(invalid_data)?;
-                    allow(admission)?;
+                    admission.check()?;
                 }
                 result = Some(value);
             }
@@ -214,14 +214,6 @@ fn caller(claim: &ClaimRequest, identity: Option<&chunk_proto::v1::ClaimIdentity
 
 fn demand_json(demand: &SessionDemand) -> Value {
     json!({"key":demand.key,"session_type":demand.session_type,"machine_profile":demand.machine_profile})
-}
-
-fn allow(admission: Admission) -> io::Result<()> {
-    if admission.allow {
-        return Ok(());
-    }
-    let reason = admission.reason.unwrap_or_else(|| "Admission denied.".into());
-    Err(io::Error::new(io::ErrorKind::PermissionDenied, reason.chars().take(256).collect::<String>()))
 }
 
 #[cfg(test)]

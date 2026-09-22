@@ -76,9 +76,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 pub(super) async fn start_configuration<S, I>(
     public: &mut Transport<S>,
     internal: &mut Transport<I>,
@@ -113,3 +110,6 @@ fn retain_settings(frame: &[u8], settings: &mut ConfigurationClientInformation) 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

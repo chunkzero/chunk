@@ -4,10 +4,6 @@ use chunk_proto::v1::{
     BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
     local_control_client::LocalControlClient,
 };
-use chunk_protocol::{
-    McString, encode_packet,
-    versions::{SUPPORTED, v26_2::StatusResponse},
-};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -88,12 +84,7 @@ impl Platform {
     }
 
     async fn admit(&self, arguments: Value) -> io::Result<()> {
-        let admission: Admission = self.hook("admit", arguments.clone()).await?;
-        if !admission.allow {
-            let reason = admission.reason.unwrap_or_else(|| "Admission denied.".into());
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason.chars().take(256).collect::<String>()));
-        }
-        Ok(())
+        self.hook::<Admission>("admit", arguments.clone()).await?.check()
     }
 
     async fn legacy_approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
@@ -123,19 +114,7 @@ impl Platform {
             tracing::debug!(%error, "status hook unavailable");
             Status { motd: "Server temporarily unavailable".into(), online: 0, max: 0 }
         });
-        let version = SUPPORTED.last().ok_or_else(|| invalid_data("missing protocol"))?;
-        encode_packet(&StatusResponse {
-            json: McString::new(
-                json!({
-                    "version": {"name": version.name, "protocol": version.protocol},
-                    "players": {"online": status.online, "max": status.max},
-                    "description": {"text": status.motd},
-                })
-                .to_string(),
-            )
-            .map_err(invalid_data)?,
-        })
-        .map_err(invalid_data)
+        super::status_packet(&status.motd, status.online, status.max)
     }
 }
 
@@ -145,6 +124,18 @@ struct Admission {
     allow: bool,
     reason: Option<String>,
 }
+
+impl Admission {
+    /// Denials carry at most 256 characters of the application's reason.
+    fn check(self) -> io::Result<()> {
+        if self.allow {
+            return Ok(());
+        }
+        let reason = self.reason.unwrap_or_else(|| "Admission denied.".into());
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, reason.chars().take(256).collect::<String>()))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Route {
