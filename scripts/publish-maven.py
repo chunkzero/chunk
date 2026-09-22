@@ -35,14 +35,11 @@ def publish(repository, version, url, username, password):
         raise ValueError("Repository contains no Maven artifacts")
     authorization = base64.b64encode(f"{username}:{password}".encode()).decode()
     for path, key in paths:
-        content_type = {".pom": "application/xml", ".module": "application/json",
-                        ".jar": "application/java-archive"}.get(path.suffix, "text/plain")
         with closing(HTTPConnection(proxy.hostname, proxy.port, timeout=300)) as connection:
             with path.open("rb") as source:
                 connection.request("PUT", f"/{key}", body=source, headers={
                     "Authorization": f"Basic {authorization}",
                     "Content-Length": str(path.stat().st_size),
-                    "Content-Type": content_type,
                 })
                 response = connection.getresponse()
                 if not 200 <= response.status < 300:

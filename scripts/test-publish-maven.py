@@ -57,7 +57,6 @@ class PublishingTest(unittest.TestCase):
             self.assertEqual(key, "/" + artifact.relative_to(self.repository).as_posix())
             self.assertEqual(body, artifact.read_bytes())
             self.assertEqual(headers["Authorization"], f"Basic {authorization}")
-        self.assertEqual(self.requests[0][1]["Content-Type"], "application/java-archive")
 
     def test_proxy_failure_stops_uploading_and_fails_the_publication_command(self):
         for status in (302, 401, 409, 503):
