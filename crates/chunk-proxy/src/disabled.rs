@@ -4,10 +4,22 @@ use std::{
     net::SocketAddr,
 };
 
-use crate::Config;
+use crate::{Config, PlatformTarget};
 
 /// No proxy can be constructed without an enabled protocol version.
 pub enum Proxy {}
+
+/// Unconstructible without an enabled protocol version.
+#[derive(Clone)]
+pub enum Retarget {}
+
+impl Retarget {
+    /// # Errors
+    /// Unreachable: a proxy cannot be constructed without a version.
+    pub fn replace(&self, _: PlatformTarget) -> io::Result<()> {
+        match *self {}
+    }
+}
 
 impl Proxy {
     /// # Errors
@@ -22,6 +34,11 @@ impl Proxy {
     /// # Errors
     /// Unreachable: a proxy cannot be constructed without a version.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        match *self {}
+    }
+
+    #[must_use]
+    pub fn retarget(&self) -> Option<Retarget> {
         match *self {}
     }
 

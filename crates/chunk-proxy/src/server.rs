@@ -9,7 +9,13 @@ mod transport;
 
 use authentication::Authentication;
 
-use std::{future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    sync::{Arc, PoisonError, RwLock},
+    time::Duration,
+};
 
 use chunk_protocol::{
     McString, encode_packet,
@@ -22,7 +28,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 
-use crate::Config;
+use crate::{Config, PlatformTarget};
 
 struct Responses {
     status: Vec<u8>,
@@ -71,7 +77,21 @@ pub struct Proxy {
     responses: Arc<Responses>,
     authentication: Arc<Authentication>,
     limbo_packets: Arc<limbo::Cache>,
-    platform: Option<platform::Platform>,
+    platform: Option<Arc<RwLock<platform::Platform>>>,
+}
+
+/// Replaces the managed platform for later connections; established connections keep theirs.
+#[derive(Clone)]
+pub struct Retarget(Arc<RwLock<platform::Platform>>);
+
+impl Retarget {
+    /// # Errors
+    /// Rejects backend or control endpoints that are not loopback HTTP.
+    pub fn replace(&self, target: PlatformTarget) -> io::Result<()> {
+        let mut platform = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        *platform = platform.retarget(target)?;
+        Ok(())
+    }
 }
 
 impl Proxy {
@@ -92,7 +112,8 @@ impl Proxy {
         if config.platform.is_some() && config.gameplay.is_some() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose managed platform or fixture gameplay"));
         }
-        let platform = config.platform.clone().map(platform::Platform::new).transpose()?;
+        let platform =
+            config.platform.clone().map(platform::Platform::new).transpose()?.map(|p| Arc::new(RwLock::new(p)));
         let responses = Arc::new(Responses::new(&config)?);
         let authentication = Arc::new(Authentication::new().await?);
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
@@ -105,6 +126,12 @@ impl Proxy {
     /// Returns the underlying socket error if its address cannot be read.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// A handle for changing the managed platform, when one is configured.
+    #[must_use]
+    pub fn retarget(&self) -> Option<Retarget> {
+        self.platform.clone().map(Retarget)
     }
 
     /// Serves until shutdown, then closes all player sockets and joins tasks.
@@ -147,7 +174,7 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
-                    let platform = self.platform.clone();
+                    let platform = self.platform.as_ref().map(|p| p.read().unwrap_or_else(PoisonError::into_inner).clone());
                     let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
@@ -172,6 +199,7 @@ impl Proxy {
         drop(self.listener);
         connections.shutdown().await;
         if let Some(platform) = self.platform {
+            let platform = platform.read().unwrap_or_else(PoisonError::into_inner).clone();
             platform.cleanup.close();
             platform.cleanup.wait().await;
         }
