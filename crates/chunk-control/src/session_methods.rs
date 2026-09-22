@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
-    placement::{auth, channel},
+    client::{auth, channel},
 };
 
 const MAX_JSON: usize = 48 * 1024;

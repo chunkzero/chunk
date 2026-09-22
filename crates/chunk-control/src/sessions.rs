@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use chunk_proto::v1::{
     ClaimIdentity, SessionCommand, SessionInventory, SessionPhase, SessionRef,
@@ -8,7 +8,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
-    placement::{auth, channel},
+    client::{auth, channel},
     state::{Phase, State},
 };
 
@@ -52,13 +52,7 @@ impl Control {
                 }
             });
         }
-        let mut drains = tokio::time::interval(Duration::from_secs(1));
-        while !tasks.is_empty() {
-            tokio::select! {
-                _ = tasks.join_next() => {},
-                _ = drains.tick() => self.progress_drains().await?,
-            }
-        }
+        self.join_progressing_drains(tasks).await?;
         Ok(())
     }
 

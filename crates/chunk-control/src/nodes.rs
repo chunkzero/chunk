@@ -1,7 +1,7 @@
 use crate::{
     Control, Error, Result,
+    client::{auth, channel},
     drain::retire_host,
-    placement::{auth, channel},
 };
 use chunk_proto::v1::{
     NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest, node_control_client::NodeControlClient,

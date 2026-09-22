@@ -6,7 +6,7 @@ use prost::Message;
 
 use crate::{
     Control, Error, Result,
-    placement::{auth, channel},
+    client::{auth, channel},
     state::{Claim, Phase, State},
 };
 
