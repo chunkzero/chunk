@@ -12,9 +12,10 @@ fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
     }
     let metadata = chunk_build::project::inspect(root.path()).unwrap();
     let config =
-        control_config(&metadata, "release-id", &[app("arena", "large", 8), app("lobby", "small", 16)]).unwrap();
+        control_config(&metadata, "release-id", "release-id-1", &[app("arena", "large", 8), app("lobby", "small", 16)])
+            .unwrap();
     assert_eq!(config.deployment.environment, "development");
-    assert_eq!(config.deployment.deployment, "release-id");
+    assert_eq!(config.deployment.deployment, "release-id-1");
     assert_eq!(config.artifact_digest, "release-id");
     assert_eq!(config.session_types.keys().map(String::as_str).collect::<Vec<_>>(), ["arena/default", "lobby/default"]);
     assert_eq!(config.session_types["arena/default"].machine_profile, "large");
@@ -27,7 +28,7 @@ fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
     fs::write(root.path().join("chunk.toml"), "").unwrap();
     fs::write(root.path().join("apps/arena/app.toml"), "").unwrap();
     assert!(
-        control_config(&chunk_build::project::inspect(root.path()).unwrap(), "release-id", &[])
+        control_config(&chunk_build::project::inspect(root.path()).unwrap(), "release-id", "release-id-1", &[])
             .err()
             .unwrap()
             .to_string()

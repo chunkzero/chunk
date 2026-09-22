@@ -11,8 +11,9 @@ pub(crate) enum Event {
 }
 
 pub(crate) enum Step {
-    Running,
+    Running(String),
     Done(String),
+    Failed(String),
 }
 
 /// One running release and the nodes its control authority reports.
@@ -68,12 +69,16 @@ impl Reporter {
         let _ = self.0.send(event);
     }
 
-    pub fn running(&self, name: &'static str) {
-        self.send(Event::Step { name, state: Step::Running });
+    pub fn running(&self, name: &'static str, detail: impl Display) {
+        self.send(Event::Step { name, state: Step::Running(detail.to_string()) });
     }
 
     pub fn done(&self, name: &'static str, detail: impl Display) {
         self.send(Event::Step { name, state: Step::Done(detail.to_string()) });
+    }
+
+    pub fn failed(&self, name: &'static str, error: impl Display) {
+        self.send(Event::Step { name, state: Step::Failed(error.to_string()) });
     }
 
     pub fn log(&self, source: Source, line: String) {

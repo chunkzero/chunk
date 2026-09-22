@@ -17,7 +17,10 @@ pub(super) fn render(frame: &mut Frame, model: &Model, title: &str) {
     render_steps(frame, model, steps, title);
     render_nodes(frame, model, nodes);
     render_logs(frame, model, logs);
-    frame.render_widget(Line::from("q quit · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow").dark_gray(), help);
+    frame.render_widget(
+        Line::from("q quit · r restart · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow").dark_gray(),
+        help,
+    );
 }
 
 fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
@@ -26,8 +29,9 @@ fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
         .iter()
         .map(|(name, state)| {
             let (mark, color, detail) = match state {
-                Step::Running => ("…", Color::Yellow, ""),
+                Step::Running(detail) => ("…", Color::Yellow, detail.as_str()),
                 Step::Done(detail) => ("✔", Color::Green, detail.as_str()),
+                Step::Failed(error) => ("✗", Color::Red, error.lines().next().unwrap_or_default()),
             };
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(color)),

@@ -56,7 +56,7 @@ pub(super) fn excerpt<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 fn noise(line: &str) -> bool {
-    const PREFIXES: [&str; 14] = [
+    const PREFIXES: [&str; 17] = [
         "> Configure project",
         "> Transform ",
         "Starting a Gradle Daemon",
@@ -71,9 +71,12 @@ fn noise(line: &str) -> bool {
         "For more on this, please refer to",
         "BUILD SUCCESSFUL",
         "w: ",
+        "[Incubating] Problems report",
+        "●  ",
+        "◆  ",
     ];
     if let Some(task) = line.strip_prefix("> Task ") {
         return !task.ends_with("FAILED");
     }
-    PREFIXES.iter().any(|prefix| line.starts_with(prefix)) || line.contains(" actionable task")
+    line.trim() == "│" || PREFIXES.iter().any(|prefix| line.starts_with(prefix)) || line.contains(" actionable task")
 }

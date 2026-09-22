@@ -4,7 +4,7 @@ use ratatui::crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::report::Event;
+use super::{Command, report::Event};
 
 mod model;
 mod view;
@@ -12,6 +12,7 @@ mod view;
 /// Draws the session until `finished`; quitting cancels `stop` so the session shuts down first.
 pub(super) fn run(
     mut events: mpsc::UnboundedReceiver<Event>,
+    commands: &mpsc::UnboundedSender<Command>,
     title: &str,
     stop: &CancellationToken,
     finished: &CancellationToken,
@@ -33,6 +34,9 @@ pub(super) fn run(
             Ok(true) => match event::read() {
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => stop.cancel(),
+                    KeyCode::Char('r') => {
+                        let _ = commands.send(Command::Restart);
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => stop.cancel(),
                     KeyCode::Left | KeyCode::BackTab => model.select(-1),
                     KeyCode::Right | KeyCode::Tab => model.select(1),

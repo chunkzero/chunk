@@ -19,7 +19,7 @@ pub(crate) struct Options {
 pub(crate) struct Project {
     pub root: PathBuf,
     pub metadata: ProjectMetadata,
-    output: PathBuf,
+    pub output: PathBuf,
 }
 
 pub(crate) struct Built {

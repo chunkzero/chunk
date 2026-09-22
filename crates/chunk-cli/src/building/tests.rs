@@ -162,10 +162,15 @@ fn build_failures_keep_diagnostics_and_drop_gradle_progress() {
 Starting a Gradle Daemon (subsequent builds will be faster)
 > Configure project :apps:lobby
 > Task :apps:lobby:chunkGenerate UP-TO-DATE
+●  Generating backend clients…
+│
+◆  Generated → /project/.chunk/generated/jvm
 > Task :apps:lobby:compileKotlin FAILED
 w: Lobby.kt:1:1 Deprecated API
 e: file:///project/apps/lobby/src/Lobby.kt:10:5 Unresolved reference 'foo'.
 
+
+[Incubating] Problems report is available at: file:///project/build/reports/problems/problems-report.html
 
 FAILURE: Build failed with an exception.
 

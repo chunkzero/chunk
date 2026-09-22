@@ -7,6 +7,7 @@ use std::{
 };
 
 use chunk_build::project::ProjectMetadata;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::building;
@@ -14,8 +15,10 @@ use report::Reporter;
 
 mod logs;
 mod plain;
+mod reload;
 mod report;
 mod services;
+mod session;
 mod tui;
 
 #[derive(clap::Args)]
@@ -32,35 +35,57 @@ pub(crate) struct Options {
     bind: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:25568")]
     backend_bind: SocketAddr,
+    /// Control address of the first release; reloaded releases use ephemeral loopback ports.
     #[arg(long, default_value = "127.0.0.1:25567")]
     control_bind: SocketAddr,
     /// Print plain progress lines instead of the terminal UI (automatic when stdout is not a terminal).
     #[arg(long)]
     plain: bool,
+    /// Rebuild only on an explicit restart instead of watching project sources.
+    #[arg(long)]
+    no_watch: bool,
+    /// After a JVM change, disconnect players still on the old release after this many seconds.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(0..=120))]
+    drain_seconds: u64,
 }
 
 struct Settings {
     state: PathBuf,
-    java: PathBuf,
     bind: SocketAddr,
     backend_bind: SocketAddr,
     control_bind: SocketAddr,
 }
 
+/// A packaged release checked against its Java runtime and projected into control configuration.
+pub(super) struct Staged {
+    release: chunk_build::Release,
+    java: PathBuf,
+    control: chunk_control::Config,
+    bundle: chunk_contract::Deployment,
+}
+
+/// Requests from the terminal UI or plain-mode input.
+pub(super) enum Command {
+    /// Rebuild and replace every running release immediately.
+    Restart,
+}
+
 pub(crate) async fn run(options: Options) -> io::Result<()> {
     let interactive = !options.plain && io::stdout().is_terminal();
     let (reporter, events) = Reporter::new();
+    let (commands, requests) = mpsc::unbounded_channel();
     if interactive {
         logs::tui(reporter.clone());
     } else {
         logs::plain();
+        plain::read_commands(commands.clone());
     }
     chunk_service::run(|stop| async move {
         let finished = CancellationToken::new();
         let ui = if interactive {
             let (stop, finished) = (stop.clone(), finished.clone());
             let title = format!("chunk dev · {}", options.build.project.display());
-            tokio::task::spawn_blocking(move || tui::run(events, &title, &stop, &finished))
+            tokio::task::spawn_blocking(move || tui::run(events, &commands, &title, &stop, &finished))
         } else {
             let finished = finished.clone();
             tokio::spawn(async move {
@@ -68,7 +93,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
                 Ok(())
             })
         };
-        let result = serve(options, interactive, reporter, stop).await;
+        let result = serve(options, interactive, reporter, requests, stop).await;
         finished.cancel();
         let shown = ui.await.map_err(io::Error::other)?;
         result.and(shown)
@@ -76,11 +101,17 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     .await
 }
 
-async fn serve(options: Options, interactive: bool, reporter: Reporter, stop: CancellationToken) -> io::Result<()> {
+async fn serve(
+    options: Options,
+    interactive: bool,
+    reporter: Reporter,
+    commands: mpsc::UnboundedReceiver<Command>,
+    stop: CancellationToken,
+) -> io::Result<()> {
     let project = building::prepare(&options.build)?;
     reporter.done("Project", project_summary(&project));
 
-    let state = options.state.unwrap_or_else(|| project.root.join(".chunk/local"));
+    let state = options.state.clone().unwrap_or_else(|| project.root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;
     if interactive {
@@ -88,37 +119,54 @@ async fn serve(options: Options, interactive: bool, reporter: Reporter, stop: Ca
     }
     let _lock = runner_lock(&state.join("runner.lock"))?;
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
-    reporter.running("Build");
+    reporter.running("Build", "Gradle chunkArtifacts");
     let started = Instant::now();
     let built = building::execute(&project, stop.clone()).await?;
     reporter.done("Build", format!("{} · release {}", report::seconds(started.elapsed()), short(&built.release.id)));
-    let java = options.java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
+    let required = built.java.version;
+    let staged = stage(&project, built, options.java.as_deref(), &stop).await?;
+    reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
+    let settings =
+        Settings { state, bind: options.bind, backend_bind: options.backend_bind, control_bind: options.control_bind };
+    let watched = if options.no_watch {
+        None
+    } else {
+        let ignored = vec![project.output.clone(), settings.state.clone()];
+        Some(reload::watch(&project.root, &ignored).map_err(io::Error::other)?)
+    };
+    let environment = staged.control.deployment.environment.clone();
+    let (shared, generation) = services::start(&settings, staged, &reporter).await?;
+    let session = session::Session::new(&settings, &options, &reporter, environment, shared, generation);
+    session.run(watched, commands, stop).await
+}
+
+/// Checks the release's Java requirement and projects it into control configuration.
+async fn stage(
+    project: &building::Project,
+    built: building::Built,
+    java: Option<&Path>,
+    stop: &CancellationToken,
+) -> io::Result<Staged> {
+    let java = java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
     tokio::select! {
-        () = stop.cancelled() => return building::cancelled(&stop),
+        () = stop.cancelled() => building::cancelled(stop)?,
         result = java_version(&java, built.java.version) => result?,
     }
-    reporter.done("Java", format!("{}+ · {}", built.java.version, java.display()));
-    let mut control = control_config(&project.metadata, &built.release.id, &built.release.apps)?;
-    let backend: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
-    backend.validate().map_err(io::Error::other)?;
-    if backend.id != built.release.id {
+    let deployment = version(&built.release.id);
+    let mut control = control_config(&project.metadata, &built.release.id, &deployment, &built.release.apps)?;
+    let mut bundle: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
+    bundle.validate().map_err(io::Error::other)?;
+    if bundle.id != built.release.id {
         return Err(io::Error::other("published backend deployment differs from release"));
     }
-    let contracts = backend.contracts;
+    bundle.id = deployment;
+    let contracts = bundle.contracts.clone();
     control.contracts = chunk_control::Contracts {
         session_methods: contracts.session_methods,
         session_configurations: contracts.session_configurations,
         destinations: contracts.destinations,
     };
-    fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
-    let settings = Settings {
-        state,
-        java,
-        bind: options.bind,
-        backend_bind: options.backend_bind,
-        control_bind: options.control_bind,
-    };
-    services::run(&settings, &control, &built.release, &reporter, stop).await
+    Ok(Staged { release: built.release, java, control, bundle })
 }
 
 fn project_summary(project: &building::Project) -> String {
@@ -130,6 +178,12 @@ fn project_summary(project: &building::Project) -> String {
     }
 }
 
+/// A local deployment version of `release`; the backend never reuses a released version ID.
+fn version(release: &str) -> String {
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    format!("{release}-{millis}")
+}
+
 /// Abbreviates a content-addressed release ID for display.
 fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
@@ -137,6 +191,7 @@ fn short(id: &str) -> &str {
 
 fn control_config(
     project: &ProjectMetadata,
+    release: &str,
     deployment: &str,
     apps: &[chunk_contract::AppArtifact],
 ) -> io::Result<chunk_control::Config> {
@@ -167,7 +222,7 @@ fn control_config(
             environment: local.environment.clone(),
             deployment: deployment.into(),
         },
-        artifact_digest: deployment.into(),
+        artifact_digest: release.into(),
         profiles: local
             .profiles
             .iter()
