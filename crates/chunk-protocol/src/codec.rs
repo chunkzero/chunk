@@ -170,3 +170,19 @@ impl<const N: usize> Decode for McString<N> {
         Ok(Self(value.to_owned()))
     }
 }
+
+/// Java modified UTF-8, as NBT strings use: NUL takes two bytes and supplementary characters are
+/// encoded as surrogate pairs.
+#[must_use]
+pub fn modified_utf8(text: &str) -> Vec<u8> {
+    let low = |value: u16| value.to_be_bytes()[1];
+    let mut bytes = Vec::with_capacity(text.len());
+    for unit in text.encode_utf16() {
+        match unit {
+            1..=0x7f => bytes.push(low(unit)),
+            0..=0x7ff => bytes.extend([0xc0 | low(unit >> 6), 0x80 | low(unit & 0x3f)]),
+            _ => bytes.extend([0xe0 | low(unit >> 12), 0x80 | low((unit >> 6) & 0x3f), 0x80 | low(unit & 0x3f)]),
+        }
+    }
+    bytes
+}

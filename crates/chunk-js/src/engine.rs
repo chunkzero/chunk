@@ -110,9 +110,6 @@ impl Engine {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         let resident = self.deployments.get_mut(id).ok_or(Error::UnknownDeployment)?;
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
         if invocation.export.is_empty() || invocation.export.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid export"));
         }
@@ -120,6 +117,9 @@ impl Engine {
         let arguments = invocation.arguments;
         if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > bounds::JSON_BYTES {
             return Err(Error::Invalid("input exceeds size limit"));
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
         }
         if resident.runtime.as_ref().is_some_and(|runtime| runtime.calls() >= bounds::RUNTIME_CALLS) {
             resident.runtime = None;
@@ -173,7 +173,7 @@ impl Engine {
         let resident = self.deployments.get_mut(id).ok_or(Error::UnknownDeployment)?;
         if invocation.export.is_empty()
             || invocation.export.len() > bounds::NAME_BYTES
-            || invocation.id.len() > 256
+            || invocation.id.len() > bounds::INVOCATION_ID_BYTES
             || invocation.arguments.as_str().len() > bounds::JSON_BYTES
             || invocation.caller.as_str().len() > bounds::JSON_BYTES
         {

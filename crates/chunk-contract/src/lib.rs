@@ -14,10 +14,7 @@ pub use commands::{
 };
 mod deployment;
 mod destinations;
-pub use destinations::{
-    Destination, DestinationManifest, DestinationOverflow, DestinationPolicy,
-    SessionCreation,
-};
+pub use destinations::{Destination, DestinationManifest, DestinationOverflow, DestinationPolicy, SessionCreation};
 mod domains;
 mod effects;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};

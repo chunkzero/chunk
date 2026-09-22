@@ -167,22 +167,8 @@ pub(super) async fn disconnect<S: AsyncRead + AsyncWrite + Unpin>(
     packet: i32,
     reason: &str,
 ) -> io::Result<()> {
-    // Anonymous NBT string uses Java modified UTF-8, including surrogate pairs.
-    let mut text = Vec::new();
-    for unit in reason.chars().take(256).collect::<String>().encode_utf16() {
-        match unit {
-            1..=127 => text.push(u8::try_from(unit).map_err(invalid_data)?),
-            0..=2047 => {
-                text.push(0xc0 | u8::try_from(unit >> 6).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
-            }
-            _ => {
-                text.push(0xe0 | u8::try_from(unit >> 12).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from((unit >> 6) & 63).map_err(invalid_data)?);
-                text.push(0x80 | u8::try_from(unit & 63).map_err(invalid_data)?);
-            }
-        }
-    }
+    // The reason is an anonymous NBT string tag.
+    let text = chunk_protocol::modified_utf8(&reason.chars().take(256).collect::<String>());
     let mut body = Vec::new();
     VarInt(packet).encode(&mut body).map_err(invalid_data)?;
     body.push(8);
