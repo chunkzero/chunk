@@ -2,18 +2,21 @@
 //! storage runs on a commit thread; replies and updates wait for its ordered acks.
 
 mod actions;
-mod commands;
-pub use commands::CommandService;
 mod actor;
+mod commands;
 mod commit;
 mod effects;
+mod hooks;
 mod reads;
+pub mod server;
 mod service;
 mod transport;
 
 pub use actions::{ActionHandle, ActionId, ActionStatus};
 pub use chunk_js::HttpMethod;
+pub use commands::CommandService;
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
+pub use hooks::HookService;
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
 pub use transport::Service;
 
@@ -72,11 +75,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-#[cfg(test)]
-mod integration_tests;
-#[cfg(test)]
-mod tests;
-
 impl Error {
     pub(crate) fn is_rejected_commit(&self) -> bool {
         matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch))
@@ -84,19 +82,4 @@ impl Error {
 }
 
 #[cfg(test)]
-mod context_tests;
-#[cfg(test)]
-mod document_tests;
-
-pub mod server;
-
-#[cfg(test)]
-mod action_tests;
-
-#[cfg(test)]
-mod effect_tests;
-mod hooks;
-pub use hooks::HookService;
-
-#[cfg(test)]
-mod job_tests;
+mod tests;

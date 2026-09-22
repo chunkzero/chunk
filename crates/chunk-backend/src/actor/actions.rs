@@ -293,7 +293,7 @@ impl Actor {
             let deployment =
                 self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Unknown)?.clone();
             self.command_permission(&deployment, &binding.scope, &call.function, &reply.cancellation)?;
-            let (request, result, receipt) = crate::commands::validate_effect(&deployment, &binding, request)?;
+            let (request, result, receipt) = crate::commands::effects::validate(&deployment, &binding.scope, request)?;
             Ok((binding.effects.clone(), request, result, receipt))
         })();
         match prepared {

@@ -211,7 +211,7 @@ fn selected<'a>(deployment: &'a Deployment, scope: &CommandScope, id: &str) -> R
 }
 
 fn scope_caller(deployment: &Deployment, scope: &CommandScope) -> Result<Json> {
-    let text = |value: &str| !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control);
+    let identifier = |value: &str| !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control);
     for value in [
         &scope.proxy_id,
         &scope.player_uuid,
@@ -223,7 +223,7 @@ fn scope_caller(deployment: &Deployment, scope: &CommandScope) -> Result<Json> {
         &scope.connection_id,
         &scope.claim_operation_id,
     ] {
-        if !text(value) {
+        if !identifier(value) {
             return Err(Error::Invalid("command scope identity"));
         }
     }

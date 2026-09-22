@@ -29,8 +29,8 @@ async fn next(subscription: &mut Subscription) -> crate::Result<Value> {
 async fn compiled_context_tracks_rank_changes_and_rolls_back_rejected_mutations() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("server/schema")).unwrap();
-    fs::write(root.path().join("server/schema/index.ts"), include_str!("context_tests/schema.ts")).unwrap();
-    fs::write(root.path().join("server/functions.ts"), include_str!("context_tests/functions.ts")).unwrap();
+    fs::write(root.path().join("server/schema/index.ts"), include_str!("context/schema.ts")).unwrap();
+    fs::write(root.path().join("server/functions.ts"), include_str!("context/functions.ts")).unwrap();
     let project = root.path().to_owned();
     let output = root.path().join("compiled");
     let destination = output.clone();

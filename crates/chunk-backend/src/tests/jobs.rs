@@ -222,7 +222,7 @@ async fn pending_cancellation_prevents_dispatch_and_releases_retained_code() {
     assert_eq!(backend.wake_handoff().await.unwrap().due_at, None);
     assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
     drop(backend);
-    let restarted = crate::job_tests::backend(&directory);
+    let restarted = self::backend(&directory);
     assert_eq!(job(&restarted, &id).await.state, JobState::Cancelled);
     restarted.forget_job(id.clone(), json!({"player":"alice"}).into()).await.unwrap();
     assert!(restarted.job(id, json!({"player":"alice"}).into()).await.is_err());

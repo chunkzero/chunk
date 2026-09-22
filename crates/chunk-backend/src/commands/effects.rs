@@ -4,7 +4,7 @@ use chunk_proto::v1::CommandScope;
 
 use crate::{Error, Result};
 
-pub(super) fn validate(deployment: &Deployment, scope: &CommandScope, request: &Json) -> Result<(Json, Schema, bool)> {
+pub(crate) fn validate(deployment: &Deployment, scope: &CommandScope, request: &Json) -> Result<(Json, Schema, bool)> {
     if request.as_str().len() > 64 * 1024 {
         return Err(Error::Invalid("command effect size"));
     }
@@ -18,11 +18,11 @@ pub(super) fn validate(deployment: &Deployment, scope: &CommandScope, request: &
         .into(),
     };
     match &mut effect {
-        Effect::Message { text: value } | Effect::ActionBar { text: value } => text(value)?,
+        Effect::Message { text: value } | Effect::ActionBar { text: value } => display_text(value)?,
         Effect::Title { title, subtitle } => {
-            text(title)?;
+            display_text(title)?;
             if let Some(subtitle) = subtitle {
-                text(subtitle)?;
+                display_text(subtitle)?;
             }
         }
         Effect::Enter { destination } => {
@@ -61,7 +61,7 @@ pub(super) fn validate(deployment: &Deployment, scope: &CommandScope, request: &
     Ok((serde_json::to_value(effect)?.into(), result, receipt))
 }
 
-fn text(value: &str) -> Result<()> {
+fn display_text(value: &str) -> Result<()> {
     if value.len() > 12 * 1024 || value.encode_utf16().count() > 4096 || value.contains('\0') {
         return Err(Error::Invalid("command text limit"));
     }
