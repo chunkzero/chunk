@@ -94,7 +94,7 @@ impl ProcessHost {
         if self.path(id, "exit")?.exists() {
             return Err(Error::Stopped);
         }
-        // A launch marker without an owned Child cannot authorize killing a recycled PID.
+        // A launch marker without an owned Child leaves termination unconfirmed instead of stopped.
         let _marker = chunk_service::private_file(&self.path(id, "launch")?)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
@@ -246,7 +246,7 @@ impl Host for ProcessHost {
                 if self.path(id, "exit")?.is_file() {
                     return Ok(());
                 }
-                if self.path(id, "launch")?.try_exists()? || self.path(id, "pid")?.try_exists()? {
+                if self.path(id, "launch")?.try_exists()? {
                     return Err(Error::Unresolved("no owned process; exit unconfirmed"));
                 }
                 // Launch holds this same lock and checks the exit record before spawning.
@@ -363,7 +363,7 @@ mod tests {
         assert!(host.ensure(&id, "bridge", "local").await.is_err());
         host.terminate(&id).await.unwrap();
         let stale = uuid::Uuid::new_v4().to_string();
-        std::fs::write(host.path(&stale, "pid").unwrap(), std::process::id().to_string()).unwrap();
+        std::fs::write(host.path(&stale, "launch").unwrap(), b"").unwrap();
         assert!(host.terminate(&stale).await.is_err());
         assert!(!host.stopped(&stale));
         let invalid = uuid::Uuid::new_v4().to_string();

@@ -1,7 +1,5 @@
 //! Backend compilation, generated clients and immutable application releases.
 
-mod program;
-pub use program::pin_program;
 mod codegen;
 pub use codegen::{GenerationTarget, generate};
 mod compiler;

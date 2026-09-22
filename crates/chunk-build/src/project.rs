@@ -132,15 +132,8 @@ pub(crate) fn load(root: &Path) -> io::Result<Inventory> {
     if root.join("chunk.toml").exists() { inspect_inventory(root) } else { discover(root) }
 }
 
-/// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children.
-/// Unmanifested directories are ignored. This inventory does not require a root project manifest.
-/// # Errors
-/// Rejects symlinks, malformed manifests, invalid or case-colliding IDs and missing app build files.
-pub fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
-    Ok(discover(root)?.apps)
-}
-
-/// Every `discover_apps` entry plus the static and authored domain scopes and authored modules.
+/// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children, plus the
+/// static and authored domain scopes and authored modules. Unmanifested directories are ignored.
 pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
     let mut inventory = authoring::discover(root)?;
     inventory.scopes = domains::discover(root, std::mem::take(&mut inventory.scopes))?;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AppArtifact, deployment::identifier};
 
-pub const DESTINATION_MANIFEST_VERSION: u32 = 1;
+const DESTINATION_MANIFEST_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

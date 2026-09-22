@@ -1,6 +1,10 @@
 use super::*;
 use serde_json::json;
 
+fn discover_apps(root: &Path) -> io::Result<Vec<AppMetadata>> {
+    discover(root).map(|inventory| inventory.apps)
+}
+
 const LOCAL: &str = r#"
 [local]
 environment = "local"

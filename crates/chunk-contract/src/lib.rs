@@ -15,7 +15,7 @@ pub use commands::{
 mod deployment;
 mod destinations;
 pub use destinations::{
-    DESTINATION_MANIFEST_VERSION, Destination, DestinationManifest, DestinationOverflow, DestinationPolicy,
+    Destination, DestinationManifest, DestinationOverflow, DestinationPolicy,
     SessionCreation,
 };
 mod domains;
