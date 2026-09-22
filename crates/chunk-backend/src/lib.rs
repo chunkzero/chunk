@@ -13,7 +13,7 @@ mod service;
 mod transport;
 
 pub use actions::{ActionHandle, ActionId, ActionStatus};
-pub use chunk_js::HttpMethod;
+pub use chunk_js::{DeploymentId, HttpMethod};
 pub use commands::CommandService;
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
 pub use hooks::HookService;

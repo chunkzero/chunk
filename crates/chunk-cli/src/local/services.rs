@@ -70,7 +70,7 @@ impl Services {
         };
         self.backend =
             Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
-        let backend_connection = Service::ready(&mut self.backend, started, "backend").await?;
+        let backend_connection = Service::ready(&mut self.backend, started, "backend").await?.connection;
         reporter.done("Backend", &backend_connection.endpoint);
         let control_state = options.state.join("control").join(&artifact.id);
         let embedded = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {

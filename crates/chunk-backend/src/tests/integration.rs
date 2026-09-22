@@ -287,7 +287,7 @@ async fn service_shutdown_closes_watchers_and_releases_durable_state() {
             ready,
             stop.clone(),
         ));
-        let connection = tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap();
+        let connection = tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap().connection;
         let mut client = BackendClient::connect(connection.endpoint).await.unwrap();
         let mut request = authorized(BackendWatchGroup { queries: vec![query("get")] });
         request.metadata_mut().insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());

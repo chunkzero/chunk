@@ -6,6 +6,12 @@ use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tokio_util::sync::CancellationToken;
 
+/// Published once the backend serves requests; `backend` deploys and releases further versions.
+pub struct Ready {
+    pub connection: BackendConnection,
+    pub backend: Backend,
+}
+
 pub struct Config {
     pub bundle: PathBuf,
     pub environment: String,
@@ -17,7 +23,7 @@ pub struct Config {
 /// Starts the backend, publishes readiness and drains its workers on shutdown.
 /// # Errors
 /// Reports configuration, storage, bind and server errors.
-pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop: CancellationToken) -> io::Result<()> {
+pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: CancellationToken) -> io::Result<()> {
     if !config.bind.ip().is_loopback() {
         return Err(io::Error::other("backend must bind loopback"));
     }
@@ -73,7 +79,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<BackendConnection>, stop
             .add_service(hooks.into_server())
             .add_service(commands.into_server())
             .serve_with_incoming_shutdown(incoming, stop.clone().cancelled_owned());
-        let _ = ready.send(connection);
+        let _ = ready.send(Ready { connection, backend: backend.clone() });
         tracing::info!(%address, "backend ready");
         tokio::pin!(server);
         let result = tokio::select! {
