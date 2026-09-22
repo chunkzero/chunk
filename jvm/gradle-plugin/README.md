@@ -22,7 +22,9 @@ rootProject.name = "my-game"
 dependencyResolutionManagement {
     repositories {
         maven("https://maven.chunkzero.com")
-        maven("https://maven.chunkzero.com/snapshots")
+        maven("https://maven.chunkzero.com/snapshots") {
+            mavenContent { includeModule("net.minestom", "minestom") }
+        }
         mavenCentral()
     }
 }

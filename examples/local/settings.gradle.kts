@@ -21,7 +21,9 @@ extensions.configure<ChunkSettingsExtension> {
 
 dependencyResolutionManagement {
     repositories {
-        maven("https://maven.chunkzero.com/snapshots")
+        maven("https://maven.chunkzero.com/snapshots") {
+            mavenContent { includeModule("net.minestom", "minestom") }
+        }
         mavenCentral()
     }
     versionCatalogs { create("libs") { from(files("../../gradle/libs.versions.toml")) } }
