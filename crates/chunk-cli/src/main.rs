@@ -65,7 +65,7 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let inspection = matches!(&cli.command, Command::Inspect { .. });
-    if !inspection {
+    if !inspection && !matches!(&cli.command, Command::Dev(_)) {
         chunk_service::logging();
     }
     match run(cli).await {

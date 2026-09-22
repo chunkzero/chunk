@@ -46,10 +46,13 @@ async fn failed_edge_start_releases_earlier_services() {
     };
     for _ in 0..2 {
         let mut services = Services::default();
-        let error = tokio::time::timeout(Duration::from_secs(10), services.start(&options, &control, &artifact))
-            .await
-            .unwrap()
-            .unwrap_err();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            services.start(&options, &control, &artifact, &Reporter::new().0),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert!(options.state.join("backend.json").exists());
         assert!(options.state.join("control.json").exists());
@@ -84,11 +87,13 @@ async fn missing_bundle_preserves_startup_error() {
         directory: directory.path().join("missing"),
         archive: directory.path().join("missing.tar.gz"),
     };
-    let error =
-        tokio::time::timeout(Duration::from_secs(10), run(&options, &control, &artifact, CancellationToken::new()))
-            .await
-            .unwrap()
-            .unwrap_err();
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        run(&options, &control, &artifact, &Reporter::new().0, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!options.state.join("backend.json").exists());
 }

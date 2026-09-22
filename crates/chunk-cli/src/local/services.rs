@@ -1,10 +1,12 @@
-use super::Settings;
+use super::{Reporter, Settings};
 use chunk_build::Release;
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 type Task = JoinHandle<io::Result<()>>;
+
+const STARTUP: Duration = Duration::from_secs(30);
 
 struct Service {
     stop: CancellationToken,
@@ -12,8 +14,15 @@ struct Service {
 }
 impl Service {
     async fn ready<T>(slot: &mut Option<Self>, started: oneshot::Receiver<T>, name: &str) -> io::Result<T> {
-        if let Ok(connection) = started.await {
-            return Ok(connection);
+        match tokio::time::timeout(STARTUP, started).await {
+            Ok(Ok(connection)) => return Ok(connection),
+            Ok(Err(_)) => {}
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{name} did not become ready within {}s", STARTUP.as_secs()),
+                ));
+            }
         }
         let result = (&mut slot.as_mut().expect("service started").task).await;
         slot.take();
@@ -43,6 +52,7 @@ impl Services {
         options: &Settings,
         authority: &chunk_control::Config,
         artifact: &Release,
+        reporter: &Reporter,
     ) -> io::Result<()> {
         let token = CancellationToken::new();
         let (ready, started) = oneshot::channel();
@@ -56,6 +66,7 @@ impl Services {
         self.backend =
             Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
         let backend_connection = Service::ready(&mut self.backend, started, "backend").await?;
+        reporter.done("Backend", &backend_connection.endpoint);
         let control_state = options.state.join("control").join(&artifact.id);
         let embedded = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
             distribution: artifact.directory.clone(),
@@ -79,6 +90,7 @@ impl Services {
         self.control =
             Some(Service { task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())), stop: token });
         let control_connection = Service::ready(&mut self.control, started, "control").await?;
+        reporter.done("Control", &control_connection.endpoint);
         let proxy = chunk_edge::Proxy::bind(
             options.bind,
             chunk_edge::ProxyConfig {
@@ -87,6 +99,7 @@ impl Services {
             },
         )
         .await?;
+        reporter.done("Proxy", options.bind);
         let token = CancellationToken::new();
         let shutdown = token.clone();
         self.edge = Some(Service {
@@ -127,12 +140,23 @@ pub(super) async fn run(
     options: &Settings,
     control: &chunk_control::Config,
     artifact: &Release,
+    reporter: &Reporter,
     stop: CancellationToken,
 ) -> io::Result<()> {
     let mut services = Services::default();
-    let started = tokio::select! { result = services.start(options, control, artifact) => result, () = stop.cancelled() => Ok(()) };
+    let started = tokio::select! {
+        result = services.start(options, control, artifact, reporter) => result,
+        () = stop.cancelled() => Ok(()),
+    };
     let result = if started.is_ok() && !stop.is_cancelled() {
-        tracing::info!(address = %options.bind, "local project ready; Ctrl-C stops all services");
+        reporter.done(
+            "Ready",
+            format!(
+                "connect to {} · JVM logs in {} · Ctrl-C stops",
+                options.bind,
+                options.state.join("control").join(&artifact.id).join("nodes").display()
+            ),
+        );
         loop {
             tokio::select! {
                 () = stop.cancelled() => break Ok(()),

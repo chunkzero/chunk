@@ -4,6 +4,7 @@ use chunk_build::{JavaRuntime, Release, ReleaseInputs, project::ProjectMetadata}
 use tokio_util::sync::CancellationToken;
 
 mod gradle;
+mod output;
 
 #[derive(Clone, clap::Args)]
 #[group(id = "build")]

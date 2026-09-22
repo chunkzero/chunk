@@ -2,14 +2,18 @@ use std::{
     fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chunk_build::project::ProjectMetadata;
 use tokio_util::sync::CancellationToken;
 
 use crate::building;
+use report::Reporter;
 
+mod logs;
+mod plain;
+mod report;
 mod services;
 
 #[derive(clap::Args)]
@@ -39,23 +43,33 @@ struct Settings {
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
-    chunk_service::run(|stop| serve(options, stop)).await
+    logs::plain();
+    let (reporter, events) = Reporter::new();
+    let ui = tokio::spawn(plain::render(events));
+    let result = chunk_service::run(|stop| serve(options, reporter, stop)).await;
+    let _ = ui.await;
+    result
 }
 
-async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
+async fn serve(options: Options, reporter: Reporter, stop: CancellationToken) -> io::Result<()> {
     let project = building::prepare(&options.build)?;
+    reporter.done("Project", project_summary(&project));
 
     let state = options.state.unwrap_or_else(|| project.root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;
     let _lock = runner_lock(&state.join("runner.lock"))?;
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
+    reporter.running("Build");
+    let started = Instant::now();
     let built = building::execute(&project, stop.clone()).await?;
+    reporter.done("Build", format!("{} · release {}", report::seconds(started.elapsed()), short(&built.release.id)));
     let java = options.java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
     tokio::select! {
         () = stop.cancelled() => return building::cancelled(&stop),
         result = java_version(&java, built.java.version) => result?,
     }
+    reporter.done("Java", format!("{}+ · {}", built.java.version, java.display()));
     let mut control = control_config(&project.metadata, &built.release.id, &built.release.apps)?;
     let backend: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
     backend.validate().map_err(io::Error::other)?;
@@ -69,7 +83,6 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
         destinations: contracts.destinations,
     };
     fs::write(state.join("control-config.json"), serde_json::to_vec(&control).map_err(io::Error::other)?)?;
-    tracing::info!(deployment = %built.release.id, "local project packaged");
     let settings = Settings {
         state,
         java,
@@ -77,7 +90,21 @@ async fn serve(options: Options, stop: CancellationToken) -> io::Result<()> {
         backend_bind: options.backend_bind,
         control_bind: options.control_bind,
     };
-    services::run(&settings, &control, &built.release, stop).await
+    services::run(&settings, &control, &built.release, &reporter, stop).await
+}
+
+fn project_summary(project: &building::Project) -> String {
+    let name =
+        project.root.file_name().map_or_else(|| project.root.display().to_string(), |n| n.to_string_lossy().into());
+    match project.metadata.apps.len() {
+        1 => format!("{name} · 1 app"),
+        apps => format!("{name} · {apps} apps"),
+    }
+}
+
+/// Abbreviates a content-addressed release ID for display.
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
 }
 
 fn control_config(
