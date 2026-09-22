@@ -85,22 +85,38 @@ async fn status_is_live_and_failed_admission_never_routes() {
     );
     let good = platform.status("localhost").await.unwrap();
     assert!(String::from_utf8_lossy(&good).contains("Live backend"));
-    assert_eq!(platform.route("uuid", "Alex").await.unwrap().key, "lobby");
+    assert_eq!(route(&platform).await.unwrap().key, "lobby");
     let status_permits = platform.status_hooks.acquire_many(64).await.unwrap();
     let saturated = platform.status("localhost").await.unwrap();
     assert!(String::from_utf8_lossy(&saturated).contains("temporarily unavailable"));
-    assert_eq!(platform.route("uuid", "Alex").await.unwrap().key, "lobby");
+    assert_eq!(route(&platform).await.unwrap().key, "lobby");
     drop(status_permits);
     hooks.mode.store(1, Ordering::SeqCst);
     let bad = platform.status("localhost").await.unwrap();
     assert!(String::from_utf8_lossy(&bad).contains("temporarily unavailable"));
-    let denied = platform.route("uuid", "Alex").await.unwrap_err();
+    let denied = route(&platform).await.unwrap_err();
     assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(denied.to_string(), "Closed");
     hooks.mode.store(2, Ordering::SeqCst);
-    assert!(platform.route("uuid", "Alex").await.is_err());
+    assert!(route(&platform).await.is_err());
     assert_eq!(hooks.status.load(Ordering::SeqCst), 2);
     assert_eq!(hooks.routes.load(Ordering::SeqCst), 2);
     server.abort();
     let _ = server.await;
+}
+
+async fn route(platform: &Platform) -> io::Result<SessionDemand> {
+    platform
+        .route_claim(&chunk_proto::v1::ClaimRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            proxy_id: platform.proxy_id.clone(),
+            connection_id: "test".into(),
+            identity: Some(chunk_proto::v1::Identity {
+                uuid: "uuid".into(),
+                username: "Alex".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
 }

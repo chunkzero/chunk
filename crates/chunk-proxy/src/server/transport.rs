@@ -180,6 +180,10 @@ fn inflate(mut frame: &[u8], threshold: usize, limit: usize) -> io::Result<Bytes
     Ok(output.into())
 }
 
+pub(super) fn timed_out(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
 pub(super) fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }

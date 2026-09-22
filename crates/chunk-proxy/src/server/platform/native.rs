@@ -1,11 +1,12 @@
-use chunk_contract::{DomainManifest, HookEvent};
-use chunk_proto::v1::{ClaimRequest, InvokeHook, backend_hooks_client::BackendHooksClient};
-use tokio::sync::OnceCell;
+use std::{io, sync::Arc};
 
-use super::{
-    Admission, Arc, Channel, Platform, RPC_TIMEOUT, Request, Route, SessionDemand, Status, Value, channel,
-    invalid_data, io, json, request,
-};
+use chunk_contract::{DomainManifest, HookEvent};
+use chunk_proto::v1::{ClaimRequest, InvokeHook, SessionDemand, backend_hooks_client::BackendHooksClient};
+use serde_json::{Value, json};
+use tokio::sync::OnceCell;
+use tonic::transport::Channel;
+
+use super::{Admission, Platform, RPC_TIMEOUT, Route, Status, channel, invalid_data};
 
 mod lifecycle;
 pub(in crate::server) use lifecycle::Lifecycle;
@@ -176,17 +177,6 @@ impl Platform {
         )?;
         let response = self.native.client.clone().invoke(request).await.map_err(io::Error::other)?.into_inner();
         serde_json::from_slice(&response.result_json).map_err(invalid_data)
-    }
-
-    fn backend_request<T>(&self, value: T, token: &str) -> io::Result<Request<T>> {
-        let mut request = request(value, token)?;
-        request
-            .metadata_mut()
-            .insert("x-chunk-environment", self.target.backend.environment.parse().map_err(invalid_data)?);
-        request
-            .metadata_mut()
-            .insert("x-chunk-deployment", self.target.backend.deployment.parse().map_err(invalid_data)?);
-        Ok(request)
     }
 }
 

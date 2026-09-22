@@ -1,8 +1,5 @@
-use super::super::super::{
-    platform::{Platform, request},
-    transport::invalid_data,
-};
 use super::{Tasks, scope::Origin};
+use crate::server::{platform::Platform, transport::invalid_data};
 use chunk_contract::EffectMethod;
 use chunk_proto::v1::{PrepareSessionMethodRequest, PreparedMethodRequest, SessionMethodPhase, SessionMethodResult};
 use serde_json::Value;
@@ -22,7 +19,7 @@ impl Drop for Prepared {
         let platform = self.platform.clone();
         let operation_id = self.operation.clone();
         self.platform.cleanup.spawn(async move {
-            if let Ok(request) = request(PreparedMethodRequest { operation_id }, &platform.target.control.token) {
+            if let Ok(request) = platform.control_request(PreparedMethodRequest { operation_id }) {
                 let _ = platform.control.clone().cancel_prepared_method(request).await;
             }
         });
@@ -65,17 +62,14 @@ async fn invoke_inner(
         .platform
         .control
         .clone()
-        .prepare_session_method(request(
-            PrepareSessionMethodRequest {
-                claim: Some(origin.identity.clone()),
-                app_id: method.app,
-                session: method.session,
-                method: method.name,
-                arguments_json: arguments.to_string(),
-                timeout_ms: 5000,
-            },
-            &tasks.platform.target.control.token,
-        )?)
+        .prepare_session_method(tasks.platform.control_request(PrepareSessionMethodRequest {
+            claim: Some(origin.identity.clone()),
+            app_id: method.app,
+            session: method.session,
+            method: method.name,
+            arguments_json: arguments.to_string(),
+            timeout_ms: 5000,
+        })?)
         .await
         .map_err(io::Error::other)?
         .into_inner();
@@ -92,10 +86,9 @@ async fn invoke_inner(
         .platform
         .control
         .clone()
-        .start_prepared_method(request(
-            PreparedMethodRequest { operation_id: prepared.operation.clone() },
-            &tasks.platform.target.control.token,
-        )?)
+        .start_prepared_method(
+            tasks.platform.control_request(PreparedMethodRequest { operation_id: prepared.operation.clone() })?,
+        )
         .await;
     let deadline = prepared.deadline;
     loop {
@@ -126,10 +119,9 @@ async fn invoke_inner(
             .platform
             .control
             .clone()
-            .poll_prepared_method(request(
-                PreparedMethodRequest { operation_id: prepared.operation.clone() },
-                &tasks.platform.target.control.token,
-            )?)
+            .poll_prepared_method(
+                tasks.platform.control_request(PreparedMethodRequest { operation_id: prepared.operation.clone() })?,
+            )
             .await;
     }
 }
@@ -147,10 +139,10 @@ fn track_send(tasks: &Tasks, origin: &Origin, mut prepared: Prepared, permit: to
         let poll = async {
             loop {
                 tokio::time::sleep(Duration::from_millis(25)).await;
-                let Ok(request) = request(
-                    PreparedMethodRequest { operation_id: prepared.operation.clone() },
-                    &prepared.platform.target.control.token,
-                ) else {
+                let Ok(request) = prepared
+                    .platform
+                    .control_request(PreparedMethodRequest { operation_id: prepared.operation.clone() })
+                else {
                     return;
                 };
                 let Ok(result) = prepared.platform.control.clone().poll_prepared_method(request).await else {

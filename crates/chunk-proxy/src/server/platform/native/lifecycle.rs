@@ -1,10 +1,10 @@
-use chunk_proto::v1::ClaimIdentity;
+use std::{io, sync::Arc};
+
+use chunk_contract::{DomainManifest, HookEvent};
+use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    Arc, ClaimRequest, DomainManifest, HookEvent, Platform, ancestors, caller, domain, invalid_data, io, payload,
-    request,
-};
+use super::{Platform, ancestors, caller, domain, invalid_data, payload};
 
 /// One socket's captured domain and membership; each invocation receives fresh capabilities.
 pub(in crate::server) struct Lifecycle {
@@ -80,7 +80,7 @@ impl Drop for Lifecycle {
                 let response = platform
                     .control
                     .clone()
-                    .reconcile_departure(request(claim.clone(), &platform.target.control.token)?)
+                    .reconcile_departure(platform.control_request(claim.clone())?)
                     .await
                     .map_err(io::Error::other)?
                     .into_inner();

@@ -8,7 +8,6 @@ use chunk_protocol::{
 };
 
 mod suggestions;
-pub use suggestions::SuggestionPlan;
 #[cfg(test)]
 mod tests;
 

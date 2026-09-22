@@ -1,5 +1,5 @@
-use super::super::super::transport::invalid_data;
 use super::{Commands, Output, Tasks, backend, run, scope::Origin};
+use crate::server::transport::invalid_data;
 use chunk_proto::v1::{CommandSuggestionRequest, PrepareCommand};
 use chunk_protocol::{
     Decode, Packet, VarInt,

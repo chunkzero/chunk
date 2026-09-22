@@ -9,8 +9,7 @@ use std::{future::Future, io, time::Duration};
 use chunk_protocol::{
     Encode, Packet, decode_packet,
     versions::v26_2::{
-        ChunkBatchReceived, ConfigurationClientInformation, ConfigurationClientInformationParticleStatus,
-        ConfirmTeleport, PlayClientInformation, PlayClientInformationParticleStatus, PlayKeepAlive,
+        ChunkBatchReceived, ConfigurationClientInformation, ConfirmTeleport, PlayClientInformation, PlayKeepAlive,
         PlayKeepAliveResponse, PlayPing, PlayPong, PlayerLoaded,
     },
 };
@@ -21,14 +20,13 @@ use tokio::{
 
 use super::{
     authentication::Authenticated,
-    configuration::{self, FRAME_LIMIT, packet_id},
-    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, within},
+    configuration::{self, FRAME_LIMIT, KeepAlive, packet_id},
+    transport::{PreparedPackets, Transport, WRITE_TIMEOUT, invalid_data, timed_out, within},
 };
 
 const LIMBO_TIMEOUT: Duration = Duration::from_secs(60);
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Returns the same authenticated play transport once all outstanding protocol
 /// acknowledgments are drained. The caller owns reconfiguration/session handoff.
@@ -80,15 +78,13 @@ where
 {
     tokio::pin!(destination);
     let mut ready = None;
-    let mut keep_alive = None;
-    let mut next_keep_alive = Instant::now();
-    let mut next_id = 0_i64;
+    let mut keep_alive = KeepAlive::new();
     let mut teleport = Some(Instant::now() + ACK_TIMEOUT);
     let loading_deadline = Instant::now() + ACK_TIMEOUT;
     let mut batch_received = false;
     let mut loaded = false;
     loop {
-        if keep_alive.is_none()
+        if keep_alive.idle()
             && teleport.is_none()
             && batch_received
             && loaded
@@ -96,26 +92,21 @@ where
         {
             return Ok((authenticated, settings, destination));
         }
-        let heartbeat_deadline = keep_alive.map_or(next_keep_alive, |(_, deadline)| deadline);
         tokio::select! {
             biased;
             () = sleep_until(teleport.unwrap_or(loading_deadline)), if teleport.is_some() => return Err(timed_out("teleport acknowledgment timed out")),
             () = sleep_until(loading_deadline), if !batch_received || !loaded => return Err(timed_out("limbo loading timed out")),
             result = &mut destination, if ready.is_none() => ready = Some(result?),
-            () = sleep_until(heartbeat_deadline) => {
-                if keep_alive.is_some() { return Err(timed_out("play keepalive timed out")); }
-                send(&mut authenticated.transport, &PlayKeepAlive { keep_alive_id: next_id }).await?;
-                keep_alive = Some((next_id, Instant::now() + ACK_TIMEOUT));
-                next_id = next_id.wrapping_add(1);
+            () = sleep_until(keep_alive.deadline()) => {
+                let id = keep_alive.start().ok_or_else(|| timed_out("play keepalive timed out"))?;
+                send(&mut authenticated.transport, &PlayKeepAlive { keep_alive_id: id }).await?;
             }
             frame = authenticated.transport.read_frame(FRAME_LIMIT) => {
                 let frame = frame?;
                 match packet_id(&frame)? {
                     PlayKeepAliveResponse::ID => {
                         let id = decode_packet::<PlayKeepAliveResponse>(&frame).map_err(invalid_data)?.keep_alive_id;
-                        if keep_alive.is_none_or(|(pending, _)| pending != id) { return Err(invalid_data("unexpected play keepalive")); }
-                        keep_alive = None;
-                        next_keep_alive = Instant::now() + KEEP_ALIVE_INTERVAL;
+                        if !keep_alive.acknowledge(id) { return Err(invalid_data("unexpected play keepalive")); }
                     }
                     ConfirmTeleport::ID => {
                         let id = decode_packet::<ConfirmTeleport>(&frame).map_err(invalid_data)?.teleport_id.0;
@@ -139,22 +130,7 @@ where
                         send(&mut authenticated.transport, &PlayPong { id: ping.id }).await?;
                     }
                     PlayClientInformation::ID => {
-                        let information = decode_packet::<PlayClientInformation>(&frame).map_err(invalid_data)?;
-                        settings = ConfigurationClientInformation {
-                            locale: information.locale,
-                            view_distance: information.view_distance,
-                            chat_flags: information.chat_flags,
-                            chat_colors: information.chat_colors,
-                            skin_parts: information.skin_parts,
-                            main_hand: information.main_hand,
-                            enable_text_filtering: information.enable_text_filtering,
-                            enable_server_listing: information.enable_server_listing,
-                            particle_status: match information.particle_status {
-                                PlayClientInformationParticleStatus::All => ConfigurationClientInformationParticleStatus::All,
-                                PlayClientInformationParticleStatus::Decreased => ConfigurationClientInformationParticleStatus::Decreased,
-                                PlayClientInformationParticleStatus::Minimal => ConfigurationClientInformationParticleStatus::Minimal,
-                            },
-                        };
+                        settings = configuration::play_settings(&frame)?;
                     }
                     id if (0..=0x44).contains(&id) && id != 0x10 => {} // Bounded chat, inventory and input packets have no effect in limbo.
                     _ => return Err(invalid_data("unknown play packet")),
@@ -176,10 +152,6 @@ async fn send_prepared<S: AsyncRead + AsyncWrite + Unpin>(
     packets: &PreparedPackets,
 ) -> io::Result<()> {
     within(WRITE_TIMEOUT, transport.write_prepared(packets)).await
-}
-
-fn timed_out(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, message)
 }
 
 #[cfg(test)]

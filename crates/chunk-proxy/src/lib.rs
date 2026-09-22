@@ -1,7 +1,7 @@
 //! Owns player sockets, serves status, authenticates login, and hosts a packet-simulated limbo.
 
 #[cfg(feature = "mc-26-2")]
-pub mod command_tree;
+mod command_tree;
 
 #[cfg(feature = "mc-26-2")]
 mod server;

@@ -3,10 +3,7 @@ use std::io;
 use chunk_proto::v1::{Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, CommandScope};
 use tokio_util::sync::CancellationToken;
 
-use super::super::super::{
-    platform::{Platform, request},
-    transport::invalid_data,
-};
+use crate::server::{platform::Platform, transport::invalid_data};
 
 #[derive(Clone)]
 pub(in crate::server::managed) struct Origin {
@@ -47,7 +44,7 @@ impl Origin {
         let assignment = platform
             .control
             .clone()
-            .inspect(request(self.claim.clone(), &platform.target.control.token)?)
+            .inspect(platform.control_request(self.claim.clone())?)
             .await
             .map_err(io::Error::other)?
             .into_inner();

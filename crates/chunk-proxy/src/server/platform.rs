@@ -51,10 +51,23 @@ impl Platform {
         })
     }
 
+    pub fn control_request<T>(&self, body: T) -> io::Result<Request<T>> {
+        request(body, &self.target.control.token)
+    }
+
+    /// Authenticates `body` with `token` for this platform's backend environment and deployment.
+    pub fn backend_request<T>(&self, body: T, token: &str) -> io::Result<Request<T>> {
+        let backend = &self.target.backend;
+        let mut request = request(body, token)?;
+        request.metadata_mut().insert("x-chunk-environment", backend.environment.parse().map_err(invalid_data)?);
+        request.metadata_mut().insert("x-chunk-deployment", backend.deployment.parse().map_err(invalid_data)?);
+        Ok(request)
+    }
+
     async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: Value) -> io::Result<T> {
         let hooks = if phase == "status" { &self.status_hooks } else { &self.hooks };
         let _permit = hooks.try_acquire().map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
-        let mut invocation = request(
+        let invocation = self.backend_request(
             BackendQuery {
                 function: format!("shared/proxy/{phase}"),
                 arguments_json: serde_json::to_vec(&arguments).map_err(invalid_data)?,
@@ -63,30 +76,8 @@ impl Platform {
             },
             &self.target.backend.token,
         )?;
-        invocation
-            .metadata_mut()
-            .insert("x-chunk-environment", self.target.backend.environment.parse().map_err(invalid_data)?);
-        invocation
-            .metadata_mut()
-            .insert("x-chunk-deployment", self.target.backend.deployment.parse().map_err(invalid_data)?);
         let result = self.backend.clone().query(invocation).await.map_err(io::Error::other)?.into_inner();
         serde_json::from_slice(&result.result_json).map_err(invalid_data)
-    }
-
-    #[cfg(test)]
-    pub async fn route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
-        self.route_claim(&chunk_proto::v1::ClaimRequest {
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            proxy_id: self.proxy_id.clone(),
-            connection_id: "test".into(),
-            identity: Some(chunk_proto::v1::Identity {
-                uuid: uuid.into(),
-                username: username.into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
     }
 
     async fn legacy_route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
