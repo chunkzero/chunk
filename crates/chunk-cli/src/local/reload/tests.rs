@@ -49,6 +49,10 @@ fn draining_releases_stop_at_the_deadline_with_players_remaining() {
     let mut draining = Retirement::until(start + Duration::from_secs(30));
     assert!(!draining.due(Some(&[node(NodePhase::Online, 3)]), start + Duration::from_secs(29)));
     assert!(draining.due(None, start + Duration::from_secs(30)));
+    let mut pinned = Retirement::pinned();
+    pinned.drain_by(start + Duration::from_secs(5));
+    pinned.drain_by(start + Duration::from_secs(60));
+    assert!(pinned.due(Some(&[node(NodePhase::Online, 3)]), start + Duration::from_secs(5)));
 }
 
 #[test]

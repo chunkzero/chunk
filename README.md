@@ -163,8 +163,8 @@ them in the generated README. Connect with Minecraft Java Edition 26.2 at `local
 
 `chunk dev` rebuilds when project sources change and starts each build as a new local deployment version; new players
 join the newest one. When only backend code changed, existing sessions stay on their version until their players leave.
-When app JARs changed, the previous version stops once it is empty or after `--drain-seconds` (default 30), disconnecting
-remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every session
+When app JARs changed, every earlier version stops once it is empty or after `--drain-seconds` (default 30),
+disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every session
 immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
 automatic rebuilds. Reloads do not preserve gameplay state.
 

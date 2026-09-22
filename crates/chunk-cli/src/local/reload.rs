@@ -47,6 +47,11 @@ impl Retirement {
         Self { deadline: Some(deadline), empty_since: None }
     }
 
+    /// Applies `deadline` unless an earlier one is already set; used when a JVM change supersedes pinned sessions.
+    pub fn drain_by(&mut self, deadline: Instant) {
+        self.deadline = Some(self.deadline.map_or(deadline, |current| current.min(deadline)));
+    }
+
     /// Whether the release can stop now; `nodes` is `None` while its control is unreachable.
     pub fn due(&mut self, nodes: Option<&[NodeStatus]>, now: Instant) -> bool {
         if self.deadline.is_some_and(|deadline| now >= deadline) {

@@ -112,6 +112,7 @@ impl<'a> Session<'a> {
         let mut queued = None;
         let mut quiet: Option<(tokio::time::Instant, PathBuf)> = None;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let result = loop {
             let settle = quiet.as_ref().map(|(deadline, _)| *deadline);
             tokio::select! {
@@ -189,31 +190,35 @@ impl<'a> Session<'a> {
         let change = current
             .map_or(Change::Jvm, |index| reload::classify(&self.live[index].generation.release, &staged.release));
         let drain = Duration::from_secs(self.options.drain_seconds);
-        let (retirement, summary) = match change {
+        let (deadline, summary) = match change {
             Change::Unchanged => return Ok("no changes".into()),
-            Change::Backend => (Retirement::pinned(), "backend only; existing sessions stay pinned".to_owned()),
+            Change::Backend => (None, "backend only; existing sessions stay pinned".to_owned()),
             Change::Jvm => (
-                Retirement::until(Instant::now() + drain),
-                format!("JVM change; the previous release drains within {}s", drain.as_secs()),
+                Some(Instant::now() + drain),
+                format!("JVM change; earlier releases drain within {}s", drain.as_secs()),
             ),
         };
         let id = staged.release.id.clone();
-        if let Some(index) = self.live.iter().position(|live| live.generation.release.id == id) {
+        let resumed = self.live.iter().position(|live| live.generation.release.id == id);
+        let next = if let Some(index) = resumed {
             self.shared.route(&self.live[index].generation)?;
             self.live[index].retirement = None;
-            if let Some(current) = current {
-                self.live[current].retirement = Some(retirement);
+            index
+        } else {
+            let generation = self.launch(staged).await?;
+            self.live.push(Live { generation, retirement: None, nodes: None });
+            self.live.len() - 1
+        };
+        for (index, live) in self.live.iter_mut().enumerate().filter(|(index, _)| *index != next) {
+            if Some(index) == current {
+                live.retirement = Some(deadline.map_or_else(Retirement::pinned, Retirement::until));
+            } else if let (Some(deadline), Some(retirement)) = (deadline, &mut live.retirement) {
+                retirement.drain_by(deadline);
             }
-            self.publish()?;
-            return Ok(format!("{} resumed · {summary}", short(&id)));
         }
-        let generation = self.launch(staged).await?;
-        if let Some(current) = current {
-            self.live[current].retirement = Some(retirement);
-        }
-        self.live.push(Live { generation, retirement: None, nodes: None });
         self.publish()?;
-        Ok(format!("{} · {summary}", short(&id)))
+        let resumed = if resumed.is_some() { " resumed" } else { "" };
+        Ok(format!("{}{resumed} · {summary}", short(&id)))
     }
 
     /// Stops every running release, disconnecting its players, then starts `staged`.
