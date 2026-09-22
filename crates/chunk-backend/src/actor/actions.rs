@@ -89,7 +89,7 @@ impl Actions {
         if !trusted && (id.incarnation != self.incarnation || id.sequence <= self.retired) {
             return Err(Error::ActionOutcomeUnknown);
         }
-        if self.records.values().filter(|record| record.worker.is_some()).count() >= MAX_LIVE {
+        if !self.capacity() {
             return Err(Error::Busy);
         }
         if self.records.len() >= MAX_RECORDS {

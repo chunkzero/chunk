@@ -462,8 +462,5 @@ impl Actor {
         for subscription in self.subscriptions.drain(..) {
             let _ = subscription.sender.send_replace(Err(error.clone()));
         }
-        self.pending.clear();
-        self.pending_bytes = 0;
-        self.view = Rc::new(View::new(self.view.base.clone()));
     }
 }

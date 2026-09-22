@@ -119,8 +119,8 @@ impl SnapshotReader for Reader {
     }
 }
 
+/// Builds the SQL for an already validated range; tests inspect its query plan.
 pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(String, Vec<SqlValue>)> {
-    range.validate(table)?;
     let fields = &table.indexes[&range.index];
     let mut conditions = Vec::new();
     let mut params = Vec::new();

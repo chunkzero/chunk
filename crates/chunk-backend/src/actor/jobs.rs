@@ -194,9 +194,6 @@ impl Actor {
             return;
         }
         if let Some(job) = self.scheduled.ready.front().cloned() {
-            if !self.actions.capacity() {
-                return;
-            }
             let id = self.actions.job_id(&job);
             let result = DeploymentId::new(&job.deployment).map_err(Error::from).and_then(|deployment| {
                 self.launch_action(
