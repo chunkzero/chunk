@@ -265,7 +265,10 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || claim.proxy_id != guard.claim.proxy_id
         || claim.membership_generation == 0
         || claim.delivery_generation == 0
-        || delivery.operation_id != claim.operation_id
+    {
+        return Err(invalid_data("control assignment claim mismatch"));
+    }
+    if delivery.operation_id != claim.operation_id
         || delivery.proxy_id != claim.proxy_id
         || delivery.connection_id != guard.claim.connection_id
         || delivery.identity.as_ref().is_some_and(|identity| Some(identity) != guard.claim.identity.as_ref())
@@ -275,7 +278,10 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || delivery.session.as_ref().is_none_or(|session| session.id.is_empty())
         || delivery.player.as_ref().map(|player| &player.id)
             != guard.claim.identity.as_ref().map(|identity| &identity.uuid)
-        || config.deployment.as_ref() != Some(&deployment)
+    {
+        return Err(invalid_data("control assignment delivery mismatch"));
+    }
+    if config.deployment.as_ref() != Some(&deployment)
         || delivery.deployment != config.deployment
         || delivery.process_generation != config.process_generation
         || delivery.runtime_id != config.runtime_id
@@ -283,7 +289,7 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
         || config.runtime_id.is_empty()
         || config.process_generation == 0
     {
-        return Err(invalid_data("control assignment identity mismatch"));
+        return Err(invalid_data("control assignment runtime mismatch"));
     }
     let prepared = assignment.preparation.as_ref().ok_or_else(|| invalid_data("missing preparation"))?;
     let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
