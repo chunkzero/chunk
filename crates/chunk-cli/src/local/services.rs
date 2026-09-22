@@ -1,5 +1,9 @@
-use super::{Reporter, Settings};
+use super::{
+    Reporter, Settings,
+    report::{self, Deployment},
+};
 use chunk_build::Release;
+use chunk_proto::v1::{NodeStatus, NodesRequest};
 use std::{io, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -45,6 +49,7 @@ struct Services {
     control: Option<Service>,
     edge: Option<Service>,
     host: Option<Arc<chunk_control::ProcessHost>>,
+    control_connection: Option<chunk_contract::ControlConnection>,
 }
 impl Services {
     async fn start(
@@ -91,6 +96,7 @@ impl Services {
             Some(Service { task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())), stop: token });
         let control_connection = Service::ready(&mut self.control, started, "control").await?;
         reporter.done("Control", &control_connection.endpoint);
+        self.control_connection = Some(control_connection.clone());
         let proxy = chunk_edge::Proxy::bind(
             options.bind,
             chunk_edge::ProxyConfig {
@@ -157,10 +163,17 @@ pub(super) async fn run(
                 options.state.join("control").join(&artifact.id).join("nodes").display()
             ),
         );
+        let mut poll = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 () = stop.cancelled() => break Ok(()),
-                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                _ = poll.tick() => {
+                    if let Some(connection) = &services.control_connection {
+                        let nodes = nodes(connection).await.unwrap_or_default();
+                        reporter.deployments(vec![Deployment { id: artifact.id.clone(), state: "current".into(), nodes }]);
+                    }
+                }
+                () = tokio::time::sleep(Duration::from_millis(100)) => {
                     if services.failed() { break Err(io::Error::other("local service stopped")); }
                 }
             }
@@ -168,8 +181,21 @@ pub(super) async fn run(
     } else {
         started
     };
+    reporter.running("Stop");
+    let started = std::time::Instant::now();
     let stopped = services.stop().await;
+    reporter.done("Stop", report::seconds(started.elapsed()));
     result.and(stopped)
+}
+
+/// The nodes a control authority reports, or none while it is unreachable.
+async fn nodes(connection: &chunk_contract::ControlConnection) -> io::Result<Vec<NodeStatus>> {
+    let request = async {
+        let mut client = crate::players::client(connection).await?;
+        let request = crate::players::auth(NodesRequest {}, &connection.token)?;
+        Ok(client.nodes(request).await.map_err(io::Error::other)?.into_inner().nodes)
+    };
+    tokio::time::timeout(Duration::from_secs(2), request).await.map_err(io::Error::other)?
 }
 
 #[cfg(test)]

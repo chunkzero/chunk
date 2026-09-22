@@ -43,6 +43,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 cliclack = "0.5.6"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

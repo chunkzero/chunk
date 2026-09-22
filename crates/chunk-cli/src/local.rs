@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, IsTerminal},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -15,6 +16,7 @@ mod logs;
 mod plain;
 mod report;
 mod services;
+mod tui;
 
 #[derive(clap::Args)]
 pub(crate) struct Options {
@@ -32,6 +34,9 @@ pub(crate) struct Options {
     backend_bind: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:25567")]
     control_bind: SocketAddr,
+    /// Print plain progress lines instead of the terminal UI (automatic when stdout is not a terminal).
+    #[arg(long)]
+    plain: bool,
 }
 
 struct Settings {
@@ -43,21 +48,44 @@ struct Settings {
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
-    logs::plain();
+    let interactive = !options.plain && io::stdout().is_terminal();
     let (reporter, events) = Reporter::new();
-    let ui = tokio::spawn(plain::render(events));
-    let result = chunk_service::run(|stop| serve(options, reporter, stop)).await;
-    let _ = ui.await;
-    result
+    if interactive {
+        logs::tui(reporter.clone());
+    } else {
+        logs::plain();
+    }
+    chunk_service::run(|stop| async move {
+        let finished = CancellationToken::new();
+        let ui = if interactive {
+            let (stop, finished) = (stop.clone(), finished.clone());
+            let title = format!("chunk dev · {}", options.build.project.display());
+            tokio::task::spawn_blocking(move || tui::run(events, &title, &stop, &finished))
+        } else {
+            let finished = finished.clone();
+            tokio::spawn(async move {
+                plain::render(events, finished).await;
+                Ok(())
+            })
+        };
+        let result = serve(options, interactive, reporter, stop).await;
+        finished.cancel();
+        let shown = ui.await.map_err(io::Error::other)?;
+        result.and(shown)
+    })
+    .await
 }
 
-async fn serve(options: Options, reporter: Reporter, stop: CancellationToken) -> io::Result<()> {
+async fn serve(options: Options, interactive: bool, reporter: Reporter, stop: CancellationToken) -> io::Result<()> {
     let project = building::prepare(&options.build)?;
     reporter.done("Project", project_summary(&project));
 
     let state = options.state.unwrap_or_else(|| project.root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;
+    if interactive {
+        tokio::spawn(logs::follow_jvms(state.join("control"), reporter.clone(), stop.clone()));
+    }
     let _lock = runner_lock(&state.join("runner.lock"))?;
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     reporter.running("Build");
