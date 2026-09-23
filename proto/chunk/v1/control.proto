@@ -18,6 +18,7 @@ service LocalControl {
   rpc PollMove(ClaimRequest) returns (PendingMove);
   rpc Drain(DrainRequest) returns (DrainStatus);
   rpc Nodes(NodesRequest) returns (NodeList);
+  rpc Players(PlayersRequest) returns (PlayerList);
   rpc ShutdownNode(ShutdownNodeRequest) returns (NodeStatus);
   rpc PrepareSessionMethod(PrepareSessionMethodRequest) returns (PreparedMethodHandle);
   rpc StartPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
@@ -121,6 +122,20 @@ message NodeStatus {
   ProcessHealth health = 5;
   uint64 observed_at_ms = 6;
   uint32 consecutive_failures = 7;
+}
+message PlayersRequest {}
+message PlayerList {
+  repeated PlayerStatus players = 1;
+}
+// A player with a current delivery; `demand` is the session that delivery targets.
+message PlayerStatus {
+  Identity identity = 1;
+  SessionDemand demand = 2;
+  string host_id = 3;
+  string app_id = 4;
+  ClaimPhase phase = 5;
+  bool moving = 6;
+  uint64 since_ms = 7;
 }
 // Retries bind this operation to the same host and drain deadline.
 message ShutdownNodeRequest {

@@ -225,14 +225,7 @@ fn set_phase(claim: &mut Claim, phase: Phase) -> Result<()> {
     claim.phase = phase;
     if let Some(bytes) = &mut claim.assignment {
         let mut assignment = Assignment::decode(bytes.as_slice())?;
-        assignment.phase = match phase {
-            Phase::Reserved => ClaimPhase::Reserved,
-            Phase::Activating => ClaimPhase::Activating,
-            Phase::Attached => ClaimPhase::Attached,
-            Phase::Arrived => ClaimPhase::Arrived,
-            Phase::Withdrawing => ClaimPhase::Withdrawing,
-            Phase::Released => ClaimPhase::Released,
-        } as i32;
+        assignment.phase = ClaimPhase::from(phase).into();
         *bytes = assignment.encode_to_vec();
     }
     Ok(())

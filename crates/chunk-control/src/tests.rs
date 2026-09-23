@@ -514,6 +514,9 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
     let owner = control.state().unwrap().players[&uuid].clone();
     assert_eq!(owner.current.as_deref(), Some("source"));
     assert_eq!(owner.pending.as_deref(), Some("move"));
+    let [listed] = control.players().unwrap().players.try_into().unwrap();
+    assert!(listed.moving && listed.phase == ClaimPhase::Arrived as i32 && listed.app_id == "bridge");
+    assert_eq!(listed.demand.unwrap().key, "lobby");
     assert!(
         control
             .move_player(chunk_proto::v1::MovePlayerRequest { operation_id: "competing".into(), ..command.clone() })
