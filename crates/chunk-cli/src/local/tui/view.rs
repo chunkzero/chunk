@@ -30,7 +30,7 @@ pub(super) fn render(frame: &mut Frame, model: &Model, info: &Info) {
     let keys = match (model.ready(), model.tab(), model.focus) {
         (true, Tab::Players, _) => match model.input {
             Some(Input::Search) => "type to filter · ↑/↓ players · Enter keep · Esc clear",
-            Some(Input::Move(_)) => "Tab/↑/↓ field · Enter move · Esc cancel",
+            Some(Input::Move(_)) => "↑/↓ session type · type a key · Enter move · Esc cancel",
             None => "↑/↓ players · / search · m move · ←/→ tabs · r restart · q quit",
         },
         (true, Tab::Log(Source::Jvm), Focus::Nodes) => {

@@ -335,6 +335,7 @@ impl<'a> Session<'a> {
                     state: live.retirement.as_ref().map_or_else(|| "current".into(), |r| r.describe(now)),
                     nodes: live.nodes.clone().unwrap_or_default(),
                     players: live.players.clone(),
+                    session_types: live.generation.session_types.clone(),
                 })
                 .collect(),
         );

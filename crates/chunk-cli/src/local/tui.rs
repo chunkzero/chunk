@@ -56,8 +56,8 @@ pub(super) fn run(
                                 let _ = commands.send(command);
                             }
                         }
-                        KeyCode::Up | KeyCode::BackTab => model.arrow(-1),
-                        KeyCode::Down | KeyCode::Tab => model.arrow(1),
+                        KeyCode::Up => model.arrow(-1),
+                        KeyCode::Down => model.arrow(1),
                         KeyCode::Backspace => model.backspace(),
                         KeyCode::Char(character) => model.type_char(character),
                         _ => {}

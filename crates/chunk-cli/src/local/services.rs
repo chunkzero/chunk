@@ -2,7 +2,7 @@ use super::{Reporter, Settings, Staged};
 use chunk_build::Release;
 use chunk_contract::{BackendConnection, ControlConnection};
 use chunk_proto::v1::{MovePlayerRequest, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand};
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -156,6 +156,8 @@ impl Shared {
 pub(super) struct Generation {
     pub release: Release,
     pub deployment: String,
+    /// Session types this release declares, each with its machine profile.
+    pub session_types: BTreeMap<String, String>,
     control: Option<Service>,
     host: Option<Arc<chunk_control::ProcessHost>>,
     connection: Option<ControlConnection>,
@@ -164,8 +166,15 @@ pub(super) struct Generation {
 impl Generation {
     /// Starts control for `staged`, whose backend version must already be active; on error, anything started is stopped again.
     pub async fn start(settings: &Settings, shared: &Shared, staged: Staged, bind: SocketAddr) -> io::Result<Self> {
-        let mut generation =
-            Self { release: staged.release, deployment: staged.bundle.id, control: None, host: None, connection: None };
+        let session_types = staged.control.session_types.iter();
+        let mut generation = Self {
+            release: staged.release,
+            deployment: staged.bundle.id,
+            session_types: session_types.map(|(name, kind)| (name.clone(), kind.machine_profile.clone())).collect(),
+            control: None,
+            host: None,
+            connection: None,
+        };
         match generation.start_control(settings, shared, staged.control, &staged.java, bind).await {
             Ok(()) => Ok(generation),
             Err(error) => {

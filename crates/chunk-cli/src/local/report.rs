@@ -1,4 +1,4 @@
-use std::{fmt::Display, time::Duration};
+use std::{collections::BTreeMap, fmt::Display, time::Duration};
 
 use chunk_proto::v1::{NodeStatus, PlayerStatus};
 use tokio::sync::mpsc;
@@ -25,6 +25,8 @@ pub(crate) struct Deployment {
     pub state: String,
     pub nodes: Vec<NodeStatus>,
     pub players: Vec<PlayerStatus>,
+    /// Session type to its machine profile.
+    pub session_types: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

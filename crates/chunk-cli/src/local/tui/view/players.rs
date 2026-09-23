@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use super::{
-    super::model::{Field, Input, Model, id_of, name},
+    super::model::{Input, Model, id_of, name},
     nodes::{count, short},
 };
 
@@ -113,19 +113,17 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     match &model.input {
         Some(Input::Move(form)) => {
             lines.push(Line::from(format!("Move {}", form.name)).bold());
-            for (field, label, value) in
-                [(Field::SessionType, "Session type", &form.session_type), (Field::Key, "Key", &form.key)]
-            {
-                let active = form.field == field;
+            for (index, (session_type, profile)) in form.session_types.iter().enumerate() {
+                let chosen = index == form.choice;
                 lines.push(Line::from(vec![
-                    Span::raw(if active { "> " } else { "  " }),
                     Span::styled(
-                        format!("{label:<14}"),
-                        Style::new().fg(if active { Color::Cyan } else { Color::DarkGray }),
+                        format!("{}{session_type}", if chosen { "> " } else { "  " }),
+                        if chosen { Style::new().fg(Color::Cyan).bold() } else { Style::new() },
                     ),
-                    Span::raw(format!("{value}{}", if active { "▏" } else { "" })),
+                    Span::raw(format!(" · {profile}")).dark_gray(),
                 ]));
             }
+            lines.push(Line::from(vec![Span::raw("Key  ").dark_gray(), Span::raw(format!("{}▏", form.key))]));
         }
         _ => lines.push(Line::from("m move · / search").dark_gray()),
     }

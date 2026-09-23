@@ -9,7 +9,7 @@ use super::super::report::{Deployment, Event, Source, Step};
 
 mod players;
 
-pub(super) use players::{Field, Input, id_of, name};
+pub(super) use players::{Input, id_of, name};
 
 const RETAINED_LINES: usize = 2000;
 pub(super) const STARTUP: [&str; 7] = ["Project", "Compile", "Release", "Java", "Backend", "Control", "Proxy"];
