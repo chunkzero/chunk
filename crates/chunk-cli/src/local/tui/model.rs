@@ -67,8 +67,8 @@ pub(super) struct Model {
 
 impl Model {
     pub fn new() -> Self {
-        let steps = [
-            ("Project", "Inspecting project"),
+        let mut steps = [
+            ("Project", ""),
             ("Compile", "Waiting for project"),
             ("Release", "Waiting for compilation"),
             ("Java", "Waiting for release"),
@@ -78,7 +78,8 @@ impl Model {
         ]
         .into_iter()
         .map(|(name, detail)| Progress::pending(name, detail))
-        .collect();
+        .collect::<Vec<_>>();
+        steps[0].update(Step::Running("Inspecting project".into()));
         Self {
             steps,
             deployments: Vec::new(),
@@ -122,7 +123,7 @@ impl Model {
             for line in error.lines() {
                 self.push(Source::Dev, line.to_owned());
             }
-            if matches!(name, "Build" | "Reload") {
+            if name == "Reload" {
                 for step in &mut self.steps {
                     if matches!(step.name, "Compile" | "Release") && matches!(step.state, Step::Running(_)) {
                         step.update(Step::Failed(error.clone()));

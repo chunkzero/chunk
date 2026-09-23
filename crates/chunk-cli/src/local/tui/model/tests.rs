@@ -114,3 +114,10 @@ fn failed_steps_keep_their_complete_diagnostic_in_the_dev_log() {
         ["Build failed", "gradle exited with status 1", "e: Lobby.kt:12:5 Unresolved reference: foo"]
     );
 }
+
+#[test]
+fn source_index_matches_tab_order() {
+    for (index, source) in Source::ALL.into_iter().enumerate() {
+        assert_eq!(source.index(), index);
+    }
+}

@@ -29,7 +29,9 @@ pub(super) async fn render(mut events: mpsc::UnboundedReceiver<Event>, finished:
         };
         let Some(event) = event else { return };
         let _ = match event {
+            // Plain output reports the build as one step rather than its phases.
             Event::Step { state: Step::Pending(_), .. }
+            | Event::Step { name: "Compile" | "Release", .. }
             | Event::Log { source: Source::Build, .. }
             | Event::Deployments(_) => Ok(()),
             Event::Step { name, state: Step::Running(detail) } => {

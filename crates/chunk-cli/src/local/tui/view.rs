@@ -40,8 +40,6 @@ fn render_header(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
         (format!("{} STOPPING", model.spinner()), Color::Yellow)
     } else if model.ready() {
         ("READY".into(), Color::Green)
-    } else if model.steps.iter().any(|step| matches!(step.state, Step::Failed(_))) {
-        ("FAILED".into(), Color::Red)
     } else {
         let build = model.step("Build").filter(|step| matches!(step.state, Step::Running(_)));
         let label =
@@ -90,7 +88,12 @@ fn render_running(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
 }
 
 fn render_summary(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
-    let mut connection = vec![Span::raw("Connect  "), Span::raw(info.address.to_string()).bold()];
+    let address = if info.address.ip().is_unspecified() {
+        format!("localhost:{}", info.address.port())
+    } else {
+        info.address.to_string()
+    };
+    let mut connection = vec![Span::raw("Connect  "), Span::raw(address).bold()];
     if let Some(build) = model.step("Build") {
         connection.push(Span::raw(format!("   ✓ Built {}", build.detail())).dark_gray());
     }
@@ -112,7 +115,7 @@ fn render_activity(frame: &mut Frame, model: &Model, step: &Progress, area: Rect
     let (mark, color) = mark(model, &step.state);
     let detail = step.detail().lines().next().unwrap_or_default();
     let suffix = match &step.state {
-        Step::Running(_) => {
+        Step::Running(_) if step.name == "Reload" => {
             let phase = ["Compile", "Release"]
                 .into_iter()
                 .filter_map(|name| model.step(name))
@@ -122,6 +125,7 @@ fn render_activity(frame: &mut Frame, model: &Model, step: &Progress, area: Rect
                 |phase| format!("{} · {} · current release serving", phase.name, report::seconds(step.elapsed())),
             )
         }
+        Step::Running(_) => report::seconds(step.elapsed()),
         Step::Failed(error) if error.contains("the previous release keeps serving") => {
             "previous release serving · details in dev log".into()
         }

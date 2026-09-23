@@ -27,19 +27,21 @@ pub(super) fn run(
     let mut terminal = ratatui::init();
     let mut model = model::Model::new();
     let result = loop {
-        for _ in 0..512 {
-            match events.try_recv() {
-                Ok(event) => model.apply(event),
-                Err(_) => break,
-            }
+        let mut applied = 0;
+        while applied < 512
+            && let Ok(event) = events.try_recv()
+        {
+            model.apply(event);
+            applied += 1;
         }
+        let backlog = applied == 512;
         if finished.is_cancelled() {
             break Ok(());
         }
         if let Err(error) = terminal.draw(|frame| view::render(frame, &model, info)) {
             break Err(error);
         }
-        match event::poll(Duration::from_millis(100)) {
+        match event::poll(if backlog { Duration::ZERO } else { Duration::from_millis(100) }) {
             Ok(false) => {}
             Ok(true) => match event::read() {
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
