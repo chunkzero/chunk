@@ -54,6 +54,16 @@ Toolchains are pinned in `mise.toml`. Install [mise](https://mise.jdx.dev), [jus
 development headers and `pkg-config`, then run `mise install`. Use `just --list` to find tasks and run the narrowest
 checks for a change; `just ready` runs the full CI checks before a PR.
 
+Mise also installs [kache](https://github.com/kunobi-ninja/kache) and enables it as the Rust compiler wrapper in this
+checkout. Activate mise in your shell or run commands through `mise exec --`, for example
+`mise exec -- cargo build -p chunk-cli`. Compatible compiler outputs share kache's user-wide cache across worktrees;
+keep a separate `target/` directory per worktree. Run `mise exec -- kache report --last-build` to inspect reuse, or
+`mise exec -- env KACHE_DISABLED=1 cargo build -p chunk-cli` to bypass caching for one build.
+
+Kache's cache budget does not bound total disk usage while target directories retain outputs. Preview stale targets with
+`mise exec -- kache clean --tracked --stale 14d --dry-run`, then use `--yes` instead of `--dry-run` to remove the
+reviewed outputs. CI uses kache with a 2 GiB retention budget per job and caches V8's native archive separately.
+
 Run `pnpm install --frozen-lockfile` after installing the toolchains. `just fmt` formats the repository and
 `just fmt-check` checks the same files in CI:
 
@@ -166,8 +176,8 @@ them in the generated README. Connect with Minecraft Java Edition 26.2 at `local
 `chunk dev` rebuilds when project sources change and starts each build as a new local deployment version; new players
 join the newest one. When only backend code changed, existing sessions stay on their version until their players leave.
 When app JARs changed, every earlier version stops once it is empty or after `--drain-seconds` (default 30),
-disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every session
-immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
+disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every
+session immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
 automatic rebuilds. Reloads do not preserve gameplay state.
 
 Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same

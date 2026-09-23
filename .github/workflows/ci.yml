@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
   RUST_TEST_THREADS: 2
 
 permissions:

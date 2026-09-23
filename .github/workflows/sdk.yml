@@ -36,6 +36,7 @@ concurrency:
 
 env:
   CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
   GRADLE_OPTS: -Dorg.gradle.workers.max=2
 
 jobs:

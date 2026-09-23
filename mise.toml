@@ -1,5 +1,6 @@
 [tools]
 rust = "1.98.1"
+"github:kunobi-ninja/kache" = "0.26.3"
 java = "temurin-21"
 ktlint = "1.8.0"
 node = "24.20.0"
@@ -7,3 +8,6 @@ pnpm = "10.33.0"
 buf = "1.72.0"
 just = "1.58.0"
 "github:google/google-java-format" = { version = "1.36.1", bin = "google-java-format" }
+
+[env]
+RUSTC_WRAPPER = "kache"
