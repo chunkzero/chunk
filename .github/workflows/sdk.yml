@@ -44,6 +44,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.value }}
+      artifact-id: ${{ steps.sdk.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
       - name: Read coordinated SDK version
@@ -80,6 +81,7 @@ jobs:
       - run: cargo build --release --locked -p chunk-cli
       - run: python3 scripts/package-sdk.py --output dist
       - uses: actions/upload-artifact@v4
+        id: sdk
         with:
           name: chunk-sdk-linux-x64
           path: |
@@ -88,7 +90,8 @@ jobs:
             dist/maven/**
             scripts/install.sh
           if-no-files-found: error
-          retention-days: 7
+          # Cleanup deletes it once used; retention only bounds runs that never reach cleanup.
+          retention-days: 1
 
   verify:
     needs: package
@@ -173,3 +176,18 @@ jobs:
           else
             gh release edit "v$SDK_VERSION" --draft=false --prerelease=false --latest
           fi
+
+  # The artifact only hands the SDK between jobs; keeping it counts against Actions storage.
+  cleanup:
+    if: always() && needs.package.outputs.artifact-id != ''
+    needs: [package, verify, publish]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the SDK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.package.outputs.artifact-id }}
+        run: gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
