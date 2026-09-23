@@ -42,7 +42,7 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
             let players = node
                 .health
                 .as_ref()
-                .map_or_else(|| "health unavailable".into(), |health| format!("{} players", health.players));
+                .map_or_else(|| "health unavailable".into(), |health| count(health.players, "player"));
             items.push(ListItem::new(vec![
                 Line::from(vec![
                     Span::styled("● ", Style::new().fg(color(phase))),
@@ -56,7 +56,8 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
     let mut state = ListState::default().with_selected(Some(selected));
     let list = List::new(items)
         .highlight_symbol(if focused { "> " } else { "  " })
-        .highlight_style(Style::new().reversed())
+        // One background for the row; reversing would invert each styled span separately.
+        .highlight_style(Style::new().bg(Color::Indexed(237)))
         .block(
             Block::default()
                 .title(format!("Nodes · {}", model.hosts().len()))
@@ -68,7 +69,12 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
 
 fn render_header(frame: &mut Frame, model: &Model, area: Rect) {
     let (title, detail) = model.selected_node().map_or_else(
-        || (Line::from("All nodes").bold(), format!("{} nodes · {} players", model.hosts().len(), model.players())),
+        || {
+            (
+                Line::from("All nodes").bold(),
+                format!("{} · {}", count(model.hosts().len(), "node"), count(model.players(), "player")),
+            )
+        },
         |(deployment, node)| {
             let phase = phase(node);
             let title = Line::from(vec![
@@ -79,8 +85,8 @@ fn render_header(frame: &mut Frame, model: &Model, area: Rect) {
                 || "health unavailable".into(),
                 |health| {
                     format!(
-                        "{} players · {}/{}M heap",
-                        health.players,
+                        "{} · {}/{}M heap",
+                        count(health.players, "player"),
                         health.heap_used_bytes >> 20,
                         health.heap_max_bytes >> 20
                     )
@@ -133,4 +139,9 @@ fn color(phase: NodePhase) -> Color {
 
 fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
+}
+
+fn count<N: Copy + std::fmt::Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
+    let suffix = if n == N::from(1) { "" } else { "s" };
+    format!("{n} {noun}{suffix}")
 }
