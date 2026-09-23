@@ -22,7 +22,7 @@ mod compiled;
 
 const APPLICATION: &str = "application-credential-is-not-platform";
 const PLATFORM: &str = "platform-command-credential-is-distinct";
-const COMMAND: &str = "shared/domains/commands/notify";
+const COMMAND: &str = "scopes/commands/notify";
 fn scope() -> wire::CommandScope {
     wire::CommandScope {
         proxy_id: "proxy".into(),
@@ -53,7 +53,7 @@ fn request<T>(message: T, credential: &str) -> Request<T> {
 fn deployment() -> Deployment {
     let domains:DomainManifest=serde_json::from_value(json!({"version":1,"scopes":{"":{"parent":null},"private":{"parent":""}},"apps":{"lobby":""},"hooks":{},"commands":{
         COMMAND:{"domain":"","name":"notify","aliases":["n"],"export":"notify","permission":"permit","follow_player":true,"routes":[{"literals":[],"arguments":[{"name":"text","parser":"word","suggestions":{"query":"choices"}}]}]},
-        "shared/domains/private/commands/hidden":{"domain":"private","name":"private","aliases":[],"export":"hidden","follow_player":false,"routes":[{"literals":[],"arguments":[]}]}
+        "scopes/private/commands/hidden":{"domain":"private","name":"private","aliases":[],"export":"hidden","follow_player":false,"routes":[{"literals":[],"arguments":[]}]}
     }})).unwrap();
     let empty = Schema::Object { fields: BTreeMap::new() };
     let suggestion = serde_json::from_value(

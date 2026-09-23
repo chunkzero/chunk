@@ -4,14 +4,18 @@ use super::*;
 
 async fn compile_command() -> Deployment {
     let root = tempfile::tempdir().unwrap();
-    for directory in ["server/schema", "server/domains", "apps/lobby"] {
+    for directory in ["server/schema", "server/commands", "apps/lobby"] {
         fs::create_dir_all(root.path().join(directory)).unwrap();
     }
     for (file, source) in [
         ("server/schema/index.ts", include_str!("schema.ts")),
         ("server/state.ts", include_str!("state.ts")),
-        ("server/domains/commands.ts", include_str!("command.ts")),
-        ("apps/lobby/app.toml", "domain = ''"),
+        ("server/commands/notify.ts", include_str!("command.ts")),
+        (
+            "apps/scope.ts",
+            "import {defineScope} from '#chunk'; import {notify} from '../server/commands/notify.ts'; export default defineScope({commands:{notify}});",
+        ),
+        ("apps/lobby/app.toml", ""),
         ("apps/lobby/build.gradle.kts", ""),
     ] {
         fs::write(root.path().join(file), source).unwrap();

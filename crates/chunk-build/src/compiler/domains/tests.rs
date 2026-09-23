@@ -6,15 +6,15 @@ fn project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
     fs::create_dir_all(root.join("server/schema")).unwrap();
-    fs::create_dir_all(root.join("server/domains/games/duels")).unwrap();
-    fs::create_dir_all(root.join("apps/duels")).unwrap();
+    fs::create_dir_all(root.join("apps/games/duels")).unwrap();
+    fs::create_dir_all(root.join("apps/lobby")).unwrap();
     fs::write(
         root.join("server/schema/index.ts"),
         "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
     )
     .unwrap();
-    fs::write(root.join("apps/duels/app.toml"), "domain = 'games/duels'").unwrap();
-    fs::write(root.join("apps/duels/build.gradle.kts"), "").unwrap();
+    fs::write(root.join("apps/lobby/app.toml"), "").unwrap();
+    fs::write(root.join("apps/lobby/build.gradle.kts"), "").unwrap();
     project
 }
 
@@ -24,7 +24,7 @@ fn compiled_domains_pin_ancestry_bindings_and_named_hooks_separately_from_functi
     let root = project.path();
     let output = root.join(".chunk/build");
     fs::write(
-        root.join("server/domains/hooks.ts"),
+        root.join("server/hooks.ts"),
         r"
 import {createHook, query, v} from '#chunk';
 export const checkBan = createHook('player.login', () => ({allow:true}), {order:10});
@@ -35,11 +35,18 @@ export const status = createHook('server.ping', () => ({motd:'Hello',online:0,ma
     )
     .unwrap();
     fs::write(
-        root.join("server/domains/games/duels/hooks.mts"),
+        root.join("apps/scope.ts"),
+        "import {defineScope} from '#chunk'; import {checkBan,status} from '../server/hooks.ts'; export default defineScope({hooks:{checkBan,status}});",
+    )
+    .unwrap();
+    fs::write(
+        root.join("apps/games/duels/scope.ts"),
         r"
-import {createHook} from '#chunk';
-export const checkEntry = createHook('player.beforeMove', (ctx) => ({allow:ctx.sourceDomain !== 'blocked'}));
-export const arrived = createHook('domain.enter', () => {}, {followPlayer:true});
+import {createHook, defineScope} from '#chunk';
+export default defineScope({hooks:{
+  checkEntry: createHook('player.beforeMove', (ctx) => ({allow:ctx.sourceDomain !== 'blocked'})),
+  arrived: createHook('domain.enter', () => {}, {followPlayer:true}),
+}});
 ",
     )
     .unwrap();
@@ -48,16 +55,16 @@ export const arrived = createHook('domain.enter', () => {}, {followPlayer:true})
     let domains = contract.contracts.domains.unwrap();
     assert_eq!(domains.version, 1);
     assert_eq!(domains.scopes["games/duels"].parent.as_deref(), Some("games"));
-    assert_eq!(domains.apps["duels"], "games/duels");
+    assert_eq!(domains.apps["lobby"], "");
     assert_eq!(domains.hooks.len(), 4);
-    assert_eq!(domains.hooks["shared/domains/hooks/checkBan"].order, Some(10));
-    assert!(domains.hooks["shared/domains/games/duels/hooks/arrived"].follow_player);
+    assert_eq!(domains.hooks["scopes/hooks/checkBan"].order, Some(10));
+    assert!(domains.hooks["scopes/games/duels/hooks/arrived"].follow_player);
     assert_eq!(contract.functions.len(), 1);
-    assert!(contract.functions.contains_key("shared/domains/hooks/read"));
+    assert!(contract.functions.contains_key("shared/hooks/read"));
     let generated = root.join("client");
     generate(&output.join("contract.json"), &generated, GenerationTarget::TypeScript).unwrap();
     let api = fs::read_to_string(generated.join("api.ts")).unwrap();
-    assert!(api.contains("shared/domains/hooks/read"));
+    assert!(api.contains("shared/hooks/read"));
     assert!(!api.contains("checkBan"));
     assert!(!api.contains("arrived"));
 }
@@ -67,31 +74,43 @@ fn compilation_rejects_ambiguous_and_misplaced_hook_descriptors() {
     let project = project();
     let root = project.path();
     let output = root.join(".chunk/build");
-    for (source, expected) in [
+    for (hooks, expected) in [
         (
-            "export const a=createHook('player.login',()=>({allow:true})); export const b=createHook('player.login',()=>({allow:true}));",
+            "a:createHook('player.login',()=>({allow:true})),b:createHook('player.login',()=>({allow:true}))",
             "distinct explicit order",
         ),
         (
-            "export const a=createHook('server.ping',()=>({motd:'A',online:0,max:1})); export const b=createHook('server.ping',()=>({motd:'B',online:0,max:1}));",
+            "a:createHook('server.ping',()=>({motd:'A',online:0,max:1})),b:createHook('server.ping',()=>({motd:'B',online:0,max:1}))",
             "ambiguous single-result",
         ),
-        ("export default createHook('player.login',()=>({allow:true}));", "require named exports"),
     ] {
-        fs::write(root.join("server/domains/hooks.ts"), format!("import {{createHook}} from '#chunk'; {source}"))
-            .unwrap();
+        fs::write(
+            root.join("apps/scope.ts"),
+            format!(
+                "import {{createHook,defineScope}} from '#chunk'; export default defineScope({{hooks:{{{hooks}}}}});"
+            ),
+        )
+        .unwrap();
         let error = compile(root, &output).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
         assert!(!output.join("contract.json").exists());
     }
-    fs::remove_file(root.join("server/domains/hooks.ts")).unwrap();
+    fs::remove_file(root.join("apps/scope.ts")).unwrap();
+    let helpers = root.join("server/helpers.ts");
     fs::write(
-        root.join("server/helpers.ts"),
+        &helpers,
+        "import {createHook} from '#chunk'; export default createHook('player.login',()=>({allow:true}));",
+    )
+    .unwrap();
+    let error = compile(root, &output).unwrap_err().to_string();
+    assert!(error.contains("require named exports"), "{error}");
+    fs::write(
+        &helpers,
         "import {createHook} from '#chunk'; export const outside=createHook('player.login',()=>({allow:true}));",
     )
     .unwrap();
     let error = compile(root, &output).unwrap_err().to_string();
-    assert!(error.contains("server/domains/**/hooks.ts"), "{error}");
+    assert!(error.contains("bound in a defineApp or defineScope hooks map: shared/helpers/outside"), "{error}");
 }
 
 mod commands;

@@ -32,9 +32,10 @@ pub(crate) struct Destination {
     pub machine_profile: Option<String>,
 }
 
-/// Parses every `app.ts` and `scope.ts` under `apps/`; the result only carries authored entries.
+/// Parses every `app.ts` and `scope.ts` under `apps/`. The root scope is always present.
 pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
-    let mut inventory = Inventory::default();
+    let mut inventory =
+        Inventory { scopes: BTreeMap::from([(String::new(), DomainScope { parent: None })]), ..Inventory::default() };
     collect(&root.join("apps"), "", &mut inventory, 0)?;
     Ok(inventory)
 }
@@ -118,9 +119,6 @@ fn register_scope(directory: &Path, relative: &str, inventory: &mut Inventory) -
             return Err(invalid(directory, "case-colliding static scope path"));
         }
         inventory.scopes.entry(current.clone()).or_insert_with(|| DomainScope { parent: Some(ancestor) });
-    }
-    if relative.is_empty() {
-        inventory.scopes.insert(String::new(), DomainScope { parent: None });
     }
     if inventory.scopes.len() > 256 {
         return Err(invalid(directory, "too many scopes"));

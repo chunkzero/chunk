@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write,
-    io,
-    path::Path,
-};
+use std::{collections::BTreeMap, fmt::Write, io};
 
 use chunk_contract::{DOMAIN_MANIFEST_VERSION, DomainManifest};
 
@@ -15,21 +10,18 @@ struct Descriptors {
     kind: &'static str,
     module: &'static str,
     metadata: Vec<String>,
-    scopes: BTreeSet<String>,
 }
 
 pub(super) struct DomainEntries {
     manifest: Option<DomainManifest>,
-    authored: bool,
     descriptors: [Descriptors; 2],
     bound: Vec<String>,
     unbound: Vec<String>,
 }
 
 impl DomainEntries {
-    pub(super) fn new(root: &Path, inventory: &Inventory) -> Self {
-        let authored = !inventory.modules.is_empty();
-        let manifest = (authored || root.join("server/domains").exists()).then(|| DomainManifest {
+    pub(super) fn new(inventory: &Inventory) -> Self {
+        let manifest = (!inventory.modules.is_empty()).then(|| DomainManifest {
             version: DOMAIN_MANIFEST_VERSION,
             scopes: inventory.scopes.clone(),
             apps: inventory.apps.iter().map(|app| (app.id.clone(), app.domain.clone())).collect(),
@@ -38,27 +30,14 @@ impl DomainEntries {
         });
         Self {
             manifest,
-            authored,
             descriptors: [("Hook", "hooks"), ("Command", "commands")].map(|(kind, module)| Descriptors {
                 kind,
                 module,
                 metadata: Vec::new(),
-                scopes: BTreeSet::new(),
             }),
             bound: Vec::new(),
             unbound: Vec::new(),
         }
-    }
-
-    pub(super) fn add_module(&mut self, entry: &Source<'_>) -> io::Result<()> {
-        for descriptors in &mut self.descriptors {
-            if let Some(scope) = descriptor_scope(entry, descriptors.module)
-                && !descriptors.scopes.insert(scope.into())
-            {
-                return Err(error(format!("multiple {} modules for domain {scope}", descriptors.module)));
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn add_export(
@@ -66,39 +45,27 @@ impl DomainEntries {
         entry: &Source<'_>,
         exported: &str,
         value: &str,
-        binding: &str,
         source: &mut String,
     ) -> io::Result<()> {
-        for descriptors in &mut self.descriptors {
+        for descriptors in &self.descriptors {
             let kind = descriptors.kind;
-            let module = descriptors.module;
-            let failure = if exported == "default" {
-                format!("{kind} descriptors require named exports: {}", entry.namespace)
-            } else if let Some(scope) = descriptor_scope(entry, module) {
-                descriptors.metadata.push(format!(
-                    "...(is{kind}({value}) ? [[{}, {{...{value}.contract, domain:{}, export:{}}}]] : [])",
-                    quote(format!("{}/{exported}", entry.namespace)),
-                    quote(scope),
-                    quote(binding),
-                ));
-                continue;
-            } else if self.authored {
-                // Authored modules may export helpers; the check runs once every binding is known.
+            if exported == "default" {
+                writeln!(
+                    source,
+                    "if(is{kind}({value})) throw new Error({});",
+                    quote(format!("{kind} descriptors require named exports: {}", entry.namespace))
+                )
+                .map_err(error)?;
+            } else {
+                // Modules may export helpers; the check runs once every binding is known.
                 self.unbound.push(format!(
                     "if(is{kind}({value}) && !boundDescriptors.has({value})) throw new Error({});",
                     quote(format!(
-                        "{kind} descriptors must be bound in a defineApp or defineScope {module} map: {}/{exported}",
-                        entry.namespace
+                        "{kind} descriptors must be bound in a defineApp or defineScope {} map: {}/{exported}",
+                        descriptors.module, entry.namespace
                     ))
                 ));
-                continue;
-            } else {
-                format!(
-                    "{kind} descriptors must be named exports in server/domains/**/{module}.ts or {module}.mts: {}",
-                    entry.namespace
-                )
-            };
-            writeln!(source, "if(is{kind}({value})) throw new Error({});", quote(failure)).map_err(error)?;
+            }
         }
         Ok(())
     }
@@ -165,11 +132,6 @@ impl DomainEntries {
         source.push('}');
         Ok(source)
     }
-}
-
-fn descriptor_scope<'a>(source: &'a Source<'_>, module: &str) -> Option<&'a str> {
-    let path = source.namespace.strip_prefix("shared/domains/")?;
-    if path == module { Some("") } else { path.strip_suffix(module)?.strip_suffix('/') }
 }
 
 #[cfg(test)]
