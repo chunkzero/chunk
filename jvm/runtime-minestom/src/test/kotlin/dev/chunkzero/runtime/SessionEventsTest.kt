@@ -8,13 +8,23 @@ import dev.chunkzero.runtime.minestom.event.SessionEvent
 import dev.chunkzero.runtime.minestom.event.SessionJoinEvent
 import dev.chunkzero.runtime.minestom.event.SessionLeaveEvent
 import net.minestom.server.ServerProcess
+import net.minestom.server.coordinate.Pos
+import net.minestom.server.entity.Entity
+import net.minestom.server.entity.EntityType
 import net.minestom.server.entity.Player
 import net.minestom.server.event.Event
 import net.minestom.server.event.EventNode
+import net.minestom.server.event.entity.EntityTickEvent
+import net.minestom.server.event.instance.InstanceRegisterEvent
 import net.minestom.server.event.player.PlayerTickEvent
+import net.minestom.server.event.trait.EntityEvent
+import net.minestom.server.event.trait.InstanceEvent
+import net.minestom.server.instance.Instance
 import net.minestom.server.network.packet.server.SendablePacket
 import net.minestom.server.network.player.GameProfile
 import net.minestom.server.network.player.PlayerConnection
+import net.minestom.server.timer.ExecutionType
+import net.minestom.server.timer.TaskSchedule
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -184,17 +194,142 @@ class SessionEventsTest {
             global.map { it.javaClass },
         )
 
+        lateinit var partial: SessionScope
+        lateinit var entity: Entity
+        var runs = 0
         val failed =
             manager(
                 object : Session() {
-                    override fun onCreate(scope: SessionScope) =
-                        CompletableFuture.failedFuture<Void>(IllegalStateException("Creation failed"))
+                    override fun onCreate(scope: SessionScope): CompletableFuture<Void> {
+                        partial = scope
+                        entity = spawn(scope.createInstance())
+                        scope.scheduler
+                            .buildTask { runs++ }
+                            .repeat(TaskSchedule.nextTick())
+                            .schedule()
+                        return CompletableFuture.failedFuture(IllegalStateException("Creation failed"))
+                    }
                 },
             )
         assertThrows(CompletionException::class.java) { await(failed.create(command("failed"))) }
         assertThrows(CompletionException::class.java) { await(failed.finish(command("failed"))) }
         assertEquals(1, global.count { it.session.id == "failed" && it is SessionDestroyEvent })
         assertFalse(global.any { it.session.id == "failed" && it is SessionCreateEvent })
+        process.schedulerManager().processTick()
+        assertEquals(0, runs)
+        assertTrue(entity.isRemoved)
+        assertTrue(partial.scheduler.isClosed)
+        assertTrue(process.instanceManager().instances.isEmpty())
+        assertFalse(process.eventHandler().children.contains(partial.events))
+    }
+
+    @Test
+    fun `sessions receive native events and run scheduled work only for what they own`() {
+        val scopes = mutableListOf<SessionScope>()
+        val manager =
+            manager(
+                object : Session() {
+                    override fun onCreate(scope: SessionScope): CompletableFuture<Void> {
+                        scope.createInstance()
+                        scopes.add(scope)
+                        return CompletableFuture.completedFuture(null)
+                    }
+                },
+            )
+        await(manager.create(command("first")))
+        await(manager.create(command("second")))
+        val (first, second) = scopes
+        val firstEvents = mutableListOf<Event>()
+        val secondEvents = mutableListOf<Event>()
+        for ((scope, events) in listOf(first to firstEvents, second to secondEvents)) {
+            scope.events.addListener(InstancePing::class.java) { events.add(it) }
+            scope.events.addListener(EntityPing::class.java) { events.add(it) }
+        }
+        val entity = spawn(first.instances.single())
+        val outsider = spawn(process.instanceManager().createInstanceContainer())
+        listOf(
+            InstancePing(first.instances.single()),
+            EntityPing(entity),
+            InstancePing(second.instances.single()),
+            EntityPing(outsider),
+        ).forEach(process.eventHandler()::call)
+        assertEquals(2, firstEvents.size)
+        assertEquals(1, secondEvents.size)
+
+        var starts = 0
+        var ends = 0
+        first.scheduler
+            .buildTask { starts++ }
+            .repeat(TaskSchedule.nextTick())
+            .schedule()
+        first.scheduler
+            .buildTask { ends++ }
+            .repeat(TaskSchedule.nextTick())
+            .executionType(ExecutionType.TICK_END)
+            .schedule()
+        val schedulers = process.schedulerManager()
+        schedulers.processTick()
+        schedulers.processTickEnd()
+        assertEquals(1 to 1, starts to ends)
+
+        await(manager.finish(command("first")))
+        schedulers.processTick()
+        schedulers.processTickEnd()
+        assertEquals(1 to 1, starts to ends)
+        assertTrue(entity.isRemoved)
+        assertFalse(outsider.isRemoved)
+        assertEquals(setOf(second.instances.single(), outsider.instance), process.instanceManager().instances)
+        await(manager.finish(command("second")))
+    }
+
+    @Test
+    fun `scopes observe their instance registration and owned errors do not skip teardown`() {
+        lateinit var scope: SessionScope
+        var registered = 0
+        val manager =
+            manager(
+                object : Session() {
+                    override fun onCreate(created: SessionScope): CompletableFuture<Void> {
+                        scope = created
+                        scope.events.addListener(InstanceRegisterEvent::class.java) { registered++ }
+                        scope.createInstance()
+                        scope.own(AutoCloseable { throw AssertionError("cleanup") })
+                        return CompletableFuture.completedFuture(null)
+                    }
+                },
+            )
+        await(manager.create(command("owner")))
+        assertEquals(1, registered)
+        assertThrows(Throwable::class.java) { await(manager.finish(command("owner"))) }
+        assertTrue(process.instanceManager().instances.isEmpty())
+        assertFalse(process.eventHandler().children.contains(scope.events))
+        assertEquals(1, global.count { it is SessionDestroyEvent })
+    }
+
+    @Test
+    fun `native listeners use the scope on the process's single dispatcher thread`() {
+        lateinit var scope: SessionScope
+        val manager =
+            manager(
+                object : Session() {
+                    override fun onCreate(created: SessionScope): CompletableFuture<Void> {
+                        scope = created
+                        spawn(scope.createInstance())
+                        return CompletableFuture.completedFuture(null)
+                    }
+                },
+            )
+        await(manager.create(command("native")))
+        val owned = CompletableFuture<Thread>()
+        scope.events.addListener(EntityTickEvent::class.java) {
+            if (!owned.isDone) {
+                scope.own(AutoCloseable {})
+                owned.complete(Thread.currentThread())
+            }
+        }
+        repeat(20) { if (!owned.isDone) process.ticker().tick(System.nanoTime()) }
+        assertSame(process.dispatcher().threads().single(), owned.join())
+        await(manager.finish(command("native")))
     }
 
     @Test
@@ -267,6 +402,23 @@ class SessionEventsTest {
             },
             GameProfile(UUID.randomUUID(), "test"),
         )
+
+    private fun spawn(instance: Instance): Entity {
+        instance.loadChunk(0, 0).join()
+        return Entity(process, EntityType.ZOMBIE).also { it.setInstance(instance, Pos(0.5, 42.0, 0.5)).join() }
+    }
+
+    private class InstancePing(
+        private val target: Instance,
+    ) : InstanceEvent {
+        override fun getInstance() = target
+    }
+
+    private class EntityPing(
+        private val target: Entity,
+    ) : EntityEvent {
+        override fun getEntity() = target
+    }
 
     private fun completeOffThread(future: CompletableFuture<Void>) {
         CompletableFuture.runAsync { future.complete(null) }.join()

@@ -66,18 +66,22 @@ The `dev.chunkzero.runtime` package retains the public app/session API. Generic 
 `@ApiStatus.Internal`. Health reports active sessions; completed and failed sessions remain in inventory for replay.
 
 Session implementations extend `Session`. `onCreate`, `onJoin`, `onLeave` and `onFinish` return `CompletionStage<Void>`
-and begin on the process tick thread. Do not block that thread. Resume asynchronous world changes with
-`scope.onTick(() -> ...)` in Java or `scope.onTick { ... }` in Kotlin. Creation becomes ready only after its stage
-completes and at least one instance exists. `scope.finish()` requests ending; do not await it from a lifecycle hook
-whose own completion ending must await.
+and begin on the process tick thread. Do not block that thread. Scope methods also accept the process's dispatcher
+thread when it is the only one, so native instance and entity listeners can use them. Resume asynchronous world changes
+with `scope.onTick(() -> ...)` in Java or `scope.onTick { ... }` in Kotlin. Creation becomes ready only after its stage
+completes and at least one instance exists; admission, delivery and session methods reject sessions that are not ready.
+`scope.finish()` requests ending; do not await it from a lifecycle hook whose own completion ending must await.
 
-`SessionScope` owns instances, session/player-filtered events, repeating tasks and registered `AutoCloseable` resources
-such as subscriptions. `scope.getProcess()` exposes their owning Minestom `ServerProcess`. Instance event nodes remain
-available for instance-local events. Direct process registrations require explicit cleanup. Ending withdraws deliveries,
-waits for leave/finish hooks, then removes only that scope's listeners, tasks, resources and instances. A process
-retains at most 256 session identities and 4096 delivery operations; exhausting history requires a replacement process.
-Stuck customer futures retain ownership until a host deadline terminates the process; they never produce a false
-withdrawal acknowledgment.
+`SessionScope` is the session's gameplay isolate within the app's shared `ServerProcess`. It owns instances from
+`createInstance`, with their entities and instance schedulers; tasks on `getScheduler()` and `repeatEvery`; its event
+node; and registered `AutoCloseable` resources such as subscriptions. `getEvents()` receives the scope's lifecycle
+notifications, its admitted players' events, and events of its instances and the entities in them. Direct process
+registrations require explicit cleanup. Ending, including after failed creation, withdraws deliveries, waits for
+leave/finish hooks, then cancels the scope's tasks, closes its resources, unregisters its instances and detaches its
+node. Sessions share the process's memory, threads and failures; a scope is not a sandbox. A process retains at most 256
+session identities and 4096 delivery operations; exhausting history requires a replacement process. Stuck customer
+futures retain ownership until a host deadline terminates the process; they never produce a false withdrawal
+acknowledgment.
 
 ## Components
 
