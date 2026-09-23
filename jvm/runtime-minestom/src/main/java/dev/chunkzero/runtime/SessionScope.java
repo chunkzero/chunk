@@ -34,6 +34,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -172,8 +173,17 @@ public final class SessionScope {
             RegistryKey<DimensionType> dimension, @Nullable ChunkLoader loader) {
         checkThread();
         checkActive();
-        var instance = process.instanceManager().createInstanceContainer(dimension, loader);
+        var instance =
+                new InstanceContainer(
+                        process, UUID.randomUUID(), dimension, loader, dimension.key());
+        // Owned before registration so the scope receives InstanceRegisterEvent.
         ownedInstances.add(instance);
+        try {
+            process.instanceManager().registerInstance(instance);
+        } catch (Throwable failure) {
+            ownedInstances.remove(instance);
+            throw failure;
+        }
         return instance;
     }
 
@@ -326,17 +336,24 @@ public final class SessionScope {
         throw failure;
     }
 
-    /** Closes every step in order; later failures are suppressed into the first. */
+    /**
+     * Closes every step in order, even after errors; later failures are suppressed into the first.
+     */
     private static void closeAll(List<? extends AutoCloseable> steps) throws Exception {
-        Exception failure = null;
+        Throwable failure = null;
         for (var step : steps) {
             try {
                 step.close();
-            } catch (Exception error) {
+            } catch (Throwable error) {
                 if (failure == null) failure = error;
                 else failure.addSuppressed(error);
             }
         }
-        if (failure != null) throw failure;
+        switch (failure) {
+            case null -> {}
+            case Exception exception -> throw exception;
+            case Error error -> throw error;
+            default -> throw new IllegalStateException(failure);
+        }
     }
 }

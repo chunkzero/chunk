@@ -15,6 +15,7 @@ import net.minestom.server.entity.Player
 import net.minestom.server.event.Event
 import net.minestom.server.event.EventNode
 import net.minestom.server.event.entity.EntityTickEvent
+import net.minestom.server.event.instance.InstanceRegisterEvent
 import net.minestom.server.event.player.PlayerTickEvent
 import net.minestom.server.event.trait.EntityEvent
 import net.minestom.server.event.trait.InstanceEvent
@@ -279,6 +280,30 @@ class SessionEventsTest {
         assertFalse(outsider.isRemoved)
         assertEquals(setOf(second.instances.single(), outsider.instance), process.instanceManager().instances)
         await(manager.finish(command("second")))
+    }
+
+    @Test
+    fun `scopes observe their instance registration and owned errors do not skip teardown`() {
+        lateinit var scope: SessionScope
+        var registered = 0
+        val manager =
+            manager(
+                object : Session() {
+                    override fun onCreate(created: SessionScope): CompletableFuture<Void> {
+                        scope = created
+                        scope.events.addListener(InstanceRegisterEvent::class.java) { registered++ }
+                        scope.createInstance()
+                        scope.own(AutoCloseable { throw AssertionError("cleanup") })
+                        return CompletableFuture.completedFuture(null)
+                    }
+                },
+            )
+        await(manager.create(command("owner")))
+        assertEquals(1, registered)
+        assertThrows(Throwable::class.java) { await(manager.finish(command("owner"))) }
+        assertTrue(process.instanceManager().instances.isEmpty())
+        assertFalse(process.eventHandler().children.contains(scope.events))
+        assertEquals(1, global.count { it is SessionDestroyEvent })
     }
 
     @Test
