@@ -4,6 +4,7 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio_util::sync::CancellationToken;
 
 use super::output::Capture;
+use super::progress::Progress;
 
 struct BuildProcess {
     child: Box<dyn ChildWrapper>,
@@ -18,8 +19,13 @@ impl Drop for BuildProcess {
     }
 }
 
-/// Runs `chunkArtifacts` quietly; a failure carries the relevant Gradle output.
-pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationToken) -> io::Result<()> {
+/// Captures `chunkArtifacts` output, forwarding it to an optional progress observer.
+pub(super) async fn run(
+    project: &Path,
+    executable: &Path,
+    stop: &CancellationToken,
+    progress: &Progress,
+) -> io::Result<()> {
     super::cancelled(stop)?;
     let wrapper = project.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
     if !fs::metadata(&wrapper).is_ok_and(|metadata| metadata.is_file()) {
@@ -52,11 +58,13 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
     let mut readers = tokio::task::JoinSet::new();
     if let Some(stdout) = process.child.stdout().take() {
         let capture = capture.clone();
-        readers.spawn(async move { capture.read(stdout).await });
+        let progress = progress.clone();
+        readers.spawn(async move { capture.read(stdout, &progress).await });
     }
     if let Some(stderr) = process.child.stderr().take() {
         let capture = capture.clone();
-        readers.spawn(async move { capture.read(stderr).await });
+        let progress = progress.clone();
+        readers.spawn(async move { capture.read(stderr, &progress).await });
     }
     let status = tokio::select! {
         biased;
@@ -70,7 +78,8 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
     };
     if status.success() {
         process.finished = true;
-        readers.abort_all();
+        // Drain the final output without waiting indefinitely on inherited pipes.
+        let _ = tokio::time::timeout(Duration::from_secs(1), readers.join_all()).await;
         return Ok(());
     }
     // Stopping the group first keeps orphaned descendants from holding the pipes open.

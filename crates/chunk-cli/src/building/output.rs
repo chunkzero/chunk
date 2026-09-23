@@ -2,6 +2,8 @@ use std::{collections::VecDeque, sync::Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
+use super::progress::{Event, Progress};
+
 const RETAINED: usize = 2000;
 const EXCERPT: usize = 80;
 
@@ -10,12 +12,13 @@ const EXCERPT: usize = 80;
 pub(super) struct Capture(Mutex<VecDeque<String>>);
 
 impl Capture {
-    pub async fn read(&self, stream: impl AsyncRead + Unpin) {
+    pub async fn read(&self, stream: impl AsyncRead + Unpin, progress: &Progress) {
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
         while reader.read_until(b'\n', &mut line).await.is_ok_and(|read| read > 0) {
             let text = String::from_utf8_lossy(&line).trim_end().to_owned();
             line.clear();
+            progress.emit(Event::Output(text.clone()));
             let Ok(mut lines) = self.0.lock() else { return };
             if lines.len() == RETAINED {
                 lines.pop_front();

@@ -3,6 +3,8 @@ use std::{fmt::Display, time::Duration};
 use chunk_proto::v1::NodeStatus;
 use tokio::sync::mpsc;
 
+use crate::building::progress;
+
 /// Progress and diagnostics from a dev session, rendered as plain lines or by the TUI.
 pub(crate) enum Event {
     Step { name: &'static str, state: Step },
@@ -11,6 +13,7 @@ pub(crate) enum Event {
 }
 
 pub(crate) enum Step {
+    Pending(String),
     Running(String),
     Done(String),
     Failed(String),
@@ -26,6 +29,7 @@ pub(crate) struct Deployment {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
     Dev,
+    Build,
     Proxy,
     Control,
     Backend,
@@ -33,11 +37,16 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    pub const ALL: [Self; 5] = [Self::Dev, Self::Proxy, Self::Control, Self::Backend, Self::Jvm];
+    pub const ALL: [Self; 6] = [Self::Dev, Self::Build, Self::Proxy, Self::Control, Self::Backend, Self::Jvm];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Dev => "dev",
+            Self::Build => "build",
             Self::Proxy => "proxy",
             Self::Control => "control",
             Self::Backend => "backend",
@@ -87,6 +96,21 @@ impl Reporter {
 
     pub fn deployments(&self, deployments: Vec<Deployment>) {
         self.send(Event::Deployments(deployments));
+    }
+
+    pub fn build_progress(&self) -> progress::Progress {
+        let reporter = self.clone();
+        progress::Progress::new(move |event| match event {
+            progress::Event::Started(phase) => reporter.running(
+                phase.name(),
+                match phase {
+                    progress::Phase::Compile => "Gradle chunkArtifacts",
+                    progress::Phase::Release => "Packaging release",
+                },
+            ),
+            progress::Event::Finished(phase, elapsed) => reporter.done(phase.name(), seconds(elapsed)),
+            progress::Event::Output(line) => reporter.log(Source::Build, line),
+        })
     }
 }
 

@@ -116,9 +116,11 @@ managed delivery, timeouts, feature selection and standalone hosting.
   `PROJECT/dist/<id>.tar.gz` and `PROJECT/dist/<id>/`.
 - `chunk dev PROJECT` (`chunk local`) builds that release and runs the development stack with embedded services and
   child JVMs. It uses the Gradle-selected Java executable; `--java PATH` can override it. In a terminal it shows a
-  UI with build and service steps, each release's nodes and players, and separate dev, proxy, control, backend and JVM
-  logs; `--plain` (automatic when stdout is not a terminal) prints one line per step. Gradle output appears only when
-  a build fails.
+  startup view with animated progress, elapsed times and live Gradle output. Once ready, log tabs fill the screen; the
+  JVM tab includes selectable nodes grouped by release, with player counts, health and the selected node's logs. Use ↑/↓
+  to select, Enter to scroll logs, Esc/Tab to return to nodes, and `b` for startup details. Reload progress stays
+  visible while the current release serves players. `--plain` (automatic when stdout is not a terminal) prints one line
+  per step and includes Gradle diagnostics on failure.
 - `chunk players` operates on local players.
 - `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use `--cloud` or `--url URL` for non-interactive
   selection. `chunk login` is an alias.

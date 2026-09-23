@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, net::SocketAddr, time::Duration};
 
 use ratatui::crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
@@ -10,24 +10,33 @@ use model::Focus;
 mod model;
 mod view;
 
+pub(super) struct Info {
+    pub title: String,
+    pub address: SocketAddr,
+    pub watching: bool,
+}
+
 /// Draws the session until `finished`; quitting cancels `stop` so the session shuts down first.
 pub(super) fn run(
     mut events: mpsc::UnboundedReceiver<Event>,
     commands: &mpsc::UnboundedSender<Command>,
-    title: &str,
+    info: &Info,
     stop: &CancellationToken,
     finished: &CancellationToken,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let mut model = model::Model::new();
     let result = loop {
-        while let Ok(event) = events.try_recv() {
-            model.apply(event);
+        for _ in 0..512 {
+            match events.try_recv() {
+                Ok(event) => model.apply(event),
+                Err(_) => break,
+            }
         }
         if finished.is_cancelled() {
             break Ok(());
         }
-        if let Err(error) = terminal.draw(|frame| view::render(frame, &model, title)) {
+        if let Err(error) = terminal.draw(|frame| view::render(frame, &model, info)) {
             break Err(error);
         }
         match event::poll(Duration::from_millis(100)) {
@@ -35,11 +44,8 @@ pub(super) fn run(
             Ok(true) => match event::read() {
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => stop.cancel(),
-                    KeyCode::Esc => {
-                        if !model.back() {
-                            stop.cancel();
-                        }
-                    }
+                    KeyCode::Esc => model.back(),
+                    KeyCode::Char('b') => model.show_details = !model.show_details,
                     KeyCode::Char('r') => {
                         let _ = commands.send(Command::Restart);
                     }

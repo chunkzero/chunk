@@ -73,7 +73,7 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
     let project = fixture.project();
     assert!(!project.output.exists());
     assert!(!fixture.root.join(".chunk/build/backend").exists());
-    let built = execute(&project, CancellationToken::new()).await.unwrap();
+    let built = execute(&project, CancellationToken::new(), Progress::default()).await.unwrap();
     let arguments = fs::read_to_string(fixture.root.join("wrapper-arguments.txt")).unwrap();
     assert_eq!(
         arguments.lines().collect::<Vec<_>>(),
@@ -113,7 +113,7 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     fs::write(fixture.root.join("chunk.toml"), "").unwrap();
     fixture.wrapper("(sleep 0.3; printf leaked > failed-leak) &\necho '> Task :apps:lobby:compileJava'\necho 'Lobby.java:3: error: missing' >&2\nexit 23\n");
     let project = fixture.project();
-    let error = execute(&project, CancellationToken::new()).await.err().unwrap().to_string();
+    let error = execute(&project, CancellationToken::new(), Progress::default()).await.err().unwrap().to_string();
     assert!(error.contains("Gradle chunkArtifacts failed"));
     assert!(error.contains("23"));
     assert!(error.contains("Lobby.java:3: error: missing"));
@@ -121,13 +121,40 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(!fixture.root.join("failed-leak").exists());
     fixture.wrapper("exit 0\n");
-    let error = execute(&project, CancellationToken::new()).await.err().unwrap();
+    let error = execute(&project, CancellationToken::new(), Progress::default()).await.err().unwrap();
     assert!(error.to_string().contains("Gradle JVM descriptor"));
     assert!(error.to_string().contains(".chunk/build/jvm/artifacts.json"));
     fs::remove_file(fixture.root.join("gradlew")).unwrap();
-    let error = execute(&project, CancellationToken::new()).await.err().unwrap();
+    let error = execute(&project, CancellationToken::new(), Progress::default()).await.err().unwrap();
     assert!(error.to_string().contains("project Gradle wrapper missing"));
     assert!(!project.output.exists());
+}
+
+#[tokio::test]
+async fn build_output_streams_before_exit_and_drains_the_final_line() {
+    let fixture = Fixture::new();
+    fixture.wrapper("echo 'stdout started'\necho 'stderr started' >&2\nwhile [ ! -f continue ]; do sleep 0.01; done\nprintf 'final line'\n");
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let progress = Progress::new(move |event| {
+        let _ = sender.send(event);
+    });
+    let root = fixture.root.clone();
+    let running = tokio::spawn(async move {
+        gradle::run(&root, &std::env::current_exe().unwrap(), &CancellationToken::new(), &progress).await
+    });
+    let mut lines = Vec::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.unwrap().unwrap();
+        let Event::Output(line) = event else { panic!("expected build output") };
+        lines.push(line);
+    }
+    lines.sort();
+    assert_eq!(lines, ["stderr started", "stdout started"]);
+    assert!(!running.is_finished());
+    fs::write(fixture.root.join("continue"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(3), running).await.unwrap().unwrap().unwrap();
+    let Event::Output(line) = events.recv().await.unwrap() else { panic!("expected final output") };
+    assert_eq!(line, "final line");
 }
 
 #[tokio::test]
@@ -137,7 +164,8 @@ async fn cancellation_and_dropped_builds_stop_wrapper_descendants() {
         fixture.wrapper("(sleep 0.3; printf leaked > leaked) &\nprintf started > started\nwait\n");
         let stop = CancellationToken::new();
         let executable = std::env::current_exe().unwrap();
-        let mut running = Box::pin(gradle::run(&fixture.root, &executable, &stop));
+        let progress = Progress::default();
+        let mut running = Box::pin(gradle::run(&fixture.root, &executable, &stop, &progress));
         tokio::select! {
             result = &mut running => panic!("wrapper exited before cancellation: {result:?}"),
             () = async {
