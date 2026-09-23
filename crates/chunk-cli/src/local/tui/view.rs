@@ -4,10 +4,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Paragraph, Row, Table, TableState, Tabs},
 };
 
-use super::model::Model;
+use super::model::{Focus, Model};
 use crate::local::report::{Source, Step};
 
 pub(super) fn render(frame: &mut Frame, model: &Model, title: &str) {
@@ -17,10 +17,14 @@ pub(super) fn render(frame: &mut Frame, model: &Model, title: &str) {
     render_steps(frame, model, steps, title);
     render_nodes(frame, model, nodes);
     render_logs(frame, model, logs);
-    frame.render_widget(
-        Line::from("q quit · r restart · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow").dark_gray(),
-        help,
-    );
+    let keys = match (model.focus, &model.filter) {
+        (Focus::Nodes, _) => "↑/↓ select node · Enter open its log · Tab/Esc back to logs · q quit",
+        (Focus::Logs, Some(_)) => {
+            "Esc all JVM logs · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow · Tab nodes · q quit"
+        }
+        (Focus::Logs, None) => "q quit · r restart · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow · Tab nodes",
+    };
+    frame.render_widget(Line::from(keys).dark_gray(), help);
 }
 
 fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
@@ -44,32 +48,37 @@ fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
 }
 
 fn render_nodes(frame: &mut Frame, model: &Model, area: Rect) {
-    let rows = model.deployments.iter().flat_map(|deployment| {
+    let mut rows = Vec::new();
+    let mut selected = None;
+    let mut node = 0;
+    for deployment in &model.deployments {
         let release = format!("{} {}", &deployment.id[..deployment.id.len().min(8)], deployment.state);
-        let mut rows: Vec<Row> = deployment
-            .nodes
-            .iter()
-            .map(|node| {
-                let phase = NodePhase::try_from(node.phase).unwrap_or(NodePhase::Unspecified);
-                let health = node.health.as_ref();
+        if deployment.nodes.is_empty() {
+            rows.push(Row::new(vec![release.clone(), "no nodes yet".into()]).dark_gray());
+        }
+        for status in &deployment.nodes {
+            if node == model.node {
+                selected = Some(rows.len());
+            }
+            node += 1;
+            let phase = NodePhase::try_from(status.phase).unwrap_or(NodePhase::Unspecified);
+            let health = status.health.as_ref();
+            rows.push(
                 Row::new(vec![
                     release.clone(),
-                    node.app_id.clone(),
-                    node.host_id[..node.host_id.len().min(8)].to_owned(),
+                    status.app_id.clone(),
+                    status.host_id[..status.host_id.len().min(8)].to_owned(),
                     phase.as_str_name().trim_start_matches("NODE_PHASE_").to_lowercase(),
                     health.map_or_else(String::new, |health| health.players.to_string()),
                     health.map_or_else(String::new, |health| {
                         format!("{}/{}M", health.heap_used_bytes >> 20, health.heap_max_bytes >> 20)
                     }),
                 ])
-                .style(Style::new().fg(phase_color(phase)))
-            })
-            .collect();
-        if rows.is_empty() {
-            rows.push(Row::new(vec![release, "no nodes yet".into()]).dark_gray());
+                .style(Style::new().fg(phase_color(phase))),
+            );
         }
-        rows
-    });
+    }
+    let focused = model.focus == Focus::Nodes;
     let table = Table::new(
         rows,
         [
@@ -82,8 +91,14 @@ fn render_nodes(frame: &mut Frame, model: &Model, area: Rect) {
         ],
     )
     .header(Row::new(["release", "app", "node", "phase", "players", "heap"]).bold())
-    .block(Block::bordered().title(format!(" nodes · {} players ", model.players())));
-    frame.render_widget(table, area);
+    .row_highlight_style(Style::new().reversed())
+    .block(Block::bordered().title(format!(" nodes · {} players ", model.players())).border_style(if focused {
+        Style::new().fg(Color::Cyan)
+    } else {
+        Style::new()
+    }));
+    let mut state = TableState::default().with_selected(selected.filter(|_| focused));
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn phase_color(phase: NodePhase) -> Color {
@@ -100,14 +115,14 @@ fn render_logs(frame: &mut Frame, model: &Model, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [tabs, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
-    frame.render_widget(
-        Tabs::new(Source::ALL.map(Source::name)).select(model.selected).highlight_style(Style::new().reversed()),
-        tabs,
-    );
-    let lines = &model.logs[model.selected];
+    let titles = Source::ALL.map(|source| match (&model.filter, source) {
+        (Some(host), Source::Jvm) => format!("jvm · {host}"),
+        _ => source.name().to_owned(),
+    });
+    frame.render_widget(Tabs::new(titles).select(model.selected).highlight_style(Style::new().reversed()), tabs);
+    let lines = model.visible();
     let height = usize::from(body.height);
     let end = lines.len() - model.scroll.min(lines.len());
-    let visible: Vec<Line> =
-        lines.range(end.saturating_sub(height)..end).map(|line| Line::raw(line.as_str())).collect();
+    let visible: Vec<Line> = lines[end.saturating_sub(height)..end].iter().map(|line| Line::raw(*line)).collect();
     frame.render_widget(Paragraph::new(visible), body);
 }

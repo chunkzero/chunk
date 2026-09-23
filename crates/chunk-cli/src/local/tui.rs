@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{Command, report::Event};
+use model::Focus;
 
 mod model;
 mod view;
@@ -33,13 +34,22 @@ pub(super) fn run(
             Ok(false) => {}
             Ok(true) => match event::read() {
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => stop.cancel(),
+                    KeyCode::Char('q') => stop.cancel(),
+                    KeyCode::Esc => {
+                        if !model.back() {
+                            stop.cancel();
+                        }
+                    }
                     KeyCode::Char('r') => {
                         let _ = commands.send(Command::Restart);
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => stop.cancel(),
-                    KeyCode::Left | KeyCode::BackTab => model.select(-1),
-                    KeyCode::Right | KeyCode::Tab => model.select(1),
+                    KeyCode::Tab | KeyCode::BackTab => model.toggle_focus(),
+                    KeyCode::Left => model.select(-1),
+                    KeyCode::Right => model.select(1),
+                    KeyCode::Up if model.focus == Focus::Nodes => model.move_node(-1),
+                    KeyCode::Down if model.focus == Focus::Nodes => model.move_node(1),
+                    KeyCode::Enter if model.focus == Focus::Nodes => model.open_node(),
                     KeyCode::Up => model.scroll(1),
                     KeyCode::Down => model.scroll(-1),
                     KeyCode::PageUp => model.scroll(20),
