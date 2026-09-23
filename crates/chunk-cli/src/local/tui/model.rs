@@ -7,8 +7,37 @@ use chunk_proto::v1::NodeStatus;
 
 use super::super::report::{Deployment, Event, Source, Step};
 
+mod players;
+
+pub(super) use players::{Input, MoveForm, id_of, name};
+
 const RETAINED_LINES: usize = 2000;
 pub(super) const STARTUP: [&str; 7] = ["Project", "Compile", "Release", "Java", "Backend", "Control", "Proxy"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tab {
+    Log(Source),
+    Players,
+}
+
+impl Tab {
+    pub const ALL: [Self; 7] = [
+        Self::Log(Source::Dev),
+        Self::Log(Source::Build),
+        Self::Log(Source::Proxy),
+        Self::Log(Source::Control),
+        Self::Log(Source::Backend),
+        Self::Log(Source::Jvm),
+        Self::Players,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Log(source) => source.name(),
+            Self::Players => "players",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Focus {
@@ -55,6 +84,7 @@ pub(super) struct Model {
     pub steps: Vec<Progress>,
     pub deployments: Vec<Deployment>,
     pub logs: [VecDeque<String>; Source::ALL.len()],
+    /// Index into `Tab::ALL`.
     pub selected: usize,
     /// Lines scrolled up from the newest output of the visible log.
     pub scroll: usize,
@@ -62,6 +92,10 @@ pub(super) struct Model {
     /// Full host identity; None selects the combined JVM output.
     pub node: Option<String>,
     pub show_details: bool,
+    /// Player ID the players tab has selected; the first match when absent or gone.
+    pub player: Option<String>,
+    pub filter: String,
+    pub input: Option<Input>,
     started: Instant,
 }
 
@@ -89,6 +123,9 @@ impl Model {
             focus: Focus::Logs,
             node: None,
             show_details: false,
+            player: None,
+            filter: String::new(),
+            input: None,
             started: Instant::now(),
         }
     }
@@ -139,7 +176,7 @@ impl Model {
             step.update(state);
             self.steps.push(step);
         }
-        if first_ready && self.source() == Source::Build && self.scroll == 0 {
+        if first_ready && self.tab() == Tab::Log(Source::Build) && self.scroll == 0 {
             self.selected = Source::Jvm.index();
             self.focus = Focus::Nodes;
         }
@@ -153,8 +190,12 @@ impl Model {
         self.step("Ready").is_some_and(|step| matches!(step.state, Step::Done(_)))
     }
 
-    pub fn source(&self) -> Source {
-        Source::ALL[self.selected]
+    pub fn tab(&self) -> Tab {
+        Tab::ALL[self.selected]
+    }
+
+    fn on_jvm(&self) -> bool {
+        self.tab() == Tab::Log(Source::Jvm)
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -162,10 +203,11 @@ impl Model {
         FRAMES[usize::try_from((self.started.elapsed().as_millis() / 100) % 10).unwrap_or(0)]
     }
 
+    /// Cycles tabs; only log tabs exist until the session is ready.
     pub fn select(&mut self, offset: isize) {
-        let count = Source::ALL.len().cast_signed();
+        let count = if self.ready() { Tab::ALL.len() } else { Source::ALL.len() }.cast_signed();
         self.selected = (self.selected.cast_signed() + offset).rem_euclid(count).cast_unsigned();
-        self.focus = if self.ready() && self.source() == Source::Jvm { Focus::Nodes } else { Focus::Logs };
+        self.focus = if self.ready() && self.on_jvm() { Focus::Nodes } else { Focus::Logs };
         self.scroll = 0;
     }
 
@@ -174,7 +216,7 @@ impl Model {
     }
 
     pub fn toggle_focus(&mut self) {
-        if self.ready() && self.source() == Source::Jvm {
+        if self.ready() && self.on_jvm() {
             self.focus = match self.focus {
                 Focus::Logs => Focus::Nodes,
                 Focus::Nodes => Focus::Logs,
@@ -184,7 +226,7 @@ impl Model {
 
     /// Selecting a node immediately previews its logs; row zero is all nodes.
     pub fn move_node(&mut self, offset: isize) {
-        if self.source() != Source::Jvm {
+        if !self.on_jvm() {
             return;
         }
         let hosts = self.hosts();
@@ -199,13 +241,14 @@ impl Model {
     }
 
     pub fn back(&mut self) {
-        if self.ready() && self.source() == Source::Jvm {
+        if self.ready() && self.on_jvm() {
             self.focus = Focus::Nodes;
         }
     }
 
     pub fn visible(&self) -> Vec<&str> {
-        self.logs[self.selected].iter().map(String::as_str).filter(|line| self.shows(line)).collect()
+        let Tab::Log(source) = self.tab() else { return Vec::new() };
+        self.logs[source.index()].iter().map(String::as_str).filter(|line| self.shows(line)).collect()
     }
 
     pub fn hosts(&self) -> Vec<&str> {
@@ -230,7 +273,7 @@ impl Model {
 
     fn push(&mut self, source: Source, line: String) {
         let index = source.index();
-        let visible = index == self.selected && self.shows(&line);
+        let visible = self.tab() == Tab::Log(source) && self.shows(&line);
         let lines = &mut self.logs[index];
         if lines.len() == RETAINED_LINES {
             lines.pop_front();
@@ -242,7 +285,7 @@ impl Model {
     }
 
     fn shows(&self, line: &str) -> bool {
-        self.source() != Source::Jvm
+        !self.on_jvm()
             || self.node.as_ref().is_none_or(|host| {
                 line.strip_prefix(&host[..host.len().min(8)]).is_some_and(|rest| rest.starts_with(' '))
             })

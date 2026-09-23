@@ -16,7 +16,10 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
         directory: directory.path().join("nodes"),
         deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
         apps: BTreeMap::from([("bridge".into(), artifact)]),
-        profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
+        profiles: BTreeMap::from([
+            ("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 }),
+            ("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 2 }),
+        ]),
         backend: chunk_contract::BackendConnection {
             platform_token: None,
             environment: "test".into(),
@@ -28,6 +31,8 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let process = host.launch(&id, "bridge", "local").unwrap();
+    // Destinations may host an app's session on a profile other than the session's default.
+    host.launch(&uuid::Uuid::new_v4().to_string(), "bridge", "large").unwrap();
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
         control_endpoint: "http://127.0.0.1:1".into(),

@@ -68,6 +68,8 @@ pub(super) struct Staged {
 pub(super) enum Command {
     /// Rebuild and replace every running release immediately.
     Restart,
+    /// Move a player served by the `deployment` release to another session.
+    MovePlayer { deployment: String, player: String, name: String, demand: chunk_proto::v1::SessionDemand },
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {

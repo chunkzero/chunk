@@ -1,7 +1,7 @@
-use super::{Reporter, Settings, Staged};
+use super::{Reporter, Settings, Staged, report::Destination};
 use chunk_build::Release;
 use chunk_contract::{BackendConnection, ControlConnection};
-use chunk_proto::v1::{NodeStatus, NodesRequest};
+use chunk_proto::v1::{MovePlayerRequest, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -156,6 +156,7 @@ impl Shared {
 pub(super) struct Generation {
     pub release: Release,
     pub deployment: String,
+    pub destinations: Vec<Destination>,
     control: Option<Service>,
     host: Option<Arc<chunk_control::ProcessHost>>,
     connection: Option<ControlConnection>,
@@ -164,8 +165,14 @@ pub(super) struct Generation {
 impl Generation {
     /// Starts control for `staged`, whose backend version must already be active; on error, anything started is stopped again.
     pub async fn start(settings: &Settings, shared: &Shared, staged: Staged, bind: SocketAddr) -> io::Result<Self> {
-        let mut generation =
-            Self { release: staged.release, deployment: staged.bundle.id, control: None, host: None, connection: None };
+        let mut generation = Self {
+            release: staged.release,
+            deployment: staged.bundle.id,
+            destinations: destinations(staged.control.contracts.destinations.as_ref()),
+            control: None,
+            host: None,
+            connection: None,
+        };
         match generation.start_control(settings, shared, staged.control, &staged.java, bind).await {
             Ok(()) => Ok(generation),
             Err(error) => {
@@ -284,14 +291,53 @@ async fn abandon(error: io::Error, shared: Shared, generation: Option<Generation
     error
 }
 
-/// The nodes a control authority reports, or an error while it is unreachable.
-pub(super) async fn nodes(connection: &ControlConnection) -> io::Result<Vec<NodeStatus>> {
+/// Names `apps/arena/destinations/standard` as `arena/standard`.
+fn destinations(manifest: Option<&chunk_contract::DestinationManifest>) -> Vec<Destination> {
+    manifest
+        .into_iter()
+        .flat_map(|manifest| &manifest.entries)
+        .map(|(id, policy)| Destination {
+            name: id.strip_prefix("apps/").unwrap_or(id).replacen("/destinations/", "/", 1),
+            demand: SessionDemand {
+                key: policy.destination.key.clone(),
+                session_type: policy.destination.session_type.clone(),
+                machine_profile: policy.destination.machine_profile.clone(),
+            },
+        })
+        .collect()
+}
+
+/// The nodes and players a control authority reports, or an error while it is unreachable.
+pub(super) async fn observe(connection: &ControlConnection) -> io::Result<(Vec<NodeStatus>, Vec<PlayerStatus>)> {
     let request = async {
         let mut client = crate::players::client(connection).await?;
-        let request = crate::players::auth(NodesRequest {}, &connection.token)?;
-        Ok(client.nodes(request).await.map_err(io::Error::other)?.into_inner().nodes)
+        let nodes = client.nodes(crate::players::auth(NodesRequest {}, &connection.token)?);
+        let nodes = nodes.await.map_err(io::Error::other)?.into_inner().nodes;
+        let players = client.players(crate::players::auth(PlayersRequest {}, &connection.token)?);
+        Ok((nodes, players.await.map_err(io::Error::other)?.into_inner().players))
     };
     tokio::time::timeout(Duration::from_secs(2), request).await.map_err(io::Error::other)?
+}
+
+/// Queues a move of `player` to `demand` on their existing connection.
+pub(super) async fn move_player(
+    connection: &ControlConnection,
+    player: String,
+    demand: SessionDemand,
+) -> io::Result<()> {
+    let mut client = crate::players::client(connection).await?;
+    let request = MovePlayerRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        player_id: player,
+        demand: Some(demand),
+        expected_source: None,
+        expected_connection_id: String::new(),
+    };
+    client
+        .move_player(crate::players::auth(request, &connection.token)?)
+        .await
+        .map_err(|status| io::Error::other(status.message().to_owned()))?;
+    Ok(())
 }
 
 #[cfg(test)]

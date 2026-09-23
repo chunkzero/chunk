@@ -41,6 +41,8 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
             phase: NodePhase::Online.into(),
             ..Default::default()
         }],
+        players: Vec::new(),
+        destinations: Vec::new(),
     }]));
     model.apply(Event::Log { source: Source::Jvm, line: "5a9e4aba lobby ready".into() });
     model.move_node(1);
@@ -55,4 +57,64 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
     assert!(backend.contains("backend output"));
     assert!(!backend.contains("All nodes"));
     assert!(!backend.contains("5a9e4aba"));
+}
+
+#[test]
+fn players_tab_lists_filters_and_shows_the_move_form() {
+    let mut model = Model::new();
+    model.apply(Event::Step { name: "Ready", state: Step::Done("connect".into()) });
+    let player = |name: &str| chunk_proto::v1::PlayerStatus {
+        identity: Some(chunk_proto::v1::Identity {
+            uuid: format!("{name}-uuid"),
+            username: name.into(),
+            properties: Vec::new(),
+        }),
+        demand: Some(chunk_proto::v1::SessionDemand {
+            session_type: "lobby/default".into(),
+            key: "main".into(),
+            ..Default::default()
+        }),
+        app_id: "lobby".into(),
+        host_id: "5a9e4aba-1234".into(),
+        phase: chunk_proto::v1::ClaimPhase::Arrived.into(),
+        ..Default::default()
+    };
+    model.apply(Event::Deployments(vec![Deployment {
+        id: "d87ec655".into(),
+        state: "current".into(),
+        nodes: Vec::new(),
+        players: vec![player("Notch"), player("jeb_")],
+        // More destinations than a short terminal can show, with the player's own last.
+        destinations: (0..8)
+            .map(|index| (format!("arena/{index}"), "arena/default", format!("arena-{index}")))
+            .chain([("lobby/main".into(), "lobby/default", "main".into())])
+            .map(|(name, session_type, key)| crate::local::report::Destination {
+                name,
+                demand: chunk_proto::v1::SessionDemand {
+                    session_type: session_type.into(),
+                    key,
+                    machine_profile: "local".into(),
+                },
+            })
+            .collect(),
+    }]));
+    model.select(1);
+    for (width, height) in [(120, 30), (60, 24)] {
+        let screen = draw(&model, width, height);
+        assert!(screen.contains("Players · 2"), "{width}x{height}:\n{screen}");
+        assert!(screen.contains("jeb_  online"), "{width}x{height}:\n{screen}");
+    }
+    model.search();
+    model.type_char('n');
+    model.type_char('o');
+    let screen = draw(&model, 120, 30);
+    assert!(screen.contains("Players · 1/2"), "{screen}");
+    assert!(screen.contains("/ no"));
+    model.submit();
+    model.start_move();
+    for (width, height) in [(120, 30), (60, 24)] {
+        let screen = draw(&model, width, height);
+        assert!(screen.contains("Move Notch to"), "{width}x{height}:\n{screen}");
+        assert!(screen.contains("> lobby/main · lobby/default:main"), "{width}x{height}:\n{screen}");
+    }
 }

@@ -8,11 +8,12 @@ use ratatui::{
 
 use super::{
     Info,
-    model::{Focus, Model, Progress, STARTUP},
+    model::{Focus, Input, Model, Progress, STARTUP, Tab},
 };
 use crate::local::report::{self, Source, Step};
 
 mod nodes;
+mod players;
 
 pub(super) fn render(frame: &mut Frame, model: &Model, info: &Info) {
     let [header, body, help] =
@@ -24,11 +25,18 @@ pub(super) fn render(frame: &mut Frame, model: &Model, info: &Info) {
         let height = 10.min(body.height.saturating_sub(4));
         let [steps, output] = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).areas(body);
         render_steps(frame, model, steps);
-        render_output(frame, model, output, &format!("{} output", model.source().name()));
+        render_output(frame, model, output, &format!("{} output", model.tab().name()));
     }
-    let keys = match (model.ready(), model.source(), model.focus) {
-        (true, Source::Jvm, Focus::Nodes) => "↑/↓ nodes · Enter logs · ←/→ tabs · b details · r restart · q quit",
-        (true, Source::Jvm, Focus::Logs) => "↑/↓ scroll · End follow · Esc/Tab nodes · ←/→ tabs · q quit",
+    let keys = match (model.ready(), model.tab(), model.focus) {
+        (true, Tab::Players, _) => match model.input {
+            Some(Input::Search) => "type to filter · ↑/↓ players · Enter keep · Esc clear",
+            Some(Input::Move(_)) => "↑/↓ destination · Enter move · Esc cancel",
+            None => "↑/↓ players · / search · m move · ←/→ tabs · r restart · q quit",
+        },
+        (true, Tab::Log(Source::Jvm), Focus::Nodes) => {
+            "↑/↓ nodes · Enter logs · ←/→ tabs · b details · r restart · q quit"
+        }
+        (true, Tab::Log(Source::Jvm), Focus::Logs) => "↑/↓ scroll · End follow · Esc/Tab nodes · ←/→ tabs · q quit",
         (true, _, _) => "↑/↓ scroll · End follow · ←/→ tabs · b details · r restart · q quit",
         _ => "↑/↓ PgUp/PgDn scroll · End follow · ←/→ logs · q quit",
     };
@@ -74,16 +82,16 @@ fn render_running(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
         render_steps(frame, model, steps);
     }
     frame.render_widget(
-        Tabs::new(Source::ALL.map(Source::name))
+        Tabs::new(Tab::ALL.map(Tab::name))
             .select(model.selected)
             .highlight_style(Style::new().reversed().bold())
             .block(Block::default().borders(Borders::BOTTOM).border_style(Style::new().dark_gray())),
         tabs,
     );
-    if model.source() == Source::Jvm {
-        nodes::render(frame, model, content);
-    } else {
-        render_output(frame, model, content, &format!("{} output", model.source().name()));
+    match model.tab() {
+        Tab::Log(Source::Jvm) => nodes::render(frame, model, content),
+        Tab::Log(source) => render_output(frame, model, content, &format!("{} output", source.name())),
+        Tab::Players => players::render(frame, model, content),
     }
 }
 
@@ -205,7 +213,7 @@ fn render_lines(frame: &mut Frame, model: &Model, area: Rect) {
     let visible: Vec<Line> = lines[end.saturating_sub(usize::from(area.height))..end]
         .iter()
         .map(|line| {
-            let line = if model.source() == Source::Jvm && model.node.is_some() {
+            let line = if model.tab() == Tab::Log(Source::Jvm) && model.node.is_some() {
                 line.split_once(' ').map_or(*line, |(_, line)| line)
             } else {
                 line

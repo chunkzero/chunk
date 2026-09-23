@@ -101,6 +101,13 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         self.control.nodes().map(Response::new).map_err(status)
     }
+    async fn players(
+        &self,
+        request: Request<chunk_proto::v1::PlayersRequest>,
+    ) -> Result<Response<chunk_proto::v1::PlayerList>, Status> {
+        self.authorize(&request)?;
+        self.control.players().map(Response::new).map_err(status)
+    }
     async fn shutdown_node(
         &self,
         request: Request<chunk_proto::v1::ShutdownNodeRequest>,

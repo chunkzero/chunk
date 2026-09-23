@@ -74,10 +74,8 @@ impl ProcessHost {
         }
         let endpoint = self.endpoint.get().ok_or(Error::Unresolved("control not listening"))?;
         let artifact = self.config.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
+        // Placement already bound the profile to the app's session or one of its declared destinations.
         let size = self.config.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
-        if !artifact.sessions.values().any(|session| session.machine_profile == profile) {
-            return Err(Error::Invalid("app does not declare this profile"));
-        }
         let backend = &self.config.backend;
         if backend.environment != self.config.deployment.environment
             || backend.deployment != self.config.deployment.deployment

@@ -176,6 +176,9 @@ impl local_control_server::LocalControl for Service {
     async fn nodes(&self, _: Request<NodesRequest>) -> Result<Response<NodeList>, Status> {
         Err(Status::unimplemented("unused"))
     }
+    async fn players(&self, _: Request<PlayersRequest>) -> Result<Response<PlayerList>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
     async fn shutdown_node(&self, _: Request<ShutdownNodeRequest>) -> Result<Response<NodeStatus>, Status> {
         Err(Status::unimplemented("unused"))
     }

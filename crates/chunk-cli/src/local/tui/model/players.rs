@@ -1,0 +1,168 @@
+use chunk_proto::v1::PlayerStatus;
+
+use super::{Model, Tab};
+use crate::local::{
+    Command,
+    report::{Deployment, Destination},
+};
+
+pub(in super::super) enum Input {
+    Search,
+    Move(MoveForm),
+}
+
+pub(in super::super) struct MoveForm {
+    pub deployment: String,
+    pub player: String,
+    pub name: String,
+    /// The release's destinations, captured when the form opens.
+    pub destinations: Vec<Destination>,
+    pub choice: usize,
+}
+
+impl Model {
+    /// Players matching the search, by name, with the release that serves each.
+    pub fn roster(&self) -> Vec<(&Deployment, &PlayerStatus)> {
+        let filter = self.filter.to_lowercase();
+        let mut players: Vec<_> = self
+            .deployments
+            .iter()
+            .flat_map(|deployment| deployment.players.iter().map(move |player| (deployment, player)))
+            .filter(|(_, player)| filter.is_empty() || matches(player, &filter))
+            .collect();
+        players.sort_by_key(|(_, player)| name(player).to_lowercase());
+        players
+    }
+
+    pub fn player_count(&self) -> usize {
+        self.deployments.iter().map(|deployment| deployment.players.len()).sum()
+    }
+
+    pub fn selected_player(&self) -> Option<(usize, &Deployment, &PlayerStatus)> {
+        let roster = self.roster();
+        let index = self.player.as_deref().and_then(|id| roster.iter().position(|(_, p)| id_of(p) == id));
+        let index = index.unwrap_or(0);
+        roster.get(index).map(|&(deployment, player)| (index, deployment, player))
+    }
+
+    pub fn move_player(&mut self, offset: isize) {
+        let index = self.selected_player().map_or(0, |(index, ..)| index);
+        let roster = self.roster();
+        let index = index.saturating_add_signed(offset).min(roster.len().saturating_sub(1));
+        self.player = roster.get(index).map(|(_, player)| id_of(player).to_owned());
+    }
+
+    pub fn search(&mut self) {
+        if self.tab() == Tab::Players {
+            self.input = Some(Input::Search);
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        self.filter.clear();
+    }
+
+    /// Opens the move form for the selected player with their current destination chosen.
+    pub fn start_move(&mut self) {
+        let Some((_, deployment, player)) = self.selected_player() else { return };
+        let current = player.demand.as_ref();
+        let choice = deployment
+            .destinations
+            .iter()
+            .position(|destination| {
+                current.is_some_and(|current| {
+                    (&current.session_type, &current.key) == (&destination.demand.session_type, &destination.demand.key)
+                })
+            })
+            .unwrap_or(0);
+        self.input = Some(Input::Move(MoveForm {
+            deployment: deployment.id.clone(),
+            player: id_of(player).to_owned(),
+            name: name(player).to_owned(),
+            destinations: deployment.destinations.clone(),
+            choice,
+        }));
+    }
+
+    pub fn type_char(&mut self, character: char) {
+        if let Some(text) = self.editing() {
+            text.push(character);
+        }
+        self.follow_search();
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(text) = self.editing() {
+            text.pop();
+        }
+        self.follow_search();
+    }
+
+    /// Up/down moves the player selection while searching and the destination in the move form.
+    pub fn arrow(&mut self, offset: isize) {
+        match &mut self.input {
+            Some(Input::Move(form)) => {
+                form.choice = form.choice.saturating_add_signed(offset).min(form.destinations.len().saturating_sub(1));
+            }
+            _ => self.move_player(offset),
+        }
+    }
+
+    /// Keeps a search's filter, or turns the chosen destination into a move.
+    pub fn submit(&mut self) -> Option<Command> {
+        match self.input.take()? {
+            Input::Search => None,
+            Input::Move(mut form) => {
+                if form.choice >= form.destinations.len() {
+                    self.input = Some(Input::Move(form));
+                    return None;
+                }
+                let destination = form.destinations.swap_remove(form.choice);
+                Some(Command::MovePlayer {
+                    deployment: form.deployment,
+                    player: form.player,
+                    name: form.name,
+                    demand: destination.demand,
+                })
+            }
+        }
+    }
+
+    /// Escape abandons the move form, or clears the search being typed.
+    pub fn cancel(&mut self) {
+        if matches!(self.input.take(), Some(Input::Search)) {
+            self.filter.clear();
+        }
+    }
+
+    fn editing(&mut self) -> Option<&mut String> {
+        match self.input.as_mut()? {
+            Input::Search => Some(&mut self.filter),
+            Input::Move(_) => None,
+        }
+    }
+
+    /// Selects the first match whenever the current selection is filtered out.
+    fn follow_search(&mut self) {
+        if matches!(self.input, Some(Input::Search)) {
+            self.move_player(0);
+        }
+    }
+}
+
+fn matches(player: &PlayerStatus, filter: &str) -> bool {
+    let demand = player.demand.as_ref();
+    [name(player), id_of(player), &player.app_id, &player.host_id]
+        .into_iter()
+        .chain(demand.map(|d| d.session_type.as_str()))
+        .chain(demand.map(|d| d.key.as_str()))
+        .any(|field| field.to_lowercase().contains(filter))
+}
+
+pub(in super::super) fn name(player: &PlayerStatus) -> &str {
+    player.identity.as_ref().map_or("", |identity| identity.username.as_str())
+}
+
+pub(in super::super) fn id_of(player: &PlayerStatus) -> &str {
+    player.identity.as_ref().map_or("", |identity| identity.uuid.as_str())
+}

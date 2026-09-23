@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
+use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
 use chunk_store::{Commit, DocumentKey, Operation, SqliteStore, Storage, Write};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,19 @@ pub(crate) enum Phase {
     Arrived,
     Withdrawing,
     Released,
+}
+
+impl From<Phase> for ClaimPhase {
+    fn from(phase: Phase) -> Self {
+        match phase {
+            Phase::Reserved => Self::Reserved,
+            Phase::Activating => Self::Activating,
+            Phase::Attached => Self::Attached,
+            Phase::Arrived => Self::Arrived,
+            Phase::Withdrawing => Self::Withdrawing,
+            Phase::Released => Self::Released,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

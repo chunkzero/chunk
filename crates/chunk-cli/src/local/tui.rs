@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{Command, report::Event};
-use model::Focus;
+use model::{Focus, Tab};
 
 mod model;
 mod view;
@@ -44,8 +44,32 @@ pub(super) fn run(
         match event::poll(if backlog { Duration::ZERO } else { Duration::from_millis(100) }) {
             Ok(false) => {}
             Ok(true) => match event::read() {
+                Ok(event::Event::Key(key))
+                    if key.kind == KeyEventKind::Press
+                        && model.input.is_some()
+                        && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    match key.code {
+                        KeyCode::Esc => model.cancel(),
+                        KeyCode::Enter => {
+                            if let Some(command) = model.submit() {
+                                let _ = commands.send(command);
+                            }
+                        }
+                        KeyCode::Up => model.arrow(-1),
+                        KeyCode::Down => model.arrow(1),
+                        KeyCode::Backspace => model.backspace(),
+                        KeyCode::Char(character) => model.type_char(character),
+                        _ => {}
+                    }
+                }
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => stop.cancel(),
+                    KeyCode::Char('/') => model.search(),
+                    KeyCode::Char('m') if model.tab() == Tab::Players => model.start_move(),
+                    KeyCode::Esc if model.tab() == Tab::Players => model.clear_search(),
+                    KeyCode::Up if model.tab() == Tab::Players => model.move_player(-1),
+                    KeyCode::Down if model.tab() == Tab::Players => model.move_player(1),
                     KeyCode::Esc => model.back(),
                     KeyCode::Char('b') => model.show_details = !model.show_details,
                     KeyCode::Char('r') => {

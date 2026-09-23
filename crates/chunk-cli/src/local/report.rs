@@ -1,6 +1,6 @@
 use std::{fmt::Display, time::Duration};
 
-use chunk_proto::v1::NodeStatus;
+use chunk_proto::v1::{NodeStatus, PlayerStatus, SessionDemand};
 use tokio::sync::mpsc;
 
 use crate::building::progress;
@@ -19,11 +19,20 @@ pub(crate) enum Step {
     Failed(String),
 }
 
-/// One running release and the nodes its control authority reports.
+/// One running release and the nodes and players its control authority reports.
 pub(crate) struct Deployment {
     pub id: String,
     pub state: String,
     pub nodes: Vec<NodeStatus>,
+    pub players: Vec<PlayerStatus>,
+    pub destinations: Vec<Destination>,
+}
+
+/// A declared destination players can be moved to; only these carry their session's configuration.
+#[derive(Clone)]
+pub(crate) struct Destination {
+    pub name: String,
+    pub demand: SessionDemand,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

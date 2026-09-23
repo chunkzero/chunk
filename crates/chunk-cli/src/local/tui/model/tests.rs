@@ -1,5 +1,7 @@
 use chunk_proto::v1::NodeStatus;
 
+use crate::local::Command;
+
 use super::*;
 
 fn log(model: &mut Model, source: Source, line: &str) {
@@ -11,6 +13,8 @@ fn nodes(model: &mut Model, hosts: &[&str]) {
         id: "release".into(),
         state: "current".into(),
         nodes: hosts.iter().map(|host| NodeStatus { host_id: (*host).into(), ..Default::default() }).collect(),
+        players: Vec::new(),
+        destinations: Vec::new(),
     }]));
 }
 
@@ -96,7 +100,7 @@ fn startup_does_not_interrupt_scrolled_build_output_and_elapsed_time_stops() {
     assert!(compile.elapsed() >= Duration::from_secs(2));
     assert!(compile.started.is_none());
     ready(&mut model);
-    assert!(model.source() == Source::Build);
+    assert!(model.tab() == Tab::Log(Source::Build));
     assert_eq!(model.scroll, 1);
     assert_eq!(model.focus, Focus::Logs);
 }
@@ -117,7 +121,74 @@ fn failed_steps_keep_their_complete_diagnostic_in_the_dev_log() {
 
 #[test]
 fn source_index_matches_tab_order() {
-    for (index, source) in Source::ALL.into_iter().enumerate() {
-        assert_eq!(source.index(), index);
+    for source in Source::ALL {
+        assert!(Tab::ALL[source.index()] == Tab::Log(source));
     }
+}
+
+fn player(name: &str, key: &str) -> chunk_proto::v1::PlayerStatus {
+    chunk_proto::v1::PlayerStatus {
+        identity: Some(chunk_proto::v1::Identity {
+            uuid: format!("{name}-id"),
+            username: name.into(),
+            properties: Vec::new(),
+        }),
+        demand: Some(chunk_proto::v1::SessionDemand {
+            session_type: "lobby/default".into(),
+            key: key.into(),
+            machine_profile: "local".into(),
+        }),
+        ..Default::default()
+    }
+}
+
+fn destination(name: &str, session_type: &str, key: &str) -> crate::local::report::Destination {
+    crate::local::report::Destination {
+        name: name.into(),
+        demand: chunk_proto::v1::SessionDemand {
+            session_type: session_type.into(),
+            key: key.into(),
+            machine_profile: "local".into(),
+        },
+    }
+}
+
+#[test]
+fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
+    let mut model = Model::new();
+    ready(&mut model);
+    model.apply(Event::Deployments(vec![Deployment {
+        id: "release".into(),
+        state: "current".into(),
+        nodes: Vec::new(),
+        players: vec![player("jeb_", "arena"), player("Notch", "main"), player("Dinnerbone", "arena")],
+        destinations: vec![
+            destination("arena/standard", "arena/default", "arena"),
+            destination("lobby/main", "lobby/default", "main"),
+        ],
+    }]));
+    model.select(1);
+    assert!(model.tab() == Tab::Players);
+    assert_eq!(model.selected_player().map(|(_, _, p)| name(p)), Some("Dinnerbone"));
+
+    model.search();
+    for character in "ARENA".chars() {
+        model.type_char(character);
+    }
+    model.move_player(1);
+    assert_eq!(model.roster().len(), 2);
+    assert_eq!(model.player.as_deref(), Some("jeb_-id"));
+    assert!(model.submit().is_none());
+    assert_eq!(model.filter, "ARENA");
+
+    model.start_move();
+    model.arrow(1);
+    model.arrow(1);
+    let Some(Command::MovePlayer { deployment, player, demand, .. }) = model.submit() else { panic!("no move") };
+    assert_eq!((deployment.as_str(), player.as_str()), ("release", "jeb_-id"));
+    assert_eq!((demand.session_type.as_str(), demand.key.as_str()), ("lobby/default", "main"));
+
+    model.search();
+    model.cancel();
+    assert!(model.filter.is_empty() && model.input.is_none());
 }

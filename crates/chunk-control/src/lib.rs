@@ -7,6 +7,7 @@ mod host;
 mod moves;
 mod nodes;
 mod placement;
+mod players;
 mod process;
 mod reconcile;
 mod rpc;
