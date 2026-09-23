@@ -111,11 +111,13 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     );
     assert!(!fixture.root.join("wrapper-arguments.txt").exists());
     fs::write(fixture.root.join("chunk.toml"), "").unwrap();
-    fixture.wrapper("(sleep 0.3; printf leaked > failed-leak) &\nexit 23\n");
+    fixture.wrapper("(sleep 0.3; printf leaked > failed-leak) &\necho '> Task :apps:lobby:compileJava'\necho 'Lobby.java:3: error: missing' >&2\nexit 23\n");
     let project = fixture.project();
-    let error = execute(&project, CancellationToken::new()).await.err().unwrap();
-    assert!(error.to_string().contains("Gradle chunkArtifacts failed"));
-    assert!(error.to_string().contains("23"));
+    let error = execute(&project, CancellationToken::new()).await.err().unwrap().to_string();
+    assert!(error.contains("Gradle chunkArtifacts failed"));
+    assert!(error.contains("23"));
+    assert!(error.contains("Lobby.java:3: error: missing"));
+    assert!(!error.contains("> Task"));
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(!fixture.root.join("failed-leak").exists());
     fixture.wrapper("exit 0\n");
@@ -152,4 +154,49 @@ async fn cancellation_and_dropped_builds_stop_wrapper_descendants() {
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!fixture.root.join("leaked").exists());
     }
+}
+
+#[test]
+fn build_failures_keep_diagnostics_and_drop_gradle_progress() {
+    let log = "\
+Starting a Gradle Daemon (subsequent builds will be faster)
+> Configure project :apps:lobby
+> Task :apps:lobby:chunkGenerate UP-TO-DATE
+●  Generating backend clients…
+│
+◆  Generated → /project/.chunk/generated/jvm
+> Task :apps:lobby:compileKotlin FAILED
+w: Lobby.kt:1:1 Deprecated API
+e: file:///project/apps/lobby/src/Lobby.kt:10:5 Unresolved reference 'foo'.
+
+
+[Incubating] Problems report is available at: file:///project/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':apps:lobby:compileKotlin'.
+> Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 3s
+4 actionable tasks: 1 executed, 3 up-to-date
+";
+    assert_eq!(
+        output::excerpt(log.lines()),
+        "\
+> Task :apps:lobby:compileKotlin FAILED
+e: file:///project/apps/lobby/src/Lobby.kt:10:5 Unresolved reference 'foo'.
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':apps:lobby:compileKotlin'.
+> Compilation error. See log for more details
+
+BUILD FAILED in 3s"
+    );
 }

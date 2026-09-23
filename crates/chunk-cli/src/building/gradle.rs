@@ -1,7 +1,9 @@
-use std::{ffi::OsString, fs, io, path::Path, process::Stdio, time::Duration};
+use std::{ffi::OsString, fs, io, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio_util::sync::CancellationToken;
+
+use super::output::Capture;
 
 struct BuildProcess {
     child: Box<dyn ChildWrapper>,
@@ -16,6 +18,7 @@ impl Drop for BuildProcess {
     }
 }
 
+/// Runs `chunkArtifacts` quietly; a failure carries the relevant Gradle output.
 pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationToken) -> io::Result<()> {
     super::cancelled(stop)?;
     let wrapper = project.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
@@ -32,7 +35,9 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
             .current_dir(project)
             .args(["chunkArtifacts", "--no-daemon", "--console=plain"])
             .arg(property)
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
     });
     command.wrap(KillOnDrop);
     #[cfg(unix)]
@@ -43,6 +48,16 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
         io::Error::new(error.kind(), format!("could not start Gradle wrapper {}: {error}", wrapper.display()))
     })?;
     let mut process = BuildProcess { child, finished: false };
+    let capture = Arc::new(Capture::default());
+    let mut readers = tokio::task::JoinSet::new();
+    if let Some(stdout) = process.child.stdout().take() {
+        let capture = capture.clone();
+        readers.spawn(async move { capture.read(stdout).await });
+    }
+    if let Some(stderr) = process.child.stderr().take() {
+        let capture = capture.clone();
+        readers.spawn(async move { capture.read(stderr).await });
+    }
     let status = tokio::select! {
         biased;
         () = stop.cancelled() => {
@@ -53,9 +68,19 @@ pub(super) async fn run(project: &Path, executable: &Path, stop: &CancellationTo
         }
         status = process.child.wait() => status?,
     };
-    if !status.success() {
-        return Err(io::Error::other(format!("Gradle chunkArtifacts failed with {status}")));
+    if status.success() {
+        process.finished = true;
+        readers.abort_all();
+        return Ok(());
     }
-    process.finished = true;
-    Ok(())
+    // Stopping the group first keeps orphaned descendants from holding the pipes open.
+    drop(process);
+    let _ = tokio::time::timeout(Duration::from_secs(1), readers.join_all()).await;
+    let excerpt = capture.excerpt();
+    let mut message = format!("Gradle chunkArtifacts failed with {status}");
+    if !excerpt.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(&excerpt);
+    }
+    Err(io::Error::other(message))
 }

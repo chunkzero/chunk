@@ -116,8 +116,10 @@ dependency/class conflicts and Java requirements; existing immutable releases ar
 [compiler and release documentation](../crates/chunk-build/README.md).
 
 `chunk dev PROJECT` builds the same release, uses the Gradle-selected Java executable unless overridden, and stores
-local state under `PROJECT/.chunk/local`. The project's `[local]` settings and resolved app requirements configure
-placement. Root framework Gradle workflows and the standalone app build are separate. The consumer acceptance check
+local state under `PROJECT/.chunk/local`. Each rebuild becomes a new local deployment version with its own control
+authority beside the shared backend and proxy; the proxy routes new players to the newest version while older versions
+drain as described in the [README](../README.md). The project's `[local]` settings and resolved app requirements
+configure placement. Root framework Gradle workflows and the standalone app build are separate. The consumer acceptance check
 exercises both Java and Kotlin projects from source copies without starting gameplay.
 
 Scopes, hooks and commands are declared only in `apps/**/scope.ts` and `app.ts`; see the

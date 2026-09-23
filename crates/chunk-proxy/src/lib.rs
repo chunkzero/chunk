@@ -6,12 +6,12 @@ mod command_tree;
 #[cfg(feature = "mc-26-2")]
 mod server;
 #[cfg(feature = "mc-26-2")]
-pub use server::Proxy;
+pub use server::{Proxy, Retarget};
 
 #[cfg(not(feature = "mc-26-2"))]
 mod disabled;
 #[cfg(not(feature = "mc-26-2"))]
-pub use disabled::Proxy;
+pub use disabled::{Proxy, Retarget};
 
 use std::{num::NonZeroUsize, time::Duration};
 

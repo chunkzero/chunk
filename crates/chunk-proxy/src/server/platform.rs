@@ -47,6 +47,11 @@ impl Platform {
         })
     }
 
+    /// A platform for `target` sharing this proxy's identity and cleanup tracking.
+    pub fn retarget(&self, target: PlatformTarget) -> io::Result<Self> {
+        Ok(Self { cleanup: self.cleanup.clone(), proxy_id: self.proxy_id.clone(), ..Self::new(target)? })
+    }
+
     pub fn control_request<T>(&self, body: T) -> io::Result<Request<T>> {
         request(body, &self.target.control.token)
     }

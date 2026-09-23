@@ -86,6 +86,10 @@ pub(crate) fn auth<T>(body: T, token: &str) -> io::Result<Request<T>> {
 pub(crate) async fn connect(path: &std::path::Path) -> io::Result<(LocalControlClient<Channel>, String)> {
     let connection: chunk_contract::ControlConnection =
         serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
+    Ok((client(&connection).await?, connection.token))
+}
+
+pub(crate) async fn client(connection: &chunk_contract::ControlConnection) -> io::Result<LocalControlClient<Channel>> {
     let address: std::net::SocketAddr = connection
         .endpoint
         .strip_prefix("http://")
@@ -95,11 +99,11 @@ pub(crate) async fn connect(path: &std::path::Path) -> io::Result<(LocalControlC
     if !address.ip().is_loopback() {
         return Err(io::Error::other("control requires loopback HTTP"));
     }
-    let channel = Channel::from_shared(connection.endpoint)
+    let channel = Channel::from_shared(connection.endpoint.clone())
         .map_err(io::Error::other)?
         .connect_timeout(Duration::from_secs(3))
         .connect()
         .await
         .map_err(io::Error::other)?;
-    Ok((LocalControlClient::new(channel), connection.token))
+    Ok(LocalControlClient::new(channel))
 }
