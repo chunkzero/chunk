@@ -5,7 +5,7 @@ use std::{
 
 use chunk_build::Release;
 use chunk_proto::v1::{NodePhase, NodeStatus};
-use notify::{EventKind, RecursiveMode, Watcher};
+use notify::{EventKind, RecursiveMode, Watcher as _};
 use tokio::sync::mpsc;
 
 /// How long a retiring release must stay empty before it stops.
@@ -80,11 +80,25 @@ impl Retirement {
     }
 }
 
+/// Project source watches: the root itself plus each relevant top-level directory, recursively.
+pub(super) struct Watcher {
+    notify: notify::RecommendedWatcher,
+    root: PathBuf,
+    ignored: Vec<PathBuf>,
+}
+
+impl Watcher {
+    /// Watches a changed path when it is a relevant top-level directory, so directories created or
+    /// recreated after startup are followed too.
+    pub fn cover(&mut self, path: &Path) {
+        if path.parent() == Some(self.root.as_path()) && path.is_dir() && relevant(&self.root, &self.ignored, path) {
+            let _ = self.notify.watch(path, RecursiveMode::Recursive);
+        }
+    }
+}
+
 /// Watches project sources, sending each relevant changed path.
-pub(super) fn watch(
-    root: &Path,
-    ignored: &[PathBuf],
-) -> notify::Result<(notify::RecommendedWatcher, mpsc::UnboundedReceiver<PathBuf>)> {
+pub(super) fn watch(root: &Path, ignored: &[PathBuf]) -> notify::Result<(Watcher, mpsc::UnboundedReceiver<PathBuf>)> {
     let (sender, receiver) = mpsc::unbounded_channel();
     let (project, excluded) = (root.to_owned(), ignored.to_vec());
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -97,11 +111,9 @@ pub(super) fn watch(
         }
     })?;
     watcher.watch(root, RecursiveMode::NonRecursive)?;
+    let mut watcher = Watcher { notify: watcher, root: root.to_owned(), ignored: ignored.to_vec() };
     for entry in std::fs::read_dir(root)?.flatten() {
-        let path = entry.path();
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) && relevant(root, ignored, &path) {
-            watcher.watch(&path, RecursiveMode::Recursive)?;
-        }
+        watcher.cover(&entry.path());
     }
     Ok((watcher, receiver))
 }

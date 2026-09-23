@@ -33,3 +33,16 @@ fn opening_a_node_limits_the_jvm_log_until_backing_out() {
     assert_eq!(model.visible().len(), 3);
     assert!(!model.back());
 }
+
+#[test]
+fn failed_steps_keep_their_complete_diagnostic_in_the_dev_log() {
+    let mut model = Model::new();
+    model.apply(Event::Step {
+        name: "Build",
+        state: Step::Failed("gradle exited with status 1\ne: Lobby.kt:12:5 Unresolved reference: foo".into()),
+    });
+    assert_eq!(
+        model.visible(),
+        ["Build failed", "gradle exited with status 1", "e: Lobby.kt:12:5 Unresolved reference: foo"]
+    );
+}

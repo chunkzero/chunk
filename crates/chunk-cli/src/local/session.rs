@@ -25,7 +25,7 @@ use crate::building;
 const QUIET: Duration = Duration::from_millis(300);
 
 type Build = JoinHandle<io::Result<(Staged, Duration)>>;
-type Watched = (notify::RecommendedWatcher, mpsc::UnboundedReceiver<PathBuf>);
+type Watched = (reload::Watcher, mpsc::UnboundedReceiver<PathBuf>);
 
 enum Trigger {
     Change(PathBuf),
@@ -48,7 +48,10 @@ pub(super) struct Session<'a> {
     shared: Shared,
     live: Vec<Live>,
     pointer: Option<chunk_service::Record>,
-    retiring: JoinSet<()>,
+    /// Stops and backend releases in flight; each yields a deployment the backend still uses.
+    retiring: JoinSet<Option<String>>,
+    /// Stopped backend versions retried until no call, subscription or job still uses them.
+    unreleased: Vec<String>,
 }
 
 impl<'a> Session<'a> {
@@ -69,6 +72,7 @@ impl<'a> Session<'a> {
             live: vec![Live { generation, retirement: None, nodes: None }],
             pointer: None,
             retiring: JoinSet::new(),
+            unreleased: Vec::new(),
         }
     }
 
@@ -78,11 +82,11 @@ impl<'a> Session<'a> {
         mut commands: mpsc::UnboundedReceiver<Command>,
         stop: CancellationToken,
     ) -> io::Result<()> {
-        let (_watcher, mut changes) = match watched {
-            Some((notifier, changes)) => (Some(notifier), changes),
+        let (mut sources, mut changes) = match watched {
+            Some((sources, changes)) => (Some(sources), changes),
             None => (None, mpsc::unbounded_channel().1),
         };
-        let result = self.serve(&mut changes, &mut commands, &stop).await;
+        let result = self.serve(sources.as_mut(), &mut changes, &mut commands, &stop).await;
         let reporter = self.reporter;
         reporter.running("Stop", "");
         let started = Instant::now();
@@ -93,6 +97,7 @@ impl<'a> Session<'a> {
 
     async fn serve(
         &mut self,
+        mut watcher: Option<&mut reload::Watcher>,
         changes: &mut mpsc::UnboundedReceiver<PathBuf>,
         commands: &mut mpsc::UnboundedReceiver<Command>,
         stop: &CancellationToken,
@@ -117,7 +122,12 @@ impl<'a> Session<'a> {
             let settle = quiet.as_ref().map(|(deadline, _)| *deadline);
             tokio::select! {
                 () = stop.cancelled() => break Ok(()),
-                Some(path) = changes.recv() => quiet = Some((tokio::time::Instant::now() + QUIET, path)),
+                Some(path) = changes.recv() => {
+                    if let Some(watcher) = watcher.as_mut() {
+                        watcher.cover(&path);
+                    }
+                    quiet = Some((tokio::time::Instant::now() + QUIET, path));
+                }
                 () = tokio::time::sleep_until(settle.unwrap_or_else(tokio::time::Instant::now)), if settle.is_some() => {
                     if let Some((_, path)) = quiet.take()
                         && !matches!(queued, Some(Trigger::Restart))
@@ -285,6 +295,12 @@ impl<'a> Session<'a> {
         if self.live.iter().any(|live| live.retirement.is_none() && live.generation.failed()) {
             return Err(io::Error::other("local control stopped"));
         }
+        while let Some(finished) = self.retiring.try_join_next() {
+            self.unreleased.extend(finished.ok().flatten());
+        }
+        for deployment in std::mem::take(&mut self.unreleased) {
+            self.release(deployment);
+        }
         let now = Instant::now();
         let mut index = 0;
         while index < self.live.len() {
@@ -320,15 +336,14 @@ impl<'a> Session<'a> {
                 Ok(()) => reporter.done("Retire", format!("{} stopped", short(&release_id))),
                 Err(error) => reporter.failed("Retire", format!("{}: {error}", short(&release_id))),
             }
-            if let Some(backend) = backend {
-                release(&backend, &deployment).await;
-            }
+            let backend = backend?;
+            (!release(&backend, &deployment).await).then_some(deployment)
         });
     }
 
     fn release(&mut self, deployment: String) {
         if let Some(backend) = self.shared.backend() {
-            self.retiring.spawn(async move { release(&backend, &deployment).await });
+            self.retiring.spawn(async move { (!release(&backend, &deployment).await).then_some(deployment) });
         }
     }
 
@@ -353,7 +368,15 @@ impl<'a> Session<'a> {
             }
             self.release(deployment);
         }
-        while self.retiring.join_next().await.is_some() {}
+        let mut unreleased = std::mem::take(&mut self.unreleased);
+        while let Some(finished) = self.retiring.join_next().await {
+            unreleased.extend(finished.ok().flatten());
+        }
+        if let Some(backend) = self.shared.backend() {
+            for deployment in unreleased {
+                release_before_exit(&backend, &deployment).await;
+            }
+        }
         self.pointer = None;
         let stopped = self.shared.stop().await;
         result.and(stopped)
@@ -368,18 +391,26 @@ async fn finished(build: &mut Option<(Build, bool)>) -> (Result<io::Result<(Stag
     (result, forced)
 }
 
-/// Releases a stopped backend version once no call, subscription or job still uses it.
-async fn release(backend: &chunk_backend::Backend, id: &str) {
-    let Ok(deployment) = chunk_backend::DeploymentId::new(id) else { return };
-    for _ in 0..10 {
-        match backend.release(deployment.clone()).await {
-            Err(chunk_backend::Error::Busy) => tokio::time::sleep(Duration::from_millis(500)).await,
-            Err(error) => {
-                tracing::warn!(%error, deployment = id, "backend version not released");
-                return;
-            }
-            Ok(_) => return,
+/// Tries once to release a stopped backend version; false while a call, subscription or job still uses it.
+async fn release(backend: &chunk_backend::Backend, id: &str) -> bool {
+    let Ok(deployment) = chunk_backend::DeploymentId::new(id) else { return true };
+    match backend.release(deployment).await {
+        Err(chunk_backend::Error::Busy) => false,
+        Err(error) => {
+            tracing::warn!(%error, deployment = id, "backend version not released");
+            true
         }
+        Ok(_) => true,
+    }
+}
+
+/// Bounded release retries while the session shuts down.
+async fn release_before_exit(backend: &chunk_backend::Backend, id: &str) {
+    for _ in 0..10 {
+        if release(backend, id).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     tracing::warn!(deployment = id, "backend version still in use; not released");
 }

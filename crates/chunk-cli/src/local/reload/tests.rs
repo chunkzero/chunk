@@ -77,3 +77,27 @@ fn only_project_sources_trigger_rebuilds() {
     }
     assert!(!relevant(root, &ignored, Path::new("/elsewhere/chunk.toml")));
 }
+
+#[test]
+fn top_level_directories_created_after_startup_are_watched() {
+    fn next(changes: &mut mpsc::UnboundedReceiver<PathBuf>) -> Option<PathBuf> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(path) = changes.try_recv() {
+                return Some(path);
+            }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (mut watcher, mut changes) = watch(root.path(), &[]).unwrap();
+    let assets = root.path().join("assets");
+    std::fs::create_dir(&assets).unwrap();
+    watcher.cover(&next(&mut changes).unwrap());
+    while changes.try_recv().is_ok() {}
+    std::fs::write(assets.join("example.txt"), "").unwrap();
+    assert!(std::iter::from_fn(|| next(&mut changes)).any(|path| path == assets.join("example.txt")));
+}

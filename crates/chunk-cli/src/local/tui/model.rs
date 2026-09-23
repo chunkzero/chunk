@@ -42,23 +42,20 @@ impl Model {
 
     pub fn apply(&mut self, event: Event) {
         match event {
-            Event::Step { name, state } => match self.steps.iter_mut().find(|(step, _)| *step == name) {
-                Some((_, current)) => *current = state,
-                None => self.steps.push((name, state)),
-            },
-            Event::Log { source, line } => {
-                let index = Source::ALL.iter().position(|candidate| *candidate == source).unwrap_or(0);
-                let visible = index == self.selected && self.shows(&line);
-                let lines = &mut self.logs[index];
-                if lines.len() == RETAINED_LINES {
-                    lines.pop_front();
+            Event::Step { name, state } => {
+                // The step row shows one line; the dev log keeps the complete diagnostic.
+                if let Step::Failed(error) = &state {
+                    self.push(Source::Dev, format!("{name} failed"));
+                    for line in error.lines() {
+                        self.push(Source::Dev, line.to_owned());
+                    }
                 }
-                lines.push_back(line);
-                if self.scroll > 0 {
-                    // Keep the viewed lines in place as new output arrives.
-                    self.scroll = (self.scroll + usize::from(visible)).min(self.visible().len());
+                match self.steps.iter_mut().find(|(step, _)| *step == name) {
+                    Some((_, current)) => *current = state,
+                    None => self.steps.push((name, state)),
                 }
             }
+            Event::Log { source, line } => self.push(source, line),
             Event::Deployments(deployments) => {
                 self.deployments = deployments;
                 self.node = self.node.min(self.hosts().len().saturating_sub(1));
@@ -131,6 +128,20 @@ impl Model {
             .filter_map(|node| node.health.as_ref())
             .map(|health| health.players)
             .sum()
+    }
+
+    fn push(&mut self, source: Source, line: String) {
+        let index = Source::ALL.iter().position(|candidate| *candidate == source).unwrap_or(0);
+        let visible = index == self.selected && self.shows(&line);
+        let lines = &mut self.logs[index];
+        if lines.len() == RETAINED_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+        if self.scroll > 0 {
+            // Keep the viewed lines in place as new output arrives.
+            self.scroll = (self.scroll + usize::from(visible)).min(self.visible().len());
+        }
     }
 
     fn shows(&self, line: &str) -> bool {

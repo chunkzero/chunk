@@ -37,10 +37,14 @@ fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
                 Step::Done(detail) => ("✔", Color::Green, detail.as_str()),
                 Step::Failed(error) => ("✗", Color::Red, error.lines().next().unwrap_or_default()),
             };
+            let detail = match state {
+                Step::Failed(error) if error.lines().nth(1).is_some() => format!("{detail} · details in dev log"),
+                _ => detail.to_owned(),
+            };
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(color)),
                 Span::styled(format!("{name:<9}"), Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(detail.to_owned()),
+                Span::raw(detail),
             ])
         })
         .collect();

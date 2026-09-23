@@ -64,5 +64,9 @@ pub(super) fn run(
         }
     };
     ratatui::restore();
+    if result.is_err() {
+        // Without the UI there are no controls, so shut the session down instead of running headless.
+        stop.cancel();
+    }
     result
 }
