@@ -1,8 +1,8 @@
-use super::{Reporter, Settings, Staged};
+use super::{Reporter, Settings, Staged, report::Destination};
 use chunk_build::Release;
 use chunk_contract::{BackendConnection, ControlConnection};
 use chunk_proto::v1::{MovePlayerRequest, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand};
-use std::{collections::BTreeMap, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -156,8 +156,7 @@ impl Shared {
 pub(super) struct Generation {
     pub release: Release,
     pub deployment: String,
-    /// Session types this release declares, each with its machine profile.
-    pub session_types: BTreeMap<String, String>,
+    pub destinations: Vec<Destination>,
     control: Option<Service>,
     host: Option<Arc<chunk_control::ProcessHost>>,
     connection: Option<ControlConnection>,
@@ -166,11 +165,10 @@ pub(super) struct Generation {
 impl Generation {
     /// Starts control for `staged`, whose backend version must already be active; on error, anything started is stopped again.
     pub async fn start(settings: &Settings, shared: &Shared, staged: Staged, bind: SocketAddr) -> io::Result<Self> {
-        let session_types = staged.control.session_types.iter();
         let mut generation = Self {
             release: staged.release,
             deployment: staged.bundle.id,
-            session_types: session_types.map(|(name, kind)| (name.clone(), kind.machine_profile.clone())).collect(),
+            destinations: destinations(staged.control.contracts.destinations.as_ref()),
             control: None,
             host: None,
             connection: None,
@@ -291,6 +289,22 @@ async fn abandon(error: io::Error, shared: Shared, generation: Option<Generation
         tracing::error!(%error, "service shutdown failed");
     }
     error
+}
+
+/// Names `apps/arena/destinations/standard` as `arena/standard`.
+fn destinations(manifest: Option<&chunk_contract::DestinationManifest>) -> Vec<Destination> {
+    manifest
+        .into_iter()
+        .flat_map(|manifest| &manifest.entries)
+        .map(|(id, policy)| Destination {
+            name: id.strip_prefix("apps/").unwrap_or(id).replacen("/destinations/", "/", 1),
+            demand: SessionDemand {
+                key: policy.destination.key.clone(),
+                session_type: policy.destination.session_type.clone(),
+                machine_profile: policy.destination.machine_profile.clone(),
+            },
+        })
+        .collect()
 }
 
 /// The nodes and players a control authority reports, or an error while it is unreachable.

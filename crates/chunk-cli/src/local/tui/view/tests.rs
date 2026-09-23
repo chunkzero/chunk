@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use chunk_proto::v1::{NodePhase, NodeStatus};
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -44,7 +42,7 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
             ..Default::default()
         }],
         players: Vec::new(),
-        session_types: BTreeMap::new(),
+        destinations: Vec::new(),
     }]));
     model.apply(Event::Log { source: Source::Jvm, line: "5a9e4aba lobby ready".into() });
     model.move_node(1);
@@ -86,10 +84,16 @@ fn players_tab_lists_filters_and_shows_the_move_form() {
         state: "current".into(),
         nodes: Vec::new(),
         players: vec![player("Notch"), player("jeb_")],
-        session_types: BTreeMap::from([
-            ("arena/duel".into(), "large".into()),
-            ("lobby/default".into(), "local".into()),
-        ]),
+        destinations: [("arena/standard", "arena/default", "arena"), ("lobby/main", "lobby/default", "main")]
+            .map(|(name, session_type, key)| crate::local::report::Destination {
+                name: name.into(),
+                demand: chunk_proto::v1::SessionDemand {
+                    session_type: session_type.into(),
+                    key: key.into(),
+                    machine_profile: "local".into(),
+                },
+            })
+            .into(),
     }]));
     model.select(1);
     for (width, height) in [(120, 30), (60, 24)] {
@@ -107,6 +111,6 @@ fn players_tab_lists_filters_and_shows_the_move_form() {
     model.start_move();
     let screen = draw(&model, 120, 30);
     assert!(screen.contains("Move Notch"), "{screen}");
-    assert!(screen.contains("  arena/duel · large"), "{screen}");
-    assert!(screen.contains("> lobby/default · local"), "{screen}");
+    assert!(screen.contains("  arena/standard · arena/default:arena · local"), "{screen}");
+    assert!(screen.contains("> lobby/main · lobby/default:main · local"), "{screen}");
 }

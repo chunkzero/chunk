@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, fmt::Display, time::Duration};
+use std::{fmt::Display, time::Duration};
 
-use chunk_proto::v1::{NodeStatus, PlayerStatus};
+use chunk_proto::v1::{NodeStatus, PlayerStatus, SessionDemand};
 use tokio::sync::mpsc;
 
 use crate::building::progress;
@@ -25,8 +25,14 @@ pub(crate) struct Deployment {
     pub state: String,
     pub nodes: Vec<NodeStatus>,
     pub players: Vec<PlayerStatus>,
-    /// Session type to its machine profile.
-    pub session_types: BTreeMap<String, String>,
+    pub destinations: Vec<Destination>,
+}
+
+/// A declared destination players can be moved to; only these carry their session's configuration.
+#[derive(Clone)]
+pub(crate) struct Destination {
+    pub name: String,
+    pub demand: SessionDemand,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1,7 +1,10 @@
-use chunk_proto::v1::{PlayerStatus, SessionDemand};
+use chunk_proto::v1::PlayerStatus;
 
 use super::{Model, Tab};
-use crate::local::{Command, report::Deployment};
+use crate::local::{
+    Command,
+    report::{Deployment, Destination},
+};
 
 pub(in super::super) enum Input {
     Search,
@@ -12,10 +15,9 @@ pub(in super::super) struct MoveForm {
     pub deployment: String,
     pub player: String,
     pub name: String,
-    /// The release's session types and their machine profiles, captured when the form opens.
-    pub session_types: Vec<(String, String)>,
+    /// The release's destinations, captured when the form opens.
+    pub destinations: Vec<Destination>,
     pub choice: usize,
-    pub key: String,
 }
 
 impl Model {
@@ -60,19 +62,25 @@ impl Model {
         self.filter.clear();
     }
 
-    /// Opens the move form for the selected player with their current session type chosen.
+    /// Opens the move form for the selected player with their current destination chosen.
     pub fn start_move(&mut self) {
         let Some((_, deployment, player)) = self.selected_player() else { return };
-        let session_types: Vec<_> = deployment.session_types.clone().into_iter().collect();
-        let current = player.demand.as_ref().map(|demand| demand.session_type.as_str());
-        let choice = session_types.iter().position(|(name, _)| Some(name.as_str()) == current).unwrap_or(0);
+        let current = player.demand.as_ref();
+        let choice = deployment
+            .destinations
+            .iter()
+            .position(|destination| {
+                current.is_some_and(|current| {
+                    (&current.session_type, &current.key) == (&destination.demand.session_type, &destination.demand.key)
+                })
+            })
+            .unwrap_or(0);
         self.input = Some(Input::Move(MoveForm {
             deployment: deployment.id.clone(),
             player: id_of(player).to_owned(),
             name: name(player).to_owned(),
-            session_types,
+            destinations: deployment.destinations.clone(),
             choice,
-            key: String::new(),
         }));
     }
 
@@ -90,31 +98,31 @@ impl Model {
         self.follow_search();
     }
 
-    /// Up/down moves the player selection while searching and the session type in the move form.
+    /// Up/down moves the player selection while searching and the destination in the move form.
     pub fn arrow(&mut self, offset: isize) {
         match &mut self.input {
             Some(Input::Move(form)) => {
-                form.choice = form.choice.saturating_add_signed(offset).min(form.session_types.len().saturating_sub(1));
+                form.choice = form.choice.saturating_add_signed(offset).min(form.destinations.len().saturating_sub(1));
             }
             _ => self.move_player(offset),
         }
     }
 
-    /// Keeps a search's filter, or turns a complete move form into a command.
+    /// Keeps a search's filter, or turns the chosen destination into a move.
     pub fn submit(&mut self) -> Option<Command> {
         match self.input.take()? {
             Input::Search => None,
             Input::Move(mut form) => {
-                if form.key.is_empty() || form.choice >= form.session_types.len() {
+                if form.choice >= form.destinations.len() {
                     self.input = Some(Input::Move(form));
                     return None;
                 }
-                let (session_type, machine_profile) = form.session_types.swap_remove(form.choice);
+                let destination = form.destinations.swap_remove(form.choice);
                 Some(Command::MovePlayer {
                     deployment: form.deployment,
                     player: form.player,
                     name: form.name,
-                    demand: SessionDemand { session_type, key: form.key, machine_profile },
+                    demand: destination.demand,
                 })
             }
         }
@@ -130,7 +138,7 @@ impl Model {
     fn editing(&mut self) -> Option<&mut String> {
         match self.input.as_mut()? {
             Input::Search => Some(&mut self.filter),
-            Input::Move(form) => Some(&mut form.key),
+            Input::Move(_) => None,
         }
     }
 

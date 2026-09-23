@@ -113,17 +113,21 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     match &model.input {
         Some(Input::Move(form)) => {
             lines.push(Line::from(format!("Move {}", form.name)).bold());
-            for (index, (session_type, profile)) in form.session_types.iter().enumerate() {
+            if form.destinations.is_empty() {
+                lines.push(Line::from("  This release declares no destinations").dark_gray());
+            }
+            for (index, destination) in form.destinations.iter().enumerate() {
                 let chosen = index == form.choice;
+                let demand = &destination.demand;
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("{}{session_type}", if chosen { "> " } else { "  " }),
+                        format!("{}{}", if chosen { "> " } else { "  " }, destination.name),
                         if chosen { Style::new().fg(Color::Cyan).bold() } else { Style::new() },
                     ),
-                    Span::raw(format!(" · {profile}")).dark_gray(),
+                    Span::raw(format!(" · {}:{} · {}", demand.session_type, demand.key, demand.machine_profile))
+                        .dark_gray(),
                 ]));
             }
-            lines.push(Line::from(vec![Span::raw("Key  ").dark_gray(), Span::raw(format!("{}▏", form.key))]));
         }
         _ => lines.push(Line::from("m move · / search").dark_gray()),
     }

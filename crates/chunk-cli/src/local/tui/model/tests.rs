@@ -1,7 +1,5 @@
 use chunk_proto::v1::NodeStatus;
 
-use std::collections::BTreeMap;
-
 use crate::local::Command;
 
 use super::*;
@@ -16,7 +14,7 @@ fn nodes(model: &mut Model, hosts: &[&str]) {
         state: "current".into(),
         nodes: hosts.iter().map(|host| NodeStatus { host_id: (*host).into(), ..Default::default() }).collect(),
         players: Vec::new(),
-        session_types: BTreeMap::new(),
+        destinations: Vec::new(),
     }]));
 }
 
@@ -144,6 +142,17 @@ fn player(name: &str, key: &str) -> chunk_proto::v1::PlayerStatus {
     }
 }
 
+fn destination(name: &str, session_type: &str, key: &str) -> crate::local::report::Destination {
+    crate::local::report::Destination {
+        name: name.into(),
+        demand: chunk_proto::v1::SessionDemand {
+            session_type: session_type.into(),
+            key: key.into(),
+            machine_profile: "local".into(),
+        },
+    }
+}
+
 #[test]
 fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
     let mut model = Model::new();
@@ -153,10 +162,10 @@ fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
         state: "current".into(),
         nodes: Vec::new(),
         players: vec![player("jeb_", "arena"), player("Notch", "main"), player("Dinnerbone", "arena")],
-        session_types: BTreeMap::from([
-            ("arena/duel".into(), "large".into()),
-            ("lobby/default".into(), "local".into()),
-        ]),
+        destinations: vec![
+            destination("arena/standard", "arena/default", "arena"),
+            destination("lobby/main", "lobby/default", "main"),
+        ],
     }]));
     model.select(1);
     assert!(model.tab() == Tab::Players);
@@ -173,16 +182,11 @@ fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
     assert_eq!(model.filter, "ARENA");
 
     model.start_move();
-    assert!(model.submit().is_none(), "an empty key keeps the form open");
-    model.type_char('x');
-    model.arrow(-1);
-    model.arrow(-1);
+    model.arrow(1);
+    model.arrow(1);
     let Some(Command::MovePlayer { deployment, player, demand, .. }) = model.submit() else { panic!("no move") };
     assert_eq!((deployment.as_str(), player.as_str()), ("release", "jeb_-id"));
-    assert_eq!(
-        (demand.session_type.as_str(), demand.machine_profile.as_str(), demand.key.as_str()),
-        ("arena/duel", "large", "x")
-    );
+    assert_eq!((demand.session_type.as_str(), demand.key.as_str()), ("lobby/default", "main"));
 
     model.search();
     model.cancel();
