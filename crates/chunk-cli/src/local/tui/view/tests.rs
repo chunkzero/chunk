@@ -84,16 +84,19 @@ fn players_tab_lists_filters_and_shows_the_move_form() {
         state: "current".into(),
         nodes: Vec::new(),
         players: vec![player("Notch"), player("jeb_")],
-        destinations: [("arena/standard", "arena/default", "arena"), ("lobby/main", "lobby/default", "main")]
+        // More destinations than a short terminal can show, with the player's own last.
+        destinations: (0..8)
+            .map(|index| (format!("arena/{index}"), "arena/default", format!("arena-{index}")))
+            .chain([("lobby/main".into(), "lobby/default", "main".into())])
             .map(|(name, session_type, key)| crate::local::report::Destination {
-                name: name.into(),
+                name,
                 demand: chunk_proto::v1::SessionDemand {
                     session_type: session_type.into(),
-                    key: key.into(),
+                    key,
                     machine_profile: "local".into(),
                 },
             })
-            .into(),
+            .collect(),
     }]));
     model.select(1);
     for (width, height) in [(120, 30), (60, 24)] {
@@ -109,8 +112,9 @@ fn players_tab_lists_filters_and_shows_the_move_form() {
     assert!(screen.contains("/ no"));
     model.submit();
     model.start_move();
-    let screen = draw(&model, 120, 30);
-    assert!(screen.contains("Move Notch"), "{screen}");
-    assert!(screen.contains("  arena/standard · arena/default:arena · local"), "{screen}");
-    assert!(screen.contains("> lobby/main · lobby/default:main · local"), "{screen}");
+    for (width, height) in [(120, 30), (60, 24)] {
+        let screen = draw(&model, width, height);
+        assert!(screen.contains("Move Notch to"), "{width}x{height}:\n{screen}");
+        assert!(screen.contains("> lobby/main · lobby/default:main"), "{width}x{height}:\n{screen}");
+    }
 }

@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use super::{
-    super::model::{Input, Model, id_of, name},
+    super::model::{Input, Model, MoveForm, id_of, name},
     nodes::{count, short},
 };
 
@@ -99,6 +99,10 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     }
     frame.render_widget(Paragraph::new(identity).dark_gray().block(metadata_block), metadata);
 
+    if let Some(Input::Move(form)) = &model.input {
+        render_picker(frame, form, body);
+        return;
+    }
     let demand = player.demand.clone().unwrap_or_default();
     let mut lines = [
         ("Session", format!("{} · {}", demand.session_type, demand.key)),
@@ -110,28 +114,28 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     .map(|(field, value)| Line::from(vec![Span::raw(format!("{field:<10}")).dark_gray(), Span::raw(value)]))
     .collect::<Vec<_>>();
     lines.push(Line::default());
-    match &model.input {
-        Some(Input::Move(form)) => {
-            lines.push(Line::from(format!("Move {}", form.name)).bold());
-            if form.destinations.is_empty() {
-                lines.push(Line::from("  This release declares no destinations").dark_gray());
-            }
-            for (index, destination) in form.destinations.iter().enumerate() {
-                let chosen = index == form.choice;
-                let demand = &destination.demand;
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{}{}", if chosen { "> " } else { "  " }, destination.name),
-                        if chosen { Style::new().fg(Color::Cyan).bold() } else { Style::new() },
-                    ),
-                    Span::raw(format!(" · {}:{} · {}", demand.session_type, demand.key, demand.machine_profile))
-                        .dark_gray(),
-                ]));
-            }
-        }
-        _ => lines.push(Line::from("m move · / search").dark_gray()),
-    }
+    lines.push(Line::from("m move · / search").dark_gray());
     render_result(frame, model, lines, body);
+}
+
+/// Takes the whole body so the chosen destination stays in view however short the terminal is.
+fn render_picker(frame: &mut Frame, form: &MoveForm, area: Rect) {
+    let [title, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    frame.render_widget(Line::from(format!("Move {} to", form.name)).bold(), title);
+    if form.destinations.is_empty() {
+        frame.render_widget(Line::from("  This release declares no destinations").dark_gray(), list);
+        return;
+    }
+    let items = form.destinations.iter().map(|destination| {
+        let demand = &destination.demand;
+        ListItem::new(Line::from(vec![
+            Span::raw(destination.name.as_str()).bold(),
+            Span::raw(format!(" · {}:{} · {}", demand.session_type, demand.key, demand.machine_profile)).dark_gray(),
+        ]))
+    });
+    let mut state = ListState::default().with_selected(Some(form.choice));
+    let picker = List::new(items).highlight_symbol("> ").highlight_style(Style::new().bg(Color::Indexed(237)));
+    frame.render_stateful_widget(picker, list, &mut state);
 }
 
 /// Appends the latest move outcome below the detail lines.
