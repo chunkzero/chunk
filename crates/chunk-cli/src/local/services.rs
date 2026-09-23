@@ -248,9 +248,11 @@ pub(super) async fn start(
     reporter: &Reporter,
 ) -> io::Result<(Shared, Generation)> {
     let mut shared = Shared::default();
+    reporter.running("Backend", settings.backend_bind);
     if let Err(error) = shared.start_backend(settings, &staged, reporter).await {
         return Err(abandon(error, shared, None).await);
     }
+    reporter.running("Control", settings.control_bind);
     let generation = match Generation::start(settings, &shared, staged, settings.control_bind).await {
         Ok(generation) => generation,
         Err(error) => return Err(abandon(error, shared, None).await),
@@ -258,6 +260,7 @@ pub(super) async fn start(
     if let Some(connection) = generation.connection() {
         reporter.done("Control", &connection.endpoint);
     }
+    reporter.running("Proxy", settings.bind);
     let proxy = match shared.target(&generation) {
         Ok(target) => shared.start_proxy(settings, target).await,
         Err(error) => Err(error),

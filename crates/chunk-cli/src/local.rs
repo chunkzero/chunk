@@ -84,8 +84,12 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         let finished = CancellationToken::new();
         let ui = if interactive {
             let (stop, finished) = (stop.clone(), finished.clone());
-            let title = format!("chunk dev · {}", options.build.project.display());
-            tokio::task::spawn_blocking(move || tui::run(events, &commands, &title, &stop, &finished))
+            let info = tui::Info {
+                title: format!("chunk dev · {}", options.build.project.display()),
+                address: options.bind,
+                watching: !options.no_watch,
+            };
+            tokio::task::spawn_blocking(move || tui::run(events, &commands, &info, &stop, &finished))
         } else {
             let finished = finished.clone();
             tokio::spawn(async move {
@@ -121,9 +125,10 @@ async fn serve(
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     reporter.running("Build", "Gradle chunkArtifacts");
     let started = Instant::now();
-    let built = building::execute(&project, stop.clone()).await?;
+    let built = building::execute(&project, stop.clone(), reporter.build_progress()).await?;
     reporter.done("Build", format!("{} · release {}", report::seconds(started.elapsed()), short(&built.release.id)));
     let required = built.java.version;
+    reporter.running("Java", format!("Checking Java {required}+"));
     let staged = stage(&project, built, options.java.as_deref(), &stop).await?;
     reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
     let settings =

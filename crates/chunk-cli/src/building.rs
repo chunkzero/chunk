@@ -1,10 +1,13 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, time::Instant};
 
 use chunk_build::{JavaRuntime, Release, ReleaseInputs, project::ProjectMetadata};
 use tokio_util::sync::CancellationToken;
 
 mod gradle;
 mod output;
+pub(crate) mod progress;
+
+use progress::{Event, Phase, Progress};
 
 #[derive(Clone, clap::Args)]
 #[group(id = "build")]
@@ -44,16 +47,21 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
-        let built = execute(&project, stop).await?;
+        let built = execute(&project, stop, Progress::default()).await?;
         cliclack::log::success(format!("Built → {}", built.release.archive.display()))
     })
     .await
 }
 
-pub(crate) async fn execute(project: &Project, stop: CancellationToken) -> io::Result<Built> {
+pub(crate) async fn execute(project: &Project, stop: CancellationToken, progress: Progress) -> io::Result<Built> {
     cancelled(&stop)?;
-    gradle::run(&project.root, &std::env::current_exe()?, &stop).await?;
+    let started = Instant::now();
+    progress.emit(Event::Started(Phase::Compile));
+    gradle::run(&project.root, &std::env::current_exe()?, &stop, &progress).await?;
+    progress.emit(Event::Finished(Phase::Compile, started.elapsed()));
     cancelled(&stop)?;
+    let started = Instant::now();
+    progress.emit(Event::Started(Phase::Release));
     let inputs = ReleaseInputs {
         project: project.root.clone(),
         backend: project.root.join(".chunk/build/backend"),
@@ -70,6 +78,7 @@ pub(crate) async fn execute(project: &Project, stop: CancellationToken) -> io::R
     .await
     .map_err(io::Error::other)??;
     cancelled(&stop)?;
+    progress.emit(Event::Finished(Phase::Release, started.elapsed()));
     Ok(built)
 }
 

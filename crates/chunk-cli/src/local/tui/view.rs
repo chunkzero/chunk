@@ -1,132 +1,220 @@
-use chunk_proto::v1::NodePhase;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, Paragraph, Row, Table, Tabs},
 };
 
-use super::model::{Focus, Model};
-use crate::local::report::{Source, Step};
+use super::{
+    Info,
+    model::{Focus, Model, Progress, STARTUP},
+};
+use crate::local::report::{self, Source, Step};
 
-pub(super) fn render(frame: &mut Frame, model: &Model, title: &str) {
-    let [top, logs, help] =
-        Layout::vertical([Constraint::Length(12), Constraint::Min(6), Constraint::Length(1)]).areas(frame.area());
-    let [steps, nodes] = Layout::horizontal([Constraint::Length(48), Constraint::Min(40)]).areas(top);
-    render_steps(frame, model, steps, title);
-    render_nodes(frame, model, nodes);
-    render_logs(frame, model, logs);
-    let keys = match (model.focus, &model.filter) {
-        (Focus::Nodes, _) => "↑/↓ select node · Enter open its log · Tab/Esc back to logs · q quit",
-        (Focus::Logs, Some(_)) => {
-            "Esc all JVM logs · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow · Tab nodes · q quit"
-        }
-        (Focus::Logs, None) => "q quit · r restart · ←/→ logs · ↑/↓ PgUp/PgDn scroll · End follow · Tab nodes",
+mod nodes;
+
+pub(super) fn render(frame: &mut Frame, model: &Model, info: &Info) {
+    let [header, body, help] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    render_header(frame, model, info, header);
+    if model.ready() {
+        render_running(frame, model, info, body);
+    } else {
+        let height = 10.min(body.height.saturating_sub(4));
+        let [steps, output] = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).areas(body);
+        render_steps(frame, model, steps);
+        render_output(frame, model, output, &format!("{} output", model.source().name()));
+    }
+    let keys = match (model.ready(), model.source(), model.focus) {
+        (true, Source::Jvm, Focus::Nodes) => "↑/↓ nodes · Enter logs · ←/→ tabs · b details · r restart · q quit",
+        (true, Source::Jvm, Focus::Logs) => "↑/↓ scroll · End follow · Esc/Tab nodes · ←/→ tabs · q quit",
+        (true, _, _) => "↑/↓ scroll · End follow · ←/→ tabs · b details · r restart · q quit",
+        _ => "↑/↓ PgUp/PgDn scroll · End follow · ←/→ logs · q quit",
     };
     frame.render_widget(Line::from(keys).dark_gray(), help);
 }
 
-fn render_steps(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
-    let lines: Vec<Line> = model
-        .steps
-        .iter()
-        .map(|(name, state)| {
-            let (mark, color, detail) = match state {
-                Step::Running(detail) => ("…", Color::Yellow, detail.as_str()),
-                Step::Done(detail) => ("✔", Color::Green, detail.as_str()),
-                Step::Failed(error) => ("✗", Color::Red, error.lines().next().unwrap_or_default()),
-            };
-            let detail = match state {
-                Step::Failed(error) if error.lines().nth(1).is_some() => format!("{detail} · details in dev log"),
-                _ => detail.to_owned(),
-            };
-            Line::from(vec![
-                Span::styled(format!("{mark} "), Style::new().fg(color)),
-                Span::styled(format!("{name:<9}"), Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(detail),
-            ])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!(" {title} "))), area);
-}
-
-fn render_nodes(frame: &mut Frame, model: &Model, area: Rect) {
-    let mut rows = Vec::new();
-    let mut selected = None;
-    let mut node = 0;
-    for deployment in &model.deployments {
-        let release = format!("{} {}", &deployment.id[..deployment.id.len().min(8)], deployment.state);
-        if deployment.nodes.is_empty() {
-            rows.push(Row::new(vec![release.clone(), "no nodes yet".into()]).dark_gray());
-        }
-        for status in &deployment.nodes {
-            if node == model.node {
-                selected = Some(rows.len());
-            }
-            node += 1;
-            let phase = NodePhase::try_from(status.phase).unwrap_or(NodePhase::Unspecified);
-            let health = status.health.as_ref();
-            rows.push(
-                Row::new(vec![
-                    release.clone(),
-                    status.app_id.clone(),
-                    status.host_id[..status.host_id.len().min(8)].to_owned(),
-                    phase.as_str_name().trim_start_matches("NODE_PHASE_").to_lowercase(),
-                    health.map_or_else(String::new, |health| health.players.to_string()),
-                    health.map_or_else(String::new, |health| {
-                        format!("{}/{}M", health.heap_used_bytes >> 20, health.heap_max_bytes >> 20)
-                    }),
-                ])
-                .style(Style::new().fg(phase_color(phase))),
-            );
-        }
-    }
-    let focused = model.focus == Focus::Nodes;
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(20),
-            Constraint::Length(12),
-            Constraint::Length(9),
-            Constraint::Length(12),
-            Constraint::Length(8),
-            Constraint::Min(10),
-        ],
-    )
-    .header(Row::new(["release", "app", "node", "phase", "players", "heap"]).bold())
-    .row_highlight_style(Style::new().reversed())
-    .block(Block::bordered().title(format!(" nodes · {} players ", model.players())).border_style(if focused {
-        Style::new().fg(Color::Cyan)
+fn render_header(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
+    let (label, color) = if model.step("Stop").is_some_and(|step| matches!(step.state, Step::Running(_))) {
+        (format!("{} STOPPING", model.spinner()), Color::Yellow)
+    } else if model.ready() {
+        ("READY".into(), Color::Green)
     } else {
-        Style::new()
-    }));
-    let mut state = TableState::default().with_selected(selected.filter(|_| focused));
-    frame.render_stateful_widget(table, area, &mut state);
-}
-
-fn phase_color(phase: NodePhase) -> Color {
-    match phase {
-        NodePhase::Online => Color::Green,
-        NodePhase::Starting | NodePhase::Draining | NodePhase::Stopping => Color::Yellow,
-        NodePhase::Unhealthy | NodePhase::Unreachable => Color::Red,
-        NodePhase::Stopped | NodePhase::Unspecified => Color::DarkGray,
-    }
-}
-
-fn render_logs(frame: &mut Frame, model: &Model, area: Rect) {
-    let block = Block::bordered();
+        let build = model.step("Build").filter(|step| matches!(step.state, Step::Running(_)));
+        let label =
+            build.map_or_else(|| "STARTING".into(), |step| format!("BUILDING · {}", report::seconds(step.elapsed())));
+        (format!("{} {label}", model.spinner()), Color::Yellow)
+    };
+    let block = Block::default().borders(Borders::BOTTOM).border_style(Style::new().dark_gray());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [tabs, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
-    let titles = Source::ALL.map(|source| match (&model.filter, source) {
-        (Some(host), Source::Jvm) => format!("jvm · {host}"),
-        _ => source.name().to_owned(),
-    });
-    frame.render_widget(Tabs::new(titles).select(model.selected).highlight_style(Style::new().reversed()), tabs);
-    let lines = model.visible();
-    let height = usize::from(body.height);
-    let end = lines.len() - model.scroll.min(lines.len());
-    let visible: Vec<Line> = lines[end.saturating_sub(height)..end].iter().map(|line| Line::raw(*line)).collect();
-    frame.render_widget(Paragraph::new(visible), body);
+    let [title, status] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(25.min(inner.width))]).areas(inner);
+    frame.render_widget(Line::from(info.title.as_str()).bold(), title);
+    frame.render_widget(Line::from(label).fg(color).right_aligned(), status);
 }
+
+fn render_running(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
+    let activity = model.step("Stop").or_else(|| model.step("Reload"));
+    let details = if model.show_details { 10.min(area.height.saturating_sub(12)) } else { 0 };
+    let [summary, activity_area, steps, tabs, content] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(if activity.is_some() { 2 } else { 0 }),
+        Constraint::Length(details),
+        Constraint::Length(2),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    render_summary(frame, model, info, summary);
+    if let Some(activity) = activity {
+        render_activity(frame, model, activity, activity_area);
+    }
+    if model.show_details {
+        render_steps(frame, model, steps);
+    }
+    frame.render_widget(
+        Tabs::new(Source::ALL.map(Source::name))
+            .select(model.selected)
+            .highlight_style(Style::new().reversed().bold())
+            .block(Block::default().borders(Borders::BOTTOM).border_style(Style::new().dark_gray())),
+        tabs,
+    );
+    if model.source() == Source::Jvm {
+        nodes::render(frame, model, content);
+    } else {
+        render_output(frame, model, content, &format!("{} output", model.source().name()));
+    }
+}
+
+fn render_summary(frame: &mut Frame, model: &Model, info: &Info, area: Rect) {
+    let address = if info.address.ip().is_unspecified() {
+        format!("localhost:{}", info.address.port())
+    } else {
+        info.address.to_string()
+    };
+    let mut connection = vec![Span::raw("Connect  "), Span::raw(address).bold()];
+    if let Some(build) = model.step("Build") {
+        connection.push(Span::raw(format!("   ✓ Built {}", build.detail())).dark_gray());
+    }
+    let mut services = Vec::new();
+    for name in ["Backend", "Control", "Proxy"] {
+        let color = if model.step(name).is_some_and(|step| matches!(step.state, Step::Done(_))) {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
+        services.push(Span::styled("● ", Style::new().fg(color)));
+        services.push(Span::raw(format!("{}   ", name.to_lowercase())));
+    }
+    services.push(Span::raw(if info.watching { "reloads on save" } else { "watch off" }).dark_gray());
+    frame.render_widget(Paragraph::new(vec![Line::from(connection), Line::from(services)]), area);
+}
+
+fn render_activity(frame: &mut Frame, model: &Model, step: &Progress, area: Rect) {
+    let (mark, color) = mark(model, &step.state);
+    let detail = step.detail().lines().next().unwrap_or_default();
+    let suffix = match &step.state {
+        Step::Running(_) if step.name == "Reload" => {
+            let phase = ["Compile", "Release"]
+                .into_iter()
+                .filter_map(|name| model.step(name))
+                .find(|step| matches!(step.state, Step::Running(_)));
+            phase.map_or_else(
+                || report::seconds(step.elapsed()),
+                |phase| format!("{} · {} · current release serving", phase.name, report::seconds(step.elapsed())),
+            )
+        }
+        Step::Running(_) => report::seconds(step.elapsed()),
+        Step::Failed(error) if error.contains("the previous release keeps serving") => {
+            "previous release serving · details in dev log".into()
+        }
+        Step::Failed(_) => "details in dev log".into(),
+        _ => String::new(),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(format!("{mark} {}  ", step.name), Style::new().fg(color)),
+                Span::raw(suffix),
+            ]),
+            Line::from(detail).dark_gray(),
+        ]),
+        area,
+    );
+}
+
+fn render_steps(frame: &mut Frame, model: &Model, area: Rect) {
+    let rows = STARTUP.into_iter().filter_map(|name| model.step(name)).map(|step| {
+        let (mark, color) = mark(model, &step.state);
+        let detail = if matches!(step.state, Step::Done(_)) && matches!(step.name, "Compile" | "Release") {
+            "Complete"
+        } else {
+            step.detail().lines().next().unwrap_or_default()
+        };
+        let elapsed = if matches!(step.state, Step::Done(_)) && matches!(step.name, "Compile" | "Release") {
+            step.detail().to_owned()
+        } else if step.elapsed().is_zero() {
+            String::new()
+        } else {
+            report::seconds(step.elapsed())
+        };
+        Row::new(vec![
+            Line::from(mark).fg(color),
+            Line::from(step.name).bold(),
+            Line::from(detail).fg(if matches!(step.state, Step::Pending(_)) { Color::DarkGray } else { Color::Reset }),
+            Line::from(elapsed).dark_gray().right_aligned(),
+        ])
+    });
+    frame.render_widget(
+        Table::new(rows, [Constraint::Length(2), Constraint::Length(10), Constraint::Min(1), Constraint::Length(9)])
+            .block(
+                Block::default()
+                    .title("Build & startup")
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::new().dark_gray()),
+            ),
+        area,
+    );
+}
+
+fn mark<'a>(model: &'a Model, state: &Step) -> (&'a str, Color) {
+    match state {
+        Step::Pending(_) => ("○", Color::DarkGray),
+        Step::Running(_) => (model.spinner(), Color::Yellow),
+        Step::Done(_) => ("✓", Color::Green),
+        Step::Failed(_) => ("✗", Color::Red),
+    }
+}
+
+fn render_output(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
+    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [name, follow] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(18.min(header.width))]).areas(header);
+    frame.render_widget(Line::from(title).bold(), name);
+    frame.render_widget(
+        Line::from(if model.scroll == 0 { "following" } else { "scroll paused" }).dark_gray().right_aligned(),
+        follow,
+    );
+    render_lines(frame, model, body);
+}
+
+fn render_lines(frame: &mut Frame, model: &Model, area: Rect) {
+    let lines = model.visible();
+    let end = lines.len().saturating_sub(model.scroll);
+    let visible: Vec<Line> = lines[end.saturating_sub(usize::from(area.height))..end]
+        .iter()
+        .map(|line| {
+            let line = if model.source() == Source::Jvm && model.node.is_some() {
+                line.split_once(' ').map_or(*line, |(_, line)| line)
+            } else {
+                line
+            };
+            Line::raw(line)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(visible), area);
+}
+
+#[cfg(test)]
+mod tests;

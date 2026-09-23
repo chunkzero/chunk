@@ -167,10 +167,11 @@ impl<'a> Session<'a> {
             Trigger::Restart => self.reporter.running("Reload", "forced restart"),
         }
         let (options, java, stop) = (self.options.build.clone(), self.options.java.clone(), stop.clone());
+        let progress = self.reporter.build_progress();
         let task = tokio::spawn(async move {
             let started = Instant::now();
             let project = building::prepare(&options)?;
-            let built = building::execute(&project, stop.clone()).await?;
+            let built = building::execute(&project, stop.clone(), progress).await?;
             let staged = super::stage(&project, built, java.as_deref(), &stop).await?;
             Ok((staged, started.elapsed()))
         });
@@ -180,8 +181,12 @@ impl<'a> Session<'a> {
     async fn finish(&mut self, result: Result<io::Result<(Staged, Duration)>, JoinError>, forced: bool) {
         let outcome = match result.map_err(io::Error::other).and_then(|built| built) {
             Ok((staged, elapsed)) => {
+                let release = short(&staged.release.id).to_owned();
                 let deployed = if forced { self.restart(staged).await } else { self.deploy(staged).await };
-                deployed.map(|summary| format!("{} · {summary}", report::seconds(elapsed)))
+                deployed.map(|summary| {
+                    self.reporter.done("Build", format!("{} · release {release}", report::seconds(elapsed)));
+                    format!("{} · {summary}", report::seconds(elapsed))
+                })
             }
             Err(error) => Err(error),
         };
