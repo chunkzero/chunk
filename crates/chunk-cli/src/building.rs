@@ -25,6 +25,15 @@ pub(crate) struct Project {
     pub output: PathBuf,
 }
 
+/// How Gradle runs `chunkArtifacts`.
+#[derive(Clone, Copy)]
+pub(crate) enum GradleMode {
+    /// Stops Gradle's JVM once the build finishes.
+    OneShot,
+    /// Keeps a Gradle daemon warm between rebuilds; it exits after 15 idle minutes.
+    Daemon,
+}
+
 pub(crate) struct Built {
     pub release: Release,
     pub java: JavaRuntime,
@@ -47,17 +56,22 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
-        let built = execute(&project, stop, Progress::default()).await?;
+        let built = execute(&project, GradleMode::OneShot, stop, Progress::default()).await?;
         cliclack::log::success(format!("Built → {}", built.release.archive.display()))
     })
     .await
 }
 
-pub(crate) async fn execute(project: &Project, stop: CancellationToken, progress: Progress) -> io::Result<Built> {
+pub(crate) async fn execute(
+    project: &Project,
+    mode: GradleMode,
+    stop: CancellationToken,
+    progress: Progress,
+) -> io::Result<Built> {
     cancelled(&stop)?;
     let started = Instant::now();
     progress.emit(Event::Started(Phase::Compile));
-    gradle::run(&project.root, &std::env::current_exe()?, &stop, &progress).await?;
+    gradle::run(&project.root, &std::env::current_exe()?, mode, &stop, &progress).await?;
     progress.emit(Event::Finished(Phase::Compile, started.elapsed()));
     cancelled(&stop)?;
     let started = Instant::now();
