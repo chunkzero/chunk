@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_proto::v1::NodeStatus;
+use chunk_proto::v1::{NodeStatus, PlayerStatus, SessionDemand};
 use tokio::{
     sync::mpsc,
     task::{JoinError, JoinHandle, JoinSet},
@@ -37,6 +37,7 @@ struct Live {
     generation: Generation,
     retirement: Option<Retirement>,
     nodes: Option<Vec<NodeStatus>>,
+    players: Vec<PlayerStatus>,
 }
 
 /// Owns the shared services and every running release, rebuilding and replacing releases on request.
@@ -69,7 +70,7 @@ impl<'a> Session<'a> {
             reporter,
             environment,
             shared,
-            live: vec![Live { generation, retirement: None, nodes: None }],
+            live: vec![Live { generation, retirement: None, nodes: None, players: Vec::new() }],
             pointer: None,
             retiring: JoinSet::new(),
             unreleased: Vec::new(),
@@ -135,7 +136,12 @@ impl<'a> Session<'a> {
                         queued = Some(Trigger::Change(path));
                     }
                 }
-                Some(Command::Restart) = commands.recv() => queued = Some(Trigger::Restart),
+                Some(command) = commands.recv() => match command {
+                    Command::Restart => queued = Some(Trigger::Restart),
+                    Command::MovePlayer { deployment, player, name, demand } => {
+                        self.move_player(&deployment, player, &name, demand);
+                    }
+                },
                 (result, forced) = finished(&mut build) => self.finish(result, forced).await,
                 _ = tick.tick() => {
                     if let Err(error) = self.observe().await {
@@ -221,7 +227,7 @@ impl<'a> Session<'a> {
             index
         } else {
             let generation = self.launch(staged).await?;
-            self.live.push(Live { generation, retirement: None, nodes: None });
+            self.live.push(Live { generation, retirement: None, nodes: None, players: Vec::new() });
             self.live.len() - 1
         };
         for (index, live) in self.live.iter_mut().enumerate().filter(|(index, _)| *index != next) {
@@ -252,7 +258,7 @@ impl<'a> Session<'a> {
             self.release(deployment);
         }
         let generation = self.launch(staged).await?;
-        self.live.push(Live { generation, retirement: None, nodes: None });
+        self.live.push(Live { generation, retirement: None, nodes: None, players: Vec::new() });
         self.publish()?;
         Ok(format!("{} · restarted; previous sessions ended", short(&id)))
     }
@@ -292,10 +298,11 @@ impl<'a> Session<'a> {
             return Err(io::Error::other("local backend or proxy stopped"));
         }
         for live in &mut self.live {
-            live.nodes = match live.generation.connection() {
-                Some(connection) => services::nodes(connection).await.ok(),
+            let observed = match live.generation.connection() {
+                Some(connection) => services::observe(connection).await.ok(),
                 None => None,
             };
+            (live.nodes, live.players) = observed.map_or((None, Vec::new()), |(nodes, players)| (Some(nodes), players));
         }
         if self.live.iter().any(|live| live.retirement.is_none() && live.generation.failed()) {
             return Err(io::Error::other("local control stopped"));
@@ -327,10 +334,28 @@ impl<'a> Session<'a> {
                     id: live.generation.release.id.clone(),
                     state: live.retirement.as_ref().map_or_else(|| "current".into(), |r| r.describe(now)),
                     nodes: live.nodes.clone().unwrap_or_default(),
+                    players: live.players.clone(),
                 })
                 .collect(),
         );
         Ok(())
+    }
+
+    fn move_player(&self, deployment: &str, player: String, name: &str, demand: SessionDemand) {
+        let reporter = self.reporter.clone();
+        let target = format!("{name} → {}:{}", demand.session_type, demand.key);
+        let live = self.live.iter().find(|live| live.generation.release.id == deployment);
+        let Some(connection) = live.and_then(|live| live.generation.connection()).cloned() else {
+            reporter.failed("Move", format!("{target}: release {} is no longer running", short(deployment)));
+            return;
+        };
+        reporter.running("Move", &target);
+        tokio::spawn(async move {
+            match services::move_player(&connection, player, demand).await {
+                Ok(()) => reporter.done("Move", format!("{target} queued")),
+                Err(error) => reporter.failed("Move", format!("{target}: {error}")),
+            }
+        });
     }
 
     fn retire(&mut self, generation: Generation) {

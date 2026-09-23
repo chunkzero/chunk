@@ -137,11 +137,11 @@ fn color(phase: NodePhase) -> Color {
     }
 }
 
-fn short(id: &str) -> &str {
+pub(super) fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
 
-fn count<N: Copy + std::fmt::Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
+pub(super) fn count<N: Copy + std::fmt::Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
     let suffix = if n == N::from(1) { "" } else { "s" };
     format!("{n} {noun}{suffix}")
 }

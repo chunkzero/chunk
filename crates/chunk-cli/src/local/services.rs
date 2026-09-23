@@ -1,7 +1,7 @@
 use super::{Reporter, Settings, Staged};
 use chunk_build::Release;
 use chunk_contract::{BackendConnection, ControlConnection};
-use chunk_proto::v1::{NodeStatus, NodesRequest};
+use chunk_proto::v1::{MovePlayerRequest, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -284,14 +284,37 @@ async fn abandon(error: io::Error, shared: Shared, generation: Option<Generation
     error
 }
 
-/// The nodes a control authority reports, or an error while it is unreachable.
-pub(super) async fn nodes(connection: &ControlConnection) -> io::Result<Vec<NodeStatus>> {
+/// The nodes and players a control authority reports, or an error while it is unreachable.
+pub(super) async fn observe(connection: &ControlConnection) -> io::Result<(Vec<NodeStatus>, Vec<PlayerStatus>)> {
     let request = async {
         let mut client = crate::players::client(connection).await?;
-        let request = crate::players::auth(NodesRequest {}, &connection.token)?;
-        Ok(client.nodes(request).await.map_err(io::Error::other)?.into_inner().nodes)
+        let nodes = client.nodes(crate::players::auth(NodesRequest {}, &connection.token)?);
+        let nodes = nodes.await.map_err(io::Error::other)?.into_inner().nodes;
+        let players = client.players(crate::players::auth(PlayersRequest {}, &connection.token)?);
+        Ok((nodes, players.await.map_err(io::Error::other)?.into_inner().players))
     };
     tokio::time::timeout(Duration::from_secs(2), request).await.map_err(io::Error::other)?
+}
+
+/// Queues a move of `player` to `demand` on their existing connection.
+pub(super) async fn move_player(
+    connection: &ControlConnection,
+    player: String,
+    demand: SessionDemand,
+) -> io::Result<()> {
+    let mut client = crate::players::client(connection).await?;
+    let request = MovePlayerRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        player_id: player,
+        demand: Some(demand),
+        expected_source: None,
+        expected_connection_id: String::new(),
+    };
+    client
+        .move_player(crate::players::auth(request, &connection.token)?)
+        .await
+        .map_err(|status| io::Error::other(status.message().to_owned()))?;
+    Ok(())
 }
 
 #[cfg(test)]

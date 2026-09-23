@@ -1,6 +1,6 @@
 use std::{fmt::Display, time::Duration};
 
-use chunk_proto::v1::NodeStatus;
+use chunk_proto::v1::{NodeStatus, PlayerStatus};
 use tokio::sync::mpsc;
 
 use crate::building::progress;
@@ -19,11 +19,12 @@ pub(crate) enum Step {
     Failed(String),
 }
 
-/// One running release and the nodes its control authority reports.
+/// One running release and the nodes and players its control authority reports.
 pub(crate) struct Deployment {
     pub id: String,
     pub state: String,
     pub nodes: Vec<NodeStatus>,
+    pub players: Vec<PlayerStatus>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
