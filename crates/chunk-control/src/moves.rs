@@ -1,9 +1,9 @@
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest, MovePlayerRequest, PendingMove};
+use chunk_proto::v1::{AbandonMoveRequest, ClaimIdentity, ClaimRequest, MovePlayerRequest, PendingMove};
 use prost::Message;
 
 use crate::{
     Control, Error, Result,
-    state::{MoveIntent, Phase, State},
+    state::{MoveFailure, MoveIntent, Phase, State},
 };
 
 impl Control {
@@ -63,9 +63,21 @@ impl Control {
             destination.operation_id = request.operation_id;
             destination.demand = request.demand;
             destination.source = Some(claim.identity(source));
+            crate::placement::validate_demand(
+                &self.config,
+                destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
+            )?;
+            let sequence = state
+                .moves
+                .values()
+                .map(|intent| intent.sequence)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(Error::Capacity)?;
             state.moves.insert(
                 destination.operation_id.clone(),
-                MoveIntent { request: destination.encode_to_vec(), canceled: false },
+                MoveIntent { request: destination.encode_to_vec(), canceled: false, sequence, failure: None },
             );
             Ok(destination)
         })
@@ -80,10 +92,13 @@ impl Control {
         source.matches(request)?;
         let mut result = PendingMove::default();
         if source.phase == Phase::Arrived {
-            for intent in state.moves.values().filter(|intent| !intent.canceled) {
+            for intent in state.moves.values().filter(|intent| !intent.canceled && intent.failure.is_none()) {
                 let destination = ClaimRequest::decode(intent.request.as_slice())?;
                 if destination.source.as_ref() == Some(&source.identity(&request.operation_id))
-                    && state.claims.get(&destination.operation_id).is_none_or(|c| c.phase != Phase::Released)
+                    && state
+                        .claims
+                        .get(&destination.operation_id)
+                        .is_none_or(|c| !matches!(c.phase, Phase::Withdrawing | Phase::Released))
                 {
                     result.claim = Some(destination);
                     break;
@@ -93,8 +108,29 @@ impl Control {
         Ok(result)
     }
 
-    pub(crate) fn cancel_intent(&self, request: &ClaimRequest) -> Result<bool> {
+    /// Records why preparation ended, leaving fenced withdrawal to reconciliation.
+    /// # Errors
+    /// Rejects changed or activated moves and failures to persist the report.
+    pub async fn abandon_move(&self, request: AbandonMoveRequest) -> Result<ClaimIdentity> {
+        if request.reason.is_empty() || request.reason.len() > 4096 {
+            return Err(Error::Invalid("invalid move failure reason"));
+        }
+        let claim = request.claim.ok_or(Error::Invalid("missing move claim"))?;
+        self.cancel_with_failure(claim, Some(request.reason)).await
+    }
+
+    pub(crate) fn cancel_intent(&self, request: &ClaimRequest, failure: Option<String>) -> Result<bool> {
         self.update(|state| {
+            if let Some(reason) = failure {
+                let intent = state.moves.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown move"))?;
+                if intent.request != request.encode_to_vec() {
+                    return Err(Error::Invalid("move changed"));
+                }
+                if state.claims.get(&request.operation_id).is_some_and(|claim| claim.activated) {
+                    return Err(Error::Invalid("move already activated"));
+                }
+                intent.failure.get_or_insert(MoveFailure { reason, at_ms: crate::now_ms() });
+            }
             if state.claims.contains_key(&request.operation_id) {
                 return Ok(false);
             }
@@ -109,6 +145,9 @@ impl Control {
 }
 
 pub(crate) fn authorize_destination(state: &mut State, identity: &ClaimIdentity) -> Result<()> {
+    if state.moves.get(&identity.operation_id).is_some_and(|intent| intent.canceled || intent.failure.is_some()) {
+        return Err(Error::Invalid("move abandoned"));
+    }
     let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
     if claim.identity(&identity.operation_id) != *identity {
         return Err(Error::Invalid("stale destination"));

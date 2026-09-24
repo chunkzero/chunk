@@ -48,7 +48,7 @@ fn status(error: Error) -> Status {
         Error::Invalid(message) => Status::failed_precondition(message),
         Error::Capacity => Status::resource_exhausted("control capacity reached"),
         Error::Unresolved(message) => Status::unavailable(message),
-        Error::Stopped => Status::unavailable("runtime stopped"),
+        Error::Stopped => Status::failed_precondition("runtime stopped"),
         Error::Rpc(error) => error,
         other => {
             tracing::error!(error = %other, "control operation failed");
@@ -137,6 +137,20 @@ impl LocalControl for Service {
     ) -> Result<Response<chunk_proto::v1::PendingMove>, Status> {
         self.authorize(&request)?;
         self.control.poll_move(request.get_ref()).map(Response::new).map_err(status)
+    }
+
+    async fn abandon_move(
+        &self,
+        request: Request<chunk_proto::v1::AbandonMoveRequest>,
+    ) -> Result<Response<ClaimIdentity>, Status> {
+        self.authorize(&request)?;
+        let control = self.control.clone();
+        self.operations
+            .spawn(async move { control.abandon_move(request.into_inner()).await })
+            .await
+            .map_err(|_| Status::internal("move abandonment task failed"))?
+            .map(Response::new)
+            .map_err(status)
     }
 
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {

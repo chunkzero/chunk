@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
 pub(super) struct Service {
+    pub movement: Arc<Mutex<Movement>>,
     pub assignment: Arc<Mutex<Assignment>>,
     pub commands: BTreeMap<String, Command>,
     pub allowed: Arc<AtomicBool>,
@@ -26,6 +27,34 @@ pub(super) struct Service {
     pub reply_order: Arc<Mutex<Vec<u32>>>,
     pub replies: Arc<AtomicUsize>,
     pub release: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Default)]
+pub(super) struct Movement {
+    pub pending: Option<ClaimRequest>,
+    pub error: Option<Status>,
+    pub attempts: usize,
+    pub reports: usize,
+    pub lose_report: bool,
+    pub stall_retries: bool,
+    pub failure: Option<AbandonMoveRequest>,
+}
+
+#[tonic::async_trait]
+impl backend_hooks_server::BackendHooks for Service {
+    async fn manifest(&self, request: Request<()>) -> Result<Response<HookManifest>, Status> {
+        auth(&request, "application")?;
+        Ok(Response::new(HookManifest {
+            deployment: "deployment".into(),
+            manifest_json: serde_json::to_vec(&serde_json::json!({
+                "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}}, "hooks":{}
+            }))
+            .unwrap(),
+        }))
+    }
+    async fn invoke(&self, _: Request<InvokeHook>) -> Result<Response<HookResult>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
 }
 fn auth<T>(request: &Request<T>, token: &str) -> Result<(), Status> {
     if request.metadata().get("authorization").is_none_or(|value| value != format!("Bearer {token}").as_str()) {
@@ -152,8 +181,18 @@ impl local_control_server::LocalControl for Service {
         self.cancels.fetch_add(1, Ordering::SeqCst);
         Err(Status::unimplemented("unused"))
     }
-    async fn claim(&self, _: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
-        Err(Status::unimplemented("unused"))
+    async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
+        auth(&request, "control")?;
+        let (error, stall) = {
+            let mut movement = self.movement.lock().unwrap();
+            assert_eq!(movement.pending.as_ref(), Some(request.get_ref()));
+            movement.attempts += 1;
+            (movement.error.clone(), movement.stall_retries && movement.attempts > 1)
+        };
+        if stall {
+            tokio::time::sleep(super::super::WAIT_TIMEOUT).await;
+        }
+        Err(error.unwrap_or_else(|| Status::unimplemented("unused")))
     }
     async fn activate(&self, _: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
         Err(Status::unimplemented("unused"))
@@ -167,8 +206,23 @@ impl local_control_server::LocalControl for Service {
     async fn move_player(&self, _: Request<MovePlayerRequest>) -> Result<Response<ClaimRequest>, Status> {
         Err(Status::unimplemented("unused"))
     }
-    async fn poll_move(&self, _: Request<ClaimRequest>) -> Result<Response<PendingMove>, Status> {
-        Err(Status::unimplemented("unused"))
+    async fn poll_move(&self, request: Request<ClaimRequest>) -> Result<Response<PendingMove>, Status> {
+        auth(&request, "control")?;
+        Ok(Response::new(PendingMove { claim: self.movement.lock().unwrap().pending.clone() }))
+    }
+    async fn abandon_move(&self, request: Request<AbandonMoveRequest>) -> Result<Response<ClaimIdentity>, Status> {
+        auth(&request, "control")?;
+        let mut movement = self.movement.lock().unwrap();
+        movement.reports += 1;
+        if std::mem::take(&mut movement.lose_report) {
+            return Err(Status::unavailable("lost failure report"));
+        }
+        let expected =
+            movement.pending.as_ref().or_else(|| movement.failure.as_ref().and_then(|failure| failure.claim.as_ref()));
+        assert_eq!(request.get_ref().claim.as_ref(), expected);
+        movement.pending = None;
+        movement.failure = Some(request.into_inner());
+        Ok(Response::new(ClaimIdentity::default()))
     }
     async fn drain(&self, _: Request<DrainRequest>) -> Result<Response<DrainStatus>, Status> {
         Err(Status::unimplemented("unused"))
@@ -218,6 +272,7 @@ impl Fixture {
             ..Default::default()
         };
         let service = Service {
+            movement: Arc::default(),
             assignment: Arc::new(Mutex::new(assignment.clone())),
             commands,
             allowed: Arc::new(AtomicBool::new(true)),
@@ -240,6 +295,7 @@ impl Fixture {
         let server_service = service.clone();
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
+                .add_service(backend_hooks_server::BackendHooksServer::new(server_service.clone()))
                 .add_service(backend_commands_server::BackendCommandsServer::new(server_service.clone()))
                 .add_service(local_control_server::LocalControlServer::new(server_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stopped.cancelled())

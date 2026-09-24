@@ -13,6 +13,7 @@ use crate::{
     state::{Claim, HostState, Phase, State},
 };
 use select::select_session;
+pub(crate) use select::validate_demand;
 
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.
@@ -209,7 +210,7 @@ fn reserve(
     unavailable: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
     if let Some(intent) = state.moves.get(&request.operation_id)
-        && (intent.canceled || intent.request != request.encode_to_vec())
+        && (intent.canceled || intent.failure.is_some() || intent.request != request.encode_to_vec())
     {
         return Err(Error::Invalid("move canceled or changed"));
     }

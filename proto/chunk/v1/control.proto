@@ -16,6 +16,8 @@ service LocalControl {
   rpc ReconcileDeparture(ClaimRequest) returns (DepartureStatus);
   rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
   rpc PollMove(ClaimRequest) returns (PendingMove);
+  // Acknowledges the durable failure; reconciliation completes withdrawal before releasing capacity.
+  rpc AbandonMove(AbandonMoveRequest) returns (ClaimIdentity);
   rpc Drain(DrainRequest) returns (DrainStatus);
   rpc Nodes(NodesRequest) returns (NodeList);
   rpc Players(PlayersRequest) returns (PlayerList);
@@ -52,6 +54,18 @@ message MovePlayerRequest {
 
 message PendingMove {
   ClaimRequest claim = 1;
+}
+
+// Records a preparation failure and schedules this exact move's fenced withdrawal.
+message AbandonMoveRequest {
+  ClaimRequest claim = 1;
+  string reason = 2;
+}
+
+message MoveFailure {
+  SessionDemand destination = 1;
+  string reason = 2;
+  uint64 failed_at_ms = 3;
 }
 
 // Selects the runtime currently hosting this player; retries retain that runtime.
@@ -136,6 +150,7 @@ message PlayerStatus {
   ClaimPhase phase = 5;
   bool moving = 6;
   uint64 since_ms = 7;
+  MoveFailure last_move_failure = 8;
 }
 // Retries bind this operation to the same host and drain deadline.
 message ShutdownNodeRequest {

@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use super::{
@@ -140,16 +140,32 @@ fn render_picker(frame: &mut Frame, form: &MoveForm, area: Rect) {
 
 /// Appends the latest move outcome below the detail lines.
 fn render_result<'a>(frame: &mut Frame, model: &'a Model, mut lines: Vec<Line<'a>>, area: Rect) {
-    if let Some(step) = model.step("Move") {
+    let failure = model.selected_player().and_then(|(_, _, player)| player.last_move_failure.as_ref());
+    if let Some(failure) = failure {
+        let destination = failure
+            .destination
+            .as_ref()
+            .map_or_else(String::new, |demand| format!(" → {}:{}", demand.session_type, demand.key));
+        lines.push(Line::default());
+        lines.push(Line::from(format!("✗ Move failed{destination}")).red());
+        lines.push(Line::from(failure.reason.as_str()));
+    }
+    if let Some(step) = model.step("Move")
+        && (failure.is_none()
+            || matches!(step.state, crate::local::report::Step::Failed(_) | crate::local::report::Step::Running(_)))
+    {
         let (mark, color) = super::mark(model, &step.state);
         let detail = step.detail().lines().next().unwrap_or_default();
         lines.push(Line::default());
         lines.push(Line::from(vec![Span::styled(format!("{mark} Move  "), Style::new().fg(color)), Span::raw(detail)]));
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn state(player: &PlayerStatus) -> (&'static str, Color) {
+    if player.last_move_failure.is_some() {
+        return ("move failed", Color::Red);
+    }
     if player.moving {
         return ("moving", Color::Yellow);
     }

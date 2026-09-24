@@ -55,9 +55,18 @@ impl Control {
     /// # Errors
     /// Unreachable control channels retain the reservation and membership.
     pub async fn cancel(&self, request: ClaimRequest) -> Result<ClaimIdentity> {
+        self.cancel_with_failure(request, None).await
+    }
+
+    pub(crate) async fn cancel_with_failure(
+        &self,
+        request: ClaimRequest,
+        failure: Option<String>,
+    ) -> Result<ClaimIdentity> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
-        if self.cancel_intent(&request)? {
+        let abandoned = failure.is_some();
+        if self.cancel_intent(&request, failure)? {
             return Ok(ClaimIdentity {
                 operation_id: request.operation_id,
                 proxy_id: request.proxy_id,
@@ -78,6 +87,10 @@ impl Control {
                 Phase::Withdrawing,
             )
         })?;
+        // The recorded failure fences activation; reconciliation owns the remaining withdrawal.
+        if abandoned {
+            return Ok(identity);
+        }
         if !self.host.stopped(&host) {
             let runtime = self.runtime(&state, &host).await?;
             let withdrawn = GameplayClient::new(channel(&runtime).await?)

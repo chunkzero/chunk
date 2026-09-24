@@ -26,6 +26,7 @@ impl Control {
             let request = chunk_proto::v1::ClaimRequest::decode(claim.request.as_slice())?;
             let expired = !claim.activated && crate::now_ms().saturating_sub(claim.created_at_ms) > 60_000;
             let cancel = expired
+                || state.moves.get(&request.operation_id).is_some_and(|intent| intent.failure.is_some())
                 || (claim.phase == Phase::Reserved && state.sessions[&claim.session].retired)
                 || claim.phase == Phase::Withdrawing
                 || (claim.assignment.is_none() && stopped.contains(&state.sessions[&claim.session].host));
