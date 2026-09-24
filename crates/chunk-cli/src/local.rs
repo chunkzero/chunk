@@ -23,8 +23,8 @@ mod tui;
 
 #[derive(clap::Args)]
 pub(crate) struct Options {
-    #[command(flatten)]
-    build: building::Options,
+    #[arg(default_value = ".")]
+    project: PathBuf,
     /// Local service state directory (defaults to PROJECT/.chunk/local).
     #[arg(long)]
     state: Option<PathBuf>,
@@ -87,7 +87,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         let ui = if interactive {
             let (stop, finished) = (stop.clone(), finished.clone());
             let info = tui::Info {
-                title: format!("chunk dev · {}", options.build.project.display()),
+                title: format!("chunk dev · {}", options.project.display()),
                 address: options.bind,
                 watching: !options.no_watch,
             };
@@ -114,16 +114,21 @@ async fn serve(
     commands: mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
 ) -> io::Result<()> {
-    let project = building::prepare(&options.build)?;
-    reporter.done("Project", project_summary(&project));
-
-    let state = options.state.clone().unwrap_or_else(|| project.root.join(".chunk/local"));
+    let root = options.project.canonicalize()?;
+    fs::create_dir_all(root.join(".chunk"))?;
+    let _project_lock = runner_lock(&root.join(crate::cleaning::PROJECT_LOCK))
+        .map_err(|_| io::Error::other("chunk dev is already running for this project"))?;
+    let state = options.state.clone().unwrap_or_else(|| root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;
+    let project = building::inspect(root, state.join("releases"))?;
+    reporter.done("Project", project_summary(&project));
+    let _lock = runner_lock(&state.join("runner.lock"))?;
+    // Control state and JVM logs of an earlier session; its releases are pruned once this one is serving.
+    crate::cleaning::remove(&state.join("control"))?;
     if interactive {
         tokio::spawn(logs::follow_jvms(state.join("control"), reporter.clone(), stop.clone()));
     }
-    let _lock = runner_lock(&state.join("runner.lock"))?;
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     reporter.running("Build", "Gradle chunkArtifacts");
     let started = Instant::now();
@@ -263,7 +268,7 @@ fn available_addresses(bind: SocketAddr, backend: SocketAddr, control: SocketAdd
     Ok(())
 }
 
-fn runner_lock(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn runner_lock(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::File::options();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]

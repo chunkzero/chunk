@@ -1,7 +1,12 @@
 use std::{
+    collections::BTreeSet,
     io,
     net::SocketAddr,
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -53,6 +58,10 @@ pub(super) struct Session<'a> {
     retiring: JoinSet<Option<String>>,
     /// Stopped backend versions retried until no call, subscription or job still uses them.
     unreleased: Vec<String>,
+    /// Retired releases whose JVMs are still stopping and may still read their release directory.
+    stopping: Arc<AtomicUsize>,
+    /// Whether a release directory may have lost its last running version since the last prune.
+    stale: bool,
 }
 
 impl<'a> Session<'a> {
@@ -74,6 +83,8 @@ impl<'a> Session<'a> {
             pointer: None,
             retiring: JoinSet::new(),
             unreleased: Vec::new(),
+            stopping: Arc::default(),
+            stale: true,
         }
     }
 
@@ -149,10 +160,11 @@ impl<'a> Session<'a> {
                     }
                 }
             }
-            if build.is_none()
-                && let Some(trigger) = queued.take()
-            {
-                build = Some(self.rebuild(trigger, stop));
+            if build.is_none() {
+                self.prune();
+                if let Some(trigger) = queued.take() {
+                    build = Some(self.rebuild(trigger, stop));
+                }
             }
         };
         if let Some((task, _)) = build {
@@ -166,17 +178,18 @@ impl<'a> Session<'a> {
         let forced = matches!(trigger, Trigger::Restart);
         match trigger {
             Trigger::Change(path) => {
-                let root = self.options.build.project.canonicalize().unwrap_or_default();
+                let root = self.options.project.canonicalize().unwrap_or_default();
                 let path = path.strip_prefix(root).unwrap_or(&path).display().to_string();
                 self.reporter.running("Reload", path);
             }
             Trigger::Restart => self.reporter.running("Reload", "forced restart"),
         }
-        let (options, java, stop) = (self.options.build.clone(), self.options.java.clone(), stop.clone());
+        let (root, releases) = (self.options.project.clone(), self.settings.state.join("releases"));
+        let (java, stop) = (self.options.java.clone(), stop.clone());
         let progress = self.reporter.build_progress();
         let task = tokio::spawn(async move {
             let started = Instant::now();
-            let project = building::prepare(&options)?;
+            let project = building::inspect(root.canonicalize()?, releases)?;
             let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), progress).await?;
             let staged = super::stage(&project, built, java.as_deref(), &stop).await?;
             Ok((staged, started.elapsed()))
@@ -185,6 +198,7 @@ impl<'a> Session<'a> {
     }
 
     async fn finish(&mut self, result: Result<io::Result<(Staged, Duration)>, JoinError>, forced: bool) {
+        self.stale = true;
         let outcome = match result.map_err(io::Error::other).and_then(|built| built) {
             Ok((staged, elapsed)) => {
                 let release = short(&staged.release.id).to_owned();
@@ -360,13 +374,16 @@ impl<'a> Session<'a> {
     }
 
     fn retire(&mut self, generation: Generation) {
-        let (backend, reporter) = (self.shared.backend(), self.reporter.clone());
+        let (backend, reporter, stopping) = (self.shared.backend(), self.reporter.clone(), self.stopping.clone());
+        self.stale = true;
+        stopping.fetch_add(1, Ordering::AcqRel);
         self.retiring.spawn(async move {
             let (release_id, deployment) = (generation.release.id.clone(), generation.deployment.clone());
             match generation.stop().await {
                 Ok(()) => reporter.done("Retire", format!("{} stopped", short(&release_id))),
                 Err(error) => reporter.failed("Retire", format!("{}: {error}", short(&release_id))),
             }
+            stopping.fetch_sub(1, Ordering::AcqRel);
             let backend = backend?;
             (!release(&backend, &deployment).await).then_some(deployment)
         });
@@ -375,6 +392,19 @@ impl<'a> Session<'a> {
     fn release(&mut self, deployment: String) {
         if let Some(backend) = self.shared.backend() {
             self.retiring.spawn(async move { (!release(&backend, &deployment).await).then_some(deployment) });
+        }
+    }
+
+    /// Deletes release directories no running version uses. Called only between builds, and waits for retired JVMs to
+    /// stop, since both may still read a release that is no longer live.
+    fn prune(&mut self) {
+        if !self.stale || self.stopping.load(Ordering::Acquire) > 0 {
+            return;
+        }
+        self.stale = false;
+        let live: BTreeSet<_> = self.live.iter().map(|live| live.generation.release.id.as_str()).collect();
+        if let Err(error) = crate::cleaning::prune(&self.settings.state.join("releases"), &live) {
+            tracing::warn!(%error, "unused releases not pruned");
         }
     }
 

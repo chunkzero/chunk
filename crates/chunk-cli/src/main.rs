@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use std::{io, path::PathBuf, process::ExitCode};
 mod building;
+mod cleaning;
 mod creation;
 mod generation;
 mod local;
@@ -24,6 +25,8 @@ enum Command {
     Dev(local::Options),
     /// Build the backend and JVM apps into one portable release archive.
     Build(building::Options),
+    /// Delete build output and local dev state, keeping local backend data unless --data is set.
+    Clean(cleaning::Options),
     /// Compile the backend and generate explicitly selected client sources.
     Gen(generation::Options),
     /// Inspect project and app manifests as JSON without building.
@@ -86,6 +89,7 @@ async fn run(cli: Cli) -> io::Result<()> {
         Command::Create(options) => creation::run(&options),
         Command::Dev(options) => local::run(options).await,
         Command::Build(options) => building::run(options).await,
+        Command::Clean(options) => cleaning::run(&options),
         Command::Gen(options) => {
             tokio::task::spawn_blocking(move || generation::run(options)).await.map_err(io::Error::other)?
         }

@@ -123,6 +123,9 @@ managed delivery, timeouts, feature selection and standalone hosting.
   logs, Esc/Tab to return to nodes, and `b` for startup details. Reload progress stays visible while the current release
   serves players. `--plain` (automatic when stdout is not a terminal) prints one line per step and includes Gradle
   diagnostics on failure.
+- `chunk clean PROJECT` deletes `dist/` and `.chunk/` so the next build starts fresh. It keeps local backend data in
+  `.chunk/local/backend` (and in any other `--state` directory directly under `.chunk/`) unless `--data` is set, and
+  refuses while `chunk dev` runs for the project. Gradle's `build/` directories are left to `./gradlew clean`.
 - `chunk players` operates on local players.
 - `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use `--cloud` or `--url URL` for non-interactive
   selection. `chunk login` is an alias.
@@ -168,9 +171,11 @@ them in the generated README. Connect with Minecraft Java Edition 26.2 at `local
 `chunk dev` rebuilds when project sources change and starts each build as a new local deployment version; new players
 join the newest one. When only backend code changed, existing sessions stay on their version until their players leave.
 When app JARs changed, every earlier version stops once it is empty or after `--drain-seconds` (default 30),
-disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every session
-immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
-automatic rebuilds. Reloads do not preserve gameplay state.
+disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every
+session immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
+automatic rebuilds. Reloads do not preserve gameplay state. Development releases live in `.chunk/local/releases`; each
+is deleted once no running version uses it, and a new session first clears the previous one's control state and JVM
+logs.
 
 Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
 libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted by edge.
