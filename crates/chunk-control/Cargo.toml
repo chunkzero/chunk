@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sy
 tonic = "0.14.6"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

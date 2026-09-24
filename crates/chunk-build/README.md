@@ -121,10 +121,11 @@ version 3; older artifacts must be rebuilt.
 Dev releases differ in how apps are packaged. A descriptor app with a `classpath` has a thin JAR, and publication stores
 it and every classpath JAR under `libs/<sha256>.jar`. The app's executable JAR is then a small launcher whose manifest
 sets `Main-Class` and a relative `Class-Path` naming those JARs. Its digest therefore changes whenever any JAR on the
-app's classpath changes. Session registrations are read from the thin app JAR; referenced classes and the main class may
-come from anywhere on its classpath, and conflicting classes across it are rejected. Scans of unchanged JARs are reused
-within one process, and files identical to ones in an earlier release under `dist/` are hard-linked instead of
-rewritten.
+app's classpath changes. Before launching, control checks that each `Class-Path` entry stays inside the release and
+still hashes to its file name. Session registrations are read from the thin app JAR; referenced classes and the main
+class may come from anywhere on its classpath, and conflicting classes across it are rejected. Scans of unchanged JARs
+are reused within one process, and files identical to ones in an earlier release under `dist/` are hard-linked instead
+of rewritten.
 
 The descriptor's absolute file paths and Java executable are local build inputs. They are excluded from the release,
 along with environment names, local process limits, `.sdk` caches, generated sources, project build files and unrelated
