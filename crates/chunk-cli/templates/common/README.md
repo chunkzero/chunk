@@ -15,8 +15,9 @@ build support is generated in `.chunk/gradle/`. These directories are ignored by
 generates the JVM clients and packages an immutable release under `dist/`. `dev` builds the release and starts the local
 backend, control and proxy. Connect with an official Minecraft Java Edition 26.2 client at `localhost:25565`; the lobby
 starts automatically on join. Ctrl-C stops the services and their gameplay JVMs. Local backend data stays in
-`.chunk/local` between runs. `dev` rebuilds when sources change and sends new players to the new version; press `r`
-(or type `r` and Enter with `--plain`) to restart every session immediately.
+`.chunk/local` between runs. `clean` deletes `dist/` and the rest of `.chunk/`; pass `--data` to also reset local
+backend data. `dev` rebuilds when sources change and sends new players to the new version; press `r` (or type `r` and
+Enter with `--plain`) to restart every session immediately.
 
 The standard Gradle wrapper downloads and caches Gradle on the first build. The build selects Java 25, downloading that
 toolchain when needed. A Java installation is required to start Gradle. Keep `gradlew`, `gradlew.bat` and

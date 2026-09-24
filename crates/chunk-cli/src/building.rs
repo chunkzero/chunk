@@ -41,7 +41,6 @@ pub(crate) struct Built {
 
 pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
     let root = options.project.canonicalize()?;
-    let metadata = chunk_build::project::inspect(&root)?;
     let output = crate::generation::destination(options.output.as_deref().unwrap_or(&root.join("dist")))?;
     for source in [root.join(".chunk"), root.join("server"), root.join("apps"), root.join("assets")] {
         let source = crate::generation::destination(&source)?;
@@ -49,6 +48,12 @@ pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
             return Err(io::Error::other("release output must be separate from project sources and build outputs"));
         }
     }
+    inspect(root, output)
+}
+
+/// Inspects the project at canonical `root`, whose releases publish into `output`.
+pub(crate) fn inspect(root: PathBuf, output: PathBuf) -> io::Result<Project> {
+    let metadata = chunk_build::project::inspect(&root)?;
     Ok(Project { root, metadata, output })
 }
 
