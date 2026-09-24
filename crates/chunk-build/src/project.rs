@@ -57,6 +57,8 @@ pub struct LocalConfig {
     pub machine_profile: String,
     pub capacity: u32,
     pub max_processes: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_node_timeout_seconds: Option<u32>,
     pub profiles: BTreeMap<String, MachineProfile>,
 }
 
@@ -225,6 +227,9 @@ impl LocalConfig {
         }
         if !(1..=32).contains(&self.max_processes) {
             return Err(invalid(path, "local.max_processes must be between 1 and 32"));
+        }
+        if self.idle_node_timeout_seconds.is_some_and(|seconds| seconds > 3600) {
+            return Err(invalid(path, "local.idle_node_timeout_seconds must be between 0 and 3600"));
         }
         if !self.profiles.contains_key(&self.machine_profile) {
             return Err(invalid(

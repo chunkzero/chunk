@@ -17,6 +17,7 @@ fn staged(directory: &std::path::Path, id: &str) -> Staged {
             chunk_control::SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 4 },
         )]),
         max_processes: 4,
+        idle_node_timeout_seconds: chunk_control::DEFAULT_IDLE_NODE_TIMEOUT_SECONDS,
     };
     let bundle = chunk_contract::Deployment {
         contracts: chunk_contract::Contracts::default(),

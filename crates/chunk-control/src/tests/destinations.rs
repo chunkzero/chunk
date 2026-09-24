@@ -130,7 +130,7 @@ async fn empty_expiry_counts_reservations_and_waits_for_lost_finish_reconciliati
     assert!(!state.sessions[&session].finished);
     assert!(matches!(control.claim(request("early", &uuid::Uuid::new_v4().to_string())).await, Err(Error::Capacity)));
     control.reconcile_all().await.unwrap();
-    assert!(control.state().unwrap().sessions[&session].finished);
+    assert!(!control.state().unwrap().sessions.contains_key(&session));
     let next = control.claim(request("next", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     assert_ne!(next.delivery.unwrap().session.unwrap().id, session);
     assert_eq!(fixture.runtime.finishes.load(Ordering::Acquire), 1);
@@ -161,7 +161,7 @@ async fn failed_unknown_creation_is_retained_until_host_fencing_and_finish_requi
     ));
     fixture.runtime.stopped.store(true, Ordering::Release);
     control.reconcile_all().await.unwrap();
-    assert!(control.state().unwrap().sessions[&session].finished);
+    assert!(!control.state().unwrap().sessions.contains_key(&session));
     fixture.close().await;
 
     let fixture = Fixture::new().await;

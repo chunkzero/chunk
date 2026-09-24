@@ -41,6 +41,8 @@ pub(crate) struct HostState {
     pub app: String,
     pub profile: String,
     pub retired: bool,
+    #[serde(default)]
+    pub idle_since_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

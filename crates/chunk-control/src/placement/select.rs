@@ -90,14 +90,18 @@ fn place_host(
             && sessions.len() < usize::from(limit)
             && sessions.iter().map(|s| s.capacity).sum::<u32>() + creation.capacity <= 128
     });
-    if let Some((id, _)) = existing {
-        return Ok(id.clone());
+    if let Some(id) = existing.map(|(id, _)| id.clone()) {
+        state.hosts.get_mut(&id).ok_or(Error::Invalid("missing host"))?.idle_since_ms = None;
+        return Ok(id);
     }
     if state.hosts.values().filter(|h| !h.retired).count() >= usize::from(config.max_processes) {
         return Err(Error::Capacity);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    state.hosts.insert(id.clone(), HostState { app: app.into(), profile: creation.profile.into(), retired: false });
+    state.hosts.insert(
+        id.clone(),
+        HostState { app: app.into(), profile: creation.profile.into(), retired: false, idle_since_ms: None },
+    );
     Ok(id)
 }
 

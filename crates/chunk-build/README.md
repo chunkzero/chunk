@@ -84,7 +84,9 @@ emits the existing `machine_profile`/`capacity` fields for build and placement t
 defaults while retaining the same implementation. Omitted `implementations` means the ordinary `default` provider;
 omitted implementation `config` accepts only `{}` and requires no generated configuration provider interface.
 
-Local capacity is 1–128 players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. Scopes come
+Local capacity is 1–128 players, process count is 1–32, and profiles allow 128–8192 MiB and 1–16 sessions. Optional
+`idle_node_timeout_seconds` (0–3600, default 60) stops a node that has had no unfinished session for that long; 0 keeps
+idle nodes running. Scopes come
 only from `apps/**/scope.ts` and `app.ts` directories; a `server/domains` tree is rejected with a migration diagnostic.
 Legacy immediate `apps/*/app.toml` apps remain supported and bind to the root scope. An app cannot contain both `app.ts`
 and `app.toml`.

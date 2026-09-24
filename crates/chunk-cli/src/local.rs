@@ -250,6 +250,9 @@ fn control_config(
             .collect(),
         session_types,
         max_processes: local.max_processes,
+        idle_node_timeout_seconds: local
+            .idle_node_timeout_seconds
+            .unwrap_or(chunk_control::DEFAULT_IDLE_NODE_TIMEOUT_SECONDS),
     })
 }
 

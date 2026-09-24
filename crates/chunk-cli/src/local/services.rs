@@ -1,7 +1,9 @@
 use super::{Reporter, Settings, Staged, report::Destination};
 use chunk_build::Release;
 use chunk_contract::{BackendConnection, ControlConnection};
-use chunk_proto::v1::{MovePlayerRequest, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand};
+use chunk_proto::v1::{
+    MovePlayerRequest, NodePhase, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand,
+};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -312,7 +314,9 @@ pub(super) async fn observe(connection: &ControlConnection) -> io::Result<(Vec<N
     let request = async {
         let mut client = crate::players::client(connection).await?;
         let nodes = client.nodes(crate::players::auth(NodesRequest {}, &connection.token)?);
-        let nodes = nodes.await.map_err(io::Error::other)?.into_inner().nodes;
+        let mut nodes = nodes.await.map_err(io::Error::other)?.into_inner().nodes;
+        // Stopped nodes stay listed for their logs, below the running ones.
+        nodes.sort_by_key(|node| node.phase == NodePhase::Stopped as i32);
         let players = client.players(crate::players::auth(PlayersRequest {}, &connection.token)?);
         Ok((nodes, players.await.map_err(io::Error::other)?.into_inner().players))
     };
