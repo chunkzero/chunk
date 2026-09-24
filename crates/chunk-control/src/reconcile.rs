@@ -15,13 +15,7 @@ impl Control {
         if !stopped.is_empty() {
             self.update(|state| {
                 for id in &stopped {
-                    if let Some(host) = state.hosts.get_mut(id) {
-                        host.retired = true;
-                    }
-                    for session in state.sessions.values_mut().filter(|session| &session.host == id) {
-                        session.retired = true;
-                        session.finished = true;
-                    }
+                    state.retire_stopped_host(id);
                 }
                 Ok(())
             })?;

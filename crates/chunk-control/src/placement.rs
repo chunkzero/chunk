@@ -153,10 +153,13 @@ impl Control {
         let runtime = match self.host.ensure(id, &host.app, &host.profile).await {
             Ok(runtime) => runtime,
             Err(error) => {
-                if self.host.stopped(id) {
-                    self.update(|state| {
-                        crate::drain::retire_host(state, format!("launch/{id}"), Vec::new(), 0, true, |_| Ok(id.into()))
-                    })?;
+                if self.host.stopped(id)
+                    && let Err(retirement) = self.update(|state| {
+                        state.retire_stopped_host(id);
+                        Ok(())
+                    })
+                {
+                    tracing::error!(%retirement, host = id, "cannot retire stopped host");
                 }
                 return Err(error);
             }

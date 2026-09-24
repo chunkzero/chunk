@@ -172,10 +172,10 @@ impl ProcessHost {
         tokio::spawn(async move {
             match own_child(child, &owned).await {
                 Ok(()) => {
-                    owned.stopped.store(true, Ordering::Release);
                     if let Err(error) = std::fs::write(exit, b"stopped") {
                         tracing::error!(%error, "cannot persist JVM exit");
                     }
+                    owned.stopped.store(true, Ordering::Release);
                 }
                 Err(error) => tracing::error!(%error, "JVM exit is unconfirmed"),
             }
@@ -297,6 +297,49 @@ impl Host for ProcessHost {
             processes.failed.contains(id)
                 || processes.running.get(id).is_some_and(|p| p.stopped.load(Ordering::Acquire))
         }) || self.path(id, "exit").is_ok_and(|p| p.is_file())
+    }
+
+    fn prune(&self, retained: &BTreeSet<String>) -> Result<()> {
+        let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
+        let mut stopped = processes.failed.clone();
+        stopped.extend(
+            processes
+                .running
+                .iter()
+                .filter(|(_, process)| process.stopped.load(Ordering::Acquire))
+                .map(|(id, _)| id.clone()),
+        );
+        // Exit records also recover cleanup interrupted after the durable host was removed.
+        let entries = match std::fs::read_dir(&self.config.directory) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries.into_iter().flatten() {
+            let path = entry?.path();
+            if path.extension().is_some_and(|extension| extension == "exit")
+                && let Some(id) = path.file_stem().and_then(|stem| stem.to_str())
+                && uuid::Uuid::parse_str(id).is_ok()
+            {
+                stopped.insert(id.into());
+            }
+        }
+        let mut result = Ok(());
+        'hosts: for id in stopped.difference(retained) {
+            for extension in ["launch", "jvm.log", "exit"] {
+                match std::fs::remove_file(self.path(id, extension)?) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        result = Err(error.into());
+                        continue 'hosts;
+                    }
+                }
+            }
+            processes.running.remove(id);
+            processes.failed.remove(id);
+        }
+        result
     }
 }
 async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {

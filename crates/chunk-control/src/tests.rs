@@ -682,6 +682,7 @@ async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() 
     assert!(control.state().unwrap().hosts[&host].retired);
     control.reconcile_all().await.unwrap();
     assert!(control.state().unwrap().drains.is_empty());
+    assert!(control.state().unwrap().hosts.is_empty());
     fixture.close().await;
 }
 
