@@ -11,7 +11,12 @@ use tokio::io::DuplexStream;
 
 #[tokio::test]
 async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_report() {
-    for transient in [false, true] {
+    for error in [
+        tonic::Status::failed_precondition("destination configuration rejected"),
+        tonic::Status::failed_precondition("runtime stopped"),
+        tonic::Status::unavailable("app did not become ready within 35 seconds"),
+    ] {
+        let transient = error.code() == tonic::Code::Unavailable;
         let fixture = Fixture::new().await;
         let source = super::super::ClaimGuard {
             platform: fixture.commands.tasks.platform.clone(),
@@ -29,12 +34,9 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
         {
             let mut state = movement.lock().unwrap();
             state.pending = Some(destination.clone());
-            state.error = Some(if transient {
-                tonic::Status::unavailable("destination unavailable")
-            } else {
-                tonic::Status::failed_precondition("destination configuration rejected")
-            });
+            state.error = Some(error.clone());
             state.lose_report = true;
+            state.stall_retries = transient;
         }
         let running = tokio::spawn(async move { super::super::next_move(&source, &identity, 776).await.map(|_| ()) });
         if transient {
@@ -57,6 +59,7 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
         })
         .await
         .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
         {
             let state = movement.lock().unwrap();
             assert_eq!(state.attempts, if transient { 2 } else { 1 });
@@ -65,9 +68,9 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
             let failure = state.failure.as_ref().unwrap();
             assert_eq!(failure.claim.as_ref(), Some(&destination));
             if transient {
-                assert!(failure.reason.contains("unavailable") || failure.reason.contains("timed out"));
+                assert_eq!(failure.reason, format!("move preparation timed out after 45 seconds: {}", error.message()));
             } else {
-                assert_eq!(failure.reason, "destination configuration rejected");
+                assert_eq!(failure.reason, error.message());
             }
         }
         assert!(!running.is_finished()); // Keeps waiting for another move on the same source.

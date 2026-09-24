@@ -65,6 +65,7 @@ impl Control {
     ) -> Result<ClaimIdentity> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
+        let abandoned = failure.is_some();
         if self.cancel_intent(&request, failure)? {
             return Ok(ClaimIdentity {
                 operation_id: request.operation_id,
@@ -86,6 +87,10 @@ impl Control {
                 Phase::Withdrawing,
             )
         })?;
+        // The recorded failure fences activation; reconciliation owns the remaining withdrawal.
+        if abandoned {
+            return Ok(identity);
+        }
         if !self.host.stopped(&host) {
             let runtime = self.runtime(&state, &host).await?;
             let withdrawn = GameplayClient::new(channel(&runtime).await?)

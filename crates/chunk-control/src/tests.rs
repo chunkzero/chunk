@@ -583,15 +583,18 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
         };
         if prepare {
             fixture.runtime.available.store(false, Ordering::Release);
-            assert!(control.abandon_move(abandoned.clone()).await.is_err());
+            control.abandon_move(abandoned.clone()).await.unwrap();
             assert!(control.state().unwrap().players[&uuid].pending.is_some());
             assert!(control.state().unwrap().claims[operation].phase == Phase::Withdrawing);
             assert!(control.poll_move(&source).unwrap().claim.is_none());
             assert!(control.players().unwrap().players[0].last_move_failure.is_some());
+            control.reconcile_all().await.unwrap();
+            assert!(control.state().unwrap().claims[operation].phase == Phase::Withdrawing);
             fixture.runtime.available.store(true, Ordering::Release);
         }
         control.abandon_move(abandoned.clone()).await.unwrap();
-        control.cancel(destination.clone()).await.unwrap();
+        control.reconcile_all().await.unwrap();
+        assert!(control.state().unwrap().claims.get(operation).is_none_or(|claim| claim.phase == Phase::Released));
         let failure = control.players().unwrap().players.remove(0).last_move_failure.unwrap();
         assert_eq!(failure.destination, destination.demand);
         assert_eq!(failure.reason, abandoned.reason);
@@ -785,6 +788,12 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     assert!(!fixture.host.stopped(&online.host_id));
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
     control.progress_drains().await.unwrap();
+    let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
+    let mut retry = Request::new(request);
+    retry.metadata_mut().insert("authorization", "Bearer control-group-credential-with-32-characters".parse().unwrap());
+    let error = chunk_proto::v1::local_control_server::LocalControl::claim(&service, retry).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error.message(), "runtime stopped");
     control.reconcile_all().await.unwrap();
     assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopped as i32);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);

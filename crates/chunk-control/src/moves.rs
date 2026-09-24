@@ -108,9 +108,9 @@ impl Control {
         Ok(result)
     }
 
-    /// Records why preparation ended, retaining reservations until cancellation confirms fencing.
+    /// Records why preparation ended, leaving fenced withdrawal to reconciliation.
     /// # Errors
-    /// Rejects changed or already activated moves and reports unresolved withdrawal.
+    /// Rejects changed or activated moves and failures to persist the report.
     pub async fn abandon_move(&self, request: AbandonMoveRequest) -> Result<ClaimIdentity> {
         if request.reason.is_empty() || request.reason.len() > 4096 {
             return Err(Error::Invalid("invalid move failure reason"));

@@ -42,7 +42,7 @@ pub(super) async fn next_move(
         match prepare(source, &guard, protocol).await {
             Ok(assignment) => return Ok((guard, assignment)),
             Err(error) => {
-                let reason = rpc_error(&error).map_or_else(|| error.to_string(), |status| status.message().into());
+                let reason = failure_reason(&error);
                 let reason = if reason.is_empty() { "move preparation failed".into() } else { reason };
                 tracing::warn!(%reason, operation = %guard.claim.operation_id, "move abandoned; source remains active");
                 guard.failure = Some(reason.chars().take(1024).collect());
@@ -54,22 +54,40 @@ pub(super) async fn next_move(
 
 async fn prepare(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {
     let deadline = Instant::now() + WAIT_TIMEOUT;
+    let mut last_error = None;
     loop {
         let error = match timeout_at(deadline, attempt(source, destination, protocol)).await {
             Ok(Ok(assignment)) => return Ok(assignment),
             Ok(Err(error)) => error,
             Err(_) => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "move preparation timed out after 45 seconds"));
+                return Err(preparation_timeout(last_error.as_ref()));
             }
         };
-        if !transient(&error) || Instant::now() >= deadline {
+        if Instant::now() >= deadline {
+            return Err(preparation_timeout(last_error.as_ref().or(Some(&error))));
+        }
+        if !transient(&error) {
             return Err(error);
         }
+        last_error = Some(error);
         sleep_until((Instant::now() + POLL_INTERVAL).min(deadline)).await;
         if Instant::now() >= deadline {
-            return Err(error);
+            return Err(preparation_timeout(last_error.as_ref()));
         }
     }
+}
+
+fn failure_reason(error: &io::Error) -> String {
+    rpc_error(error).map_or_else(|| error.to_string(), |status| status.message().into())
+}
+
+fn preparation_timeout(last_error: Option<&io::Error>) -> io::Error {
+    let mut reason = format!("move preparation timed out after {} seconds", WAIT_TIMEOUT.as_secs());
+    if let Some(error) = last_error {
+        reason.push_str(": ");
+        reason.push_str(&failure_reason(error));
+    }
+    io::Error::new(io::ErrorKind::TimedOut, reason)
 }
 
 async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {

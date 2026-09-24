@@ -16,6 +16,7 @@ service LocalControl {
   rpc ReconcileDeparture(ClaimRequest) returns (DepartureStatus);
   rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
   rpc PollMove(ClaimRequest) returns (PendingMove);
+  // Acknowledges the durable failure; reconciliation completes withdrawal before releasing capacity.
   rpc AbandonMove(AbandonMoveRequest) returns (ClaimIdentity);
   rpc Drain(DrainRequest) returns (DrainStatus);
   rpc Nodes(NodesRequest) returns (NodeList);
@@ -55,7 +56,7 @@ message PendingMove {
   ClaimRequest claim = 1;
 }
 
-// Records a preparation failure and withdraws this exact move using normal claim fencing.
+// Records a preparation failure and schedules this exact move's fenced withdrawal.
 message AbandonMoveRequest {
   ClaimRequest claim = 1;
   string reason = 2;

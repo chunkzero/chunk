@@ -36,6 +36,7 @@ pub(super) struct Movement {
     pub attempts: usize,
     pub reports: usize,
     pub lose_report: bool,
+    pub stall_retries: bool,
     pub failure: Option<AbandonMoveRequest>,
 }
 
@@ -182,10 +183,16 @@ impl local_control_server::LocalControl for Service {
     }
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
         auth(&request, "control")?;
-        let mut movement = self.movement.lock().unwrap();
-        assert_eq!(movement.pending.as_ref(), Some(request.get_ref()));
-        movement.attempts += 1;
-        Err(movement.error.clone().unwrap_or_else(|| Status::unimplemented("unused")))
+        let (error, stall) = {
+            let mut movement = self.movement.lock().unwrap();
+            assert_eq!(movement.pending.as_ref(), Some(request.get_ref()));
+            movement.attempts += 1;
+            (movement.error.clone(), movement.stall_retries && movement.attempts > 1)
+        };
+        if stall {
+            tokio::time::sleep(super::super::WAIT_TIMEOUT).await;
+        }
+        Err(error.unwrap_or_else(|| Status::unimplemented("unused")))
     }
     async fn activate(&self, _: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
         Err(Status::unimplemented("unused"))
