@@ -150,7 +150,17 @@ impl Control {
 
     pub(crate) async fn runtime(&self, state: &State, id: &str) -> Result<RuntimeConnection> {
         let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
-        let runtime = self.host.ensure(id, &host.app, &host.profile).await?;
+        let runtime = match self.host.ensure(id, &host.app, &host.profile).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if self.host.stopped(id) {
+                    self.update(|state| {
+                        crate::drain::retire_host(state, format!("launch/{id}"), Vec::new(), 0, true, |_| Ok(id.into()))
+                    })?;
+                }
+                return Err(error);
+            }
+        };
         if !self.runs_host(&runtime, host) {
             return Err(Error::Invalid("host returned incompatible runtime"));
         }

@@ -5,7 +5,7 @@ use crate::{
 use chunk_proto::v1::{ProcessIdentity, ProcessRegistration, node_control_client::NodeControlClient};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, Write},
     process::Stdio,
     sync::{
@@ -23,7 +23,12 @@ use tokio_util::sync::CancellationToken;
 pub struct ProcessHost {
     config: ProcessHostConfig,
     endpoint: OnceLock<String>,
-    processes: Mutex<BTreeMap<String, Arc<Process>>>,
+    processes: Mutex<Processes>,
+}
+#[derive(Default)]
+struct Processes {
+    running: BTreeMap<String, Arc<Process>>,
+    failed: BTreeSet<String>,
 }
 struct Process {
     identity: ProcessIdentity,
@@ -46,7 +51,7 @@ impl Process {
 impl Drop for ProcessHost {
     fn drop(&mut self) {
         if let Ok(processes) = self.processes.lock() {
-            for process in processes.values() {
+            for process in processes.running.values() {
                 process.stop.cancel();
             }
         }
@@ -62,16 +67,45 @@ impl ProcessHost {
         Ok(self.config.directory.join(id).with_extension(extension))
     }
     fn process(&self, id: &str) -> Result<Option<Arc<Process>>> {
-        Ok(self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.get(id).cloned())
+        Ok(self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.get(id).cloned())
     }
     fn launch(&self, id: &str, app: &str, profile: &str) -> Result<Arc<Process>> {
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
-        if let Some(process) = processes.get(id) {
+        if let Some(process) = processes.running.get(id) {
             if process.identity.app_id != app || process.identity.machine_profile != profile {
                 return Err(Error::Invalid("host binding changed"));
             }
             return Ok(process.clone());
         }
+        if processes.failed.contains(id) || self.path(id, "exit")?.try_exists()? {
+            return Err(Error::Stopped);
+        }
+        if self.path(id, "launch")?.try_exists()? {
+            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+        }
+        match self.start(id, app, profile) {
+            Ok(process) => {
+                processes.running.insert(id.into(), process.clone());
+                Ok(process)
+            }
+            Err(error) => {
+                // No child was spawned, and the launch lock excludes another attempt for this ID.
+                processes.failed.insert(id.into());
+                if let Err(persist) = self.record_exit(id, b"launch failed") {
+                    tracing::error!(%persist, host = id, "cannot persist failed JVM launch");
+                }
+                Err(error)
+            }
+        }
+    }
+    fn record_exit(&self, id: &str, reason: &[u8]) -> Result<()> {
+        std::fs::create_dir_all(&self.config.directory)?;
+        let mut exit = chunk_service::private_file(&self.path(id, "exit")?)?;
+        exit.write_all(reason)?;
+        exit.sync_all()?;
+        Ok(())
+    }
+    fn start(&self, id: &str, app: &str, profile: &str) -> Result<Arc<Process>> {
         let endpoint = self.endpoint.get().ok_or(Error::Unresolved("control not listening"))?;
         let artifact = self.config.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
         // Placement already bound the profile to the app's session or one of its declared destinations.
@@ -90,9 +124,6 @@ impl ProcessHost {
         }
         classpath::verify(&distribution, &jar, &bytes)?;
         std::fs::create_dir_all(&self.config.directory)?;
-        if self.path(id, "exit")?.exists() {
-            return Err(Error::Stopped);
-        }
         // A launch marker without an owned Child leaves termination unconfirmed instead of stopped.
         let _marker = chunk_service::private_file(&self.path(id, "launch")?)?;
         let log_path = self.path(id, "jvm.log")?;
@@ -136,14 +167,7 @@ impl ProcessHost {
                 .kill_on_drop(true)
                 .spawn()
         })();
-        let child = match child {
-            Ok(child) => child,
-            Err(error) => {
-                std::fs::write(exit, b"spawn failed")?;
-                return Err(error.into());
-            }
-        };
-        processes.insert(id.into(), process.clone());
+        let child = child?;
         let owned = process.clone();
         tokio::spawn(async move {
             match own_child(child, &owned).await {
@@ -163,7 +187,7 @@ impl ProcessHost {
     /// Reports unconfirmed process exits.
     pub async fn shutdown(&self) -> Result<()> {
         let ids: Vec<_> =
-            self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.keys().cloned().collect();
+            self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
         let mut result = Ok(());
         for id in ids {
             if let Err(error) = self.terminate(&id).await {
@@ -239,7 +263,7 @@ impl Host for ProcessHost {
         }
         let process = {
             let processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
-            if let Some(process) = processes.get(id) {
+            if let Some(process) = processes.running.get(id) {
                 process.clone()
             } else {
                 if self.path(id, "exit")?.is_file() {
@@ -249,10 +273,7 @@ impl Host for ProcessHost {
                     return Err(Error::Unresolved("no owned process; exit unconfirmed"));
                 }
                 // Launch holds this same lock and checks the exit record before spawning.
-                std::fs::create_dir_all(&self.config.directory)?;
-                let mut exit = chunk_service::private_file(&self.path(id, "exit")?)?;
-                exit.write_all(b"never launched")?;
-                exit.sync_all()?;
+                self.record_exit(id, b"never launched")?;
                 return Ok(());
             }
         };
@@ -272,8 +293,10 @@ impl Host for ProcessHost {
             && !self.stopped(id)
     }
     fn stopped(&self, id: &str) -> bool {
-        self.process(id).ok().flatten().is_some_and(|p| p.stopped.load(Ordering::Acquire))
-            || self.path(id, "exit").is_ok_and(|p| p.is_file())
+        self.processes.lock().is_ok_and(|processes| {
+            processes.failed.contains(id)
+                || processes.running.get(id).is_some_and(|p| p.stopped.load(Ordering::Acquire))
+        }) || self.path(id, "exit").is_ok_and(|p| p.is_file())
     }
 }
 async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
