@@ -38,6 +38,11 @@ abstract class WriteChunkModule : DefaultTask() {
     @get:PathSensitive(PathSensitivity.ABSOLUTE)
     abstract val classpath: ConfigurableFileCollection
 
+    /** Classpath order decides class and resource precedence, which `@InputFiles` does not track. */
+    @get:Input
+    val classpathOrder: List<String>
+        get() = classpath.files.map { it.absolutePath }
+
     @get:Optional
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NONE)
@@ -57,7 +62,7 @@ abstract class WriteChunkModule : DefaultTask() {
                     app.get(),
                     projectPath.get(),
                     jarFile.get().asFile.absolutePath,
-                    classpath.files.map { it.absolutePath },
+                    classpathOrder,
                     javaVersion.get(),
                     javaExecutable.get(),
                     sessionCatalog.orNull

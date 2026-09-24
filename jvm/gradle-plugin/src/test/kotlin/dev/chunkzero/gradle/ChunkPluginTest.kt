@@ -81,6 +81,34 @@ class ChunkPluginTest {
     }
 
     @Test
+    fun `dev descriptors follow runtime classpath order`() {
+        fixture()
+        app("lobby")
+        library("fixture", "alpha", "1.0")
+        library("fixture", "beta", "1.0")
+        val build = directory.resolve("apps/lobby/build.gradle.kts").toFile()
+        val original = build.readText()
+
+        fun order(vararg libraries: String): List<String> {
+            build.writeText(
+                original +
+                    libraries.joinToString("\n", "\ndependencies {\n", "\n}\n") {
+                        "implementation(\"fixture:$it:1.0\")"
+                    },
+            )
+            run("chunkArtifacts", "-Pchunk.dev=true")
+            return descriptor()
+                .getAsJsonArray("apps")[0]
+                .asJsonObject
+                .getAsJsonArray("classpath")
+                .map { it.asString.substringAfterLast('/') }
+                .filter { it.startsWith("alpha") || it.startsWith("beta") }
+        }
+        assertEquals(listOf("alpha-1.0.jar", "beta-1.0.jar"), order("alpha", "beta"))
+        assertEquals(listOf("beta-1.0.jar", "alpha-1.0.jar"), order("beta", "alpha"))
+    }
+
+    @Test
     fun `Kotlin opt in builds a facade separately from shared Java classes`() {
         fixture(kotlin = true)
         app("lobby", kotlin = true)
