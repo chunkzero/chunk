@@ -551,12 +551,13 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
 #[tokio::test]
 async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let mut control = fixture.control();
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
     fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
+    let mut previous = None;
     for (operation, prepare) in [("queued", false), ("prepared", true)] {
         let destination = control
             .move_player(chunk_proto::v1::MovePlayerRequest {
@@ -567,11 +568,38 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
                 demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
             })
             .unwrap();
+        if let Some(previous) = previous.take() {
+            control.abandon_move(previous).await.unwrap();
+        }
+        let player = control.players().unwrap().players.remove(0);
+        assert!(player.moving);
+        assert!(player.last_move_failure.is_none());
         if prepare {
             control.claim(destination.clone()).await.unwrap();
         }
+        let abandoned = chunk_proto::v1::AbandonMoveRequest {
+            claim: Some(destination.clone()),
+            reason: "destination preparation failed".into(),
+        };
+        if prepare {
+            fixture.runtime.available.store(false, Ordering::Release);
+            assert!(control.abandon_move(abandoned.clone()).await.is_err());
+            assert!(control.state().unwrap().players[&uuid].pending.is_some());
+            assert!(control.state().unwrap().claims[operation].phase == Phase::Withdrawing);
+            assert!(control.poll_move(&source).unwrap().claim.is_none());
+            assert!(control.players().unwrap().players[0].last_move_failure.is_some());
+            fixture.runtime.available.store(true, Ordering::Release);
+        }
+        control.abandon_move(abandoned.clone()).await.unwrap();
         control.cancel(destination.clone()).await.unwrap();
-        control.cancel(destination.clone()).await.unwrap();
+        let failure = control.players().unwrap().players.remove(0).last_move_failure.unwrap();
+        assert_eq!(failure.destination, destination.demand);
+        assert_eq!(failure.reason, abandoned.reason);
+        assert!(failure.failed_at_ms > 0);
+        drop(control);
+        control = fixture.control();
+        assert_eq!(control.players().unwrap().players[0].last_move_failure.as_ref(), Some(&failure));
+        previous = Some(abandoned);
         assert!(control.claim(destination).await.is_err());
         assert!(control.poll_move(&source).unwrap().claim.is_none());
         assert_eq!(control.inspect(source.clone()).await.unwrap().phase, ClaimPhase::Arrived as i32);

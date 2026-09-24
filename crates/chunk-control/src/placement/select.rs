@@ -7,6 +7,16 @@ use crate::{
     state::{HostState, Phase, SessionState, State},
 };
 
+pub(crate) fn validate_demand(config: &Config, demand: &SessionDemand) -> Result<()> {
+    if demand.key.is_empty() || demand.key.len() > 128 {
+        return Err(Error::Invalid("invalid destination key"));
+    }
+    let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
+    let policy =
+        config.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    resolve_creation(config, demand, spec, policy).map(|_| ())
+}
+
 /// Reuses a compatible session with room, or creates one on a compatible host or a new host.
 pub(super) fn select_session(
     state: &mut State,

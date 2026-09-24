@@ -1,4 +1,5 @@
 mod commands;
+mod moves;
 mod relay;
 
 use std::{io, time::Duration};
@@ -16,12 +17,15 @@ use super::{
     transport::{Transport, invalid_data},
 };
 
+use moves::{check_move, next_move};
+
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct ClaimGuard {
     platform: Platform,
     claim: ClaimRequest,
     armed: bool,
+    failure: Option<String>,
 }
 
 impl Drop for ClaimGuard {
@@ -29,18 +33,20 @@ impl Drop for ClaimGuard {
         if !self.armed {
             return;
         }
-        let platform = self.platform.clone();
-        let claim = self.claim.clone();
+        let guard = Self {
+            platform: self.platform.clone(),
+            claim: self.claim.clone(),
+            armed: false,
+            failure: self.failure.clone(),
+        };
         self.platform.cleanup.spawn(async move {
             for attempt in 0..2 {
-                let Ok(message) = platform.control_request(claim.clone()) else {
-                    return;
-                };
-                match platform.control.clone().cancel(message).await {
+                match guard.cancel().await {
                     Err(error)
                         if attempt == 0
-                            && error.code() == tonic::Code::FailedPrecondition
-                            && error.message() == "unknown claim" =>
+                            && moves::rpc_error(&error).is_some_and(|status| {
+                                status.code() == tonic::Code::FailedPrecondition && status.message() == "unknown claim"
+                            }) =>
                     {
                         sleep(Duration::from_millis(100)).await;
                     }
@@ -48,6 +54,23 @@ impl Drop for ClaimGuard {
                 }
             }
         });
+    }
+}
+
+impl ClaimGuard {
+    async fn cancel(&self) -> io::Result<()> {
+        let mut control = self.platform.control.clone();
+        let result = if let Some(reason) = &self.failure {
+            control
+                .abandon_move(self.platform.control_request(chunk_proto::v1::AbandonMoveRequest {
+                    claim: Some(self.claim.clone()),
+                    reason: reason.clone(),
+                })?)
+                .await
+        } else {
+            control.cancel(self.platform.control_request(self.claim.clone())?).await
+        };
+        result.map(|_| ()).map_err(io::Error::other)
     }
 }
 
@@ -61,7 +84,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let mut claim = claim;
         claim.demand = Some(platform.route_claim(&claim).await?);
         // Construct before sending: cancellation must cover a claim whose reply was lost.
-        let guard = ClaimGuard { platform: platform.clone(), claim, armed: true };
+        let guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
         let mut message = platform.control_request(guard.claim.clone())?;
         message.set_timeout(WAIT_TIMEOUT);
         let assignment = platform.control.clone().claim(message).await.map_err(claim_error)?.into_inner();
@@ -160,66 +183,6 @@ async fn open<S>(
         .map_err(io::Error::other)?;
     let preparation = assignment.preparation.clone().ok_or_else(|| invalid_data("missing preparation"))?;
     gameplay::login(authenticated, settings, preparation).await
-}
-
-async fn next_move(
-    source: &ClaimGuard,
-    identity: &ClaimIdentity,
-    protocol: i32,
-) -> io::Result<(ClaimGuard, Assignment)> {
-    loop {
-        sleep(Duration::from_millis(500)).await;
-        let polled =
-            source.platform.control.clone().poll_move(source.platform.control_request(source.claim.clone())?).await;
-        let Ok(response) = polled else {
-            continue;
-        };
-        let Some(claim) = response.into_inner().claim else {
-            continue;
-        };
-        if claim.source.as_ref() != Some(identity)
-            || claim.proxy_id != source.claim.proxy_id
-            || claim.connection_id != source.claim.connection_id
-            || claim.identity != source.claim.identity
-        {
-            return Err(invalid_data("move identity mismatch"));
-        }
-        let guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true };
-        let prepare = async {
-            guard.platform.approve_move(&source.claim, &guard.claim).await?;
-            check_move(source, &guard.claim).await?;
-            let mut message = guard.platform.control_request(guard.claim.clone())?;
-            message.set_timeout(WAIT_TIMEOUT);
-            let assignment =
-                guard.platform.control.clone().claim(message).await.map_err(io::Error::other)?.into_inner();
-            validate(&assignment, &guard)?;
-            if assignment.configuration.as_ref().is_none_or(|c| c.protocol != protocol) {
-                return Err(invalid_data("destination protocol differs from client"));
-            }
-            check_move(source, &guard.claim).await?;
-            Ok::<_, io::Error>(assignment)
-        };
-        match timeout(WAIT_TIMEOUT, prepare).await {
-            Ok(Ok(assignment)) => return Ok((guard, assignment)),
-            Ok(Err(error)) => tracing::warn!(%error, "move preparation failed; source remains active"),
-            Err(_) => tracing::warn!("move preparation timed out; source remains active"),
-        }
-    }
-}
-
-async fn check_move(source: &ClaimGuard, destination: &ClaimRequest) -> io::Result<()> {
-    let pending = source
-        .platform
-        .control
-        .clone()
-        .poll_move(source.platform.control_request(source.claim.clone())?)
-        .await
-        .map_err(io::Error::other)?
-        .into_inner();
-    if pending.claim.as_ref() != Some(destination) {
-        return Err(invalid_data("move canceled or source ownership changed"));
-    }
-    Ok(())
 }
 
 async fn withdraw(source: &ClaimGuard, identity: &ClaimIdentity) -> io::Result<()> {

@@ -37,6 +37,16 @@ pub(crate) struct Drain {
 pub(crate) struct MoveIntent {
     pub request: Vec<u8>,
     pub canceled: bool,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub failure: Option<MoveFailure>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct MoveFailure {
+    pub reason: String,
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

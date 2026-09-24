@@ -139,6 +139,20 @@ impl LocalControl for Service {
         self.control.poll_move(request.get_ref()).map(Response::new).map_err(status)
     }
 
+    async fn abandon_move(
+        &self,
+        request: Request<chunk_proto::v1::AbandonMoveRequest>,
+    ) -> Result<Response<ClaimIdentity>, Status> {
+        self.authorize(&request)?;
+        let control = self.control.clone();
+        self.operations
+            .spawn(async move { control.abandon_move(request.into_inner()).await })
+            .await
+            .map_err(|_| Status::internal("move abandonment task failed"))?
+            .map(Response::new)
+            .map_err(status)
+    }
+
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
         self.authorize(&request)?;
         let control = self.control.clone();

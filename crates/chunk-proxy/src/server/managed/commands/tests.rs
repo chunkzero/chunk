@@ -9,6 +9,74 @@ use fixture::Fixture;
 use std::{sync::atomic::Ordering, time::Duration};
 use tokio::io::DuplexStream;
 
+#[tokio::test]
+async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_report() {
+    for transient in [false, true] {
+        let fixture = Fixture::new().await;
+        let source = super::super::ClaimGuard {
+            platform: fixture.commands.tasks.platform.clone(),
+            claim: fixture.claim.clone(),
+            armed: false,
+            failure: None,
+        };
+        let identity = fixture.assignment.claim.clone().unwrap();
+        let destination = ClaimRequest {
+            operation_id: "failed-move".into(),
+            source: Some(identity.clone()),
+            ..fixture.claim.clone()
+        };
+        let movement = fixture.service.movement.clone();
+        {
+            let mut state = movement.lock().unwrap();
+            state.pending = Some(destination.clone());
+            state.error = Some(if transient {
+                tonic::Status::unavailable("destination unavailable")
+            } else {
+                tonic::Status::failed_precondition("destination configuration rejected")
+            });
+            state.lose_report = true;
+        }
+        let running = tokio::spawn(async move { super::super::next_move(&source, &identity, 776).await.map(|_| ()) });
+        if transient {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while movement.lock().unwrap().attempts < 2 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(movement.lock().unwrap().reports, 0);
+            tokio::time::pause();
+            tokio::time::advance(super::super::WAIT_TIMEOUT).await;
+            tokio::time::resume();
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while movement.lock().unwrap().failure.is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        {
+            let state = movement.lock().unwrap();
+            assert_eq!(state.attempts, if transient { 2 } else { 1 });
+            assert_eq!(state.reports, 2);
+            assert!(state.pending.is_none());
+            let failure = state.failure.as_ref().unwrap();
+            assert_eq!(failure.claim.as_ref(), Some(&destination));
+            if transient {
+                assert!(failure.reason.contains("unavailable") || failure.reason.contains("timed out"));
+            } else {
+                assert_eq!(failure.reason, "destination configuration rejected");
+            }
+        }
+        assert!(!running.is_finished()); // Keeps waiting for another move on the same source.
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        fixture.close().await;
+    }
+}
+
 fn unsigned(command: &str) -> Vec<u8> {
     let frame = encode_packet(&UnsignedCommand { command: McString::new(command).unwrap() }).unwrap();
     body(&frame).to_vec()

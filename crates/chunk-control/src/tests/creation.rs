@@ -145,5 +145,20 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     assert!(control.state().unwrap().claims.is_empty());
     assert!(fixture.host.ids.lock().unwrap().is_empty());
     assert!(!fixture.directory.path().join("invalid.sqlite").exists());
+    let source = demand("source", "small");
+    let assignment = control.claim(source.clone()).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    assert!(matches!(
+        control.move_player(chunk_proto::v1::MovePlayerRequest {
+            operation_id: "invalid-move".into(),
+            player_id: source.identity.as_ref().unwrap().uuid.clone(),
+            demand: Some(SessionDemand { key: "undeclared".into(), ..source.demand.clone().unwrap() }),
+            ..Default::default()
+        }),
+        Err(Error::Invalid("session configuration differs from its implementation schema"))
+    ));
+    assert!(control.state().unwrap().moves.is_empty());
+    assert!(control.poll_move(&source).unwrap().claim.is_none());
     fixture.close().await;
 }
