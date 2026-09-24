@@ -42,7 +42,7 @@ def read_json(path):
 
 def verify_release(project, package, app_ids, kotlin):
     descriptor = read_json(project / ".chunk/build/jvm/artifacts.json")
-    require(descriptor["version"] == 3, "Unsupported JVM descriptor")
+    require(descriptor["version"] == 4, "Unsupported JVM descriptor")
     require({app["id"] for app in descriptor["apps"]} == app_ids, "Unexpected descriptor apps")
     compiled_apps = {app["id"]: Path(app["jar"]) for app in descriptor["apps"]}
     require(all(path.is_file() for path in compiled_apps.values()), "Missing compiled app JAR")

@@ -114,13 +114,15 @@ managed delivery, timeouts, feature selection and standalone hosting.
 - `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
 - `chunk build PROJECT` runs the project Gradle wrapper and packages backend code, app JARs, dependencies and assets as
   `PROJECT/dist/<id>.tar.gz` and `PROJECT/dist/<id>/`.
-- `chunk dev PROJECT` (`chunk local`) builds that release and runs the development stack with embedded services and
-  child JVMs. It uses the Gradle-selected Java executable; `--java PATH` can override it. In a terminal it shows a
-  startup view with animated progress, elapsed times and live Gradle output. Once ready, log tabs fill the screen; the
-  JVM tab includes selectable nodes grouped by release, with player counts, health and the selected node's logs. Use ↑/↓
-  to select, Enter to scroll logs, Esc/Tab to return to nodes, and `b` for startup details. Reload progress stays
-  visible while the current release serves players. `--plain` (automatic when stdout is not a terminal) prints one line
-  per step and includes Gradle diagnostics on failure.
+- `chunk dev PROJECT` (`chunk local`) builds a development release and runs the development stack with embedded services
+  and child JVMs. Development releases run each app from its thin JAR plus separate dependency JARs and have no archive,
+  so reloads skip rebuilding and rewriting the self-contained app JARs that `chunk build` produces. It uses the
+  Gradle-selected Java executable; `--java PATH` can override it. In a terminal it shows a startup view with animated
+  progress, elapsed times and live Gradle output. Once ready, log tabs fill the screen; the JVM tab includes selectable
+  nodes grouped by release, with player counts, health and the selected node's logs. Use ↑/↓ to select, Enter to scroll
+  logs, Esc/Tab to return to nodes, and `b` for startup details. Reload progress stays visible while the current release
+  serves players. `--plain` (automatic when stdout is not a terminal) prints one line per step and includes Gradle
+  diagnostics on failure.
 - `chunk players` operates on local players.
 - `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use `--cloud` or `--url URL` for non-interactive
   selection. `chunk login` is an alias.

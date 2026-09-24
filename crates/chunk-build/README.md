@@ -102,12 +102,12 @@ cancelled Gradle builds stop their child processes and do not publish a release.
 followed by `target/debug/chunk build examples/local` builds the two-app example without starting services. Its archive
 and release directory appear under `examples/local/dist`.
 
-`publish_release(&ReleaseInputs { project, backend, jvm_descriptor }, dist)` combines separately built backend and JVM
-outputs into `dist/<id>/` and `dist/<id>.tar.gz`. It reads the shared app inventory and Gradle's version-3 JSON
-descriptor. Every discovered app must have exactly one descriptor entry containing its session type IDs and an
-executable JAR with a valid `Main-Class`. Publication never runs Java or Gradle. The descriptor’s selected Java
-executable is used by `chunk dev` unless `--java PATH` overrides it; the executable must satisfy the release’s Java
-version requirement. Local state defaults to `PROJECT/.chunk/local`.
+`publish_release(&ReleaseInputs { project, backend, jvm_descriptor, archive }, dist)` combines separately built backend
+and JVM outputs into `dist/<id>/` and, when `archive` is set, `dist/<id>.tar.gz`. `chunk dev` skips the archive. It
+reads the shared app inventory and Gradle's version-4 JSON descriptor. Every discovered app must have exactly one
+descriptor entry containing its session type IDs and an executable JAR with a valid `Main-Class`. Publication never runs
+Java or Gradle. The descriptor’s selected Java executable is used by `chunk dev` unless `--java PATH` overrides it; the
+executable must satisfy the release’s Java version requirement. Local state defaults to `PROJECT/.chunk/local`.
 
 The release includes `source.mjs`, `contract.json`, an optional source map, `backend.json`, `release.json`, and
 content-named executable JARs under `apps/<id>/`. Root `assets/` and discovered apps' `apps/<id>/assets/` retain their
@@ -115,8 +115,17 @@ paths. `release.json` records app identities, JAR hashes, Java requirements, ses
 capacity settings, referenced profile definitions and asset hashes. It is the deployment manifest consumed by control;
 JARs contain only executable code, dependencies and their local factory registries. Each app carries its own
 dependencies and may use different dependency versions. Publication validates executable entrypoints and effective
-multi-release bytecode against the declared Java version. Descriptor and release metadata use version 3; older artifacts
-must be rebuilt.
+multi-release bytecode against the declared Java version. Descriptor metadata uses version 4 and release metadata
+version 3; older artifacts must be rebuilt.
+
+Dev releases differ in how apps are packaged. A descriptor app with a `classpath` has a thin JAR, and publication stores
+it and every classpath JAR under `libs/<sha256>.jar`. The app's executable JAR is then a small launcher whose manifest
+sets `Main-Class` and a relative `Class-Path` naming those JARs. Its digest therefore changes whenever any JAR on the
+app's classpath changes. Before launching, control checks that each `Class-Path` entry stays inside the release and
+still hashes to its file name. Session registrations are read from the thin app JAR; referenced classes and the main
+class may come from anywhere on its classpath, and conflicting classes across it are rejected. Scans of unchanged JARs
+are reused within one process, and files identical to ones in an earlier release under `dist/` are hard-linked instead
+of rewritten.
 
 The descriptor's absolute file paths and Java executable are local build inputs. They are excluded from the release,
 along with environment names, local process limits, `.sdk` caches, generated sources, project build files and unrelated

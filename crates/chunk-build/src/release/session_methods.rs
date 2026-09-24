@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, io};
 use chunk_contract::{SessionMethodDeclaration, SessionMethods};
 use serde::Deserialize;
 
-use super::manifest::{self, class_exists, read_registration};
+use super::{
+    jars::Classpath,
+    manifest::{self, read_registration},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +40,7 @@ struct Method {
 
 pub(super) fn validate(
     bytes: &[u8],
+    classpath: &Classpath,
     app: &str,
     sessions: &[String],
     contract: Option<&SessionMethods>,
@@ -51,13 +55,13 @@ pub(super) fn validate(
         bytes,
         app,
         &expected,
-        |archive, method| {
+        |_, method| {
             if method.app != app
                 || !sessions.contains(&method.session)
                 || !chunk_contract::class_name(&method.interface)
                 || !chunk_contract::class_name(&method.binary_interface)
                 || method.function.is_empty()
-                || !class_exists(archive, &method.binary_interface)
+                || !classpath.contains(&method.binary_interface)
             {
                 return Ok(None);
             }
@@ -80,7 +84,7 @@ pub(super) fn validate(
             if registration.len() > 65_536
                 || providers.len() != 1
                 || !chunk_contract::class_name(providers[0])
-                || !class_exists(archive, providers[0])
+                || !classpath.contains(providers[0])
             {
                 return Err(io::Error::other("invalid session method provider registration"));
             }

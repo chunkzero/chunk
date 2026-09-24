@@ -555,6 +555,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]

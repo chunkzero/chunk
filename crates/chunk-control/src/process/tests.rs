@@ -1,6 +1,13 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+fn manifest_jar(manifest: &str) -> Vec<u8> {
+    let mut jar = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+    jar.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
+    jar.write_all(manifest.as_bytes()).unwrap();
+    jar.finish().unwrap().into_inner()
+}
+
 #[tokio::test]
 async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated() {
     let directory = tempfile::tempdir().unwrap();
@@ -8,8 +15,16 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
-    std::fs::write(directory.path().join(&artifact.jar), b"test artifact").unwrap();
-    artifact.sha256 = format!("{:x}", Sha256::digest(b"test artifact"));
+    let library = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
+    let library_path = directory.path().join(format!("libs/{:x}.jar", Sha256::digest(&library)));
+    std::fs::create_dir_all(directory.path().join("libs")).unwrap();
+    std::fs::write(&library_path, &library).unwrap();
+    let launcher = manifest_jar(&format!(
+        "Manifest-Version: 1.0\r\nClass-Path: {}\r\n\r\n",
+        library_path.strip_prefix(directory.path()).unwrap().display()
+    ));
+    std::fs::write(directory.path().join(&artifact.jar), &launcher).unwrap();
+    artifact.sha256 = format!("{:x}", Sha256::digest(&launcher));
     let host = ProcessHost::new(ProcessHostConfig {
         distribution: directory.path().into(),
         java,
@@ -73,8 +88,17 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     assert!(!host.path(&invalid, "launch").unwrap().exists());
     host.terminate(&invalid).await.unwrap();
     assert!(host.stopped(&invalid));
-    std::fs::write(&jar, b"test artifact").unwrap();
+    std::fs::write(&jar, &launcher).unwrap();
     assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Err(Error::Stopped)));
+    // A classpath JAR replaced under its digest name no longer matches the app identity.
+    let replaced = uuid::Uuid::new_v4().to_string();
+    std::fs::write(&library_path, manifest_jar("Manifest-Version: 1.0\r\nCreated-By: replacement\r\n\r\n")).unwrap();
+    assert!(matches!(
+        host.ensure(&replaced, "bridge", "local").await,
+        Err(Error::Invalid("app classpath digest mismatch"))
+    ));
+    assert!(!host.path(&replaced, "launch").unwrap().exists());
+    std::fs::write(&library_path, &library).unwrap();
     let failed_log = uuid::Uuid::new_v4().to_string();
     std::fs::create_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
     assert!(host.ensure(&failed_log, "bridge", "local").await.is_err());

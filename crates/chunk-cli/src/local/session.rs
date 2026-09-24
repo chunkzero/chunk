@@ -177,7 +177,7 @@ impl<'a> Session<'a> {
         let task = tokio::spawn(async move {
             let started = Instant::now();
             let project = building::prepare(&options)?;
-            let built = building::execute(&project, stop.clone(), progress).await?;
+            let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), progress).await?;
             let staged = super::stage(&project, built, java.as_deref(), &stop).await?;
             Ok((staged, started.elapsed()))
         });

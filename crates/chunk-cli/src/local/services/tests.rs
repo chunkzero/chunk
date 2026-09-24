@@ -2,12 +2,7 @@ use super::*;
 use std::{collections::BTreeMap, time::Duration};
 
 fn staged(directory: &std::path::Path, id: &str) -> Staged {
-    let release = Release {
-        apps: vec![],
-        id: id.into(),
-        directory: directory.join(id),
-        archive: directory.join(format!("{id}.tar.gz")),
-    };
+    let release = Release { apps: vec![], id: id.into(), directory: directory.join(id), archive: None };
     let control = chunk_control::Config {
         contracts: chunk_control::Contracts::default(),
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),

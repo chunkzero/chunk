@@ -15,6 +15,16 @@ internal fun configureModule(
     appId: String,
 ) {
     configureComponents(project, appId)
+    // `chunk dev` runs thin app JARs over their runtime classpath instead of rebuilding a shadow JAR.
+    val dev =
+        project.providers
+            .gradleProperty("chunk.dev")
+            .map(String::toBoolean)
+            .getOrElse(false)
+    project.tasks.named("jar", Jar::class.java) {
+        isPreserveFileTimestamps = false
+        isReproducibleFileOrder = true
+    }
     val registry =
         if (appId.isNotEmpty()) {
             project.pluginManager.apply("application")
@@ -65,6 +75,9 @@ internal fun configureModule(
                 output.dir(mapOf("builtBy" to compileBindings), compileBindings.flatMap { it.destinationDirectory })
             }
             sources.configure { resources.srcDir(registry.flatMap { it.outputDirectory }) }
+            project.tasks.named("jar", Jar::class.java) {
+                manifest.attributes(mapOf("Main-Class" to application.mainClass))
+            }
             project.tasks.named("shadowJar", ShadowJar::class.java) {
                 mergeServiceFiles()
                 filesMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
@@ -97,10 +110,13 @@ internal fun configureModule(
             javaVersion.set(java.toolchain.languageVersion.map { it.asInt() })
             javaExecutable.set(launcher.map { it.executablePath.asFile.absolutePath })
             jarFile.set(
-                project.tasks.named(if (appId.isEmpty()) "jar" else "shadowJar", Jar::class.java).flatMap {
+                project.tasks.named(if (appId.isEmpty() || dev) "jar" else "shadowJar", Jar::class.java).flatMap {
                     it.archiveFile
                 },
             )
+            if (appId.isNotEmpty() && dev) {
+                classpath.from(project.configurations.named("runtimeClasspath"))
+            }
             outputFile.set(project.layout.buildDirectory.file("chunk/module.json"))
             dependsOn(project.tasks.named("validateChunkJvm"))
         }
@@ -113,6 +129,7 @@ internal data class ModuleArtifact(
     val app: String,
     val projectPath: String,
     val jar: String,
+    val classpath: List<String>,
     val javaVersion: Int,
     val javaExecutable: String,
     val sessions: List<String>,

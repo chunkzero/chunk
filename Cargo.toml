@@ -25,3 +25,11 @@ module_name_repetitions = "allow"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Release packaging hashes and compresses app JARs with these; unoptimized, they dominate debug `chunk dev` builds.
+[profile.dev.package]
+crc32fast.opt-level = 3
+flate2.opt-level = 3
+sha2.opt-level = 3
+zip.opt-level = 3
+zlib-rs.opt-level = 3

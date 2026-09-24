@@ -18,10 +18,6 @@ pub(super) trait Manifest: DeserializeOwned {
     fn parts(self) -> (u32, String, Vec<Self::Item>);
 }
 
-pub(super) fn class_exists(archive: &mut Archive<'_>, class: &str) -> bool {
-    archive.by_name(&format!("{}.class", class.replace('.', "/"))).is_ok()
-}
-
 pub(super) fn read_registration(archive: &mut Archive<'_>, service: &str) -> io::Result<String> {
     let mut registration = String::new();
     archive

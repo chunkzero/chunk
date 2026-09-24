@@ -82,12 +82,13 @@ impl ProcessHost {
         {
             return Err(Error::Invalid("gameplay backend scope mismatch"));
         }
+        let distribution = self.config.distribution.canonicalize()?;
         let jar = self.config.distribution.join(&artifact.jar).canonicalize()?;
-        if !jar.starts_with(self.config.distribution.canonicalize()?)
-            || format!("{:x}", Sha256::digest(std::fs::read(&jar)?)) != artifact.sha256
-        {
+        let bytes = std::fs::read(&jar)?;
+        if !jar.starts_with(&distribution) || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256 {
             return Err(Error::Invalid("app artifact digest mismatch"));
         }
+        classpath::verify(&distribution, &jar, &bytes)?;
         std::fs::create_dir_all(&self.config.directory)?;
         if self.path(id, "exit")?.exists() {
             return Err(Error::Stopped);
@@ -297,6 +298,8 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
     }
     Ok(())
 }
+
+mod classpath;
 
 #[cfg(all(test, unix))]
 mod tests;

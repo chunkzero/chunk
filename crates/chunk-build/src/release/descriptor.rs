@@ -26,6 +26,8 @@ pub struct JavaRuntime {
 pub(super) struct App {
     pub id: String,
     pub jar: PathBuf,
+    /// Runtime dependency JARs of a thin `chunk dev` app JAR; empty when `jar` bundles them.
+    pub classpath: Vec<PathBuf>,
     pub java_version: u32,
     pub sessions: Vec<String>,
 }
@@ -36,11 +38,11 @@ pub(super) struct App {
 pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
     let descriptor: JvmDescriptor =
         serde_json::from_slice(&read_limited(path, 2 * 1024 * 1024)?).map_err(io::Error::other)?;
-    if descriptor.version != 3
+    if descriptor.version != 4
         || !(25..=100).contains(&descriptor.java.version)
         || !descriptor.java.executable.is_absolute()
     {
-        return Err(io::Error::other("JVM descriptor requires version 3, Java 25–100 and an absolute executable path"));
+        return Err(io::Error::other("JVM descriptor requires version 4, Java 25–100 and an absolute executable path"));
     }
     if descriptor.apps.is_empty() || descriptor.apps.len() > 128 {
         return Err(io::Error::other("JVM descriptor requires 1–128 apps"));
@@ -55,8 +57,10 @@ pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
             return Err(io::Error::other("JVM descriptor requires 1–128 unique session type IDs per app"));
         }
         if !(25..=descriptor.java.version).contains(&app.java_version)
-            || !app.jar.is_absolute()
-            || app.jar.extension().is_none_or(|ext| ext != "jar")
+            || app.classpath.len() > 1024
+            || std::iter::once(&app.jar)
+                .chain(&app.classpath)
+                .any(|jar| !jar.is_absolute() || jar.extension().is_none_or(|ext| ext != "jar"))
         {
             return Err(io::Error::other(format!(
                 "app {:?} has incompatible Java requirements or a nonabsolute JAR path",

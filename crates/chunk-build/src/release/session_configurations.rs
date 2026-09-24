@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, io};
 use chunk_contract::{SessionConfigurationDeclaration, SessionConfigurations};
 use serde::Deserialize;
 
-use super::manifest::{self, class_exists, read_registration};
+use super::{
+    jars::Classpath,
+    manifest::{self, read_registration},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +38,7 @@ struct PackagedConfiguration {
 
 pub(super) fn validate(
     bytes: &[u8],
+    classpath: &Classpath,
     app: &str,
     sessions: &[String],
     contract: Option<&SessionConfigurations>,
@@ -55,8 +59,8 @@ pub(super) fn validate(
                 || !chunk_contract::class_name(&configuration.interface)
                 || !chunk_contract::class_name(&configuration.binary_interface)
                 || !chunk_contract::class_name(&configuration.provider)
-                || !class_exists(archive, &configuration.binary_interface)
-                || !class_exists(archive, &configuration.provider)
+                || !classpath.contains(&configuration.binary_interface)
+                || !classpath.contains(&configuration.provider)
             {
                 return Ok(None);
             }

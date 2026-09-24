@@ -68,6 +68,44 @@ class ChunkPluginTest {
                 )
             }
         }
+        run("chunkArtifacts", "-Pchunk.dev=true")
+        val dev = descriptor()
+        assertSessionRegistries(dev)
+        dev.getAsJsonArray("apps").forEach { app ->
+            JarFile(
+                app.asJsonObject["jar"].asString,
+            ).use { assertTrue(it.getEntry("fixture/shared-version.txt") == null) }
+            val shared = if (app.asJsonObject["id"].asString == "lobby") "shared-2.0.jar" else "shared-1.0.jar"
+            assertTrue(app.asJsonObject.getAsJsonArray("classpath").any { it.asString.endsWith(shared) })
+        }
+    }
+
+    @Test
+    fun `dev descriptors follow runtime classpath order`() {
+        fixture()
+        app("lobby")
+        library("fixture", "alpha", "1.0")
+        library("fixture", "beta", "1.0")
+        val build = directory.resolve("apps/lobby/build.gradle.kts").toFile()
+        val original = build.readText()
+
+        fun order(vararg libraries: String): List<String> {
+            build.writeText(
+                original +
+                    libraries.joinToString("\n", "\ndependencies {\n", "\n}\n") {
+                        "implementation(\"fixture:$it:1.0\")"
+                    },
+            )
+            run("chunkArtifacts", "-Pchunk.dev=true")
+            return descriptor()
+                .getAsJsonArray("apps")[0]
+                .asJsonObject
+                .getAsJsonArray("classpath")
+                .map { it.asString.substringAfterLast('/') }
+                .filter { it.startsWith("alpha") || it.startsWith("beta") }
+        }
+        assertEquals(listOf("alpha-1.0.jar", "beta-1.0.jar"), order("alpha", "beta"))
+        assertEquals(listOf("beta-1.0.jar", "alpha-1.0.jar"), order("beta", "alpha"))
     }
 
     @Test
@@ -716,7 +754,7 @@ class ChunkPluginTest {
     private fun calls() = directory.resolve("calls.txt").toFile().readLines()
 
     private fun assertSessionRegistries(artifacts: JsonObject) {
-        assertEquals(3, artifacts["version"].asInt)
+        assertEquals(4, artifacts["version"].asInt)
         artifacts.getAsJsonArray("apps").forEach { app ->
             assertEquals(listOf("default"), app.asJsonObject.getAsJsonArray("sessions").map { it.asString })
             JarFile(app.asJsonObject["jar"].asString).use { jar ->

@@ -43,14 +43,15 @@ impl Fixture {
         fs::create_dir_all(backend.join(".sdk")).unwrap();
         fs::write(backend.join(".sdk/cache"), b"build cache").unwrap();
         let descriptor = json!({
-            "version":3, "java":{"version":25,"executable":root.path().join("jdk/bin/java")},
+            "version":4, "java":{"version":25,"executable":root.path().join("jdk/bin/java")},
             "apps":[
-                {"id":"lobby","jar":root.path().join("lobby.jar"),"java_version":25,"sessions":["default"]},
-                {"id":"arena","jar":root.path().join("arena.jar"),"java_version":25,"sessions":["default"]}
+                {"id":"lobby","jar":root.path().join("lobby.jar"),"classpath":[],"java_version":25,"sessions":["default"]},
+                {"id":"arena","jar":root.path().join("arena.jar"),"classpath":[],"java_version":25,"sessions":["default"]}
             ]
         });
         let jvm_descriptor = root.path().join("artifacts.json");
-        let fixture = Self { root, inputs: ReleaseInputs { project, backend, jvm_descriptor }, descriptor };
+        let fixture =
+            Self { root, inputs: ReleaseInputs { project, backend, jvm_descriptor, archive: true }, descriptor };
         fixture.save_descriptor();
         fixture
     }
@@ -112,11 +113,11 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     let b = moved.publish().unwrap();
     assert_eq!(a.id, b.id);
     assert_eq!(a.id, first.publish().unwrap().id);
-    let compressed = fs::read(&a.archive).unwrap();
-    assert_eq!(compressed, fs::read(&b.archive).unwrap());
+    let compressed = fs::read(a.archive.as_ref().unwrap()).unwrap();
+    assert_eq!(compressed, fs::read(b.archive.unwrap()).unwrap());
     assert_eq!(&compressed[..8], &[0x1f, 0x8b, 8, 0, 0, 0, 0, 0]);
     assert_eq!(compressed[9], 255);
-    assert_eq!(a.archive.parent(), a.directory.parent());
+    assert_eq!(a.archive.as_ref().unwrap().parent(), a.directory.parent());
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(compressed.as_slice()));
     let mut archived = BTreeMap::new();
     let mut ordering = Vec::new();
@@ -165,6 +166,44 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     let encoded = manifest.to_string();
     assert!(!encoded.contains(first.root.path().to_str().unwrap()));
     assert!(!encoded.contains("executable") && !encoded.contains("environment") && !encoded.contains("max_processes"));
+}
+
+#[test]
+fn dev_classpaths_run_from_a_launcher_whose_digest_covers_every_jar() {
+    let mut fixture = Fixture::new();
+    fixture.inputs.archive = false;
+    let root = fixture.root.path().to_owned();
+    fixture.descriptor["apps"][0]["classpath"] = json!([root.join("library.jar"), root.join("generated.jar")]);
+    fixture.save_descriptor();
+    let first = fixture.publish().unwrap();
+    assert!(first.archive.is_none());
+    assert!(!root.join(format!("dist/{}.tar.gz", first.id)).exists());
+    let lobby = |release: &Release| release.apps.iter().find(|app| app.id == "lobby").unwrap().clone();
+    let launcher = first.directory.join(lobby(&first).jar);
+    let mut jar = zip::ZipArchive::new(fs::File::open(&launcher).unwrap()).unwrap();
+    let mut manifest = String::new();
+    jar.by_name("META-INF/MANIFEST.MF").unwrap().read_to_string(&mut manifest).unwrap();
+    let classpath = manifest.replace("\r\n ", "");
+    let classpath = classpath.lines().find_map(|line| line.strip_prefix("Class-Path: ")).unwrap();
+    let expected: Vec<_> = ["lobby.jar", "library.jar", "generated.jar"]
+        .iter()
+        .map(|jar| format!("../../libs/{}.jar", content_digest(&fs::read(root.join(jar)).unwrap())))
+        .collect();
+    assert_eq!(classpath.split(' ').collect::<Vec<_>>(), expected);
+    assert!(manifest.contains("Main-Class: sample.lobby.Provider"));
+    assert!(expected.iter().all(|path| launcher.parent().unwrap().join(path).is_file()));
+
+    write_jar(&root.join("library.jar"), &[("sample/Library.class", class(21, 2))]);
+    let second = fixture.publish().unwrap();
+    assert_ne!(lobby(&first).sha256, lobby(&second).sha256);
+    assert_eq!(first.apps.iter().find(|app| app.id == "arena"), second.apps.iter().find(|app| app.id == "arena"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let inode = |release: &Release, name: &str| fs::metadata(release.directory.join(name)).unwrap().ino();
+        let unchanged = expected[0].trim_start_matches("../../");
+        assert_eq!(inode(&first, unchanged), inode(&second, unchanged));
+    }
 }
 
 #[test]
@@ -223,10 +262,11 @@ fn published_directories_and_archives_are_verified_without_overwrite() {
     assert!(fixture.publish().err().unwrap().to_string().contains("modified"));
     assert_eq!(fs::read(&unexpected).unwrap(), b"tampered");
     fs::remove_file(unexpected).unwrap();
-    fs::rename(&release.archive, release.archive.with_extension("saved")).unwrap();
-    fs::write(&release.archive, b"tampered archive").unwrap();
+    let archive = release.archive.unwrap();
+    fs::rename(&archive, archive.with_extension("saved")).unwrap();
+    fs::write(&archive, b"tampered archive").unwrap();
     assert!(fixture.publish().err().unwrap().to_string().contains("modified"));
-    assert_eq!(fs::read(&release.archive).unwrap(), b"tampered archive");
+    assert_eq!(fs::read(&archive).unwrap(), b"tampered archive");
     let other = fixture.root.path().join("other");
     fs::create_dir_all(other.join(&release.id)).unwrap();
     assert!(publish_release(&fixture.inputs, &other).is_err());
@@ -272,9 +312,7 @@ fn releases_reject_incompatible_bytecode_and_missing_main_classes() {
     assert!(fixture.publish().err().unwrap().to_string().contains("Main-Class"));
     write_jar(&fixture.root.path().join("library.jar"), &[("sample/Library.class", class(26, 1))]);
     let bytes = fs::read(fixture.root.path().join("library.jar")).unwrap();
-    assert!(
-        jars::Classpath::default().add(&bytes, "library", 25, false).unwrap_err().to_string().contains("incompatible")
-    );
+    assert!(jars::Classpath::default().add(&bytes, "library", 25).unwrap_err().to_string().contains("incompatible"));
 }
 
 #[test]
@@ -295,12 +333,12 @@ fn class_conflicts_use_the_effective_multi_release_definition() {
         &[("sample/Library.class", class(23, 2)), ("module-info.class", class(21, 2))],
     );
     let mut classes = jars::Classpath::default();
-    classes.add(&fs::read(fixture.root.path().join("library.jar")).unwrap(), "library", 25, false).unwrap();
-    classes.add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, false).unwrap();
+    classes.add(&fs::read(fixture.root.path().join("library.jar")).unwrap(), "library", 25).unwrap();
+    classes.add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25).unwrap();
     write_jar(&fixture.root.path().join("generated.jar"), &[("sample/Library.class", class(21, 1))]);
     assert!(
         classes
-            .add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25, false)
+            .add(&fs::read(fixture.root.path().join("generated.jar")).unwrap(), "generated", 25)
             .unwrap_err()
             .to_string()
             .contains("conflicting class")

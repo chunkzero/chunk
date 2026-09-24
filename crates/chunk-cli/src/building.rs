@@ -25,6 +25,15 @@ pub(crate) struct Project {
     pub output: PathBuf,
 }
 
+/// How a build packages the project.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildMode {
+    /// Self-contained app JARs and a portable archive; Gradle's JVM stops once the build finishes.
+    Release,
+    /// Thin app JARs behind launcher JARs and no archive, from a Gradle daemon that exits after 15 idle minutes.
+    Dev,
+}
+
 pub(crate) struct Built {
     pub release: Release,
     pub java: JavaRuntime,
@@ -47,17 +56,23 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
-        let built = execute(&project, stop, Progress::default()).await?;
-        cliclack::log::success(format!("Built → {}", built.release.archive.display()))
+        let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
+        let release = built.release.archive.as_ref().unwrap_or(&built.release.directory);
+        cliclack::log::success(format!("Built → {}", release.display()))
     })
     .await
 }
 
-pub(crate) async fn execute(project: &Project, stop: CancellationToken, progress: Progress) -> io::Result<Built> {
+pub(crate) async fn execute(
+    project: &Project,
+    mode: BuildMode,
+    stop: CancellationToken,
+    progress: Progress,
+) -> io::Result<Built> {
     cancelled(&stop)?;
     let started = Instant::now();
     progress.emit(Event::Started(Phase::Compile));
-    gradle::run(&project.root, &std::env::current_exe()?, &stop, &progress).await?;
+    gradle::run(&project.root, &std::env::current_exe()?, mode, &stop, &progress).await?;
     progress.emit(Event::Finished(Phase::Compile, started.elapsed()));
     cancelled(&stop)?;
     let started = Instant::now();
@@ -66,6 +81,7 @@ pub(crate) async fn execute(project: &Project, stop: CancellationToken, progress
         project: project.root.clone(),
         backend: project.root.join(".chunk/build/backend"),
         jvm_descriptor: project.root.join(".chunk/build/jvm/artifacts.json"),
+        archive: mode == BuildMode::Release,
     };
     let output = project.output.clone();
     let built = tokio::task::spawn_blocking(move || {

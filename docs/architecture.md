@@ -115,12 +115,13 @@ sources, SDK caches and machine-local descriptor paths are excluded. Publication
 dependency/class conflicts and Java requirements; existing immutable releases are verified before reuse. See the
 [compiler and release documentation](../crates/chunk-build/README.md).
 
-`chunk dev PROJECT` builds the same release, uses the Gradle-selected Java executable unless overridden, and stores
-local state under `PROJECT/.chunk/local`. Each rebuild becomes a new local deployment version with its own control
-authority beside the shared backend and proxy; the proxy routes new players to the newest version while older versions
-drain as described in the [README](../README.md). The project's `[local]` settings and resolved app requirements
-configure placement. Root framework Gradle workflows and the standalone app build are separate. The consumer acceptance check
-exercises both Java and Kotlin projects from source copies without starting gameplay.
+`chunk dev PROJECT` builds a development variant of that release: apps run from thin JARs plus shared dependency JARs
+via small launcher JARs, and no archive is written. It uses the Gradle-selected Java executable unless overridden, and
+stores local state under `PROJECT/.chunk/local`. Each rebuild becomes a new local deployment version with its own
+control authority beside the shared backend and proxy; the proxy routes new players to the newest version while older
+versions drain as described in the [README](../README.md). The project's `[local]` settings and resolved app
+requirements configure placement. Root framework Gradle workflows and the standalone app build are separate. The
+consumer acceptance check exercises both Java and Kotlin projects from source copies without starting gameplay.
 
 Scopes, hooks and commands are declared only in `apps/**/scope.ts` and `app.ts`; see the
 [SDK documentation](../crates/chunk-build/sdk/README.md). Cross-domain event semantics, typed proxy effects and durable

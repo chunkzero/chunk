@@ -3,10 +3,12 @@ package dev.chunkzero.gradle
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import org.gradle.api.DefaultTask
+import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.PathSensitive
@@ -32,6 +34,15 @@ abstract class WriteChunkModule : DefaultTask() {
     @get:PathSensitive(PathSensitivity.ABSOLUTE)
     abstract val jarFile: RegularFileProperty
 
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.ABSOLUTE)
+    abstract val classpath: ConfigurableFileCollection
+
+    /** Classpath order decides class and resource precedence, which `@InputFiles` does not track. */
+    @get:Input
+    val classpathOrder: List<String>
+        get() = classpath.files.map { it.absolutePath }
+
     @get:Optional
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NONE)
@@ -51,6 +62,7 @@ abstract class WriteChunkModule : DefaultTask() {
                     app.get(),
                     projectPath.get(),
                     jarFile.get().asFile.absolutePath,
+                    classpathOrder,
                     javaVersion.get(),
                     javaExecutable.get(),
                     sessionCatalog.orNull
