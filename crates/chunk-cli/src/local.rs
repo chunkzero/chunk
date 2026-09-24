@@ -127,8 +127,7 @@ async fn serve(
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     reporter.running("Build", "Gradle chunkArtifacts");
     let started = Instant::now();
-    let built =
-        building::execute(&project, building::GradleMode::Daemon, stop.clone(), reporter.build_progress()).await?;
+    let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), reporter.build_progress()).await?;
     reporter.done("Build", format!("{} · release {}", report::seconds(started.elapsed()), short(&built.release.id)));
     let required = built.java.version;
     reporter.running("Java", format!("Checking Java {required}+"));

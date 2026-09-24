@@ -16,6 +16,7 @@ use crate::{
 mod archive;
 mod descriptor;
 mod jars;
+mod launcher;
 mod manifest;
 mod session_configurations;
 mod session_methods;
@@ -26,12 +27,14 @@ pub struct ReleaseInputs {
     pub project: PathBuf,
     pub backend: PathBuf,
     pub jvm_descriptor: PathBuf,
+    /// Also publish the portable `.tar.gz`; `chunk dev` runs releases from their directory alone.
+    pub archive: bool,
 }
 
 pub struct Release {
     pub id: String,
     pub directory: PathBuf,
-    pub archive: PathBuf,
+    pub archive: Option<PathBuf>,
     pub apps: Vec<chunk_contract::AppArtifact>,
 }
 
@@ -51,8 +54,9 @@ struct Manifest<'a, 'b> {
     metadata: &'a Metadata<'b>,
 }
 
-/// Publishes one portable release directory and its sibling gzip-compressed tar archive.
+/// Publishes one portable release directory and, when requested, its sibling gzip-compressed tar archive.
 /// Identity covers normalized metadata and payloads, excluding derived IDs and the archive wrapper.
+/// Apps with a descriptor classpath run from a launcher JAR over their thin JARs; others run their bundled JAR.
 /// Repeated publication verifies existing bytes and never overwrites an immutable release.
 /// # Errors
 /// Rejects inconsistent app/JAR identities, incompatible classpaths, invalid contracts, symlinks,
@@ -77,15 +81,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     };
     for app in &project.apps {
         let input = descriptor_apps[app.id.as_str()];
-        let bytes = read_limited(&input.jar, 128 * 1024 * 1024)?;
-        jars::Classpath::default().add(&bytes, &format!("app {}", app.id), jvm.java.version, true)?;
-        session_methods::validate(&bytes, &app.id, &input.sessions, backend.contracts.session_methods.as_ref())?;
-        session_configurations::validate(
-            &bytes,
-            &app.id,
-            &input.sessions,
-            backend.contracts.session_configurations.as_ref(),
-        )?;
+        let bytes = executable_jar(input, jvm.java.version, &backend, &mut files)?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
         validate_implementations(&inputs.project, app, &input.sessions)?;
@@ -140,12 +136,59 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         serde_json::to_vec(&Manifest { id: &id, metadata: &metadata }).map_err(io::Error::other)?,
     );
     insert(&mut files, "backend.json".into(), serde_json::to_vec(&backend).map_err(io::Error::other)?)?;
-    let archive = archive::prepare(dist, &files)?;
-    let archive_path = dist.join(format!("{id}.tar.gz"));
-    archive::verify_existing(&archive, &archive_path)?;
+    let archive = if inputs.archive {
+        let prepared = archive::prepare(dist, &files)?;
+        let path = dist.join(format!("{id}.tar.gz"));
+        archive::verify_existing(&prepared, &path)?;
+        Some((prepared, path))
+    } else {
+        None
+    };
     let directory = publication::publish_directory(dist, &id, &files)?;
-    archive::publish(archive, &archive_path)?;
-    Ok(Release { id, directory, archive: archive_path.canonicalize()?, apps: metadata.apps })
+    let archive = match archive {
+        Some((prepared, path)) => {
+            archive::publish(prepared, &path)?;
+            Some(path.canonicalize()?)
+        }
+        None => None,
+    };
+    Ok(Release { id, directory, archive, apps: metadata.apps })
+}
+
+/// Validates one app's JAR and classpath, returning the JAR its JVM runs: the bundled JAR itself, or a launcher over
+/// the thin JAR and classpath JARs it adds to `files`.
+fn executable_jar(
+    app: &descriptor::App,
+    java: u32,
+    backend: &chunk_contract::Deployment,
+    files: &mut Files,
+) -> io::Result<Vec<u8>> {
+    let bytes = read_limited(&app.jar, 128 * 1024 * 1024)?;
+    let main = jars::main_class(&bytes)?;
+    let mut classpath = jars::Classpath::default();
+    classpath.add(&bytes, &format!("app {}", app.id), java)?;
+    let mut libraries = Vec::new();
+    for path in &app.classpath {
+        let library = read_limited(path, 128 * 1024 * 1024)?;
+        classpath.add(&library, &path.display().to_string(), java)?;
+        libraries.push(library);
+    }
+    if !classpath.contains(&main) {
+        return Err(io::Error::other(format!("app {} Main-Class {main} is not on its classpath", app.id)));
+    }
+    let contracts = &backend.contracts;
+    session_methods::validate(&bytes, &classpath, &app.id, &app.sessions, contracts.session_methods.as_ref())?;
+    session_configurations::validate(
+        &bytes,
+        &classpath,
+        &app.id,
+        &app.sessions,
+        contracts.session_configurations.as_ref(),
+    )?;
+    if libraries.is_empty() {
+        return Ok(bytes);
+    }
+    launcher::assemble(&main, std::iter::once(bytes).chain(libraries), files)
 }
 
 fn validate_implementations(root: &Path, app: &project::AppMetadata, actual: &[String]) -> io::Result<()> {

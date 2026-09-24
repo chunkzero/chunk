@@ -25,13 +25,13 @@ pub(crate) struct Project {
     pub output: PathBuf,
 }
 
-/// How Gradle runs `chunkArtifacts`.
-#[derive(Clone, Copy)]
-pub(crate) enum GradleMode {
-    /// Stops Gradle's JVM once the build finishes.
-    OneShot,
-    /// Keeps a Gradle daemon warm between rebuilds; it exits after 15 idle minutes.
-    Daemon,
+/// How a build packages the project.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildMode {
+    /// Self-contained app JARs and a portable archive; Gradle's JVM stops once the build finishes.
+    Release,
+    /// Thin app JARs behind launcher JARs and no archive, from a Gradle daemon that exits after 15 idle minutes.
+    Dev,
 }
 
 pub(crate) struct Built {
@@ -56,15 +56,16 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
-        let built = execute(&project, GradleMode::OneShot, stop, Progress::default()).await?;
-        cliclack::log::success(format!("Built → {}", built.release.archive.display()))
+        let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
+        let release = built.release.archive.as_ref().unwrap_or(&built.release.directory);
+        cliclack::log::success(format!("Built → {}", release.display()))
     })
     .await
 }
 
 pub(crate) async fn execute(
     project: &Project,
-    mode: GradleMode,
+    mode: BuildMode,
     stop: CancellationToken,
     progress: Progress,
 ) -> io::Result<Built> {
@@ -80,6 +81,7 @@ pub(crate) async fn execute(
         project: project.root.clone(),
         backend: project.root.join(".chunk/build/backend"),
         jvm_descriptor: project.root.join(".chunk/build/jvm/artifacts.json"),
+        archive: mode == BuildMode::Release,
     };
     let output = project.output.clone();
     let built = tokio::task::spawn_blocking(move || {

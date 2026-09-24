@@ -45,8 +45,8 @@ impl Fixture {
         fs::write(
             root.join("fixture/artifacts.json"),
             serde_json::to_vec(&json!({
-                "version":3,"java":{"version":25,"executable":root.join("jdk/bin/java")},
-                "apps":[{"id":"lobby","jar":root.join("fixture/lobby.jar"),"java_version":25,"sessions":["default"]}]
+                "version":4,"java":{"version":25,"executable":root.join("jdk/bin/java")},
+                "apps":[{"id":"lobby","jar":root.join("fixture/lobby.jar"),"classpath":[],"java_version":25,"sessions":["default"]}]
             }))
             .unwrap(),
         )
@@ -73,7 +73,7 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
     let project = fixture.project();
     assert!(!project.output.exists());
     assert!(!fixture.root.join(".chunk/build/backend").exists());
-    let built = execute(&project, GradleMode::OneShot, CancellationToken::new(), Progress::default()).await.unwrap();
+    let built = execute(&project, BuildMode::Release, CancellationToken::new(), Progress::default()).await.unwrap();
     let arguments = fs::read_to_string(fixture.root.join("wrapper-arguments.txt")).unwrap();
     assert_eq!(
         arguments.lines().collect::<Vec<_>>(),
@@ -85,11 +85,15 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
             &format!("-Pchunk.executable={}", std::env::current_exe().unwrap().display()),
         ]
     );
-    execute(&project, GradleMode::Daemon, CancellationToken::new(), Progress::default()).await.unwrap();
+    execute(&project, BuildMode::Dev, CancellationToken::new(), Progress::default()).await.unwrap();
     let arguments = fs::read_to_string(fixture.root.join("wrapper-arguments.txt")).unwrap();
-    assert_eq!(arguments.lines().nth(2), Some("-Dorg.gradle.daemon.idletimeout=900000"));
-    assert_eq!(built.release.archive.parent().unwrap(), fixture.root.join("dist"));
-    assert!(built.release.archive.is_file());
+    assert_eq!(
+        arguments.lines().skip(2).take(2).collect::<Vec<_>>(),
+        ["-Dorg.gradle.daemon.idletimeout=900000", "-Pchunk.dev=true"]
+    );
+    let archive = built.release.archive.unwrap();
+    assert_eq!(archive.parent().unwrap(), fixture.root.join("dist"));
+    assert!(archive.is_file());
     assert!(built.release.directory.join("backend.json").is_file());
     assert_eq!(built.java.version, 25);
     assert_eq!(built.java.executable, fixture.root.join("jdk/bin/java"));
@@ -116,7 +120,7 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     fs::write(fixture.root.join("chunk.toml"), "").unwrap();
     fixture.wrapper("(sleep 0.3; printf leaked > failed-leak) &\necho '> Task :apps:lobby:compileJava'\necho 'Lobby.java:3: error: missing' >&2\nexit 23\n");
     let project = fixture.project();
-    let error = execute(&project, GradleMode::OneShot, CancellationToken::new(), Progress::default())
+    let error = execute(&project, BuildMode::Release, CancellationToken::new(), Progress::default())
         .await
         .err()
         .unwrap()
@@ -129,12 +133,12 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     assert!(!fixture.root.join("failed-leak").exists());
     fixture.wrapper("exit 0\n");
     let error =
-        execute(&project, GradleMode::OneShot, CancellationToken::new(), Progress::default()).await.err().unwrap();
+        execute(&project, BuildMode::Release, CancellationToken::new(), Progress::default()).await.err().unwrap();
     assert!(error.to_string().contains("Gradle JVM descriptor"));
     assert!(error.to_string().contains(".chunk/build/jvm/artifacts.json"));
     fs::remove_file(fixture.root.join("gradlew")).unwrap();
     let error =
-        execute(&project, GradleMode::OneShot, CancellationToken::new(), Progress::default()).await.err().unwrap();
+        execute(&project, BuildMode::Release, CancellationToken::new(), Progress::default()).await.err().unwrap();
     assert!(error.to_string().contains("project Gradle wrapper missing"));
     assert!(!project.output.exists());
 }
@@ -149,7 +153,7 @@ async fn build_output_streams_before_exit_and_drains_the_final_line() {
     });
     let root = fixture.root.clone();
     let running = tokio::spawn(async move {
-        gradle::run(&root, &std::env::current_exe().unwrap(), GradleMode::Daemon, &CancellationToken::new(), &progress)
+        gradle::run(&root, &std::env::current_exe().unwrap(), BuildMode::Dev, &CancellationToken::new(), &progress)
             .await
     });
     let mut lines = Vec::new();
@@ -175,7 +179,7 @@ async fn cancellation_and_dropped_builds_stop_wrapper_descendants() {
         let stop = CancellationToken::new();
         let executable = std::env::current_exe().unwrap();
         let progress = Progress::default();
-        let mut running = Box::pin(gradle::run(&fixture.root, &executable, GradleMode::Daemon, &stop, &progress));
+        let mut running = Box::pin(gradle::run(&fixture.root, &executable, BuildMode::Dev, &stop, &progress));
         tokio::select! {
             result = &mut running => panic!("wrapper exited before cancellation: {result:?}"),
             () = async {

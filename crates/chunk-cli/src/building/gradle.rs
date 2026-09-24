@@ -3,7 +3,7 @@ use std::{ffi::OsString, fs, io, path::Path, process::Stdio, sync::Arc, time::Du
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio_util::sync::CancellationToken;
 
-use super::GradleMode;
+use super::BuildMode;
 use super::output::Capture;
 use super::progress::Progress;
 
@@ -24,7 +24,7 @@ impl Drop for BuildProcess {
 pub(super) async fn run(
     project: &Path,
     executable: &Path,
-    mode: GradleMode,
+    mode: BuildMode,
     stop: &CancellationToken,
     progress: &Progress,
 ) -> io::Result<()> {
@@ -42,9 +42,9 @@ pub(super) async fn run(
         command
             .current_dir(project)
             .arg("chunkArtifacts")
-            .arg(match mode {
-                GradleMode::OneShot => "--no-daemon",
-                GradleMode::Daemon => "-Dorg.gradle.daemon.idletimeout=900000",
+            .args(match mode {
+                BuildMode::Release => &["--no-daemon"][..],
+                BuildMode::Dev => &["-Dorg.gradle.daemon.idletimeout=900000", "-Pchunk.dev=true"],
             })
             .arg("--console=plain")
             .arg(property)

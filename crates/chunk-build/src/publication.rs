@@ -100,10 +100,14 @@ pub(super) fn publish_directory(directory: &Path, id: &str, files: &Files) -> io
         verify(&destination, files)?;
     } else {
         let staging = tempfile::Builder::new().prefix(".build-").tempdir_in(directory)?;
+        let earlier = releases(directory)?;
         for (name, bytes) in files {
             relative_name(name)?;
             let path = staging.path().join(name);
             fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("artifact path"))?)?;
+            if link_unchanged(&earlier, name, bytes, &path)? {
+                continue;
+            }
             let mut file = fs::File::options().create_new(true).write(true).open(&path)?;
             file.write_all(bytes)?;
             file.sync_all()?;
@@ -118,6 +122,29 @@ pub(super) fn publish_directory(directory: &Path, id: &str, files: &Files) -> io
         }
     }
     destination.canonicalize()
+}
+
+/// Published release directories under `directory`, skipping staging directories and archives.
+fn releases(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut releases = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
+            releases.push(entry.path());
+        }
+    }
+    Ok(releases)
+}
+
+/// Hard-links `name` from the first earlier release holding it with identical bytes, so unchanged JARs are not
+/// rewritten. Published files are read-only, and republishing a release still verifies its bytes.
+fn link_unchanged(releases: &[PathBuf], name: &str, bytes: &[u8], path: &Path) -> io::Result<bool> {
+    let Some(existing) = releases.iter().map(|release| release.join(name)).find(|existing| {
+        fs::symlink_metadata(existing).is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes.len() as u64)
+    }) else {
+        return Ok(false);
+    };
+    Ok(read_limited(&existing, MAX_BYTES as u64)? == bytes && fs::hard_link(existing, path).is_ok())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]

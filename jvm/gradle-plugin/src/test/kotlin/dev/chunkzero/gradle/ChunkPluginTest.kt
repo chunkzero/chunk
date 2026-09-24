@@ -68,6 +68,16 @@ class ChunkPluginTest {
                 )
             }
         }
+        run("chunkArtifacts", "-Pchunk.dev=true")
+        val dev = descriptor()
+        assertSessionRegistries(dev)
+        dev.getAsJsonArray("apps").forEach { app ->
+            JarFile(
+                app.asJsonObject["jar"].asString,
+            ).use { assertTrue(it.getEntry("fixture/shared-version.txt") == null) }
+            val shared = if (app.asJsonObject["id"].asString == "lobby") "shared-2.0.jar" else "shared-1.0.jar"
+            assertTrue(app.asJsonObject.getAsJsonArray("classpath").any { it.asString.endsWith(shared) })
+        }
     }
 
     @Test
@@ -716,7 +726,7 @@ class ChunkPluginTest {
     private fun calls() = directory.resolve("calls.txt").toFile().readLines()
 
     private fun assertSessionRegistries(artifacts: JsonObject) {
-        assertEquals(3, artifacts["version"].asInt)
+        assertEquals(4, artifacts["version"].asInt)
         artifacts.getAsJsonArray("apps").forEach { app ->
             assertEquals(listOf("default"), app.asJsonObject.getAsJsonArray("sessions").map { it.asString })
             JarFile(app.asJsonObject["jar"].asString).use { jar ->

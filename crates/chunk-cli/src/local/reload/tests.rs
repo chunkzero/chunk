@@ -5,7 +5,7 @@ fn release(id: &str, jar: &str) -> Release {
     Release {
         id: id.into(),
         directory: PathBuf::new(),
-        archive: PathBuf::new(),
+        archive: None,
         apps: vec![super::super::tests::app("lobby", "small", 16)]
             .into_iter()
             .map(|app| chunk_contract::AppArtifact { sha256: jar.into(), ..app })

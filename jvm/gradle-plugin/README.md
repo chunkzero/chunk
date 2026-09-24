@@ -175,10 +175,11 @@ compilation. Backend outputs go to `.chunk/build/backend`, and JVM source output
 That directory has `java/` models/references, `java-client/` asynchronous clients, and an optional `kotlin/` facade
 source root. The plugin wires those roots into their owning projects; applications depend on compiled shared artifacts.
 
-`chunkArtifacts` builds every discovered app and writes `.chunk/build/jvm/artifacts.json`. The version-3 descriptor
+`chunkArtifacts` builds every discovered app and writes `.chunk/build/jvm/artifacts.json`. The version-4 descriptor
 includes each executable app JAR, its session type IDs and Java requirement, plus the selected Java executable. Provider
 class names remain in the local service registry. Descriptor file paths are local inputs for release assembly. Every
-discovered app must apply a Chunk project plugin.
+discovered app must apply a Chunk project plugin. `chunk dev` passes `-Pchunk.dev=true`, which skips the shadow JAR:
+each app's descriptor entry names its thin `jar` output and lists its `runtimeClasspath` JARs instead.
 
 `chunk build PROJECT` invokes this root task and publishes a complete release directory and archive under
 `PROJECT/dist`. It passes its own executable to Gradle, so inspection and generation use the same CLI installation. The
