@@ -10,7 +10,7 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
         "deployment":{"environment":"test","deployment":"release"},"artifact_digest":"artifact",
         "profiles":{"small":{"memory_mib":512,"max_sessions":4},"large":{"memory_mib":1024,"max_sessions":4}},
         "session_types":{"arena/default":{"app":"arena","machine_profile":"small","capacity":16}},
-        "max_processes":4,
+        "max_processes":4,"idle_node_timeout_seconds":0,
         "destinations":{"version":1,"entries":{"apps/arena/destinations/main":{
             "destination":{"key":"public-arena","session_type":"arena/default","machine_profile":"large"},
             "overflow":"replicate","empty_timeout_seconds":60,"creation":{"capacity":80,"configuration":{}}
@@ -62,6 +62,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
         ]),
         session_types: BTreeMap::new(),
         max_processes: 4,
+        idle_node_timeout_seconds: 0,
     };
     for (name, app, profile) in
         [("lobby/default", "lobby", "small"), ("arena/default", "arena", "small"), ("arena/large", "arena", "large")]

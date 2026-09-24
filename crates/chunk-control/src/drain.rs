@@ -14,6 +14,7 @@ pub(crate) fn retire_host(
     operation: String,
     request: Vec<u8>,
     timeout_seconds: u32,
+    automatic: bool,
     host: impl FnOnce(&State) -> Result<String>,
 ) -> Result<()> {
     if let Some(drain) = state.drains.get(&operation) {
@@ -27,9 +28,8 @@ pub(crate) fn retire_host(
     for session in state.sessions.values_mut().filter(|s| s.host == host) {
         session.retired = true;
     }
-    state
-        .drains
-        .insert(operation, Drain { request, host, deadline_ms: crate::now_ms() + u64::from(timeout_seconds) * 1000 });
+    let deadline_ms = crate::now_ms() + u64::from(timeout_seconds) * 1000;
+    state.drains.insert(operation, Drain { request, host, deadline_ms, automatic });
     Ok(())
 }
 
@@ -50,6 +50,7 @@ impl Control {
                 request.operation_id.clone(),
                 request.encode_to_vec(),
                 request.timeout_seconds,
+                false,
                 |state| {
                     let owner = state
                         .players

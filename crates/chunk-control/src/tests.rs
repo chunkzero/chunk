@@ -350,6 +350,7 @@ impl Fixture {
                 SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 2 },
             )]),
             max_processes: 1,
+            idle_node_timeout_seconds: 0,
         };
         Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server }
     }
@@ -642,6 +643,46 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         }
         fixture.close().await;
     }
+}
+
+/// Releases `claim` and finishes its session as an expired destination would, returning its host.
+async fn leave(control: &Arc<Control>, claim: ClaimRequest) -> String {
+    let session = control.state().unwrap().claims[&claim.operation_id].session.clone();
+    control.cancel(claim).await.unwrap();
+    control
+        .update(|state| {
+            state.sessions.get_mut(&session).unwrap().retired = true;
+            Ok(())
+        })
+        .unwrap();
+    let host = control.state().unwrap().sessions[&session].host.clone();
+    control.reconcile_all().await.unwrap();
+    assert!(!control.state().unwrap().sessions.contains_key(&session));
+    host
+}
+
+#[tokio::test]
+async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() {
+    let mut fixture = Fixture::new().await;
+    fixture.config.idle_node_timeout_seconds = 1;
+    let control = fixture.control();
+    let first = request("first", &uuid::Uuid::new_v4().to_string());
+    control.claim(first.clone()).await.unwrap();
+    let host = leave(&control, first).await;
+    let second = request("second", &uuid::Uuid::new_v4().to_string());
+    control.claim(second.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    control.reconcile_all().await.unwrap();
+    assert!(!fixture.host.stopped(&host));
+    assert_eq!(leave(&control, second).await, host);
+    assert!(!fixture.host.stopped(&host));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    control.reconcile_all().await.unwrap();
+    assert!(fixture.host.stopped(&host));
+    assert!(control.state().unwrap().hosts[&host].retired);
+    control.reconcile_all().await.unwrap();
+    assert!(control.state().unwrap().drains.is_empty());
+    fixture.close().await;
 }
 
 pub(crate) fn test_app() -> chunk_contract::AppArtifact {

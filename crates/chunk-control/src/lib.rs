@@ -4,6 +4,7 @@ mod client;
 mod delivery;
 mod drain;
 mod host;
+mod idle;
 mod moves;
 mod nodes;
 mod placement;
@@ -42,6 +43,8 @@ pub struct SessionType {
     pub capacity: u32,
 }
 
+pub const DEFAULT_IDLE_NODE_TIMEOUT_SECONDS: u32 = 60;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -51,6 +54,8 @@ pub struct Config {
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
     pub max_processes: u16,
+    /// Seconds a node may run without unfinished sessions before it is stopped; zero keeps idle nodes.
+    pub idle_node_timeout_seconds: u32,
     #[serde(flatten)]
     pub contracts: Contracts,
 }
@@ -75,6 +80,7 @@ impl Config {
             || self.artifact_digest.is_empty()
             || self.max_processes == 0
             || self.max_processes > 32
+            || self.idle_node_timeout_seconds > 3600
             || self.session_types.is_empty()
             || self
                 .profiles

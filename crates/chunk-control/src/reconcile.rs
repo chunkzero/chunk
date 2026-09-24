@@ -53,6 +53,7 @@ impl Control {
         }
         self.join_progressing_drains(tasks).await?;
         self.reconcile_sessions().await?;
+        self.retire_idle_hosts()?;
         self.progress_drains().await?;
         Ok(())
     }
