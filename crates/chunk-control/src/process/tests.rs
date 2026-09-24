@@ -48,6 +48,8 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     let process = host.launch(&id, "bridge", "local").unwrap();
     // Destinations may host an app's session on a profile other than the session's default.
     host.launch(&uuid::Uuid::new_v4().to_string(), "bridge", "large").unwrap();
+    host.prune(&BTreeSet::new()).unwrap();
+    assert!(host.process(&id).unwrap().is_some());
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
         control_endpoint: "http://127.0.0.1:1".into(),
@@ -104,4 +106,18 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     assert!(host.ensure(&failed_log, "bridge", "local").await.is_err());
     assert!(host.stopped(&failed_log));
     host.terminate(&failed_log).await.unwrap();
+    std::fs::remove_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
+    assert_stopped_hosts_are_pruned(&host, &invalid, &stale).await;
+}
+
+async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unconfirmed: &str) {
+    host.shutdown().await.unwrap();
+    host.prune(&BTreeSet::from([retained.into()])).unwrap();
+    assert!(host.stopped(retained));
+    host.prune(&BTreeSet::new()).unwrap();
+    let processes = host.processes.lock().unwrap();
+    assert!(processes.running.is_empty());
+    assert!(processes.failed.is_empty());
+    assert!(!host.path(retained, "exit").unwrap().exists());
+    assert!(host.path(unconfirmed, "launch").unwrap().exists());
 }

@@ -1,7 +1,7 @@
 use crate::{Error, Result};
 use chunk_proto::v1::{ProcessIdentity, ProcessRegistration};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +27,12 @@ pub trait Host: Send + Sync {
     /// Success requires affirmative evidence of complete process shutdown.
     async fn terminate(&self, id: &str) -> Result<()>;
     fn stopped(&self, id: &str) -> bool;
+    /// Removes stopped host resources absent from durable state. The caller must exclude concurrent placement.
+    /// # Errors
+    /// Failed cleanup remains eligible for the next reconciliation pass.
+    fn prune(&self, _retained: &BTreeSet<String>) -> Result<()> {
+        Ok(())
+    }
     fn unresolved(&self, _id: &str) -> bool {
         false
     }

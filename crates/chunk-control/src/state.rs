@@ -134,6 +134,16 @@ impl Claim {
 }
 
 impl State {
+    pub fn retire_stopped_host(&mut self, id: &str) {
+        if let Some(host) = self.hosts.get_mut(id) {
+            host.retired = true;
+        }
+        for session in self.sessions.values_mut().filter(|session| session.host == id) {
+            session.retired = true;
+            session.finished = true;
+        }
+    }
+
     /// The arrived claim `identity` names, if it is still current and owns its player.
     pub fn arrived_claim(&self, identity: &ClaimIdentity) -> Option<&Claim> {
         let operation = &identity.operation_id;
