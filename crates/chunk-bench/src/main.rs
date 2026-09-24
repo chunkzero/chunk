@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use config::{Config, Scenario};
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_ansi(false).with_writer(std::io::stderr).init();
     if std::env::args().nth(1).as_deref() == Some("--worker") {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line)?;
@@ -102,7 +103,9 @@ async fn clients(config: &Config, target: &target::Target) -> Result<VecDeque<lo
         eprintln!("Seeding {} arrived players through control RPCs…", config.population);
         let mut client = control::Client::connect(connection).await?;
         for index in 0..config.population {
-            tokio::time::timeout(Duration::from_secs(30), client.arrive(control::claim(u64::from(index)))).await??;
+            tokio::time::timeout(Duration::from_secs(30), client.arrive(control::claim(u64::from(index))))
+                .await?
+                .with_context(|| format!("seeding arrived player {} of {}", index + 1, config.population))?;
         }
         client.verify_population(config.population).await?;
         for _ in 0..config.concurrency {

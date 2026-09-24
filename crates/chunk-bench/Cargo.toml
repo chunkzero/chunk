@@ -32,6 +32,8 @@ tokio = { version = "1", features = [
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = "0.14.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 uuid = "1"
 
 [dev-dependencies]
