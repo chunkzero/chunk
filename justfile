@@ -49,6 +49,10 @@ build: toolchain
 # Everything CI runs. Run before opening a PR.
 ready: fmt-check lint typecheck test build consumers
 
+# Run an opt-in local workload benchmark (see crates/chunk-bench/README.md).
+bench *args:
+    cargo run --release --locked -p chunk-bench -- {{ args }}
+
 # Create Java/Kotlin projects and build consumers from source-only scratch copies.
 consumers: toolchain
     python3 scripts/check-consumers.py target/debug/chunk

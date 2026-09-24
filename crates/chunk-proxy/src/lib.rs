@@ -8,6 +8,10 @@ mod server;
 #[cfg(feature = "mc-26-2")]
 pub use server::{Proxy, Retarget};
 
+#[cfg(feature = "bench-support")]
+#[doc(hidden)]
+pub use server::benchmark;
+
 #[cfg(not(feature = "mc-26-2"))]
 mod disabled;
 #[cfg(not(feature = "mc-26-2"))]

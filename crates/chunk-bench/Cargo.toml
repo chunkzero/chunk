@@ -1,0 +1,41 @@
+[package]
+name = "chunk-bench"
+description = "Opt-in proxy and control workload benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+chunk-control = { path = "../chunk-control" }
+chunk-proto = { path = "../chunk-proto" }
+chunk-proxy = { path = "../chunk-proxy", features = ["bench-support"] }
+clap = { version = "4", features = ["derive"] }
+hdrhistogram = { version = "7", default-features = false, features = ["serialization"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+tempfile = "3"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "io-std",
+  "process",
+  "signal",
+  "sync",
+  "time",
+] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = "0.14.6"
+uuid = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints]
+workspace = true

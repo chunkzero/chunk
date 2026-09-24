@@ -2,6 +2,9 @@ mod commands;
 mod moves;
 mod relay;
 
+#[cfg(feature = "bench-support")]
+pub mod benchmark;
+
 use std::{io, time::Duration};
 
 use chunk_proto::v1::{ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest};
