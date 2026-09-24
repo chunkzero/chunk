@@ -115,6 +115,9 @@ async fn serve(
     stop: CancellationToken,
 ) -> io::Result<()> {
     let root = options.project.canonicalize()?;
+    fs::create_dir_all(root.join(".chunk"))?;
+    let _project_lock = runner_lock(&root.join(crate::cleaning::PROJECT_LOCK))
+        .map_err(|_| io::Error::other("chunk dev is already running for this project"))?;
     let state = options.state.clone().unwrap_or_else(|| root.join(".chunk/local"));
     fs::create_dir_all(&state)?;
     let state = state.canonicalize()?;

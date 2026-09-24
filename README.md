@@ -124,8 +124,8 @@ managed delivery, timeouts, feature selection and standalone hosting.
   serves players. `--plain` (automatic when stdout is not a terminal) prints one line per step and includes Gradle
   diagnostics on failure.
 - `chunk clean PROJECT` deletes `dist/` and `.chunk/` so the next build starts fresh. It keeps local backend data in
-  `.chunk/local/backend` unless `--data` is set and refuses while `chunk dev` runs for the project. Gradle's `build/`
-  directories are left to `./gradlew clean`.
+  `.chunk/local/backend` (and in any other `--state` directory directly under `.chunk/`) unless `--data` is set, and
+  refuses while `chunk dev` runs for the project. Gradle's `build/` directories are left to `./gradlew clean`.
 - `chunk players` operates on local players.
 - `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use `--cloud` or `--url URL` for non-interactive
   selection. `chunk login` is an alias.
