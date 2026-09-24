@@ -9,6 +9,7 @@ publish = false
 
 [features]
 default = ["mc-26-2"]
+bench-support = ["mc-26-2"]
 mc-26-2 = ["chunk-protocol/mc-26-2", "dep:openssl", "dep:reqwest", "dep:serde", "dep:flate2", "dep:zeroize"]
 
 [dependencies]

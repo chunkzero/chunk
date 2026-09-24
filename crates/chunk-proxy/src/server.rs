@@ -7,6 +7,9 @@ mod managed;
 mod platform;
 mod transport;
 
+#[cfg(feature = "bench-support")]
+pub use managed::benchmark;
+
 use authentication::Authentication;
 
 use std::{
