@@ -9,12 +9,9 @@ use crate::{
     state::{Phase, State},
 };
 
-/// How long a stopped host's drain stays answerable to repeated drain requests.
-const DRAIN_RETENTION_MS: u64 = 10 * 60 * 1000;
-
 impl Control {
     /// Drains hosts that have had no unfinished session or open claim for the idle timeout,
-    /// and forgets finished sessions and old drains that nothing references anymore.
+    /// and forgets finished sessions and its own drains once nothing references them.
     pub(crate) fn retire_idle_hosts(&self) -> Result<()> {
         let now = crate::now_ms();
         // Most passes change nothing, so only commit when the current state would change.
@@ -29,9 +26,7 @@ impl Control {
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
         let (sessions, drains) = (state.sessions.len(), state.drains.len());
         state.sessions.retain(|id, session| !session.finished || open.contains(id));
-        state.drains.retain(|_, drain| {
-            !self.host.stopped(&drain.host) || now < drain.deadline_ms.saturating_add(DRAIN_RETENTION_MS)
-        });
+        state.drains.retain(|_, drain| !drain.automatic || !self.host.stopped(&drain.host));
         let mut changed = sessions != state.sessions.len() || drains != state.drains.len();
         let timeout = u64::from(self.config.idle_node_timeout_seconds) * 1000;
         if timeout == 0 {
@@ -56,7 +51,7 @@ impl Control {
             let operation = format!("idle/{id}");
             let request =
                 ShutdownNodeRequest { operation_id: operation.clone(), host_id: id.clone(), timeout_seconds: 0 };
-            retire_host(state, operation, request.encode_to_vec(), 0, |_| Ok(id))?;
+            retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id))?;
             changed = true;
         }
         Ok(changed)

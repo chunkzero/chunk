@@ -28,6 +28,9 @@ pub(crate) struct Drain {
     pub request: Vec<u8>,
     pub host: String,
     pub deadline_ms: u64,
+    /// Started by control itself, so no caller retries it and it can be forgotten once the host stops.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

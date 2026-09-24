@@ -611,7 +611,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         assert_eq!(fixture.runtime.bindings.lock().unwrap()["source"].phase, DeliveryPhase::Arrived);
         control
             .update(|state| {
-                state.drains.get_mut("drain").unwrap().deadline_ms = crate::now_ms();
+                state.drains.get_mut("drain").unwrap().deadline_ms = 0;
                 Ok(())
             })
             .unwrap();
@@ -680,6 +680,8 @@ async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() 
     control.reconcile_all().await.unwrap();
     assert!(fixture.host.stopped(&host));
     assert!(control.state().unwrap().hosts[&host].retired);
+    control.reconcile_all().await.unwrap();
+    assert!(control.state().unwrap().drains.is_empty());
     fixture.close().await;
 }
 

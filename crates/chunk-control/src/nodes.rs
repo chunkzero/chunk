@@ -73,7 +73,7 @@ impl Control {
         }
         let operation = format!("node/{}", request.operation_id);
         self.update(|state| {
-            retire_host(state, operation, request.encode_to_vec(), request.timeout_seconds, |state| {
+            retire_host(state, operation, request.encode_to_vec(), request.timeout_seconds, false, |state| {
                 state
                     .hosts
                     .contains_key(&request.host_id)
