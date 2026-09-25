@@ -1,3 +1,4 @@
+mod backend;
 mod config;
 mod control;
 mod fixtures;
@@ -76,14 +77,18 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
         let config = config.clone();
         services.spawn(async move { proxy::gameplay(listener, &config, token).await });
         address.to_string()
+    } else if config.scenario.is_backend() {
+        eprintln!("Compiling the benchmark bundle…");
+        let bundle = output.to_path_buf();
+        tokio::task::spawn_blocking(move || backend::compile(&bundle)).await??.display().to_string()
     } else {
         services.spawn(fixtures::Runtimes::default().serve(listener, token));
         format!("http://{address}")
     };
-    let target = target::Target::start(&config, backend, state.path()).await?;
+    let mut target = target::Target::start(&config, backend, state.path(), output).await?;
     let result = tokio::select! {
-        result = measure(config, output.to_path_buf(), &target) => result,
-        result = services.join_next() => {
+        result = measure(config, output.to_path_buf(), &mut target) => result,
+        result = services.join_next(), if !services.is_empty() => {
             result.context("fixture missing")???;
             anyhow::bail!("fixture stopped unexpectedly");
         }
@@ -97,9 +102,23 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
     shutdown
 }
 
-async fn clients(config: &Config, target: &target::Target) -> Result<VecDeque<load::Client>> {
+async fn clients(
+    config: &Config,
+    target: &target::Target,
+) -> Result<(VecDeque<load::Client>, Option<Arc<backend::Fanout>>)> {
     let mut clients = VecDeque::new();
-    if let Some(connection) = &target.ready.control {
+    let mut fanout = None;
+    if let Some(connection) = &target.ready.backend {
+        eprintln!("Seeding {} player profiles…", config.population);
+        backend::seed(connection, config.population).await?;
+        if config.scenario == Scenario::BackendFanout {
+            eprintln!("Opening {} subscriptions in groups of {}…", config.subscribers, config.group_size);
+            fanout = Some(backend::subscribe(connection, config).await?);
+        }
+        for _ in 0..config.concurrency {
+            clients.push_back(load::Client::Backend(backend::Client::connect(connection, fanout.clone()).await?));
+        }
+    } else if let Some(connection) = &target.ready.control {
         eprintln!("Seeding {} arrived players through control RPCs…", config.population);
         let mut client = control::Client::connect(connection).await?;
         for index in 0..config.population {
@@ -118,11 +137,11 @@ async fn clients(config: &Config, target: &target::Target) -> Result<VecDeque<lo
             clients.push_back(load::Client::Proxy(client));
         }
     }
-    Ok(clients)
+    Ok((clients, fanout))
 }
 
-async fn measure(config: Arc<Config>, output: PathBuf, target: &target::Target) -> Result<()> {
-    let mut clients = clients(&config, target).await?;
+async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Target) -> Result<()> {
+    let (mut clients, fanout) = clients(&config, target).await?;
     eprintln!(
         "Warmup {}s, then {}s at {}/s with {} lanes…",
         config.warmup,
@@ -134,6 +153,10 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &target::Target) 
     let warmup = load::run(config.clone(), &mut clients, config.warmup, 0).await?;
     warmup.write(&output, "warmup")?;
     ensure!(warmup.errors.is_empty(), "warmup operations failed: {:?}", warmup.errors);
+    target.reset().await?;
+    if let Some(fanout) = &fanout {
+        fanout.reset();
+    }
     let monitor_stop = CancellationToken::new();
     let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone());
     let workload = async {
@@ -150,10 +173,18 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &target::Target) 
     let (stats, samples) = tokio::join!(workload, monitor);
     let stats = stats?;
     stats.write(&output, "measured")?;
-    let summary = stats.summary(config.seconds, bytes);
-    let report = json!({"schema_version":1, "warmup":warmup.summary(config.warmup, bytes), "measurement":summary, "resources":samples?});
+    let samples = samples?;
+    let target_cpu_ms = samples.last().and_then(|sample| sample["target"]["cpu_ms"].as_u64()).unwrap_or_default();
+    let result = json!({
+        "measurement": stats.summary(config.seconds, bytes),
+        "target_cpu_us_per_completed": metrics::count(target_cpu_ms * 1000) / metrics::count(stats.completed.max(1)),
+        "phases_us": target.report().await?,
+        "fanout": fanout.map(|fanout| fanout.summary(&output)).transpose()?,
+    });
+    let mut report = json!({"schema_version":1, "warmup":warmup.summary(config.warmup, bytes), "resources":samples});
+    report.as_object_mut().context("report object")?.extend(result.as_object().context("result object")?.clone());
     serde_json::to_writer_pretty(File::create(output.join("summary.json"))?, &report)?;
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    println!("{}", serde_json::to_string_pretty(&result)?);
     if stats.errors.is_empty()
         && let Some(connection) = &target.ready.control
     {

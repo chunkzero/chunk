@@ -8,6 +8,24 @@ pub enum Scenario {
     ProxyRelay,
     ControlPopulation,
     ControlChurn,
+    BackendQuery,
+    BackendMutation,
+    BackendFanout,
+}
+
+impl Scenario {
+    pub fn is_backend(self) -> bool {
+        matches!(self, Self::BackendQuery | Self::BackendMutation | Self::BackendFanout)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Subscription {
+    /// Everyone watches the identical leaderboard query.
+    Shared,
+    /// Everyone watches their own standing: the leaderboard plus their profile.
+    PerPlayer,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ValueEnum)]
@@ -27,15 +45,27 @@ pub struct Config {
     pub seconds: u32,
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
-    /// Total operations/second. Defaults: relay 2000, population 2/player, churn 10.
+    /// Total operations/second. Defaults: relay 2000, population 2/player, churn 10, backend query 1000,
+    /// mutation 100, fan-out 10.
     #[arg(long)]
     pub rate: Option<u32>,
-    /// Established proxy connections or independent control RPC lanes.
+    /// Established proxy connections or independent control/backend RPC lanes.
     #[arg(long, default_value_t = 64)]
     pub concurrency: u32,
-    /// Arrived players seeded before either control workload.
+    /// Arrived players (control) or player profiles (backend) seeded before the workload.
     #[arg(long, default_value_t = 128)]
     pub population: u32,
+    /// Backend fan-out: query subscriptions held open while writes change the leaderboard.
+    #[arg(long, default_value_t = 64)]
+    pub subscribers: u32,
+    /// Backend fan-out: subscriptions per watch-group stream; each stream has its own connection.
+    #[arg(long, default_value_t = 1)]
+    pub group_size: u32,
+    #[arg(long, value_enum, default_value_t = Subscription::Shared)]
+    pub subscription: Subscription,
+    /// Pin the target process with `taskset -c`, e.g. `12-13`. Pin the generator by running under taskset.
+    #[arg(long)]
+    pub target_cpus: Option<String>,
     #[arg(long, default_value_t = 2)]
     pub target_threads: usize,
     #[arg(long, default_value_t = 2)]
@@ -64,7 +94,9 @@ impl Config {
         self.rate.unwrap_or(match self.scenario {
             Scenario::ProxyRelay => 2000,
             Scenario::ControlPopulation => self.population * 2,
-            Scenario::ControlChurn => 10,
+            Scenario::ControlChurn | Scenario::BackendFanout => 10,
+            Scenario::BackendQuery => 1000,
+            Scenario::BackendMutation => 100,
         })
     }
 
@@ -75,7 +107,18 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!((1..=3600).contains(&self.seconds) && self.warmup <= 60, "invalid duration");
         ensure!((1..=4096).contains(&self.concurrency), "concurrency must be 1..=4096");
-        ensure!((1..=1024).contains(&self.population), "population must be 1..=1024");
+        let population = if self.scenario.is_backend() { 100_000 } else { 1024 };
+        ensure!((1..=population).contains(&self.population), "population must be 1..={population}");
+        ensure!(
+            (1..=100_000).contains(&self.subscribers) && (1..=1024).contains(&self.group_size),
+            "subscribers must be 1..=100000 and group size 1..=1024"
+        );
+        ensure!(
+            self.target_cpus.as_ref().is_none_or(|cpus| {
+                !cpus.is_empty() && cpus.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '-')
+            }),
+            "target CPUs must be a taskset list such as 12-13"
+        );
         ensure!(
             (1..=64).contains(&self.target_threads) && (1..=64).contains(&self.generator_threads),
             "invalid thread count"

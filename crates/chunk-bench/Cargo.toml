@@ -1,6 +1,6 @@
 [package]
 name = "chunk-bench"
-description = "Opt-in proxy and control workload benchmarks"
+description = "Opt-in proxy, control and backend workload benchmarks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+chunk-backend = { path = "../chunk-backend", features = ["bench-support"] }
+chunk-build = { path = "../chunk-build" }
+chunk-contract = { path = "../chunk-contract" }
 chunk-control = { path = "../chunk-control" }
 chunk-proto = { path = "../chunk-proto" }
 chunk-proxy = { path = "../chunk-proxy", features = ["bench-support"] }

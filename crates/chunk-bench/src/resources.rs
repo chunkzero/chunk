@@ -24,7 +24,7 @@ pub fn metadata(root: &Path) -> Result<Value> {
         "os": System::long_os_version(), "architecture": std::env::consts::ARCH,
         "cpu": system.cpus().first().map(sysinfo::Cpu::brand), "logical_cpus": system.cpus().len(),
         "memory_bytes": system.total_memory(),
-        "scope": "local loopback; target process isolated from generator and synthetic gameplay/runtime services; no CPU affinity or quotas"
+        "scope": "local loopback; target process isolated from generator and synthetic gameplay/runtime services; no quotas; CPU affinity only as given by target_cpus and the caller"
     }))
 }
 

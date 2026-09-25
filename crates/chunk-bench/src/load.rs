@@ -6,11 +6,12 @@ use tokio::{
     time::{Instant, sleep_until, timeout_at},
 };
 
-use crate::{config::Config, control, metrics::Stats, proxy};
+use crate::{backend, config::Config, control, metrics::Stats, proxy};
 
 pub enum Client {
     Proxy(proxy::Client),
     Control(control::Client),
+    Backend(backend::Client),
 }
 
 impl Client {
@@ -18,6 +19,7 @@ impl Client {
         match self {
             Self::Proxy(client) => client.exchange(sequence).await,
             Self::Control(client) => client.execute(sequence, config).await,
+            Self::Backend(client) => client.execute(sequence, config).await,
         }
     }
 }
@@ -81,7 +83,7 @@ pub async fn run(
                 Ok(Ok(())) => None,
             };
             // A canceled or failed frame exchange cannot safely reuse the cipher/framing state.
-            let reusable = error.is_none() || matches!(client, Client::Control(_));
+            let reusable = error.is_none() || !matches!(client, Client::Proxy(_));
             Finished { client: reusable.then_some(client), latency: Instant::now().duration_since(scheduled), error }
         });
     }
