@@ -48,42 +48,42 @@ async fn prepared_packets_are_reusable_across_connections_and_compression_modes(
 }
 
 #[test]
-fn compressed_frames_enforce_threshold_size_and_complete_zlib_stream() {
+fn compressed_frames_enforce_threshold_and_exact_size() {
     let body = [1; 4096];
-    let framed = deflate(&body, 256).unwrap();
+    let mut framed = Vec::new();
+    encode_frame(&mut framed, &body, Some(256)).unwrap();
     let mut buffer = BytesMut::from(framed.as_slice());
     let frame = decode_frame(&mut buffer, MAX_FRAME_SIZE).unwrap().unwrap();
     assert_eq!(&inflate(&frame, 256, 4096).unwrap()[..], &body);
     assert!(inflate(&frame, 256, 4095).is_err());
-    assert!(inflate(&frame[..frame.len() - 1], 256, 4096).is_err());
-    let mut trailing = frame.to_vec();
-    trailing.push(0);
-    assert!(inflate(&trailing, 256, 4096).is_err());
-    assert!(inflate(&[0, 1, 2], 2, 4096).is_err());
-    assert!(inflate(&[0], 256, 4096).is_err());
-    assert!(inflate(&[0xff, 0xff, 0xff, 0xff, 0x0f], 256, 4096).is_err());
+    assert!(inflate(&frame.slice(..frame.len() - 1), 256, 4096).is_err());
+    assert!(inflate(&Bytes::from_static(&[0, 1, 2]), 2, 4096).is_err());
+    assert!(inflate(&Bytes::from_static(&[0]), 256, 4096).is_err());
+    assert!(inflate(&Bytes::from_static(&[0xff, 0xff, 0xff, 0xff, 0x0f]), 256, 4096).is_err());
     let mut smaller = frame.to_vec();
     smaller[0] = 0xff;
     smaller[1] = 0x1f;
-    assert!(inflate(&smaller, 256, 4096).is_err());
+    assert!(inflate(&smaller.into(), 256, 4096).is_err());
 }
 
 #[tokio::test]
 async fn encryption_switch_decrypts_buffered_bytes_and_keeps_cipher_state_between_reads() {
     let (mut client, server) = tokio::io::duplex(4096);
     let secret = [0x12; 16];
-    let mut cipher = Crypter::new(Cipher::aes_128_cfb8(), Mode::Encrypt, &secret, Some(&secret)).unwrap();
+    let mut cipher = cfb8(&secret, true).unwrap();
     let acknowledgment = encode_packet(&LoginAcknowledged).unwrap();
-    let mut wire = acknowledgment.clone();
-    wire.extend(transform(&mut cipher, &acknowledgment).unwrap());
+    let mut encrypted = acknowledgment.clone();
+    apply(&mut cipher, &mut encrypted).unwrap();
+    let mut wire = acknowledgment;
+    wire.extend(encrypted);
     client.write_all(&wire).await.unwrap();
     let mut server = Transport::new(server);
     server.read_frame(4096).await.unwrap();
     assert!(server.has_buffered_data());
     server.enable_encryption(&secret).unwrap();
     decode_packet::<LoginAcknowledged>(&server.read_frame(4096).await.unwrap()).unwrap();
-    let next = encode_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 42 }).unwrap();
-    let encrypted = transform(&mut cipher, &next).unwrap();
+    let mut encrypted = encode_packet(&ConfigurationKeepAliveResponse { keep_alive_id: 42 }).unwrap();
+    apply(&mut cipher, &mut encrypted).unwrap();
     let sender = async {
         for byte in encrypted {
             client.write_all(&[byte]).await.unwrap();

@@ -122,3 +122,63 @@ async fn active_destination_failure_sends_a_play_disconnect() {
     assert_eq!(packet[0], 0x20);
     assert_eq!(server.await.unwrap().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
+
+/// Relays gameplay output to a player reading `chunk` bytes per `period`, for at most a minute.
+async fn relay_to_reader(period: std::time::Duration, chunk: usize) -> (Option<io::Error>, usize) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::AsyncReadExt;
+
+    let (mut client, public) = tokio::io::duplex(1024);
+    let (jvm, internal) = tokio::io::duplex(8192);
+    let relay = tokio::spawn(async move {
+        until(
+            &mut Transport::new(public),
+            &mut Transport::new(internal),
+            &mut information(),
+            std::future::pending::<()>(),
+            true,
+            None,
+        )
+        .await
+    });
+    let sent = Arc::new(AtomicUsize::new(0));
+    let writer = tokio::spawn({
+        let sent = sent.clone();
+        async move {
+            let mut jvm = Transport::new(jvm);
+            while sent.load(Ordering::Relaxed) < 8 * BACKLOG_LIMIT && jvm.write_body(&[0x7f; 16_384]).await.is_ok() {
+                sent.fetch_add(16_384, Ordering::Relaxed);
+            }
+            std::future::pending::<()>().await;
+        }
+    });
+    let reader = tokio::spawn(async move {
+        let mut bytes = vec![0; chunk];
+        loop {
+            tokio::time::sleep(period).await;
+            if matches!(client.read(&mut bytes).await, Ok(0) | Err(_)) {
+                return;
+            }
+        }
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), relay).await;
+    writer.abort();
+    reader.abort();
+    (result.ok().map(|result| result.unwrap().unwrap_err()), sent.load(Ordering::Relaxed))
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_players_bound_gameplay_reads_and_only_trickling_ones_time_out() {
+    use std::time::Duration;
+
+    let (error, sent) = relay_to_reader(Duration::from_secs(1), 256).await;
+    assert_eq!(error.unwrap().kind(), io::ErrorKind::TimedOut);
+    assert!(sent < 2 * BACKLOG_LIMIT);
+    // About 10 KiB/s: slow, but drains faster than the minimum write progress.
+    let (error, sent) = relay_to_reader(Duration::from_millis(100), 1024).await;
+    assert!(error.is_none());
+    assert!(sent > 2 * BACKLOG_LIMIT);
+}

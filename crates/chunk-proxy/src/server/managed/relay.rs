@@ -8,18 +8,22 @@ use chunk_protocol::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    time::timeout,
+    time::{Instant, sleep_until, timeout},
 };
 
 use super::super::{
     configuration,
     platform::RPC_TIMEOUT,
-    transport::{Transport, invalid_data},
+    transport::{Transport, WRITE_TIMEOUT, invalid_data, timed_out, within},
 };
 
 const INPUT_LIMIT: usize = 65_536;
+/// Output queued for one side before the relay stops reading from the other.
+const BACKLOG_LIMIT: usize = 64 * 1024;
 
 /// RPCs and destination preparation run alongside the current delivery's packet pump.
+/// Frames already received are forwarded together, and each side's output is
+/// written while both sides keep being read.
 pub(super) async fn until<S, I, T>(
     public: &mut Transport<S>,
     internal: &mut Transport<I>,
@@ -37,43 +41,71 @@ where
     // changes for players who stay connected.
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
+        let read_public = receiving && internal.queued() < BACKLOG_LIMIT;
+        let read_internal = public.queued() < BACKLOG_LIMIT;
+        let stall = public.write_deadline().into_iter().chain(internal.write_deadline()).min();
         tokio::select! {
-            result = &mut ready => return Ok(result),
+            result = &mut ready => {
+                if let Err(error) = within(WRITE_TIMEOUT, internal.flush()).await {
+                    return Err(unavailable(public, error).await);
+                }
+                within(WRITE_TIMEOUT, public.flush()).await?;
+                return Ok(result);
+            }
             _ = refresh.tick() => { if let Some(commands) = &mut commands { commands.refresh(); } }
             output = async { match &mut commands { Some(commands) => commands.receive().await, None => std::future::pending().await } } => {
                 if let Some(commands) = &mut commands {
                     timeout(RPC_TIMEOUT, commands.publish(output, public)).await.map_err(io::Error::other)??;
                 }
             }
-            frame = public.read_frame(INPUT_LIMIT), if receiving => {
-                let frame = frame?;
-                if let Some(commands) = &commands && commands.input(&frame)? { continue; }
-                retain_settings(&frame, settings)?;
-                if let Err(error) = timeout(RPC_TIMEOUT, internal.write_body(&frame)).await.map_err(io::Error::other).and_then(|result| result) {
-                    let _ = configuration::disconnect(public, 0x20, "Gameplay server unavailable").await;
-                    return Err(error);
+            // Deadlines move as writes drain, so this only fires on the one computed for this iteration.
+            () = sleep_until(stall.unwrap_or_else(Instant::now)), if stall.is_some() => {
+                let now = Instant::now();
+                if internal.write_deadline().is_some_and(|deadline| deadline <= now) {
+                    return Err(unavailable(public, timed_out("relay write stalled")).await);
+                }
+                if public.write_deadline().is_some_and(|deadline| deadline <= now) {
+                    return Err(timed_out("relay write stalled"));
                 }
             }
-            frame = internal.read_frame(chunk_protocol::MAX_FRAME_SIZE) => {
-                let frame = match frame {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let _ = configuration::disconnect(public, 0x20, "Gameplay server unavailable").await;
-                        return Err(error);
+            frame = public.pump(read_public.then_some(INPUT_LIMIT)), if read_public || public.queued() > 0 => {
+                let mut frame = frame?;
+                while let Some(body) = frame {
+                    let consumed = match &commands { Some(commands) => commands.input(&body)?, None => false };
+                    if !consumed {
+                        retain_settings(&body, settings)?;
+                        internal.queue(&body)?;
                     }
-                };
-                let replacement = if VarInt::decode(&mut frame.as_ref()).map_err(invalid_data)?.0 == chunk_protocol::commands::CommandTree::ID {
-                    commands.as_mut().map(|commands| commands.tree(&decode_packet(&frame).map_err(invalid_data)?)).transpose()?
-                } else { None };
-                if let Some(replacement) = replacement {
-                    timeout(RPC_TIMEOUT, public.write_encoded(&replacement)).await.map_err(io::Error::other)??;
-                } else {
-                    timeout(RPC_TIMEOUT, public.write_body(&frame)).await.map_err(io::Error::other)??;
+                    frame = if internal.queued() < BACKLOG_LIMIT { public.buffered_frame(INPUT_LIMIT)? } else { None };
                 }
-                receiving = true;
+            }
+            frame = internal.pump(read_internal.then_some(chunk_protocol::MAX_FRAME_SIZE)), if read_internal || internal.queued() > 0 => {
+                let mut frame = frame;
+                loop {
+                    let body = match frame {
+                        Ok(Some(body)) => body,
+                        Ok(None) => break,
+                        Err(error) => return Err(unavailable(public, error).await),
+                    };
+                    let replacement = if VarInt::decode(&mut body.as_ref()).map_err(invalid_data)?.0 == chunk_protocol::commands::CommandTree::ID {
+                        commands.as_mut().map(|commands| commands.tree(&decode_packet(&body).map_err(invalid_data)?)).transpose()?
+                    } else { None };
+                    match replacement {
+                        Some(replacement) => public.queue_encoded(&replacement)?,
+                        None => public.queue(&body)?,
+                    }
+                    receiving = true;
+                    if public.queued() >= BACKLOG_LIMIT { break; }
+                    frame = internal.buffered_frame(chunk_protocol::MAX_FRAME_SIZE);
+                }
             }
         }
     }
+}
+
+async fn unavailable<S: AsyncRead + AsyncWrite + Unpin>(public: &mut Transport<S>, error: io::Error) -> io::Error {
+    let _ = configuration::disconnect(public, 0x20, "Gameplay server unavailable").await;
+    error
 }
 
 pub(super) async fn start_configuration<S, I>(
