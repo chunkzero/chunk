@@ -12,8 +12,10 @@ import "google/protobuf/timestamp.proto";
 service AuthService {
   // Starts a login. Needs no token.
   rpc StartLogin(StartLoginRequest) returns (StartLoginResponse);
-  // Checks a started login. Needs no token; login_id is the secret. The token
-  // is returned once, on the first poll after approval.
+  // Checks a started login. Needs no token; login_id is the secret. Once
+  // approved, every poll returns the same token and secret until the login's
+  // expire_time, so a lost response can be retried; after that the login is
+  // gone and polls fail with NOT_FOUND.
   rpc PollLogin(PollLoginRequest) returns (PollLoginResponse);
   // Approves a pending login by the code the CLI showed, issuing a token for
   // the calling person. Called by the dashboard.
@@ -65,7 +67,7 @@ message PollLoginRequest {
 
 message PollLoginResponse {
   LoginState state = 1;
-  // Set once, with state APPROVED.
+  // Set with state APPROVED.
   string secret = 2;
   Token token = 3;
 }
