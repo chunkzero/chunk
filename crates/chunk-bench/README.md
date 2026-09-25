@@ -41,13 +41,11 @@ settings. The fixture declares 128-player sessions, one session per process, and
 
 Population defaults to two polls per player per second, approximating the proxy's 500 ms move polling cadence. This is
 deliberately an open-loop offered rate; production polling waits for each reply, so it self-throttles under overload.
-Churn reports complete player lifecycles per second, not individual RPCs. It grows retained history during the run and
-is not a steady-state churn benchmark: control currently retains up to 1,024 claim/operation IDs, including released
-claims. The runner rejects churn configurations where `population + (warmup + seconds) * rate > 1024`. Every run starts
-with fresh state. The store also limits each document to 1 MiB, and control puts its state in one document. This can
-bind before the claim count limit, depending on the population and retained history. Setup reports the player index on
-failure; target warnings and errors go to stderr. Treat storage/capacity rejections separately from throughput
-saturation. The claim-count budget does not guarantee that a workload fits in the state document.
+Churn reports complete player lifecycles per second, not individual RPCs. Control holds at most 1,024 open claims, so
+the runner rejects churn configurations where `population + concurrency > 1024`. Released claims are retained for five
+minutes, so runs shorter than that measure churn with growing history. Every run starts with fresh state. Setup reports
+the player index on failure; target warnings and errors go to stderr. Treat capacity rejections separately from
+throughput saturation.
 
 ## Measurement and output
 

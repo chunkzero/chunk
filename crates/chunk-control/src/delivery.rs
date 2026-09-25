@@ -217,6 +217,7 @@ impl Control {
 fn release(state: &mut State, operation: &str) -> Result<()> {
     let claim = state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?;
     set_phase(claim, Phase::Released)?;
+    claim.released_at_ms.get_or_insert(crate::now_ms());
     let session_id = claim.session.clone();
     if let Some(player) = state.players.get_mut(&claim.player) {
         if player.current.as_deref() == Some(operation) {

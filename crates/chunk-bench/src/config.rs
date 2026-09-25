@@ -88,8 +88,8 @@ impl Config {
         ensure!(self.rate() > 0 && offers <= 10_000_000, "rate must be positive; at most 10 million offers/run");
         if self.scenario == Scenario::ControlChurn {
             ensure!(
-                offers + u64::from(self.population) <= 1024,
-                "control retains at most 1024 claim/operation IDs: population + (seconds + warmup) * rate must be <= 1024; use shorter runs and fresh state"
+                self.population + self.concurrency <= 1024,
+                "control holds at most 1024 open claims: population + concurrency must be <= 1024"
             );
         }
         Ok(())
@@ -101,8 +101,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn churn_budget_includes_warmup_and_seeded_players() {
-        let mut config = Config::parse_from(["bench", "control-churn", "--population", "904", "--rate", "10"]);
+    fn churn_budget_includes_in_flight_and_seeded_players() {
+        let mut config = Config::parse_from(["bench", "control-churn", "--population", "960", "--concurrency", "64"]);
         assert!(config.validate().is_ok());
         config.population += 1;
         assert!(config.validate().unwrap_err().to_string().contains("1024"));

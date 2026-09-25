@@ -217,7 +217,7 @@ fn reserve(
     if let Some(claim) = state.claims.get(&request.operation_id) {
         return claim.matches(request);
     }
-    if state.claims.len() >= 1024 {
+    if state.claims.values().filter(|claim| claim.phase != Phase::Released).count() >= 1024 {
         return Err(Error::Capacity);
     }
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
@@ -261,6 +261,7 @@ fn reserve(
             assignment: None,
             activated: false,
             created_at_ms: crate::now_ms(),
+            released_at_ms: None,
         },
     );
     Ok(())
