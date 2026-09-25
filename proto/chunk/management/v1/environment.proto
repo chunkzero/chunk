@@ -16,17 +16,20 @@ service EnvironmentService {
   // process that reconnects applies the latest message and carries on. The
   // server may resend an unchanged revision as a keepalive.
   //
-  // A core attach registers the core incarnation (instance_id, epoch) that
-  // ReportStatus and SetWakeAlarm are fenced against. The latest core attach
-  // with the highest epoch is current; the management plane ends every other
-  // core's stream, and refuses core attaches with a lower epoch, with
-  // FAILED_PRECONDITION. A core that receives it must stop serving.
+  // Every accepted core attach gets a new lease, higher than any before it
+  // for the environment, and makes that core the owner. ReportStatus,
+  // SetWakeAlarm, EnsureCapacity and ReleaseCapacity carry the lease, and any
+  // call with a lower lease fails with FAILED_PRECONDITION. A core attach is
+  // refused with FAILED_PRECONDITION when its epoch is lower than the
+  // environment's, or when its instance_id was superseded by another core's
+  // attach; superseded instance IDs never become owner again. The previous
+  // owner's stream ends with FAILED_PRECONDITION. A core that receives it
+  // must stop serving.
   rpc Attach(AttachRequest) returns (stream AttachResponse);
   // Reports what the environment serves: ready gateways, players, deployment
   // progress and the server-list statuses edges cache while it sleeps. Called
-  // by core periodically, on change, and before suspending. Only the current
-  // core incarnation may report; others get FAILED_PRECONDITION. Within the
-  // incarnation, a report whose sequence is not greater than the last
+  // by core periodically, on change, and before suspending. Fenced by lease.
+  // Under one lease, a report whose sequence is not greater than the last
   // accepted one is ignored. Wall-clock time never orders reports.
   rpc ReportStatus(ReportStatusRequest) returns (ReportStatusResponse);
   // Hands off the backend's next due job so the management plane can wake a
@@ -37,18 +40,20 @@ service EnvironmentService {
   // pair is ignored; the stored pair with the same due time is a no-op; the
   // stored pair with a different due time fails with FAILED_PRECONDITION.
   // The response echoes the alarm that is stored. Acknowledge the handoff
-  // locally only when all three echoed fields equal the request.
+  // locally only when all three echoed fields equal the request. Fenced by
+  // lease.
   rpc SetWakeAlarm(SetWakeAlarmRequest) returns (SetWakeAlarmResponse);
   // Asks for one machine of a named machine profile. Durable and idempotent
   // by request_id: the first call records the intent and may return while the
   // machine is still provisioning. Repeat the call with the same request_id
   // and arguments to observe progress or recover a lost reply; the same
   // request_id with a different workload, machine_profile, release_id or
-  // app_id fails with ALREADY_EXISTS. A failed request stays failed; retry
-  // with a new request_id.
+  // app_id fails with ALREADY_EXISTS; the lease is not part of that match. A
+  // failed request stays failed; retry with a new request_id. Fenced by lease.
   rpc EnsureCapacity(EnsureCapacityRequest) returns (EnsureCapacityResponse);
   // Returns the capacity granted under an EnsureCapacity request_id.
   // Idempotent: releasing unknown or already released capacity succeeds.
+  // Fenced by lease.
   rpc ReleaseCapacity(ReleaseCapacityRequest) returns (ReleaseCapacityResponse);
   // Records usage for accounting. At least once: the server deduplicates by
   // record ID, so retry a batch until it succeeds.
@@ -79,7 +84,8 @@ message AttachRequest {
 
 // The environment's complete desired state.
 message AttachResponse {
-  // Increases with every change.
+  // Increases with every change, including every Wake the management plane
+  // accepts for the environment.
   uint64 revision = 1;
   string environment_id = 2;
   string project_id = 3;
@@ -92,6 +98,8 @@ message AttachResponse {
   ObjectStore log_store = 7;
   // Set for forks: when the local log is empty, restore this snapshot first.
   Restore restore = 8;
+  // Set for core: the lease this attach was granted. Constant for the stream.
+  uint64 lease = 9;
 }
 
 // A release archive (`dist/<id>.tar.gz` from `chunk build`) to download.
@@ -145,17 +153,17 @@ message ReportStatusRequest {
   DeploymentProgress deployment = 5;
   // No players remain, the log is flushed and the wake alarm is handed off.
   // The management plane may suspend the environment only while this report
-  // is the latest accepted one, desired_revision is still the current
-  // desired-state revision, and it has accepted no Wake since the report.
-  // Environments that never sleep leave it false.
+  // is the latest accepted one under the current lease and desired_revision
+  // equals the current desired-state revision. Because every accepted Wake
+  // advances that revision, a wake accepted after core observed its state
+  // invalidates the report. Environments that never sleep leave it false.
   bool ready_to_suspend = 6;
-  // The reporting core incarnation, as registered through Attach.
-  string instance_id = 7;
-  uint64 epoch = 8;
-  // Increases with every report from this incarnation.
-  uint64 sequence = 9;
+  // The lease from this core's Attach.
+  uint64 lease = 7;
+  // Increases with every report under this lease.
+  uint64 sequence = 8;
   // The AttachResponse revision this status reflects.
-  uint64 desired_revision = 10;
+  uint64 desired_revision = 9;
 }
 
 message PingStatus {
@@ -181,6 +189,8 @@ message SetWakeAlarmRequest {
   google.protobuf.Timestamp due_time = 2;
   // The log epoch the backend serves, as registered through Attach.
   uint64 epoch = 3;
+  // The lease from this core's Attach.
+  uint64 lease = 4;
 }
 
 // The alarm now stored. A higher (epoch, generation) than the request means a
@@ -200,6 +210,8 @@ message EnsureCapacityRequest {
   string release_id = 4;
   // The release app to run. Required for WORKLOAD_JVM, empty otherwise.
   string app_id = 5;
+  // The lease from this core's Attach.
+  uint64 lease = 6;
 }
 
 enum Workload {
@@ -236,6 +248,8 @@ enum CapacityState {
 message ReleaseCapacityRequest {
   // The EnsureCapacity request_id.
   string request_id = 1;
+  // The lease from this core's Attach.
+  uint64 lease = 2;
 }
 
 message ReleaseCapacityResponse {

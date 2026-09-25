@@ -15,9 +15,12 @@ service EdgeService {
   // Asks for a sleeping environment to wake for a login, or for a ping when
   // its ping mode is WAKE. Concurrent wakes of one environment from any edge
   // share one provider start, and wakes are refused for blocked clients and
-  // rate-limited per environment. Returns without waiting for the environment;
-  // the edge holds the connection until the route lists gateways or its own
-  // deadline passes.
+  // rate-limited per environment. An accepted wake (WAKING or AWAKE) advances
+  // the environment's desired-state revision, which reaches core through
+  // EnvironmentService.Attach and invalidates any idle report core made
+  // before seeing it. Returns without waiting for the environment; the edge
+  // holds the connection until the route lists gateways or its own deadline
+  // passes.
   rpc Wake(WakeRequest) returns (WakeResponse);
 }
 
