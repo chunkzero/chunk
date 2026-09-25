@@ -35,20 +35,21 @@ impl Control {
     fn tidy(&self, state: &mut State, now: u64) -> Result<()> {
         // A released move claim stays while the other end is open: the source's move checks
         // read its destination's outcome, and a destination's activation checks its fenced source.
+        let source = |request: &[u8]| ClaimRequest::decode(request).ok().and_then(|request| request.source);
         let open = |operation: &str| state.claims.get(operation).is_some_and(|claim| claim.phase != Phase::Released);
-        let mut referenced = BTreeSet::new();
-        for (destination, intent) in &state.moves {
-            let Some(source) = ClaimRequest::decode(intent.request.as_slice()).ok().and_then(|request| request.source)
-            else {
-                continue;
-            };
-            if open(destination) {
-                referenced.insert(source.operation_id.clone());
-            }
-            if open(&source.operation_id) {
-                referenced.insert(destination.clone());
-            }
-        }
+        let mut referenced: BTreeSet<_> = state
+            .claims
+            .values()
+            .filter(|claim| claim.phase != Phase::Released)
+            .filter_map(|claim| source(&claim.request).map(|source| source.operation_id))
+            .collect();
+        referenced.extend(
+            state
+                .moves
+                .iter()
+                .filter(|(_, intent)| source(&intent.request).is_some_and(|source| open(&source.operation_id)))
+                .map(|(destination, _)| destination.clone()),
+        );
         state.claims.retain(|operation, claim| {
             claim.released_at_ms.is_none_or(|at| now.saturating_sub(at) < RELEASED_RETENTION_MS)
                 || referenced.contains(operation)

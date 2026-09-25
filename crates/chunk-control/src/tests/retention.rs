@@ -74,3 +74,33 @@ async fn released_claims_stay_while_an_open_claim_of_their_move_references_them(
     control.activate(activation).await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let source = request("source", &uuid::Uuid::new_v4().to_string());
+    let first = control.claim(source.clone()).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
+    let destination = ClaimRequest {
+        operation_id: "direct".into(),
+        demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
+        source: first.claim,
+        ..source.clone()
+    };
+    let second = control.claim(destination).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("direct").unwrap().phase = DeliveryPhase::Arrived;
+    control.cancel(source).await.unwrap();
+    let activation = ActivateClaim { claim: second.claim };
+    control.activate(activation.clone()).await.unwrap();
+    control
+        .update(|state| {
+            state.claims.get_mut("source").unwrap().released_at_ms = Some(0);
+            Ok(())
+        })
+        .unwrap();
+    control.retire_idle_hosts().unwrap();
+    control.activate(activation).await.unwrap();
+    fixture.close().await;
+}
