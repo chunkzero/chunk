@@ -2,6 +2,8 @@ name: SDK distribution
 
 on:
   pull_request:
+    # Drafts skip CI; run the checks locally while iterating. Marking a PR ready runs them here.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/sdk.yml
       - .github/actions/rust-cache/**
@@ -40,6 +42,7 @@ env:
 
 jobs:
   package:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 60
     outputs:
