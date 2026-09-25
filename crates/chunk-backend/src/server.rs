@@ -30,7 +30,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let connection_path = config.connection.clone();
-    let (backend, bundle, token, platform_token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+    let (backend, bundle, token, platform_token, replicator) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let bundle: Deployment = chunk_service::read(&config.bundle)?;
         let database = config.state.join("environment.sqlite");
@@ -39,9 +39,17 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         }
         let token = chunk_service::secret(&config.state.join("token"))?;
         let platform_token = chunk_service::secret(&config.state.join("platform-token"))?;
-        let store = chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?;
+        let (store, replicator) = match chunk_store::Replication::from_env().map_err(io::Error::other)? {
+            Some(replication) => {
+                let (store, replicator) =
+                    chunk_store::SqliteStore::open_replicated(database, &config.environment, replication)
+                        .map_err(io::Error::other)?;
+                (store, Some(replicator))
+            }
+            None => (chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?, None),
+        };
         let backend = Backend::new(config.environment, Box::new(store)).map_err(io::Error::other)?;
-        Ok((backend, bundle, token, platform_token))
+        Ok((backend, bundle, token, platform_token, replicator))
     })
     .await
     .map_err(io::Error::other)??;
@@ -103,6 +111,11 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         result
     }
     .await;
-    tokio::task::spawn_blocking(move || drop(backend)).await.map_err(io::Error::other)?;
-    result
+    let flushed = tokio::task::spawn_blocking(move || {
+        drop(backend);
+        replicator.as_ref().map_or(Ok(()), chunk_store::Replicator::flush)
+    })
+    .await
+    .map_err(io::Error::other)?;
+    result.and(flushed.map_err(io::Error::other))
 }

@@ -2,11 +2,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Error, Operation, Result, RetryContext};
 
-pub(super) fn prepare(
-    connection: &mut Connection,
-    operation: &Operation,
-    proposed: RetryContext,
-) -> Result<RetryContext> {
+pub(super) fn prepare(connection: &Connection, operation: &Operation, proposed: RetryContext) -> Result<RetryContext> {
     operation.validate()?;
     if proposed.deployment.is_empty()
         || proposed.deployment.len() > 128
@@ -14,8 +10,7 @@ pub(super) fn prepare(
     {
         return Err(Error::Invalid("invocation retry context"));
     }
-    let transaction = connection.transaction()?;
-    let existing: Option<(Vec<u8>, String)> = transaction
+    let existing: Option<(Vec<u8>, String)> = connection
         .query_row(
             "SELECT fingerprint, context FROM _chunk_retry_contexts WHERE operation_id = ?1",
             [&operation.id],
@@ -29,10 +24,9 @@ pub(super) fn prepare(
         }
         return Ok(context);
     }
-    transaction.execute(
+    connection.execute(
         "INSERT INTO _chunk_retry_contexts VALUES (?1, ?2, ?3)",
         params![operation.id, operation.fingerprint.as_slice(), serde_json::to_string(&proposed)?],
     )?;
-    transaction.commit()?;
     Ok(proposed)
 }
