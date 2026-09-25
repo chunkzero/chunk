@@ -2,8 +2,8 @@ name: SDK distribution
 
 on:
   pull_request:
-    # Drafts skip CI; run the checks locally, or mark the PR ready and push to run them here.
-    types: [opened, synchronize, reopened]
+    # Drafts skip CI; run the checks locally while iterating. Marking a PR ready runs them here.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/sdk.yml
       - .github/actions/rust-cache/**

@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Drafts skip CI; run the checks locally, or mark the PR ready and push to run them here.
-    types: [opened, synchronize, reopened]
+    # Drafts skip CI; run the checks locally while iterating. Marking a PR ready runs them here.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 env:
