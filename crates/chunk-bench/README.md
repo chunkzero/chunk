@@ -7,6 +7,7 @@ as part of tests or CI.
 just bench proxy-relay
 just bench proxy-relay --rate 10000 --concurrency 128 --seconds 30
 just bench proxy-relay --response-bytes 32768 --payload random --rate 1000
+just bench proxy-relay --burst 16 --response-bytes 256 --rate 2000
 just bench control-population --population 128 --seconds 30
 just bench control-population --population 512 --rate 2000 --seconds 30
 just bench control-churn --population 128 --rate 20 --seconds 20
@@ -31,8 +32,9 @@ listeners and authentication policy are unchanged. Each request and response is 
 sequence number. Default packet bodies are 32 bytes upstream and 1 KiB downstream with mixed compressibility. Try
 `--payload repeated`, `mixed` and `random`, and `--no-compression` / `--no-encryption` to distinguish costs. These
 opaque packets model transport work, not an actual Minecraft play session or representative traffic capture. Each
-connection has at most one outstanding round trip; there is no independent server broadcast, sustained one-way stream,
-slow reader or backpressure workload.
+connection has at most one outstanding round trip. `--burst N` makes the gameplay server answer each request with N
+response packets in one write, which exercises write batching; there is still no independent server broadcast, sustained
+one-way stream, slow reader or backpressure workload.
 
 Control populations are seeded through real claim and activation RPCs. Synthetic runtimes provide independent process
 identities, session inventories and instant player arrival; they do not launch JVMs or simulate game ticks, startup or

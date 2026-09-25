@@ -130,7 +130,11 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &target::Target) 
         config.rate(),
         config.concurrency
     );
-    let bytes = if config.scenario == Scenario::ProxyRelay { config.request_bytes + config.response_bytes } else { 0 };
+    let bytes = if config.scenario == Scenario::ProxyRelay {
+        config.request_bytes + config.response_bytes * config.burst
+    } else {
+        0
+    };
     let warmup = load::run(config.clone(), &mut clients, config.warmup, 0).await?;
     warmup.write(&output, "warmup")?;
     ensure!(warmup.errors.is_empty(), "warmup operations failed: {:?}", warmup.errors);
