@@ -1,8 +1,8 @@
 # Repository architecture
 
-This page maps the implemented local platform to its repository boundaries. The
-[knowledgebase](https://github.com/chunkzero/knowledgebase) owns the broader platform design and unresolved decisions.
-Proposed domains, hosted APIs and rollout features below remain separate from the implemented build and runtime.
+This page maps the implemented local platform to its repository boundaries. Architecture decisions are GitHub issues
+labelled `decision`; the current direction is [#149](https://github.com/chunkzero/chunk/issues/149). Proposed domains,
+hosted APIs and rollout features below remain separate from the implemented build and runtime.
 
 ## Ownership
 

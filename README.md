@@ -42,8 +42,10 @@ branch; dashboard integration and asset uploads remain deferred.
 | `examples/java/`          | Java consumer using the runtime and generated typed backend API                          |
 | `docs/architecture.md`    | Implemented boundaries and deferred platform design                                      |
 
-The intended platform design lives in the [chunkzero knowledgebase](https://github.com/chunkzero/knowledgebase). The
-[repository architecture](docs/architecture.md) maps the implementation and identifies the remaining proposals.
+Architecture decisions are GitHub issues labelled `decision`; the current direction is
+[#149](https://github.com/chunkzero/chunk/issues/149) and the roadmap is
+[#46](https://github.com/chunkzero/chunk/issues/46). The [repository architecture](docs/architecture.md) maps the
+implementation and identifies the remaining proposals.
 
 ## Development
 
