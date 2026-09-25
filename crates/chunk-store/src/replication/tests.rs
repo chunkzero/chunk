@@ -22,12 +22,25 @@ impl Memory {
     fn keys(&self) -> Vec<String> {
         self.0.lock().unwrap().keys().cloned().collect()
     }
+
+    fn copy(&self) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(self.0.lock().unwrap().clone())))
+    }
 }
 
 impl ObjectStorage for Memory {
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
         self.0.lock().unwrap().insert(key.into(), bytes);
         Ok(())
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        let mut objects = self.0.lock().unwrap();
+        if objects.contains_key(key) {
+            return Ok(false);
+        }
+        objects.insert(key.into(), bytes);
+        Ok(true)
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
@@ -53,7 +66,11 @@ fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
 }
 
-/// Every schema object and row except the epoch and the pending log.
+fn count(storage: &Memory, kind: &str) -> usize {
+    storage.keys().iter().filter(|key| key.contains(kind)).count()
+}
+
+/// Every schema object and row except replication bookkeeping.
 fn dump(path: &Path) -> Vec<String> {
     let connection = Connection::open(path).unwrap();
     let mut lines = Vec::new();
@@ -73,7 +90,7 @@ fn dump(path: &Path) -> Vec<String> {
         let mut cursor = rows.query([]).unwrap();
         while let Some(row) = cursor.next().unwrap() {
             let values: Vec<String> = (0..columns.len())
-                .filter(|index| columns[*index] != "epoch")
+                .filter(|index| !matches!(columns[*index].as_str(), "epoch" | "claim" | "log_sequence"))
                 .map(|index| format!("{:?}", row.get::<_, Value>(index).unwrap()))
                 .collect();
             lines.push(format!("  {}", values.join(", ")));
@@ -94,18 +111,24 @@ fn restore_replays_the_latest_snapshot_and_later_segments_exactly() {
         .commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1}))), write("b", Some(json!({"coins": 2})))]))
         .unwrap();
     replicator.flush().unwrap();
-    let context = RetryContext { deployment: "v1".into(), timestamp: 1, seed: 2 };
-    store.prepare_operation(&operation("pending"), context).unwrap();
-    store.commit(commit("two", 2, vec![write("a", None)])).unwrap();
-    replicator.flush().unwrap();
     let extended = serde_json::from_value(json!({"profiles": {
         "fields": {"coins": {"schema": {"type": "integer"}}, "name": {"schema": {"type": "string"}, "optional": true}},
         "indexes": {"by_name": ["name"]}
     }}))
     .unwrap();
     store.apply_schema(&extended).unwrap();
+    store.commit(commit("three", 3, vec![write("c", Some(json!({"coins": 3, "name": "c"})))])).unwrap();
     replicator.flush().unwrap();
-    store.commit(commit("three", 4, vec![write("c", Some(json!({"coins": 3, "name": "c"})))])).unwrap();
+    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (1, 2));
+
+    // The schema change is replayed from a segment, not carried by a snapshot.
+    let schema_replayed = directory.path().join("schema.db");
+    drop(open(&schema_replayed, manual(&storage.copy())));
+    assert_eq!(dump(&schema_replayed), dump(&path));
+
+    let context = RetryContext { deployment: "v1".into(), timestamp: 1, seed: 2 };
+    store.prepare_operation(&operation("pending"), context).unwrap();
+    store.commit(commit("two", 4, vec![write("a", None)])).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
 
@@ -119,9 +142,7 @@ fn restore_replays_the_latest_snapshot_and_later_segments_exactly() {
     store.commit(commit("six", 7, vec![write("e", Some(json!({"coins": 6})))])).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
-    let keys = storage.keys();
-    assert_eq!(keys.iter().filter(|key| key.contains("/snapshots/")).count(), 3, "{keys:#?}");
-    assert_eq!(keys.iter().filter(|key| key.contains("/segments/")).count(), 4, "{keys:#?}");
+    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (3, 3));
 
     let restored = directory.path().join("restored.db");
     let (store, _replicator) = open(&restored, manual(&storage));
@@ -131,7 +152,7 @@ fn restore_replays_the_latest_snapshot_and_later_segments_exactly() {
 }
 
 #[test]
-fn a_crash_loses_only_the_unsent_tail_and_restores_never_reuse_a_generation() {
+fn successive_crashes_lose_only_unsent_tails_and_never_reuse_a_generation() {
     let storage = Arc::new(Memory::default());
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.db");
@@ -144,22 +165,87 @@ fn a_crash_loses_only_the_unsent_tail_and_restores_never_reuse_a_generation() {
     // Stopping without a flush stands in for a killed process.
     drop((store, replicator));
 
-    let second = directory.path().join("second.db");
-    let (mut store, replicator) = open(&second, manual(&storage));
-    assert_eq!(store.epoch(), Epoch(2));
-    assert!(store.outcome(&operation("kept")).unwrap().is_some());
-    assert!(store.outcome(&operation("lost")).unwrap().is_none());
-    let next = store.commit(commit("next", 2, vec![])).unwrap();
-    assert_eq!(next.revision, lost.revision);
-    assert_ne!((store.epoch(), next.revision), (Epoch(1), lost.revision));
+    let mut generations = vec![(Epoch(1), lost.revision)];
+    for (attempt, epoch) in [(2, Epoch(2)), (3, Epoch(3))] {
+        let (mut store, replicator) = open(&directory.path().join(format!("{attempt}.db")), manual(&storage));
+        assert_eq!(store.epoch(), epoch);
+        assert!(store.outcome(&operation("kept")).unwrap().is_some());
+        assert!(store.outcome(&operation("lost")).unwrap().is_none());
+        let next = store.commit(commit(&format!("next-{attempt}"), 2, vec![])).unwrap();
+        assert_eq!(next.revision, lost.revision);
+        assert!(!generations.contains(&(store.epoch(), next.revision)));
+        generations.push((store.epoch(), next.revision));
+        // Acknowledged, then lost before its epoch's first snapshot was uploaded.
+        drop((store, replicator));
+    }
+
+    assert!(matches!(SqliteStore::open_replicated(&path, "local", manual(&storage)), Err(Error::StaleReplica)));
+    let (mut store, replicator) = open(&directory.path().join("last.db"), manual(&storage));
+    assert_eq!(store.epoch(), Epoch(4));
+    store.commit(commit("durable", 2, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    let (mut store, _replicator) = open(&directory.path().join("after.db"), manual(&storage));
+    assert_eq!(store.epoch(), Epoch(5));
+    assert!(store.outcome(&operation("durable")).unwrap().is_some());
+    assert_eq!(store.snapshot().unwrap().revision, Revision(3));
+}
+
+#[test]
+fn competing_restores_claim_distinct_epochs() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("data.db"), manual(&storage));
+    store.apply_schema(&schema()).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
 
-    assert!(matches!(SqliteStore::open_replicated(&path, "local", manual(&storage)), Err(Error::StaleReplica)));
-    let (mut store, _replicator) = open(&directory.path().join("third.db"), manual(&storage));
-    assert_eq!(store.epoch(), Epoch(3));
-    assert!(store.outcome(&operation("next")).unwrap().is_some());
-    assert_eq!(store.snapshot().unwrap().revision, Revision(3));
+    // Both restores list storage before either claims an epoch.
+    let remote = Remote::load(storage.as_ref()).unwrap();
+    let epochs: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|name| {
+            let path = directory.path().join(name);
+            std::fs::File::create(&path).unwrap();
+            restore(&path, "local", storage.as_ref(), &remote).unwrap();
+            let (store, _replicator) = open(&path, manual(&storage));
+            store.epoch()
+        })
+        .collect();
+    assert_eq!(epochs, [Epoch(2), Epoch(3)]);
+    assert!(matches!(
+        SqliteStore::open_replicated(directory.path().join("first"), "local", manual(&storage)),
+        Err(Error::StaleReplica)
+    ));
+}
+
+#[test]
+fn enabling_replication_snapshots_existing_data_before_any_commit() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let mut store = SqliteStore::open(&path, "local").unwrap();
+    assert_eq!(store.apply_schema(&schema()).unwrap(), Revision(1));
+    drop(store);
+    let (_store, replicator) = open(&path, manual(&storage));
+    replicator.flush().unwrap();
+    assert_eq!(count(&storage, "/snapshots/"), 1);
+    let (mut store, _replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert_eq!(store.snapshot().unwrap().schema(), &schema());
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_keeps_the_database_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (_store, replicator) = open(&directory.path().join("data.db"), manual(&storage));
+    replicator.flush().unwrap();
+    let path = directory.path().join("restored.db");
+    std::fs::File::create(&path).unwrap().set_permissions(std::fs::Permissions::from_mode(0o600)).unwrap();
+    drop(open(&path, manual(&storage)));
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
 
 #[test]
@@ -169,12 +255,14 @@ fn uploads_follow_commits_and_an_idle_store_uploads_nothing() {
     let path = directory.path().join("data.db");
     let replication = || Replication { batch_delay: Duration::from_millis(10), ..Replication::new(storage.clone()) };
     let (mut store, replicator) = open(&path, replication());
+    replicator.flush().unwrap();
+    let initial = storage.keys();
     std::thread::sleep(Duration::from_millis(100));
-    assert!(storage.keys().is_empty());
+    assert_eq!(storage.keys(), initial);
 
     store.apply_schema(&schema()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while storage.keys().is_empty() {
+    while storage.keys() == initial {
         assert!(Instant::now() < deadline, "commit was not uploaded");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -209,7 +297,11 @@ fn segments_round_trip_and_reject_corruption() {
 fn s3_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.db");
-    let (mut store, replicator) = open(&path, Replication::from_env().unwrap().expect("CHUNK_REPLICATION_BUCKET"));
+    let replication = Replication::from_env().unwrap().expect("CHUNK_REPLICATION_BUCKET");
+    let claim = "probes/claim";
+    assert!(replication.storage().create(claim, vec![1]).unwrap());
+    assert!(!replication.storage().create(claim, vec![2]).unwrap());
+    let (mut store, replicator) = open(&path, Replication::from_env().unwrap().unwrap());
     let epoch = store.epoch();
     store.apply_schema(&schema()).unwrap();
     replicator.flush().unwrap();

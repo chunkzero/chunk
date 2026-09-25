@@ -76,17 +76,28 @@ pub(crate) fn epoch(connection: &Connection) -> Result<u64> {
     Ok(connection.query_row("SELECT epoch FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?)
 }
 
-/// Advances the sequence without an entry and drops pending entries, so the
-/// uploader sees a gap and replaces the unlogged history with a snapshot.
+/// The random token this database wrote to its epoch's claim object.
+pub(crate) fn claim(connection: &Connection) -> Result<String> {
+    Ok(connection.query_row("SELECT claim FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?)
+}
+
+/// Marks changes the replicated log may lack, once replication has been used.
 pub(super) fn mark_unlogged(connection: &Connection) -> Result<()> {
     if position(connection)?.0 > 0 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             UPDATE _chunk_metadata SET log_sequence = log_sequence + 1 WHERE singleton = 1;
-             DELETE FROM _chunk_log;
-             COMMIT;",
-        )?;
+        skip_sequence(connection)?;
     }
+    Ok(())
+}
+
+/// Advances the sequence without an entry and drops pending entries, so the
+/// uploader sees a gap and replaces the unlogged history with a snapshot.
+pub(super) fn skip_sequence(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         UPDATE _chunk_metadata SET log_sequence = log_sequence + 1 WHERE singleton = 1;
+         DELETE FROM _chunk_log;
+         COMMIT;",
+    )?;
     Ok(())
 }
 
@@ -144,9 +155,17 @@ impl Replica {
         Ok(())
     }
 
-    /// Commits the replayed entries under `epoch`, leaving a single durable file.
-    pub fn finish(self, epoch: u64) -> Result<()> {
-        self.connection.execute("UPDATE _chunk_metadata SET epoch = ?1 WHERE singleton = 1", [epoch])?;
+    /// A fresh random claim token.
+    pub fn token(&self) -> Result<String> {
+        Ok(self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?)
+    }
+
+    /// Commits the replayed entries under a claimed `epoch`, leaving a single durable file.
+    pub fn finish(self, epoch: u64, claim: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE _chunk_metadata SET epoch = ?1, claim = ?2 WHERE singleton = 1",
+            rusqlite::params![epoch, claim],
+        )?;
         self.connection.execute_batch("DELETE FROM _chunk_log; COMMIT;")?;
         self.connection.close().map_err(|(_, error)| error)?;
         Ok(())

@@ -112,6 +112,8 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
             "BEGIN IMMEDIATE;
              ALTER TABLE _chunk_metadata ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0);
              ALTER TABLE _chunk_metadata ADD COLUMN log_sequence INTEGER NOT NULL DEFAULT 0 CHECK (log_sequence >= 0);
+             ALTER TABLE _chunk_metadata ADD COLUMN claim TEXT NOT NULL DEFAULT '';
+             UPDATE _chunk_metadata SET claim = lower(hex(randomblob(16)));
              CREATE TABLE _chunk_log (sequence INTEGER PRIMARY KEY, entry BLOB NOT NULL) STRICT;
              PRAGMA user_version = 7;
              COMMIT;",

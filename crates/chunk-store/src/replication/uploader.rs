@@ -149,6 +149,7 @@ impl Uploader {
 
     fn upload_snapshot(&self, copy: &Path) -> Result<u64> {
         let name = copy.to_str().ok_or(Error::Invalid("database path is not UTF-8"))?;
+        super::create_private(copy)?;
         self.connection.execute("VACUUM INTO ?1", [name])?;
         let database = Connection::open(copy)?;
         database.pragma_update(None, "journal_mode", "DELETE")?;

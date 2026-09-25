@@ -1,5 +1,6 @@
 use std::{
     fs::{self, File},
+    io::Write,
     path::Path,
 };
 
@@ -57,8 +58,8 @@ impl Remote {
 }
 
 /// Restores the newest epoch's latest snapshot and its later segments into
-/// `path`, under the next unused epoch. Leaves `path` untouched when storage has
-/// no snapshot or anything fails.
+/// `path`, under an epoch it claims in storage first. Leaves `path` untouched
+/// when storage has no snapshot or anything fails.
 pub(crate) fn restore(path: &Path, environment: &str, storage: &dyn ObjectStorage, remote: &Remote) -> Result<()> {
     let snapshots = remote.objects.iter().filter(|object| matches!(object, Object::Snapshot { .. }));
     let Some(epoch) = snapshots.map(Object::epoch).max() else {
@@ -68,7 +69,9 @@ pub(crate) fn restore(path: &Path, environment: &str, storage: &dyn ObjectStorag
     let base = remote.base(epoch).unwrap_or(0);
     let temporary = super::sibling(path, "restore");
     let result = (|| {
-        fs::write(&temporary, storage.get(&segment::snapshot_key(epoch, base))?)?;
+        let mut file = super::create_private(&temporary)?;
+        file.write_all(&storage.get(&segment::snapshot_key(epoch, base))?)?;
+        drop(file);
         let mut replica = Replica::open(&temporary, environment, epoch, base)?;
         let mut segments: Vec<_> = remote.segments(epoch).collect();
         segments.sort_unstable();
@@ -85,7 +88,13 @@ pub(crate) fn restore(path: &Path, environment: &str, storage: &dyn ObjectStorag
                 replica.replay(entry)?;
             }
         }
-        replica.finish(latest + 1)?;
+        let token = replica.token()?;
+        let mut claimed = latest + 1;
+        while !storage.create(&segment::claim_key(claimed), token.clone().into_bytes())? {
+            claimed += 1;
+        }
+        replica.finish(claimed, &token)?;
+        fs::set_permissions(&temporary, fs::metadata(path)?.permissions())?;
         File::open(&temporary)?.sync_all()?;
         fs::rename(&temporary, path)?;
         if let Some(directory) = path.parent() {

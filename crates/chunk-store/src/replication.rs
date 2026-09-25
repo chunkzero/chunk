@@ -43,6 +43,11 @@ pub trait ObjectStorage: Send + Sync {
     /// Reports transport or storage failures.
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()>;
 
+    /// Stores `bytes` only if `key` is absent, atomically, reporting whether it did.
+    /// # Errors
+    /// Reports transport or storage failures.
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool>;
+
     /// # Errors
     /// Reports missing objects, transport or storage failures.
     fn get(&self, key: &str) -> io::Result<Vec<u8>>;
@@ -195,6 +200,24 @@ impl Shared {
         state.pending_since.get_or_insert_with(Instant::now);
         self.changed.notify_all();
     }
+}
+
+/// Owns `epoch` through its claim object, creating it when absent.
+pub(crate) fn claim(storage: &dyn ObjectStorage, epoch: u64, token: &str) -> Result<()> {
+    let key = segment::claim_key(epoch);
+    if storage.create(&key, token.as_bytes().to_vec())? || storage.get(&key)? == token.as_bytes() {
+        return Ok(());
+    }
+    Err(Error::StaleReplica)
+}
+
+/// Creates a file only its owner can read, since it holds environment data.
+fn create_private(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::File::options();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
 }
 
 /// A scratch file beside the database, on the same filesystem for atomic renames.

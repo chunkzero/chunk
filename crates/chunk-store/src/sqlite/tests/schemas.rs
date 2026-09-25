@@ -161,6 +161,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
             .execute_batch(
                 "ALTER TABLE _chunk_metadata DROP COLUMN epoch;
                  ALTER TABLE _chunk_metadata DROP COLUMN log_sequence;
+                 ALTER TABLE _chunk_metadata DROP COLUMN claim;
                  DROP TABLE _chunk_log;",
             )
             .unwrap();

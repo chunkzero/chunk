@@ -71,11 +71,16 @@ impl SqliteStore {
             log::mark_unlogged(&connection)?;
         }
         let epoch = log::epoch(&connection)?;
-        let (sequence, _) = log::position(&connection)?;
         let uploaded = remote.uploaded(epoch);
-        if remote.latest_epoch().is_some_and(|latest| latest > epoch) || uploaded > sequence {
+        if remote.latest_epoch().is_some_and(|latest| latest > epoch) || uploaded > log::position(&connection)?.0 {
             return Err(Error::StaleReplica);
         }
+        replication::claim(replication.storage(), epoch, &log::claim(&connection)?)?;
+        if remote.base(epoch).is_none() {
+            // Existing data reaches storage only through a first snapshot.
+            log::skip_sequence(&connection)?;
+        }
+        let (sequence, _) = log::position(&connection)?;
         connection.execute("DELETE FROM _chunk_log WHERE sequence <= ?1", [uploaded])?;
         let (replicator, shared) = Replicator::start(path.clone(), replication, epoch, &remote, sequence)?;
         let store = Self::new(connection, path, writer_lock, Some(log::Log::new(shared, uploaded)))?;

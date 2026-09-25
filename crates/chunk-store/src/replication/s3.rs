@@ -1,7 +1,9 @@
 use std::{io, sync::Arc};
 
 use futures_util::TryStreamExt;
-use object_store::{ObjectStore, PutPayload, aws::AmazonS3Builder, path::Path, prefix::PrefixStore};
+use object_store::{
+    ObjectStore, PutMode, PutOptions, PutPayload, aws::AmazonS3Builder, path::Path, prefix::PrefixStore,
+};
 
 use super::ObjectStorage;
 use crate::{Error, Result};
@@ -62,6 +64,18 @@ impl ObjectStorage for S3 {
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
         let (store, key) = (self.store.clone(), Path::from(key));
         self.run(async move { store.put(&key, PutPayload::from(bytes)).await.map(|_| ()) })
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        let (store, key) = (self.store.clone(), Path::from(key));
+        self.run(async move {
+            let options = PutOptions { mode: PutMode::Create, ..PutOptions::default() };
+            match store.put_opts(&key, PutPayload::from(bytes), options).await {
+                Ok(_) => Ok(true),
+                Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(false),
+                Err(error) => Err(error),
+            }
+        })
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {

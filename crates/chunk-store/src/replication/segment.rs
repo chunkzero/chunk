@@ -115,12 +115,17 @@ pub(crate) fn snapshot_key(epoch: u64, sequence: u64) -> String {
     format!("epochs/{epoch:020}/snapshots/{sequence:020}.db")
 }
 
+pub(crate) fn claim_key(epoch: u64) -> String {
+    format!("epochs/{epoch:020}/claim")
+}
+
 pub(crate) fn segment_key(epoch: u64, first: u64, last: u64) -> String {
     format!("epochs/{epoch:020}/segments/{first:020}-{last:020}.log")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Object {
+    Claim { epoch: u64 },
     Snapshot { epoch: u64, sequence: u64 },
     Segment { epoch: u64, first: u64, last: u64, size: u64 },
 }
@@ -130,6 +135,9 @@ impl Object {
     pub fn parse(key: &str, size: u64) -> Option<Self> {
         let (epoch, rest) = key.strip_prefix("epochs/")?.split_once('/')?;
         let epoch = epoch.parse().ok()?;
+        if rest == "claim" {
+            return Some(Self::Claim { epoch });
+        }
         if let Some(name) = rest.strip_prefix("snapshots/") {
             return Some(Self::Snapshot { epoch, sequence: name.strip_suffix(".db")?.parse().ok()? });
         }
@@ -139,7 +147,7 @@ impl Object {
 
     pub fn epoch(&self) -> u64 {
         match self {
-            Self::Snapshot { epoch, .. } | Self::Segment { epoch, .. } => *epoch,
+            Self::Claim { epoch } | Self::Snapshot { epoch, .. } | Self::Segment { epoch, .. } => *epoch,
         }
     }
 }
