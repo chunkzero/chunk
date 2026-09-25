@@ -14,16 +14,20 @@ service AuthService {
   rpc StartLogin(StartLoginRequest) returns (StartLoginResponse);
   // Checks a started login. Needs no token; login_id is the secret. Once
   // approved, every poll returns the same token and secret until the login's
-  // expire_time, so a lost response can be retried; after that the login is
-  // gone and polls fail with NOT_FOUND.
+  // expire_time, so a lost response can be retried. Past expire_time, an
+  // unapproved login returns state EXPIRED, and an approved one fails with
+  // NOT_FOUND like an unknown login_id.
   rpc PollLogin(PollLoginRequest) returns (PollLoginResponse);
   // Approves a pending login by the code the CLI showed, issuing a token for
-  // the calling person. Called by the dashboard.
+  // the calling person. Called by the dashboard. Fails with PERMISSION_DENIED
+  // when the calling token is limited to a project.
   rpc ApproveLogin(ApproveLoginRequest) returns (ApproveLoginResponse);
   // Returns who the calling token belongs to.
   rpc GetCurrentPrincipal(GetCurrentPrincipalRequest) returns (GetCurrentPrincipalResponse);
   // Creates a named token for the caller, for example for CI. Idempotent by
-  // request_id. The secret is only ever returned here.
+  // request_id. The secret is only ever returned here. A caller whose token is
+  // limited to a project can only create tokens limited to that project;
+  // anything else fails with PERMISSION_DENIED.
   rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
   // Lists the caller's tokens, without secrets.
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);

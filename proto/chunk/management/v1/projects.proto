@@ -36,6 +36,7 @@ message Project {
   string id = 1;
   // The account or team that owns the project. Opaque; single-tenant installs leave it empty.
   string owner_id = 2;
+  // Unique per owner; a DNS label: 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
   string name = 3;
   google.protobuf.Timestamp create_time = 4;
 }
@@ -43,7 +44,7 @@ message Project {
 message Environment {
   string id = 1;
   string project_id = 2;
-  // Unique within the project.
+  // Unique within the project; a DNS label: 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
   string name = 3;
   EnvironmentState state = 4;
   // Empty until something is deployed.
@@ -152,7 +153,7 @@ message ForkEnvironmentRequest {
   string source_environment_id = 2;
   // Empty for the source's latest snapshot.
   string snapshot_id = 3;
-  // The fork's name; unique within the project.
+  // The fork's name, following Environment.name rules.
   string name = 4;
   // Copy the source's secrets into the fork. Otherwise the fork starts with none.
   bool copy_secrets = 5;

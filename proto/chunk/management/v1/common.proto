@@ -8,7 +8,10 @@
 // - Mutations that are not naturally idempotent take a client-chosen
 //   `request_id` (a UUID). A retry with the same ID returns the first result
 //   instead of repeating the mutation; reusing an ID with different arguments
-//   fails with ALREADY_EXISTS.
+//   fails with ALREADY_EXISTS. Request IDs are scoped to the calling
+//   principal and its token's scope: the same ID from another principal or a
+//   differently scoped token is an unrelated request and never replays
+//   another caller's result.
 // - Lists take `page_size` and `page_token` and return `next_page_token`,
 //   which is empty on the last page. A `page_size` of 0 means the server's
 //   default, and the server may cap it.

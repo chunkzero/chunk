@@ -24,7 +24,12 @@ message Domain {
   // Lowercase, without a trailing dot.
   string hostname = 3;
   DomainState state = 4;
-  // Records the owner must create: an ownership proof and routing to the edge.
+  // Records the owner must create: a TXT ownership proof and a
+  // `_minecraft._tcp.<hostname>` SRV record that routes players to the edge.
+  // SRV works at a zone apex, where a CNAME cannot. Its target is a name the
+  // install routes to this environment, so routing works whichever hostname
+  // the client puts in its handshake. For hostnames below the apex, a CNAME
+  // to the edge may be listed as well.
   repeated DnsRecord dns_records = 5;
   google.protobuf.Timestamp create_time = 6;
 }
@@ -36,9 +41,10 @@ enum DomainState {
 }
 
 message DnsRecord {
-  // TXT, CNAME, SRV, A or AAAA.
+  // TXT, SRV or CNAME.
   string type = 1;
   string name = 2;
+  // For SRV: `priority weight port target`.
   string value = 3;
 }
 

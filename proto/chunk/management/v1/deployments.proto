@@ -13,7 +13,9 @@ service DeploymentService {
   // Starts or resumes uploading a release archive. Idempotent by release ID:
   // if the project already holds the release, no upload target is returned.
   // Otherwise PUT the archive bytes to the target, then call
-  // CompleteReleaseUpload.
+  // CompleteReleaseUpload. Until the release is READY, the latest call's
+  // digest and size replace earlier ones; once it is READY, a different
+  // digest or size fails with ALREADY_EXISTS.
   rpc UploadRelease(UploadReleaseRequest) returns (UploadReleaseResponse);
   // Verifies an uploaded archive against its digest and manifest and makes
   // the release deployable. Idempotent.
