@@ -8,6 +8,7 @@ use crate::{
     commit::Job,
     reads::View,
     service::{Call, Request, Update},
+    timing::{Phase, Timer},
 };
 
 impl Actor {
@@ -127,6 +128,7 @@ impl Actor {
         if self.deploying.is_some() || self.releasing.is_some() {
             return Err(Error::Busy);
         }
+        let timer = Timer::start();
         let cancellation = &Cancellation::default();
         let snapshot = self.view.clone();
         let context = mutation.context.as_ref().ok_or(Error::Invalid("operation not prepared"))?;
@@ -188,6 +190,7 @@ impl Actor {
         // Execution and validation are serialized on this thread, so no mutation
         // can change the read revision before this batch is applied.
         let revision = Revision(snapshot.revision.0.checked_add(1).ok_or(Error::Invalid("revision exhausted"))?);
+        timer.stop(Phase::Mutation);
         self.send(Job::Commit {
             expected: snapshot.revision,
             operation: mutation.operation.clone(),
@@ -197,7 +200,14 @@ impl Actor {
         })?;
         drop(snapshot);
         std::rc::Rc::make_mut(&mut self.view).apply(revision, &writes);
-        self.pending.push_back(Pending { operation: mutation.operation.id.clone(), revision, writes, changes, bytes });
+        self.pending.push_back(Pending {
+            operation: mutation.operation.id.clone(),
+            revision,
+            writes,
+            changes,
+            bytes,
+            staged: Timer::start(),
+        });
         self.pending_bytes += bytes;
         Ok(())
     }
@@ -233,6 +243,7 @@ impl Actor {
             self.fail(&Error::CommitFailed);
             return;
         }
+        pending.staged.stop(Phase::Durable);
         self.pending_bytes -= pending.bytes;
         let mut view = View::new(snapshot);
         for next in &self.pending {

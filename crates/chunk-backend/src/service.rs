@@ -60,6 +60,7 @@ pub struct GroupUpdate {
 
 pub(crate) struct Request<T> {
     pub cancellation: Cancellation,
+    pub queued: crate::timing::Timer,
     reply: oneshot::Sender<Result<T>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -70,7 +71,7 @@ impl<T> Request<T> {
         reply: oneshot::Sender<Result<T>>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        Self { cancellation, reply, _permit: permit }
+        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit }
     }
 
     pub fn finish(self, result: Result<T>) {
@@ -320,7 +321,7 @@ impl Backend {
         let cancellation = Cancellation::default();
         let _cancel = CancelOnDrop(cancellation.clone());
         let (reply, response) = oneshot::channel();
-        let request = Request { cancellation, reply, _permit: permit };
+        let request = Request::new(cancellation, reply, permit);
         self.0.events.try_send(Event::Request(Box::new(make(request)))).map_err(|error| match error {
             queue::error::TrySendError::Full(_) => Error::Busy,
             queue::error::TrySendError::Closed(_) => Error::Closed,

@@ -4,6 +4,7 @@ use crate::{
     Error, Result,
     reads::{Dependencies, View},
     service::{Call, GroupSubscription, GroupUpdate, Request},
+    timing::{Phase, Timer},
 };
 use chunk_js::{Cancellation, Mode};
 use std::{rc::Rc, sync::Arc};
@@ -60,6 +61,7 @@ impl Actor {
             view: Rc::new(View::new(self.view.base.clone())),
             changes: Some(changes.to_vec()),
             ids: self.subscriptions.iter().map(|subscription| subscription.id).collect(),
+            published: Timer::start(),
         };
         if self.reevaluations.len() == 2 {
             // Slow watches coalesce to the latest durable snapshot. Reevaluating all
@@ -72,6 +74,14 @@ impl Actor {
     }
 
     pub(super) fn reevaluate_one(&mut self) {
+        let finishing = self.reevaluations.front().filter(|batch| batch.ids.len() == 1).map(|batch| batch.published);
+        self.reevaluate_next();
+        if let Some(published) = finishing {
+            published.stop(Phase::FanOut);
+        }
+    }
+
+    fn reevaluate_next(&mut self) {
         let Some(batch) = self.reevaluations.front_mut() else {
             return;
         };
@@ -90,7 +100,9 @@ impl Actor {
         if subscription.sender.is_closed() {
             return;
         }
+        let timer = Timer::start();
         let (results, dependencies) = self.evaluate_group(&subscription.calls, &view, &Cancellation::default());
+        timer.stop(Phase::Reevaluate);
         subscription.dependencies = dependencies;
         let changed = results.iter().zip(&subscription.results).any(|(next, previous)| match (next, previous) {
             (Ok(a), Ok(b)) => a != b,
