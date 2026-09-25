@@ -1,0 +1,25 @@
+{
+  "name": "@chunkzero/management",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "generate": "buf generate ../../proto --template buf.gen.yaml --path ../../proto/chunk/management && oxfmt src/gen",
+    "typecheck": "tsc --project tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.15.0",
+    "@connectrpc/connect": "2.2.0",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "2.15.0",
+    "@connectrpc/connect-web": "2.2.0",
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}

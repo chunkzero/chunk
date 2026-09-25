@@ -1,0 +1,101 @@
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import type { DescService } from "@bufbuild/protobuf";
+import { type Client, createClient } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+
+import { ensureOperatorToken } from "../src/auth/tokens.ts";
+import { deriveKeys, type Keys, randomToken } from "../src/crypto.ts";
+import { connect, migrate, type Sql } from "../src/db.ts";
+import { localReleaseStore } from "../src/releases/local-store.ts";
+import { createHandler } from "../src/server.ts";
+
+/** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
+export const databaseUrl = process.env.TEST_DATABASE_URL;
+
+export interface Harness {
+  sql: Sql;
+  keys: Keys;
+  url: string;
+  operatorToken: string;
+  /** TXT records the fake resolver answers with, by name. */
+  txt: Map<string, string[]>;
+  /** A client sending `token` as its bearer, or none when null. */
+  client<T extends DescService>(service: T, token?: string | null): Client<T>;
+  close(): Promise<void>;
+}
+
+/** Serves the API on a random port against a fresh schema, a temporary release directory and a fake resolver. */
+export async function startHarness(): Promise<Harness> {
+  if (!databaseUrl) throw new Error("TEST_DATABASE_URL is not set");
+  const schema = `test_${randomBytes(6).toString("hex")}`;
+  const admin = connect(databaseUrl);
+  await admin.unsafe(`create schema ${schema}`);
+  const sql = connect(databaseUrl, { searchPath: schema });
+  await migrate(sql);
+  const operatorToken = `chunk_${randomToken()}`;
+  await ensureOperatorToken(sql, operatorToken);
+  const keys = deriveKeys(randomBytes(32));
+  const directory = await mkdtemp(join(tmpdir(), "chunk-management-"));
+  const txt = new Map<string, string[]>();
+
+  let handler: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => handler(request) });
+  const url = server.url.origin;
+  handler = createHandler({
+    sql,
+    keys,
+    releases: localReleaseStore({ directory, keys, publicUrl: url }),
+    async resolveTxt(name) {
+      const records = txt.get(name);
+      if (!records) throw Object.assign(new Error(`no records for ${name}`), { code: "ENOTFOUND" });
+      return records.map((record) => [record]);
+    },
+    publicUrl: url,
+    edge: { domain: "play.example.net", port: 25565 },
+  });
+
+  return {
+    sql,
+    keys,
+    url,
+    operatorToken,
+    txt,
+    client(service, token = operatorToken) {
+      const transport = createConnectTransport({
+        baseUrl: url,
+        useBinaryFormat: true,
+        interceptors:
+          token === null
+            ? []
+            : [
+                (next) => (request) => {
+                  request.header.set("authorization", `Bearer ${token}`);
+                  return next(request);
+                },
+              ],
+      });
+      return createClient(service, transport);
+    },
+    async close() {
+      await server.stop(true);
+      await sql.end();
+      await admin.unsafe(`drop schema ${schema} cascade`);
+      await admin.end();
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Runs `call` and returns the Connect error code it failed with. */
+export async function codeOf(call: Promise<unknown>): Promise<number | undefined> {
+  try {
+    await call;
+    return undefined;
+  } catch (error) {
+    return (error as { code?: number }).code;
+  }
+}
