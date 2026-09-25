@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Drafts skip CI; run the checks locally, or mark the PR ready and push to run them here.
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 env:
   CARGO_BUILD_JOBS: 2
@@ -18,6 +21,7 @@ concurrency:
 
 jobs:
   formatting:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -32,6 +36,7 @@ jobs:
       - run: just fmt-check
 
   rust:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
@@ -51,6 +56,7 @@ jobs:
       - run: cargo test -p chunk-proxy --no-default-features
 
   jvm:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 60
     env:
@@ -90,6 +96,7 @@ jobs:
           retention-days: 7
 
   proto:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -101,6 +108,7 @@ jobs:
           pr_comment: false
 
   typescript:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
