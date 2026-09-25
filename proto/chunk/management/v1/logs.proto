@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Environment logs, for the CLI and dashboards. Environments ship them
+// through EnvironmentService.ReportLogs.
+service LogService {
+  // Streams matching log entries, oldest first, in batches. Without follow,
+  // the stream ends after the stored entries; with follow, it stays open and
+  // sends new entries as they arrive.
+  rpc ReadLogs(ReadLogsRequest) returns (stream ReadLogsResponse);
+}
+
+message ReadLogsRequest {
+  string environment_id = 1;
+  // Optional filters.
+  string deployment_id = 2;
+  string app_id = 3;
+  // Entries at or after this time. Unset for the most recent `limit` entries.
+  google.protobuf.Timestamp start_time = 4;
+  // Maximum stored entries to send before following; 0 means the server's default.
+  uint32 limit = 5;
+  bool follow = 6;
+}
+
+message ReadLogsResponse {
+  repeated LogEntry entries = 1;
+}

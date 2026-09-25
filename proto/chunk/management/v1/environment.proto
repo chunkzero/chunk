@@ -1,0 +1,256 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Called by an environment's own processes with that environment's token; the
+// token decides which environment each call concerns. Environments never hold
+// provider credentials: they ask this service for capacity and it drives the
+// provider.
+service EnvironmentService {
+  // Registers one environment process and streams the environment's desired
+  // state. The first message is sent at once and later ones follow every
+  // change. Each message is complete and replaces the previous one, so a
+  // process that reconnects applies the latest message and carries on. The
+  // server may resend an unchanged revision as a keepalive.
+  rpc Attach(AttachRequest) returns (stream AttachResponse);
+  // Reports what the environment serves: ready gateways, players, deployment
+  // progress and the server-list statuses edges cache while it sleeps. Called
+  // by core periodically, on change, and before suspending. A report older
+  // than the last accepted one, by observe_time, is ignored.
+  rpc ReportStatus(ReportStatusRequest) returns (ReportStatusResponse);
+  // Hands off the backend's next due job so the management plane can wake a
+  // suspended environment for it. Keyed by the backend's wake generation: a
+  // newer generation replaces the stored alarm, an older one is ignored, and
+  // repeating the stored one is a no-op. Acknowledge the handoff locally only
+  // when the response echoes the generation that was sent.
+  rpc SetWakeAlarm(SetWakeAlarmRequest) returns (SetWakeAlarmResponse);
+  // Asks for one machine of a named machine profile. Durable and idempotent
+  // by request_id: the first call records the intent and may return while the
+  // machine is still provisioning. Repeat the call with the same request_id
+  // to observe progress or recover a lost reply. A failed request stays
+  // failed; retry with a new request_id.
+  rpc EnsureCapacity(EnsureCapacityRequest) returns (EnsureCapacityResponse);
+  // Returns the capacity granted under an EnsureCapacity request_id.
+  // Idempotent: releasing unknown or already released capacity succeeds.
+  rpc ReleaseCapacity(ReleaseCapacityRequest) returns (ReleaseCapacityResponse);
+  // Records usage for accounting. At least once: the server deduplicates by
+  // record ID, so retry a batch until it succeeds.
+  rpc ReportUsage(ReportUsageRequest) returns (ReportUsageResponse);
+  // Ships a batch of log lines. At least once: the server drops entries it
+  // already holds by (instance_id, sequence).
+  rpc ReportLogs(ReportLogsRequest) returns (ReportLogsResponse);
+  // Ships a batch of metric samples. Best effort: a lost batch need not be
+  // resent.
+  rpc ReportMetrics(ReportMetricsRequest) returns (ReportMetricsResponse);
+  // Reports client addresses that failed Minecraft authentication at a
+  // gateway. For an expiring period those addresses (IPv6 by prefix) cannot
+  // wake environments through EdgeService.Wake. It never affects connections
+  // to an awake environment.
+  rpc ReportFailedAuth(ReportFailedAuthRequest) returns (ReportFailedAuthResponse);
+}
+
+message AttachRequest {
+  // Stable for the life of the process; the provider's machine ID when there is one.
+  string instance_id = 1;
+  // The environment image version this process runs.
+  string version = 2;
+}
+
+// The environment's complete desired state.
+message AttachResponse {
+  // Increases with every change.
+  uint64 revision = 1;
+  string environment_id = 2;
+  string project_id = 3;
+  // The deployment to serve; empty until something is deployed.
+  string deployment_id = 4;
+  ReleaseArtifact release = 5;
+  // Every secret granted to the environment. Rotation arrives as a new version here.
+  repeated SecretValue secrets = 6;
+  // Where to replicate the log; unset when replication is off.
+  ObjectStore log_store = 7;
+  // Set for forks: when the local log is empty, restore this snapshot first.
+  Restore restore = 8;
+}
+
+// A release archive (`dist/<id>.tar.gz` from `chunk build`) to download.
+message ReleaseArtifact {
+  string release_id = 1;
+  // Fetch with HTTP GET. If the URL is not presigned, send the environment's
+  // bearer token. It may expire; attaching again returns a fresh one.
+  string url = 2;
+  // Hex SHA-256 of the archive bytes.
+  string sha256 = 3;
+  uint64 size_bytes = 4;
+}
+
+message SecretValue {
+  string name = 1;
+  uint64 version = 2;
+  bytes value = 3;
+}
+
+// An S3-compatible prefix with credentials scoped to it.
+message ObjectStore {
+  string endpoint = 1;
+  string region = 2;
+  string bucket = 3;
+  string prefix = 4;
+  string access_key_id = 5;
+  string secret_access_key = 6;
+  // Set for temporary credentials.
+  string session_token = 7;
+  // When the credentials expire; attaching again returns fresh ones.
+  google.protobuf.Timestamp expire_time = 8;
+}
+
+message Restore {
+  // The source environment's log, readable only.
+  ObjectStore source = 1;
+  string snapshot_id = 2;
+}
+
+message ReportStatusRequest {
+  google.protobuf.Timestamp observe_time = 1;
+  // Gateways ready for players, as host:port reachable from edges. The
+  // management plane only routes to addresses on machines it provisioned for
+  // this environment.
+  repeated string gateway_addresses = 2;
+  uint32 online_players = 3;
+  // The latest `server.ping` hook result for each hostname.
+  repeated PingStatus pings = 4;
+  // Progress of the deployment from the latest desired state.
+  DeploymentProgress deployment = 5;
+  // No players remain, the log is flushed and the wake alarm is handed off;
+  // the management plane may suspend the environment. Environments that never
+  // sleep leave it false.
+  bool ready_to_suspend = 6;
+}
+
+message PingStatus {
+  string hostname = 1;
+  // The Minecraft status response JSON.
+  string status_json = 2;
+}
+
+message DeploymentProgress {
+  string deployment_id = 1;
+  // IN_PROGRESS, ACTIVE or FAILED.
+  DeploymentState state = 2;
+  // Why the deployment failed.
+  string message = 3;
+}
+
+message ReportStatusResponse {}
+
+message SetWakeAlarmRequest {
+  uint64 generation = 1;
+  // When the next job is due; unset clears the alarm.
+  google.protobuf.Timestamp due_time = 2;
+}
+
+message SetWakeAlarmResponse {
+  // The generation now stored. Higher than the request means a newer alarm won.
+  uint64 generation = 1;
+}
+
+message EnsureCapacityRequest {
+  string request_id = 1;
+  Workload workload = 2;
+  // A machine profile named in the release's configuration, never a provider size.
+  string machine_profile = 3;
+  // The release whose machine profiles and JVM apps apply.
+  string release_id = 4;
+}
+
+enum Workload {
+  WORKLOAD_UNSPECIFIED = 0;
+  // JVMs for the release's apps.
+  WORKLOAD_JVM = 1;
+  // An extra gateway-only instance of the environment image.
+  WORKLOAD_GATEWAY = 2;
+  // An extra exec-only instance of the environment image.
+  WORKLOAD_EXEC = 3;
+}
+
+message EnsureCapacityResponse {
+  Capacity capacity = 1;
+}
+
+message Capacity {
+  string request_id = 1;
+  CapacityState state = 2;
+  // The provider's machine ID once known. The machine presents request_id when it connects to core.
+  string machine_id = 3;
+  // Why provisioning failed.
+  string message = 4;
+}
+
+enum CapacityState {
+  CAPACITY_STATE_UNSPECIFIED = 0;
+  CAPACITY_STATE_PROVISIONING = 1;
+  CAPACITY_STATE_READY = 2;
+  CAPACITY_STATE_FAILED = 3;
+  CAPACITY_STATE_RELEASED = 4;
+}
+
+message ReleaseCapacityRequest {
+  // The EnsureCapacity request_id.
+  string request_id = 1;
+}
+
+message ReleaseCapacityResponse {
+  Capacity capacity = 1;
+}
+
+message ReportUsageRequest {
+  repeated UsageRecord records = 1;
+}
+
+// A span of time the environment was awake. Spans never overlap.
+message UsageRecord {
+  // Chosen by the environment; the deduplication key.
+  string id = 1;
+  google.protobuf.Timestamp start_time = 2;
+  google.protobuf.Timestamp end_time = 3;
+  // Connected player time summed over all players in the span.
+  uint64 player_seconds = 4;
+}
+
+message ReportUsageResponse {}
+
+message ReportLogsRequest {
+  repeated LogEntry entries = 1;
+}
+
+message ReportLogsResponse {}
+
+message ReportMetricsRequest {
+  repeated MetricSample samples = 1;
+}
+
+// A gauge, or a cumulative counter when the name ends in `_total`.
+message MetricSample {
+  string name = 1;
+  map<string, string> labels = 2;
+  google.protobuf.Timestamp time = 3;
+  double value = 4;
+  string instance_id = 5;
+}
+
+message ReportMetricsResponse {}
+
+message ReportFailedAuthRequest {
+  repeated FailedAuth failures = 1;
+}
+
+message FailedAuth {
+  // The client IP address, without a port.
+  string client_address = 1;
+  google.protobuf.Timestamp time = 2;
+}
+
+message ReportFailedAuthResponse {}
