@@ -20,6 +20,14 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net"] }
 
+[dev-dependencies]
+rustix = { version = "1", features = ["time"] }
+
+[[bench]]
+name = "engines"
+path = "benches/engines/main.rs"
+harness = false
+
 [build-dependencies]
 deno_core.workspace = true
 deno_web.workspace = true
