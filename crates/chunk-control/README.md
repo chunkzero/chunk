@@ -58,13 +58,13 @@ acknowledgment.
 Graceful control shutdown stops owned JVMs. After an abrupt control-process failure, local child handles cannot be
 recovered: durable launch markers retain unresolved ownership and prevent duplicate launches, and such nodes report
 unreachable until their JVM re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its
-process identity and the SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as its
-stdin, and control closes its own handle once the spawn returns. A JVM keeps repeating its registration; control
-accepts it only when the host's marker matches that credential and identity and the JVM still runs the host's app.
-Nothing adopts a process by PID. A launch without a child handle, re-attached or not, is confirmed exited only when
-control can take its marker's lock, which means neither the JVM nor anything it spawned is still running. Any other
-outcome leaves the exit unconfirmed. Hosted providers will need durable provider identities to confirm termination
-across control restarts.
+process identity and the SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file
+descriptor 3, which no Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3
+from app code, for example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only
+when the host's marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a
+process by PID. A launch without a child handle, re-attached or not, is confirmed exited only when control can take its
+marker's lock, which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers
+will need durable provider identities to confirm termination across control restarts.
 
 After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving launch is
 fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generations no open claim in the log matches,

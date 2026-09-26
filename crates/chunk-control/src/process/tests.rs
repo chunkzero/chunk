@@ -129,7 +129,8 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
 async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_record() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    std::fs::write(&java, "#!/bin/sh\necho $$\nexec sleep 60\n").unwrap();
+    // The JVM closes its stdin, as app code calling `System.in.close()` does.
+    std::fs::write(&java, "#!/bin/sh\nexec 0<&-\necho $$\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
@@ -255,6 +256,19 @@ fn a_launch_interrupted_before_its_spawn_is_confirmed_exited() {
     // Control stops before spawning, which releases its lock.
     drop(lock);
     assert!(confirmed_stopped(&host, &id));
+}
+
+#[test]
+fn a_launch_whose_marker_cannot_be_looked_up_stays_unresolved() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = idle_host(&directory);
+    let (id, lock) = marked(&host, &directory);
+    drop(lock);
+    let nodes = directory.path().join("nodes");
+    std::fs::set_permissions(&nodes, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unresolved = host.unresolved(&id);
+    std::fs::set_permissions(&nodes, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(unresolved);
 }
 
 #[tokio::test]

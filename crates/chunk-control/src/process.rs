@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, TryLockError},
-    io::{self, Seek, Write},
+    io::{self, Write},
     process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
@@ -146,12 +146,13 @@ impl ProcessHost {
             adopted: false,
         });
         // The launch marker records the process's identity and credential digest before the JVM exists, so the JVM can
-        // re-attach after a restart. The JVM inherits the marker's lock as its stdin, and control's handle closes once
-        // the spawn returns, so only the JVM and its descendants hold the lock.
+        // re-attach after a restart. The JVM inherits the marker's lock, and control's handle closes once the spawn
+        // returns, so only the JVM holds the lock.
         let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token))?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
-            Command::new(&self.config.java)
+            let mut command = Command::new(&self.config.java);
+            command
                 .arg(format!("-Xmx{}m", size.memory_mib))
                 .arg("-jar")
                 .arg(&jar)
@@ -167,11 +168,12 @@ impl ProcessHost {
                 .env("CHUNK_APP_ID", app)
                 .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
                 .env("CHUNK_BACKEND_TOKEN", &backend.token)
-                .stdin(Stdio::from(marker))
+                .stdin(Stdio::null())
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))
-                .kill_on_drop(true)
-                .spawn()
+                .kill_on_drop(true);
+            inherit_lock(&mut command, marker)?;
+            command.spawn()
         })();
         let child = child?;
         let owned = process.clone();
@@ -207,9 +209,8 @@ impl ProcessHost {
         }
         Ok(ids)
     }
-    /// Publishes `id`'s launch marker atomically and returns an exclusive lock on it, positioned at its end so a
-    /// JVM reading it as stdin sees no input. Dropping the handle keeps any lock a spawned JVM inherited; unlocking
-    /// it would release the JVM's lock too.
+    /// Publishes `id`'s launch marker atomically and returns an exclusive lock on it. Dropping the handle keeps any
+    /// lock a spawned JVM inherited; unlocking it would release the JVM's lock too.
     fn record_launch(&self, id: &str, record: &LaunchRecord) -> Result<File> {
         let (marker, staged) = (self.path(id, "launch")?, self.path(id, "launch.staged")?);
         match std::fs::remove_file(&staged) {
@@ -219,9 +220,8 @@ impl ProcessHost {
         let mut file = chunk_service::private_file(&staged)?;
         file.write_all(&serde_json::to_vec(record)?)?;
         file.sync_all()?;
-        let mut lock = File::open(&staged)?;
+        let lock = File::open(&staged)?;
         lock.try_lock().map_err(io::Error::from)?;
-        lock.seek(io::SeekFrom::End(0))?;
         std::fs::rename(staged, marker)?;
         File::open(&self.config.directory)?.sync_all()?;
         Ok(lock)
@@ -230,8 +230,8 @@ impl ProcessHost {
         serde_json::from_slice(&std::fs::read(self.path(id, "launch").ok()?).ok()?).ok()
     }
     /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does. A JVM holds its marker's
-    /// lock until it and every process inheriting its stdin exit, and control releases its own once the spawn
-    /// returns or control stops, so a free lock means no JVM runs. Anything else leaves the exit unconfirmed.
+    /// lock until it exits, and control releases its own once the spawn returns or control stops, so a free lock
+    /// means no JVM runs. Anything else leaves the exit unconfirmed.
     fn confirm_exit(&self, id: &str) -> bool {
         let Ok(marker) = self.path(id, "launch").and_then(|path| Ok(File::open(path)?)) else {
             return false;
@@ -373,8 +373,9 @@ impl Host for ProcessHost {
         Ok(())
     }
     fn unresolved(&self, id: &str) -> bool {
+        // A marker that cannot be looked up may exist.
         self.process(id).ok().flatten().is_none()
-            && self.path(id, "launch").is_ok_and(|p| p.exists())
+            && self.path(id, "launch").is_ok_and(|path| path.try_exists().unwrap_or(true))
             && !self.stopped(id)
     }
     fn unowned(&self) -> Result<BTreeSet<String>> {
@@ -462,6 +463,20 @@ impl LaunchRecord {
             && self.generation == identity.generation
             && self.token_sha256 == digest(token)
     }
+}
+
+/// Leaves `lock` open in the JVM as descriptor 3. No Java stream uses it, so app code cannot close it, and Java
+/// closes it in the processes the JVM starts.
+#[cfg(unix)]
+fn inherit_lock(command: &mut Command, lock: File) -> io::Result<()> {
+    use command_fds::{CommandFdExt, FdMapping};
+    command.fd_mappings(vec![FdMapping { parent_fd: lock.into(), child_fd: 3 }]).map_err(io::Error::other)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn inherit_lock(_command: &mut Command, _lock: File) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "JVM launches require Unix"))
 }
 
 fn digest(token: &str) -> String {

@@ -27,6 +27,9 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[target.'cfg(unix)'.dependencies]
+command-fds = { version = "0.3", features = ["tokio"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
