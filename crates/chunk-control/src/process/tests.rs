@@ -81,6 +81,8 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     host.terminate(&id).await.unwrap();
     let stale = uuid::Uuid::new_v4().to_string();
     std::fs::write(host.path(&stale, "launch").unwrap(), b"").unwrap();
+    let held = File::open(host.path(&stale, "launch").unwrap()).unwrap();
+    held.lock().unwrap();
     assert!(host.terminate(&stale).await.is_err());
     assert!(!host.stopped(&stale));
     let invalid = uuid::Uuid::new_v4().to_string();
@@ -108,6 +110,7 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     host.terminate(&failed_log).await.unwrap();
     std::fs::remove_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
     assert_stopped_hosts_are_pruned(&host, &invalid, &stale).await;
+    drop(held);
 }
 
 async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unconfirmed: &str) {
@@ -126,7 +129,7 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
 async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_record() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::write(&java, "#!/bin/sh\necho $$\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
@@ -161,8 +164,6 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     std::mem::forget(crashed);
 
     let host = ProcessHost::new(config());
-    let recorded = host.launch_record(&id).unwrap();
-    assert!(recorded.boot == liveness::current_boot() && recorded.launched.is_some());
     assert!(host.unresolved(&id));
     assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
     assert!(host.adopt("another-credential", registration.clone()).is_err());
@@ -176,8 +177,14 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert_eq!(host.connection(&id).unwrap().token, process.token);
     assert!(host.adopt(&process.token, registration).is_err());
     assert!(!host.stopped(&id));
-    // The JVM exits without a Child in this host; its launch marker confirms the termination.
-    let pid = recorded.launched.unwrap().pid;
+    // The JVM exits without a Child in this host; its launch marker's lock confirms the termination.
+    let log = host.path(&id, "jvm.log").unwrap();
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&log).ok().and_then(|log| log.trim().parse::<u32>().ok()) {
+            break pid;
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
     assert!(std::process::Command::new("kill").arg(pid.to_string()).status().unwrap().success());
     host.terminate(&id).await.unwrap();
     assert!(host.stopped(&id));
@@ -202,90 +209,52 @@ fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
     })
 }
 
-/// A host with a launch marker, left by a host that restarted, recording `boot`, `launch` and `launched`.
-fn marked(
-    directory: &tempfile::TempDir,
-    boot: Option<String>,
-    launch: &str,
-    launched: Option<liveness::Launched>,
-) -> (ProcessHost, String) {
-    let host = idle_host(directory);
+/// Publishes a launch marker for a new host ID, returning the lock control holds until it spawns the JVM.
+fn marked(host: &ProcessHost, directory: &tempfile::TempDir) -> (String, File) {
     let id = uuid::Uuid::new_v4().to_string();
-    let record = LaunchRecord {
-        process_id: "jvm".into(),
-        generation: 1,
-        token_sha256: digest("token"),
-        boot,
-        launch: launch.into(),
-        launched,
-    };
+    let record = LaunchRecord { process_id: "jvm".into(), generation: 1, token_sha256: digest("token") };
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
-    std::fs::write(host.path(&id, "launch").unwrap(), serde_json::to_vec(&record).unwrap()).unwrap();
-    (host, id)
+    let lock = host.record_launch(&id, &record).unwrap();
+    (id, lock)
 }
 
-#[cfg(target_os = "linux")]
+/// Whether `host` confirms `id` stopped within a second. A process another test forks holds a copy of every open lock
+/// until it executes its program.
+fn confirmed_stopped(host: &ProcessHost, id: &str) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !host.stopped(id) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
 #[test]
-fn a_launch_from_another_boot_is_confirmed_exited() {
+fn a_launch_is_unresolved_while_a_process_holds_its_lock_and_confirmed_exited_once_none_does() {
     let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, Some("another-boot".into()), "", None);
-    assert!(host.stopped(&id));
+    let host = idle_host(&directory);
+    let (id, lock) = marked(&host, &directory);
+    let mut child = std::process::Command::new("sleep").arg("60").stdin(Stdio::from(lock)).spawn().unwrap();
+    assert!(!host.stopped(&id));
+    assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(confirmed_stopped(&host, &id));
     assert!(host.path(&id, "exit").unwrap().is_file());
     assert!(host.unowned().unwrap().is_empty());
 }
 
 #[test]
-fn a_launch_whose_pid_is_gone_is_confirmed_exited() {
-    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
-    let launched = liveness::Launched { pid: child.id(), started: liveness::started(child.id()).unwrap().unwrap() };
-    let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, liveness::current_boot(), "", Some(launched));
-    assert!(!host.stopped(&id));
-    assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert!(host.stopped(&id));
-    assert!(host.unowned().unwrap().is_empty());
-}
-
-#[test]
-fn a_reused_pid_with_another_start_time_is_confirmed_exited() {
-    let pid = std::process::id();
-    let started = liveness::started(pid).unwrap().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let (host, id) =
-        marked(&directory, liveness::current_boot(), "", Some(liveness::Launched { pid, started: started + 1 }));
-    assert!(host.stopped(&id));
-}
-
-#[test]
-fn a_marker_without_boot_or_spawn_waits_for_an_exit_record() {
-    let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, None, "", None);
-    assert!(!host.stopped(&id));
-    assert!(host.unresolved(&id));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn a_launch_interrupted_before_its_spawn_is_confirmed_exited() {
     let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, liveness::current_boot(), &uuid::Uuid::new_v4().to_string(), None);
-    assert!(host.stopped(&id));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn a_launch_interrupted_before_recording_its_spawn_is_found_by_its_launch_id() {
-    let launch = uuid::Uuid::new_v4().to_string();
-    let mut child = std::process::Command::new("sleep").arg("60").env(liveness::LAUNCH_ENV, &launch).spawn().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, liveness::current_boot(), &launch, None);
-    assert!(!host.stopped(&id));
-    assert_eq!(host.launch_record(&id).unwrap().launched.map(|launched| launched.pid), Some(child.id()));
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert!(host.stopped(&id));
+    let host = idle_host(&directory);
+    let (id, lock) = marked(&host, &directory);
+    assert!(host.unresolved(&id));
+    // Control stops before spawning, which releases its lock.
+    drop(lock);
+    assert!(confirmed_stopped(&host, &id));
 }
 
 #[tokio::test]
@@ -302,5 +271,4 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
     std::fs::write(host.path(&id, "launch").unwrap(), b"").unwrap();
     assert!(host.adopt("credential", registration).is_err());
-    assert!(host.unresolved(&id));
 }

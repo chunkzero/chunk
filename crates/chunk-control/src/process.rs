@@ -6,7 +6,8 @@ use chunk_proto::v1::{ProcessIdentity, ProcessRegistration, node_control_client:
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Write},
+    fs::{File, TryLockError},
+    io::{self, Seek, Write},
     process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
@@ -144,9 +145,10 @@ impl ProcessHost {
             stopped: AtomicBool::new(false),
             adopted: false,
         });
-        // A launch marker without an owned Child leaves termination unconfirmed instead of stopped. It records the
-        // process's identity and credential digest before the JVM exists, so the JVM can re-attach after a restart.
-        let mut record = self.record_launch(id, &process)?;
+        // The launch marker records the process's identity and credential digest before the JVM exists, so the JVM can
+        // re-attach after a restart. The JVM inherits the marker's lock as its stdin, and control's handle closes once
+        // the spawn returns, so only the JVM and its descendants hold the lock.
+        let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token))?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
             Command::new(&self.config.java)
@@ -154,7 +156,6 @@ impl ProcessHost {
                 .arg("-jar")
                 .arg(&jar)
                 .env("CHUNK_PROCESS_TOKEN", &process.token)
-                .env(liveness::LAUNCH_ENV, &record.launch)
                 .env("CHUNK_ENVIRONMENT", &self.config.deployment.environment)
                 .env("CHUNK_DEPLOYMENT", &self.config.deployment.deployment)
                 .env("CHUNK_CONTROL_ENDPOINT", endpoint)
@@ -166,16 +167,13 @@ impl ProcessHost {
                 .env("CHUNK_APP_ID", app)
                 .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
                 .env("CHUNK_BACKEND_TOKEN", &backend.token)
-                .stdin(Stdio::null())
+                .stdin(Stdio::from(marker))
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))
                 .kill_on_drop(true)
                 .spawn()
         })();
         let child = child?;
-        if let Err(error) = self.record_spawn(id, &mut record, child.id()) {
-            tracing::warn!(%error, host = id, "only an exit record can confirm this JVM stopped");
-        }
         let owned = process.clone();
         tokio::spawn(async move {
             match own_child(child, &owned).await {
@@ -209,23 +207,10 @@ impl ProcessHost {
         }
         Ok(ids)
     }
-    fn record_launch(&self, id: &str, process: &Process) -> Result<LaunchRecord> {
-        let record = LaunchRecord::of(&process.identity, &process.token);
-        let mut marker = chunk_service::private_file(&self.path(id, "launch")?)?;
-        marker.write_all(&serde_json::to_vec(&record)?)?;
-        marker.sync_all()?;
-        std::fs::File::open(&self.config.directory)?.sync_all()?;
-        Ok(record)
-    }
-    /// Adds the spawned JVM's PID and start time to its launch marker.
-    fn record_spawn(&self, id: &str, record: &mut LaunchRecord, pid: Option<u32>) -> Result<()> {
-        let pid = pid.ok_or(Error::Unresolved("JVM exited before its PID was read"))?;
-        let started = liveness::started(pid)?.ok_or(Error::Unresolved("JVM exited before its start was read"))?;
-        record.launched = Some(liveness::Launched { pid, started });
-        self.replace_launch(id, record)
-    }
-    /// Replaces `id`'s launch marker with `record` atomically.
-    fn replace_launch(&self, id: &str, record: &LaunchRecord) -> Result<()> {
+    /// Publishes `id`'s launch marker atomically and returns an exclusive lock on it, positioned at its end so a
+    /// JVM reading it as stdin sees no input. Dropping the handle keeps any lock a spawned JVM inherited; unlocking
+    /// it would release the JVM's lock too.
+    fn record_launch(&self, id: &str, record: &LaunchRecord) -> Result<File> {
         let (marker, staged) = (self.path(id, "launch")?, self.path(id, "launch.staged")?);
         match std::fs::remove_file(&staged) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
@@ -234,40 +219,30 @@ impl ProcessHost {
         let mut file = chunk_service::private_file(&staged)?;
         file.write_all(&serde_json::to_vec(record)?)?;
         file.sync_all()?;
+        let mut lock = File::open(&staged)?;
+        lock.try_lock().map_err(io::Error::from)?;
+        lock.seek(io::SeekFrom::End(0))?;
         std::fs::rename(staged, marker)?;
-        std::fs::File::open(&self.config.directory)?.sync_all()?;
-        Ok(())
-    }
-    /// Whether no process carries `record`'s launch ID. Records the PID of one that does.
-    fn find_launch(&self, id: &str, record: &mut LaunchRecord) -> bool {
-        match liveness::find(&record.launch) {
-            Ok(None) => true,
-            Ok(Some(launched)) => {
-                record.launched = Some(launched);
-                if let Err(error) = self.replace_launch(id, record) {
-                    tracing::warn!(%error, host = id, "cannot record a found JVM's PID");
-                }
-                false
-            }
-            Err(error) => {
-                tracing::debug!(%error, host = id, "cannot tell whether an unrecorded JVM runs");
-                false
-            }
-        }
+        File::open(&self.config.directory)?.sync_all()?;
+        Ok(lock)
     }
     fn launch_record(&self, id: &str) -> Option<LaunchRecord> {
         serde_json::from_slice(&std::fs::read(self.path(id, "launch").ok()?).ok()?).ok()
     }
-    /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does. A marker written before
-    /// its JVM's PID gets the PID of the process carrying its launch ID, or proves the JVM never ran or exited.
+    /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does. A JVM holds its marker's
+    /// lock until it and every process inheriting its stdin exit, and control releases its own once the spawn
+    /// returns or control stops, so a free lock means no JVM runs. Anything else leaves the exit unconfirmed.
     fn confirm_exit(&self, id: &str) -> bool {
-        let Some(mut record) = self.launch_record(id) else {
+        let Ok(marker) = self.path(id, "launch").and_then(|path| Ok(File::open(path)?)) else {
             return false;
         };
-        let exited = liveness::exited(record.boot.as_deref(), record.launched.as_ref())
-            || (record.launched.is_none() && !record.launch.is_empty() && self.find_launch(id, &mut record));
-        if !exited {
-            return false;
+        match marker.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return false,
+            Err(TryLockError::Error(error)) => {
+                tracing::debug!(%error, host = id, "cannot tell whether an unowned JVM runs");
+                return false;
+            }
         }
         if let Err(error) = self.record_exit(id, b"exited while unowned") {
             tracing::error!(%error, host = id, "cannot persist confirmed JVM exit");
@@ -469,33 +444,17 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
     Ok(())
 }
 
-/// What a launch marker records: the JVM's process identity and the SHA-256 digest of its credential, and what
-/// confirms its exit once no Child is owned. Markers without the boot, launch ID and spawn wait for an exit record.
+/// What a launch marker records: the JVM's process identity and the SHA-256 digest of its credential.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LaunchRecord {
     process_id: String,
     generation: u64,
     token_sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    boot: Option<String>,
-    /// The random ID passed to the JVM in [`liveness::LAUNCH_ENV`].
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    launch: String,
-    /// Recorded once the JVM is spawned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    launched: Option<liveness::Launched>,
 }
 
 impl LaunchRecord {
     fn of(identity: &ProcessIdentity, token: &str) -> Self {
-        Self {
-            process_id: identity.process_id.clone(),
-            generation: identity.generation,
-            token_sha256: digest(token),
-            boot: liveness::current_boot(),
-            launch: uuid::Uuid::new_v4().to_string(),
-            launched: None,
-        }
+        Self { process_id: identity.process_id.clone(), generation: identity.generation, token_sha256: digest(token) }
     }
 
     fn authenticates(&self, identity: &ProcessIdentity, token: &str) -> bool {
@@ -539,7 +498,6 @@ fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
 }
 
 mod classpath;
-mod liveness;
 
 #[cfg(all(test, unix))]
 mod tests;
