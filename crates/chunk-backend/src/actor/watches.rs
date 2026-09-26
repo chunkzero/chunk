@@ -221,10 +221,11 @@ impl Watches {
         id
     }
 
-    /// Runs a new query in the current batch, or starts the next one.
+    /// Runs a new query in the current batch while no invalidated query waits for the next
+    /// one; otherwise it waits too, so newcomers cannot keep the current batch from finishing.
     fn schedule(&mut self, id: QueryId) {
         let query = self.queries.get_mut(&id).expect("scheduled query");
-        if let Some(batch) = &mut self.batch {
+        if let Some(batch) = self.batch.as_mut().filter(|_| self.next.is_empty()) {
             query.scheduled = true;
             batch.queue.push_back(id);
         } else if query.dirty.is_none() {
