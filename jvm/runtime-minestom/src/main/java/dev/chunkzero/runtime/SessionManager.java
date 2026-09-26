@@ -83,6 +83,13 @@ public final class SessionManager {
         this.components = components;
     }
 
+    /**
+     * Completes after the tick thread runs the work queued before it, such as session creations.
+     */
+    public CompletableFuture<Void> afterQueued() {
+        return ticks.submit(() -> null);
+    }
+
     public TickExecutor getTicks() {
         return ticks;
     }

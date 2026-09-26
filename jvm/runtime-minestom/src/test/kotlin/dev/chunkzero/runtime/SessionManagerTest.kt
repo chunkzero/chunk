@@ -65,6 +65,33 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `work queued after a session creation sees the created session`() {
+        val process = ServerProcess.create()
+        val ticks = TickExecutor()
+        val manager = SessionManager(process, ticks, mapOf("flat" to Supplier { FlatSession() }))
+        try {
+            manager.create(
+                SessionCommand
+                    .newBuilder()
+                    .setOperationId("create")
+                    .setSession(SessionRef.newBuilder().setId("queued"))
+                    .setGeneration(1)
+                    .setSessionType("flat")
+                    .setCapacity(2)
+                    .build(),
+            )
+            val queued = manager.afterQueued()
+            assertTrue(manager.inventory().isEmpty())
+            assertFalse(queued.isDone)
+            ticks.flush()
+            assertTrue(queued.isDone)
+            assertEquals(listOf("queued"), manager.inventory().map { it.session.id })
+        } finally {
+            process.stop()
+        }
+    }
+
+    @Test
     fun `resource disposal failure still awaits the leave hook`() {
         val process = ServerProcess.create()
         val ticks = TickExecutor()
