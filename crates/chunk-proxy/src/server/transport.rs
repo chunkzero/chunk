@@ -324,7 +324,9 @@ fn encode_frame(output: &mut Vec<u8>, body: &[u8], compression: Option<usize>) -
 /// Sets the level for compressors created afterwards; existing threads keep theirs.
 #[cfg(feature = "bench-support")]
 pub(super) fn set_compression_level(level: i32) -> io::Result<()> {
-    CompressionLvl::new(level).map_err(|_| invalid_data("compression level must be 1..=12"))?;
+    if !(1..=12).contains(&level) {
+        return Err(invalid_data("compression level must be 1..=12"));
+    }
     DEFLATE_LEVEL.store(level, Ordering::Relaxed);
     Ok(())
 }
