@@ -21,6 +21,27 @@ async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_u
 }
 
 #[tokio::test]
+async fn restored_reservations_are_neither_prepared_nor_activated_until_survivors_are_fenced() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let prepared = control.claim(request("prepared", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    fixture.runtime.available.store(false, Ordering::Release);
+    let reserved = request("reserved", &uuid::Uuid::new_v4().to_string());
+    assert!(control.claim(reserved.clone()).await.is_err());
+    assert!(control.state().unwrap().claims["reserved"].assignment.is_none());
+    fixture.runtime.available.store(true, Ordering::Release);
+    drop(control);
+    fixture.host.forgotten.store(true, Ordering::Release);
+
+    // The lost tail may have canceled either claim and admitted its player on a JVM that has not re-attached.
+    let control = fixture.control();
+    assert!(matches!(control.claim(reserved.clone()).await, Err(Error::Busy)));
+    assert!(matches!(control.activate(ActivateClaim { claim: prepared.claim }).await, Err(Error::Busy)));
+    assert!(!fixture.runtime.bindings.lock().unwrap().contains_key("reserved"));
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_claims() {
     let fixture = Fixture::new().await;
     let control = fixture.control();

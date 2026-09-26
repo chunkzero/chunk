@@ -24,9 +24,11 @@ impl Control {
 
     /// Records admission intent; native Minecraft login attaches the prepared delivery.
     /// # Errors
-    /// Rejects stale identity and retains authority after ambiguous runtime replies.
+    /// Rejects stale identity and retains authority after ambiguous runtime replies. Reports `Busy` until recovery
+    /// has fenced surviving JVMs.
     pub async fn activate(&self, request: ActivateClaim) -> Result<Assignment> {
         let identity = request.claim.as_ref().ok_or(Error::Invalid("missing claim identity"))?;
+        self.admit().await?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
