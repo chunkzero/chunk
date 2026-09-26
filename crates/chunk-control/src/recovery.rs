@@ -1,6 +1,7 @@
 //! Recovery after control restarts: JVMs that outlived it re-attach, and the log decides which of their deliveries
-//! remain owned. Until every surviving JVM's deliveries are fenced, new claims are refused as busy, so a player a
-//! JVM still serves without a claim in the log cannot gain a second owner.
+//! remain owned. Until every surviving JVM's deliveries are fenced or its host confirms it stopped, new claims are
+//! refused as busy, so a player a JVM still serves without a claim in the log cannot gain a second owner. No timeout
+//! reopens admission: an unreachable JVM may still be serving players.
 
 use std::{
     collections::BTreeSet,
@@ -20,8 +21,8 @@ use crate::{
     state::{Claim, Generation, Phase},
 };
 
-/// How long admission waits for a surviving JVM to re-attach and be fenced. JVMs repeat registration every second.
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
+const RECOVERY_WARNING: Duration = Duration::from_secs(30);
 /// Tombstones one commit may add, keeping it well within a store commit.
 const TOMBSTONES_PER_COMMIT: usize = 128;
 
@@ -33,14 +34,19 @@ pub(crate) struct Recovery {
 
 struct Pending {
     hosts: BTreeSet<String>,
-    /// After this, hosts still pending no longer block admission.
+    /// When admission next warns that hosts are still pending.
     deadline: Instant,
 }
 
 impl Recovery {
     pub fn new(hosts: BTreeSet<String>) -> Self {
-        let pending = Pending { hosts, deadline: Instant::now() + RECOVERY_TIMEOUT };
+        let pending = Pending { hosts, deadline: Instant::now() + RECOVERY_WARNING };
         Self { pending: Mutex::new(pending), resolving: AsyncMutex::new(()) }
+    }
+
+    #[cfg(test)]
+    pub fn pass_deadline(&self) {
+        self.pending.lock().unwrap().deadline = Instant::now();
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Pending>> {
@@ -52,9 +58,7 @@ impl Recovery {
     }
 
     fn reopen(&self, host: &str) -> Result<()> {
-        let mut pending = self.lock()?;
-        pending.hosts.insert(host.into());
-        pending.deadline = Instant::now() + RECOVERY_TIMEOUT;
+        self.lock()?.hosts.insert(host.into());
         Ok(())
     }
 }
@@ -68,8 +72,7 @@ impl Control {
         if self.recovery.open()? { Ok(()) } else { Err(Error::Busy) }
     }
 
-    /// Fences each pending host's surviving deliveries, or gives up on hosts that stay unresolved past the deadline.
-    /// Returns at once while another caller is resolving.
+    /// Fences each pending host's surviving deliveries. Returns at once while another caller is resolving.
     pub(crate) async fn resolve_recovery(&self) -> Result<()> {
         if self.recovery.open()? {
             return Ok(());
@@ -86,13 +89,17 @@ impl Control {
                     false
                 }
             };
-            let mut pending = self.recovery.lock()?;
             if resolved {
-                pending.hosts.remove(&id);
-            } else if Instant::now() >= pending.deadline {
-                tracing::warn!(host = id, "admitting new claims without fencing an unreachable JVM");
-                pending.hosts.remove(&id);
+                self.recovery.lock()?.hosts.remove(&id);
             }
+        }
+        let mut pending = self.recovery.lock()?;
+        if !pending.hosts.is_empty() && Instant::now() >= pending.deadline {
+            pending.deadline = Instant::now() + RECOVERY_WARNING;
+            tracing::warn!(
+                hosts = ?pending.hosts,
+                "new claims wait until surviving JVMs re-attach or their hosts confirm they stopped"
+            );
         }
         Ok(())
     }
@@ -102,7 +109,8 @@ impl Control {
             return Ok(true);
         }
         let Some(runtime) = self.host.connection(id) else {
-            return Ok(false);
+            // Without an unowned launch, no JVM from before the restart can run on this host.
+            return Ok(!self.host.unresolved(id));
         };
         let host = self.state()?.hosts.get(id).cloned().ok_or(Error::Invalid("missing host"))?;
         if !self.runs_host(&runtime, &host) {

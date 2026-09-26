@@ -2,6 +2,25 @@ use super::*;
 use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
 
 #[tokio::test]
+async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_until_it_is_confirmed_stopped() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    control.claim(request("served", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["served"].session].host.clone();
+    drop(control);
+    fixture.host.forgotten.store(true, Ordering::Release);
+
+    let control = fixture.control();
+    control.recovery.pass_deadline();
+    control.reconcile_all().await.unwrap();
+    assert!(matches!(control.admit().await, Err(Error::Busy)));
+    fixture.host.terminated.lock().unwrap().insert(host);
+    control.admit().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_claims() {
     let fixture = Fixture::new().await;
     let control = fixture.control();
