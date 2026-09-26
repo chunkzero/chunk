@@ -65,7 +65,10 @@ TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres pnpm --filte
 ```
 
 Tests that need Postgres skip when `TEST_DATABASE_URL` is unset. Each test file uses its own schema. The provider tests
-use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists.
+use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists. The STS log store test runs against MinIO
+when `TEST_MINIO_URL` is set, for example
+`podman run --rm -p 127.0.0.1:59000:9000 -e MINIO_ROOT_USER=chunkroot -e MINIO_ROOT_PASSWORD=chunkrootsecret cgr.dev/chainguard/minio server /data`
+with `TEST_MINIO_URL=http://127.0.0.1:59000`.
 
 ## Machines
 
