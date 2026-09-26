@@ -164,6 +164,9 @@ impl Control {
     /// be treated as a fencing acknowledgment.
     pub async fn shutdown(&self) -> Result<()> {
         self.draining.store(true, std::sync::atomic::Ordering::Release);
+        // Placements check draining inside an update, which holds the writer until it has published. Taking the writer
+        // once waits for every placement that saw control still admitting, so the hosts it reserved are read below.
+        drop(self.authority.writer()?);
         let mut result = Ok(());
         let mut stopped = BTreeSet::new();
         // Repeats until a pass finds no host it hasn't stopped, so hosts that a placement or recovery transition

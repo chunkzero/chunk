@@ -123,6 +123,9 @@ pub(crate) struct Authority {
     store: Mutex<Writable>,
     current: RwLock<Arc<State>>,
     feed: feed::Feed,
+    /// Runs once inside the next commit, before it is written, while other writers are excluded.
+    #[cfg(test)]
+    pub committing: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct Writable {
@@ -141,7 +144,14 @@ impl Authority {
         let state = store.load()?;
         let feed = feed::Feed::new(state.position());
         let store = Mutex::new(Writable { store, stale: false });
-        let authority = Self { system, store, current: RwLock::new(Arc::new(state)), feed };
+        let authority = Self {
+            system,
+            store,
+            current: RwLock::new(Arc::new(state)),
+            feed,
+            #[cfg(test)]
+            committing: Mutex::default(),
+        };
         let fingerprint = Sha256::digest(serde_json::to_vec(config)?).to_vec();
         authority.update(|state| {
             if state.config.is_empty() {
@@ -208,6 +218,10 @@ impl Writer<'_> {
             return Ok(result);
         }
         let rows = feed::rows(writes.keys());
+        #[cfg(test)]
+        if let Some(committing) = self.authority.committing.lock().ok().and_then(|mut hook| hook.take()) {
+            committing();
+        }
         match self.store.store.commit(next.epoch, writes) {
             Ok(revision) if revision > previous.revision => {
                 next.revision = revision;

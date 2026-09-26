@@ -93,3 +93,35 @@ async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
     fixture.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_stops_the_host_of_a_placement_committing_while_it_drains() {
+    let fixture = Fixture::new().await;
+    let control =
+        open(&fixture.directory.path().join("control.sqlite"), fixture.release.clone(), fixture.host.clone()).unwrap();
+    let (committing, paused) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    *control.authority.committing.lock().unwrap() = Some(Box::new(move || {
+        committing.send(()).unwrap();
+        resumed.recv().unwrap();
+    }));
+    let claim = tokio::spawn({
+        let control = control.clone();
+        async move { control.claim(request("late", &uuid::Uuid::new_v4().to_string())).await }
+    });
+    // The placement passed the draining check and reserved a new host, but has not published it.
+    tokio::task::spawn_blocking(move || paused.recv().unwrap()).await.unwrap();
+    let shutdown = tokio::spawn({
+        let control = control.clone();
+        async move { control.shutdown().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!shutdown.is_finished());
+    resume.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    let state = control.state().unwrap();
+    let host = &state.sessions[&state.claims["late"].session].host;
+    assert!(fixture.host.terminated.lock().unwrap().contains(host));
+    claim.abort();
+    fixture.close().await;
+}

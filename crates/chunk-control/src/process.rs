@@ -32,6 +32,8 @@ pub struct ProcessHost {
 struct Processes {
     running: BTreeMap<String, Arc<Process>>,
     failed: BTreeSet<String>,
+    /// Set by shutdown, which then stops the running processes; no launch may start after it.
+    stopping: bool,
 }
 struct Process {
     identity: ProcessIdentity,
@@ -101,6 +103,9 @@ impl ProcessHost {
         }
         if self.path(id, "launch")?.try_exists()? {
             return Ok(None);
+        }
+        if processes.stopping {
+            return Err(Error::Stopped);
         }
         match self.start(id, release, app, profile) {
             Ok(process) => {
@@ -272,14 +277,17 @@ impl ProcessHost {
         }
         true
     }
-    /// Stops all owned JVMs, including launches awaiting readiness.
+    /// Stops all owned JVMs, including launches awaiting readiness, and launches no more.
     /// # Errors
     /// Reports unconfirmed process exits, including those of launches this host does not own.
     pub async fn shutdown(&self) -> Result<()> {
         // Read before the running processes: adoption moves a launch from unowned to running, so it can't escape both.
         let unowned = self.unowned()?;
-        let ids: Vec<_> =
-            self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
+        let ids: Vec<_> = {
+            let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
+            processes.stopping = true;
+            processes.running.keys().cloned().collect()
+        };
         let mut result = Ok(());
         for id in ids {
             match self.release(&id).await {
