@@ -1,0 +1,82 @@
+// chunk.management.v1 is the public API of the management plane. Environments,
+// edges, the CLI and dashboards call it over Connect; chunk's single-tenant
+// service and Chunk Cloud both implement it.
+//
+// Conventions for every service in this package:
+// - Resources have opaque, immutable, server-assigned IDs. Names are for
+//   people and may be looked up through list calls.
+// - Mutations that are not naturally idempotent take a client-chosen
+//   `request_id` (a UUID). A retry with the same ID returns the first result
+//   instead of repeating the mutation; reusing an ID with different arguments
+//   fails with ALREADY_EXISTS. Request IDs are scoped to the calling
+//   principal and its token's scope: the same ID from another principal or a
+//   differently scoped token is an unrelated request and never replays
+//   another caller's result.
+// - Lists take `page_size` and `page_token` and return `next_page_token`,
+//   which is empty on the last page. A `page_size` of 0 means the server's
+//   default, and the server may cap it.
+// - Every call carries a bearer token. The token decides who the caller is
+//   (an environment, an edge, or a person or CI job) and what it may touch.
+// - Errors use Connect/gRPC status codes.
+// - Fields are only ever added. Removed fields are reserved, never reused.
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// One log line from an environment process or one of its JVMs.
+message LogEntry {
+  google.protobuf.Timestamp time = 1;
+  LogSource source = 2;
+  LogSeverity severity = 3;
+  string message = 4;
+  // The process or JVM node that wrote the line.
+  string instance_id = 5;
+  // The app a JVM line belongs to; empty for other sources.
+  string app_id = 6;
+  // The deployment the writer was serving.
+  string deployment_id = 7;
+  // Increases per instance_id; (instance_id, sequence) identifies the entry.
+  uint64 sequence = 8;
+}
+
+enum LogSource {
+  LOG_SOURCE_UNSPECIFIED = 0;
+  LOG_SOURCE_CORE = 1;
+  LOG_SOURCE_GATEWAY = 2;
+  LOG_SOURCE_EXEC = 3;
+  LOG_SOURCE_JVM = 4;
+}
+
+enum LogSeverity {
+  LOG_SEVERITY_UNSPECIFIED = 0;
+  LOG_SEVERITY_DEBUG = 1;
+  LOG_SEVERITY_INFO = 2;
+  LOG_SEVERITY_WARN = 3;
+  LOG_SEVERITY_ERROR = 4;
+}
+
+enum DeploymentState {
+  DEPLOYMENT_STATE_UNSPECIFIED = 0;
+  // Recorded; the environment has not picked it up yet.
+  DEPLOYMENT_STATE_PENDING = 1;
+  // The environment is starting the release.
+  DEPLOYMENT_STATE_IN_PROGRESS = 2;
+  // The environment serves this release.
+  DEPLOYMENT_STATE_ACTIVE = 3;
+  // The environment could not start the release; the previous one keeps serving.
+  DEPLOYMENT_STATE_FAILED = 4;
+  // A later deployment replaced this one.
+  DEPLOYMENT_STATE_SUPERSEDED = 5;
+}
+
+// How an edge answers server-list pings while the environment sleeps.
+// Environments that never sleep always answer pings live.
+enum SleepingPingMode {
+  SLEEPING_PING_MODE_UNSPECIFIED = 0;
+  // Answer from the status the environment reported before suspending, with 0 online.
+  SLEEPING_PING_MODE_CACHE = 1;
+  // Wake the environment and answer from its live ping hook, subject to wake limits.
+  SLEEPING_PING_MODE_WAKE = 2;
+}

@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// Authenticates people and CI jobs with bearer tokens. `chunk login --cloud`
+// and `chunk login --url` use the same device flow: the CLI starts a login,
+// the person approves its code in the dashboard, and the CLI polls for a
+// token.
+service AuthService {
+  // Starts a login. Needs no token.
+  rpc StartLogin(StartLoginRequest) returns (StartLoginResponse);
+  // Checks a started login. Needs no token; login_id is the secret. Once
+  // approved, every poll returns the same token and secret until the login's
+  // expire_time, so a lost response can be retried. Past expire_time, an
+  // unapproved login returns state EXPIRED, and an approved one fails with
+  // NOT_FOUND like an unknown login_id.
+  rpc PollLogin(PollLoginRequest) returns (PollLoginResponse);
+  // Approves a pending login by the code the CLI showed, issuing a token for
+  // the calling person. Called by the dashboard. Fails with PERMISSION_DENIED
+  // when the calling token is limited to a project.
+  rpc ApproveLogin(ApproveLoginRequest) returns (ApproveLoginResponse);
+  // Returns who the calling token belongs to.
+  rpc GetCurrentPrincipal(GetCurrentPrincipalRequest) returns (GetCurrentPrincipalResponse);
+  // Creates a named token for the caller, for example for CI. Idempotent by
+  // request_id. The secret is only ever returned here. A caller whose token is
+  // limited to a project can only create tokens limited to that project;
+  // anything else fails with PERMISSION_DENIED.
+  rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
+  // Lists the caller's tokens, without secrets.
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+  // Revokes a token; logging out revokes the CLI's own. Idempotent.
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+}
+
+message Principal {
+  string id = 1;
+  string display_name = 2;
+}
+
+message Token {
+  string id = 1;
+  string name = 2;
+  // When set, the token only reaches this project.
+  string project_id = 3;
+  google.protobuf.Timestamp create_time = 4;
+  // Unset for tokens that do not expire.
+  google.protobuf.Timestamp expire_time = 5;
+}
+
+message StartLoginRequest {
+  // Shown when approving, such as "chunk CLI on laptop".
+  string client_name = 1;
+}
+
+message StartLoginResponse {
+  string login_id = 1;
+  // The short code the person confirms in the dashboard.
+  string user_code = 2;
+  // The dashboard page that approves this login.
+  string verification_url = 3;
+  google.protobuf.Timestamp expire_time = 4;
+  google.protobuf.Duration poll_interval = 5;
+}
+
+message PollLoginRequest {
+  string login_id = 1;
+}
+
+message PollLoginResponse {
+  LoginState state = 1;
+  // Set with state APPROVED.
+  string secret = 2;
+  Token token = 3;
+}
+
+enum LoginState {
+  LOGIN_STATE_UNSPECIFIED = 0;
+  LOGIN_STATE_PENDING = 1;
+  LOGIN_STATE_APPROVED = 2;
+  LOGIN_STATE_EXPIRED = 3;
+}
+
+message ApproveLoginRequest {
+  string user_code = 1;
+}
+
+message ApproveLoginResponse {}
+
+message GetCurrentPrincipalRequest {}
+
+message GetCurrentPrincipalResponse {
+  Principal principal = 1;
+  // The calling token.
+  Token token = 2;
+}
+
+message CreateTokenRequest {
+  string request_id = 1;
+  string name = 2;
+  // Optional: limit the token to one project.
+  string project_id = 3;
+  // Optional: unset for a token that does not expire.
+  google.protobuf.Timestamp expire_time = 4;
+}
+
+message CreateTokenResponse {
+  Token token = 1;
+  string secret = 2;
+}
+
+message ListTokensRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListTokensResponse {
+  repeated Token tokens = 1;
+  string next_page_token = 2;
+}
+
+message RevokeTokenRequest {
+  string token_id = 1;
+}
+
+message RevokeTokenResponse {}

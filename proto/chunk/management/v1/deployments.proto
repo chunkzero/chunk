@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Releases and deployments, for the CLI and dashboards. A release is an
+// immutable archive from `chunk build`; a deployment makes one release an
+// environment's desired state. Environments receive deployments through
+// EnvironmentService.Attach and report progress through ReportStatus.
+service DeploymentService {
+  // Starts or resumes uploading a release archive. Idempotent by release ID:
+  // if the project already holds the release, no upload target is returned.
+  // Otherwise PUT the archive bytes to the target, then call
+  // CompleteReleaseUpload. Until the release is READY, the latest call's
+  // digest and size replace earlier ones; once it is READY, a different
+  // digest or size fails with ALREADY_EXISTS.
+  rpc UploadRelease(UploadReleaseRequest) returns (UploadReleaseResponse);
+  // Verifies an uploaded archive against its digest and manifest and makes
+  // the release deployable. Idempotent.
+  rpc CompleteReleaseUpload(CompleteReleaseUploadRequest) returns (CompleteReleaseUploadResponse);
+  // Deploys a release of the environment's project. Returns once recorded; the
+  // deployment becomes ACTIVE when the environment reports serving it, and a
+  // later deployment supersedes an unfinished one. Idempotent by request_id.
+  rpc Deploy(DeployRequest) returns (DeployResponse);
+  // Deploys the release active in one environment to another environment of
+  // the same project. Only the release moves, never data or secrets.
+  // Idempotent by request_id.
+  rpc Promote(PromoteRequest) returns (PromoteResponse);
+  // Deploys the release of an earlier deployment again. Idempotent by
+  // request_id.
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+  rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
+  // Lists an environment's deployments, newest first.
+  rpc ListDeployments(ListDeploymentsRequest) returns (ListDeploymentsResponse);
+  // Lists the apps in a release. A release holds few apps, so this is not paginated.
+  rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+}
+
+message Release {
+  // The content-derived ID `chunk build` gives `dist/<id>.tar.gz`; unique within the project.
+  string id = 1;
+  string project_id = 2;
+  ReleaseState state = 3;
+  // Hex SHA-256 of the archive bytes.
+  string archive_sha256 = 4;
+  uint64 archive_size_bytes = 5;
+  google.protobuf.Timestamp create_time = 6;
+}
+
+enum ReleaseState {
+  RELEASE_STATE_UNSPECIFIED = 0;
+  RELEASE_STATE_UPLOADING = 1;
+  RELEASE_STATE_READY = 2;
+}
+
+message Deployment {
+  string id = 1;
+  string environment_id = 2;
+  string release_id = 3;
+  DeploymentState state = 4;
+  DeploymentTrigger trigger = 5;
+  // Why the deployment failed.
+  string message = 6;
+  google.protobuf.Timestamp create_time = 7;
+  google.protobuf.Timestamp update_time = 8;
+}
+
+enum DeploymentTrigger {
+  DEPLOYMENT_TRIGGER_UNSPECIFIED = 0;
+  DEPLOYMENT_TRIGGER_DEPLOY = 1;
+  DEPLOYMENT_TRIGGER_PROMOTE = 2;
+  DEPLOYMENT_TRIGGER_ROLLBACK = 3;
+}
+
+message App {
+  string id = 1;
+  // The app's session types.
+  repeated string sessions = 2;
+}
+
+// Where to send the archive bytes: a presigned object store URL or the
+// management service itself.
+message UploadTarget {
+  string url = 1;
+  // The HTTP method, normally PUT.
+  string method = 2;
+  // Headers to send with the upload.
+  map<string, string> headers = 3;
+  google.protobuf.Timestamp expire_time = 4;
+}
+
+message UploadReleaseRequest {
+  string project_id = 1;
+  string release_id = 2;
+  string archive_sha256 = 3;
+  uint64 archive_size_bytes = 4;
+}
+
+message UploadReleaseResponse {
+  Release release = 1;
+  // Unset when the release is already READY.
+  UploadTarget upload = 2;
+}
+
+message CompleteReleaseUploadRequest {
+  string project_id = 1;
+  string release_id = 2;
+}
+
+message CompleteReleaseUploadResponse {
+  Release release = 1;
+}
+
+message DeployRequest {
+  string request_id = 1;
+  string environment_id = 2;
+  // A READY release of the environment's project.
+  string release_id = 3;
+}
+
+message DeployResponse {
+  Deployment deployment = 1;
+}
+
+message PromoteRequest {
+  string request_id = 1;
+  string source_environment_id = 2;
+  string target_environment_id = 3;
+}
+
+message PromoteResponse {
+  Deployment deployment = 1;
+}
+
+message RollbackRequest {
+  string request_id = 1;
+  string environment_id = 2;
+  // The deployment whose release to restore; empty for the one active before the current one.
+  string deployment_id = 3;
+}
+
+message RollbackResponse {
+  Deployment deployment = 1;
+}
+
+message GetDeploymentRequest {
+  string deployment_id = 1;
+}
+
+message GetDeploymentResponse {
+  Deployment deployment = 1;
+}
+
+message ListDeploymentsRequest {
+  string environment_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListDeploymentsResponse {
+  repeated Deployment deployments = 1;
+  string next_page_token = 2;
+}
+
+message ListAppsRequest {
+  string environment_id = 1;
+  // Empty for the environment's active release.
+  string release_id = 2;
+}
+
+message ListAppsResponse {
+  repeated App apps = 1;
+}

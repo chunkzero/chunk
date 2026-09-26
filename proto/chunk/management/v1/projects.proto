@@ -1,0 +1,181 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Projects and their environments, for the CLI and dashboards.
+service ProjectService {
+  // Creates a project. Idempotent by request_id.
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
+  // Lists projects the caller can see.
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  // Creates an empty named environment, such as staging or production. It
+  // starts once something is deployed to it. Idempotent by request_id.
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (CreateEnvironmentResponse);
+  rpc GetEnvironment(GetEnvironmentRequest) returns (GetEnvironmentResponse);
+  rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
+  // Changes owner settings. Unset fields keep their value.
+  rpc UpdateEnvironment(UpdateEnvironmentRequest) returns (UpdateEnvironmentResponse);
+  // Creates a preview environment from a snapshot of another environment in
+  // the same project. The fork deploys the source's active release and
+  // restores the snapshot on first start; the source is untouched. Idempotent
+  // by request_id.
+  rpc ForkEnvironment(ForkEnvironmentRequest) returns (ForkEnvironmentResponse);
+  // Stops an environment, returns its capacity and removes its routes and
+  // domains. Idempotent.
+  rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
+  // Lists an environment's snapshots in object storage, newest first. Empty
+  // when replication is off.
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+}
+
+message Project {
+  string id = 1;
+  // The account or team that owns the project. Opaque; single-tenant installs leave it empty.
+  string owner_id = 2;
+  // Unique per owner; a DNS label: 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
+  string name = 3;
+  google.protobuf.Timestamp create_time = 4;
+}
+
+message Environment {
+  string id = 1;
+  string project_id = 2;
+  // Unique within the project; a DNS label: 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
+  string name = 3;
+  EnvironmentState state = 4;
+  // Empty until something is deployed.
+  string active_deployment_id = 5;
+  // The hostname the install assigns, if it assigns one. Custom domains come from DomainService.
+  string hostname = 6;
+  SleepingPingMode sleeping_ping = 7;
+  // From the latest status report.
+  uint32 online_players = 8;
+  // Set for forks.
+  string forked_from_environment_id = 9;
+  string forked_from_snapshot_id = 10;
+  google.protobuf.Timestamp create_time = 11;
+}
+
+enum EnvironmentState {
+  ENVIRONMENT_STATE_UNSPECIFIED = 0;
+  // Nothing deployed yet.
+  ENVIRONMENT_STATE_PENDING = 1;
+  ENVIRONMENT_STATE_STARTING = 2;
+  ENVIRONMENT_STATE_RUNNING = 3;
+  ENVIRONMENT_STATE_SUSPENDED = 4;
+  ENVIRONMENT_STATE_DELETING = 5;
+}
+
+// A point in an environment's log that it can be restored or forked from.
+message Snapshot {
+  string id = 1;
+  string environment_id = 2;
+  uint64 epoch = 3;
+  uint64 log_revision = 4;
+  google.protobuf.Timestamp create_time = 5;
+}
+
+message CreateProjectRequest {
+  string request_id = 1;
+  string name = 2;
+  // Optional: the owning account or team, for installs with several.
+  string owner_id = 3;
+}
+
+message CreateProjectResponse {
+  Project project = 1;
+}
+
+message GetProjectRequest {
+  string project_id = 1;
+}
+
+message GetProjectResponse {
+  Project project = 1;
+}
+
+message ListProjectsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  // Optional: only projects of this owner.
+  string owner_id = 3;
+}
+
+message ListProjectsResponse {
+  repeated Project projects = 1;
+  string next_page_token = 2;
+}
+
+message CreateEnvironmentRequest {
+  string request_id = 1;
+  string project_id = 2;
+  string name = 3;
+}
+
+message CreateEnvironmentResponse {
+  Environment environment = 1;
+}
+
+message GetEnvironmentRequest {
+  string environment_id = 1;
+}
+
+message GetEnvironmentResponse {
+  Environment environment = 1;
+}
+
+message ListEnvironmentsRequest {
+  string project_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListEnvironmentsResponse {
+  repeated Environment environments = 1;
+  string next_page_token = 2;
+}
+
+message UpdateEnvironmentRequest {
+  string environment_id = 1;
+  optional SleepingPingMode sleeping_ping = 2;
+}
+
+message UpdateEnvironmentResponse {
+  Environment environment = 1;
+}
+
+message ForkEnvironmentRequest {
+  string request_id = 1;
+  string source_environment_id = 2;
+  // Empty for the source's latest snapshot.
+  string snapshot_id = 3;
+  // The fork's name, following Environment.name rules.
+  string name = 4;
+  // Copy the source's secrets into the fork. Otherwise the fork starts with none.
+  bool copy_secrets = 5;
+}
+
+message ForkEnvironmentResponse {
+  Environment environment = 1;
+}
+
+message DeleteEnvironmentRequest {
+  string environment_id = 1;
+}
+
+message DeleteEnvironmentResponse {}
+
+message ListSnapshotsRequest {
+  string environment_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+  string next_page_token = 2;
+}

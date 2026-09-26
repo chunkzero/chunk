@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Custom domains, for the CLI and dashboards. A hostname enters the routing
+// table only after its ownership is verified.
+service DomainService {
+  // Claims a hostname for an environment and returns the DNS records to
+  // create. Idempotent: adding the same hostname to the same environment
+  // returns the existing domain.
+  rpc AddDomain(AddDomainRequest) returns (AddDomainResponse);
+  // Checks the domain's DNS records now and marks it verified when they match.
+  rpc VerifyDomain(VerifyDomainRequest) returns (VerifyDomainResponse);
+  rpc ListDomains(ListDomainsRequest) returns (ListDomainsResponse);
+  // Removes a domain and its route. Idempotent.
+  rpc RemoveDomain(RemoveDomainRequest) returns (RemoveDomainResponse);
+}
+
+message Domain {
+  string id = 1;
+  string environment_id = 2;
+  // Lowercase, without a trailing dot.
+  string hostname = 3;
+  DomainState state = 4;
+  // Records the owner must create: a TXT ownership proof and a
+  // `_minecraft._tcp.<hostname>` SRV record that routes players to the edge.
+  // SRV works at a zone apex, where a CNAME cannot. Its target is a name the
+  // install routes to this environment, so routing works whichever hostname
+  // the client puts in its handshake. For hostnames below the apex, a CNAME
+  // to the edge may be listed as well.
+  repeated DnsRecord dns_records = 5;
+  google.protobuf.Timestamp create_time = 6;
+}
+
+enum DomainState {
+  DOMAIN_STATE_UNSPECIFIED = 0;
+  DOMAIN_STATE_PENDING_VERIFICATION = 1;
+  DOMAIN_STATE_VERIFIED = 2;
+}
+
+message DnsRecord {
+  // TXT, SRV or CNAME.
+  string type = 1;
+  string name = 2;
+  // For SRV: `priority weight port target`.
+  string value = 3;
+}
+
+message AddDomainRequest {
+  string environment_id = 1;
+  string hostname = 2;
+}
+
+message AddDomainResponse {
+  Domain domain = 1;
+}
+
+message VerifyDomainRequest {
+  string domain_id = 1;
+}
+
+message VerifyDomainResponse {
+  Domain domain = 1;
+}
+
+message ListDomainsRequest {
+  string environment_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListDomainsResponse {
+  repeated Domain domains = 1;
+  string next_page_token = 2;
+}
+
+message RemoveDomainRequest {
+  string domain_id = 1;
+}
+
+message RemoveDomainResponse {}

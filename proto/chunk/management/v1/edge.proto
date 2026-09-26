@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/common.proto";
+
+// Called by edges with an edge token. Edges keep no state of their own and
+// hold no provider credentials: routes come from WatchRoutes and wakes go
+// through Wake, so any number of edges can serve one address.
+service EdgeService {
+  // Streams the routing table. The first message has reset set and carries
+  // every route; later messages carry changed and removed routes and apply in
+  // order. After reconnecting, an edge starts again from a reset message.
+  rpc WatchRoutes(WatchRoutesRequest) returns (stream WatchRoutesResponse);
+  // Asks for a sleeping environment to wake for a login, or for a ping when
+  // its ping mode is WAKE. Concurrent wakes of one environment from any edge
+  // share one provider start, and wakes are refused for blocked clients and
+  // rate-limited per environment. An accepted wake (WAKING or AWAKE) advances
+  // the environment's desired-state revision, which reaches core through
+  // EnvironmentService.Attach and invalidates any idle report core made
+  // before seeing it. Returns without waiting for the environment; the edge
+  // holds the connection until the route lists gateways or its own deadline
+  // passes.
+  rpc Wake(WakeRequest) returns (WakeResponse);
+}
+
+message WatchRoutesRequest {}
+
+message WatchRoutesResponse {
+  // Increases with every message.
+  uint64 revision = 1;
+  // Replace every route the edge holds with this message's routes.
+  bool reset = 2;
+  // Added or changed routes, keyed by hostname.
+  repeated Route routes = 3;
+  repeated string removed_hostnames = 4;
+}
+
+// Unknown hostnames have no route; edges reject them and wake nothing.
+message Route {
+  // Lowercase, without a trailing dot. Edges normalize the handshake hostname
+  // the same way before matching.
+  string hostname = 1;
+  string environment_id = 2;
+  // Ready gateways as host:port; pick any. Empty while asleep or starting.
+  repeated string gateway_addresses = 3;
+  bool asleep = 4;
+  SleepingPingMode sleeping_ping = 5;
+  // The status JSON the environment last reported for this hostname. While
+  // asleep in CACHE mode, edges answer pings with it and 0 online.
+  string cached_status_json = 6;
+}
+
+message WakeRequest {
+  string environment_id = 1;
+  WakeReason reason = 2;
+  // The player's IP address, checked against addresses blocked after failed authentication.
+  string client_address = 3;
+}
+
+enum WakeReason {
+  WAKE_REASON_UNSPECIFIED = 0;
+  WAKE_REASON_LOGIN = 1;
+  WAKE_REASON_PING = 2;
+}
+
+message WakeResponse {
+  WakeOutcome outcome = 1;
+}
+
+enum WakeOutcome {
+  WAKE_OUTCOME_UNSPECIFIED = 0;
+  // A start is in flight; wait for the route to list gateways.
+  WAKE_OUTCOME_WAKING = 1;
+  // Already awake.
+  WAKE_OUTCOME_AWAKE = 2;
+  // The client recently failed authentication; show a "server is sleeping" message.
+  WAKE_OUTCOME_BLOCKED = 3;
+  // The environment's wake limit is reached.
+  WAKE_OUTCOME_THROTTLED = 4;
+}
