@@ -17,6 +17,10 @@ const REVISION_BITS: u32 = 40;
 const EPOCH_BITS: u32 = 23;
 
 impl Generation {
+    /// Stands for the commit applying the current update until the writer stamps in that commit's generation. No
+    /// commit has it.
+    pub(crate) const PENDING: Self = Self { epoch: u64::MAX, revision: u64::MAX };
+
     /// # Errors
     /// Rejects a pair that the wire form cannot carry.
     pub(crate) fn new(epoch: u64, revision: u64) -> Result<Self> {
@@ -35,8 +39,26 @@ impl Generation {
     /// The `uint64` generation carried by the current wire contract: the epoch above 40 revision bits. It orders like
     /// the pair and stays a positive signed 64-bit value, as JVMs require.
     #[must_use]
-    pub fn wire(self) -> u64 {
+    pub const fn wire(self) -> u64 {
         self.epoch << REVISION_BITS | self.revision
+    }
+}
+
+/// A row that may name the commit writing it as [`Generation::PENDING`].
+pub(crate) trait Stamp {
+    /// Whether the row names [`Generation::PENDING`].
+    fn pending(&self) -> bool {
+        false
+    }
+
+    /// Replaces [`Generation::PENDING`] with `generation`.
+    fn stamp(&mut self, _generation: Generation) {}
+}
+
+/// Replaces a wire generation naming [`Generation::PENDING`] with `generation`'s.
+pub(super) fn stamp_wire(field: &mut u64, generation: Generation) {
+    if *field == Generation::PENDING.wire() {
+        *field = generation.wire();
     }
 }
 
@@ -47,6 +69,16 @@ pub(crate) struct Meta {
     #[serde(with = "bytes")]
     pub config: Vec<u8>,
     pub method_sequence: u64,
+}
+
+impl Stamp for Meta {
+    fn pending(&self) -> bool {
+        self.method_sequence == Generation::PENDING.wire()
+    }
+
+    fn stamp(&mut self, generation: Generation) {
+        stamp_wire(&mut self.method_sequence, generation);
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +99,16 @@ pub(crate) struct MoveIntent {
     pub sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<MoveFailure>,
+}
+
+impl Stamp for MoveIntent {
+    fn pending(&self) -> bool {
+        self.sequence == Generation::PENDING.wire()
+    }
+
+    fn stamp(&mut self, generation: Generation) {
+        stamp_wire(&mut self.sequence, generation);
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -222,6 +264,26 @@ impl Claim {
         Ok(())
     }
 }
+
+impl Stamp for Claim {
+    fn pending(&self) -> bool {
+        self.membership == Generation::PENDING || self.generation == Generation::PENDING
+    }
+
+    fn stamp(&mut self, generation: Generation) {
+        for field in [&mut self.membership, &mut self.generation] {
+            if *field == Generation::PENDING {
+                *field = generation;
+            }
+        }
+    }
+}
+
+impl Stamp for HostState {}
+impl Stamp for SessionState {}
+impl Stamp for PlayerState {}
+impl Stamp for Drain {}
+impl Stamp for Roster {}
 
 /// Destination claims reserved together for a group move. Members are admitted together or not at all.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

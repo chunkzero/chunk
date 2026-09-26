@@ -146,7 +146,7 @@ async fn system_commits_go_ahead_of_queued_app_commits() {
     barrier(&backend).await;
     let key = chunk_store::DocumentKey::new("chunk_claims", "claim").unwrap();
     let write = chunk_store::Write { key, value: Some(json!({"player": "alex"})) };
-    let committed = tokio::task::spawn_blocking(move || system.commit(vec![write]));
+    let committed = tokio::task::spawn_blocking(move || system.commit(move |_| Ok(vec![write])));
     while backend.system().queued() == 0 {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
@@ -167,4 +167,59 @@ async fn system_commits_go_ahead_of_queued_app_commits() {
     let next = backend.mutate("g".into(), call("bump", json!({"id": "p"}))).await.unwrap();
     assert_eq!((next.revision, value(&next)), (Revision(system_revision.0 + 6), json!(7)));
     tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_claim_committed_between_app_commits_carries_its_exact_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, mut notice) = signals::unbounded_channel();
+    let (batch, batch_gate) = mpsc::channel();
+    let store =
+        ControlledStore { batched: true, batch: Some(batch_gate), ..ControlledStore::new(open(&directory), notices) };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    let batch = batch;
+    backend.register(id(), super::SOURCE.into(), Limits::default()).await.unwrap();
+    let system = backend.system();
+    let schema = json!({"chunk_claims": {"fields": {"generation": {"schema": {"type": "integer"}}}}});
+    let opened = tokio::task::spawn_blocking({
+        let system = system.clone();
+        move || system.open(serde_json::from_value(schema).unwrap())
+    });
+    opened.await.unwrap().unwrap();
+
+    // The first app commit's write is held while later app commits queue behind it.
+    let mut first = Box::pin(backend.mutate("a".into(), call("bump", json!({"id": "p"}))));
+    pending(first.as_mut()).await;
+    assert_eq!(notice.recv().await.unwrap(), Notice::Batch(vec!["prepare a".into()]));
+    assert_eq!(notice.recv().await.unwrap(), Notice::Batch(vec!["commit a".into()]));
+    let mut queued: Vec<_> =
+        ["b", "c"].map(|name| Box::pin(backend.mutate(name.into(), call("bump", json!({"id": "p"}))))).into();
+    for mutation in &mut queued {
+        pending(mutation.as_mut()).await;
+    }
+    barrier(&backend).await;
+
+    // The claim stamps the revision the commit thread hands it, after the held app commit and before the queued ones.
+    let key = chunk_store::DocumentKey::new("chunk_claims", "claim").unwrap();
+    let committed = tokio::task::spawn_blocking({
+        let key = key.clone();
+        move || {
+            system.commit(move |revision| {
+                Ok(vec![chunk_store::Write { key, value: Some(json!({"generation": revision.0})) }])
+            })
+        }
+    });
+    while backend.system().queued() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    batch.send(()).unwrap();
+    let first = first.await.unwrap();
+    let revision = committed.await.unwrap().unwrap();
+    assert_eq!(revision, Revision(first.revision.0 + 1));
+    for mutation in queued {
+        assert!(mutation.await.unwrap().revision > revision);
+    }
+    tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
+    let claim = open(&directory).snapshot().unwrap().get(&key).unwrap().unwrap();
+    assert_eq!((claim.revision, claim.value), (revision, json!({"generation": revision.0})));
 }

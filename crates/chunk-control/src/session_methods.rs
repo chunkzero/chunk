@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Control, Error, Result, RuntimeConnection,
+    Control, Error, Generation, Result, RuntimeConnection,
     client::{auth, channel},
 };
 
@@ -129,10 +129,13 @@ impl Control {
             return Err(Error::Invalid("invalid session method arguments or timeout"));
         }
         // The allocating commit's generation increases across restores, as JVMs require of sequences.
-        let sequence = self.update(|state| {
-            state.method_sequence = state.next_generation()?.wire();
-            Ok(state.method_sequence)
+        let mut writer = self.authority.writer()?;
+        writer.update(|state| {
+            state.method_sequence = Generation::PENDING.wire();
+            Ok(())
         })?;
+        let sequence = self.state()?.method_sequence;
+        drop(writer);
         let issued_at_ms = crate::now_ms();
         let request = SessionMethodRequest {
             identity: Some(target.identity.clone()),
