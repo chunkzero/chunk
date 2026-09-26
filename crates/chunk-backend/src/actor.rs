@@ -83,6 +83,8 @@ pub(crate) struct Actor {
     queue: Arc<EngineQueue>,
     /// Request memory, charged for query replies retained until durable.
     memory: Arc<tokio::sync::Semaphore>,
+    /// System commits acknowledged so far.
+    system: u64,
     failure: Option<Error>,
 }
 
@@ -135,6 +137,7 @@ impl Actor {
             deferred: VecDeque::new(),
             queue,
             memory,
+            system: 0,
             failure: None,
         })
     }
@@ -202,6 +205,7 @@ impl Actor {
                     self.released(result);
                 }
                 Event::Evaluated(evaluated) => self.evaluated(*evaluated),
+                Event::System { count, revision, snapshot } => self.system_committed(count, revision, snapshot),
                 Event::Wake => {}
             }
             if !stopped.load(Ordering::Acquire) {
@@ -370,6 +374,10 @@ impl Actor {
         let contract = self.versions.get(&call.deployment).cloned().flatten();
         let target = Target { call, function: function.as_ref(), contract };
         evaluate(&mut self.js, target, mode, view, cancellation, context)
+    }
+
+    pub fn lane(&self) -> Arc<crate::system::Lane> {
+        self.committer.lane()
     }
 
     fn send(&mut self, job: Job) -> Result<()> {

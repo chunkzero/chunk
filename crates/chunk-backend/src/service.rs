@@ -58,7 +58,7 @@ impl Call {
 }
 
 pub(crate) fn validate_operation(id: &str) -> Result<()> {
-    if id.is_empty() || id.len() > 256 {
+    if id.is_empty() || id.len() > 256 || id.starts_with(crate::system::OPERATION_PREFIX) {
         return Err(Error::Invalid("operation identity"));
     }
     Ok(())
@@ -248,6 +248,13 @@ pub(crate) enum Event {
         result: Result<bool>,
     },
     Evaluated(Box<crate::actor::Evaluated>),
+    /// System commits up to `revision` that precede every app commit not yet acknowledged,
+    /// and a snapshot that includes them.
+    System {
+        count: u64,
+        revision: Revision,
+        snapshot: Result<Snapshot>,
+    },
     Wake,
 }
 
@@ -258,6 +265,7 @@ struct Owner {
     events: queue::Sender<Event>,
     memory: Arc<Semaphore>,
     queue: Arc<EngineQueue>,
+    lane: Arc<crate::system::Lane>,
     stopped: Arc<AtomicBool>,
     thread: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -300,6 +308,7 @@ impl Backend {
             events,
             memory: memory.clone(),
             queue: Arc::default(),
+            lane: Arc::default(),
             stopped: Arc::default(),
             thread: std::sync::Mutex::new(None),
         }));
@@ -349,7 +358,7 @@ impl Backend {
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
             match Actor::new(store, outgoing, action_incarnation, effects, readers, dequeued, retained) {
                 Ok(actor) => {
-                    if ready.send(Ok(())).is_ok() {
+                    if ready.send(Ok(actor.lane())).is_ok() {
                         actor.run(incoming, &stop);
                     }
                 }
@@ -358,18 +367,24 @@ impl Backend {
                 }
             }
         })?;
-        let backend = Self(Arc::new(Owner {
+        let lane = match initialized.recv().map_err(|_| Error::Closed).and_then(|lane| lane) {
+            Ok(lane) => lane,
+            Err(error) => {
+                let _ = thread.join();
+                return Err(error);
+            }
+        };
+        Ok(Self(Arc::new(Owner {
             environment,
             incarnation,
             action_sequence: AtomicU64::new(1),
             events,
             memory,
             queue: engine_queue,
+            lane,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
-        }));
-        initialized.recv().map_err(|_| Error::Closed)??;
-        Ok(backend)
+        })))
     }
 
     /// Stops admitting requests, drains accepted commits and joins both threads,
@@ -382,6 +397,12 @@ impl Backend {
     #[must_use]
     pub fn environment(&self) -> &str {
         &self.0.environment
+    }
+
+    /// The native system module's handle to this environment's store.
+    #[must_use]
+    pub fn system(&self) -> crate::System {
+        crate::System::new(self.clone(), self.0.lane.clone())
     }
 
     /// Validates and durably retains a deployment before enabling its functions.

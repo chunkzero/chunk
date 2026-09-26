@@ -95,3 +95,76 @@ async fn queued_commits_share_a_durable_write_without_early_acks_or_speculative_
     assert_eq!((update.revision, value(&update)), (next.revision, json!(4)));
     tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
 }
+
+#[tokio::test]
+async fn system_commits_go_ahead_of_queued_app_commits() {
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, mut notice) = signals::unbounded_channel();
+    let (scheduling, scheduling_gate) = mpsc::channel();
+    let (batch, batch_gate) = mpsc::channel();
+    let store = ControlledStore {
+        scheduling: Some(scheduling_gate),
+        batched: true,
+        batch: Some(batch_gate),
+        ..ControlledStore::new(open(&directory), notices)
+    };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    // Gate senders drop before the backend, so a failed assertion cannot strand its join.
+    let (scheduling, batch) = (scheduling, batch);
+    backend.register(id(), super::SOURCE.into(), Limits::default()).await.unwrap();
+    let system = backend.system();
+    let schema =
+        serde_json::from_value(json!({"chunk_claims": {"fields": {"player": {"schema": {"type": "string"}}}}}));
+    let opened = tokio::task::spawn_blocking({
+        let system = system.clone();
+        move || system.open(schema.unwrap())
+    });
+    assert!(opened.await.unwrap().unwrap().schema().contains_key("chunk_claims"));
+
+    // The first commit's write is held while later mutations queue their prepares, then a held scheduling command.
+    let first = backend.mutate("a".into(), call("bump", json!({"id": "p"})));
+    let mut first = Box::pin(first);
+    pending(first.as_mut()).await;
+    assert_eq!(notice.recv().await.unwrap(), Notice::Batch(vec!["prepare a".into()]));
+    assert_eq!(notice.recv().await.unwrap(), Notice::Batch(vec!["commit a".into()]));
+    let names = ["b", "c", "d", "e", "f"];
+    let mut mutations: Vec<_> =
+        names.map(|name| Box::pin(backend.mutate(name.into(), call("bump", json!({"id": "p"}))))).into();
+    for mutation in &mut mutations {
+        pending(mutation.as_mut()).await;
+    }
+    barrier(&backend).await;
+    let mut blocker = Box::pin(backend.acknowledge_wake(0, None));
+    pending(blocker.as_mut()).await;
+    barrier(&backend).await;
+    batch.send(()).unwrap();
+    let first = first.await.unwrap();
+    assert_eq!(notice.recv().await.unwrap(), Notice::Batch(names.map(|name| format!("prepare {name}")).into()));
+    assert_eq!(notice.recv().await.unwrap(), Notice::Scheduling);
+
+    // Every app commit is now staged and queued behind the held command when the system commit arrives.
+    barrier(&backend).await;
+    let key = chunk_store::DocumentKey::new("chunk_claims", "claim").unwrap();
+    let write = chunk_store::Write { key, value: Some(json!({"player": "alex"})) };
+    let committed = tokio::task::spawn_blocking(move || system.commit(vec![write]));
+    while backend.system().queued() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    scheduling.send(()).unwrap();
+    assert!(blocker.await.is_err());
+    let Notice::Batch(write) = notice.recv().await.unwrap() else { panic!("expected a batch") };
+    let system_revision = Revision(first.revision.0 + 1);
+    assert_eq!(write[0], format!("commit chunk/1/{}", system_revision.0));
+    assert_eq!(write[1..], names.map(|name| format!("commit {name}")));
+    assert_eq!(committed.await.unwrap().unwrap(), system_revision);
+
+    // Queued app commits moved past it and still commit, each on the previous one's writes.
+    for (index, mutation) in mutations.into_iter().enumerate() {
+        let update = mutation.await.unwrap();
+        let count = index as u64 + 2;
+        assert_eq!((update.revision, value(&update)), (Revision(system_revision.0 + count - 1), json!(count)));
+    }
+    let next = backend.mutate("g".into(), call("bump", json!({"id": "p"}))).await.unwrap();
+    assert_eq!((next.revision, value(&next)), (Revision(system_revision.0 + 6), json!(7)));
+    tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
+}
