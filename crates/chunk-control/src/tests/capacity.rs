@@ -5,7 +5,7 @@ use crate::state::Capacity;
 async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launches() {
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
-    let control = open(&path, fixture.config.clone(), fixture.host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let waiting = request("waiting", &uuid::Uuid::new_v4().to_string());
     let claim = tokio::spawn({
         let (control, waiting) = (control.clone(), waiting.clone());
@@ -35,7 +35,7 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
 async fn a_restart_resumes_requested_and_releasing_capacity() {
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
-    let control = open(&path, fixture.config.clone(), fixture.host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let claim = tokio::spawn({
         let control = control.clone();
         async move { control.claim(request("waiting", &uuid::Uuid::new_v4().to_string())).await }
@@ -51,7 +51,7 @@ async fn a_restart_resumes_requested_and_releasing_capacity() {
             let host = crate::state::HostState {
                 capacity: Capacity::Releasing,
                 retired: true,
-                ..crate::state::HostState::requested("bridge", "local")
+                ..crate::state::HostState::requested("build", "bridge", "local")
             };
             state.hosts.insert(releasing.clone(), host);
             Ok(())

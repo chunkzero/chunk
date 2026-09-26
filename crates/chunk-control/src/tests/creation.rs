@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 fn configured_destinations(fixture: &mut Fixture) {
-    fixture.config.contracts.session_configurations = Some(
+    fixture.release.contracts.session_configurations = Some(
         serde_json::from_value(json!({
             "version":1,"configurations":[{"app":"bridge","session":"default","configuration":{
                 "type":"object","fields":{"map":{"schema":{"type":"enum","values":["forest","desert"]}}}
@@ -10,7 +10,7 @@ fn configured_destinations(fixture: &mut Fixture) {
         }))
         .unwrap(),
     );
-    fixture.config.contracts.destinations = Some(serde_json::from_value(json!({
+    fixture.release.contracts.destinations = Some(serde_json::from_value(json!({
         "version":1,"entries":{
             "apps/bridge/destinations/small":{
                 "destination":{"key":"small","session_type":"bridge/default","machine_profile":"local"},
@@ -67,7 +67,7 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
         assert_eq!(commands[id].configuration_json, serde_json::to_vec(&session.configuration).unwrap());
     }
     drop(control);
-    let mut changed = fixture.config.clone();
+    let mut changed = fixture.release.clone();
     changed
         .contracts
         .destinations
@@ -90,7 +90,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     let mut fixture = Fixture::new().await;
     configured_destinations(&mut fixture);
     for configuration in [json!({}), json!({"map":"ocean"}), json!({"map":"forest","extra":true}), json!([])] {
-        let mut config = fixture.config.clone();
+        let mut config = fixture.release.clone();
         config
             .contracts
             .destinations
@@ -107,7 +107,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
         assert!(open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
     }
     for field in ["schema", "profile", "capacity"] {
-        let mut config = fixture.config.clone();
+        let mut config = fixture.release.clone();
         match field {
             "schema" => config.contracts.session_configurations = None,
             "profile" => {

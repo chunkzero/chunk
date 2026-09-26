@@ -14,13 +14,21 @@ pub struct Config {
     pub bind: SocketAddr,
     pub control: crate::Config,
     pub host: Arc<dyn Host>,
+    /// Drops every control row before serving, as when a local session starts over.
+    pub fresh: bool,
+}
+
+/// A serving control, which activates and retires releases.
+pub struct Ready {
+    pub connection: ControlConnection,
+    pub control: Arc<Control>,
 }
 
 /// Serves control requests and awaits accepted operations before stopping hosts. Stops once the environment store
 /// can no longer commit, such as after another store took over the environment.
 /// # Errors
 /// Reports configuration, durable-state, transport and shutdown errors, and a stopped environment store.
-pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop: CancellationToken) -> io::Result<()> {
+pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: CancellationToken) -> io::Result<()> {
     if !config.bind.ip().is_loopback() {
         return Err(io::Error::other("control must bind loopback"));
     }
@@ -31,7 +39,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let token = chunk_service::secret(&config.state.join("token"))?;
-        let control = Control::open(config.system, config.control, config.host).map_err(io::Error::other)?;
+        let control =
+            Control::open(config.system, config.control, config.host, config.fresh).map_err(io::Error::other)?;
         Ok((control, token))
     })
     .await
@@ -52,7 +61,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
             }
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
-        let _ = ready.send(connection);
+        let _ = ready.send(Ready { connection, control: control.clone() });
         let shutdown = {
             let (stop, service) = (stop.clone(), service.clone());
             async move {

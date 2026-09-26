@@ -113,7 +113,7 @@ impl Control {
             .filter(|runtime| Some(&runtime.identity) == identity && !state.released(host))
             .ok_or(Error::Invalid("unregistered or replaced process"))?;
         if let Some(expected) = state.hosts.get(host)
-            && !self.runs_host(&runtime, expected)
+            && !crate::placement::runs_host(state, &runtime, expected)
         {
             return Err(Error::Invalid("process runs another host"));
         }

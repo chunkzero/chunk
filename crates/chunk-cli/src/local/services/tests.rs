@@ -1,9 +1,9 @@
 use super::*;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
 fn staged(directory: &std::path::Path, id: &str) -> Staged {
     let release = Release { apps: vec![], id: id.into(), directory: directory.join(id), archive: None };
-    let control = chunk_control::Config {
+    let control = chunk_control::Release {
         contracts: chunk_control::Contracts::default(),
         apps: BTreeMap::from([("bridge".into(), super::super::tests::app("bridge", "local", 4))]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "local".into(), deployment: id.into() },
@@ -56,6 +56,6 @@ async fn failed_proxy_start_releases_earlier_services() {
         .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert!(!settings.state.join("backend.json").exists());
-        assert!(!settings.state.join("control/test/connection.json").exists());
+        assert!(!settings.state.join("control/connection.json").exists());
     }
 }

@@ -9,13 +9,13 @@ async fn run_releases_authority_before_returning_with_an_open_watch() {
     for attempt in 1..=ATTEMPTS {
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
             let fixture = Fixture::new().await;
+            let environment = environment(&fixture.release);
             let store = chunk_store::SqliteStore::open(
                 fixture.directory.path().join("control.sqlite"),
-                &fixture.config.deployment.environment,
+                &environment.environment,
             )
             .unwrap();
-            let backend =
-                chunk_backend::Backend::new(fixture.config.deployment.environment.clone(), Box::new(store)).unwrap();
+            let backend = chunk_backend::Backend::new(environment.environment.clone(), Box::new(store)).unwrap();
             let system = backend.system();
             let stop = CancellationToken::new();
             let (ready, connection) = oneshot::channel();
@@ -24,16 +24,17 @@ async fn run_releases_authority_before_returning_with_an_open_watch() {
                 system: system.clone(),
                 connection: fixture.directory.path().join("control.json"),
                 bind: "127.0.0.1:0".parse().unwrap(),
-                control: fixture.config.clone(),
+                control: environment.clone(),
                 host: fixture.host.clone(),
+                fresh: false,
             };
             let server = async {
                 crate::server::run(config, ready, stop.clone()).await.unwrap();
-                // No yield or retry: returning from run must release the deployment's scope lock.
-                Control::open(system, fixture.config.clone(), fixture.host.clone())
+                // No yield or retry: returning from run must release the environment's lock.
+                Control::open(system, environment.clone(), fixture.host.clone(), false)
             };
             let watch = async {
-                let connection = connection.await.unwrap();
+                let connection = connection.await.unwrap().connection;
                 let mut client = LocalControlClient::connect(connection.endpoint).await.unwrap();
                 let mut request = Request::new(WatchRequest { proxy_id: "proxy-1".into() });
                 request.metadata_mut().insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());

@@ -4,7 +4,9 @@ use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use std::sync::Arc;
+
+use crate::{Error, Release, Result};
 
 /// The `(epoch, revision)` of a commit. Order and compare the pair; a restore starts a new epoch and may reuse revisions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -65,10 +67,13 @@ pub(super) fn stamp_wire(field: &mut u64, generation: Generation) {
 /// Control's singleton row.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct Meta {
-    /// Fingerprint of the configuration the state was written under.
+    /// Fingerprint of the environment configuration the state was written under.
     #[serde(with = "bytes")]
     pub config: Vec<u8>,
     pub method_sequence: u64,
+    /// The release new placements use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 impl Stamp for Meta {
@@ -119,6 +124,8 @@ pub(crate) struct MoveFailure {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HostState {
+    /// The deployment version whose release this host runs.
+    pub release: String,
     pub app: String,
     pub profile: String,
     pub retired: bool,
@@ -133,8 +140,9 @@ pub(crate) struct HostState {
 }
 
 impl HostState {
-    pub fn requested(app: &str, profile: &str) -> Self {
+    pub fn requested(release: &str, app: &str, profile: &str) -> Self {
         Self {
+            release: release.into(),
             app: app.into(),
             profile: profile.into(),
             retired: false,
@@ -142,6 +150,21 @@ impl HostState {
             capacity: Capacity::Requested,
             failure: None,
         }
+    }
+}
+
+/// A release that hosts may run. A recorded release never changes, so rows compare by identity.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ReleaseState {
+    #[serde(with = "json_release")]
+    pub release: Arc<Release>,
+    /// Retired releases place nothing new; their hosts are stopping.
+    pub retired: bool,
+}
+
+impl PartialEq for ReleaseState {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.release, &other.release) && self.retired == other.retired
     }
 }
 
@@ -284,6 +307,7 @@ impl Stamp for SessionState {}
 impl Stamp for PlayerState {}
 impl Stamp for Drain {}
 impl Stamp for Roster {}
+impl Stamp for ReleaseState {}
 
 /// Destination claims reserved together for a group move. Members are admitted together or not at all.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -338,5 +362,21 @@ mod json_text {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<serde_json::Value, D::Error> {
         serde_json::from_str(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+mod json_release {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::Release;
+
+    pub fn serialize<S: Serializer>(value: &Arc<Release>, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&serde_json::to_string(&**value).map_err(serde::ser::Error::custom)?)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<Release>, D::Error> {
+        Ok(Arc::new(serde_json::from_str(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)?))
     }
 }

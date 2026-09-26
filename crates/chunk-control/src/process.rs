@@ -1,5 +1,5 @@
 use crate::{
-    Error, Host, ProcessHostConfig, Progress, Result, RuntimeConnection,
+    Distribution, Error, Host, ProcessHostConfig, Progress, Release, Result, RuntimeConnection,
     client::{auth, channel},
 };
 use chunk_proto::v1::{ProcessIdentity, ProcessRegistration, node_control_client::NodeControlClient};
@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 pub struct ProcessHost {
     config: ProcessHostConfig,
     endpoint: OnceLock<String>,
+    /// Each launchable release's distribution, by deployment version.
+    distributions: Mutex<BTreeMap<String, Distribution>>,
     processes: Mutex<Processes>,
 }
 #[derive(Default)]
@@ -64,7 +66,15 @@ impl Drop for ProcessHost {
 impl ProcessHost {
     #[must_use]
     pub fn new(config: ProcessHostConfig) -> Self {
-        Self { config, endpoint: OnceLock::new(), processes: Mutex::default() }
+        Self { config, endpoint: OnceLock::new(), distributions: Mutex::default(), processes: Mutex::default() }
+    }
+    /// Launches JVMs of `deployment`'s release from `distribution`.
+    /// # Errors
+    /// Reports a poisoned host.
+    pub fn add_release(&self, deployment: &str, distribution: Distribution) -> Result<()> {
+        let mut distributions = self.distributions.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
+        distributions.insert(deployment.into(), distribution);
+        Ok(())
     }
     fn path(&self, id: &str, extension: &str) -> Result<std::path::PathBuf> {
         uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("invalid host ID"))?;
@@ -75,10 +85,13 @@ impl ProcessHost {
     }
     /// The process running `id`, launching it if `id` never launched. `None` while a launch this host does not own
     /// may still run.
-    fn launch(&self, id: &str, app: &str, profile: &str) -> Result<Option<Arc<Process>>> {
+    fn launch(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Option<Arc<Process>>> {
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
         if let Some(process) = processes.running.get(id) {
-            if process.identity.app_id != app || process.identity.machine_profile != profile {
+            if process.identity.deployment.as_ref() != Some(&release.deployment)
+                || process.identity.app_id != app
+                || process.identity.machine_profile != profile
+            {
                 return Err(Error::Invalid("host binding changed"));
             }
             return Ok(Some(process.clone()));
@@ -89,7 +102,7 @@ impl ProcessHost {
         if self.path(id, "launch")?.try_exists()? {
             return Ok(None);
         }
-        match self.start(id, app, profile) {
+        match self.start(id, release, app, profile) {
             Ok(process) => {
                 processes.running.insert(id.into(), process.clone());
                 Ok(Some(process))
@@ -111,30 +124,36 @@ impl ProcessHost {
         exit.sync_all()?;
         Ok(())
     }
-    fn start(&self, id: &str, app: &str, profile: &str) -> Result<Arc<Process>> {
+    fn start(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Arc<Process>> {
         let endpoint = self.endpoint.get().ok_or(Error::Unresolved("control not listening"))?;
-        let artifact = self.config.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
+        let deployment = &release.deployment;
+        let distribution = self
+            .distributions
+            .lock()
+            .map_err(|_| Error::Unresolved("host poisoned"))?
+            .get(&deployment.deployment)
+            .cloned()
+            .ok_or(Error::Invalid("unknown release distribution"))?;
+        let artifact = release.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
         // Placement already bound the profile to the app's session or one of its declared destinations.
-        let size = self.config.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
+        let size = release.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
         let backend = &self.config.backend;
-        if backend.environment != self.config.deployment.environment
-            || backend.deployment != self.config.deployment.deployment
-        {
+        if backend.environment != deployment.environment {
             return Err(Error::Invalid("gameplay backend scope mismatch"));
         }
-        let distribution = self.config.distribution.canonicalize()?;
-        let jar = self.config.distribution.join(&artifact.jar).canonicalize()?;
+        let root = distribution.directory.canonicalize()?;
+        let jar = distribution.directory.join(&artifact.jar).canonicalize()?;
         let bytes = std::fs::read(&jar)?;
-        if !jar.starts_with(&distribution) || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256 {
+        if !jar.starts_with(&root) || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256 {
             return Err(Error::Invalid("app artifact digest mismatch"));
         }
-        classpath::verify(&distribution, &jar, &bytes)?;
+        classpath::verify(&root, &jar, &bytes)?;
         std::fs::create_dir_all(&self.config.directory)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
         let process = Arc::new(Process {
             identity: ProcessIdentity {
-                deployment: Some(self.config.deployment.clone()),
+                deployment: Some(deployment.clone()),
                 runtime_id: id.into(),
                 process_id: uuid::Uuid::new_v4().to_string(),
                 generation: 1,
@@ -155,14 +174,14 @@ impl ProcessHost {
         let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token))?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
-            let mut command = Command::new(&self.config.java);
+            let mut command = Command::new(&distribution.java);
             command
                 .arg(format!("-Xmx{}m", size.memory_mib))
                 .arg("-jar")
                 .arg(&jar)
                 .env("CHUNK_PROCESS_TOKEN", &process.token)
-                .env("CHUNK_ENVIRONMENT", &self.config.deployment.environment)
-                .env("CHUNK_DEPLOYMENT", &self.config.deployment.deployment)
+                .env("CHUNK_ENVIRONMENT", &deployment.environment)
+                .env("CHUNK_DEPLOYMENT", &deployment.deployment)
                 .env("CHUNK_CONTROL_ENDPOINT", endpoint)
                 .env("CHUNK_INSTANCE_ID", id)
                 .env("CHUNK_PROCESS_ID", &process.identity.process_id)
@@ -275,8 +294,8 @@ impl Host for ProcessHost {
     fn configure(&self, endpoint: String) -> Result<()> {
         self.endpoint.set(endpoint).map_err(|_| Error::Invalid("control endpoint already set"))
     }
-    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<Progress> {
-        let process = match self.launch(id, app, profile) {
+    async fn ensure(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Progress> {
+        let process = match self.launch(id, release, app, profile) {
             Ok(Some(process)) => process,
             // Only the JVM's re-attachment or its free launch lock resolves a launch from before control restarted.
             Ok(None) if self.stopped(id) => return Ok(Progress::Failed("JVM exited while unowned".into())),

@@ -31,16 +31,15 @@ pub struct Change {
 
 pub(super) type Row = (Table, String, bool);
 
-/// The claim and move rows among written `keys`, whose IDs start with `scope`.
-pub(super) fn rows<'a>(keys: impl Iterator<Item = (&'a DocumentKey, bool)>, scope: &str) -> Vec<Row> {
+/// The claim and move rows among written `keys`.
+pub(super) fn rows<'a>(keys: impl Iterator<Item = (&'a DocumentKey, bool)>) -> Vec<Row> {
     keys.filter_map(|(key, removed)| {
         let table = match key.table.as_str() {
             CLAIMS => Table::Claims,
             MOVES => Table::Moves,
             _ => return None,
         };
-        let id = key.id.strip_prefix(scope).unwrap_or(&key.id);
-        Some((table, id.to_owned(), removed))
+        Some((table, key.id.clone(), removed))
     })
     .collect()
 }

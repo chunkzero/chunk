@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity() {
-    let mut config: Config = serde_json::from_value(serde_json::json!({
+    let mut config: Release = serde_json::from_value(serde_json::json!({
         "apps":{"arena":{"id":"arena","jar":"arena.jar","sha256":"artifact","java_version":25,
             "sessions":{"default":{"machine_profile":"small","capacity":16}}}},
         "deployment":{"environment":"test","deployment":"release"},"artifact_digest":"artifact",
@@ -24,10 +24,10 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
         machine_profile: "large".into(),
     };
     let mut state = State::default();
-    let first = select_session(&mut state, &config, &demand, &BTreeSet::new()).unwrap();
+    let first = select_session(&mut state, "release", &config, &demand, &BTreeSet::new()).unwrap();
     assert_eq!(state.sessions[&first].capacity, 80);
     assert_eq!(state.hosts[&state.sessions[&first].host].profile, "large");
-    assert_eq!(select_session(&mut state, &config, &demand, &BTreeSet::new()).unwrap(), first);
+    assert_eq!(select_session(&mut state, "release", &config, &demand, &BTreeSet::new()).unwrap(), first);
     for field in ["capacity", "configuration", "profile"] {
         let mut changed = state.clone();
         match field {
@@ -37,13 +37,13 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
             }
             _ => changed.hosts.get_mut(&state.sessions[&first].host).unwrap().profile = "small".into(),
         }
-        let next = select_session(&mut changed, &config, &demand, &BTreeSet::new()).unwrap();
+        let next = select_session(&mut changed, "release", &config, &demand, &BTreeSet::new()).unwrap();
         assert_ne!(next, first, "{field}");
         assert_ne!(changed.sessions[&next].host, changed.sessions[&first].host, "{field}");
     }
     let mut wrong_profile = demand.clone();
     wrong_profile.machine_profile = "small".into();
-    assert!(select_session(&mut state, &config, &wrong_profile, &BTreeSet::new()).is_err());
+    assert!(select_session(&mut state, "release", &config, &wrong_profile, &BTreeSet::new()).is_err());
     config.contracts.destinations.as_mut().unwrap().entries.values_mut().next().unwrap().creation = None;
     assert!(config.validate().is_err());
 }
@@ -51,7 +51,7 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
 #[test]
 fn placement_groups_only_matching_apps_and_profiles() {
     let mut state = State::default();
-    let mut config = Config {
+    let mut config = Release {
         contracts: Contracts::default(),
         apps: BTreeMap::new(),
         deployment: chunk_proto::v1::DeploymentRef::default(),
@@ -77,6 +77,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
     {
         let session = select_session(
             &mut state,
+            "release",
             &config,
             &chunk_proto::v1::SessionDemand {
                 key: key.into(),
@@ -95,6 +96,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
     assert!(
         select_session(
             &mut state,
+            "release",
             &config,
             &chunk_proto::v1::SessionDemand {
                 key: "changed".into(),

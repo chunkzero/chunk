@@ -8,10 +8,10 @@ async fn fixture() -> Fixture {
     let app: chunk_contract::AppArtifact = serde_json::from_value(serde_json::json!({"id":"bridge","jar":"app.jar",
         "sha256":"artifact","java_version":25,"sessions":{"default":{"machine_profile":"local","capacity":4}}}))
     .unwrap();
-    fixture.config.apps.insert("bridge".into(), app);
-    fixture.config.session_types.get_mut("bridge/default").unwrap().capacity = 4;
-    fixture.config.max_processes = 4;
-    fixture.config.contracts.destinations = Some(
+    fixture.release.apps.insert("bridge".into(), app);
+    fixture.release.session_types.get_mut("bridge/default").unwrap().capacity = 4;
+    fixture.release.max_processes = 4;
+    fixture.release.contracts.destinations = Some(
         serde_json::from_value(serde_json::json!({"version":1,"entries":{"shared/destinations/arena":{
             "destination":{"key":"arena","session_type":"bridge/default","machine_profile":"local"},
             "overflow":"reject","empty_timeout_seconds":60}}}))

@@ -27,7 +27,8 @@ async fn released_claims_and_their_moves_are_forgotten_after_retention_and_stay_
     drop(control);
     fixture.detach().await;
 
-    let reopened = open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone());
+    let reopened =
+        open(&fixture.directory.path().join("control.sqlite"), fixture.release.clone(), fixture.host.clone());
     let state = reopened.unwrap().state().unwrap();
     assert!(!state.claims.contains_key("old") && state.moves.is_empty());
     assert!(state.claims["recent"].phase == Phase::Released);

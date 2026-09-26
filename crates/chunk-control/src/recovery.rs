@@ -21,6 +21,7 @@ use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     drain::retire_host,
+    placement::runs_host,
     state::{Capacity, Claim, Generation, HostState, Phase, SessionState},
 };
 
@@ -129,7 +130,7 @@ impl Control {
             return Ok(!self.host.unresolved(id));
         };
         if let Some(host) = state.hosts.get(id)
-            && !self.runs_host(&runtime, host)
+            && !runs_host(&state, &runtime, host)
         {
             return Err(Error::Invalid("recovered runtime mismatch"));
         }
@@ -186,16 +187,17 @@ impl Control {
         })
     }
 
-    /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity, so the host lifecycle stops it:
-    /// its drain releases it at once, and control shutdown stops it like any logged host.
+    /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity of the release it names, so the
+    /// host lifecycle stops it: its drain releases it at once, and control shutdown stops it like any logged host.
     fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
             if state.hosts.contains_key(id) {
                 return Ok(());
             }
+            let release = identity.deployment.as_ref().map(|deployment| deployment.deployment.as_str());
             let host = HostState {
                 capacity: Capacity::Ready,
-                ..HostState::requested(&identity.app_id, &identity.machine_profile)
+                ..HostState::requested(release.unwrap_or_default(), &identity.app_id, &identity.machine_profile)
             };
             state.hosts.insert(id.into(), host);
             let operation = format!("orphan/{id}");
@@ -220,14 +222,15 @@ impl Control {
         let (Some(identity), Some(secret)) = (registration.identity.clone(), token.strip_prefix("Bearer ")) else {
             return Err(error);
         };
-        if let Some(host) = self.state()?.hosts.get(&identity.runtime_id) {
+        let state = self.state()?;
+        if let Some(host) = state.hosts.get(&identity.runtime_id) {
             let connection = RuntimeConnection {
                 endpoint: registration.control_endpoint.clone(),
                 token: secret.into(),
                 identity: identity.clone(),
                 player_endpoint: registration.player_endpoint.clone(),
             };
-            if !self.runs_host(&connection, host) {
+            if !runs_host(&state, &connection, host) {
                 return Err(error);
             }
         }

@@ -1,7 +1,7 @@
-use crate::{Error, Result};
+use crate::{Error, Release, Result};
 use chunk_proto::v1::{ProcessIdentity, ProcessRegistration};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,9 +32,9 @@ pub enum Progress {
 /// lifetime, never relaunched.
 #[tonic::async_trait]
 pub trait Host: Send + Sync {
-    /// Starts providing `id`'s runtime if it has not started yet, and reports its progress without waiting. Repeated
-    /// calls with the same ID never start a second runtime.
-    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<Progress>;
+    /// Starts providing `id`'s runtime of `release`'s `app` if it has not started yet, and reports its progress without
+    /// waiting. Repeated calls with the same ID never start a second runtime.
+    async fn ensure(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Progress>;
     /// Stops `id`'s runtime, or confirms it never started. `true` only with affirmative evidence that no process for
     /// `id` runs; `false` asks the caller to try again.
     async fn release(&self, id: &str) -> Result<bool>;
@@ -78,11 +78,15 @@ pub trait Host: Send + Sync {
 }
 
 pub struct ProcessHostConfig {
-    pub distribution: std::path::PathBuf,
-    pub java: std::path::PathBuf,
+    /// Holds each host's launch marker, exit record and JVM log.
     pub directory: std::path::PathBuf,
-    pub deployment: chunk_proto::v1::DeploymentRef,
-    pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
-    pub profiles: BTreeMap<String, MachineProfile>,
+    /// The environment's backend. Each JVM connects to its release's deployment.
     pub backend: chunk_contract::BackendConnection,
+}
+
+/// Where a release's distribution was unpacked, and the Java executable that runs its apps.
+#[derive(Clone)]
+pub struct Distribution {
+    pub directory: std::path::PathBuf,
+    pub java: std::path::PathBuf,
 }

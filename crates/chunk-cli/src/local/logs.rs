@@ -63,12 +63,12 @@ impl Visit for Line {
     }
 }
 
-/// Follows every `<control>/*/nodes/*.jvm.log`, skipping output written before the session started.
-pub(super) async fn follow_jvms(control: PathBuf, reporter: Reporter, stop: CancellationToken) {
+/// Follows every `<nodes>/*.jvm.log`, skipping output written before the session started.
+pub(super) async fn follow_jvms(nodes: PathBuf, reporter: Reporter, stop: CancellationToken) {
     let mut offsets = HashMap::new();
     let mut first = true;
     loop {
-        for path in jvm_logs(&control) {
+        for path in jvm_logs(&nodes) {
             let offset = offsets.entry(path.clone()).or_insert_with(|| {
                 if first { std::fs::metadata(&path).map_or(0, |metadata| metadata.len()) } else { 0 }
             });
@@ -85,12 +85,11 @@ pub(super) async fn follow_jvms(control: PathBuf, reporter: Reporter, stop: Canc
     }
 }
 
-fn jvm_logs(control: &Path) -> Vec<PathBuf> {
-    let Ok(releases) = std::fs::read_dir(control) else { return Vec::new() };
-    releases
+fn jvm_logs(nodes: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(nodes) else { return Vec::new() };
+    entries
         .flatten()
-        .filter_map(|release| std::fs::read_dir(release.path().join("nodes")).ok())
-        .flat_map(|nodes| nodes.flatten().map(|entry| entry.path()))
+        .map(|entry| entry.path())
         .filter(|path| path.to_str().is_some_and(|path| path.ends_with(".jvm.log")))
         .collect()
 }

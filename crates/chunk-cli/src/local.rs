@@ -35,7 +35,7 @@ pub(crate) struct Options {
     bind: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:25568")]
     backend_bind: SocketAddr,
-    /// Control address of the first release; reloaded releases use ephemeral loopback ports.
+    /// Control address, shared by every release.
     #[arg(long, default_value = "127.0.0.1:25567")]
     control_bind: SocketAddr,
     /// Print plain progress lines instead of the terminal UI (automatic when stdout is not a terminal).
@@ -56,11 +56,11 @@ struct Settings {
     control_bind: SocketAddr,
 }
 
-/// A packaged release checked against its Java runtime and projected into control configuration.
+/// A packaged release checked against its Java runtime and projected into a control release.
 pub(super) struct Staged {
     release: chunk_build::Release,
     java: PathBuf,
-    control: chunk_control::Config,
+    control: chunk_control::Release,
     bundle: chunk_contract::Deployment,
 }
 
@@ -124,11 +124,11 @@ async fn serve(
     let project = building::inspect(root, state.join("releases"))?;
     reporter.done("Project", project_summary(&project));
     let _lock = runner_lock(&state.join("runner.lock"))?;
-    // Control's local files and JVM logs of an earlier session; the backend clears its rows once it starts, and its
+    // Control's local files and JVM logs of an earlier session; control drops its rows once it starts, and its
     // releases are pruned once this one is serving.
     crate::cleaning::remove(&state.join("control"))?;
     if interactive {
-        tokio::spawn(logs::follow_jvms(state.join("control"), reporter.clone(), stop.clone()));
+        tokio::spawn(logs::follow_jvms(state.join("control").join("nodes"), reporter.clone(), stop.clone()));
     }
     available_addresses(options.bind, options.backend_bind, options.control_bind)?;
     reporter.running("Build", "Gradle chunkArtifacts");
@@ -148,12 +148,12 @@ async fn serve(
         Some(reload::watch(&project.root, &ignored).map_err(io::Error::other)?)
     };
     let environment = staged.control.deployment.environment.clone();
-    let (shared, generation) = services::start(&settings, staged, &reporter).await?;
-    let session = session::Session::new(&settings, &options, &reporter, environment, shared, generation);
+    let (shared, version) = services::start(&settings, staged, &reporter).await?;
+    let session = session::Session::new(&settings, &options, &reporter, environment, shared, version);
     session.run(watched, commands, stop).await
 }
 
-/// Checks the release's Java requirement and projects it into control configuration.
+/// Checks the release's Java requirement and projects it into a control release.
 async fn stage(
     project: &building::Project,
     built: building::Built,
@@ -207,7 +207,7 @@ fn control_config(
     release: &str,
     deployment: &str,
     apps: &[chunk_contract::AppArtifact],
-) -> io::Result<chunk_control::Config> {
+) -> io::Result<chunk_control::Release> {
     let local =
         project.local.as_ref().ok_or_else(|| io::Error::other("chunk dev requires [local] settings in chunk.toml"))?;
     if project.apps.is_empty() {
@@ -228,7 +228,7 @@ fn control_config(
             })
         })
         .collect();
-    Ok(chunk_control::Config {
+    Ok(chunk_control::Release {
         contracts: chunk_control::Contracts::default(),
         apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
         deployment: chunk_proto::v1::DeploymentRef {

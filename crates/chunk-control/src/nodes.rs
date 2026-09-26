@@ -51,6 +51,7 @@ impl Control {
                     };
                     NodeStatus {
                         host_id: id.clone(),
+                        deployment: host.release.clone(),
                         app_id: host.app.clone(),
                         machine_profile: host.profile.clone(),
                         phase: phase.into(),

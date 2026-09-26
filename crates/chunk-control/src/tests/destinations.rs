@@ -1,7 +1,7 @@
 use super::*;
 
 fn policy(fixture: &mut Fixture, overflow: &str) {
-    fixture.config.contracts.destinations = Some(
+    fixture.release.contracts.destinations = Some(
         serde_json::from_value(serde_json::json!({
             "version":1,"entries":{"shared/destinations/lobby":{
                 "destination":{"key":"lobby","session_type":"bridge/default","machine_profile":"local"},
@@ -42,7 +42,7 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
         drop(control);
         fixture.detach().await;
         for change in ["version", "profile", "timeout"] {
-            let mut config = fixture.config.clone();
+            let mut config = fixture.release.clone();
             match change {
                 "version" => config.deployment.deployment = "next".into(),
                 "profile" => {
@@ -73,8 +73,8 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
             }
             let opened = open(&fixture.directory.path().join("control.sqlite"), config, fixture.host.clone());
             if change == "version" {
-                // Another deployment version is another control authority, with rows of its own.
-                assert!(opened.unwrap().state().unwrap().claims.is_empty());
+                // Another deployment version is another release of the same authority, beside the earlier one.
+                assert_eq!(opened.unwrap().state().unwrap().claims.len(), accepted);
             } else {
                 assert!(opened.is_err());
             }

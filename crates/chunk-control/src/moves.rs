@@ -12,7 +12,7 @@ impl Control {
     /// Rejects changed operations, concurrent moves and players without an arrived delivery.
     pub fn move_player(&self, request: MovePlayerRequest) -> Result<ClaimRequest> {
         validate(&request)?;
-        self.update(|state| queue(state, &self.config, request))
+        self.update(|state| queue(state, request))
     }
 
     /// Records why preparation ended, leaving fenced withdrawal to reconciliation.
@@ -63,8 +63,8 @@ pub(crate) fn validate(request: &MovePlayerRequest) -> Result<()> {
     Ok(())
 }
 
-/// Queues `request`'s move in the current update, returning the destination claim request.
-pub(crate) fn queue(state: &mut State, config: &crate::Config, request: MovePlayerRequest) -> Result<ClaimRequest> {
+/// Queues `request`'s move within its source's release in the current update, returning the destination claim request.
+pub(crate) fn queue(state: &mut State, request: MovePlayerRequest) -> Result<ClaimRequest> {
     if let Some(expected) = &request.expected_source {
         let claim = state.arrived_claim(expected).ok_or(Error::Invalid("stale captured move source"))?;
         if claim.player != request.player_id
@@ -107,8 +107,9 @@ pub(crate) fn queue(state: &mut State, config: &crate::Config, request: MovePlay
     destination.operation_id = request.operation_id;
     destination.demand = request.demand;
     destination.source = Some(claim.identity(source));
+    let (_, release) = state.placing(&destination)?;
     crate::placement::validate_demand(
-        config,
+        &release,
         destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
     )?;
     let sequence = Generation::PENDING.wire();

@@ -155,6 +155,8 @@ message NodeStatus {
   ProcessHealth health = 5;
   uint64 observed_at_ms = 6;
   uint32 consecutive_failures = 7;
+  // The deployment version whose release the node runs.
+  string deployment = 8;
 }
 message PlayersRequest {}
 message PlayerList {

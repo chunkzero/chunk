@@ -7,20 +7,23 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 
-use chunk_proto::v1::ClaimIdentity;
+use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
 use sha2::{Digest, Sha256};
 
-use crate::{Config, Error, Result};
+use crate::{Config, Error, Release, Result};
 pub use entities::Generation;
 use entities::Stamp;
 pub(crate) use entities::{
-    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
+    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, ReleaseState, Roster,
+    SessionState,
 };
-pub use store::clear;
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
     pub config: Vec<u8>,
+    /// The release new placements use.
+    pub current: Option<String>,
+    pub releases: BTreeMap<String, ReleaseState>,
     pub hosts: BTreeMap<String, HostState>,
     pub sessions: BTreeMap<String, SessionState>,
     pub players: BTreeMap<String, PlayerState>,
@@ -54,6 +57,31 @@ impl State {
                 && claim.phase == Phase::Arrived
                 && self.players.get(&claim.player).and_then(|owner| owner.current.as_ref()) == Some(operation)
         })
+    }
+
+    /// The release `host` runs.
+    pub fn host_release(&self, host: &str) -> Result<&Arc<Release>> {
+        let name = &self.hosts.get(host).ok_or(Error::Invalid("unknown host"))?.release;
+        Ok(&self.releases.get(name).ok_or(Error::Invalid("unknown release"))?.release)
+    }
+
+    /// The release that places `request`: the current one for a login, and its source's for a move. Retired
+    /// releases place nothing.
+    pub fn placing(&self, request: &ClaimRequest) -> Result<(String, Arc<Release>)> {
+        let name = match &request.source {
+            None => self.current.clone().ok_or(Error::Invalid("no current release"))?,
+            Some(source) => {
+                let claim = self.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
+                let session = self.sessions.get(&claim.session).ok_or(Error::Invalid("missing move source"))?;
+                self.hosts.get(&session.host).ok_or(Error::Invalid("missing move source"))?.release.clone()
+            }
+        };
+        let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;
+        if release.retired {
+            return Err(Error::Invalid("release retired"));
+        }
+        let release = release.release.clone();
+        Ok((name, release))
     }
 
     /// Replaces [`Generation::PENDING`] with `generation`, the commit that applied the update.
@@ -95,8 +123,12 @@ struct Writable {
 }
 
 impl Authority {
-    pub fn open(system: chunk_backend::System, config: &Config) -> Result<Self> {
-        let store = store::Store::new(system.clone(), &config.deployment.deployment)?;
+    /// Opens the environment's control state, first dropping every row when `fresh`.
+    pub fn open(system: chunk_backend::System, config: &Config, fresh: bool) -> Result<Self> {
+        let store = store::Store::new(system.clone())?;
+        if fresh {
+            store.drop_all()?;
+        }
         let state = store.load()?;
         let feed = feed::Feed::new(state.position());
         let store = Mutex::new(Writable { store, stale: false });
@@ -128,7 +160,7 @@ impl Authority {
         Ok(Writer { authority: self, store })
     }
 
-    /// Stops committing and releases this authority's scope, so another can open it.
+    /// Stops committing and releases the environment, so another authority can open it.
     pub fn close(&self) -> Result<()> {
         self.store.lock().map_err(|_| Error::Unresolved("control authority poisoned"))?.store.close();
         Ok(())
@@ -162,11 +194,11 @@ impl Writer<'_> {
         let previous = self.authority.read()?;
         let mut next = State::clone(&previous);
         let result = change(&mut next)?;
-        let writes = self.store.store.writes(&previous, &next)?;
+        let writes = store::Store::writes(&previous, &next)?;
         if writes.is_empty() {
             return Ok(result);
         }
-        let rows = feed::rows(writes.keys(), self.store.store.scope());
+        let rows = feed::rows(writes.keys());
         match self.store.store.commit(next.epoch, writes) {
             Ok(revision) if revision > previous.revision => {
                 next.revision = revision;
