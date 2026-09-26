@@ -27,13 +27,16 @@ export const standing = query({
   },
 });
 
+// Sets a new overall record, so every write changes every leaderboard result regardless of arrival order.
 export const submit = mutation({
-  args: { best: v.integer() },
+  args: {},
   returns: v.integer(),
-  handler: (ctx, { best }) => {
+  handler: (ctx) => {
     const found = own(ctx);
     if (!found) throw new Error("Profile missing");
-    if (best > found.best) ctx.db.patch(found._id, { best, rank: -best, lastSeen: Date.now() });
-    return Math.max(best, found.best);
+    const [leader] = ctx.db.query("profiles").withIndex("by_rank").collect(1);
+    const best = (leader?.best ?? 0) + 1;
+    ctx.db.patch(found._id, { best, rank: -best, lastSeen: Date.now() });
+    return best;
   },
 });

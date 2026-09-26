@@ -124,9 +124,8 @@ impl Client {
                 ensure!(std::str::from_utf8(&result.result_json)?.parse::<u64>().is_ok(), "unexpected save result");
             }
             Scenario::BackendFanout => {
-                let best = json!({"best": 1_000_000 + sequence});
                 let result =
-                    self.mutate(format!("submit-{sequence}"), "shared/leaderboard/submit", &best, player).await?;
+                    self.mutate(format!("submit-{sequence}"), "shared/leaderboard/submit", &json!({}), player).await?;
                 let replied = Instant::now();
                 let fanout = self.fanout.as_ref().context("fan-out subscriptions missing")?;
                 fanout.delivered(result.revision).await?;
@@ -328,5 +327,39 @@ mod tests {
         fanout.receive(1, &update(5));
         waiting.await.unwrap();
         fanout.delivered(2).await.unwrap();
+    }
+
+    /// Needs native TypeScript, like other compiled-bundle tests.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fanout_writes_arriving_out_of_order_still_change_every_subscription() {
+        use clap::Parser;
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().to_owned();
+        let bundle = tokio::task::spawn_blocking(move || compile(&output)).await.unwrap().unwrap();
+        let (ready, receiver) = oneshot::channel();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(chunk_backend::server::run(
+            chunk_backend::server::Config {
+                bundle,
+                environment: ENVIRONMENT.into(),
+                state: root.path().join("state"),
+                connection: root.path().join("connection.json"),
+                bind: "127.0.0.1:0".parse().unwrap(),
+            },
+            ready,
+            stop.clone(),
+        ));
+        let connection = receiver.await.unwrap().connection;
+        let config = Config::parse_from(["bench", "backend-fanout", "--population", "1", "--subscribers", "2"]);
+        seed(&connection, config.population).await.unwrap();
+        let fanout = subscribe(&connection, &config).await.unwrap();
+        let mut client = Client::connect(&connection, Some(fanout)).await.unwrap();
+        // A later offer can reach the backend first; the earlier one must still change the leaderboard.
+        for sequence in [1, 0] {
+            tokio::time::timeout(Duration::from_secs(5), client.execute(sequence, &config)).await.unwrap().unwrap();
+        }
+        drop(client);
+        stop.cancel();
+        server.await.unwrap().unwrap();
     }
 }

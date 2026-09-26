@@ -14,19 +14,23 @@ pub struct Data {
     by_rank: Vec<String>,
 }
 
-/// Mirrors the bundle's `seed` mutation.
+/// One seeded profile document and its ID, as the bundle's `seed` mutation writes it.
+pub fn profile(index: u64) -> (String, Value) {
+    let best = (index * 7919) % 100_000;
+    let inventory: Vec<_> =
+        (0..8).map(|slot| json!({"item": format!("item-{}", (index + slot) % 64), "count": 1 + slot})).collect();
+    let document = json!({"player": format!("p{index}"), "name": format!("Player {index}"), "coins": index % 1000,
+        "xp": index * 10, "level": 1 + index % 50, "best": best, "rank": -i64::try_from(best).unwrap(),
+        "inventory": inventory, "lastSeen": 0, "saves": 0});
+    (format!("profiles:{index:032x}"), document)
+}
+
 pub fn seed() -> Rc<Data> {
     let mut documents = HashMap::new();
     let mut by_player = HashMap::new();
     let mut ranked = Vec::new();
     for index in 0..PLAYERS {
-        let best = (index * 7919) % 100_000;
-        let id = format!("profiles:{index:032x}");
-        let inventory: Vec<_> =
-            (0..8).map(|slot| json!({"item": format!("item-{}", (index + slot) % 64), "count": 1 + slot})).collect();
-        let document = json!({"player": format!("p{index}"), "name": format!("Player {index}"), "coins": index % 1000,
-            "xp": index * 10, "level": 1 + index % 50, "best": best, "rank": -i64::try_from(best).unwrap(),
-            "inventory": inventory, "lastSeen": 0, "saves": 0});
+        let (id, document) = profile(index);
         by_player.insert(format!("p{index}"), id.clone());
         ranked.push((id.clone(), document.clone()));
         documents.insert(id, document);

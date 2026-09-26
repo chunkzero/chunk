@@ -16,6 +16,8 @@ use deno_core::v8;
 use serde::Deserialize;
 use serde_json::Value;
 
+pub type Writes = Vec<(Key, Option<Value>)>;
+
 const HEAP_BYTES: usize = 32 * 1024 * 1024;
 const EMERGENCY_HEAP_BYTES: usize = 8 * 1024 * 1024;
 const JSON_BYTES: usize = 1024 * 1024;
@@ -259,7 +261,7 @@ impl Direct {
         })
     }
 
-    /// Returns the strict JSON result and the number of buffered writes.
+    /// Returns the strict JSON result and the buffered writes.
     pub fn execute(
         &mut self,
         export: &str,
@@ -267,7 +269,7 @@ impl Direct {
         arguments: &str,
         mode: Mode,
         host: Box<dyn ReadHost>,
-    ) -> Result<(String, usize), String> {
+    ) -> Result<(String, Writes), String> {
         self.calls += 1;
         self.isolate.set_slot(State {
             generation: self.calls,
@@ -297,7 +299,7 @@ impl Direct {
             return Err("result exceeds size limit".into());
         }
         serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
-        Ok((text, state.writes.len()))
+        Ok((text, state.writes.into_iter().map(|(key, (value, _))| (key, value)).collect()))
     }
 }
 
@@ -380,10 +382,13 @@ impl Watchdog {
     }
 
     fn arm(&self, handle: v8::IsolateHandle, budget: Duration) -> Guard<'_> {
-        *self.shared.active.lock().expect("watchdog lock") = Some(handle);
+        // Publish the deadline before releasing the lock, so an awake watchdog never sees the new handle unarmed.
+        let mut active = self.shared.active.lock().expect("watchdog lock");
+        *active = Some(handle);
         let micros = u64::try_from(budget.as_micros()).unwrap_or(u64::MAX);
         self.shared.at.store(self.shared.now().saturating_add(micros), Ordering::Release);
         self.thread.as_ref().expect("watchdog thread").thread().unpark();
+        drop(active);
         Guard(self)
     }
 }

@@ -13,12 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Json, Limits, Mode};
+use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Json, Key, Limits, Mode};
+use direct::Writes;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-type Call = Box<dyn FnMut(&(Json, Json)) -> std::result::Result<(String, usize), String>>;
+type Call = Box<dyn FnMut(&(Json, Json)) -> std::result::Result<(String, Writes), String>>;
 
 const ENGINES: [&str; 2] = ["deno", "direct"];
 const WORKLOADS: [(&str, &str, Mode); 3] = [
@@ -114,7 +115,11 @@ fn cell(engine: &str, workload: &str, bundle: &Path) -> Result<()> {
                 };
                 let host = Box::new(host::Host(data.clone()));
                 let execution = engine.execute(&id, invocation, host, &Cancellation::default());
-                execution.map(|execution| (execution.value, execution.writes.len())).map_err(|error| error.to_string())
+                execution
+                    .map(|execution| {
+                        (execution.value, execution.writes.into_iter().map(|write| (write.key, write.value)).collect())
+                    })
+                    .map_err(|error| error.to_string())
             })
         }
         "direct" => {
@@ -128,7 +133,11 @@ fn cell(engine: &str, workload: &str, bundle: &Path) -> Result<()> {
     };
     let (warmup, calls) = (setting("BENCH_WARMUP", 1000)?, setting("BENCH_CALLS", 8000)?);
     for index in 0..warmup {
-        call(&inputs[index % inputs.len()])?;
+        let player = index % inputs.len();
+        let (_, writes) = call(&inputs[player])?;
+        if writes != expected(mode, player as u64, &inputs[player].1)? {
+            return Err(format!("unexpected writes for player {player}: {writes:?}").into());
+        }
     }
     let mut checksum = Sha256::new();
     let mut samples = Vec::with_capacity(calls);
@@ -138,8 +147,8 @@ fn cell(engine: &str, workload: &str, bundle: &Path) -> Result<()> {
         let start = Instant::now();
         let (value, writes) = call(&inputs[index % inputs.len()])?;
         samples.push(start.elapsed());
-        if writes != usize::from(mode == Mode::Mutation) {
-            return Err(format!("unexpected write count {writes}").into());
+        if writes.len() != usize::from(mode == Mode::Mutation) {
+            return Err(format!("unexpected write count {}", writes.len()).into());
         }
         checksum.update(value.as_bytes());
     }
@@ -159,6 +168,22 @@ fn cell(engine: &str, workload: &str, bundle: &Path) -> Result<()> {
     });
     println!("{result}");
     Ok(())
+}
+
+/// The `save` mutation patches the seeded profile with its arguments at the fixed invocation time.
+fn expected(mode: Mode, player: u64, arguments: &Json) -> Result<Writes> {
+    if mode == Mode::Query {
+        return Ok(Vec::new());
+    }
+    let (id, mut document) = host::profile(player);
+    let arguments: Value = serde_json::from_str(arguments.as_str())?;
+    let fields = document.as_object_mut().ok_or("profile object")?;
+    fields.extend(arguments.as_object().ok_or("arguments object")?.clone());
+    let best = arguments["best"].as_i64().ok_or("best")?;
+    fields.insert("rank".into(), json!(-best));
+    fields.insert("lastSeen".into(), json!(1_700_000_000_000_u64));
+    fields.insert("saves".into(), json!(1));
+    Ok(vec![(Key { table: "profiles".into(), id }, Some(document))])
 }
 
 fn micros(duration: Duration) -> f64 {
