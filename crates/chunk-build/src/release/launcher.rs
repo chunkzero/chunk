@@ -1,7 +1,8 @@
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Read, Write};
 
-use zip::{CompressionMethod, DateTime, ZipWriter, write::SimpleFileOptions};
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+use super::jars;
 use crate::publication::{Files, insert};
 
 /// Publishes a thin app JAR and its runtime classpath under `libs/` and returns a launcher JAR that runs `main` with
@@ -16,6 +17,11 @@ pub(super) fn assemble(main: &str, jars: impl IntoIterator<Item = Vec<u8>>, file
             classpath.push(entry);
         }
     }
+    write(main, &classpath)
+}
+
+/// The launcher JAR that runs `main` over `classpath`, byte for byte as `assemble` publishes it.
+pub(super) fn write(main: &str, classpath: &[String]) -> io::Result<Vec<u8>> {
     let manifest: String = [
         "Manifest-Version: 1.0".to_owned(),
         format!("Main-Class: {main}"),
@@ -33,6 +39,24 @@ pub(super) fn assemble(main: &str, jars: impl IntoIterator<Item = Vec<u8>>, file
     jar.start_file("META-INF/MANIFEST.MF", options).map_err(io::Error::other)?;
     jar.write_all(manifest.as_bytes())?;
     Ok(jar.finish().map_err(io::Error::other)?.into_inner())
+}
+
+/// The `Class-Path` of a launcher JAR, which holds only its manifest; `None` for any other JAR.
+pub(super) fn classpath(jar: &[u8]) -> io::Result<Option<Vec<String>>> {
+    let mut archive = ZipArchive::new(Cursor::new(jar)).map_err(io::Error::other)?;
+    if archive.len() != 1 {
+        return Ok(None);
+    }
+    let mut manifest = Vec::new();
+    match archive.by_name("META-INF/MANIFEST.MF") {
+        Ok(entry) => entry.take(65_537).read_to_end(&mut manifest)?,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    Ok(jars::attributes(&manifest)?.iter().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case("Class-Path").then(|| value.split_whitespace().map(Into::into).collect())
+    }))
 }
 
 /// Splits a manifest attribute into 72-byte lines without breaking UTF-8 characters.

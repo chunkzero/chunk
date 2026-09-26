@@ -86,7 +86,7 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     };
     for app in &project.apps {
         let input = descriptor_apps[app.id.as_str()];
-        let bytes = executable_jar(input, jvm.java.version, &backend, &mut files)?;
+        let bytes = executable_jar(input, &mut files)?;
         let sha256 = content_digest(&bytes);
         let jar = format!("apps/{}/{}.jar", app.id, sha256);
         validate_implementations(&inputs.project, app, &input.sessions)?;
@@ -164,40 +164,19 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     Ok(Release { id, directory, archive, apps: verified.apps })
 }
 
-/// Validates one app's JAR and classpath, returning the JAR its JVM runs: the bundled JAR itself, or a launcher over
-/// the thin JAR and classpath JARs it adds to `files`.
-fn executable_jar(
-    app: &descriptor::App,
-    java: u32,
-    backend: &chunk_contract::Deployment,
-    files: &mut Files,
-) -> io::Result<Vec<u8>> {
+/// Returns the JAR an app's JVM runs: the bundled JAR itself, or a launcher over the thin JAR and the classpath JARs
+/// it adds to `files`.
+fn executable_jar(app: &descriptor::App, files: &mut Files) -> io::Result<Vec<u8>> {
     let bytes = read_limited(&app.jar, 128 * 1024 * 1024)?;
-    let main = jars::main_class(&bytes)?;
-    let mut classpath = jars::Classpath::default();
-    classpath.add(&bytes, &format!("app {}", app.id), java)?;
-    let mut libraries = Vec::new();
-    for path in &app.classpath {
-        let library = read_limited(path, 128 * 1024 * 1024)?;
-        classpath.add(&library, &path.display().to_string(), java)?;
-        libraries.push(library);
-    }
-    if !classpath.contains(&main) {
-        return Err(io::Error::other(format!("app {} Main-Class {main} is not on its classpath", app.id)));
-    }
-    let contracts = &backend.contracts;
-    session_methods::validate(&bytes, &classpath, &app.id, &app.sessions, contracts.session_methods.as_ref())?;
-    session_configurations::validate(
-        &bytes,
-        &classpath,
-        &app.id,
-        &app.sessions,
-        contracts.session_configurations.as_ref(),
-    )?;
-    if libraries.is_empty() {
+    if app.classpath.is_empty() {
         return Ok(bytes);
     }
-    launcher::assemble(&main, std::iter::once(bytes).chain(libraries), files)
+    let main = jars::main_class(&bytes)?;
+    let mut jars = vec![bytes];
+    for path in &app.classpath {
+        jars.push(read_limited(path, 128 * 1024 * 1024)?);
+    }
+    launcher::assemble(&main, jars, files)
 }
 
 fn validate_implementations(root: &Path, app: &project::AppMetadata, actual: &[String]) -> io::Result<()> {

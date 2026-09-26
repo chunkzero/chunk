@@ -6,7 +6,9 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::publication::{self, MAX_BYTES, MAX_FILES};
+use std::collections::BTreeSet;
+
+use crate::publication::{self, MAX_BYTES, MAX_COMPONENTS, MAX_FILES};
 
 const LONG_NAME_LIMIT: u64 = 4096;
 
@@ -16,24 +18,24 @@ pub struct ArchiveDigest {
     pub size: u64,
 }
 
-/// How many files and content bytes an archive may unpack to. The default admits every release `chunk build` can
-/// publish.
+/// How many filesystem entries, files and directories together, and content bytes an archive may unpack to.
+/// The default admits releases of up to 4096 files in as many directories and every size `chunk build` publishes.
 pub struct UnpackLimits {
-    pub files: usize,
+    pub entries: usize,
     pub bytes: u64,
 }
 
 impl Default for UnpackLimits {
     fn default() -> Self {
-        Self { files: MAX_FILES, bytes: MAX_BYTES as u64 }
+        Self { entries: 2 * MAX_FILES, bytes: MAX_BYTES as u64 }
     }
 }
 
 /// Checks a release archive against `expected`, then extracts it into the new directory `destination`.
 /// Nothing is created at `destination` unless every entry extracts.
 /// # Errors
-/// Rejects a size or digest mismatch, entries other than regular files, nonportable or escaping paths, duplicate
-/// paths, archives beyond `limits` and an existing `destination`.
+/// Rejects a size or digest mismatch, entries other than regular files, nonportable, escaping or deeper paths than
+/// `chunk build` publishes, duplicate paths, archives beyond `limits` and an existing `destination`.
 pub fn unpack_release(
     archive: &Path,
     expected: &ArchiveDigest,
@@ -56,7 +58,8 @@ pub fn unpack_release(
 
 fn extract(reader: impl Read, directory: &Path, limits: &UnpackLimits) -> io::Result<()> {
     let mut archive = tar::Archive::new(reader);
-    let (mut files, mut bytes, mut long_name) = (0, 0, None);
+    let (mut entries, mut bytes, mut long_name) = (0, 0, None);
+    let mut directories = BTreeSet::new();
     for entry in archive.entries()?.raw(true) {
         let mut entry = entry?;
         let kind = entry.header().entry_type();
@@ -75,14 +78,25 @@ fn extract(reader: impl Read, directory: &Path, limits: &UnpackLimits) -> io::Re
         if !kind.is_file() {
             return Err(io::Error::other("release archive holds something other than regular files"));
         }
-        files += 1;
-        bytes += entry.size();
-        if files > limits.files || bytes > limits.bytes {
-            return Err(io::Error::other("release archive exceeds unpack limits"));
-        }
         let name = long_name.take().unwrap_or_else(|| entry.path_bytes().into_owned());
         let name = String::from_utf8(name).map_err(|_| io::Error::other("release archive paths must be UTF-8"))?;
         publication::relative_name(&name)?;
+        if name.split('/').count() > MAX_COMPONENTS {
+            return Err(io::Error::other("release archive path exceeds nesting limit"));
+        }
+        entries += 1;
+        let mut ancestor = name.as_str();
+        // Deepest first: once one ancestor is known, so are all of its own.
+        while let Some((parent, _)) = ancestor.rsplit_once('/')
+            && directories.insert(parent.to_owned())
+        {
+            entries += 1;
+            ancestor = parent;
+        }
+        bytes += entry.size();
+        if entries > limits.entries || bytes > limits.bytes {
+            return Err(io::Error::other("release archive exceeds unpack limits"));
+        }
         let path = directory.join(&name);
         fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("release archive path"))?)?;
         io::copy(&mut entry, &mut fs::File::create_new(path)?)?;

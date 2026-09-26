@@ -152,7 +152,7 @@ fn manifest_is_multi_release(bytes: &[u8]) -> io::Result<bool> {
 }
 
 /// Main manifest attributes with continuation lines joined.
-fn attributes(bytes: &[u8]) -> io::Result<Vec<String>> {
+pub(super) fn attributes(bytes: &[u8]) -> io::Result<Vec<String>> {
     let source = std::str::from_utf8(bytes).map_err(io::Error::other)?;
     let mut attributes: Vec<String> = Vec::new();
     for line in source.lines().take_while(|line| !line.is_empty()) {

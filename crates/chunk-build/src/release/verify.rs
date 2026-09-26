@@ -1,11 +1,18 @@
-use std::{collections::BTreeMap, io, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    path::Path,
+};
 
-use chunk_contract::{AppArtifact, Deployment};
+use chunk_contract::{AppArtifact, Contracts, Deployment};
 use serde::Deserialize;
 
-use super::{Manifest, Metadata, content_digest};
+use super::{
+    Manifest, Metadata, content_digest, jars, jars::Classpath, launcher, session_configurations, session_methods,
+};
 use crate::{
     BackendMetadata,
+    project::MachineProfile,
     publication::{self, Files},
 };
 
@@ -28,8 +35,9 @@ struct Signed {
 /// Validates an unpacked release directory the same way `chunk build` validates the releases it publishes.
 /// # Errors
 /// Rejects links, nonportable paths, oversized contents, an unsupported descriptor version, contents that differ
-/// from the release ID, a `backend.json` not derived from the release's backend, invalid contracts and missing or
-/// modified app JARs and assets.
+/// from the release ID, a `backend.json` not derived from the release's backend, invalid contracts, app catalogs or
+/// machine profiles, contract references outside the release, missing or modified assets, and app JARs that are
+/// missing, incompatible, conflicting or differ from their contracts.
 pub fn verify_release(directory: &Path) -> io::Result<VerifiedRelease> {
     let mut files = Files::new();
     publication::collect(directory, "", &mut files)?;
@@ -63,25 +71,15 @@ pub(super) fn check(files: &Files) -> io::Result<VerifiedRelease> {
     }
     backend.validate().map_err(io::Error::other)?;
 
-    let mut apps = BTreeMap::new();
-    for app in &metadata.apps {
-        app.validate().map_err(io::Error::other)?;
-        if !(25..=metadata.java_version).contains(&app.java_version)
-            || app.jar != format!("apps/{}/{}.jar", app.id, app.sha256)
-            || files.get(&app.jar).is_none_or(|bytes| content_digest(bytes) != app.sha256)
-        {
-            return Err(io::Error::other(format!("app {} JAR is missing or differs from the release", app.id)));
-        }
-        if apps.insert(app.id.clone(), app.clone()).is_some() {
-            return Err(io::Error::other(format!("release declares app {} twice", app.id)));
-        }
+    let apps = check_catalog(&metadata, &backend)?;
+    for app in apps.values() {
+        check_jar(app, metadata.java_version, files, &backend.contracts)?;
     }
     for (name, sha256) in &metadata.assets {
         if files.get(name).is_none_or(|bytes| content_digest(bytes) != *sha256) {
             return Err(io::Error::other(format!("asset {name} is missing or differs from the release")));
         }
     }
-    check_app_contracts(&backend, &apps)?;
     Ok(VerifiedRelease { id, java_version: metadata.java_version, apps: metadata.apps, backend })
 }
 
@@ -97,13 +95,46 @@ pub(super) fn deployment(source: String, contract: BackendMetadata) -> Deploymen
     }
 }
 
-fn check_app_contracts(backend: &Deployment, apps: &BTreeMap<String, AppArtifact>) -> io::Result<()> {
+/// Checks the app inventory, machine profiles and every contract reference into them.
+fn check_catalog(metadata: &Metadata, backend: &Deployment) -> io::Result<BTreeMap<String, AppArtifact>> {
+    if metadata.apps.is_empty() || metadata.apps.len() > 128 {
+        return Err(io::Error::other("release requires 1–128 apps"));
+    }
+    let mut apps = BTreeMap::new();
+    let mut folded = BTreeSet::new();
+    for app in &metadata.apps {
+        app.validate().map_err(io::Error::other)?;
+        if !(25..=metadata.java_version).contains(&app.java_version) {
+            return Err(io::Error::other(format!("app {} requires an incompatible Java version", app.id)));
+        }
+        if !folded.insert(app.id.to_ascii_lowercase()) {
+            return Err(io::Error::other("release app IDs must be unique and must not differ only by case"));
+        }
+        apps.insert(app.id.clone(), app.clone());
+    }
     let contracts = &backend.contracts;
+    if metadata.profiles.iter().any(|(name, profile)| !MachineProfile::valid(name, profile)) {
+        return Err(io::Error::other("release declares an invalid machine profile"));
+    }
+    let mut referenced =
+        apps.values().flat_map(|app| app.sessions.values().map(|session| &session.machine_profile)).chain(
+            contracts.destinations.iter().flat_map(|destinations| {
+                destinations.entries.values().map(|policy| &policy.destination.machine_profile)
+            }),
+        );
+    if !metadata.profiles.is_empty() && referenced.any(|name| !metadata.profiles.contains_key(name)) {
+        return Err(io::Error::other("release references a machine profile it does not declare"));
+    }
+    if let Some(domains) = &contracts.domains
+        && !domains.apps.keys().eq(apps.keys())
+    {
+        return Err(io::Error::other("domain manifest app bindings differ from the release's apps"));
+    }
     if let Some(destinations) = &contracts.destinations {
-        destinations.validate_apps(apps).map_err(io::Error::other)?;
+        destinations.validate_apps(&apps).map_err(io::Error::other)?;
     }
     if let Some(configurations) = &contracts.session_configurations {
-        configurations.validate_apps(apps).map_err(io::Error::other)?;
+        configurations.validate_apps(&apps).map_err(io::Error::other)?;
     }
     if let Some(methods) = &contracts.session_methods
         && methods
@@ -113,5 +144,47 @@ fn check_app_contracts(backend: &Deployment, apps: &BTreeMap<String, AppArtifact
     {
         return Err(io::Error::other("session method references unknown release app or session"));
     }
-    Ok(())
+    Ok(apps)
+}
+
+/// Checks the JARs one app runs: its release JAR, or the launcher's dependency closure, with a compatible and
+/// conflict-free classpath, its `Main-Class` and the session schemas and providers it packages.
+fn check_jar(app: &AppArtifact, java: u32, files: &Files, contracts: &Contracts) -> io::Result<()> {
+    let missing = || io::Error::other(format!("app {} JAR is missing or differs from the release", app.id));
+    if app.jar != format!("apps/{}/{}.jar", app.id, app.sha256) {
+        return Err(missing());
+    }
+    let jar = files.get(&app.jar).filter(|bytes| content_digest(bytes) == app.sha256).ok_or_else(missing)?;
+    let launcher = launcher::classpath(jar)?;
+    let jars = match &launcher {
+        None => vec![(app.jar.as_str(), jar.as_slice())],
+        Some(entries) => entries
+            .iter()
+            .map(|entry| {
+                let name = entry.strip_prefix("../../")?;
+                let bytes = files.get(name)?;
+                (name == format!("libs/{}.jar", content_digest(bytes))).then_some((name, bytes.as_slice()))
+            })
+            .collect::<Option<_>>()
+            .ok_or_else(|| io::Error::other(format!("app {} launcher names a missing or modified JAR", app.id)))?,
+    };
+    let [(_, app_jar), ..] = jars.as_slice() else {
+        return Err(io::Error::other(format!("app {} launcher has an empty classpath", app.id)));
+    };
+    let main = jars::main_class(app_jar)?;
+    if let Some(entries) = &launcher
+        && launcher::write(&main, entries)? != *jar
+    {
+        return Err(io::Error::other(format!("app {} launcher differs from its classpath", app.id)));
+    }
+    let mut classpath = Classpath::default();
+    for (label, bytes) in &jars {
+        classpath.add(bytes, label, java)?;
+    }
+    if !classpath.contains(&main) {
+        return Err(io::Error::other(format!("app {} Main-Class {main} is not on its classpath", app.id)));
+    }
+    let sessions: Vec<_> = app.sessions.keys().cloned().collect();
+    session_methods::validate(app_jar, &classpath, &app.id, &sessions, contracts.session_methods.as_ref())?;
+    session_configurations::validate(app_jar, &classpath, &app.id, &sessions, contracts.session_configurations.as_ref())
 }

@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 pub(super) type Files = BTreeMap<String, Vec<u8>>;
 pub(super) const MAX_BYTES: usize = 256 * 1024 * 1024;
 pub(super) const MAX_FILES: usize = 4096;
+/// The most path components a collected file may have.
+pub(super) const MAX_COMPONENTS: usize = 18;
 
 pub(super) fn insert(files: &mut Files, name: String, bytes: Vec<u8>) -> io::Result<()> {
     relative_name(&name)?;
@@ -36,7 +38,7 @@ pub(super) fn relative_name(name: &str) -> io::Result<()> {
 }
 
 pub(super) fn collect(directory: &Path, prefix: &str, files: &mut Files) -> io::Result<()> {
-    if prefix.matches('/').count() > 16 {
+    if prefix.split('/').count() > MAX_COMPONENTS - 1 {
         return Err(io::Error::other("artifact directory nesting exceeds local limit"));
     }
     if !fs::symlink_metadata(directory)?.is_dir() {
