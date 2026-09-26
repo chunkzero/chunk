@@ -138,3 +138,16 @@ jobs:
       - run: pnpm test
       - run: pnpm test:management
       - run: pnpm lint
+
+  image:
+    # A cold release build of the environment image is slow, so pull requests skip it.
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the pinned just
+        uses: jdx/mise-action@v3
+        with:
+          install_args: just
+      - run: just image

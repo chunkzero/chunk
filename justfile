@@ -76,3 +76,12 @@ package-cli:
     pnpm install --frozen-lockfile
     cargo build --release --locked -p chunk-cli
     python3 scripts/package-sdk.py
+
+# Build the environment container image with podman or docker, tagged with the workspace version.
+image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=$(command -v podman || command -v docker)
+    version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+    "$engine" build -f crates/chunk-environment/Dockerfile -t "chunk-environment:$version" \
+        --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
