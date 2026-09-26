@@ -126,6 +126,31 @@ async fn active_destination_failure_sends_a_play_disconnect() {
 const PACKET: [u8; 16_384] = [0x7f; 16_384];
 const PACKETS: usize = 8 * BACKLOG_LIMIT / PACKET.len();
 
+#[tokio::test]
+async fn packets_sent_before_a_clean_close_are_delivered() {
+    for trial in 0..200 {
+        let (client, public) = tokio::io::duplex(8192);
+        let (jvm, internal) = tokio::io::duplex(8192);
+        let (mut client, mut jvm) = (Transport::new(client), Transport::new(jvm));
+        let (sender, receiver) = if trial % 2 == 0 { (&mut client, &mut jvm) } else { (&mut jvm, &mut client) };
+        sender.write_body(&[0x7f, 42]).await.unwrap();
+        sender.shutdown().await.unwrap();
+        let mut public = Transport::new(public);
+        let error = until(
+            &mut public,
+            &mut Transport::new(internal),
+            &mut information(),
+            std::future::pending::<()>(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(receiver.read_frame(4096).await.unwrap().as_ref(), [0x7f, 42]);
+    }
+}
+
 /// Relays `PACKETS` gameplay packets to a player reading `chunk` bytes per `period`, who
 /// leaves once all of them arrive. Returns the relay's error, the bytes the JVM sent,
 /// and the packets the player decoded.

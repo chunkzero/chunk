@@ -69,7 +69,14 @@ where
                 }
             }
             frame = public.pump(read_public.then_some(INPUT_LIMIT)), if read_public || public.queued() > 0 => {
-                let mut frame = frame?;
+                let mut frame = match frame {
+                    // Packets sent before a player closes cleanly still reach the gameplay server.
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                        let _ = within(WRITE_TIMEOUT, internal.flush()).await;
+                        return Err(error);
+                    }
+                    frame => frame?,
+                };
                 while let Some(body) = frame {
                     let consumed = match &commands { Some(commands) => commands.input(&body)?, None => false };
                     if !consumed {
