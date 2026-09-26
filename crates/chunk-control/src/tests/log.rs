@@ -6,7 +6,7 @@ use prost::Message;
 #[tokio::test]
 async fn reopens_state_larger_than_the_default_scan_budget() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let mut first = request("claim-0", &uuid::Uuid::new_v4().to_string());
     first.identity.as_mut().unwrap().properties.push(chunk_proto::v1::Property {
         name: "textures".into(),
@@ -46,6 +46,7 @@ async fn reopens_state_larger_than_the_default_scan_budget() {
     let expected = control.state().unwrap();
     assert_eq!(expected.claims.len(), 512);
     drop(control);
+    fixture.detach().await;
 
     let reopened = open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone())
         .and_then(|control| control.state());
@@ -96,19 +97,21 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
-    let control = fixture.control();
+    let control = fixture.control().await;
     let kept = request("kept", &uuid::Uuid::new_v4().to_string());
     let kept_assignment = control.claim(kept.clone()).await.unwrap();
     drop(control);
+    fixture.detach().await;
     let (store, replicator) = SqliteStore::open_replicated(&path, "test", Replication::new(storage.clone())).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
 
     // These commits never reach object storage before the host is lost.
-    let control = fixture.control();
+    let control = fixture.control().await;
     let lost = request("lost", &uuid::Uuid::new_v4().to_string());
     let outdated = control.claim(lost.clone()).await.unwrap().claim.unwrap();
     drop(control);
+    fixture.detach().await;
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
@@ -116,21 +119,21 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     assert_eq!(store.epoch().0, 2);
     drop((store, replicator));
 
-    let control = fixture.control();
+    // The JVM still serves the lost delivery, so no new login is admitted until recovery fences it.
+    fixture.runtime.available.store(false, Ordering::Release);
+    let control = fixture.control().await;
     let state = control.state().unwrap();
     assert_eq!(state.epoch, 2);
     assert!(state.claims.contains_key("kept") && !state.claims.contains_key("lost"));
     assert!(control.changes_after(Generation { epoch: 1, revision: state.revision }).is_none());
     let (position, restored) = (state.position(), state.revision);
     let lost_player = lost.identity.as_ref().unwrap().uuid.clone();
-    // The JVM still serves the lost delivery, so no new login is admitted until recovery fences it.
-    fixture.runtime.available.store(false, Ordering::Release);
     let relogin = request("relogin", &lost_player);
     assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
     control.reconcile_all().await.unwrap();
     assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
     fixture.runtime.available.store(true, Ordering::Release);
-    control.reconcile_all().await.unwrap();
+    fixture.recovered(&control).await;
     {
         let bindings = fixture.runtime.bindings.lock().unwrap();
         assert_eq!(bindings["lost"].phase, DeliveryPhase::Closed);
@@ -151,7 +154,7 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     assert!(restored < lost_revision && lost_revision <= current);
     assert!(fresh.delivery_generation > outdated.delivery_generation);
     control.activate(ActivateClaim { claim: Some(fresh) }).await.unwrap();
-    assert_eq!(control.inspect(kept).await.unwrap().claim, kept_assignment.claim);
+    assert_eq!(control.inspect(&kept).unwrap().claim, kept_assignment.claim);
 
     let changes = control.changes_after(position).unwrap();
     assert!(changes.iter().any(|change| change.table == Table::Claims && change.id == "lost" && !change.removed));
@@ -169,25 +172,27 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
-    drop(fixture.control());
+    drop(fixture.control().await);
+    fixture.detach().await;
     let (store, replicator) = SqliteStore::open_replicated(&path, "test", Replication::new(storage.clone())).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
 
     // The host's creation and its player's admission never reach object storage.
-    let control = fixture.control();
+    let control = fixture.control().await;
     let player = uuid::Uuid::new_v4().to_string();
     control.claim(request("lost", &player)).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["lost"].session].host.clone();
     drop(control);
+    fixture.detach().await;
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
     drop(SqliteStore::open_replicated(&path, "test", Replication::new(storage)).unwrap());
     fixture.host.forgotten.store(true, Ordering::Release);
 
-    let control = fixture.control();
+    let control = fixture.control().await;
     assert!(control.state().unwrap().hosts.is_empty());
     let relogin = request("relogin", &player);
     assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
@@ -202,6 +207,7 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     });
     registration.metadata_mut().insert("authorization", "Bearer test-runtime-credential".parse().unwrap());
     service.register_process(registration).await.unwrap();
+    fixture.recovered(&control).await;
     control.admit().await.unwrap();
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["lost"].phase, DeliveryPhase::Closed);
     let state = control.state().unwrap();
@@ -215,7 +221,7 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     let state = control.state().unwrap();
     assert!(!state.hosts.contains_key(&host) && state.drains.is_empty());
     drop((service, control));
-    fixture.control().claim(relogin).await.unwrap();
+    fixture.control().await.claim(relogin).await.unwrap();
     fixture.close().await;
 }
 
@@ -224,30 +230,31 @@ async fn a_session_whose_creation_a_restore_lost_on_a_surviving_host_is_finished
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
-    let control = fixture.control();
+    let control = fixture.control().await;
     control.claim(request("kept", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     drop(control);
+    fixture.detach().await;
     let (store, replicator) = SqliteStore::open_replicated(&path, "test", Replication::new(storage.clone())).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
 
-    // The JVM creates a second session on the same host, but no delivery is prepared and the commit is lost.
-    let control = fixture.control();
-    let mut lost = request("lost", &uuid::Uuid::new_v4().to_string());
-    lost.demand.as_mut().unwrap().key = "arena".into();
-    fixture.runtime.lost_creation.store(true, Ordering::Release);
-    assert!(control.claim(lost).await.is_err());
-    let session = control.state().unwrap().claims["lost"].session.clone();
-    assert!(fixture.runtime.sessions.lock().unwrap().contains_key(&session));
-    assert!(fixture.runtime.bindings.lock().unwrap().get("lost").is_none());
-    drop(control);
+    // The JVM creates a second session on the same host, but the commit recording it is lost.
+    let session = uuid::Uuid::new_v4().to_string();
+    let command = SessionCommand {
+        session: Some(chunk_proto::v1::SessionRef { id: session.clone() }),
+        generation: 1,
+        session_type: "bridge/default".into(),
+        capacity: 2,
+        ..Default::default()
+    };
+    fixture.runtime.sessions.lock().unwrap().insert(session.clone(), command);
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
     drop(SqliteStore::open_replicated(&path, "test", Replication::new(storage)).unwrap());
 
-    let control = fixture.control();
-    assert!(!control.state().unwrap().sessions.contains_key(&session));
+    // Admission opens once the JVM confirms it ended the session.
+    let control = fixture.control().await;
     control.admit().await.unwrap();
     assert!(fixture.runtime.ended_sessions.lock().unwrap().contains(&session));
     assert!(control.state().unwrap().sessions[&session].finished);

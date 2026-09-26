@@ -6,7 +6,8 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{Control, Result, state::Phase};
 
 impl Control {
-    /// Refreshes surviving bindings and expires unactivated reservations. Unreachable owners remain fenced.
+    /// Expires unactivated reservations, releases claims on stopped hosts and repairs what JVMs reported. Unreachable
+    /// owners remain fenced.
     /// # Errors
     /// Reports durable-state errors. Individual unavailable runtimes are retained for a later pass.
     pub async fn reconcile_all(self: &Arc<Self>) -> Result<()> {
@@ -16,6 +17,16 @@ impl Control {
         for id in &stopped {
             self.update(|state| {
                 state.retire_stopped_host(id);
+                let open: Vec<_> = state
+                    .claims
+                    .iter()
+                    .filter(|(_, claim)| claim.phase != Phase::Released && claim.assignment.is_some())
+                    .filter(|(_, claim)| state.sessions.get(&claim.session).is_some_and(|session| session.host == *id))
+                    .map(|(operation, _)| operation.clone())
+                    .collect();
+                for operation in open {
+                    crate::delivery::release(state, &operation)?;
+                }
                 Ok(())
             })?;
         }
@@ -29,18 +40,16 @@ impl Control {
                 || (claim.phase == Phase::Reserved && state.sessions[&claim.session].retired)
                 || claim.phase == Phase::Withdrawing
                 || (claim.assignment.is_none() && stopped.contains(&state.sessions[&claim.session].host));
+            if !cancel {
+                continue;
+            }
             let control = self.clone();
             let permits = permits.clone();
             tasks.spawn(async move {
                 let Ok(_permit) = permits.acquire_owned().await else {
                     return;
                 };
-                let result = if cancel {
-                    control.cancel(request).await.map(|_| ())
-                } else {
-                    control.inspect(request).await.map(|_| ())
-                };
-                if let Err(error) = result {
+                if let Err(error) = control.cancel(request).await {
                     tracing::debug!(%error, "control reconciliation retains unresolved claim");
                 }
             });
@@ -49,29 +58,6 @@ impl Control {
         self.reconcile_sessions().await?;
         self.retire_idle_hosts()?;
         self.progress_drains().await?;
-        Ok(())
-    }
-
-    /// Refreshes activated claims from their runtimes, so watchers see arrivals without waiting for a full pass.
-    /// # Errors
-    /// Reports unreadable control state. Unavailable runtimes are retried on the next call.
-    pub async fn reconcile_arrivals(self: &Arc<Self>) -> Result<()> {
-        let state = self.state()?;
-        let mut tasks = JoinSet::new();
-        let permits = Arc::new(Semaphore::new(8));
-        for claim in state.claims.values().filter(|claim| matches!(claim.phase, Phase::Activating | Phase::Attached)) {
-            let request = chunk_proto::v1::ClaimRequest::decode(claim.request.as_slice())?;
-            let (control, permits) = (self.clone(), permits.clone());
-            tasks.spawn(async move {
-                let Ok(_permit) = permits.acquire_owned().await else {
-                    return;
-                };
-                if let Err(error) = control.inspect(request).await {
-                    tracing::debug!(%error, "claim arrival unresolved");
-                }
-            });
-        }
-        tasks.join_all().await;
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 mod select;
 
 use chunk_proto::v1::{
-    Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, PlayerDelivery, PlayerRef, SessionCommand,
-    SessionPhase, SessionRef, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
+    Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, PlayerDelivery, PlayerRef,
+    SessionRef, gameplay_client::GameplayClient,
 };
 use prost::Message;
 use tonic::transport::Channel;
@@ -41,42 +41,15 @@ impl Control {
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let runtime = self.runtime(&state, &session.host).await?;
         let channel = channel(&runtime).await?;
+        let config = self.configuration(&runtime, channel.clone()).await?;
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
-            let config = self.configuration(&runtime, channel).await?;
             assignment.configuration = Some(config);
             return Ok(assignment);
         }
-
-        let created = ProcessControlClient::new(channel.clone())
-            .create_session(auth(
-                &runtime,
-                SessionCommand {
-                    identity: Some(runtime.identity.clone()),
-                    operation_id: format!("session/{}", claim.session),
-                    session: Some(SessionRef { id: claim.session.clone() }),
-                    generation: 1,
-                    session_type: session.session_type.clone(),
-                    capacity: session.capacity,
-                    configuration_json: serde_json::to_vec(&session.configuration)?,
-                },
-                10,
-            )?)
-            .await?
-            .into_inner();
-        if created.phase != SessionPhase::Ready as i32
-            || created.generation != 1
-            || created.session.as_ref().map(|s| &s.id) != Some(&claim.session)
-            || created.session_type != session.session_type
-            || created.capacity != session.capacity
-        {
-            self.update(|s| {
-                s.sessions.get_mut(&claim.session).ok_or(Error::Invalid("missing session"))?.retired = true;
-                Ok(())
-            })?;
-            return Err(Error::Unresolved("session is not ready"));
-        }
-        let assignment = self.prepare_assignment(&runtime, channel, claim, &request).await?;
+        // Control's desired state already asks the JVM for this session.
+        self.session_ready(&session.host, &runtime, &claim.session).await?;
+        let assignment = self.prepare_assignment(&runtime, channel, config, claim, &request).await?;
         self.update(|state| {
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
@@ -94,10 +67,10 @@ impl Control {
         &self,
         runtime: &RuntimeConnection,
         channel: Channel,
+        config: ConfigurationResponse,
         claim: &Claim,
         request: &ClaimRequest,
     ) -> Result<Assignment> {
-        let config = self.configuration(runtime, channel.clone()).await?;
         let mut gameplay = GameplayClient::new(channel);
         let mut delivery = PlayerDelivery {
             deployment: Some(self.config.deployment.clone()),
@@ -132,11 +105,7 @@ impl Control {
         Ok(assignment)
     }
 
-    async fn configuration(
-        &self,
-        runtime: &RuntimeConnection,
-        channel: Channel,
-    ) -> Result<chunk_proto::v1::ConfigurationResponse> {
+    async fn configuration(&self, runtime: &RuntimeConnection, channel: Channel) -> Result<ConfigurationResponse> {
         let mut gameplay = GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
         let config = gameplay
             .configuration(auth(runtime, ConfigurationRequest { deployment: Some(self.config.deployment.clone()) }, 3)?)

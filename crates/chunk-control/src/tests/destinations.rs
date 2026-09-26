@@ -17,7 +17,7 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
     for (overflow, accepted, sessions) in [("reject", 2, 1), ("replicate", 4, 2)] {
         let mut fixture = Fixture::new().await;
         policy(&mut fixture, overflow);
-        let control = fixture.control();
+        let control = fixture.control().await;
         let mut calls = tokio::task::JoinSet::new();
         for index in 0..4 {
             let control = control.clone();
@@ -40,6 +40,7 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
         wrong.demand.as_mut().unwrap().machine_profile.clear();
         assert!(control.claim(wrong).await.is_err());
         drop(control);
+        fixture.detach().await;
         for change in ["version", "profile", "timeout"] {
             let mut config = fixture.config.clone();
             match change {
@@ -83,16 +84,14 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
 }
 
 #[tokio::test]
-async fn lost_creation_and_preparation_recover_the_original_reservation() {
+async fn lost_preparation_recovers_the_original_reservation() {
     let mut fixture = Fixture::new().await;
     policy(&mut fixture, "reject");
-    let control = fixture.control();
+    let control = fixture.control().await;
     let claim = request("lost", &uuid::Uuid::new_v4().to_string());
-    fixture.runtime.lost_creation.store(true, Ordering::Release);
-    assert!(control.claim(claim.clone()).await.is_err());
-    let original = control.state().unwrap().claims["lost"].clone();
     fixture.runtime.lost_preparation.store(true, Ordering::Release);
     assert!(control.claim(claim.clone()).await.is_err());
+    let original = control.state().unwrap().claims["lost"].clone();
     let recovered = control.claim(claim.clone()).await.unwrap();
     assert_eq!(recovered.claim.unwrap(), original.identity("lost"));
     assert_eq!(fixture.runtime.sessions.lock().unwrap().len(), 1);
@@ -104,10 +103,10 @@ async fn lost_creation_and_preparation_recover_the_original_reservation() {
 }
 
 #[tokio::test]
-async fn empty_expiry_counts_reservations_and_waits_for_lost_finish_reconciliation() {
+async fn empty_expiry_counts_reservations_and_waits_for_the_jvm_to_confirm_the_finish() {
     let mut fixture = Fixture::new().await;
     policy(&mut fixture, "reject");
-    let control = fixture.control();
+    let control = fixture.control().await;
     let claim = request("reserved", &uuid::Uuid::new_v4().to_string());
     control.claim(claim.clone()).await.unwrap();
     let session = control.state().unwrap().claims["reserved"].session.clone();
@@ -127,12 +126,15 @@ async fn empty_expiry_counts_reservations_and_waits_for_lost_finish_reconciliati
             Ok(())
         })
         .unwrap();
-    fixture.runtime.lost_finish.store(true, Ordering::Release);
+    // An unreachable JVM cannot confirm the session ended.
+    fixture.runtime.available.store(false, Ordering::Release);
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
     assert!(state.sessions[&session].retired);
     assert!(!state.sessions[&session].finished);
     assert!(matches!(control.claim(request("early", &uuid::Uuid::new_v4().to_string())).await, Err(Error::Capacity)));
+    fixture.runtime.available.store(true, Ordering::Release);
+    eventually(|| control.state().unwrap().sessions[&session].finished).await;
     control.reconcile_all().await.unwrap();
     assert!(!control.state().unwrap().sessions.contains_key(&session));
     let next = control.claim(request("next", &uuid::Uuid::new_v4().to_string())).await.unwrap();
@@ -142,46 +144,34 @@ async fn empty_expiry_counts_reservations_and_waits_for_lost_finish_reconciliati
 }
 
 #[tokio::test]
-async fn failed_unknown_creation_is_retained_until_host_fencing_and_finish_requires_current_claim() {
+async fn failed_creation_frees_its_capacity_and_finish_requires_current_claim() {
     let mut fixture = Fixture::new().await;
     policy(&mut fixture, "reject");
-    let control = fixture.control();
+    let control = fixture.control().await;
     let claim = request("failed", &uuid::Uuid::new_v4().to_string());
     fixture.runtime.failed_creation.store(true, Ordering::Release);
     assert!(control.claim(claim.clone()).await.is_err());
     control.cancel(claim).await.unwrap();
     let session = control.state().unwrap().claims["failed"].session.clone();
-    control
-        .update(|state| {
-            state.sessions.get_mut(&session).unwrap().empty_since_ms = Some(0);
-            Ok(())
-        })
-        .unwrap();
     control.reconcile_all().await.unwrap();
-    assert!(!control.state().unwrap().sessions[&session].finished);
-    assert!(matches!(
-        control.claim(request("duplicate", &uuid::Uuid::new_v4().to_string())).await,
-        Err(Error::Capacity)
-    ));
-    fixture.runtime.stopped.store(true, Ordering::Release);
-    control.reconcile_all().await.unwrap();
-    assert!(!control.state().unwrap().sessions.contains_key(&session));
+    assert!(control.state().unwrap().sessions.get(&session).is_none_or(|session| session.finished));
+    fixture.runtime.failed_creation.store(false, Ordering::Release);
+    let next = control.claim(request("next", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    assert_ne!(next.delivery.unwrap().session.unwrap().id, session);
     fixture.close().await;
 
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let claim = request("arrived", &uuid::Uuid::new_v4().to_string());
     let identity = control.claim(claim.clone()).await.unwrap().claim.unwrap();
     assert!(control.finish_destination(&identity).is_err());
-    fixture.runtime.bindings.lock().unwrap().get_mut("arrived").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "arrived").await;
     control.activate(ActivateClaim { claim: Some(identity.clone()) }).await.unwrap();
     let mut stale = identity.clone();
     stale.delivery_generation += 1;
     assert!(control.finish_destination(&stale).is_err());
     control.finish_destination(&identity).unwrap();
-    control.reconcile_all().await.unwrap();
-    control.reconcile_all().await.unwrap();
-    assert!(control.state().unwrap().sessions.values().all(|session| session.finished));
+    eventually(|| control.state().unwrap().sessions.values().all(|session| session.finished)).await;
     assert!(control.finish_destination(&identity).is_err());
     fixture.close().await;
 }

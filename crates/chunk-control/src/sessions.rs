@@ -1,15 +1,11 @@
 use std::sync::Arc;
 
-use chunk_proto::v1::{
-    ClaimIdentity, SessionCommand, SessionInventory, SessionPhase, SessionRef,
-    process_control_client::ProcessControlClient,
-};
+use chunk_proto::v1::{ClaimIdentity, SessionInventory, SessionPhase};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
-    client::{auth, channel},
-    state::{Phase, State},
+    state::{Phase, SessionState, State},
 };
 
 impl Control {
@@ -56,6 +52,8 @@ impl Control {
         Ok(())
     }
 
+    /// Reapplies what `host`'s JVM last reported, fences deliveries the log does not own, and asks the JVM to end
+    /// sessions that emptied past their timeout or retired.
     pub(crate) async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
         let state = self.state()?;
         if self.host.stopped(host) {
@@ -65,44 +63,28 @@ impl Control {
             return Ok(());
         };
         self.validate_session_runtime(&state, host, &runtime)?;
-        let mut client = ProcessControlClient::new(channel(&runtime).await?).max_decoding_message_size(8 * 1024 * 1024);
-        let inventory = client.inventory(auth(&runtime, runtime.identity.clone(), 3)?).await?.into_inner();
-        if inventory.identity.as_ref() != Some(&runtime.identity) {
-            return Err(Error::Invalid("session inventory process mismatch"));
-        }
+        let Some(report) = self.links.report(host, &runtime.identity) else {
+            return Ok(());
+        };
         // Unfenced deliveries are retried on the next pass.
-        self.fence_deliveries(&runtime, &inventory).await?;
+        self.fence_deliveries(&runtime, &report).await?;
         let now = crate::now_ms();
-        let finish = self.update(|state| {
-            let mut finish = Vec::new();
+        self.update(|state| {
+            self.reapply(state, host, &runtime.identity)?;
+            let open: std::collections::BTreeSet<_> = state
+                .claims
+                .values()
+                .filter(|claim| claim.phase != Phase::Released)
+                .map(|claim| claim.session.clone())
+                .collect();
             for (id, session) in
                 state.sessions.iter_mut().filter(|(_, session)| session.host == host && !session.finished)
             {
-                let empty = !state.claims.values().any(|claim| claim.session == *id && claim.phase != Phase::Released);
+                let empty = !open.contains(id);
                 if empty {
                     session.empty_since_ms.get_or_insert(now);
                 } else {
                     session.empty_since_ms = None;
-                }
-                let observed = inventory
-                    .sessions
-                    .iter()
-                    .find(|observed| observed.session.as_ref().is_some_and(|reference| reference.id == *id));
-                if let Some(observed) = observed {
-                    validate_inventory(id, session, observed)?;
-                    match SessionPhase::try_from(observed.phase).map_err(|_| Error::Invalid("unknown session phase"))? {
-                        SessionPhase::Ended => {
-                            session.retired = true;
-                            session.finish_requested = true;
-                            session.finished = empty && observed.prepared == 0 && observed.attached == 0;
-                        }
-                        SessionPhase::Ending | SessionPhase::Failed => {
-                            session.retired = true;
-                            session.finish_requested = true;
-                        }
-                        SessionPhase::Starting | SessionPhase::Ready => {}
-                        SessionPhase::Unspecified => return Err(Error::Invalid("unknown session phase")),
-                    }
                 }
                 let destinations = self.config.contracts.destinations.as_ref();
                 let policy =
@@ -117,44 +99,9 @@ impl Control {
                     session.retired = true;
                     session.finish_requested = true;
                 }
-                if session.finish_requested && !session.finished {
-                    finish.push((id.clone(), session.clone()));
-                }
             }
-            Ok(finish)
-        })?;
-        for (id, session) in finish {
-            let command = SessionCommand {
-                identity: Some(runtime.identity.clone()),
-                operation_id: format!("finish/{id}"),
-                session: Some(SessionRef { id: id.clone() }),
-                generation: 1,
-                session_type: session.session_type.clone(),
-                capacity: session.capacity,
-                configuration_json: serde_json::to_vec(&session.configuration)?,
-            };
-            match client.finish_session(auth(&runtime, command, 10)?).await {
-                Ok(response) => {
-                    let observed = response.into_inner();
-                    validate_inventory(&id, &session, &observed)?;
-                    if observed.phase == SessionPhase::Ended as i32 && observed.prepared == 0 && observed.attached == 0
-                    {
-                        self.update(|state| {
-                            let empty = !state
-                                .claims
-                                .values()
-                                .any(|claim| claim.session == id && claim.phase != Phase::Released);
-                            let session =
-                                state.sessions.get_mut(&id).ok_or(Error::Invalid("missing finished session"))?;
-                            session.finished = empty;
-                            Ok(())
-                        })?;
-                    }
-                }
-                Err(error) => tracing::debug!(%error, session=id,"session finish will be reconciled"),
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn validate_session_runtime(&self, state: &State, host: &str, runtime: &RuntimeConnection) -> Result<()> {
@@ -166,13 +113,38 @@ impl Control {
     }
 }
 
-fn validate_inventory(id: &str, session: &crate::state::SessionState, observed: &SessionInventory) -> Result<()> {
-    if observed.session.as_ref().is_none_or(|reference| reference.id != id)
-        || observed.generation != 1
-        || observed.session_type != session.session_type
-        || observed.capacity != session.capacity
-    {
-        return Err(Error::Invalid("session inventory binding mismatch"));
+/// Records the phase a JVM reported for one of `host`'s sessions. A session that ended, is ending or failed is retired;
+/// one that ended or failed with no open claim or delivery is finished, which frees its capacity.
+pub(crate) fn apply(state: &mut State, host: &str, observed: &SessionInventory) {
+    let Some(id) = observed.session.as_ref().map(|session| session.id.clone()) else {
+        return;
+    };
+    let empty = !state.claims.values().any(|claim| claim.session == id && claim.phase != Phase::Released);
+    let Some(session) = state.sessions.get_mut(&id).filter(|session| session.host == host && !session.finished) else {
+        return;
+    };
+    if !matches(&id, session, observed) {
+        tracing::debug!(session = id, "ignoring a mismatched session report");
+        return;
     }
-    Ok(())
+    match SessionPhase::try_from(observed.phase) {
+        Ok(SessionPhase::Ended | SessionPhase::Failed) => {
+            session.retired = true;
+            session.finish_requested = true;
+            session.finished = empty && observed.prepared == 0 && observed.attached == 0;
+        }
+        Ok(SessionPhase::Ending) => {
+            session.retired = true;
+            session.finish_requested = true;
+        }
+        _ => {}
+    }
+}
+
+/// Whether `observed` reports the session control recorded as `id`.
+pub(crate) fn matches(id: &str, session: &SessionState, observed: &SessionInventory) -> bool {
+    observed.session.as_ref().is_some_and(|reference| reference.id == id)
+        && observed.generation == 1
+        && observed.session_type == session.session_type
+        && observed.capacity == session.capacity
 }

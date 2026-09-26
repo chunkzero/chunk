@@ -4,14 +4,14 @@ use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
 #[tokio::test]
 async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_until_it_is_confirmed_stopped() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     control.claim(request("served", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["served"].session].host.clone();
     drop(control);
     fixture.host.forgotten.store(true, Ordering::Release);
 
-    let control = fixture.control();
+    let control = fixture.control().await;
     control.recovery.pass_deadline();
     control.reconcile_all().await.unwrap();
     assert!(matches!(control.admit().await, Err(Error::Busy)));
@@ -23,7 +23,7 @@ async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_u
 #[tokio::test]
 async fn restored_reservations_are_neither_prepared_nor_activated_until_survivors_are_fenced() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let prepared = control.claim(request("prepared", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     fixture.runtime.available.store(false, Ordering::Release);
     let reserved = request("reserved", &uuid::Uuid::new_v4().to_string());
@@ -34,7 +34,7 @@ async fn restored_reservations_are_neither_prepared_nor_activated_until_survivor
     fixture.host.forgotten.store(true, Ordering::Release);
 
     // The lost tail may have canceled either claim and admitted its player on a JVM that has not re-attached.
-    let control = fixture.control();
+    let control = fixture.control().await;
     assert!(matches!(control.claim(reserved.clone()).await, Err(Error::Busy)));
     assert!(matches!(control.activate(ActivateClaim { claim: prepared.claim }).await, Err(Error::Busy)));
     assert!(!fixture.runtime.bindings.lock().unwrap().contains_key("reserved"));
@@ -44,18 +44,26 @@ async fn restored_reservations_are_neither_prepared_nor_activated_until_survivor
 #[tokio::test]
 async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_claims() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let arrived = request("arrived", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(arrived.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("arrived").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "arrived").await;
     control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["arrived"].session].host.clone();
     drop(control);
     fixture.host.forgotten.store(true, Ordering::Release);
 
-    let control = fixture.control();
-    assert!(control.inspect(arrived.clone()).await.is_err());
+    // The surviving JVM also holds a delivery the log does not know.
+    let stray = PlayerDelivery {
+        operation_id: "stray".into(),
+        owner_generation: assignment.claim.as_ref().unwrap().delivery_generation,
+        ..assignment.delivery.clone().unwrap()
+    };
+    let binding = Binding { delivery: stray, phase: DeliveryPhase::Arrived };
+    fixture.runtime.bindings.lock().unwrap().insert("stray".into(), binding);
+
+    let control = fixture.control().await;
     // Until the surviving JVM re-attaches and is fenced, no new login is admitted.
     let newcomer = request("newcomer", &uuid::Uuid::new_v4().to_string());
     assert!(matches!(control.claim(newcomer.clone()).await, Err(Error::Busy)));
@@ -84,16 +92,9 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
     assert!(!fixture.host.forgotten.load(Ordering::Acquire));
 
     // The log owns the arrived delivery; a delivery it does not know is withdrawn.
-    let stray = PlayerDelivery {
-        operation_id: "stray".into(),
-        owner_generation: assignment.claim.as_ref().unwrap().delivery_generation,
-        ..assignment.delivery.clone().unwrap()
-    };
-    let binding = Binding { delivery: stray, phase: DeliveryPhase::Arrived };
-    fixture.runtime.bindings.lock().unwrap().insert("stray".into(), binding);
-    control.reconcile_all().await.unwrap();
+    fixture.recovered(&control).await;
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
-    let current = control.inspect(arrived).await.unwrap();
+    let current = control.inspect(&arrived).unwrap();
     assert_eq!(current.phase, ClaimPhase::Arrived as i32);
     assert_eq!(current.claim, assignment.claim);
     control.claim(newcomer).await.unwrap();
@@ -103,7 +104,7 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
 /// Restarts control while its surviving JVM also holds a delivery the log does not own, such as one a restore lost.
 /// Returns the restarted control and the JVM's re-registration.
 async fn restart_with_stray_delivery(fixture: &Fixture) -> (Arc<Control>, ProcessRegistration) {
-    let control = fixture.control();
+    let control = fixture.control().await;
     let assignment = control.claim(request("served", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["served"].session].host.clone();
@@ -117,7 +118,7 @@ async fn restart_with_stray_delivery(fixture: &Fixture) -> (Arc<Control>, Proces
         control_endpoint: fixture.host.endpoint.clone(),
         player_endpoint: "127.0.0.1:1".into(),
     };
-    (fixture.control(), registration)
+    (fixture.control().await, registration)
 }
 
 #[tokio::test]
@@ -130,7 +131,7 @@ async fn a_jvm_re_attaching_while_recovery_finds_no_connection_is_still_fenced()
         registering.register("Bearer test-runtime-credential", registration).unwrap();
     }));
     assert!(matches!(control.admit().await, Err(Error::Busy)));
-    control.admit().await.unwrap();
+    fixture.recovered(&control).await;
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
     fixture.close().await;
 }
@@ -155,7 +156,7 @@ async fn a_jvm_paused_between_adoption_and_its_recovery_stamp_is_still_fenced() 
     }));
     assert!(matches!(control.admit().await, Err(Error::Busy)));
     paused.lock().unwrap().take().unwrap().join().unwrap();
-    control.admit().await.unwrap();
+    fixture.recovered(&control).await;
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
     fixture.close().await;
 }

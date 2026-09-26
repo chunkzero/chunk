@@ -64,12 +64,12 @@ impl SessionMethods for RuntimeService {
 async fn captured_methods_require_live_authority_and_keep_operation_identity_across_retries() {
     let mut fixture = Fixture::new().await;
     fixture.config.contracts.session_methods = Some(method_contract());
-    let control = fixture.control();
+    let control = fixture.control().await;
     let claim = request("method-caller", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(claim.clone()).await.unwrap();
     let identity = assignment.claim.clone().unwrap();
     assert!(control.capture_session(&identity).is_err());
-    fixture.runtime.bindings.lock().unwrap().get_mut(&claim.operation_id).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, &claim.operation_id).await;
     control.activate(ActivateClaim { claim: Some(identity.clone()) }).await.unwrap();
     let captured = control.capture_session(&identity).unwrap();
     let mut wrong = identity.clone();
@@ -93,7 +93,7 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     assert_eq!(control.call_session_method(&lost, &CancellationToken::new()).await.unwrap().result_json, "7");
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 2);
     drop(control);
-    let control = fixture.control();
+    let control = fixture.control().await;
     let next = control.prepare_session_method(&captured, "score", json!({}), timeout).unwrap();
     assert_ne!(next.operation_id(), operation.operation_id());
     assert_ne!(next.operation_id(), lost.operation_id());

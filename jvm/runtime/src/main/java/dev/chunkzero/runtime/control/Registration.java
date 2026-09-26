@@ -14,14 +14,19 @@ import java.net.URI;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Reattachment repeats the frozen registration; it never disposes gameplay. */
+/**
+ * Reattachment repeats the frozen registration and reopens the process's stream to control; it
+ * never disposes gameplay.
+ */
 @ApiStatus.Internal
 public final class Registration implements AutoCloseable {
     private final ManagedChannel channel;
+    private final ProcessSync sync;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread worker;
 
-    public Registration(String endpoint, String token, ProcessRegistration registration) {
+    public Registration(
+            String endpoint, String token, ProcessRegistration registration, ProcessState state) {
         var address = URI.create(endpoint);
         if (!"127.0.0.1".equals(address.getHost())
                 || address.getPort() <= 0
@@ -40,6 +45,8 @@ public final class Registration implements AutoCloseable {
             channel.shutdownNow();
             throw error;
         }
+        sync = new ProcessSync(channel, token, registration.getIdentity(), state);
+        sync.open();
         worker = Thread.startVirtualThread(() -> register(token, registration));
     }
 
@@ -62,6 +69,7 @@ public final class Registration implements AutoCloseable {
                     throw new IllegalStateException(
                             "Supervisor returned a different process identity");
                 }
+                sync.open();
             } catch (Exception ignored) {
                 // Existing authenticated TCP deliveries retain their original ownership.
             }
@@ -71,6 +79,11 @@ public final class Registration implements AutoCloseable {
                 break;
             }
         }
+    }
+
+    /** Reports session and delivery changes to control. Call from the engine's tick thread. */
+    public void flush() {
+        sync.flush();
     }
 
     @Override

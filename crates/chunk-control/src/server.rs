@@ -62,8 +62,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
                     .max_encoding_message_size(8 * 1024 * 1024),
             )
             .add_service(
+                // A JVM's complete report lists every delivery it holds.
                 chunk_proto::v1::supervisor_server::SupervisorServer::new(service.clone())
-                    .max_decoding_message_size(65_536),
+                    .max_decoding_message_size(8 * 1024 * 1024),
             )
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown);
         tokio::pin!(server);
@@ -83,12 +84,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         tokio::pin!(reconcile);
         let health = monitor_health(&control, &stop);
         tokio::pin!(health);
-        let arrivals = monitor_arrivals(&control, &stop);
-        tokio::pin!(arrivals);
         tracing::info!(%address, "control ready");
         let result = tokio::select! {
             () = &mut health => Ok(()),
-            () = &mut arrivals => Ok(()),
             result = &mut server => result.map_err(io::Error::other),
             reconciled = &mut reconcile => {
                 stop.cancel();
@@ -110,18 +108,6 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     operations.wait().await;
     let stopped = control.shutdown().await.and(control.close()).map_err(io::Error::other);
     result.and(stopped)
-}
-
-/// Reads the runtime inventory for each activated claim, so arrivals reach watching proxies promptly.
-async fn monitor_arrivals(control: &Arc<Control>, stop: &CancellationToken) {
-    let mut timer = tokio::time::interval(Duration::from_millis(250));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
-        if let Err(error) = control.reconcile_arrivals().await {
-            tracing::debug!(%error, "claim arrival refresh unavailable");
-        }
-    }
 }
 
 pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationToken) {

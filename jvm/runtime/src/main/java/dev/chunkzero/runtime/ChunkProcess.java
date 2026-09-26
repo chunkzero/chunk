@@ -9,6 +9,7 @@ import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.bootstrap.SessionBackend;
 import dev.chunkzero.runtime.control.ProcessAuthentication;
+import dev.chunkzero.runtime.control.ProcessState;
 import dev.chunkzero.runtime.control.Registration;
 
 import io.grpc.BindableService;
@@ -36,7 +37,8 @@ public final class ChunkProcess implements AutoCloseable {
     private final ProcessHealth health = new ProcessHealth(ticks);
     private final CompletableFuture<Void> shutdown = new CompletableFuture<>();
     private @Nullable Server control;
-    private @Nullable Registration registration;
+    private volatile @Nullable Registration registration;
+    private @Nullable ProcessState state;
     private String playerEndpoint = "";
     private boolean closed;
 
@@ -89,12 +91,14 @@ public final class ChunkProcess implements AutoCloseable {
         return backend.client(session, environment.appId());
     }
 
-    long tickCount() {
-        return ticks.get();
-    }
-
     void progress(int sessions, int players) {
         health.tick(sessions, players);
+    }
+
+    /** Reports session and delivery changes to control. */
+    void flush() {
+        var current = registration;
+        if (current != null) current.flush();
     }
 
     /** Stops accepting new work and notifies the app's shutdown handler. */
@@ -107,12 +111,14 @@ public final class ChunkProcess implements AutoCloseable {
         return health.acceptsWork();
     }
 
-    /** Engine adapters bind their services once, before application readiness. */
-    synchronized void bind(List<BindableService> services, String playerEndpoint)
+    /** Engine adapters bind their services and state once, before application readiness. */
+    synchronized void bind(
+            List<BindableService> services, String playerEndpoint, ProcessState state)
             throws IOException {
         if (closed || control != null)
             throw new IllegalStateException("Process already bound or closed");
         this.playerEndpoint = playerEndpoint;
+        this.state = state;
         var builder =
                 NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                         .maxConcurrentCallsPerConnection(128)
@@ -162,7 +168,8 @@ public final class ChunkProcess implements AutoCloseable {
 
     /** Marks application initialization complete and waits for control to accept this launch. */
     public synchronized void ready() {
-        if (closed || control == null) throw new IllegalStateException("Engine must be started");
+        if (closed || control == null || state == null)
+            throw new IllegalStateException("Engine must be started");
         if (registration != null) return;
         health.ready(true);
         try {
@@ -174,7 +181,8 @@ public final class ChunkProcess implements AutoCloseable {
                                     .setIdentity(identity)
                                     .setControlEndpoint("http://127.0.0.1:" + control.getPort())
                                     .setPlayerEndpoint(playerEndpoint)
-                                    .build());
+                                    .build(),
+                            state);
         } catch (RuntimeException error) {
             health.ready(false);
             throw error;

@@ -5,11 +5,11 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test]
 async fn queued_moves_reach_the_watching_proxy_without_polling() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
     let (sender, mut updates) = tokio::sync::mpsc::channel(1);
     let proxy = control.clone();

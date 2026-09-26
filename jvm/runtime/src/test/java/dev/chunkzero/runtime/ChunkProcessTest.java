@@ -10,6 +10,7 @@ import chunk.v1.SupervisorGrpc;
 import com.google.protobuf.Empty;
 
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
+import dev.chunkzero.runtime.control.ProcessState;
 
 import io.grpc.*;
 import io.grpc.stub.MetadataUtils;
@@ -18,6 +19,7 @@ import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -27,6 +29,8 @@ class ChunkProcessTest {
     @Test
     void connectsWithoutAManifestAndReadinessAndShutdownRemainAuthenticated() throws Exception {
         var registered = new AtomicReference<ProcessRegistration>();
+        var reported = new CompletableFuture<ProcessReport>();
+        var desired = new CompletableFuture<DesiredSessions>();
         var backend =
                 ServerBuilder.forPort(0)
                         .addService(
@@ -52,6 +56,29 @@ class ChunkProcessTest {
                                         response.onNext(request.getIdentity());
                                         response.onCompleted();
                                     }
+
+                                    @Override
+                                    public StreamObserver<ProcessReport> sync(
+                                            StreamObserver<DesiredSessions> response) {
+                                        return new StreamObserver<>() {
+                                            @Override
+                                            public void onNext(ProcessReport report) {
+                                                reported.complete(report);
+                                                response.onNext(
+                                                        DesiredSessions.newBuilder()
+                                                                .addCreate(
+                                                                        SessionCommand
+                                                                                .getDefaultInstance())
+                                                                .build());
+                                            }
+
+                                            @Override
+                                            public void onError(Throwable error) {}
+
+                                            @Override
+                                            public void onCompleted() {}
+                                        };
+                                    }
                                 })
                         .build()
                         .start();
@@ -59,12 +86,29 @@ class ChunkProcessTest {
         try (var process = new ChunkProcess(environment)) {
             assertFalse(process.isReady());
             assertThrows(IllegalStateException.class, process::ready);
-            process.bind(List.of(), "127.0.0.1:25565");
+            process.bind(
+                    List.of(),
+                    "127.0.0.1:25565",
+                    new ProcessState() {
+                        @Override
+                        public ProcessReport inventory() {
+                            return ProcessReport.getDefaultInstance();
+                        }
+
+                        @Override
+                        public void apply(DesiredSessions sessions) {
+                            desired.complete(sessions);
+                        }
+                    });
             assertNull(registered.get());
             process.progress(2, 3);
             process.ready();
             assertTrue(process.isReady());
             assertEquals(process.identity(), registered.get().getIdentity());
+            // The first flush after the stream opens reports everything, and control answers.
+            process.flush();
+            assertEquals(process.identity(), reported.get(3, TimeUnit.SECONDS).getIdentity());
+            assertEquals(1, desired.get(3, TimeUnit.SECONDS).getCreateCount());
             var address = java.net.URI.create(registered.get().getControlEndpoint());
             var channel =
                     ManagedChannelBuilder.forAddress(address.getHost(), address.getPort())

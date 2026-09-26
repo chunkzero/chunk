@@ -17,7 +17,7 @@ fn auth<T>(value: T, token: &str) -> Request<T> {
 async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
     let mut fixture = Fixture::new().await;
     fixture.config.contracts.session_methods = Some(super::session_methods::method_contract());
-    let control = fixture.control();
+    let control = fixture.control().await;
     let source = request("method-source", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(source.clone()).await.unwrap();
     let prepared_request = PrepareSessionMethodRequest {
@@ -32,7 +32,7 @@ async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
     let (mut client, stop, server) = serve_methods(service.clone()).await;
     reject_untrusted_credentials(&mut client, &prepared_request).await;
     assert!(client.prepare_session_method(auth(prepared_request.clone(), TOKEN)).await.is_err()); // Not ARRIVED.
-    fixture.runtime.bindings.lock().unwrap().get_mut(&source.operation_id).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, &source.operation_id).await;
     control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
     reject_invalid_declarations(&mut client, &prepared_request).await;
     let handle = client.prepare_session_method(auth(prepared_request.clone(), TOKEN)).await.unwrap().into_inner();
@@ -120,10 +120,10 @@ async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
 async fn prepared_methods_bound_pending_handles_and_cancel_before_shutdown_wait() {
     let mut fixture = Fixture::new().await;
     fixture.config.contracts.session_methods = Some(super::session_methods::method_contract());
-    let control = fixture.control();
+    let control = fixture.control().await;
     let source = request("method-capacity", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut(&source.operation_id).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, &source.operation_id).await;
     control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
     let service = Service::new(control, TOKEN.into()).unwrap();
     let request = PrepareSessionMethodRequest {
@@ -169,11 +169,11 @@ async fn prepared_methods_bound_pending_handles_and_cancel_before_shutdown_wait(
 #[tokio::test]
 async fn captured_moves_reject_replaced_connections_even_for_existing_operations() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("move-source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut(&source.operation_id).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, &source.operation_id).await;
     control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
     let expected = MovePlayerRequest {
         operation_id: "captured-move".into(),
@@ -195,7 +195,7 @@ async fn captured_moves_reject_replaced_connections_even_for_existing_operations
     control.cancel(source).await.unwrap();
     let replacement = request("replacement", &uuid);
     let next = control.claim(replacement.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut(&replacement.operation_id).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, &replacement.operation_id).await;
     control.activate(ActivateClaim { claim: next.claim.clone() }).await.unwrap();
     assert!(control.move_player(expected.clone()).is_err());
     assert!(

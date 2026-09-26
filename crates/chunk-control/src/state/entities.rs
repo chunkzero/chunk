@@ -116,7 +116,8 @@ pub(crate) struct PlayerState {
     pub pending: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Claim phases in lifecycle order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     Reserved,

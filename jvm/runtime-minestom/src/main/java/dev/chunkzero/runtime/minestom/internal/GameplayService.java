@@ -11,6 +11,7 @@ import chunk.v1.GameplayOuterClass.PlayerWithdrawal;
 import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest;
 import chunk.v1.Supervision.DeliveryInventory;
 import chunk.v1.Supervision.DeliveryPhase;
+import chunk.v1.Supervision.ProcessReport;
 import chunk.v1.Supervision.SessionInventory;
 
 import dev.chunkzero.runtime.ManagedPlayer;
@@ -29,6 +30,7 @@ import net.minestom.server.event.player.AsyncPlayerPreLoginEvent;
 
 import org.jetbrains.annotations.ApiStatus;
 
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -239,27 +241,24 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
     }
 
     public List<SessionInventory> sessions() {
-        return manager.inventory().stream()
-                .map(
-                        session ->
-                                session.toBuilder()
-                                        .setPrepared(
-                                                (int)
-                                                        deliveries().stream()
-                                                                .filter(
-                                                                        delivery ->
-                                                                                delivery.getDelivery()
-                                                                                                .getSession()
-                                                                                                .equals(
-                                                                                                        session
-                                                                                                                .getSession())
-                                                                                        && delivery
-                                                                                                        .getPhase()
-                                                                                                == DeliveryPhase
-                                                                                                        .DELIVERY_PHASE_PREPARED)
-                                                                .count())
-                                        .build())
-                .toList();
+        return inventory().getSessionsList();
+    }
+
+    /** Every session with its prepared deliveries counted, and every delivery. */
+    public ProcessReport inventory() {
+        var deliveries = deliveries();
+        var prepared = new HashMap<String, Integer>();
+        for (var delivery : deliveries) {
+            if (delivery.getPhase() == DeliveryPhase.DELIVERY_PHASE_PREPARED)
+                prepared.merge(delivery.getDelivery().getSession().getId(), 1, Integer::sum);
+        }
+        var report = ProcessReport.newBuilder().addAllDeliveries(deliveries);
+        for (var session : manager.inventory()) {
+            report.addSessions(
+                    session.toBuilder()
+                            .setPrepared(prepared.getOrDefault(session.getSession().getId(), 0)));
+        }
+        return report.build();
     }
 
     @Override
