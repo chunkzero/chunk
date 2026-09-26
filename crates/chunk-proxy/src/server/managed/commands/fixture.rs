@@ -27,6 +27,9 @@ pub(super) struct Service {
     pub reply_order: Arc<Mutex<Vec<u32>>>,
     pub replies: Arc<AtomicUsize>,
     pub release: Arc<tokio::sync::Notify>,
+    /// Activations answered as waiting for the rest of a roster before one succeeds.
+    pub roster_waits: Arc<AtomicUsize>,
+    pub activations: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -194,8 +197,13 @@ impl local_control_server::LocalControl for Service {
         }
         Err(error.unwrap_or_else(|| Status::unimplemented("unused")))
     }
-    async fn activate(&self, _: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
-        Err(Status::unimplemented("unused"))
+    async fn activate(&self, request: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
+        auth(&request, "control")?;
+        self.activations.fetch_add(1, Ordering::SeqCst);
+        if self.roster_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waits| waits.checked_sub(1)).is_ok() {
+            return Err(Status::unavailable("roster awaiting members"));
+        }
+        Ok(Response::new(self.assignment.lock().unwrap().clone()))
     }
     async fn cancel(&self, _: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
         Err(Status::unimplemented("unused"))
@@ -287,6 +295,8 @@ impl Fixture {
             reply_order: Arc::default(),
             replies: Arc::default(),
             release: Arc::default(),
+            roster_waits: Arc::default(),
+            activations: Arc::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());

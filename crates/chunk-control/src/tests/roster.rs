@@ -120,10 +120,14 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
         control.cancel(request(&source.operation_id, player)).await.unwrap();
         activations.push(ActivateClaim { claim: prepared.claim });
     }
-    assert!(matches!(
-        control.activate(activations[0].clone()).await,
-        Err(Error::Unresolved("roster awaiting members"))
-    ));
+    // Gateways retry exactly this status until the group is complete.
+    let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
+    let mut waiting = Request::new(activations[0].clone());
+    waiting
+        .metadata_mut()
+        .insert("authorization", "Bearer control-group-credential-with-32-characters".parse().unwrap());
+    let status = chunk_proto::v1::local_control_server::LocalControl::activate(&service, waiting).await.unwrap_err();
+    assert_eq!((status.code(), status.message()), (tonic::Code::Unavailable, "roster awaiting members"));
     assert!(
         control.state().unwrap().claims.values().filter(|claim| claim.roster.is_some()).all(|claim| !claim.activated)
     );

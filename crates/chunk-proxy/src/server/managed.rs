@@ -23,6 +23,8 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Control's reply while other members of the player's roster have not yet asked to activate.
+const ROSTER_WAITING: &str = "roster awaiting members";
 
 struct ClaimGuard {
     platform: Platform,
@@ -177,15 +179,23 @@ async fn open<S>(
     if assignment.configuration.as_ref().is_none_or(|c| c.protocol != authenticated.protocol_version) {
         return Err(invalid_data("destination protocol differs from client"));
     }
-    guard
-        .platform
-        .control
-        .clone()
-        .activate(guard.platform.control_request(ActivateClaim { claim: assignment.claim.clone() })?)
-        .await
-        .map_err(io::Error::other)?;
+    activate(guard, assignment.claim.clone()).await?;
     let preparation = assignment.preparation.clone().ok_or_else(|| invalid_data("missing preparation"))?;
     gameplay::login(authenticated, settings, preparation).await
+}
+
+/// Records admission intent. A roster member waits for the rest of its group; the caller bounds the wait.
+async fn activate(guard: &ClaimGuard, claim: Option<ClaimIdentity>) -> io::Result<()> {
+    let activation = ActivateClaim { claim };
+    loop {
+        match guard.platform.control.clone().activate(guard.platform.control_request(activation.clone())?).await {
+            Ok(_) => return Ok(()),
+            Err(error) if error.code() == tonic::Code::Unavailable && error.message() == ROSTER_WAITING => {
+                sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
 }
 
 async fn withdraw(source: &ClaimGuard, identity: &ClaimIdentity) -> io::Result<()> {
