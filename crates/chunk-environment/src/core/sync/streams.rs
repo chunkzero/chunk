@@ -381,6 +381,9 @@ mod tests {
             }
         }
         assert!((10..=11).contains(&received), "{received} advances in 500 ms");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = stream.recv().await.unwrap().unwrap();
+        assert_eq!(held.position, Some(Position { epoch: 1, revision: 500 }));
 
         let sent = Instant::now();
         sender.send(upsert("a", "1", 501));
