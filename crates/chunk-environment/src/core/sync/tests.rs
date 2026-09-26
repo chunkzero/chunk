@@ -88,6 +88,7 @@ struct Fixture {
     cli: String,
     /// The credential of gateway `proxy`, which holds the fake JVM's claims.
     gateway: String,
+    gateways: Arc<Gateways>,
 }
 
 impl Fixture {
@@ -112,7 +113,7 @@ impl Fixture {
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
-            services: Some(services(backend.clone(), gateways)),
+            services: Some(services(backend.clone(), gateways.clone())),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
@@ -126,6 +127,7 @@ impl Fixture {
             client,
             cli: started.connection.token,
             gateway,
+            gateways,
         }
     }
 
@@ -148,6 +150,18 @@ impl Fixture {
             deployment: "test".into(),
             caller,
             stream: String::new(),
+        };
+        self.client.call(authorized(message, credential)).await.unwrap().into_inner()
+    }
+
+    /// Reads the count as `credential`, naming `stream`.
+    async fn call_on(&mut self, credential: &str, stream: &str) -> CallResponse {
+        let message = CallRequest {
+            method: "get".into(),
+            arguments: "null".into(),
+            deployment: "test".into(),
+            stream: stream.into(),
+            ..CallRequest::default()
         };
         self.client.call(authorized(message, credential)).await.unwrap().into_inner()
     }
@@ -392,7 +406,8 @@ async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
     let resumed = SubscribeRequest { after: Some(after), ..subscription };
     let mut second = fixture.client.subscribe(authorized(resumed, &gateway)).await.unwrap().into_inner();
     let update = next(&mut second).await;
-    assert!(!update.snapshot && update.stream == snapshot.stream && update.error.is_none());
+    assert!(!update.snapshot && update.error.is_none());
+    assert!(!update.stream.is_empty() && update.stream != snapshot.stream);
 
     let mut last = next(&mut first).await;
     while last.error.is_none() {
@@ -400,6 +415,41 @@ async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
     }
     assert_eq!(last.error.map(|error| error.code()), Some(Code::Stopped));
     assert!(first.message().await.unwrap().is_none());
+    assert_eq!(code(&fixture.call_on(&gateway, &snapshot.stream).await), Code::Stopped);
+    let current = fixture.call_on(&gateway, &update.stream).await;
+    assert_eq!(current.outcome, Some(Outcome::Result(b"0".to_vec())));
+    let cli = fixture.cli.clone();
+    assert_eq!(code(&fixture.call_on(&cli, &update.stream).await), Code::Stopped);
     drop((first, second));
     fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_acts_only_for_players_it_holds_claims_for() {
+    let (jvm, server) = runtime::Runtime::start();
+    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    fixture.control.activate_release(runtime::release()).unwrap();
+    fixture.control.claim(runtime::login()).await.unwrap();
+    let holder = fixture.gateway.clone();
+    let other = fixture.gateways.mint("other");
+    let player = || Some(Caller { session: String::new(), player: runtime::PLAYER.into() });
+
+    let held = fixture.call_as(&holder, "", "get", "null", player()).await;
+    assert_eq!(held.outcome, Some(Outcome::Result(b"0".to_vec())));
+    assert_eq!(code(&fixture.call_as(&other, "", "get", "null", player()).await), Code::Denied);
+
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"count": {"function": "get"}}"#.to_vec(),
+        deployment: "test".into(),
+        caller: player(),
+        ..SubscribeRequest::default()
+    };
+    let mut held = fixture.client.subscribe(authorized(subscription.clone(), &holder)).await.unwrap().into_inner();
+    assert!(next(&mut held).await.snapshot);
+    let mut foreign = fixture.client.subscribe(authorized(subscription, &other)).await.unwrap().into_inner();
+    assert_eq!(next(&mut foreign).await.error.map(|error| error.code()), Some(Code::Denied));
+    drop((held, foreign));
+    fixture.stop().await;
+    server.abort();
 }

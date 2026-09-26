@@ -21,8 +21,8 @@ pub(in super::super) struct Gateway {
     superseded: CancellationToken,
 }
 
-/// Opens the gateway topic `request` names, resuming after its cursor when that names this stream in the current
-/// epoch, and supersedes the gateway's earlier stream.
+/// Opens the gateway topic `request` names under a new stream ID, resuming after its cursor when that names a stream
+/// of the same scope in the current epoch, and supersedes the gateway's earlier stream.
 pub(super) fn open(service: &SyncService, principal: Principal, request: &SubscribeRequest) -> Result<Gateway, Error> {
     let id = request.topic.strip_prefix("gateway/").unwrap_or_default();
     if principal.class != (Class::Gateway { id: id.to_owned() }) {
@@ -31,20 +31,23 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
     if !request.arguments.is_empty() || !request.deployment.is_empty() || request.caller.is_some() {
         return Err(errors::invalid("the gateway topic takes no arguments, deployment or caller"));
     }
-    let stream = service.streams.id(request, &principal.credential);
-    let after = request.after.as_ref().filter(|after| after.stream == stream).and_then(|after| after.position);
+    let credential = &principal.credential;
+    let after = request.after.as_ref().filter(|after| service.streams.verify(&after.stream, request, credential));
+    let after = after.and_then(|after| after.position);
     let after = after
         .filter(|position| position.epoch == service.epoch)
         .map(|position| Generation { epoch: position.epoch, revision: position.revision });
     let positions = service.control.subscribe();
     let (topic, first) = Topic::open(&service.control, id, after).map_err(|failure| errors::control(&failure))?;
+    let stream = service.streams.id(request, credential);
+    let superseded = service.fences.fence(&request.topic, &stream, credential);
     Ok(Gateway {
         topic,
         first: Update { stream, ..first },
         control: service.control.clone(),
         positions,
         grant: Grant::new(service.credentials.clone(), principal, "", None),
-        superseded: service.fences.fence(&request.topic),
+        superseded,
     })
 }
 

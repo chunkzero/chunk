@@ -89,6 +89,9 @@ impl SyncService {
         if request.method.is_empty() || request.method.contains(':') {
             return Err(errors::invalid("unknown method"));
         }
+        if !request.stream.is_empty() {
+            self.fences.check(&request.stream, &principal.credential)?;
+        }
         let (deployment, caller) = self.scope(principal, &request.deployment, request.caller.as_ref())?;
         let arguments = std::str::from_utf8(&request.arguments).ok().and_then(|text| Json::parse(text).ok());
         let arguments = arguments.ok_or_else(|| errors::invalid("arguments are not JSON"))?;
