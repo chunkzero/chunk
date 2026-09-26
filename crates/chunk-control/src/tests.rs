@@ -971,4 +971,5 @@ mod log;
 mod recovery;
 mod retention;
 mod roster;
+mod server;
 mod watch;
