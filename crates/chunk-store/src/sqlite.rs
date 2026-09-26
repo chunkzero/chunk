@@ -31,13 +31,13 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 /// this boundary; editing the database externally is unsupported.
 pub struct SqliteStore {
     connection: Connection,
-    path: PathBuf,
     schema: Arc<DatabaseSchema>,
     epoch: Epoch,
     log: Option<log::Log>,
     retention: retention::Retention,
     job_limits: jobs::JobLimits,
     pruned_at: Option<Instant>,
+    readers: Arc<read::Pool>,
     _writer_lock: bootstrap::WriterLock,
 }
 
@@ -147,7 +147,7 @@ impl SqliteStore {
         let epoch = Epoch(log::epoch(&connection)?);
         Ok(Self {
             connection,
-            path,
+            readers: read::Pool::new(path),
             schema,
             epoch,
             log,
@@ -220,7 +220,7 @@ impl Storage for SqliteStore {
     }
 
     fn snapshot(&mut self) -> Result<Snapshot> {
-        read::snapshot(&self.path, self.schema.clone())
+        read::snapshot(&self.readers, self.schema.clone())
     }
 
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
