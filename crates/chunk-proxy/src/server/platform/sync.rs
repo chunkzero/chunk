@@ -49,7 +49,8 @@ impl Connection {
     }
 
     /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's
-    /// position after it. A call naming a superseded stream runs again on the topic's next stream.
+    /// position after it. A call core stops because the stream it named was superseded runs again on the topic's next
+    /// stream; any other stop fails the call.
     pub async fn call<R: Message + Default>(
         &self,
         method: &str,
@@ -78,11 +79,17 @@ impl Connection {
                 Some(Outcome::Result(result)) => {
                     return Ok((R::decode(result.as_slice()).map_err(invalid_data)?, response.position));
                 }
-                Some(Outcome::Error(error)) if error.code() == Code::Stopped => stale = Some(stream),
+                Some(Outcome::Error(error)) if error.code() == Code::Stopped && self.superseded(&stream) => {
+                    stale = Some(stream);
+                }
                 Some(Outcome::Error(error)) => return Err(io::Error::other(Failure(error))),
                 None => return Err(invalid_data("core returned no outcome")),
             }
         }
+    }
+
+    fn superseded(&self, stream: &str) -> bool {
+        self.claims.get().is_some_and(|(view, _)| view.borrow().superseded(stream))
     }
 }
 

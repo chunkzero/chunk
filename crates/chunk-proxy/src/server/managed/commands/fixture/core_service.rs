@@ -108,6 +108,12 @@ impl core_server::Core for Service {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         super::auth(&request, "gateway")?;
         let call = request.into_inner();
+        if call.stream == *self.stream.lock().unwrap() && self.supersede.swap(false, Ordering::SeqCst) {
+            self.superseded.notify_one();
+            while call.stream == *self.stream.lock().unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
         let outcome = if call.stream == *self.stream.lock().unwrap() {
             self.platform(&call).await?
         } else {
@@ -143,6 +149,11 @@ impl core_server::Core for Service {
                 }
                 tokio::select! {
                     () = service.watches.cancelled() => return,
+                    () = service.superseded.notified() => {
+                        let stopped = sync::Error { code: Code::Stopped.into(), message: "superseded".into() };
+                        let _ = sender.send(Ok(Update { error: Some(stopped), ..Update::default() })).await;
+                        return;
+                    }
                     () = sender.closed() => return,
                     _ = published.changed() => {}
                 }

@@ -23,7 +23,7 @@ const REVISION_BITS: u32 = 40;
 #[derive(Default)]
 pub(in crate::server) struct View {
     live: bool,
-    /// The stream the last update came from.
+    /// The stream the last update came from, cleared when it ends superseded.
     stream: String,
     position: Option<Position>,
     claims: BTreeMap<String, GatewayClaim>,
@@ -50,6 +50,11 @@ impl View {
     /// The stream claim calls name, once the view is live.
     pub fn stream(&self) -> Option<&str> {
         Some(self.stream.as_str()).filter(|stream| self.live && !stream.is_empty())
+    }
+
+    /// Whether `stream` was superseded: the view has moved on from it, or saw it end stopped.
+    pub fn superseded(&self, stream: &str) -> bool {
+        self.stream != stream
     }
 
     fn reached(&self, wire: u64) -> bool {
@@ -135,7 +140,11 @@ async fn stream(
         };
         if let Some(error) = update.error {
             tracing::debug!(message = %error.message, "gateway topic ended");
-            return (error.code() != Code::Stopped).then_some(cursor).flatten();
+            if error.code() != Code::Stopped {
+                return cursor;
+            }
+            view.send_modify(|view| view.stream.clear());
+            return None;
         }
         let continued = update.continued;
         pending.push(update);

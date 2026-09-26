@@ -44,6 +44,9 @@ pub(super) struct Service {
     pub watch_down: Arc<AtomicBool>,
     pub refused_watches: Arc<AtomicUsize>,
     pub logins: Arc<Mutex<Logins>>,
+    /// The next call naming the open stream first ends it stopped, then waits for the next one.
+    pub supersede: Arc<AtomicBool>,
+    superseded: Arc<tokio::sync::Notify>,
     /// The newest stream; calls naming another are stopped.
     stream: Arc<Mutex<String>>,
     streams: Arc<AtomicUsize>,
@@ -291,6 +294,8 @@ impl Fixture {
             watch_down: Arc::default(),
             refused_watches: Arc::default(),
             logins: Arc::default(),
+            supersede: Arc::default(),
+            superseded: Arc::default(),
             stream: Arc::default(),
             streams: Arc::default(),
             watches: CancellationToken::new(),

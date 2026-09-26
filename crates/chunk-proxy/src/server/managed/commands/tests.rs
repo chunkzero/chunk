@@ -14,7 +14,7 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
     use chunk_proto::sync::v1::{Error, GatewayMove, SessionDemand, error::Code};
     for (code, message) in [
         (Code::Invalid, "destination configuration rejected"),
-        (Code::Invalid, "runtime stopped"),
+        (Code::Stopped, "runtime stopped"),
         (Code::Unavailable, "app did not become ready within 35 seconds"),
     ] {
         let transient = code == Code::Unavailable;
@@ -302,6 +302,21 @@ async fn claim_view_resyncs_from_a_snapshot_after_its_stream_drops() {
     fixture.service.watch_down.store(false, Ordering::SeqCst);
     fixture.sync().await;
     assert!(origin.check(&platform).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_call_on_a_superseded_stream_runs_again_on_its_replacement_under_the_same_operation() {
+    use chunk_proto::sync::v1::WithdrawResult;
+    let fixture = Fixture::new().await;
+    let platform = fixture.commands.tasks.platform.clone();
+    fixture.sync().await;
+    fixture.service.supersede.store(true, Ordering::SeqCst);
+    let withdrawal = platform.call::<WithdrawResult>("withdraw", "claim", &(), crate::server::platform::RPC_TIMEOUT);
+    tokio::time::timeout(Duration::from_secs(3), withdrawal).await.unwrap().unwrap();
+    // Only the retry on the replacement stream reached the claim.
+    assert_eq!(fixture.service.logins.lock().unwrap().cancels, ["claim"]);
+    fixture.sync().await;
     fixture.close().await;
 }
 
