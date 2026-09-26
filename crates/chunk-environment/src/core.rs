@@ -76,25 +76,30 @@ impl Core {
         Ok(())
     }
 
-    /// Starts control. When `fresh`, a control on the previous files first stops the JVMs that still hold their launch
-    /// locks, since only it can confirm they exited, and the files are deleted after.
+    /// Starts control. When `fresh`, the previous control's files and discovery record are deleted, but first a control
+    /// on those files stops the JVMs that still hold their launch locks, since only it can confirm they exited. It
+    /// serves at the previous address, where those JVMs retry registering, while that address is known and free.
     async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
         if config.fresh {
             let state = config.state.join("control");
+            // The record belongs to the previous credential, which is deleted with the files.
+            let previous = chunk_service::read::<ControlConnection>(&config.control_record).ok();
+            if_present(fs::remove_file(&config.control_record))?;
             if survivors(&state.join("nodes"))? {
-                tracing::warn!("stopping JVMs that outlived the previous control");
-                self.serve_control(config).await?;
+                let bind = previous.as_ref().and_then(previous_bind).unwrap_or_else(|| {
+                    tracing::warn!("previous control address unknown or taken; waiting for its JVMs to exit");
+                    config.control_bind
+                });
+                tracing::warn!(%bind, "stopping JVMs that outlived the previous control");
+                self.serve_control(config, bind).await?;
                 self.stop_control(|| {}).await?;
             }
-            match fs::remove_dir_all(&state) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
-            }
+            if_present(fs::remove_dir_all(&state))?;
         }
-        self.serve_control(config).await
+        self.serve_control(config, config.control_bind).await
     }
 
-    async fn serve_control(&mut self, config: &CoreConfig) -> io::Result<()> {
+    async fn serve_control(&mut self, config: &CoreConfig, bind: SocketAddr) -> io::Result<()> {
         let state = config.state.join("control");
         let host = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
             directory: state.join("nodes"),
@@ -107,7 +112,7 @@ impl Core {
             connection: config.control_record.clone(),
             state,
             system: self.system()?,
-            bind: config.control_bind,
+            bind,
             control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
@@ -265,6 +270,19 @@ fn survivors(nodes: &Path) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// The address `previous` served at, if control can serve there again.
+fn previous_bind(previous: &ControlConnection) -> Option<SocketAddr> {
+    let bind = previous.endpoint.strip_prefix("http://")?.parse().ok()?;
+    std::net::TcpListener::bind(bind).ok().map(|_| bind)
+}
+
+fn if_present(removed: io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// Waits before the next attempt to stop the JVMs, calling `on_wait` the first time.
