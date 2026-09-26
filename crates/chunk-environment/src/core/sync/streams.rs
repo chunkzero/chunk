@@ -1,5 +1,9 @@
 //! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
 //! nudges after a credential's own writes.
+//!
+//! A stream sends position-only updates at most every [`ADVANCE_INTERVAL`], so a slow client's advances coalesce
+//! sooner. Rust clients multiplexing many independently-consumed streams on one connection should still raise h2's
+//! `data_frame_budget` or lower their stream window, since a stalled stream's small frames can exceed the budget.
 
 use super::{MESSAGE_BYTES, errors};
 use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State, error::Code};
@@ -11,8 +15,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Write,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::{
+    sync::{Notify, mpsc, watch},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
@@ -21,6 +29,9 @@ const HEADER_BYTES: usize = 2048;
 
 /// The hex nonce that starts every stream ID.
 const NONCE_BYTES: usize = 32;
+
+/// The least time between a stream's sends when the later one only advances its position.
+const ADVANCE_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Keys stream IDs for this process only, so a stream from before a restart never resumes.
 pub(super) struct StreamKey([u8; 32]);
@@ -231,6 +242,10 @@ impl Changes {
         }
     }
 
+    fn only_advances(&self) -> bool {
+        !self.snapshot && self.upserts.is_empty() && self.removed.is_empty()
+    }
+
     fn into_update(self) -> Update {
         Update {
             position: self.position,
@@ -244,18 +259,22 @@ impl Changes {
 }
 
 /// Hands the slot's changes to `client` as it takes them, split to fit in messages, and ends after the slot's error.
+/// Changes that only advance the position wait out [`ADVANCE_INTERVAL`] since the previous send.
 async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, closed: CancellationToken) {
     let _closed = closed.drop_guard();
     let mut parts = VecDeque::new();
+    let mut advance_at = Instant::now();
     while let Ok(permit) = client.reserve().await {
         let (part, last) = loop {
+            let held;
             {
                 let mut pending = slot.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(error) = pending.error.take() {
                     break (Update { error: Some(error), ..Update::default() }, true);
                 }
+                let paced = !pending.ended && Instant::now() < advance_at;
                 if parts.is_empty()
-                    && let Some(changes) = pending.changes.take()
+                    && let Some(changes) = pending.changes.take_if(|changes| !(paced && changes.only_advances()))
                 {
                     parts = split(changes.into_update()).into();
                 }
@@ -265,13 +284,16 @@ async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, cl
                 if pending.ended {
                     return;
                 }
+                held = pending.changes.is_some();
             }
             tokio::select! {
                 () = slot.wake.notified() => {}
+                () = tokio::time::sleep_until(advance_at), if held => {}
                 () = client.closed() => return,
             }
         };
         permit.send(Ok(part));
+        advance_at = Instant::now() + ADVANCE_INTERVAL;
         if last {
             return;
         }
@@ -345,5 +367,28 @@ mod tests {
         let values: Vec<_> = update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
         assert_eq!(values, [("a", Some(State::Value(b"2".to_vec())))]);
         assert_eq!(update.removed, ["b"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn position_only_updates_are_paced_but_data_is_not() {
+        let (sender, mut stream) = channel();
+        let mut received = 0;
+        for revision in 1..=500 {
+            sender.send(Update { position: Some(Position { epoch: 1, revision }), ..Update::default() });
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            while stream.try_recv().is_ok() {
+                received += 1;
+            }
+        }
+        assert!((10..=11).contains(&received), "{received} advances in 500 ms");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = stream.recv().await.unwrap().unwrap();
+        assert_eq!(held.position, Some(Position { epoch: 1, revision: 500 }));
+
+        let sent = Instant::now();
+        sender.send(upsert("a", "1", 501));
+        let update = stream.recv().await.unwrap().unwrap();
+        assert_eq!(Instant::now(), sent);
+        assert_eq!((update.upserts.len(), update.position), (1, Some(Position { epoch: 1, revision: 501 })));
     }
 }
