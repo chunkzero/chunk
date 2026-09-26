@@ -2,7 +2,7 @@
 //! on the commit thread: each durable write takes queued system commits ahead of app commits.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -28,6 +28,8 @@ pub(crate) struct Lane {
     queue: Mutex<Queue>,
     epoch: OnceLock<Epoch>,
     stopped: AtomicBool,
+    /// Scopes held by a [`ScopeLock`].
+    scopes: Mutex<HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -105,6 +107,18 @@ impl System {
         self.lane.queue.lock().map_or(0, |queue| queue.jobs.len())
     }
 
+    /// Holds `scope` exclusively on this backend until the returned lock drops, so one writer at a time owns the
+    /// system rows it names.
+    /// # Errors
+    /// Reports a scope another lock on this backend holds.
+    pub fn lock_scope(&self, scope: &str) -> Result<ScopeLock> {
+        let mut scopes = self.lane.scopes.lock().map_err(|_| Error::Closed)?;
+        if !scopes.insert(scope.to_owned()) {
+            return Err(Error::Invalid("system scope is already locked"));
+        }
+        Ok(ScopeLock { lane: self.lane.clone(), scope: scope.to_owned() })
+    }
+
     /// Additively installs `schema`'s system tables, then reads the store.
     /// Blocks until the commit thread replies.
     /// # Errors
@@ -131,5 +145,19 @@ impl System {
         let (reply, result) = mpsc::sync_channel(1);
         self.lane.submit(SystemJob::Commit { writes, reply })?;
         result.recv().map_err(|_| Error::Closed)?
+    }
+}
+
+/// An exclusive hold on a scope of system rows, released on drop.
+pub struct ScopeLock {
+    lane: Arc<Lane>,
+    scope: String,
+}
+
+impl Drop for ScopeLock {
+    fn drop(&mut self) {
+        if let Ok(mut scopes) = self.lane.scopes.lock() {
+            scopes.remove(&self.scope);
+        }
     }
 }

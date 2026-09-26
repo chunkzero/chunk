@@ -206,6 +206,11 @@ impl Actor {
                 }
                 Event::Evaluated(evaluated) => self.evaluated(*evaluated),
                 Event::System { count, revision, snapshot } => self.system_committed(count, revision, snapshot),
+                Event::Failed => {
+                    if self.failure.is_none() {
+                        self.fail(&Error::CommitFailed);
+                    }
+                }
                 Event::Wake => {}
             }
             if !stopped.load(Ordering::Acquire) {

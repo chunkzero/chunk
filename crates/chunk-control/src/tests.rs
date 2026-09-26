@@ -516,9 +516,13 @@ async fn duplicate_control_open_on_same_backend_is_rejected() {
     let rejected = second.is_err();
     drop(second);
     drop(first);
+    let reopened = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let released = reopened.is_ok();
+    drop(reopened);
     drop(backend);
     fixture.close().await;
     assert!(rejected, "second Control::open on the same backend and deployment must be rejected");
+    assert!(released, "dropping the first control must release its deployment");
 }
 
 #[tokio::test]

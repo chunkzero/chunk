@@ -99,7 +99,7 @@ struct Writable {
 
 impl Authority {
     pub fn open(system: chunk_backend::System, config: &Config) -> Result<Self> {
-        let store = store::Store::new(system.clone(), &config.deployment.deployment);
+        let store = store::Store::new(system.clone(), &config.deployment.deployment)?;
         let state = store.load()?;
         let feed = feed::Feed::new(state.position());
         let store = Mutex::new(Writable { store, stale: false });

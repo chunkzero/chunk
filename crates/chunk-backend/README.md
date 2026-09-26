@@ -83,7 +83,8 @@ system commits first into every durable write, ahead of queued prepares and app 
 move past them, and the engine shifts their staged revisions, so each commit's revision stays the previous one plus
 one. System commits record operation IDs starting with `chunk/`, which app operations may not use. Deployments may not
 declare `chunk_` tables in any letter case, so apps can neither read nor write them. JavaScript never runs for a system
-commit. Once the pipeline fails, `System::stopped` reports it.
+commit. Once the pipeline fails, `System::stopped` reports it and app calls fail too. `System::lock_scope` holds a
+scope of system rows exclusively on one backend until the returned lock drops.
 
 Construction waits for initialization. Dropping the last backend handle drains accepted commits and joins its owned
 threads; use a blocking task for construction and final drop from async code. Persistent module state is disposable:

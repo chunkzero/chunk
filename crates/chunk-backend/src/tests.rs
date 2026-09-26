@@ -476,6 +476,30 @@ async fn system_post_commit_snapshot_failure_stops_lane_and_app_calls() {
 }
 
 #[tokio::test]
+async fn fatal_system_commit_failure_stops_lane_and_app_calls() {
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, _) = signals::unbounded_channel();
+    let store = ControlledStore { ambiguous: true, ..ControlledStore::new(open(&directory), notices) };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let system = backend.system();
+    let schema = serde_json::from_value(json!({
+        "chunk_claims": {"fields": {"player": {"schema": {"type": "string"}}}}
+    }))
+    .unwrap();
+    system.open(schema).unwrap();
+    let write = chunk_store::Write {
+        key: DocumentKey::new("chunk_claims", "claim").unwrap(),
+        value: Some(json!({"player": "alex"})),
+    };
+    assert!(system.commit(vec![write]).is_err());
+    // The commit thread handles this after it notified the engine of the first failure.
+    assert!(matches!(system.commit(Vec::new()), Err(Error::CommitFailed)));
+    assert!(system.stopped());
+    assert!(matches!(backend.query(call("get", json!({"id": "p"}))).await, Err(Error::CommitFailed)));
+}
+
+#[tokio::test]
 async fn subscriptions_track_empty_ranges_and_update_dependencies_when_results_match() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();

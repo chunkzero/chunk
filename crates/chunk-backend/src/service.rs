@@ -255,6 +255,8 @@ pub(crate) enum Event {
         revision: Revision,
         snapshot: Result<Snapshot>,
     },
+    /// The commit thread failed and commits nothing more.
+    Failed,
     Wake,
 }
 

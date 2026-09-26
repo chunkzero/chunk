@@ -89,7 +89,8 @@ impl Committer {
             let mut next = None;
             while let Some(job) = next.take().or_else(|| incoming.recv().ok()) {
                 let system = lane.0.take();
-                let batch = match job {
+                let healthy = !failed;
+                let mut batch = match job {
                     job @ (Job::Prepare { .. } | Job::Commit { .. }) => {
                         // Prepares and commits already queued share one durable write.
                         let mut batch = vec![job];
@@ -112,8 +113,10 @@ impl Committer {
                         events
                     }
                 };
-                if failed {
+                // The first fatal failure stops the system lane and the engine together.
+                if failed && healthy {
                     lane.0.fail();
+                    batch.push(Event::Failed);
                 }
                 for event in batch {
                     if events.blocking_send(event).is_err() {
@@ -208,7 +211,9 @@ fn open(
         sequence.revision = revision;
         sequence.system += 1;
     }
-    (advanced, store.snapshot().map_err(Error::from))
+    let snapshot = store.snapshot().map_err(Error::from);
+    *failed |= advanced && snapshot.is_err();
+    (advanced, snapshot)
 }
 
 type Replies = Vec<mpsc::SyncSender<Result<Revision>>>;
@@ -350,6 +355,7 @@ fn durable(
     if let (count @ 1.., revision) = acknowledge(replies, &mut results, failed) {
         sequence.system += count;
         let snapshot = snapshot.clone().unwrap_or(Err(Error::CommitFailed));
+        *failed |= snapshot.is_err();
         events.push(Event::System { count, revision, snapshot });
     }
     events.extend(queued.into_iter().map(|queued| {

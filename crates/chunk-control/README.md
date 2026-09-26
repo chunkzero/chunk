@@ -32,8 +32,9 @@ Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chun
 environment has one log. Each update is one commit through the backend's system lane, which takes it into the next
 durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt from the tables on open. Apps
 cannot declare, read or write `chunk_` tables. Each deployment version's control prefixes its row IDs with a scope
-derived from the deployment, so `chunk dev` releases running side by side keep separate state; a new `chunk dev`
-session clears every scope. When the backend's commit pipeline fails or stops, as after another store fences this
+derived from the deployment and holds that scope exclusively, so a second control for the same deployment on one
+backend fails to open until the first drops, and `chunk dev` releases running side by side keep separate state; a
+new `chunk dev` session clears every scope. When the backend's commit pipeline fails or stops, as after another store fences this
 one, control stops too. The tables retain requests, reservations and activation intent before external effects. A lost activation reply
 is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft connection;
 control carries destination metadata. A player row exists only while it owns a claim. Released claims, and moves that

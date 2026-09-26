@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use chunk_backend::System;
+use chunk_backend::{ScopeLock, System};
 use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Snapshot, Write};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{Meta, Phase, State};
-use crate::Result;
+use crate::{Error, Result};
 
 pub(crate) const CLAIMS: &str = "chunk_claims";
 pub(crate) const MOVES: &str = "chunk_moves";
@@ -20,16 +20,21 @@ const ROSTERS: &str = "chunk_rosters";
 const TABLES: [&str; 8] = [META, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS];
 
 /// Control state as system tables in the environment's store. Several control authorities, one per deployment
-/// version, may share the tables, so each row ID starts with its authority's scope.
+/// version, may share the tables, so each row ID starts with its authority's scope, which it holds exclusively.
 pub(super) struct Store {
     system: System,
     scope: String,
+    _lock: ScopeLock,
 }
 
 impl Store {
-    pub fn new(system: System, deployment: &str) -> Self {
+    pub fn new(system: System, deployment: &str) -> Result<Self> {
         let digest = format!("{:x}", Sha256::digest(deployment.as_bytes()));
-        Self { system, scope: format!("{}/", &digest[..16]) }
+        let scope = format!("{}/", &digest[..16]);
+        let lock = system
+            .lock_scope(&scope)
+            .map_err(|_| Error::Invalid("another control authority already runs this deployment"))?;
+        Ok(Self { system, scope, _lock: lock })
     }
 
     pub fn scope(&self) -> &str {
