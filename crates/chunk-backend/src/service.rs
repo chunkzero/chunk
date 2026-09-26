@@ -14,9 +14,16 @@ use chunk_js::{Cancellation, DeploymentId, Json};
 use chunk_store::{Revision, Snapshot, Storage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
-use crate::{ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result, actor::Actor};
+use crate::{
+    ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result,
+    actor::Actor,
+    limits::{EngineQueue, Limit, REQUEST_BYTES, REQUEST_OVERHEAD},
+};
 
-const REQUESTS: usize = 64;
+/// Admission is bounded by `limits::REQUEST_BYTES`; this only bounds the channel's own memory.
+const EVENTS: usize = 65_536;
+/// Query engines beyond this rarely pay for their memory: one engine per core, up to four.
+const MAX_READERS: usize = 4;
 
 #[derive(Clone)]
 pub struct Call {
@@ -31,6 +38,11 @@ impl Call {
         self.validate_limit(256)
     }
 
+    /// Input bytes a request for this call charges against admission.
+    pub(crate) fn bytes(&self) -> usize {
+        self.function.len() + self.arguments.as_str().len() + self.caller.as_str().len()
+    }
+
     pub(crate) fn validate_limit(&self, name_limit: usize) -> Result<()> {
         if self.function.is_empty() || self.function.len() > name_limit {
             return Err(Error::Invalid("function name"));
@@ -43,6 +55,13 @@ impl Call {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_operation(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 {
+        return Err(Error::Invalid("operation identity"));
+    }
+    Ok(())
 }
 
 /// A result whose revision has reached durable storage.
@@ -63,6 +82,8 @@ pub(crate) struct Request<T> {
     pub queued: crate::timing::Timer,
     reply: oneshot::Sender<Result<T>>,
     _permit: OwnedSemaphorePermit,
+    /// Request memory held by a reply retained until its revision is durable.
+    retained: Option<OwnedSemaphorePermit>,
 }
 
 impl<T> Request<T> {
@@ -71,7 +92,11 @@ impl<T> Request<T> {
         reply: oneshot::Sender<Result<T>>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit }
+        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit, retained: None }
+    }
+
+    pub fn retain(&mut self, permit: OwnedSemaphorePermit) {
+        self.retained = Some(permit);
     }
 
     pub fn finish(self, result: Result<T>) {
@@ -208,7 +233,10 @@ pub(crate) enum Event {
         operation: String,
         result: Result<chunk_store::RetryContext>,
     },
-    Request(Box<Command>),
+    Request {
+        command: Box<Command>,
+        admitted: std::time::Instant,
+    },
     Committed {
         operation: String,
         result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>,
@@ -219,6 +247,7 @@ pub(crate) enum Event {
     Released {
         result: Result<bool>,
     },
+    Evaluated(Box<crate::actor::Evaluated>),
     Wake,
 }
 
@@ -227,7 +256,8 @@ struct Owner {
     incarnation: String,
     action_sequence: AtomicU64,
     events: queue::Sender<Event>,
-    slots: Arc<Semaphore>,
+    memory: Arc<Semaphore>,
+    queue: Arc<EngineQueue>,
     stopped: Arc<AtomicBool>,
     thread: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -258,6 +288,24 @@ impl Drop for Owner {
 pub struct Backend(Arc<Owner>);
 
 impl Backend {
+    /// Holds ingress without an actor so tests can inspect admission before dequeue.
+    #[cfg(test)]
+    pub(crate) fn held_ingress() -> (Self, queue::Receiver<Event>, Arc<Semaphore>) {
+        let (events, incoming) = queue::channel(EVENTS);
+        let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
+        let backend = Self(Arc::new(Owner {
+            environment: "test".into(),
+            incarnation: "test-incarnation".into(),
+            action_sequence: AtomicU64::new(1),
+            events,
+            memory: memory.clone(),
+            queue: Arc::default(),
+            stopped: Arc::default(),
+            thread: std::sync::Mutex::new(None),
+        }));
+        (backend, incoming, memory)
+    }
+
     /// Storage must hold the environment's exclusive writer authority. Construction waits for the initial snapshot and engine.
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
@@ -270,12 +318,28 @@ impl Backend {
     /// # Errors
     /// Reports invalid scope, thread, snapshot or JS initialization failures.
     pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
+        let readers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get).min(MAX_READERS);
+        Self::start(environment, store, effects, readers)
+    }
+
+    /// Starts with exactly `readers` query engines.
+    #[cfg(test)]
+    pub(crate) fn with_readers(environment: String, store: Box<dyn Storage>, readers: usize) -> Result<Self> {
+        let effects = ActionEffects::new(environment.clone())?;
+        Self::start(environment, store, effects, readers)
+    }
+
+    fn start(environment: String, store: Box<dyn Storage>, effects: ActionEffects, readers: usize) -> Result<Self> {
         effects.validate_environment(&environment)?;
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("environment identity"));
         }
         chunk_js::Engine::init_platform();
-        let (events, incoming) = queue::channel(REQUESTS);
+        let (events, incoming) = queue::channel(EVENTS);
+        let engine_queue = Arc::new(EngineQueue::default());
+        let dequeued = engine_queue.clone();
+        let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
+        let retained = memory.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let outgoing = events.clone();
@@ -283,7 +347,7 @@ impl Backend {
         let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, action_incarnation, effects) {
+            match Actor::new(store, outgoing, action_incarnation, effects, readers, dequeued, retained) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
@@ -299,7 +363,8 @@ impl Backend {
             incarnation,
             action_sequence: AtomicU64::new(1),
             events,
-            slots: Arc::new(Semaphore::new(REQUESTS)),
+            memory,
+            queue: engine_queue,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
         }));
@@ -325,21 +390,33 @@ impl Backend {
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
     pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
         deployment.validate().map_err(Error::Invalid)?;
-        self.submit(|reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
+        let bytes = serde_json::to_vec(&deployment)?.len();
+        self.submit_sized(bytes, |reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
     }
 
     pub(crate) async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
+        self.submit_sized(0, make).await
+    }
+
+    /// Admits a request carrying `bytes` of input until it replies.
+    pub(crate) async fn submit_sized<T>(&self, bytes: usize, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
         if self.0.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        let permit = self.0.slots.clone().try_acquire_owned().map_err(|_| Error::Busy)?;
+        let cost = u32::try_from(REQUEST_OVERHEAD + bytes).map_err(|_| Limit::RequestMemory.exceeded())?;
+        let permit = self.0.memory.clone().try_acquire_many_owned(cost).map_err(|_| Limit::RequestMemory.exceeded())?;
+        self.0.queue.enter()?;
         let cancellation = Cancellation::default();
         let _cancel = CancelOnDrop(cancellation.clone());
         let (reply, response) = oneshot::channel();
         let request = Request::new(cancellation, reply, permit);
-        self.0.events.try_send(Event::Request(Box::new(make(request)))).map_err(|error| match error {
-            queue::error::TrySendError::Full(_) => Error::Busy,
-            queue::error::TrySendError::Closed(_) => Error::Closed,
+        let event = Event::Request { command: Box::new(make(request)), admitted: std::time::Instant::now() };
+        self.0.events.try_send(event).map_err(|error| {
+            self.0.queue.leave();
+            match error {
+                queue::error::TrySendError::Full(_) => Limit::EngineQueue.exceeded(),
+                queue::error::TrySendError::Closed(_) => Error::Closed,
+            }
         })?;
         response.await.map_err(|_| Error::Closed)?
     }
@@ -390,7 +467,14 @@ impl Backend {
         if id.incarnation != self.0.incarnation {
             return Err(Error::ActionOutcomeUnknown);
         }
-        self.submit(|reply| Command::StartAction { purpose: crate::commands::Purpose::Function, id, call, reply }).await
+        let bytes = id.incarnation.len() + call.bytes();
+        self.submit_sized(bytes, |reply| Command::StartAction {
+            purpose: crate::commands::Purpose::Function,
+            id,
+            call,
+            reply,
+        })
+        .await
     }
 
     /// Looks up native hook descriptors in the exact retained deployment.
@@ -403,8 +487,14 @@ impl Backend {
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
         call.validate_limit(512)?;
         let id = self.allocate_action_id()?;
+        let bytes = id.incarnation.len() + call.bytes();
         let mut handle = self
-            .submit(|reply| Command::StartAction { purpose: crate::commands::Purpose::Hook, id, call, reply })
+            .submit_sized(bytes, |reply| Command::StartAction {
+                purpose: crate::commands::Purpose::Hook,
+                id,
+                call,
+                reply,
+            })
             .await?;
         handle.outcome().await
     }
@@ -413,24 +503,30 @@ impl Backend {
     /// # Errors
     /// Returns unknown after restart, retention expiry or a caller mismatch.
     pub async fn action_status(&self, id: ActionId, caller: Json) -> Result<ActionStatus> {
-        self.submit(|reply| Command::ActionStatus { id, caller, reply }).await
+        let bytes = id.incarnation.len() + caller.as_str().len();
+        self.submit_sized(bytes, |reply| Command::ActionStatus { id, caller, reply }).await
     }
 
     /// Reads a durable job record using its originating caller authority.
     /// # Errors
     /// Rejects unknown jobs, caller mismatches and unavailable service.
     pub async fn job(&self, id: String, caller: Json) -> Result<chunk_store::Job> {
-        self.submit(|reply| Command::JobStatus { id, caller, reply }).await
+        let bytes = id.len() + caller.as_str().len();
+        self.submit_sized(bytes, |reply| Command::JobStatus { id, caller, reply }).await
     }
 
     /// Forget a terminal record. This does not reverse earlier effects.
     /// # Errors
     /// Rejects live jobs, caller mismatches and persistence failures.
     pub async fn forget_job(&self, id: String, caller: Json) -> Result<()> {
+        let bytes = id.len() + caller.as_str().len();
         let caller = serde_json::from_str(caller.as_str())?;
-        self.submit(|reply| Command::JobControl { command: chunk_store::JobCommand::Forget { id, caller }, reply })
-            .await
-            .map(|_| ())
+        self.submit_sized(bytes, |reply| Command::JobControl {
+            command: chunk_store::JobCommand::Forget { id, caller },
+            reply,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Host-adapter handoff: durably install this exact alarm before acknowledging it.
@@ -457,7 +553,7 @@ impl Backend {
     /// Reports admission, execution, cancellation and persistence failures.
     pub async fn query(&self, call: Call) -> Result<Update> {
         call.validate()?;
-        self.submit(|reply| Command::Query { call, reply }).await
+        self.submit_sized(call.bytes(), |reply| Command::Query { call, reply }).await
     }
 
     /// Commits once for this operation identity and request. A lost/cancelled reply
@@ -465,8 +561,10 @@ impl Backend {
     /// # Errors
     /// Reports mismatched identities, admission, execution and commit failures.
     pub async fn mutate(&self, operation: String, call: Call) -> Result<Update> {
+        validate_operation(&operation)?;
         call.validate()?;
-        self.submit(|reply| Command::Mutate { operation, call, reply }).await
+        let bytes = operation.len() + call.bytes();
+        self.submit_sized(bytes, |reply| Command::Mutate { operation, call, reply }).await
     }
 
     /// Subscribes against the durable snapshot. Slow consumers coalesce updates;
@@ -485,15 +583,16 @@ impl Backend {
         if calls.is_empty() || calls.len() > 16 {
             return Err(Error::Invalid("query group limit"));
         }
-        let mut bytes = 0;
+        let mut input = 0;
         for call in &calls {
             call.validate()?;
-            bytes += call.arguments.as_str().len() + call.caller.as_str().len();
+            input += call.arguments.as_str().len() + call.caller.as_str().len();
         }
-        if bytes > 1024 * 1024 {
+        if input > 1024 * 1024 {
             return Err(Error::Invalid("query group input limit"));
         }
-        self.submit(|reply| Command::Subscribe { calls, reply }).await
+        let bytes = calls.iter().map(Call::bytes).sum();
+        self.submit_sized(bytes, |reply| Command::Subscribe { calls, reply }).await
     }
 }
 

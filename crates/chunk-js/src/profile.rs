@@ -42,7 +42,11 @@ fn context(state: &mut OpState) -> Result<&mut Context, JsErrorBox> {
 
 #[op2(fast)]
 fn op_chunk_now(state: &mut OpState) -> Result<f64, JsErrorBox> {
-    Ok(context(state)?.timestamp)
+    let timestamp = context(state)?.timestamp;
+    if let Some(capabilities) = state.borrow_mut::<Option<crate::capabilities::Capabilities>>().as_mut() {
+        capabilities.host.read_time();
+    }
+    Ok(timestamp)
 }
 
 #[op2(fast)]

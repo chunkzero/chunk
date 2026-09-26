@@ -1,68 +1,57 @@
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, VecDeque},
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
-use chunk_contract::{Deployment, Function, FunctionKind, Visibility, validate_wire_value};
-use chunk_js::{Cancellation, DeploymentId, Engine, Execution, Invocation, Limits, Mode};
+use chunk_contract::{Deployment, Function, FunctionKind, Visibility};
+use chunk_js::{Cancellation, DeploymentId, Engine, Execution, Limits, Mode};
 use chunk_store::{Operation, Revision, Storage, Write};
-use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::{
     Error, Result,
     commit::{Committer, Job},
-    reads::{Change, Dependencies, Host, View},
-    service::{Call, Command, Event, GroupUpdate, Request, Update},
+    evaluate::{Target, evaluate},
+    limits::EngineQueue,
+    reads::{Change, Dependencies, View},
+    service::{Call, Command, Event, Request, Update},
     timing::{Phase, Timer},
 };
 
 mod actions;
 mod commands;
 mod deployments;
+mod index;
 mod jobs;
 mod pipeline;
+mod queries;
+mod readers;
 mod subscriptions;
+mod watches;
+
+pub(crate) use readers::Evaluated;
 
 const MAX_DEPLOYMENTS: usize = 16;
-const MAX_SUBSCRIPTIONS: usize = 64;
-const MAX_PENDING: usize = 16;
-const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 struct Mutation {
     operation: Operation,
     context: Option<chunk_store::RetryContext>,
     call: Call,
     waiters: Vec<Request<Update>>,
+    admitted: Instant,
 }
 
 struct Pending {
     operation: String,
     revision: Revision,
     writes: Vec<Write>,
-    changes: Vec<Change>,
+    changes: Arc<[Change]>,
     bytes: usize,
     staged: Timer,
-}
-
-struct Subscribed {
-    id: u64,
-    calls: Vec<Call>,
-    dependencies: Dependencies,
-    results: Vec<Result<Arc<str>>>,
-    sender: watch::Sender<Result<GroupUpdate>>,
-}
-
-struct Reevaluation {
-    view: Rc<View>,
-    changes: Option<Vec<Change>>,
-    ids: VecDeque<u64>,
-    published: Timer,
 }
 
 pub(crate) struct Actor {
@@ -71,13 +60,19 @@ pub(crate) struct Actor {
     /// Bounds the idle wait so due jobs dispatch without another event arriving.
     timer: tokio::runtime::Runtime,
     recovering: bool,
-    next_subscription: u64,
-    reevaluations: VecDeque<Reevaluation>,
+    watches: watches::Watches,
     js: Engine,
+    readers: readers::Readers,
+    sources: BTreeMap<DeploymentId, Arc<readers::Source>>,
+    reads: VecDeque<queries::Waiting>,
+    /// Whether a subscription reevaluation goes before the next queued query.
+    rerun_turn: bool,
+    /// Increments when staged writes roll back, so queries that read them run again.
+    epoch: u64,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
     deploying: Option<(Arc<Deployment>, Request<()>)>,
     releasing: Option<(DeploymentId, Request<bool>)>,
-    view: Rc<View>,
+    view: Arc<View>,
     catalogs: BTreeMap<(DeploymentId, String), commands::CachedCatalog>,
     committer: Committer,
     outstanding: usize,
@@ -85,7 +80,9 @@ pub(crate) struct Actor {
     pending: VecDeque<Pending>,
     pending_bytes: usize,
     deferred: VecDeque<(Update, Request<Update>)>,
-    subscriptions: Vec<Subscribed>,
+    queue: Arc<EngineQueue>,
+    /// Request memory, charged for query replies retained until durable.
+    memory: Arc<tokio::sync::Semaphore>,
     failure: Option<Error>,
 }
 
@@ -95,29 +92,40 @@ impl Actor {
         events: mpsc::Sender<Event>,
         incarnation: String,
         effects: crate::ActionEffects,
+        readers: usize,
+        queue: Arc<EngineQueue>,
+        memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, snapshot, deployments, scheduled) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
+        let mut sources = BTreeMap::new();
         for deployment in deployments {
             deployment.validate().map_err(Error::Invalid)?;
             Self::schema_ready(&deployment, snapshot.schema())?;
             let id = DeploymentId::new(&deployment.id)?;
             js.register(id.clone(), deployment.source.clone(), Limits::default())?;
+            let source = readers::Source { code: deployment.source.clone(), limits: Limits::default() };
+            sources.insert(id.clone(), Arc::new(source));
             versions.insert(id, Some(Arc::new(deployment)));
         }
+        let readers = readers::Readers::new(readers, &events)?;
         Ok(Self {
             scheduled: jobs::Scheduled::new(scheduled),
             timer: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
             actions: actions::Actions::new(events, incarnation, effects),
             recovering: false,
-            next_subscription: 0,
-            reevaluations: VecDeque::new(),
+            watches: watches::Watches::new(snapshot.revision),
             js,
+            readers,
+            sources,
+            reads: VecDeque::new(),
+            rerun_turn: false,
+            epoch: 0,
             versions,
             deploying: None,
             releasing: None,
-            view: Rc::new(View::new(snapshot)),
+            view: Arc::new(View::new(snapshot)),
             catalogs: BTreeMap::new(),
             committer,
             outstanding: 0,
@@ -125,7 +133,8 @@ impl Actor {
             pending: VecDeque::new(),
             pending_bytes: 0,
             deferred: VecDeque::new(),
-            subscriptions: Vec::new(),
+            queue,
+            memory,
             failure: None,
         })
     }
@@ -135,16 +144,7 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let event = if !self.reevaluations.is_empty() {
-                match incoming.try_recv() {
-                    Ok(event) => Some(event),
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        self.reevaluate_one();
-                        continue;
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => None,
-                }
-            } else if let Some(wait) = self.scheduled.next_due() {
+            let event = if let Some(wait) = self.scheduled.next_due() {
                 self.timer
                     .block_on(async { tokio::time::timeout(wait, incoming.recv()).await })
                     .unwrap_or(Some(Event::Wake))
@@ -154,7 +154,6 @@ impl Actor {
             let Some(event) = event else {
                 break;
             };
-            self.subscriptions.retain(|subscription| !subscription.sender.is_closed());
             match event {
                 Event::Scheduled { command, result } => {
                     self.outstanding -= 1;
@@ -176,7 +175,8 @@ impl Actor {
                         self.action_transaction(&id, sequence, mode, function, arguments, reply);
                     }
                 }
-                Event::Request(command) => {
+                Event::Request { command, admitted } => {
+                    self.queue.dequeued(admitted);
                     if stopped.load(Ordering::Acquire) {
                         command.reject(Error::Closed);
                     } else if let Some(error) = &self.failure {
@@ -201,16 +201,18 @@ impl Actor {
                     self.outstanding -= 1;
                     self.released(result);
                 }
+                Event::Evaluated(evaluated) => self.evaluated(*evaluated),
                 Event::Wake => {}
             }
             if !stopped.load(Ordering::Acquire) {
                 self.dispatch_jobs();
             }
-            self.reevaluate_one();
+            self.dispatch();
         }
         incoming.close();
         while let Ok(event) = incoming.try_recv() {
-            if let Event::Request(command) = event {
+            if let Event::Request { command, admitted } = event {
+                self.queue.dequeued(admitted);
                 command.reject(Error::Closed);
             }
         }
@@ -266,7 +268,8 @@ impl Actor {
                 } else if self.versions.len() >= MAX_DEPLOYMENTS {
                     Err(Error::Busy)
                 } else {
-                    self.js.register(id.clone(), source, limits).map_err(Error::from).map(|()| {
+                    self.js.register(id.clone(), source.clone(), limits).map_err(Error::from).map(|()| {
+                        self.sources.insert(id.clone(), Arc::new(readers::Source { code: source, limits }));
                         self.versions.insert(id, None);
                     })
                 };
@@ -274,14 +277,10 @@ impl Actor {
             }
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
-            Command::Query { mut call, reply } => {
-                reply.queued.stop(Phase::Queue);
-                if let Err(error) = self.normalize_call(&mut call) {
-                    reply.finish(Err(error));
-                    return;
-                }
-                self.query(&call, reply);
-            }
+            Command::Query { mut call, reply } => match self.normalize_call(&mut call) {
+                Ok(()) => self.query(call, reply),
+                Err(error) => reply.finish(Err(error)),
+            },
             Command::Mutate { operation, mut call, reply } => {
                 reply.queued.stop(Phase::Queue);
                 match self.normalize_call(&mut call) {
@@ -295,27 +294,6 @@ impl Actor {
                     Err(error) => reply.finish(Err(error)),
                 }
             }
-        }
-    }
-
-    fn query(&mut self, call: &Call, reply: Request<Update>) {
-        let timer = Timer::start();
-        let result = self.evaluate(call, Mode::Query, self.view.clone(), &reply.cancellation);
-        timer.stop(Phase::Query);
-        match result {
-            Ok((execution, dependencies)) => {
-                let independent = self.pending.iter().all(|pending| !dependencies.affected(&pending.changes));
-                let update = Update {
-                    revision: if independent { self.view.base.revision } else { self.view.revision },
-                    json: execution.value.into(),
-                };
-                if update.revision <= self.view.base.revision {
-                    reply.finish(Ok(update));
-                } else {
-                    self.deferred.push_back((update, reply));
-                }
-            }
-            Err(error) => reply.finish(Err(error)),
         }
     }
 
@@ -370,7 +348,7 @@ impl Actor {
         &mut self,
         call: &Call,
         mode: Mode,
-        view: Rc<View>,
+        view: Arc<View>,
         cancellation: &Cancellation,
     ) -> Result<(Execution, Dependencies)> {
         let (execution, dependencies) = self.evaluate_traced(call, mode, view, cancellation, None);
@@ -381,7 +359,7 @@ impl Actor {
         &mut self,
         call: &Call,
         mode: Mode,
-        view: Rc<View>,
+        view: Arc<View>,
         cancellation: &Cancellation,
         context: Option<(i64, u64, String)>,
     ) -> (Result<Execution>, Dependencies) {
@@ -389,58 +367,9 @@ impl Actor {
             Ok(function) => function,
             Err(error) => return (Err(error), Dependencies::default()),
         };
-        let trace = Rc::new(RefCell::new(Dependencies::default()));
-        let operation = context.as_ref().map(|(_, _, operation)| operation.clone());
-        let (timestamp, seed) = context.map_or_else(
-            || {
-                (view.base.timestamp, {
-                    u64::from_be_bytes(Sha256::digest(call.function.as_bytes())[..8].try_into().expect("digest prefix"))
-                })
-            },
-            |(timestamp, seed, _)| (timestamp, seed),
-        );
-        let host = Host {
-            operation,
-            view,
-            trace: trace.clone(),
-            contract: self.versions.get(&call.deployment).cloned().flatten(),
-            budget: crate::reads::read_budget(),
-        };
-        let execution = self
-            .js
-            .execute(
-                &call.deployment,
-                Invocation {
-                    export: function
-                        .as_ref()
-                        .map_or_else(|| call.function.clone(), |f| f.export.clone()),
-                    arguments: call.arguments.clone(),
-                    caller: call.caller.clone(),
-                    mode,
-                    timestamp,
-                    seed,
-                },
-                Box::new(host),
-                cancellation,
-            )
-            .map_err(Error::from)
-            .and_then(|mut execution| {
-                for log in &execution.logs {
-                    tracing::info!(target: "chunk_backend::console", deployment = call.deployment.as_str(), function = call.function, level = log.level, message = log.message);
-                }
-                let mut value = serde_json::from_str(&execution.value)?;
-                if let Some(function) = &function {
-                    function.result.normalize_api(&mut value);
-                }
-                validate_wire_value(&value).map_err(Error::Invalid)?;
-                if function.as_ref().is_some_and(|f| !f.result.accepts(&value)) {
-                    return Err(Error::Contract);
-                }
-                execution.value = serde_json::to_string(&value)?;
-                Ok(execution)
-            });
-        let dependencies = std::mem::take(&mut *trace.borrow_mut());
-        (execution, dependencies)
+        let contract = self.versions.get(&call.deployment).cloned().flatten();
+        let target = Target { call, function: function.as_ref(), contract };
+        evaluate(&mut self.js, target, mode, view, cancellation, context)
     }
 
     fn send(&mut self, job: Job) -> Result<()> {
@@ -460,16 +389,17 @@ impl Actor {
         }
         self.pending.clear();
         self.pending_bytes = 0;
-        self.view = Rc::new(View::new(self.view.base.clone()));
+        self.epoch += 1;
+        self.view = Arc::new(View::new(self.view.base.clone()));
     }
 
     fn fail(&mut self, error: &Error) {
         self.actions.cancel();
         self.failure = Some(error.clone());
         self.reset_pending(error);
-        self.reevaluations.clear();
-        for subscription in self.subscriptions.drain(..) {
-            let _ = subscription.sender.send_replace(Err(error.clone()));
+        for waiting in self.reads.drain(..) {
+            waiting.fail(error);
         }
+        self.watches.fail(error);
     }
 }

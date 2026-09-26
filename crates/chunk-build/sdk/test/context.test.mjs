@@ -106,3 +106,24 @@ test("schema-bound providers share the invocation reader or writer and may rejec
   assert.equal(denied.contract.visibility, "internal");
   await assert.rejects(denied.handler({ caller: null, db: {} }, {}), /Player required/);
 });
+
+test("wrappers read the caller only when the handler does", async () => {
+  const typed = defineFunctions(defineSchema({ profiles: defineTable({ rank: v.string() }) }));
+  let reads = 0;
+  const context = () => ({
+    get caller() {
+      reads++;
+      return { player: "alice" };
+    },
+    db: {},
+  });
+  const builders = [query, typed.query, query.withContext(() => ({ extra: 1 })), typed.query.withContext(() => ({}))];
+  for (const build of builders) {
+    reads = 0;
+    await build({ args: {}, returns: v.null(), handler: () => null }).handler(context(), {});
+    assert.equal(reads, 0);
+    const read = build({ args: {}, returns: v.string(), handler: (ctx) => ctx.caller.player + ctx.caller.player });
+    assert.equal(await read.handler(context(), {}), "alicealice");
+    assert.equal(reads, 1);
+  }
+});

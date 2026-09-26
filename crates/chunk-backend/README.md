@@ -1,30 +1,34 @@
 # Environment backend
 
-`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread and a local job
-timer. Supply a store with exclusive writer authority. `deploy` validates and initializes a versioned
-`chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains the bundle before
-enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`, `subscribe`, or
-`subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform processes may supply
-caller identity. Internal functions are inaccessible through this ingress. Activation waits for the commit pipeline to
-drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during activation. Schema
-changes advance the revision; every successful activation reevaluates existing subscriptions.
+`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread, a local job timer
+and one read engine per core (up to four). Supply a store with exclusive writer authority. `deploy` validates and
+initializes a versioned `chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains
+the bundle before enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`,
+`subscribe`, or `subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform
+processes may supply caller identity. Internal functions are inaccessible through this ingress. Activation waits for the
+commit pipeline to drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during
+activation. Schema changes advance the revision; every successful activation reevaluates existing subscriptions.
 
-The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription dependencies. Each
-mutation executes against the latest view, validates its writes against the snapshot's schema, and applies them to a
-bounded overlay. Execution and validation are serialized, so another mutation cannot change the read revision between
-them. The commit thread persists batches in order while the engine can continue evaluating requests.
+The engine thread owns the mutation `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription state.
+Queries and subscription reevaluations run on the read engines, which load deployments on first use; module-level
+JavaScript state is not shared between engines. Each mutation executes against the latest view, validates its writes
+against the snapshot's schema, and applies them to a bounded overlay. Execution and validation are serialized, so
+another mutation cannot change the read revision between them. The commit thread persists batches in order while the
+engine can continue evaluating requests.
 
 Mutation responses wait for durable commits. Queries may read staged writes, and responses that depend on those writes
 wait for durability. Queries whose dependencies do not intersect pending writes return immediately at the base revision.
 Subscriptions read only acknowledged snapshots, track point misses and empty ranges, and reevaluate after relevant
 commits. Dependencies refresh even when the JSON result is unchanged. Result changes use JSON text equality; object key
 order can cause an extra update. Application errors remain reactive results, retaining reads collected before failure;
-an error-to-success transition always publishes. Reevaluations run one group (at most 16 queries) per actor scheduling
-boundary, with at most two retained durable snapshots. Queued revisions may coalesce conservatively to the latest
-snapshot. Slow subscribers coalesce updates through a watch channel, so they receive the latest durable result rather
-than every intermediate revision. Each group evaluates all queries against one snapshot. Per-query failures occupy their
-original result positions, retain dependencies, and recover reactively. Transport errors close the stream; clients mark
-retained results stale until a fresh full group arrives on reconnect.
+an error-to-success transition always publishes. Subscribed queries with the same deployment, function and arguments
+share one evaluation. The caller joins that identity only after an evaluation reads `ctx.caller`; the query then splits
+so each caller gets its own. A read index finds the queries a commit affects. They rerun in batches, each against one
+durable snapshot, and commits during a batch coalesce into the next one. Foreground queries take idle read engines
+before reevaluations. Slow subscribers coalesce updates through a watch channel, so they receive the latest durable
+result rather than every intermediate revision. A group publishes once all its queries hold for one revision. Per-query
+failures occupy their original result positions, retain dependencies, and recover reactively. Transport errors close the
+stream; clients mark retained results stale until a fresh full group arrives on reconnect.
 
 Give every mutation a stable operation ID. Its fingerprint includes the function, canonical arguments and caller,
 independent of bundle and deployment identity. Duplicate requests recover the stored outcome without executing again,
@@ -49,18 +53,23 @@ dependent batch. Ambiguous commit or acknowledgment failures stop the pipeline a
 same store and recover outcomes by operation ID; a failed acknowledgment may follow a durable commit. The backend never
 automatically retries a speculative suffix.
 
-Admission allows 64 outstanding requests, including replies waiting for durability. Limits are 16 resident deployments,
-64 subscriptions, 16 outstanding mutations and 32 MiB of serialized pending writes/results. Excess work returns
-`Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own source, heap, capability and payload
-budgets. Release a deployment after its mutations and subscriptions drain. Release durably removes the bundle and
-permanently retires its identity before unloading the runtime. It cannot be reactivated under the same ID. Data and
-schema remain shared; release never drops application tables or operation outcomes. Uncommitted operation IDs remain
-bound to the retired deployment and return `OperationMismatch` if retried against another deployment. Clients must use
-new operation IDs for those requests. Committed outcomes remain recoverable through a retained deployment exposing the
-same mutation. If a retained bundle prevents startup, open the store with exclusive writer authority and call
+Admission is bounded by queue time and memory rather than counts. New requests are refused once queued work of the same
+kind has waited over 500 ms: requests for the engine thread, queries for a read engine, or mutations to commit. Memory
+budgets cover admitted requests including replies waiting for durability (64 MiB, each charged its input plus 1 KiB and
+any retained result), pending mutations with their staged writes and results (32 MiB), subscriptions with their latest
+results (256 MiB), and live actions at their 32 MiB engine heap limit (256 MiB). A result, error or read set that grows
+past the subscription budget closes the subscriptions that share it. Each refusal is `Error::Overloaded` naming its
+`Limit`; `Error::Busy` remains for state conflicts such as a deployment change in progress. At most 16 deployments are
+resident. These are logical bounds, not an RSS limit. JS retains its own source, heap, capability and payload budgets.
+Release a deployment after its mutations and subscriptions drain. Release durably removes the bundle and permanently
+retires its identity before unloading the runtime. It cannot be reactivated under the same ID. Data and schema remain
+shared; release never drops application tables or operation outcomes. Uncommitted operation IDs remain bound to the
+retired deployment and return `OperationMismatch` if retried against another deployment. Clients must use new operation
+IDs for those requests. Committed outcomes remain recoverable through a retained deployment exposing the same mutation.
+If a retained bundle prevents startup, open the store with exclusive writer authority and call
 `Storage::release_deployment` with its ID before constructing the backend again.
 
-The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the engine thread. A
+The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
 fails the read instead of returning a silently truncated result. `scanIndex` supports declared ascending indexes,
 equality prefixes and a half-open range on the next field, with 1–1,024 results. Both pending and invocation-local
@@ -172,7 +181,7 @@ full originating caller; job arguments cannot select a caller, environment or de
 call a mutation to record intent.
 
 `Backend` starts a local timer and dispatches due jobs automatically, checking at most every 100 milliseconds when the
-actor is available. At most two scheduled jobs run within the existing eight-action limit. Busy action capacity leaves
+actor is available. At most two scheduled jobs run within the live-action memory budget. Busy action capacity leaves
 jobs pending, or retains an already-durable claim until a worker is available. The commit thread durably changes
 `pending` to `running` before any action starts. SQLite keeps job metadata and wake state in private tables, separate
 from application schema. Other storage adapters must implement atomic scheduling; nonempty intents fail closed by
@@ -199,10 +208,10 @@ code: releasing their deployment makes later retries fail. The queue retains at 
 (`JobLimits` in `chunk-store`), with 16 intents per mutation, 64 KiB per encoded intent and 64 KiB for captured caller
 data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's captured time; times
 already due become immediately eligible. Expired terminal records are removed before a new job is admitted, and a full
-queue rejects the whole mutation: the store reports a distinct `JobBudget` error, which the backend currently surfaces
-as a retryable rejection (`ABORTED`). There is no recurring schedule or automatic action retry. Host HTTP/secret grants
-must be supplied again after restart; grants and secret values are never part of a job record unless application code
-explicitly puts such values in its arguments/result.
+queue rejects the whole mutation with `Error::Overloaded(Limit::Jobs)` (`RESOURCE_EXHAUSTED`); retry once jobs finish or
+expire. There is no recurring schedule or automatic action retry. Host HTTP/secret grants must be supplied again after
+restart; grants and secret values are never part of a job record unless application code explicitly puts such values in
+its arguments/result.
 
 ### Host alarm handoff
 

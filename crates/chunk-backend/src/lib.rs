@@ -1,12 +1,15 @@
-//! One environment engine thread owns JS execution and speculative state. Durable
-//! storage runs on a commit thread; replies and updates wait for its ordered acks.
+//! One environment engine thread owns mutations and speculative state, and read engines
+//! run queries and subscriptions. Durable storage runs on a commit thread; replies and
+//! updates wait for its ordered acks.
 
 mod actions;
 mod actor;
 mod commands;
 mod commit;
 mod effects;
+mod evaluate;
 mod hooks;
+mod limits;
 mod reads;
 pub mod server;
 mod service;
@@ -18,6 +21,7 @@ pub use chunk_js::{DeploymentId, HttpMethod};
 pub use commands::CommandService;
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
 pub use hooks::HookService;
+pub use limits::Limit;
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
 #[cfg(feature = "bench-support")]
 pub use timing::{Phase, observe};
@@ -29,6 +33,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("backend capacity reached")]
     Busy,
+    #[error("backend overloaded: {0}")]
+    Overloaded(Limit),
     #[error("commit rejected; retry the operation")]
     Retry,
     #[error("action outcome unknown; do not retry under a new invocation identity")]
@@ -64,7 +70,10 @@ impl From<chunk_js::Error> for Error {
 }
 impl From<chunk_store::Error> for Error {
     fn from(error: chunk_store::Error) -> Self {
-        Self::Storage(error.into())
+        match error {
+            chunk_store::Error::JobBudget => Limit::Jobs.exceeded(),
+            error => Self::Storage(error.into()),
+        }
     }
 }
 impl From<std::io::Error> for Error {
@@ -80,7 +89,8 @@ impl From<serde_json::Error> for Error {
 
 impl Error {
     pub(crate) fn is_rejected_commit(&self) -> bool {
-        matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::JobBudget | chunk_store::Error::OperationMismatch))
+        matches!(self, Self::Overloaded(Limit::Jobs))
+            || matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch))
     }
 }
 

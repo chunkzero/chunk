@@ -15,10 +15,10 @@ use super::Actor;
 use crate::{
     ActionHandle, ActionId, ActionStatus, Error, Result,
     actions::{Host, Scope},
+    limits::{ACTION_BYTES, Limit},
     service::{Call, Event, Request, Update},
 };
 
-const MAX_LIVE: usize = 8;
 const MAX_RECORDS: usize = 32;
 
 struct Record {
@@ -74,8 +74,10 @@ impl Actions {
         }
     }
 
+    /// Each live action reserves its engine's heap limit.
     pub fn capacity(&self) -> bool {
-        self.records.values().filter(|record| record.worker.is_some()).count() < MAX_LIVE
+        let live = self.records.values().filter(|record| record.worker.is_some()).count();
+        (live + 1) * chunk_js::Limits::default().heap_bytes <= ACTION_BYTES
     }
 
     /// The `:job:` suffix keeps job identities outside the client-allocated incarnation, so `admit`
@@ -90,7 +92,7 @@ impl Actions {
             return Err(Error::ActionOutcomeUnknown);
         }
         if !self.capacity() {
-            return Err(Error::Busy);
+            return Err(Limit::ActionMemory.exceeded());
         }
         if self.records.len() >= MAX_RECORDS {
             let retired = self
@@ -349,7 +351,7 @@ impl Actor {
             return;
         }
         match mode {
-            Mode::Query => self.query(&call, reply),
+            Mode::Query => self.query(call, reply),
             Mode::Mutation => self.mutate(operation, call, reply),
         }
     }

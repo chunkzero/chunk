@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use super::{CommandBinding, PlatformEffect, Prepared, Purpose};
+use super::{CommandBinding, PlatformEffect, Prepared, Purpose, scope_bytes};
 use crate::{ActionId, Backend, Error, Result, Service, service::Command, transport::status};
 
 #[derive(Clone, Default)]
@@ -74,7 +74,8 @@ impl backend_commands_server::BackendCommands for CommandService {
     ) -> std::result::Result<Response<wire::CommandCatalog>, Status> {
         let id = self.platform.binding(&request)?;
         let scope = request.into_inner();
-        let catalog = bounded(self.backend.submit(|reply| Command::Catalog { id, scope, reply })).await?;
+        let bytes = scope_bytes(&scope);
+        let catalog = bounded(self.backend.submit_sized(bytes, |reply| Command::Catalog { id, scope, reply })).await?;
         Ok(Response::new(catalog))
     }
     async fn suggest(
@@ -83,7 +84,12 @@ impl backend_commands_server::BackendCommands for CommandService {
     ) -> std::result::Result<Response<wire::CommandSuggestionResult>, Status> {
         let id = self.platform.binding(&request)?;
         let request = request.into_inner();
-        let suggestions = bounded(self.backend.submit(|reply| Command::Suggest { id, request, reply })).await?;
+        let bytes = request.scope.as_ref().map_or(0, scope_bytes)
+            + request.command_id.len()
+            + request.query.len()
+            + request.input.len();
+        let suggestions =
+            bounded(self.backend.submit_sized(bytes, |reply| Command::Suggest { id, request, reply })).await?;
         Ok(Response::new(suggestions))
     }
     async fn prepare(
@@ -93,7 +99,8 @@ impl backend_commands_server::BackendCommands for CommandService {
         let id = self.platform.binding(&request)?;
         let message = request.into_inner();
         let scope = message.scope.ok_or_else(|| Status::invalid_argument("missing command scope"))?;
-        let prepared = bounded(self.backend.submit(|reply| Command::Prepare {
+        let bytes = scope_bytes(&scope) + message.command_id.len() + message.input.len();
+        let prepared = bounded(self.backend.submit_sized(bytes, |reply| Command::Prepare {
             id,
             scope,
             command: message.command_id,
@@ -230,9 +237,10 @@ async fn owner_run(
 ) {
     let (effects, mut requests) = mpsc::channel::<PlatformEffect>(8);
     let call = prepared.call();
+    let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
     let purpose = Purpose::Command(Arc::new(CommandBinding { scope: prepared.scope, input: prepared.input, effects }));
     let invocation = id.to_string();
-    let acceptance = backend.submit(|reply| Command::StartAction { id, call, purpose, reply });
+    let acceptance = backend.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, reply });
     let accepted = tokio::select! {
         ()=output.closed()=>Err(Error::Cancelled),
         ()=shutdown.cancelled()=>Err(Error::Cancelled),

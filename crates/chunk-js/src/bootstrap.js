@@ -4,6 +4,7 @@
   const action = Deno.core.ops.op_chunk_action;
   const actionId = Deno.core.ops.op_chunk_action_id;
   const read = Deno.core.ops.op_chunk_read;
+  const readCaller = Deno.core.ops.op_chunk_caller;
   const write = Deno.core.ops.op_chunk_write;
   const now = Deno.core.ops.op_chunk_now;
   const random = Deno.core.ops.op_chunk_random;
@@ -74,6 +75,8 @@
   }
   return async (handler, callerJson, generation, argsJson) => {
     const invocationId = actionId();
+    let caller;
+    let callerRead = false;
     const context =
       typeof invocationId === "string"
         ? freeze({
@@ -93,7 +96,14 @@
             },
           })
         : freeze({
-            caller: parse(callerJson),
+            get caller() {
+              if (!callerRead) {
+                callerRead = true;
+                readCaller(generation);
+                caller = parse(callerJson);
+              }
+              return caller;
+            },
             scheduler: freeze({
               runAt: (at, functionPath, argumentsValue) =>
                 parse(

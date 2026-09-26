@@ -46,6 +46,12 @@ pub trait ReadHost: 'static {
         Err("Scheduled jobs require a durable mutation host".into())
     }
 
+    /// Records that the invocation read `ctx.caller`, so its result may differ per caller.
+    fn read_caller(&mut self) {}
+
+    /// Records that the invocation read the snapshot time, so its result may change with every commit.
+    fn read_time(&mut self) {}
+
     /// # Errors
     /// Reports invalid keys or snapshot limits without publishing effects.
     fn get(&mut self, key: &Key) -> Result<Option<Value>, String>;

@@ -12,9 +12,9 @@ use chunk_store::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc as signals;
 
-use crate::{Backend, Call, Error, Update};
+use crate::{Backend, Call, Error, Limit, Update};
 
-const SOURCE: &str = r"
+pub(crate) const SOURCE: &str = r"
 export function get(ctx, args) { return ctx.db.get('profiles', args.id)?.coins ?? 0; }
 export function bump(ctx, args) {
   const value = (ctx.db.get('profiles', args.id)?.coins ?? 0) + 1;
@@ -42,7 +42,7 @@ export function shiftIndex(ctx) {
 fn id() -> DeploymentId {
     DeploymentId::new("build").unwrap()
 }
-fn call(function: &str, arguments: Value) -> Call {
+pub(crate) fn call(function: &str, arguments: Value) -> Call {
     Call {
         deployment: id(),
         function: function.into(),
@@ -54,7 +54,7 @@ fn value(update: &Update) -> Value {
     serde_json::from_str(&update.json).unwrap()
 }
 
-fn open(directory: &tempfile::TempDir) -> SqliteStore {
+pub(crate) fn open(directory: &tempfile::TempDir) -> SqliteStore {
     let mut store = SqliteStore::open(directory.path().join("data.db"), "test").unwrap();
     let schema: DatabaseSchema = serde_json::from_value(json!({"profiles": {"fields": {
         "coins": {"schema": {"type": "integer"}, "optional": true},
@@ -65,7 +65,7 @@ fn open(directory: &tempfile::TempDir) -> SqliteStore {
     store
 }
 
-async fn pending<F: Future>(mut future: Pin<&mut F>) {
+pub(crate) async fn pending<F: Future>(mut future: Pin<&mut F>) {
     poll_fn(|cx| {
         assert!(matches!(future.as_mut().poll(cx), Poll::Pending), "response escaped before durability");
         Poll::Ready(())
@@ -342,19 +342,18 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
 }
 
 #[tokio::test]
-async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_twice() {
+async fn duplicate_waiters_share_one_mutation_and_cancelled_waiter_does_not_stage_twice() {
     let mut harness = Harness::new(false).await;
     let mut requests = Vec::new();
     for index in 0..64 {
         let mut request = Box::pin(harness.backend.mutate("same".into(), call("bump", json!({"id": "p"}))));
         pending(request.as_mut()).await;
         if index == 0 {
-            // Let preparation finish before filling the shared event queue.
+            // Let preparation finish before the duplicates arrive.
             assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
         }
         requests.push(request);
     }
-    assert!(matches!(harness.backend.query(call("get", json!({"id": "p"}))).await, Err(Error::Busy)));
     drop(requests.remove(0));
     harness.controls.commits[0].send(()).unwrap();
     for request in requests {
@@ -364,6 +363,42 @@ async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_
     }
     let result = harness.backend.query(call("get", json!({"id": "p"}))).await.unwrap();
     assert_eq!(value(&result), json!(1));
+}
+
+#[tokio::test]
+async fn query_replies_waiting_for_a_stalled_commit_hold_request_memory() {
+    let mut harness = Harness::new(false).await;
+    let large = DeploymentId::new("large").unwrap();
+    let source = format!(
+        "{SOURCE} export function large(ctx) {{ return ctx.db.get('profiles','p') ? 'x'.repeat(1000000) : ''; }}"
+    );
+    harness.backend.register(large.clone(), source, Limits::default()).await.unwrap();
+    let mut stalled = Box::pin(harness.backend.mutate("stalled".into(), call("bump", json!({"id": "p"}))));
+    pending(stalled.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    // Each 1 MB reply reads the staged write, so it waits for the commit; 64 MiB holds about 67.
+    let queries: Vec<_> = (0..100)
+        .map(|_| {
+            let backend = harness.backend.clone();
+            let call = Call { deployment: large.clone(), ..call("large", json!({})) };
+            tokio::spawn(async move { backend.query(call).await })
+        })
+        .collect();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while queries.iter().filter(|query| query.is_finished()).count() < 30 {
+        assert!(tokio::time::Instant::now() < deadline, "retained replies were not charged");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    harness.controls.commits[0].send(()).unwrap();
+    stalled.await.unwrap();
+    let mut delivered = 0;
+    for query in queries {
+        match query.await.unwrap() {
+            Ok(_) => delivered += 1,
+            Err(error) => assert!(matches!(error, Error::Overloaded(Limit::RequestMemory)), "{error}"),
+        }
+    }
+    assert!((1..=70).contains(&delivered), "{delivered} replies delivered");
 }
 
 #[tokio::test]
@@ -490,15 +525,23 @@ async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_erro
 #[tokio::test]
 async fn foreground_queries_run_between_subscription_reevaluations() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
-    backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=0; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
+    // One read engine, so its counter sees every rerun and the query competes with them.
+    let backend = Backend::with_readers("local".into(), Box::new(open(&directory)), 1).unwrap();
+    backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx, args) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=args.n; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
     let mut watches = Vec::new();
-    for _ in 0..16 {
-        watches.push(backend.subscribe(call("slow", json!({}))).await.unwrap());
+    for n in 0..16 {
+        let mut watch = backend.subscribe(call("slow", json!({ "n": n }))).await.unwrap();
+        watch.next().await.unwrap();
+        watches.push(watch);
     }
     backend.mutate("start".into(), call("bump", json!({"id":"p"}))).await.unwrap();
-    let count = value(&backend.query(call("count", json!({}))).await.unwrap());
-    assert!(count.as_u64().unwrap() < 16, "foreground query ran after every subscriber: {count}");
+    // Each rerun takes tens of milliseconds; the query queues during the first and runs next.
+    let count = value(&backend.query(call("count", json!({}))).await.unwrap()).as_u64().unwrap();
+    assert!(count <= 2, "foreground query waited for {count} of 16 reruns");
+    for watch in &mut watches {
+        watch.next().await.unwrap();
+    }
+    assert_eq!(value(&backend.query(call("count", json!({}))).await.unwrap()), json!(16));
 }
 
 #[tokio::test]
@@ -616,3 +659,5 @@ mod documents;
 mod effects;
 mod integration;
 mod jobs;
+mod limits;
+mod subscriptions;

@@ -5,7 +5,7 @@ use chunk_js::DeploymentId;
 use chunk_store::SqliteStore;
 use serde_json::json;
 
-use crate::{ActionStatus, Backend, Call, Error};
+use crate::{ActionStatus, Backend, Call, Error, Limit};
 
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
@@ -208,7 +208,7 @@ async fn action_capacity_and_status_retirement_never_restart_evicted_invocations
         backend
             .start_action(backend.allocate_action_id().unwrap(), call("old", "flow", "overflow", json!(30_000)))
             .await,
-        Err(Error::Busy)
+        Err(Error::Overloaded(Limit::ActionMemory))
     ));
     for action in &mut actions {
         action.cancel();

@@ -31,6 +31,25 @@ impl Purpose {
     }
 }
 
+/// Bytes a command scope retains, charged at admission.
+pub(crate) fn scope_bytes(scope: &CommandScope) -> usize {
+    [
+        &scope.proxy_id,
+        &scope.player_uuid,
+        &scope.username,
+        &scope.session_id,
+        &scope.app,
+        &scope.session_type,
+        &scope.domain,
+        &scope.scope_id,
+        &scope.connection_id,
+        &scope.claim_operation_id,
+    ]
+    .iter()
+    .map(|value| value.len())
+    .sum()
+}
+
 #[derive(Clone)]
 pub(crate) struct CommandBinding {
     pub scope: CommandScope,
