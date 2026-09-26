@@ -123,7 +123,7 @@ pub async fn serve(init: Init) -> Result<()> {
         chunk_backend::observe(backend::observe);
         let state = init.state.join("core");
         let config = chunk_environment::CoreConfig {
-            bundle: init.backend.clone().into(),
+            bundle: Some(init.backend.clone().into()),
             environment: backend::ENVIRONMENT.into(),
             backend_record: state.join("backend.json"),
             control_record: state.join("control.json"),
