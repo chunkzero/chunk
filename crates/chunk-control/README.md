@@ -57,20 +57,22 @@ acknowledgment.
 
 Graceful control shutdown stops owned JVMs. After an abrupt control-process failure, local child handles cannot be
 recovered: durable launch markers retain unresolved ownership and prevent duplicate launches, and such nodes report
-unreachable until their JVM re-attaches. Before spawning a JVM, the host writes its process identity and the SHA-256
-digest of its credential into the launch marker. A JVM keeps repeating its registration; control accepts it only when
-the host's marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a process
-by PID. A re-attached JVM has no child handle, so stopping it sends `StopProcess` but its exit stays unconfirmed; stop
-such processes before discarding local state. Hosted providers will need durable provider identities to confirm
-termination across control restarts.
+unreachable until their JVM re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its
+process identity and the SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as its
+stdin, and control closes its own handle once the spawn returns. A JVM keeps repeating its registration; control
+accepts it only when the host's marker matches that credential and identity and the JVM still runs the host's app.
+Nothing adopts a process by PID. A launch without a child handle, re-attached or not, is confirmed exited only when
+control can take its marker's lock, which means neither the JVM nor anything it spawned is still running. Any other
+outcome leaves the exit unconfirmed. Hosted providers will need durable provider identities to confirm termination
+across control restarts.
 
-After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving JVM is fenced:
-its deliveries whose generations no open claim in the log matches are withdrawn with the generation the JVM holds, and
-operations the log does not know, such as those a restore lost, become released tombstones that reject retries. A
-JVM that has not re-attached and been fenced within 30 seconds stops blocking admission; placement still avoids it.
-JVM failure loses transient
-worlds; no packets or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this
-release.
+After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving launch is
+fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generations no open claim in the log matches,
+using the generation the JVM holds. Operations the log does not know, such as those a restore lost, become released
+tombstones that reject retries. Sessions the JVM runs on a logged host without a log row are recorded as retired and
+count against the host's capacity; admission waits until the JVM confirms they ended. No timeout reopens admission:
+while a launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets or worlds are replayed. State from the
+previous shared-classpath runtime is incompatible with this release.
 
 Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
 sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
