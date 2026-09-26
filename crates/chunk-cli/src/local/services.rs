@@ -123,7 +123,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         control_record: settings.state.join("control").join("connection.json"),
         backend_bind: settings.backend_bind,
         control_bind: settings.control_bind,
-        // Drops the control rows of an earlier session, whose JVMs are gone.
+        // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,
     };
     let core = Core::start(config, |connection| {

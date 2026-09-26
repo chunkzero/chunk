@@ -75,7 +75,13 @@ pub(super) fn run(
                     KeyCode::Char('r') => {
                         let _ = commands.send(Command::Restart);
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => stop.cancel(),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if stop.is_cancelled() {
+                            ratatui::restore();
+                            super::force_exit();
+                        }
+                        stop.cancel();
+                    }
                     KeyCode::Tab | KeyCode::BackTab => model.toggle_focus(),
                     KeyCode::Left => model.select(-1),
                     KeyCode::Right => model.select(1),

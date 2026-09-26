@@ -1,6 +1,13 @@
 use crate::{PlatformTarget, Running};
 use chunk_contract::{BackendConnection, ControlConnection};
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs::{self, File},
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -14,7 +21,8 @@ pub struct CoreConfig {
     pub control_record: PathBuf,
     pub backend_bind: SocketAddr,
     pub control_bind: SocketAddr,
-    /// Drops every control row before serving, as when a local session starts over.
+    /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
+    /// that outlived the previous control are stopped first.
     pub fresh: bool,
 }
 
@@ -39,7 +47,7 @@ impl Core {
         let mut started = core.start_backend(&config).await;
         if started.is_ok() {
             on_backend(core.backend_connection()?);
-            started = core.start_control(config).await;
+            started = core.start_control(&config).await;
         }
         if let Err(error) = started {
             if let Err(error) = core.stop(|| {}).await {
@@ -68,7 +76,25 @@ impl Core {
         Ok(())
     }
 
-    async fn start_control(&mut self, config: CoreConfig) -> io::Result<()> {
+    /// Starts control. When `fresh`, a control on the previous files first stops the JVMs that still hold their launch
+    /// locks, since only it can confirm they exited, and the files are deleted after.
+    async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
+        if config.fresh {
+            let state = config.state.join("control");
+            if survivors(&state.join("nodes"))? {
+                tracing::warn!("stopping JVMs that outlived the previous control");
+                self.serve_control(config).await?;
+                self.stop_control(|| {}).await?;
+            }
+            match fs::remove_dir_all(&state) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+        self.serve_control(config).await
+    }
+
+    async fn serve_control(&mut self, config: &CoreConfig) -> io::Result<()> {
         let state = config.state.join("control");
         let host = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
             directory: state.join("nodes"),
@@ -78,11 +104,11 @@ impl Core {
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
-            connection: config.control_record,
+            connection: config.control_record.clone(),
             state,
             system: self.system()?,
             bind: config.control_bind,
-            control: chunk_control::Config { environment: config.environment },
+            control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
         };
@@ -222,6 +248,23 @@ impl Core {
         }
         result
     }
+}
+
+/// Whether a JVM may still hold the lock of a launch marker in `nodes`. Control confirms the exit; this only tells
+/// whether there is one to confirm.
+fn survivors(nodes: &Path) -> io::Result<bool> {
+    let entries = match fs::read_dir(nodes) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "launch") && File::open(&path)?.try_lock().is_err() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Waits before the next attempt to stop the JVMs, calling `on_wait` the first time.

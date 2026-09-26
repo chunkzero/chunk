@@ -95,3 +95,29 @@ async fn all_in_one_serves_backend_and_control_until_stopped() {
     assert!(!backend_record.exists());
     assert!(!control_record.exists());
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+    config.fresh = true;
+    let nodes = config.state.join("control").join("nodes");
+    std::fs::create_dir_all(&nodes).unwrap();
+    // A JVM of the previous session still holds its launch marker's lock, and never re-attaches.
+    let marker = nodes.join("5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f.launch");
+    std::fs::write(&marker, b"{}").unwrap();
+    let lock = std::fs::File::open(&marker).unwrap();
+    lock.try_lock().unwrap();
+    let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
+
+    let starting = tokio::spawn(Core::start(config, |_| {}));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!starting.is_finished());
+    assert!(marker.exists());
+    jvm.kill().unwrap();
+    jvm.wait().unwrap();
+    let core = tokio::time::timeout(Duration::from_secs(30), starting).await.unwrap().unwrap().unwrap();
+    assert!(!marker.exists());
+    core.stop(|| {}).await.unwrap();
+}
