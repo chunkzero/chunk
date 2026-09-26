@@ -237,8 +237,9 @@ impl Owner {
         self.stopped.store(true, Ordering::Release);
         // A full queue already guarantees the engine will wake and see shutdown.
         let _ = self.events.try_send(Event::Wake);
-        let thread = self.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        if let Some(thread) = thread {
+        // Joining under the lock makes concurrent callers wait for the same drain.
+        let mut thread = self.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(thread) = thread.take() {
             let _ = thread.join();
         }
     }
