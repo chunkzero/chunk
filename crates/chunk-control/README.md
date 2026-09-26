@@ -71,8 +71,8 @@ fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generat
 using the generation the JVM holds. Operations the log does not know, such as those a restore lost, become released
 tombstones that reject retries. Sessions the JVM runs on a logged host without a log row are recorded as retired and
 count against the host's capacity; admission waits until the JVM confirms they ended. No timeout reopens admission:
-while a launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets or worlds are replayed. State from the
-previous shared-classpath runtime is incompatible with this release.
+while a launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets
+or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this release.
 
 Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
 sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
