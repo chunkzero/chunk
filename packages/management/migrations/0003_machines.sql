@@ -4,7 +4,7 @@ alter table environments
   add column machine_addresses text[] not null default '{}',
   add column machine_token bytea;
 
--- EnsureCapacity intents. The reconciler provisions PROVISIONING ones and removes the machines of released or
+-- EnsureCapacity intents. The reconciler provisions PROVISIONING ones and removes the machines of releasing or
 -- failed ones.
 create table capacity_requests (
   environment_id text not null references environments (id) on delete cascade,

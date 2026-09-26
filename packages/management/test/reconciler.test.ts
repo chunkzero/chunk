@@ -48,8 +48,8 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     };
   }
 
-  const nameOf = (environmentId: string, requestId: string) =>
-    capacityMachineName({ environment_id: environmentId, request_id: requestId, workload: Workload.JVM } as never);
+  const nameOf = (environmentId: string, requestId: string, workload = Workload.JVM) =>
+    capacityMachineName({ environment_id: environmentId, request_id: requestId, workload } as never);
 
   test("core gets a machine with its own token, and the addresses it has once started", async () => {
     const env = await running();
@@ -85,7 +85,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(verifyJoinToken("another token", machine?.spec.env.CHUNK_JOIN_TOKEN ?? "")).toBeUndefined();
 
     const released = await env.client.releaseCapacity({ requestId: "cap-1", lease: env.lease });
-    expect(released.capacity?.state).toBe(CapacityState.RELEASED);
+    expect(released.capacity?.state).toBe(CapacityState.RELEASING);
     await pass();
     expect(machines.has(ready?.machineId ?? "")).toBe(false);
     const unknown = await env.client.releaseCapacity({ requestId: "never", lease: env.lease });
@@ -93,11 +93,11 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("an exited extra machine is replaced with a fresh join token", async () => {
+  test("an exited gateway machine is replaced with a fresh join token", async () => {
     const env = await running();
-    await env.client.ensureCapacity(capacityRequest(env, "cap-3"));
+    await env.client.ensureCapacity({ ...capacityRequest(env, "cap-3"), workload: Workload.GATEWAY, appId: "" });
     await pass();
-    const name = nameOf(env.environmentId, "cap-3");
+    const name = nameOf(env.environmentId, "cap-3", Workload.GATEWAY);
     const first = machines.get(name)?.spec;
     await provider.stop(name);
     await pass();
@@ -105,6 +105,31 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(replaced?.spec).not.toBe(first);
     expect(replaced?.machine.state).toBe("running");
     expect(verifyJoinToken(env.token, replaced?.spec.env.CHUNK_JOIN_TOKEN ?? "")?.request_id).toBe("cap-3");
+    env.close();
+  });
+
+  test("an exited JVM machine fails its request, and release waits for its removal", async () => {
+    const env = await running();
+    const request = capacityRequest(env, "cap-jvm");
+    await env.client.ensureCapacity(request);
+    await pass();
+    const name = nameOf(env.environmentId, "cap-jvm");
+    const first = machines.get(name)?.spec;
+    await provider.stop(name);
+    await pass();
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.FAILED,
+      message: "the JVM machine exited",
+    });
+    expect(machines.get(name)?.spec).toBe(first);
+    expect(machines.get(name)?.machine.state).toBe("stopped");
+
+    const release = () => env.client.releaseCapacity({ requestId: "cap-jvm", lease: env.lease });
+    expect((await release()).capacity?.state).toBe(CapacityState.RELEASING);
+    expect((await release()).capacity?.state).toBe(CapacityState.RELEASING);
+    await pass();
+    expect(machines.has(name)).toBe(false);
+    expect((await release()).capacity?.state).toBe(CapacityState.RELEASED);
     env.close();
   });
 

@@ -1,7 +1,7 @@
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
 import type { Deps } from "../deps.ts";
-import { CapacityState } from "../gen/chunk/management/v1/environment_pb.ts";
+import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import type { Machine, Provider } from "../providers/provider.ts";
 import type { CapacityRow } from "./capacity.ts";
@@ -91,7 +91,7 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
     return;
   }
   for (const request of capacity) {
-    if (request.state === CapacityState.FAILED || request.state === CapacityState.RELEASED) {
+    if (request.state === CapacityState.FAILED || request.state === CapacityState.RELEASING) {
       await tearDown(deps, options, request);
     }
   }
@@ -190,9 +190,9 @@ async function saveCoreAddresses({ sql }: Deps, environment: EnvironmentRow, cor
 }
 
 /**
- * Keeps an extra machine running: resumes a suspended one and replaces one that is missing or exited, since extra
- * machines are stateless and their join tokens expire. A provider error fails the request for good; core retries
- * with a new request ID.
+ * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime, so one that exited or
+ * went missing fails its request; gateway and exec machines are stateless and are replaced, with a fresh join token.
+ * A provider error fails the request for good; core retries with a new request ID.
  */
 async function keepRunning(
   deps: Deps,
@@ -207,6 +207,9 @@ async function keepRunning(
   try {
     let machine = request.machine_id ? await provider.status(request.machine_id) : undefined;
     if (machine?.state === "suspended") machine = await provider.start(machine.id);
+    if (machine && machine.state !== "running" && request.workload === Workload.JVM) {
+      throw new Error(machine.state === "missing" ? "the JVM machine went missing" : "the JVM machine exited");
+    }
     if (machine?.state !== "running") {
       const coreHost = core.addresses[0];
       if (!coreHost || !environment.machine_token) return;
@@ -237,11 +240,16 @@ async function keepRunning(
   await notify(sql, { kind: "environment", environmentId: request.environment_id });
 }
 
-/** Removes a released or failed request's machine by name, which also finds one whose ID was never saved. */
+/**
+ * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved. A releasing
+ * request is released once its machine is gone.
+ */
 async function tearDown({ sql }: Deps, { provider }: ReconcilerOptions, request: CapacityRow) {
   await provider.destroy(capacityMachineName(request));
   await sql`
-    update capacity_requests set torn_down = true
+    update capacity_requests
+    set torn_down = true,
+      state = case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end
     where environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
 }
 

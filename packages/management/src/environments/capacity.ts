@@ -95,10 +95,13 @@ export function capacityServices({ sql }: Deps): CapacityServices {
           select lease from environments where id = ${environmentId} for update`;
         if (!environment) throw notFound("environment");
         fenceLease(environment.lease, request.lease);
+        // RELEASED once the machine is gone: a failed request's machine may already be torn down, otherwise the
+        // reconciler sets it when it removes the machine.
         const [released] = await tx<CapacityRow[]>`
-          update capacity_requests set state = ${CapacityState.RELEASED}
+          update capacity_requests
+          set state = case when torn_down then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end
           where environment_id = ${environmentId} and request_id = ${requestId}
-            and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})
+            and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY}, ${CapacityState.FAILED})
           returning *`;
         if (released) await notify(tx, { kind: "environment", environmentId });
         const [existing] = released
