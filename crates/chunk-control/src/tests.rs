@@ -199,11 +199,8 @@ impl Gameplay for RuntimeService {
         self.check(&request)?;
         let delivery = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
-        // Like the JVM's delivery fence, a closed delivery yields only to a newer owner generation.
-        if let Some(previous) = bindings.get(&delivery.operation_id)
-            && !(previous.phase == DeliveryPhase::Closed
-                && delivery.owner_generation > previous.delivery.owner_generation)
-        {
+        // Like the JVM, an operation keeps its first delivery, even after it closes.
+        if let Some(previous) = bindings.get(&delivery.operation_id) {
             if previous.delivery != delivery {
                 return Err(Status::failed_precondition("changed preparation"));
             }

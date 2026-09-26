@@ -56,6 +56,9 @@ impl Control {
             return Err(Error::Invalid("invalid roster"));
         }
         let _operation = self.operation(&request.operation_id)?;
+        if !self.state()?.rosters.contains_key(&request.operation_id) && !self.recovery.open()? {
+            return Err(Error::Busy);
+        }
         let unavailable = self.unavailable()?;
         self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {

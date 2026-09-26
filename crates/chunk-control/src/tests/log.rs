@@ -64,8 +64,15 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     assert_eq!(state.epoch, 2);
     assert!(state.claims.contains_key("kept") && !state.claims.contains_key("lost"));
     assert!(control.changes_after(Generation { epoch: 1, revision: state.revision }).is_none());
-    let position = state.position();
-    // The JVM still holds the lost delivery; the log does not own it, so reconciliation withdraws it.
+    let (position, restored) = (state.position(), state.revision);
+    let lost_player = lost.identity.as_ref().unwrap().uuid.clone();
+    // The JVM still serves the lost delivery, so no new login is admitted until recovery fences it.
+    fixture.runtime.available.store(false, Ordering::Release);
+    let relogin = request("relogin", &lost_player);
+    assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
+    control.reconcile_all().await.unwrap();
+    assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
+    fixture.runtime.available.store(true, Ordering::Release);
     control.reconcile_all().await.unwrap();
     {
         let bindings = fixture.runtime.bindings.lock().unwrap();
@@ -73,12 +80,20 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
         assert_eq!(bindings["kept"].phase, DeliveryPhase::Prepared);
     }
 
-    // A retry reserves the same revision under the new epoch; the pair tells the two claims apart.
-    let retried = control.claim(lost.clone()).await.unwrap().claim.unwrap();
-    assert_eq!(retried.delivery_generation & REVISION_MASK, outdated.delivery_generation & REVISION_MASK);
-    assert!(retried.delivery_generation > outdated.delivery_generation);
-    assert!(control.activate(ActivateClaim { claim: Some(outdated) }).await.is_err());
-    control.activate(ActivateClaim { claim: Some(retried) }).await.unwrap();
+    // The lost operation is retired with the generations the JVM holds; retrying it reserves nothing.
+    let tombstone = control.state().unwrap().claims["lost"].clone();
+    assert!(tombstone.phase == Phase::Released);
+    assert_eq!(tombstone.generation, Generation::from_wire(outdated.delivery_generation));
+    assert!(control.claim(lost.clone()).await.is_err());
+    assert!(control.activate(ActivateClaim { claim: Some(outdated.clone()) }).await.is_err());
+    assert!(!control.state().unwrap().players.contains_key(&lost_player));
+
+    // A fresh login reuses the lost claim's revision under the new epoch; the pair tells them apart.
+    let fresh = control.claim(relogin).await.unwrap().claim.unwrap();
+    let (lost_revision, current) = (outdated.delivery_generation & REVISION_MASK, control.state().unwrap().revision);
+    assert!(restored < lost_revision && lost_revision <= current);
+    assert!(fresh.delivery_generation > outdated.delivery_generation);
+    control.activate(ActivateClaim { claim: Some(fresh) }).await.unwrap();
     assert_eq!(control.inspect(kept).await.unwrap().claim, kept_assignment.claim);
 
     let changes = control.changes_after(position).unwrap();

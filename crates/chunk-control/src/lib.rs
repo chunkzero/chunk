@@ -157,6 +157,7 @@ pub struct Control {
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
+    recovery: recovery::Recovery,
 }
 
 impl Control {
@@ -166,7 +167,9 @@ impl Control {
     pub fn open(path: &Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
         let authority = Authority::open(path, &config)?;
+        let surviving = authority.read()?.hosts.keys().filter(|id| !host.stopped(id)).cloned().collect();
         Ok(Arc::new(Self {
+            recovery: recovery::Recovery::new(surviving),
             config,
             host,
             observations: Mutex::default(),

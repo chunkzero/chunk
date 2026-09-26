@@ -44,7 +44,8 @@ after a log position, and `Control::subscribe` announces new positions.
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
 any member's claim ending, or `Control::cancel_roster`, fails every member's move. Session capacity is the only hard
-limit.
+limit. Until the group is complete, activation fails with `UNAVAILABLE` "roster awaiting members", which gateways retry
+within their connection timeout.
 
 `Nodes` reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped states, including the
 last observed JVM health metrics and observation timestamp. Health is polled every five seconds; missing or stalled
@@ -63,6 +64,10 @@ by PID. A re-attached JVM has no child handle, so stopping it sends `StopProcess
 such processes before discarding local state. Hosted providers will need durable provider identities to confirm
 termination across control restarts.
 
+After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving JVM is fenced:
+its deliveries whose generations no open claim in the log matches are withdrawn with the generation the JVM holds, and
+operations the log does not know, such as those a restore lost, become released tombstones that reject retries. A
+JVM that has not re-attached and been fenced within 30 seconds stops blocking admission; placement still avoids it.
 JVM failure loses transient
 worlds; no packets or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this
 release.

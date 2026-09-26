@@ -22,6 +22,9 @@ impl Control {
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         validate(&request)?;
         let operation = self.operation(&request.operation_id)?;
+        if !self.state()?.claims.contains_key(&request.operation_id) {
+            self.admit().await?;
+        }
         let unavailable = self.unavailable()?;
         self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {

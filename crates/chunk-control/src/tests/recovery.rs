@@ -16,6 +16,11 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
 
     let control = fixture.control();
     assert!(control.inspect(arrived.clone()).await.is_err());
+    // Until the surviving JVM re-attaches and is fenced, no new login is admitted.
+    let newcomer = request("newcomer", &uuid::Uuid::new_v4().to_string());
+    assert!(matches!(control.claim(newcomer.clone()).await, Err(Error::Busy)));
+    control.reconcile_all().await.unwrap();
+    assert!(matches!(control.claim(newcomer.clone()).await, Err(Error::Busy)));
     let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
     let register = |token: &str, process: &str| {
         let identity = ProcessIdentity {
@@ -51,5 +56,6 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
     let current = control.inspect(arrived).await.unwrap();
     assert_eq!(current.phase, ClaimPhase::Arrived as i32);
     assert_eq!(current.claim, assignment.claim);
+    control.claim(newcomer).await.unwrap();
     fixture.close().await;
 }

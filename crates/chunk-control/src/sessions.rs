@@ -70,6 +70,7 @@ impl Control {
         if inventory.identity.as_ref() != Some(&runtime.identity) {
             return Err(Error::Invalid("session inventory process mismatch"));
         }
+        // Unfenced deliveries are retried on the next pass.
         self.fence_deliveries(&runtime, &inventory).await?;
         let now = crate::now_ms();
         let finish = self.update(|state| {

@@ -26,6 +26,12 @@ impl Generation {
         Ok(Self { epoch, revision })
     }
 
+    /// Reads [`Self::wire`]'s form, as JVMs report it.
+    #[must_use]
+    pub fn from_wire(wire: u64) -> Self {
+        Self { epoch: wire >> REVISION_BITS, revision: wire & ((1 << REVISION_BITS) - 1) }
+    }
+
     /// The `uint64` generation carried by the current wire contract: the epoch above 40 revision bits. It orders like
     /// the pair and stays a positive signed 64-bit value, as JVMs require.
     #[must_use]
@@ -163,6 +169,9 @@ impl Claim {
     }
 
     pub fn matches(&self, request: &ClaimRequest) -> Result<()> {
+        if self.request.is_empty() {
+            return Err(Error::Invalid("claim operation lost in a restore"));
+        }
         if self.request != request.encode_to_vec() {
             return Err(Error::Invalid("claim operation changed"));
         }
