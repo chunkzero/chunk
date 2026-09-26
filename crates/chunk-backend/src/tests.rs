@@ -14,7 +14,7 @@ use tokio::sync::mpsc as signals;
 
 use crate::{Backend, Call, Error, Limit, Update};
 
-const SOURCE: &str = r"
+pub(crate) const SOURCE: &str = r"
 export function get(ctx, args) { return ctx.db.get('profiles', args.id)?.coins ?? 0; }
 export function bump(ctx, args) {
   const value = (ctx.db.get('profiles', args.id)?.coins ?? 0) + 1;
@@ -42,7 +42,7 @@ export function shiftIndex(ctx) {
 fn id() -> DeploymentId {
     DeploymentId::new("build").unwrap()
 }
-fn call(function: &str, arguments: Value) -> Call {
+pub(crate) fn call(function: &str, arguments: Value) -> Call {
     Call {
         deployment: id(),
         function: function.into(),
@@ -54,7 +54,7 @@ fn value(update: &Update) -> Value {
     serde_json::from_str(&update.json).unwrap()
 }
 
-fn open(directory: &tempfile::TempDir) -> SqliteStore {
+pub(crate) fn open(directory: &tempfile::TempDir) -> SqliteStore {
     let mut store = SqliteStore::open(directory.path().join("data.db"), "test").unwrap();
     let schema: DatabaseSchema = serde_json::from_value(json!({"profiles": {"fields": {
         "coins": {"schema": {"type": "integer"}, "optional": true},
@@ -65,7 +65,7 @@ fn open(directory: &tempfile::TempDir) -> SqliteStore {
     store
 }
 
-async fn pending<F: Future>(mut future: Pin<&mut F>) {
+pub(crate) async fn pending<F: Future>(mut future: Pin<&mut F>) {
     poll_fn(|cx| {
         assert!(matches!(future.as_mut().poll(cx), Poll::Pending), "response escaped before durability");
         Poll::Ready(())

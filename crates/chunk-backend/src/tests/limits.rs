@@ -38,3 +38,69 @@ async fn queries_are_refused_once_queued_ones_wait_too_long_for_a_read_engine() 
     }
     backend.query(call("fast", json!({}))).await.unwrap();
 }
+
+#[tokio::test]
+async fn oversized_mutation_operation_ids_are_rejected_before_enqueue() {
+    let (backend, mut incoming, memory) = Backend::held_ingress();
+    let mut mutation = Box::pin(backend.mutate("x".repeat(1024 * 1024), call("bump", json!({"id": "p"}))));
+    std::future::poll_fn(|cx| {
+        assert!(
+            matches!(mutation.as_mut().poll(cx), std::task::Poll::Ready(Err(Error::Invalid("operation identity")))),
+            "oversized mutation operation ID was retained before validation"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(incoming.try_recv().is_err(), "invalid operation must never enter the actor queue");
+    assert_eq!(memory.available_permits(), crate::limits::REQUEST_BYTES);
+}
+
+pub(crate) fn assert_request_charge(memory: &tokio::sync::Semaphore, payload: usize) {
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + payload;
+    assert!(charged >= required, "retained request charged {charged} bytes, but needs at least {required} bytes");
+}
+
+#[tokio::test]
+async fn mutation_admission_charges_retained_operation_ids() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let operation = "x".repeat(256);
+    let call = call("bump", json!({"id": "p"}));
+    let bytes = operation.len() + call.arguments.as_str().len() + call.caller.as_str().len();
+    let mut mutation = Box::pin(backend.mutate(operation, call));
+    super::pending(mutation.as_mut()).await;
+    assert_request_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn action_status_admission_charges_retained_ids_and_callers() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let id = backend.allocate_action_id().unwrap();
+    let caller: chunk_js::Json = json!({"player": "x".repeat(4096)}).into();
+    let bytes = id.incarnation.len() + caller.as_str().len();
+    let mut status = Box::pin(backend.action_status(id, caller));
+    super::pending(status.as_mut()).await;
+    assert_request_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn job_status_admission_charges_retained_ids_and_callers() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let id = "j".repeat(256);
+    let caller: chunk_js::Json = json!({"player": "x".repeat(4096)}).into();
+    let bytes = id.len() + caller.as_str().len();
+    let mut status = Box::pin(backend.job(id, caller));
+    super::pending(status.as_mut()).await;
+    assert_request_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn forget_job_admission_charges_retained_ids_and_callers() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let id = "j".repeat(256);
+    let caller: chunk_js::Json = json!({"player": "x".repeat(4096)}).into();
+    let bytes = id.len() + caller.as_str().len();
+    let mut forgotten = Box::pin(backend.forget_job(id, caller));
+    super::pending(forgotten.as_mut()).await;
+    assert_request_charge(&memory, bytes);
+}

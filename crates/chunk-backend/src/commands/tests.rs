@@ -95,6 +95,9 @@ impl Fixture {
         )
         .unwrap();
         backend.deploy(deployment).await.unwrap();
+        Self::with_backend(directory, backend).await
+    }
+    async fn with_backend(directory: tempfile::TempDir, backend: Backend) -> Self {
         let service = CommandService::new(backend.clone(), APPLICATION, PLATFORM).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -433,4 +436,99 @@ fn platform_requests_reject_foreign_targets_undeclared_methods_and_oversized_val
     let mut bad = session;
     bad["arguments"]["limit"] = json!("wrong type");
     assert!(effects::validate(&deployment, &scope(), &bad.into()).is_err());
+}
+
+fn scope_bytes(scope: &wire::CommandScope) -> usize {
+    [
+        &scope.proxy_id,
+        &scope.player_uuid,
+        &scope.username,
+        &scope.session_id,
+        &scope.app,
+        &scope.session_type,
+        &scope.domain,
+        &scope.scope_id,
+        &scope.connection_id,
+        &scope.claim_operation_id,
+    ]
+    .iter()
+    .map(|value| value.len())
+    .sum()
+}
+
+fn assert_ingress_charge(memory: &tokio::sync::Semaphore, payload: usize) {
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + payload;
+    assert!(charged >= required, "retained command charged {charged} bytes, but needs at least {required} bytes");
+}
+
+#[tokio::test]
+async fn command_catalog_admission_charges_retained_scope() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
+    let scope = scope();
+    let bytes = scope_bytes(&scope);
+    let mut catalog = Box::pin(service.catalog(request(scope, PLATFORM)));
+    crate::tests::pending(catalog.as_mut()).await;
+    assert_ingress_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn command_suggestion_admission_charges_retained_scope_and_input() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
+    let scope = scope();
+    let suggestion = wire::CommandSuggestionRequest {
+        scope: Some(scope.clone()),
+        command_id: COMMAND.into(),
+        query: "choices".into(),
+        input: "notify o".into(),
+        cursor: 8,
+    };
+    let bytes = scope_bytes(&scope) + suggestion.command_id.len() + suggestion.query.len() + suggestion.input.len();
+    let mut suggestions = Box::pin(service.suggest(request(suggestion, PLATFORM)));
+    crate::tests::pending(suggestions.as_mut()).await;
+    assert_ingress_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn command_preparation_admission_charges_retained_scope_and_input() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
+    let scope = scope();
+    let preparation =
+        wire::PrepareCommand { scope: Some(scope.clone()), command_id: COMMAND.into(), input: "notify hello".into() };
+    let bytes = scope_bytes(&scope) + preparation.command_id.len() + preparation.input.len();
+    let mut prepared = Box::pin(service.prepare(request(preparation, PLATFORM)));
+    crate::tests::pending(prepared.as_mut()).await;
+    assert_ingress_charge(&memory, bytes);
+}
+
+#[tokio::test]
+async fn command_start_admission_charges_retained_scope_and_input() {
+    use crate::service::{Command, Event};
+
+    let (backend, mut incoming, memory) = Backend::held_ingress();
+    let mut fixture = Fixture::with_backend(tempfile::tempdir().unwrap(), backend).await;
+    let scope = scope();
+    let input = "notify hello";
+    let mut preparation = Box::pin(fixture.service.prepare(request(
+        wire::PrepareCommand { scope: Some(scope.clone()), command_id: COMMAND.into(), input: input.into() },
+        PLATFORM,
+    )));
+    crate::tests::pending(preparation.as_mut()).await;
+    let Event::Request { command, .. } = incoming.try_recv().unwrap() else { panic!("expected preparation") };
+    let Command::Prepare { id, scope, command, input, reply } = *command else { panic!("expected preparation") };
+    let prepared = Prepared { deployment: id, scope, command, input, follow_player: false };
+    let bytes = prepared.call().bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
+    reply.finish(Ok(prepared));
+    let invocation = preparation.await.unwrap().into_inner().invocation_id;
+    let (_sender, _output) = fixture.run(&invocation).await;
+    let event = tokio::time::timeout(Duration::from_secs(2), incoming.recv()).await.unwrap().unwrap();
+    assert!(
+        matches!(&event, Event::Request { command, .. } if matches!(command.as_ref(), Command::StartAction { .. }))
+    );
+    // Close the transport worker before asserting; the retained event still owns its permit.
+    fixture.close().await;
+    assert_ingress_charge(&memory, bytes);
 }

@@ -281,6 +281,24 @@ impl Drop for Owner {
 pub struct Backend(Arc<Owner>);
 
 impl Backend {
+    /// Holds ingress without an actor so tests can inspect admission before dequeue.
+    #[cfg(test)]
+    pub(crate) fn held_ingress() -> (Self, queue::Receiver<Event>, Arc<Semaphore>) {
+        let (events, incoming) = queue::channel(EVENTS);
+        let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
+        let backend = Self(Arc::new(Owner {
+            environment: "test".into(),
+            incarnation: "test-incarnation".into(),
+            action_sequence: AtomicU64::new(1),
+            events,
+            memory: memory.clone(),
+            queue: Arc::default(),
+            stopped: Arc::default(),
+            thread: std::sync::Mutex::new(None),
+        }));
+        (backend, incoming, memory)
+    }
+
     /// Storage must hold the environment's exclusive writer authority. Construction waits for the initial snapshot and engine.
     /// # Errors
     /// Reports thread, snapshot or JS engine initialization failures.
