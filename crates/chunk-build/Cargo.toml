@@ -11,17 +11,17 @@ publish = false
 default = ["compiler"]
 # Project inspection, app compilation and bundling, SDK generation and release publishing.
 compiler = [
-    "dep:anyhow",
-    "dep:nodejs-built-in-modules",
-    "dep:oxc_allocator",
-    "dep:oxc_ast",
-    "dep:oxc_parser",
-    "dep:oxc_span",
-    "dep:rolldown",
-    "dep:rolldown_common",
-    "dep:tokio",
-    "dep:chunk-js",
-    "dep:toml",
+  "dep:anyhow",
+  "dep:nodejs-built-in-modules",
+  "dep:oxc_allocator",
+  "dep:oxc_ast",
+  "dep:oxc_parser",
+  "dep:oxc_span",
+  "dep:rolldown",
+  "dep:rolldown_common",
+  "dep:tokio",
+  "dep:chunk-js",
+  "dep:toml",
 ]
 
 [[bin]]
