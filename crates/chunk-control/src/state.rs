@@ -65,11 +65,20 @@ impl State {
         Ok(&self.releases.get(name).ok_or(Error::Invalid("unknown release"))?.release)
     }
 
-    /// The release that places `request`: the current one for a login, and its source's for a move. Retired
-    /// releases place nothing.
+    /// The release that places `request`: for a login, the one its proxy routed it with, or the current one when it
+    /// names none; for a move, its source's. Retired releases place nothing, and a login routed with one is
+    /// rejected as unavailable so its proxy routes it again.
     pub fn placing(&self, request: &ClaimRequest) -> Result<(String, Arc<Release>)> {
         let name = match &request.source {
-            None => self.current.clone().ok_or(Error::Invalid("no current release"))?,
+            None if request.deployment.is_empty() => {
+                self.current.clone().ok_or(Error::Invalid("no current release"))?
+            }
+            None => {
+                if self.releases.get(&request.deployment).is_none_or(|release| release.retired) {
+                    return Err(Error::Unresolved(crate::ROUTE_AGAIN));
+                }
+                request.deployment.clone()
+            }
             Some(source) => {
                 let claim = self.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
                 let session = self.sessions.get(&claim.session).ok_or(Error::Invalid("missing move source"))?;

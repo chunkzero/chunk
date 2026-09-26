@@ -52,6 +52,10 @@ pub struct SessionType {
 
 pub const DEFAULT_IDLE_NODE_TIMEOUT_SECONDS: u32 = 60;
 
+/// Control's reply to a login routed with a release that no longer accepts logins. Nothing was reserved, so the proxy
+/// routes the login again through the current release.
+pub const ROUTE_AGAIN: &str = "routed release no longer accepts logins";
+
 /// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,8 +63,8 @@ pub struct Config {
     pub environment: String,
 }
 
-/// One deployment version's apps, profiles and limits. Control runs every release that still has hosts, and places
-/// new logins on the current one.
+/// One deployment version's apps, profiles and limits. Control runs every release that still has hosts, and new
+/// logins route through the current one.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Release {

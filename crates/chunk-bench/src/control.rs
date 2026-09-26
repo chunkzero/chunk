@@ -79,6 +79,7 @@ pub fn claim(index: u64) -> ClaimRequest {
             machine_profile: "bench".into(),
         }),
         source: None,
+        deployment: String::new(),
     }
 }
 

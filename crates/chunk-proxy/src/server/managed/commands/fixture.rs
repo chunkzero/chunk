@@ -462,5 +462,6 @@ fn claim() -> ClaimRequest {
             machine_profile: "local".into(),
         }),
         source: None,
+        deployment: String::new(),
     }
 }

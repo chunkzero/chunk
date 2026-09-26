@@ -188,7 +188,8 @@ impl Control {
     }
 
     /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity of the release it names, so the
-    /// host lifecycle stops it: its drain releases it at once, and control shutdown stops it like any logged host.
+    /// host lifecycle stops it: its drain releases it at once, and control shutdown stops it like any logged host. The
+    /// release need not be known: after another restart, the JVM re-attaches to this row by its launch record alone.
     fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
             if state.hosts.contains_key(id) {

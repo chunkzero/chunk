@@ -2,10 +2,6 @@ use std::{
     collections::BTreeSet,
     io,
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
     time::{Duration, Instant},
 };
 
@@ -59,12 +55,13 @@ pub(super) struct Session<'a> {
     shared: Shared,
     live: Vec<Live>,
     pointer: Option<chunk_service::Record>,
-    /// Stops and backend releases in flight; each yields a deployment the backend still uses.
+    /// Backend releases in flight; each yields a deployment the backend still uses.
     retiring: JoinSet<Option<String>>,
     /// Stopped backend versions retried until no call, subscription or job still uses them.
     unreleased: Vec<String>,
-    /// Retired releases whose JVMs are still stopping and may still read their release directory.
-    stopping: Arc<AtomicUsize>,
+    /// Retired releases whose JVMs have not all confirmed their exit. They keep their backend version and release
+    /// directory until they have, however long that takes.
+    stopping: Vec<Version>,
     /// Whether a release directory may have lost its last running version since the last prune.
     stale: bool,
 }
@@ -88,7 +85,7 @@ impl<'a> Session<'a> {
             pointer: None,
             retiring: JoinSet::new(),
             unreleased: Vec::new(),
-            stopping: Arc::default(),
+            stopping: Vec::new(),
             stale: true,
         }
     }
@@ -262,32 +259,18 @@ impl<'a> Session<'a> {
         Ok(format!("{}{resumed} · {summary}", short(&id)))
     }
 
-    /// Makes `staged` current, then stops every earlier release, disconnecting its players. The backend and control
-    /// activate `staged` first, so a release either rejects leaves the running ones untouched.
+    /// Makes `staged` current and routes new players to it, then stops every earlier release, disconnecting its
+    /// players. The backend and control activate `staged` first, so a release either rejects leaves the running ones
+    /// untouched.
     async fn restart(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
         let id = staged.release.id.clone();
-        let deployment = staged.bundle.id.clone();
-        self.shared.deploy(staged.bundle.clone()).await?;
-        let version = Version::new(staged);
-        if let Err(error) = self.shared.activate(&version) {
-            self.release(deployment);
-            return Err(error);
+        let version = self.launch(staged).await?;
+        for live in std::mem::take(&mut self.live) {
+            self.retire(live.version);
         }
-        let control = self.shared.control()?;
-        let mut stopped = Vec::new();
-        for live in self.live.drain(..) {
-            if let Err(error) = services::retire(&control, &live.version.deployment).await {
-                tracing::error!(%error, "release shutdown failed");
-            }
-            stopped.push(live.version.deployment);
-        }
-        self.shared.route(&version)?;
         self.live.push(Live::new(version));
-        for deployment in stopped {
-            self.release(deployment);
-        }
-        Ok(format!("{} · restarted; previous sessions ended", short(&id)))
+        Ok(format!("{} · restarted; previous sessions end", short(&id)))
     }
 
     fn check_environment(&self, staged: &Staged) -> io::Result<()> {
@@ -354,6 +337,7 @@ impl<'a> Session<'a> {
                 index += 1;
             }
         }
+        self.confirm_stopped();
         self.reporter.deployments(
             self.live
                 .iter()
@@ -387,25 +371,30 @@ impl<'a> Session<'a> {
         });
     }
 
+    /// Retires `version` in control, which stops its JVMs at once.
     fn retire(&mut self, version: Version) {
-        let (backend, reporter, stopping) = (self.shared.backend(), self.reporter.clone(), self.stopping.clone());
-        let control = self.shared.control();
-        self.stale = true;
-        stopping.fetch_add(1, Ordering::AcqRel);
-        self.retiring.spawn(async move {
-            let (release_id, deployment) = (version.release.id, version.deployment);
-            let stopped = match control {
-                Ok(control) => services::retire(&control, &deployment).await,
-                Err(error) => Err(error),
-            };
-            match stopped {
-                Ok(()) => reporter.done("Retire", format!("{} stopped", short(&release_id))),
-                Err(error) => reporter.failed("Retire", format!("{}: {error}", short(&release_id))),
+        self.stopping.push(version);
+        self.confirm_stopped();
+    }
+
+    /// Asks control to stop each retired release's JVMs, and releases the backend version of each release whose JVMs
+    /// have all confirmed their exit. Only that confirmation ends a release's stop.
+    fn confirm_stopped(&mut self) {
+        let Ok(control) = self.shared.control() else { return };
+        for version in std::mem::take(&mut self.stopping) {
+            match control.retire_release(&version.deployment) {
+                Ok(true) => {
+                    self.reporter.done("Retire", format!("{} stopped", short(&version.release.id)));
+                    self.stale = true;
+                    self.release(version.deployment);
+                }
+                Ok(false) => self.stopping.push(version),
+                Err(error) => {
+                    tracing::warn!(%error, deployment = version.deployment, "retired release not yet stopping");
+                    self.stopping.push(version);
+                }
             }
-            stopping.fetch_sub(1, Ordering::AcqRel);
-            let backend = backend?;
-            (!release(&backend, &deployment).await).then_some(deployment)
-        });
+        }
     }
 
     fn release(&mut self, deployment: String) {
@@ -414,14 +403,15 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Deletes release directories no running version uses. Called only between builds, and waits for retired JVMs to
-    /// stop, since both may still read a release that is no longer live.
+    /// Deletes release directories no running or stopping version uses. Called only between builds, since a build may
+    /// still read a release that is no longer live.
     fn prune(&mut self) {
-        if !self.stale || self.stopping.load(Ordering::Acquire) > 0 {
+        if !self.stale {
             return;
         }
         self.stale = false;
-        let live: BTreeSet<_> = self.live.iter().map(|live| live.version.release.id.as_str()).collect();
+        let versions = self.live.iter().map(|live| &live.version).chain(&self.stopping);
+        let live: BTreeSet<_> = versions.map(|version| version.release.id.as_str()).collect();
         if let Err(error) = crate::cleaning::prune(&self.settings.state.join("releases"), &live) {
             tracing::warn!(%error, "unused releases not pruned");
         }
@@ -429,15 +419,22 @@ impl<'a> Session<'a> {
 
     async fn stop(mut self) -> io::Result<()> {
         let mut result = self.shared.stop_proxy().await;
-        // Retirements in flight finish while control runs; stopping control then stops every JVM left.
         let mut unreleased = std::mem::take(&mut self.unreleased);
         while let Some(finished) = self.retiring.join_next().await {
             unreleased.extend(finished.ok().flatten());
         }
-        if let Err(error) = self.shared.stop_control().await {
-            result = Err(error);
+        // Stopping control stops every JVM left; only its confirmation frees their backend versions.
+        match self.shared.stop_control().await {
+            Ok(()) => {
+                let stopping = self.stopping.drain(..);
+                let versions = self.live.drain(..).map(|live| live.version).chain(stopping);
+                unreleased.extend(versions.map(|version| version.deployment));
+            }
+            Err(error) => {
+                tracing::warn!("backend versions of JVMs whose exit is unconfirmed stay deployed");
+                result = Err(error);
+            }
         }
-        unreleased.extend(std::mem::take(&mut self.live).into_iter().map(|live| live.version.deployment));
         if let Some(backend) = self.shared.backend() {
             for deployment in unreleased {
                 release_before_exit(&backend, &deployment).await;

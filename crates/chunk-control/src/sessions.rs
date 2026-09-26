@@ -74,7 +74,8 @@ impl Control {
         let now = crate::now_ms();
         self.update(|state| {
             self.reapply(state, host, &runtime.identity)?;
-            let release = state.host_release(host)?.clone();
+            // A host whose release a restore lost only stops, so no destination policy applies to it.
+            let release = state.host_release(host).ok().cloned();
             let open: std::collections::BTreeSet<_> = state
                 .claims
                 .values()
@@ -90,7 +91,7 @@ impl Control {
                 } else {
                     session.empty_since_ms = None;
                 }
-                let destinations = release.contracts.destinations.as_ref();
+                let destinations = release.as_ref().and_then(|release| release.contracts.destinations.as_ref());
                 let policy =
                     destinations.and_then(|policies| policies.policy(&session.session_type, &session.demand_key));
                 let expired = empty

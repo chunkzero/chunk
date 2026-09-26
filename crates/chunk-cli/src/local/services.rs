@@ -12,9 +12,6 @@ type Task = JoinHandle<io::Result<()>>;
 
 const STARTUP: Duration = Duration::from_secs(30);
 
-/// How long a retired release's JVMs may take to stop.
-const RETIREMENT: Duration = Duration::from_secs(30);
-
 struct Service {
     stop: CancellationToken,
     task: Task,
@@ -262,18 +259,6 @@ impl Version {
             java: staged.java,
         }
     }
-}
-
-/// Retires `deployment`'s release in `control` and waits until its JVMs have stopped.
-pub(super) async fn retire(control: &chunk_control::Control, deployment: &str) -> io::Result<()> {
-    let deadline = tokio::time::Instant::now() + RETIREMENT;
-    while !control.retire_release(deployment).map_err(io::Error::other)? {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::other("JVM shutdown not confirmed"));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Ok(())
 }
 
 /// Starts the backend, control with its first release, and the proxy; on error, everything started is stopped.

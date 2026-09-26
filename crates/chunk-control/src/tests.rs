@@ -530,6 +530,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
             machine_profile: "local".into(),
         }),
         source: None,
+        deployment: String::new(),
     }
 }
 

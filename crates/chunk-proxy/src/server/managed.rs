@@ -14,6 +14,7 @@ use tokio::{
 };
 
 use super::{
+    Retarget,
     authentication::Authenticated,
     configuration, gameplay,
     platform::{Lifecycle, Platform},
@@ -25,6 +26,8 @@ use moves::{check_move, next_move};
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 /// Control's reply while other members of the player's roster have not yet asked to activate.
 const ROSTER_WAITING: &str = "roster awaiting members";
+/// Control's reply to a login routed with a release that no longer accepts logins; it reserved nothing.
+const ROUTE_AGAIN: &str = "routed release no longer accepts logins";
 
 struct ClaimGuard {
     platform: Platform,
@@ -79,27 +82,48 @@ impl ClaimGuard {
     }
 }
 
+/// Serves a login routed and claimed through one release: `routed`, or the release `current` names once control
+/// asks for the login to be routed again.
 pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     authenticated: Authenticated<S>,
-    platform: &Platform,
+    routed: &Platform,
+    current: &Retarget,
     deadline: Duration,
 ) -> io::Result<()> {
-    let claim = login_claim(&authenticated.profile, platform);
+    let login = login_claim(&authenticated.profile);
     let destination = async {
-        let mut claim = claim;
-        claim.demand = Some(platform.route_claim(&claim).await?);
-        // Construct before sending: cancellation must cover a claim whose reply was lost.
-        let guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
-        let mut message = platform.control_request(guard.claim.clone())?;
-        message.set_timeout(WAIT_TIMEOUT);
-        let assignment = platform.control.clone().claim(message).await.map_err(claim_error)?.into_inner();
-        validate(&assignment, &guard)?;
-        Ok((guard, assignment))
+        let mut platform = routed.clone();
+        loop {
+            let mut claim = ClaimRequest {
+                proxy_id: platform.proxy_id.clone(),
+                deployment: platform.target.backend.deployment.clone(),
+                ..login.clone()
+            };
+            claim.demand = Some(platform.route_claim(&claim).await?);
+            // Construct before sending: cancellation must cover a claim whose reply was lost.
+            let mut guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
+            let mut message = platform.control_request(guard.claim.clone())?;
+            message.set_timeout(WAIT_TIMEOUT);
+            match platform.control.clone().claim(message).await {
+                Ok(assignment) => {
+                    let assignment = assignment.into_inner();
+                    validate(&assignment, &guard)?;
+                    return Ok((guard, assignment));
+                }
+                Err(error) if error.code() == tonic::Code::Unavailable && error.message() == ROUTE_AGAIN => {
+                    guard.armed = false;
+                    sleep(Duration::from_millis(100)).await;
+                    platform = current.platform();
+                }
+                Err(error) => return Err(claim_error(error)),
+            }
+        }
     };
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
+    let platform = guard.platform.clone();
     let mut lifecycle = Lifecycle::new(platform.clone());
-    let mut commands = commands::Commands::new(platform).await?;
+    let mut commands = commands::Commands::new(&platform).await?;
     loop {
         commands.bind(&guard.claim, &assignment)?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
@@ -145,7 +169,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         )
         .await
         .map_err(io::Error::other)??;
-        check_move(platform, &next.0.claim).await?;
+        check_move(&platform, &next.0.claim).await?;
         // The client's acknowledgment fences all remaining source PLAY input.
         if let Err(error) = withdraw(&guard, &identity).await {
             let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
@@ -158,14 +182,12 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, platform: &Platform) -> ClaimRequest {
+fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess) -> ClaimRequest {
     ClaimRequest {
         operation_id: uuid::Uuid::new_v4().to_string(),
-        proxy_id: platform.proxy_id.clone(),
         connection_id: uuid::Uuid::new_v4().to_string(),
         identity: Some(gameplay::identity(profile)),
-        demand: None,
-        source: None,
+        ..ClaimRequest::default()
     }
 }
 

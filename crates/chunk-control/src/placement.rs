@@ -100,16 +100,23 @@ impl Control {
     }
 }
 
-/// Whether `runtime` runs the artifact of `host`'s release for its app and profile.
+/// Whether `runtime` runs `host`'s app and profile under its release, and that release's artifact. A host whose release
+/// a restore lost is its JVM's by the launch record its host adopted it with alone; no placement uses such a host, so
+/// it only reports and stops.
 pub(crate) fn runs_host(state: &State, runtime: &RuntimeConnection, host: &HostState) -> bool {
     let identity = &runtime.identity;
-    let Some(release) = state.releases.get(&host.release) else {
+    let deployment = identity.deployment.as_ref();
+    if deployment.map_or("", |deployment| deployment.deployment.as_str()) != host.release
+        || identity.app_id != host.app
+        || identity.machine_profile != host.profile
+    {
         return false;
+    }
+    let Some(release) = state.releases.get(&host.release) else {
+        return true;
     };
     let release = &release.release;
-    identity.deployment.as_ref() == Some(&release.deployment)
-        && identity.app_id == host.app
-        && identity.machine_profile == host.profile
+    deployment == Some(&release.deployment)
         && release.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
 }
 

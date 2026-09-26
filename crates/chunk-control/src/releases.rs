@@ -1,5 +1,6 @@
-//! The releases one control runs side by side. New logins are placed on the current release; every other placement,
-//! and recovery, uses the release of the host a row runs on. A release is forgotten once none of its hosts remain.
+//! The releases one control runs side by side. A login is placed on the release its proxy routed it with; every other
+//! placement, and recovery, uses the release of the host a row runs on. A release is forgotten once none of its hosts
+//! remain.
 
 use std::sync::Arc;
 
