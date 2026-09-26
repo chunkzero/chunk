@@ -26,18 +26,35 @@ struct Scan {
 /// A JAR's SHA-256 digest and the Java version it was scanned for.
 type ScanKey = ([u8; 32], u32);
 
-/// Scans are memoized by JAR digest and Java version, so `chunk dev` rescans only JARs whose bytes changed.
-static SCANS: LazyLock<Mutex<HashMap<ScanKey, Arc<Scan>>>> = LazyLock::new(Mutex::default);
+/// Scans are memoized by JAR digest and Java version, so `chunk dev` rescans only JARs whose bytes changed. The cache
+/// holds at most [`CACHED_ENTRIES`] archive entries in total and starts over when a scan would exceed that, so
+/// verifying untrusted releases can't grow it without bound.
+static SCANS: LazyLock<Mutex<Scans>> = LazyLock::new(Mutex::default);
+
+/// Two full classpaths' worth of archive entries.
+const CACHED_ENTRIES: usize = 400_000;
+
+#[derive(Default)]
+struct Scans {
+    scans: HashMap<ScanKey, Arc<Scan>>,
+    entries: usize,
+}
 
 impl Classpath {
     pub fn add(&mut self, bytes: &[u8], label: &str, java: u32) -> io::Result<()> {
         let key = (Sha256::digest(bytes).into(), java);
-        let cached = SCANS.lock().unwrap_or_else(PoisonError::into_inner).get(&key).cloned();
+        let cached = SCANS.lock().unwrap_or_else(PoisonError::into_inner).scans.get(&key).cloned();
         let scan = if let Some(scan) = cached {
             scan
         } else {
             let scan = Arc::new(scan_jar(bytes, label, java)?);
-            SCANS.lock().unwrap_or_else(PoisonError::into_inner).insert(key, scan.clone());
+            let mut cache = SCANS.lock().unwrap_or_else(PoisonError::into_inner);
+            if cache.entries + scan.entries > CACHED_ENTRIES {
+                *cache = Scans::default();
+            }
+            if cache.scans.insert(key, scan.clone()).is_none() {
+                cache.entries += scan.entries;
+            }
             scan
         };
         self.entries += scan.entries;
