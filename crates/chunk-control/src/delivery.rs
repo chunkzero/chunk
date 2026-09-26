@@ -48,7 +48,7 @@ impl Control {
             Ok(!members.is_empty())
         })?;
         if !admitted {
-            return Err(Error::Unresolved("roster awaiting members"));
+            return Err(Error::Unresolved(crate::ROSTER_WAITING));
         }
         self.apply_reported(&identity.operation_id)?;
         self.reconcile(&identity.operation_id)

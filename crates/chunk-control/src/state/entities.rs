@@ -282,7 +282,7 @@ impl Claim {
             return Err(Error::Invalid("claim operation lost in a restore"));
         }
         if self.request != request.encode_to_vec() {
-            return Err(Error::Invalid("claim operation changed"));
+            return Err(Error::Invalid(crate::OPERATION_CHANGED));
         }
         Ok(())
     }
