@@ -70,15 +70,18 @@ export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceIm
         if (!(await desiredDeployment(tx, environmentId))) {
           throw failedPrecondition("nothing is deployed to the environment");
         }
+        const accepted = environment.state === EnvironmentState.RUNNING ? WakeOutcome.AWAKE : WakeOutcome.WAKING;
         const [blocked] = await tx`
           select 1 from blocked_addresses
           where environment_id = ${environmentId} and address = ${address} and expire_time > now()`;
-        if (blocked) return { outcome: WakeOutcome.BLOCKED };
+        // Blocked clients may reach a server that is already up or starting, but never wake a sleeping one.
+        if (blocked) {
+          return { outcome: environment.state === EnvironmentState.SUSPENDED ? WakeOutcome.BLOCKED : accepted };
+        }
         // Edges answer these pings from the cached status, so there is nothing to wake.
         if (request.reason === WakeReason.PING && environment.sleeping_ping === SleepingPingMode.CACHE) {
           return { outcome: WakeOutcome.AWAKE };
         }
-        const accepted = environment.state === EnvironmentState.RUNNING ? WakeOutcome.AWAKE : WakeOutcome.WAKING;
         // No report reflects the current revision yet, so an earlier wake already invalidated the idle report.
         if (environment.report_desired_revision < environment.revision) return { outcome: accepted };
         const count = environment.in_window ? environment.wake_count : 0;

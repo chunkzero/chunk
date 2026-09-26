@@ -142,6 +142,26 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     env.close();
   });
 
+  test("Wake from a blocked client leaves an environment that is already running alone", async () => {
+    const env = await running();
+    await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`] });
+    const state = async () =>
+      (await h.client(ProjectService).getEnvironment({ environmentId: env.environmentId })).environment?.state;
+    expect(await state()).toBe(EnvironmentState.RUNNING);
+    await env.client.reportFailedAuth({ failures: [{ clientAddress: "192.0.2.20" }] });
+
+    // An edge still holding the environment's asleep route wakes for the blocked client.
+    const before = await env.revision();
+    const { outcome } = await edge.wake({
+      environmentId: env.environmentId,
+      clientAddress: "192.0.2.20",
+      reason: WakeReason.LOGIN,
+    });
+    expect(outcome).toBe(WakeOutcome.AWAKE);
+    expect(await env.revision()).toBe(before);
+    env.close();
+  });
+
   test("ReadLogs sends the newest stored entries oldest first, then follows", async () => {
     const env = await running();
     let sequence = 0n;
