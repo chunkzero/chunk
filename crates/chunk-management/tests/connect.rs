@@ -1,0 +1,188 @@
+//! The client against a tiny in-process Connect server.
+
+use std::convert::Infallible;
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+use chunk_management::v1::{
+    AttachRequest, AttachResponse, DeployRequest, DeployResponse, Deployment, GetDeploymentRequest, ObjectStore,
+    WakeReason, WakeRequest, WatchRoutesRequest, WatchRoutesResponse,
+};
+use chunk_management::{Client, Code, Error};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
+use hyper::{Request, Response};
+use prost::Message;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
+type Body = BoxBody<Bytes, Infallible>;
+
+fn full(status: u16, content_type: &str, body: impl Into<Bytes>) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .body(Full::new(body.into()).boxed())
+        .expect("response")
+}
+
+fn envelope(flags: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = vec![flags];
+    frame.extend_from_slice(&u32::try_from(payload.len()).expect("small").to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Sends `bytes` in pieces of at most `size` bytes, so frames arrive split across chunks.
+fn chunked(bytes: Vec<u8>, size: usize) -> Response<Body> {
+    let (sender, receiver) = mpsc::channel(4);
+    tokio::spawn(async move {
+        for piece in bytes.chunks(size) {
+            if sender.send(Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(piece)))).await.is_err() {
+                return;
+            }
+        }
+    });
+    Response::builder()
+        .header("content-type", "application/connect+proto")
+        .body(StreamBody::new(ReceiverStream::new(receiver)).boxed())
+        .expect("response")
+}
+
+async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible> {
+    let path = request.uri().path().to_owned();
+    let authorized = request.headers().get("authorization").is_some_and(|value| value == "Bearer secret");
+    let content_type = request.headers().get("content-type").cloned();
+    let body = request.into_body().collect().await.expect("request body").to_bytes();
+    if !authorized {
+        return Ok(full(
+            401,
+            "application/json",
+            r#"{"code":"unauthenticated","message":"a valid bearer token is required"}"#,
+        ));
+    }
+    let response = match path.as_str() {
+        "/chunk.management.v1.DeploymentService/Deploy" => {
+            assert_eq!(content_type.expect("content type"), "application/proto");
+            let request = DeployRequest::decode(body).expect("deploy request");
+            let deployment = Deployment { id: format!("dep_{}", request.request_id), ..Deployment::default() };
+            full(200, "application/proto", DeployResponse { deployment: Some(deployment) }.encode_to_vec())
+        }
+        "/chunk.management.v1.DeploymentService/GetDeployment" => {
+            full(404, "application/json", r#"{"code":"not_found","message":"deployment not found"}"#)
+        }
+        "/chunk.management.v1.EdgeService/Wake" => full(503, "text/plain", "upstream is down"),
+        "/chunk.management.v1.EnvironmentService/Attach" => {
+            assert_eq!(content_type.expect("content type"), "application/connect+proto");
+            let request = AttachRequest::decode(&body[5..]).expect("attach request");
+            assert_eq!(usize::try_from(u32::from_be_bytes(body[1..5].try_into().expect("length"))), Ok(body.len() - 5));
+            let mut stream = Vec::new();
+            for revision in [1, 2] {
+                let message = AttachResponse {
+                    revision,
+                    environment_id: "env_1".into(),
+                    lease: u64::from(request.core),
+                    log_store: Some(ObjectStore { prefix: "environments/env_1/".into(), ..ObjectStore::default() }),
+                    ..AttachResponse::default()
+                };
+                stream.extend(envelope(0, &message.encode_to_vec()));
+            }
+            let end = br#"{"error":{"code":"failed_precondition","message":"lease 1 was superseded by lease 2"}}"#;
+            stream.extend(envelope(2, end));
+            chunked(stream, 3)
+        }
+        "/chunk.management.v1.EdgeService/WatchRoutes" => {
+            let mut stream =
+                envelope(0, &WatchRoutesResponse { revision: 1, reset: true, ..Default::default() }.encode_to_vec());
+            stream.extend(envelope(2, b"{}"));
+            chunked(stream, 1024)
+        }
+        _ => full(404, "text/plain", "no such route"),
+    };
+    Ok(response)
+}
+
+async fn serve() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            tokio::spawn(async move {
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, hyper::service::service_fn(handle))
+                    .await;
+            });
+        }
+    });
+    address
+}
+
+async fn client() -> Client {
+    Client::new(format!("http://{}/", serve().await)).with_token("secret")
+}
+
+#[tokio::test]
+async fn unary_calls_round_trip_binary_protobuf() {
+    let client = client().await;
+    let response = client
+        .deploy(&DeployRequest { request_id: "abc".into(), environment_id: "env_1".into(), release_id: "r1".into() })
+        .await
+        .expect("deploy");
+    assert_eq!(response.deployment.expect("deployment").id, "dep_abc");
+}
+
+#[tokio::test]
+async fn errors_map_connect_codes_and_plain_http_statuses() {
+    let client = client().await;
+    let error = client.get_deployment(&GetDeploymentRequest { deployment_id: "x".into() }).await.unwrap_err();
+    assert_eq!(error.code(), Code::NotFound);
+    assert_eq!(error.to_string(), "not_found: deployment not found");
+
+    let error = client
+        .wake(&WakeRequest {
+            environment_id: "env_1".into(),
+            reason: WakeReason::Login.into(),
+            client_address: "192.0.2.1".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+
+    let anonymous = Client::new(format!("http://{}", serve().await));
+    let error = anonymous.deploy(&DeployRequest::default()).await.unwrap_err();
+    assert_eq!(error.code(), Code::Unauthenticated);
+
+    let unreachable = Client::new("http://127.0.0.1:9").with_token("secret");
+    let error = unreachable.deploy(&DeployRequest::default()).await.unwrap_err();
+    assert!(matches!(error, Error::Transport(_)));
+    assert_eq!(error.code(), Code::Unavailable);
+}
+
+#[tokio::test]
+async fn server_streams_reassemble_split_frames_and_surface_the_end_of_stream_error() {
+    let client = client().await;
+    let mut stream = client
+        .attach(&AttachRequest { instance_id: "i".into(), core: true, ..Default::default() })
+        .await
+        .expect("attach");
+    let first = stream.message().await.expect("first").expect("a message");
+    assert_eq!((first.revision, first.lease), (1, 1));
+    assert_eq!(first.log_store.expect("log store").prefix, "environments/env_1/");
+    assert_eq!(stream.message().await.expect("second").expect("a message").revision, 2);
+    let error = stream.message().await.unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.to_string().contains("superseded"));
+    assert!(stream.message().await.expect("after the end").is_none());
+}
+
+#[tokio::test]
+async fn a_clean_end_of_stream_ends_the_stream() {
+    let client = client().await;
+    let mut stream = client.watch_routes(&WatchRoutesRequest {}).await.expect("watch");
+    assert!(stream.message().await.expect("first").expect("a message").reset);
+    assert!(stream.message().await.expect("end").is_none());
+}
