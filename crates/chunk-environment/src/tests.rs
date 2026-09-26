@@ -161,8 +161,9 @@ async fn a_fresh_start_refuses_a_backend_on_the_address_surviving_jvms_re_attach
 /// A JVM of the previous control that exits once control stops it.
 struct Survivor {
     jvm: Mutex<std::process::Child>,
-    marker: PathBuf,
-    /// Whether the JVM's launch marker still existed when control stopped it.
+    /// The launch marker and previous discovery record, with their contents.
+    evidence: Vec<(PathBuf, Vec<u8>)>,
+    /// Whether that evidence was unchanged when control stopped the JVM.
     stopped: Arc<Mutex<Option<bool>>>,
 }
 
@@ -173,7 +174,8 @@ impl NodeControl for Survivor {
     }
 
     async fn stop_process(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessIdentity>, Status> {
-        *self.stopped.lock().unwrap() = Some(self.marker.exists());
+        let unchanged = self.evidence.iter().all(|(path, bytes)| std::fs::read(path).ok().as_ref() == Some(bytes));
+        *self.stopped.lock().unwrap() = Some(unchanged);
         let mut jvm = self.jvm.lock().unwrap();
         jvm.kill().unwrap();
         jvm.wait().unwrap();
@@ -208,9 +210,7 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
         ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "stale".into() }
     } else {
         // An older launch record names no address, so the previous control's discovery record is its only evidence.
-        let token = "previous".repeat(8);
-        std::fs::write(config.state.join("control").join("token"), &token).unwrap();
-        ControlConnection { endpoint: endpoint.clone(), token }
+        ControlConnection { endpoint: endpoint.clone(), token: "previous".into() }
     };
     std::fs::write(&config.control_record, serde_json::to_vec(&record).unwrap()).unwrap();
     let id = "5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f";
@@ -229,7 +229,8 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let node = listener.local_addr().unwrap();
     let stopped = Arc::default();
-    let survivor = Survivor { jvm: Mutex::new(jvm), marker: marker.clone(), stopped: Arc::clone(&stopped) };
+    let evidence = [&marker, &config.control_record].map(|path| (path.clone(), std::fs::read(path).unwrap())).into();
+    let survivor = Survivor { jvm: Mutex::new(jvm), evidence, stopped: Arc::clone(&stopped) };
     let incoming = tonic::transport::server::TcpIncoming::from(listener);
     tokio::spawn(
         tonic::transport::Server::builder().add_service(NodeControlServer::new(survivor)).serve_with_incoming(incoming),

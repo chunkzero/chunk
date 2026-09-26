@@ -79,13 +79,13 @@ impl Core {
             if_present(fs::remove_dir_all(config.state.join("control")))?;
         }
         let listener = TcpListener::bind(config.control_bind).await?;
-        self.serve_control(config, listener).await
+        self.serve_control(config, listener, config.control_record.clone()).await
     }
 
     /// Stops the JVMs of the previous control that may still hold their launch locks, since only a control on its
     /// files can confirm they exited. Each re-attaches only at the endpoint its launch record names, or at the previous
     /// discovery record's endpoint when the record names none, so control serves there, waiting while another process
-    /// holds that address.
+    /// holds that address. That record stays as it is until they have exited, as control publishes its own elsewhere.
     async fn stop_survivors(&mut self, config: &CoreConfig) -> io::Result<()> {
         let launches = chunk_control::ProcessHost::new(self.host_config(config)?);
         let previous =
@@ -96,10 +96,6 @@ impl Core {
             let endpoints = launches.unowned_endpoints().map_err(io::Error::other)?;
             if endpoints.is_empty() {
                 return Ok(());
-            }
-            // JVMs whose launch records name no endpoint re-attach at the record's, which recovery republishes.
-            if !endpoints.contains(&None) {
-                if_present(fs::remove_file(&config.control_record))?;
             }
             let known = survivor_bind(&endpoints, previous.as_deref())?;
             let bind = known.unwrap_or(config.control_bind);
@@ -116,7 +112,8 @@ impl Core {
                     } else {
                         tracing::warn!(%bind, "stopping JVMs that outlived the previous control at an address they may not know");
                     }
-                    self.serve_control(config, listener).await?;
+                    let record = config.state.join("control").join("recovery.json");
+                    self.serve_control(config, listener, record).await?;
                     return self.stop_control(|| {}).await;
                 }
                 Err(error) => {
@@ -134,13 +131,13 @@ impl Core {
         Ok(chunk_control::ProcessHostConfig { directory, backend: self.backend_connection()?.clone() })
     }
 
-    async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener) -> io::Result<()> {
+    async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener, record: PathBuf) -> io::Result<()> {
         let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
         self.host = Some(host.clone());
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
-            connection: config.control_record.clone(),
+            connection: record,
             state: config.state.join("control"),
             system: self.system()?,
             listener,
