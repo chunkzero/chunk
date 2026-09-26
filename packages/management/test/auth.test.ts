@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code } from "@connectrpc/connect";
 
 import { AuthService, LoginState } from "../src/gen/chunk/management/v1/auth_pb.ts";
@@ -76,5 +77,18 @@ describe.skipIf(!databaseUrl)("AuthService", () => {
     await auth.revokeToken({ tokenId: created.token?.id ?? "" });
     await auth.revokeToken({ tokenId: created.token?.id ?? "" });
     expect(await codeOf(scoped.listProjects({}))).toBe(Code.Unauthenticated);
+  });
+
+  test("a token retry replays its first result after expire_time passes", async () => {
+    const auth = h.client(AuthService);
+    const request = {
+      requestId: crypto.randomUUID(),
+      name: "short-lived",
+      expireTime: timestampFromDate(new Date(Date.now() + 1000)),
+    };
+    const created = await auth.createToken(request);
+    await Bun.sleep(1100);
+    expect((await auth.createToken(request)).secret).toBe(created.secret);
+    expect(await codeOf(auth.createToken({ ...request, requestId: crypto.randomUUID() }))).toBe(Code.InvalidArgument);
   });
 });

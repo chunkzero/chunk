@@ -112,10 +112,11 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
         throw new ConnectError("a project token can only create tokens for its own project", Code.PermissionDenied);
       }
       const expireTime = request.expireTime && timestampDate(request.expireTime);
-      if (expireTime && expireTime <= new Date()) throw invalid("expire_time must be in the future");
       return idempotent(
         { sql, keys, caller, method: AuthService.method.createToken, request, sealed: true },
         async (tx) => {
+          // Checked only when minting, so a retry after expire_time still returns the first result.
+          if (expireTime && expireTime <= new Date()) throw invalid("expire_time must be in the future");
           if (projectId !== undefined && !(await findProject(tx, projectId))) throw notFound("project");
           const { row, secret } = await issueToken(tx, {
             principalId: caller.principal.id,
