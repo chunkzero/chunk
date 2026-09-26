@@ -130,6 +130,8 @@ pub(super) struct Watches {
     recent: Vec<(Revision, Commit)>,
     recent_bytes: usize,
     durable: Revision,
+    /// Groups holding results evaluated past the durable revision, published once it catches up.
+    withheld: BTreeSet<GroupId>,
     ids: u64,
     /// Estimated memory held by groups and queries, limited to `budget`.
     bytes: usize,
@@ -149,6 +151,7 @@ impl Watches {
             recent: Vec::new(),
             recent_bytes: 0,
             durable,
+            withheld: BTreeSet::new(),
             ids: 0,
             bytes: 0,
             budget: SUBSCRIPTION_BYTES,
@@ -243,6 +246,11 @@ impl Watches {
         }
         if !affected.is_empty() {
             self.next_commits.push(Timer::start());
+        }
+        for group in std::mem::take(&mut self.withheld) {
+            if self.groups.contains_key(&group) {
+                self.publish(group);
+            }
         }
     }
 
@@ -466,6 +474,9 @@ impl Watches {
             if let Some(stale) = query.stale {
                 last = last.min(Revision(stale.0.saturating_sub(1)));
             }
+        }
+        if first > self.durable {
+            self.withheld.insert(id);
         }
         if first > last || last < group.revision {
             return;
