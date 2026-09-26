@@ -42,6 +42,47 @@ test("shared log store credentials need an explicit opt-in", () => {
   expect(loadConfig({ ...env, CHUNK_LOG_STORE_SHARED_CREDENTIALS: "1" }).logStore?.sharedCredentials).toBe(true);
 });
 
+test("concurrent grants for an environment share one STS request, and a failed one is not kept", async () => {
+  let requests = 0;
+  let respond: (response: Response) => void = () => {};
+  const sts = () => {
+    requests++;
+    return new Promise<Response>((resolve) => (respond = resolve));
+  };
+  const issuer = logStoreIssuer(
+    {
+      endpoint: "http://127.0.0.1:9000",
+      region: "us-east-1",
+      bucket: "logs",
+      prefix: "p/",
+      accessKeyId: "operator",
+      secretAccessKey: "secret",
+      sharedCredentials: false,
+      stsEndpoint: "http://sts.invalid",
+      roleArn: "arn:aws:iam::123456789012:role/chunk-logs",
+      credentialSeconds: 3600,
+    },
+    sts as unknown as typeof fetch,
+  );
+
+  const failed = Array.from({ length: 10 }, () => issuer.grant("env_a"));
+  expect(requests).toBe(1);
+  respond(new Response("denied", { status: 403 }));
+  for (const grant of failed) await expect(grant).rejects.toThrow("HTTP 403");
+
+  const granted = Array.from({ length: 10 }, () => issuer.grant("env_a"));
+  expect(requests).toBe(2);
+  const expiration = new Date(Date.now() + 3_600_000).toISOString();
+  respond(
+    new Response(
+      `<AccessKeyId>temp</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken>` +
+        `<Expiration>${expiration}</Expiration>`,
+    ),
+  );
+  expect((await Promise.all(granted)).map((grant) => grant.accessKeyId)).toEqual(Array(10).fill("temp"));
+  expect(requests).toBe(2);
+});
+
 describe.skipIf(!databaseUrl)("STS log store credentials", () => {
   let h: Harness;
   let sts: ReturnType<typeof Bun.serve>;

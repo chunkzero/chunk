@@ -49,7 +49,7 @@ function sharedIssuer(store: LogStore): LogStoreIssuer {
  * with AWS S3 and MinIO.
  */
 function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
-  const cache = new Map<string, Promise<{ grant: LogStoreGrant; refreshAt: number }>>();
+  const cache = new Map<string, { grant: Promise<LogStoreGrant>; refreshAt: number }>();
   const assume = async (environmentId: string) => {
     const issuedAt = Date.now();
     const target = location(store, environmentId);
@@ -82,13 +82,22 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
     return { grant, refreshAt: expiration.getTime() - Math.min(maxRefreshBeforeMs, lifetime / 3) };
   };
   return {
-    async grant(environmentId) {
-      const cached = await cache.get(environmentId)?.catch(() => undefined);
+    grant(environmentId) {
+      const cached = cache.get(environmentId);
       if (cached && Date.now() < cached.refreshAt) return cached.grant;
+      // Cached before it settles, so concurrent grants share one AssumeRole; it is refreshed once it has settled.
       const issued = assume(environmentId);
-      cache.set(environmentId, issued);
-      issued.catch(() => cache.delete(environmentId));
-      return (await issued).grant;
+      const entry = { grant: issued.then(({ grant }) => grant), refreshAt: Number.POSITIVE_INFINITY };
+      cache.set(environmentId, entry);
+      issued.then(
+        ({ refreshAt }) => {
+          entry.refreshAt = refreshAt;
+        },
+        () => {
+          if (cache.get(environmentId) === entry) cache.delete(environmentId);
+        },
+      );
+      return entry.grant;
     },
   };
 }
