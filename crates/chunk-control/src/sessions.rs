@@ -56,7 +56,7 @@ impl Control {
         Ok(())
     }
 
-    async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
+    pub(crate) async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
         let state = self.state()?;
         if self.host.stopped(host) {
             return Ok(());

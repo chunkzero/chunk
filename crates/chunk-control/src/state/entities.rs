@@ -92,11 +92,19 @@ pub(crate) struct SessionState {
     pub finished: bool,
     pub host: String,
     pub session_type: String,
+    /// Empty for a session recovery found running without a log row.
     pub demand_key: String,
     pub capacity: u32,
     #[serde(with = "json_text")]
     pub configuration: serde_json::Value,
     pub retired: bool,
+}
+
+impl SessionState {
+    /// Whether recovery recorded this session from its JVM's inventory, rather than placement creating it.
+    pub fn recovered(&self) -> bool {
+        self.demand_key.is_empty()
+    }
 }
 
 /// Which claims a player owns. The row exists only while it names one.

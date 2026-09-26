@@ -1,7 +1,8 @@
 //! Recovery after control restarts: JVMs that outlived it re-attach, and the log decides which of their deliveries
-//! remain owned. Until every surviving JVM's deliveries are fenced or its host confirms it stopped, new claims are
-//! refused as busy, so a player a JVM still serves without a claim in the log cannot gain a second owner. No timeout
-//! reopens admission: an unreachable JVM may still be serving players.
+//! and sessions remain owned. Until every surviving JVM's deliveries are fenced and the sessions the log lost are
+//! finished, or its host confirms it stopped, new claims are refused as busy, so a player a JVM still serves without a
+//! claim in the log cannot gain a second owner. No timeout reopens admission: an unreachable JVM may still be serving
+//! players.
 
 use std::{
     collections::BTreeSet,
@@ -11,7 +12,7 @@ use std::{
 
 use chunk_proto::v1::{
     DeliveryPhase, PlayerDelivery, PlayerWithdrawal, ProcessIdentity, ProcessInventory, ProcessRegistration,
-    ShutdownNodeRequest, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
+    SessionPhase, ShutdownNodeRequest, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
 };
 use prost::Message;
 use tokio::sync::Mutex as AsyncMutex;
@@ -20,7 +21,7 @@ use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     drain::retire_host,
-    state::{Claim, Generation, HostState, Phase},
+    state::{Claim, Generation, HostState, Phase, SessionState, State},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -126,11 +127,52 @@ impl Control {
             return Err(Error::Invalid("recovered inventory mismatch"));
         }
         self.retire_unknown_operations(&inventory)?;
-        let fenced = self.fence_deliveries(&runtime, &inventory).await?;
-        if fenced {
-            self.retire_orphan(id, &runtime.identity)?;
+        self.retire_unknown_sessions(id, &inventory)?;
+        if !self.fence_deliveries(&runtime, &inventory).await? {
+            return Ok(false);
         }
-        Ok(fenced)
+        self.retire_orphan(id, &runtime.identity)?;
+        let unfinished = |state: &State| {
+            state.sessions.values().any(|session| session.host == id && session.recovered() && !session.finished)
+        };
+        if unfinished(&*self.state()?) {
+            self.reconcile_host_sessions(id).await?;
+        }
+        Ok(!unfinished(&*self.state()?))
+    }
+
+    /// Records each session a logged host's JVM runs without a log row, such as one whose creation a restore lost, as
+    /// a retired session to finish. Until the JVM confirms it ended, its row counts toward the host's capacity. A lost
+    /// orphan host's sessions end with its JVM instead.
+    fn retire_unknown_sessions(&self, id: &str, inventory: &ProcessInventory) -> Result<()> {
+        self.update(|state| {
+            if !state.hosts.contains_key(id) {
+                return Ok(());
+            }
+            for observed in &inventory.sessions {
+                let Some(session) = &observed.session else {
+                    continue;
+                };
+                let ended =
+                    observed.phase == SessionPhase::Ended as i32 && observed.prepared == 0 && observed.attached == 0;
+                if ended || state.sessions.contains_key(&session.id) {
+                    continue;
+                }
+                let tombstone = SessionState {
+                    empty_since_ms: None,
+                    finish_requested: true,
+                    finished: false,
+                    host: id.into(),
+                    session_type: observed.session_type.clone(),
+                    demand_key: String::new(),
+                    capacity: observed.capacity,
+                    configuration: serde_json::json!({}),
+                    retired: true,
+                };
+                state.sessions.insert(session.id.clone(), tombstone);
+            }
+            Ok(())
+        })
     }
 
     /// Records a fenced JVM whose host row a restore lost as a retiring host, so the host lifecycle stops it: its
