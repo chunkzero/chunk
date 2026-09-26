@@ -175,8 +175,12 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert!(host.unowned().unwrap().is_empty());
     assert_eq!(host.connection(&id).unwrap().token, process.token);
     assert!(host.adopt(&process.token, registration).is_err());
-    assert!(matches!(host.terminate(&id).await, Err(Error::Unresolved(_))));
     assert!(!host.stopped(&id));
+    // The JVM exits without a Child in this host; its launch marker confirms the termination.
+    let pid = recorded.launched.unwrap().pid;
+    assert!(std::process::Command::new("kill").arg(pid.to_string()).status().unwrap().success());
+    host.terminate(&id).await.unwrap();
+    assert!(host.stopped(&id));
 }
 
 /// A host that launches nothing in `directory`.

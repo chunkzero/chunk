@@ -384,12 +384,12 @@ impl Host for ProcessHost {
             }
         };
         process.stop.cancel();
+        // A re-attached JVM has no Child to stop it, so only its launch marker can confirm it exited.
         if process.adopted {
             stop_gracefully(&process).await;
-            return Err(Error::Unresolved("re-attached JVM exit unconfirmed"));
         }
         let deadline = Instant::now() + Duration::from_secs(12);
-        while !process.stopped.load(Ordering::Acquire) {
+        while !self.stopped(id) {
             if Instant::now() >= deadline {
                 return Err(Error::Unresolved("JVM shutdown not confirmed"));
             }

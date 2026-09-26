@@ -11,14 +11,16 @@ use std::{
 
 use chunk_proto::v1::{
     DeliveryPhase, PlayerDelivery, PlayerWithdrawal, ProcessIdentity, ProcessInventory, ProcessRegistration,
-    gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
+    ShutdownNodeRequest, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
 };
+use prost::Message;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
-    state::{Claim, Generation, Phase},
+    drain::retire_host,
+    state::{Claim, Generation, HostState, Phase},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -124,7 +126,32 @@ impl Control {
             return Err(Error::Invalid("recovered inventory mismatch"));
         }
         self.retire_unknown_operations(&inventory)?;
-        self.fence_deliveries(&runtime, &inventory).await
+        let fenced = self.fence_deliveries(&runtime, &inventory).await?;
+        if fenced {
+            self.retire_orphan(id, &runtime.identity)?;
+        }
+        Ok(fenced)
+    }
+
+    /// Records a fenced JVM whose host row a restore lost as a retiring host, so the host lifecycle stops it: its
+    /// drain terminates it at once, and control shutdown stops it like any logged host.
+    fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
+        self.update(|state| {
+            if state.hosts.contains_key(id) {
+                return Ok(());
+            }
+            let host = HostState {
+                app: identity.app_id.clone(),
+                profile: identity.machine_profile.clone(),
+                retired: false,
+                idle_since_ms: None,
+            };
+            state.hosts.insert(id.into(), host);
+            let operation = format!("orphan/{id}");
+            let request =
+                ShutdownNodeRequest { operation_id: operation.clone(), host_id: id.into(), timeout_seconds: 0 };
+            retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id.into()))
+        })
     }
 
     /// Accepts a JVM registration. A JVM launched before control restarted re-attaches only if its host adopts it,

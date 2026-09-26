@@ -144,15 +144,25 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
 
     let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
     let mut registration = Request::new(ProcessRegistration {
-        identity: Some(ProcessIdentity { runtime_id: host, ..fixture.runtime.identity.clone() }),
+        identity: Some(ProcessIdentity { runtime_id: host.clone(), ..fixture.runtime.identity.clone() }),
         control_endpoint: fixture.host.endpoint.clone(),
         player_endpoint: "127.0.0.1:1".into(),
     });
     registration.metadata_mut().insert("authorization", "Bearer test-runtime-credential".parse().unwrap());
     service.register_process(registration).await.unwrap();
-    control.reconcile_all().await.unwrap();
+    control.admit().await.unwrap();
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["lost"].phase, DeliveryPhase::Closed);
-    assert!(control.state().unwrap().claims["lost"].phase == Phase::Released);
-    control.claim(relogin).await.unwrap();
+    let state = control.state().unwrap();
+    assert!(state.claims["lost"].phase == Phase::Released);
+
+    // The fenced JVM becomes a retiring host, so the host lifecycle stops and forgets it.
+    assert!(state.hosts[&host].retired && state.drains.values().any(|drain| drain.host == host));
+    control.shutdown().await.unwrap();
+    assert!(fixture.host.terminated.lock().unwrap().contains(&host));
+    control.reconcile_all().await.unwrap();
+    let state = control.state().unwrap();
+    assert!(!state.hosts.contains_key(&host) && state.drains.is_empty());
+    drop((service, control));
+    fixture.control().claim(relogin).await.unwrap();
     fixture.close().await;
 }
