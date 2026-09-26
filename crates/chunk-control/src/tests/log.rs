@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Generation, Table};
-use chunk_store::{ObjectStorage, Replication, SqliteStore};
+use chunk_store::{Listed, ObjectStorage, Replication, SqliteStore, Storage};
 
 #[derive(Default)]
 struct Memory(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -21,14 +21,19 @@ impl ObjectStorage for Memory {
     fn get(&self, key: &str) -> std::io::Result<Vec<u8>> {
         self.0.lock().unwrap().get(key).cloned().ok_or_else(|| std::io::ErrorKind::NotFound.into())
     }
-    fn list(&self, prefix: &str) -> std::io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> std::io::Result<Vec<Listed>> {
         let objects = self.0.lock().unwrap();
         let prefix = format!("{}/", prefix.trim_end_matches('/'));
+        let modified = std::time::SystemTime::now();
         Ok(objects
             .iter()
             .filter(|(key, _)| key.starts_with(&prefix))
-            .map(|(key, bytes)| (key.clone(), bytes.len() as u64))
+            .map(|(key, bytes)| Listed { key: key.clone(), size: bytes.len() as u64, modified })
             .collect())
+    }
+    fn delete(&self, key: &str) -> std::io::Result<()> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
     }
 }
 
