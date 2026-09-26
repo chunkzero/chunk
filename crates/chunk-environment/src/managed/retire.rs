@@ -15,8 +15,8 @@ impl Managed<'_> {
         }
     }
 
-    /// Once a deployment serves, stops the JVMs of every other deployment the backend holds, except one being loaded,
-    /// then releases its backend version once they have all exited.
+    /// Stops the JVMs of every deployment the backend holds that is neither control's current one nor kept for
+    /// management, then releases its backend version once they have all exited.
     async fn retire(&self) {
         let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
         let resident = match backend.deployments().await {
@@ -25,15 +25,16 @@ impl Managed<'_> {
         };
         for id in resident {
             let deployment = id.as_str();
-            // Checked and retired without an await in between, so no deployment starts loading it meanwhile.
+            // Checked and retired without an await in between, so management cannot ask for it meanwhile.
             let stopped = {
-                let deployments = lock(&self.deployments);
-                let serving = deployments.serving.as_deref();
-                let loading = deployments.loading.as_ref().map(|(loading, _)| loading.as_str());
-                if serving.is_none_or(|serving| serving == deployment) || loading == Some(deployment) {
+                if lock(&self.deployments).kept(deployment) {
                     continue;
                 }
-                control.retire_release(deployment)
+                match control.current_release() {
+                    Ok(current) if current.as_deref() == Some(deployment) => continue,
+                    Ok(_) => control.retire_release(deployment),
+                    Err(error) => Err(error),
+                }
             };
             match stopped {
                 Ok(true) => match backend.release(id.clone()).await {
@@ -46,19 +47,15 @@ impl Managed<'_> {
         }
     }
 
-    /// Removes the unpacked releases that neither control, whose JVMs run from them, nor a loading deployment uses.
+    /// Removes the unpacked releases that neither control, whose JVMs run from them, nor a load claims.
     async fn remove_unused_releases(&self) {
         let Ok(control) = self.core.control() else { return };
-        let mut used = match control.release_artifacts() {
+        let used = match control.release_artifacts() {
             Ok(used) => used,
             Err(error) => return tracing::warn!(%error, "releases in use unknown"),
         };
-        // Set aside without an await in between, so no deployment starts loading one meanwhile.
-        let unused = {
-            let deployments = lock(&self.deployments);
-            used.extend(deployments.loading.as_ref().map(|(_, release)| release.clone()));
-            release::set_aside(&self.releases, &used)
-        };
+        // Set aside without an await in between, so no loaded release activates and drops its claim meanwhile.
+        let unused = release::set_aside(&self.releases, &self.claims, used);
         if let Err(error) = release::remove(unused).await {
             tracing::warn!(%error, "unused releases not removed");
         }

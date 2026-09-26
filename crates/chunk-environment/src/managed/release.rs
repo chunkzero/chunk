@@ -3,9 +3,10 @@
 use chunk_build::{ArchiveDigest, UnpackLimits, VerifiedRelease};
 use chunk_management::{Client, v1};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
@@ -20,17 +21,52 @@ const MIN_BYTES_PER_SECOND: u64 = 256 * 1024;
 /// JVMs one release may run at once: control's limit, since capacity bounds them.
 const MAX_PROCESSES: u16 = 32;
 
-/// A verified release, unpacked under the state directory.
+/// A verified release, unpacked under the state directory, which reclamation leaves alone until it is dropped.
 pub(super) struct Loaded {
     directory: PathBuf,
     release: VerifiedRelease,
+    _claim: Claim,
+}
+
+/// The releases a load, its filesystem workers or a loaded release use. Each release has one user at a time, and
+/// reclamation leaves them alone.
+#[derive(Default)]
+pub(super) struct Claims(Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+/// The exclusive use of one release's directory, until dropped.
+struct Claim {
+    _release: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Claims {
+    async fn claim(&self, id: &str) -> Claim {
+        let release = self.0.lock().unwrap_or_else(PoisonError::into_inner).entry(id.into()).or_default().clone();
+        Claim { _release: release.lock_owned().await }
+    }
+
+    /// The releases claimed or waited for.
+    fn used(&self) -> BTreeSet<String> {
+        let mut claims = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        claims.retain(|_, release| Arc::strong_count(release) > 1);
+        claims.keys().cloned().collect()
+    }
+}
+
+/// A path only one load attempt uses, removed once dropped.
+struct Staged(PathBuf);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        _ = if self.0.is_dir() { fs::remove_dir_all(&self.0) } else { fs::remove_file(&self.0) };
+    }
 }
 
 /// Unpacks and verifies the release `artifact` names into `releases/<release_id>`, reusing an earlier copy there that
-/// still verifies. Returns `None` once `cancel` stops its download.
+/// still verifies. Returns `None` once `cancel` stops it before its download finishes.
 pub(super) async fn load(
     client: &Client,
     releases: &Path,
+    claims: &Claims,
     artifact: &v1::ReleaseArtifact,
     cancel: &CancellationToken,
 ) -> io::Result<Option<Loaded>> {
@@ -40,30 +76,42 @@ pub(super) async fn load(
         return Err(io::Error::other("the release ID is not a plain name"));
     }
     fs::create_dir_all(releases)?;
+    let claim = tokio::select! {
+        claim = claims.claim(&id) => claim,
+        () = cancel.cancelled() => return Ok(None),
+    };
+    // Each blocking worker holds the claim until it finishes, even once this future is dropped.
     let directory = releases.join(&id);
     let (existing, expected) = (directory.clone(), id.clone());
-    if let Some(release) = blocking(move || Ok(reusable(&existing, &expected))).await? {
-        return Ok(Some(Loaded { directory, release }));
+    let (reused, claim) = blocking(move || Ok((reusable(&existing, &expected), claim))).await?;
+    if let Some(release) = reused {
+        return Ok(Some(Loaded { directory, release, _claim: claim }));
     }
-    let archive = releases.join(format!(".{id}.tar.gz"));
-    let downloaded = tokio::select! {
-        downloaded = download(client, artifact, &archive) => downloaded.map(|()| true),
-        () = cancel.cancelled() => Ok(false),
-    };
-    if !matches!(downloaded, Ok(true)) {
-        _ = fs::remove_file(&archive);
-        return downloaded.map(|_| None);
+    let attempt = uuid::Uuid::new_v4();
+    let archive = Staged(releases.join(format!(".{attempt}.tar.gz")));
+    tokio::select! {
+        downloaded = download(client, artifact, &archive.0) => downloaded?,
+        () = cancel.cancelled() => return Ok(None),
     }
     let digest = ArchiveDigest { sha256: artifact.sha256.clone(), size: artifact.size_bytes };
-    let destination = directory.clone();
-    let release = blocking(move || {
-        let unpacked = chunk_build::unpack_release(&archive, &digest, &destination, &UnpackLimits::default());
-        _ = fs::remove_file(&archive);
-        unpacked?;
-        verify(&destination, &id).inspect_err(|_| _ = fs::remove_dir_all(&destination))
+    let (staging, destination) = (Staged(releases.join(format!(".{attempt}"))), directory.clone());
+    let (release, claim) = blocking(move || {
+        chunk_build::unpack_release(&archive.0, &digest, &staging.0, &UnpackLimits::default())?;
+        drop(archive);
+        let release = verify(&staging.0, &id)?;
+        publish(&staging.0, &destination)?;
+        Ok((release, claim))
     })
     .await?;
-    Ok(Some(Loaded { directory, release }))
+    Ok(Some(Loaded { directory, release, _claim: claim }))
+}
+
+/// Moves the verified `staging` to `destination`, unless a copy is already published there.
+fn publish(staging: &Path, destination: &Path) -> io::Result<()> {
+    match fs::rename(staging, destination) {
+        Err(_) if destination.is_dir() => Ok(()),
+        published => published,
+    }
 }
 
 /// Removes the downloads and unpacks a previous run left unfinished: every entry of `releases` named with a dot.
@@ -72,8 +120,10 @@ pub(super) async fn sweep(releases: &Path) -> io::Result<()> {
     remove(hidden).await
 }
 
-/// Renames aside the unpacked releases in `releases` whose IDs are not in `used`, returning their new paths.
-pub(super) fn set_aside(releases: &Path, used: &BTreeSet<String>) -> Vec<PathBuf> {
+/// Renames aside the unpacked releases in `releases` whose IDs are neither in `used` nor claimed, returning their new
+/// paths.
+pub(super) fn set_aside(releases: &Path, claims: &Claims, mut used: BTreeSet<String>) -> Vec<PathBuf> {
+    used.extend(claims.used());
     let unused = entries(releases).unwrap_or_default().into_iter().filter(|path| {
         !hidden(path) && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| !used.contains(name))
     });
@@ -172,7 +222,8 @@ impl Loaded {
     }
 }
 
-/// An earlier copy of release `id` at `directory` that still verifies. A copy that does not is removed.
+/// An earlier copy of release `id` at `directory` that still verifies. A copy that does not is removed; the caller's
+/// claim means no other load uses it.
 fn reusable(directory: &Path, id: &str) -> Option<VerifiedRelease> {
     if !directory.exists() {
         return None;

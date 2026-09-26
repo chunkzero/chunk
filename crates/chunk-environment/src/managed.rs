@@ -43,18 +43,34 @@ pub(crate) struct Managed<'a> {
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
+    claims: release::Claims,
     /// The sequence of the latest report under the current lease.
     sequence: AtomicU64,
 }
 
 #[derive(Default)]
 struct Deployments {
+    /// The deployment of the latest desired state this process received; unset until the first one arrives.
+    desired: Option<String>,
     /// The deployment players are routed to.
     serving: Option<String>,
-    /// The deployment being loaded and its release, which retirement and storage reclamation leave alone.
-    loading: Option<(String, String)>,
+    /// The deployment control made current while management has not yet accepted it as active, and the one current
+    /// before it.
+    unacknowledged: Option<(String, Option<String>)>,
+    /// The deployment being loaded.
+    loading: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
+}
+
+impl Deployments {
+    /// Whether management may still ask for `deployment` or players may still be routed to it, so it must not retire.
+    /// Before the first desired state arrives, every deployment is kept.
+    fn kept(&self, deployment: &str) -> bool {
+        let Some(desired) = &self.desired else { return true };
+        let previous = self.unacknowledged.as_ref().and_then(|(_, previous)| previous.as_deref());
+        [Some(desired.as_str()), self.serving.as_deref(), previous, self.loading.as_deref()].contains(&Some(deployment))
+    }
 }
 
 /// Why following the desired state stopped.
@@ -77,7 +93,7 @@ impl From<chunk_management::Error> for Interrupted {
 
 type Future<'a> = Pin<Box<dyn std::future::Future<Output = Result<(), Interrupted>> + Send + 'a>>;
 
-/// The work of applying one desired revision. Dropping it stops the work and lets its deployment be retired.
+/// The work of applying one desired revision. Dropping it stops the work.
 struct Work<'a> {
     revision: u64,
     deployment: String,
@@ -110,6 +126,7 @@ impl<'a> Managed<'a> {
             gateway,
             gateway_config,
             deployments: Mutex::default(),
+            claims: release::Claims::default(),
             sequence: AtomicU64::new(0),
         }
     }
@@ -166,6 +183,7 @@ impl<'a> Managed<'a> {
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
+                    lock(&self.deployments).desired = Some(desired.deployment_id.clone());
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
                     }
@@ -190,8 +208,7 @@ impl<'a> Managed<'a> {
     }
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
-        let release = desired.release.as_ref().map(|release| release.release_id.clone()).unwrap_or_default();
-        lock(&self.deployments).loading = Some((desired.deployment_id.clone(), release));
+        lock(&self.deployments).loading = Some(desired.deployment_id.clone());
         let cancel = CancellationToken::new();
         Work {
             revision: desired.revision,
@@ -203,9 +220,14 @@ impl<'a> Managed<'a> {
     }
 
     /// Serves `desired`'s deployment unless it already serves or rejected it, then reports its progress. Work that
-    /// `cancel` superseded ends without switching traffic or reporting.
+    /// `cancel` superseded ends without switching traffic or reporting. First, it reports an earlier activation
+    /// management has not accepted yet, since the deployment served before it is kept until then.
     async fn apply(&self, desired: v1::AttachResponse, cancel: CancellationToken) -> Result<(), Interrupted> {
         let deployment = desired.deployment_id.as_str();
+        let unacknowledged = lock(&self.deployments).unacknowledged.as_ref().map(|(active, _)| active.clone());
+        if let Some(active) = unacknowledged.filter(|active| active != deployment) {
+            self.report(&desired, Some(progress(&active, v1::DeploymentState::Active, String::new()))).await?;
+        }
         if deployment.is_empty() {
             return self.report(&desired, None).await;
         }
@@ -243,7 +265,7 @@ impl<'a> Managed<'a> {
     /// makes it control's current release. Returns whether it did.
     async fn deploy(&self, desired: &v1::AttachResponse, cancel: &CancellationToken) -> io::Result<bool> {
         let artifact = desired.release.as_ref().ok_or_else(|| io::Error::other("the deployment names no release"))?;
-        let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
+        let Some(loaded) = release::load(&self.client, &self.releases, &self.claims, artifact, cancel).await? else {
             return Ok(false);
         };
         let deployment = &desired.deployment_id;
@@ -255,7 +277,10 @@ impl<'a> Managed<'a> {
         if cancel.is_cancelled() {
             return Ok(false);
         }
+        let previous = self.core.control()?.current_release().map_err(io::Error::other)?;
         self.core.activate(deployment, loaded.distribution(), loaded.control(&self.environment, deployment))?;
+        let previous = previous.filter(|previous| previous != deployment);
+        lock(&self.deployments).unacknowledged = Some((deployment.clone(), previous));
         Ok(true)
     }
 
@@ -272,11 +297,17 @@ impl<'a> Managed<'a> {
         Ok(())
     }
 
+    /// Reports status under `desired`'s lease. Once management accepts an activation, the deployment served before it
+    /// may retire.
     async fn report(
         &self,
         desired: &v1::AttachResponse,
         deployment: Option<v1::DeploymentProgress>,
     ) -> Result<(), Interrupted> {
+        let active = deployment
+            .as_ref()
+            .filter(|progress| progress.state() == v1::DeploymentState::Active)
+            .map(|progress| progress.deployment_id.clone());
         let request = v1::ReportStatusRequest {
             observe_time: Some(std::time::SystemTime::now().into()),
             deployment,
@@ -286,6 +317,12 @@ impl<'a> Managed<'a> {
             ..Default::default()
         };
         deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
+        let mut deployments = lock(&self.deployments);
+        if let Some(active) = active
+            && deployments.unacknowledged.as_ref().is_some_and(|(unacknowledged, _)| *unacknowledged == active)
+        {
+            deployments.unacknowledged = None;
+        }
         Ok(())
     }
 }

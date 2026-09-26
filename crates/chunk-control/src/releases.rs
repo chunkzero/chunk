@@ -86,6 +86,13 @@ impl Control {
         Ok(self.state()?.releases.values().map(|release| release.release.artifact_digest.clone()).collect())
     }
 
+    /// The deployment of the current release, where new players are placed.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn current_release(&self) -> Result<Option<String>> {
+        Ok(self.state()?.current.clone())
+    }
+
     pub(crate) fn launches(&self) -> Result<Launches> {
         let unowned = self.host.unowned()?;
         Ok(Launches { recovered: self.recovery.open()?, unowned })

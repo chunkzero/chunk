@@ -25,6 +25,7 @@ type Body = BoxBody<Bytes, Infallible>;
 
 /// The parts of the management service a core uses to deploy.
 struct Management {
+    records: Mutex<Records>,
     desired: watch::Sender<AttachResponse>,
     /// The lease of the latest core attach, which fences every core attached before it.
     lease: watch::Sender<u64>,
@@ -33,6 +34,75 @@ struct Management {
     /// Notified when a download of an archive whose path names it `stalled` starts. That download sends half of the
     /// archive, then nothing.
     stalled: Notify,
+    /// ACTIVE reports for this deployment are refused as unavailable, notifying `refusal`.
+    refused: Mutex<Option<String>>,
+    refusal: Notify,
+}
+
+/// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
+#[derive(Default)]
+struct Records {
+    revision: u64,
+    deployments: Vec<(String, ReleaseArtifact, DeploymentState)>,
+}
+
+impl Management {
+    /// Supersedes the unfinished deployments with a new one.
+    fn deploy(&self, deployment: &str, release: ReleaseArtifact) {
+        let mut records = self.records.lock().unwrap();
+        for (_, _, state) in &mut records.deployments {
+            if matches!(state, DeploymentState::Pending | DeploymentState::InProgress) {
+                *state = DeploymentState::Superseded;
+            }
+        }
+        records.deployments.push((deployment.into(), release, DeploymentState::Pending));
+        self.publish(&mut records);
+    }
+
+    fn record(&self, progress: &DeploymentProgress) {
+        let mut records = self.records.lock().unwrap();
+        let deployments = &mut records.deployments;
+        let active = deployments.iter().position(|(_, _, state)| *state == DeploymentState::Active);
+        let Some(index) = deployments.iter().position(|(id, _, _)| *id == progress.deployment_id) else { return };
+        let state = deployments[index].2;
+        let unfinished = matches!(state, DeploymentState::Pending | DeploymentState::InProgress);
+        match progress.state() {
+            DeploymentState::InProgress if state == DeploymentState::Pending => {
+                deployments[index].2 = DeploymentState::InProgress;
+            }
+            // A superseded deployment the environment activated still replaces an older active one.
+            DeploymentState::Active
+                if unfinished
+                    || (state == DeploymentState::Superseded && active.is_none_or(|active| active < index)) =>
+            {
+                if let Some(active) = active {
+                    deployments[active].2 = DeploymentState::Superseded;
+                }
+                deployments[index].2 = DeploymentState::Active;
+            }
+            DeploymentState::Failed if unfinished => {
+                deployments[index].2 = DeploymentState::Failed;
+                self.publish(&mut records);
+            }
+            _ => {}
+        }
+    }
+
+    /// Desires the newest deployment that neither failed nor was superseded, as a new revision.
+    fn publish(&self, records: &mut Records) {
+        records.revision += 1;
+        let served = records.deployments.iter().rev().find(|(_, _, state)| {
+            matches!(state, DeploymentState::Pending | DeploymentState::InProgress | DeploymentState::Active)
+        });
+        self.desired.send_replace(AttachResponse {
+            revision: records.revision,
+            environment_id: "env_test".into(),
+            project_id: "prj_test".into(),
+            deployment_id: served.map(|(id, _, _)| id.clone()).unwrap_or_default(),
+            release: served.map(|(_, release, _)| release.clone()),
+            ..Default::default()
+        });
+    }
 }
 
 fn envelope(flags: u8, payload: &[u8]) -> Bytes {
@@ -43,6 +113,7 @@ fn envelope(flags: u8, payload: &[u8]) -> Bytes {
 }
 
 const FENCED: &str = r#"{"code":"failed_precondition","message":"a newer core attached"}"#;
+const UNAVAILABLE: &str = r#"{"code":"unavailable","message":"try again"}"#;
 
 async fn handle(
     management: Arc<Management>,
@@ -81,15 +152,27 @@ async fn handle(
         }
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             let report = ReportStatusRequest::decode(body).unwrap();
-            if report.lease < *management.lease.borrow() {
-                return Ok(response
-                    .status(400)
+            let progress = report.deployment.clone().unwrap_or_default();
+            let refused = progress.state() == DeploymentState::Active
+                && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
+            let error = if report.lease < *management.lease.borrow() {
+                Some((400, FENCED))
+            } else if refused {
+                management.refusal.notify_one();
+                Some((503, UNAVAILABLE))
+            } else {
+                management.record(&progress);
+                management.reports.send(report).unwrap();
+                None
+            };
+            match error {
+                Some((status, error)) => response
+                    .status(status)
                     .header("content-type", "application/json")
-                    .body(Full::new(FENCED.into()).boxed())
-                    .unwrap());
+                    .body(Full::new(error.into()).boxed())
+                    .unwrap(),
+                None => response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap(),
             }
-            management.reports.send(report).unwrap();
-            response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap()
         }
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -201,11 +284,14 @@ impl Harness {
         let release_id = archive.file_name().unwrap().to_str().unwrap().trim_end_matches(".tar.gz").to_owned();
         let (reports, reported) = mpsc::unbounded_channel();
         let management = Arc::new(Management {
+            records: Mutex::default(),
             desired: watch::Sender::new(AttachResponse::default()),
             lease: watch::Sender::new(0),
             reports,
             archives: Mutex::default(),
             stalled: Notify::new(),
+            refused: Mutex::default(),
+            refusal: Notify::new(),
         });
         let url = serve(management.clone()).await;
         Self { directory, management, url, reported, release: (release_id, fs::read(&archive).unwrap()) }
@@ -219,35 +305,50 @@ impl Harness {
         artifact(&self.management, &self.url, "stalled", self.release.1.clone())
     }
 
-    fn desire(&self, revision: u64, deployment: &str, release: ReleaseArtifact) {
-        self.management.desired.send_replace(AttachResponse {
-            revision,
-            environment_id: "env_test".into(),
-            project_id: "prj_test".into(),
-            deployment_id: deployment.into(),
-            release: Some(release),
-            ..Default::default()
-        });
+    fn deploy(&self, deployment: &str, release: ReleaseArtifact) {
+        self.management.deploy(deployment, release);
     }
 
     fn state(&self) -> std::path::PathBuf {
         self.directory.path().join("state")
     }
 
-    fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
+    fn core(&self) -> CoreConfig {
         let state = self.state();
+        CoreConfig {
+            bundle: None,
+            environment: "env_test".into(),
+            backend_record: state.join("backend.json"),
+            control_record: state.join("control.json"),
+            state,
+            backend_bind: "127.0.0.1:0".parse().unwrap(),
+            control_bind: "127.0.0.1:0".parse().unwrap(),
+            fresh: false,
+        }
+    }
+
+    /// Leaves `count` backend versions resident that control never ran, as a run that crashed after each commit would.
+    async fn abandon(&self, count: usize) {
+        let core = crate::Core::start(self.core(), |_| {}).await.unwrap();
+        for index in 0..count {
+            let bundle = chunk_contract::Deployment {
+                contracts: chunk_contract::Contracts::default(),
+                contract_version: 2,
+                runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+                id: format!("dep_abandoned_{index}"),
+                source: "export const value=1;".into(),
+                tables: BTreeMap::new(),
+                functions: BTreeMap::new(),
+            };
+            core.deploy(bundle).await.unwrap();
+        }
+        core.stop(|| {}).await.unwrap();
+    }
+
+    fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
         let config = Config {
             services: Services::default(),
-            core: CoreConfig {
-                bundle: None,
-                environment: "env_test".into(),
-                backend_record: state.join("backend.json"),
-                control_record: state.join("control.json"),
-                state,
-                backend_bind: "127.0.0.1:0".parse().unwrap(),
-                control_bind: "127.0.0.1:0".parse().unwrap(),
-                fresh: false,
-            },
+            core: self.core(),
             gateway: GatewayConfig::new("127.0.0.1:0".parse().unwrap()),
             management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
         };
@@ -279,30 +380,37 @@ impl Harness {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deploys_a_valid_release_and_keeps_serving_it_when_a_later_one_is_rejected() {
+async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_falls_back_to_it() {
     let mut harness = Harness::new().await;
-    let valid = harness.valid();
-    harness.desire(1, "dep_first", valid.clone());
+    harness.deploy("dep_a", harness.valid());
     let (stop, running) = harness.start();
-
-    let (first, _) = harness.expect(1, "dep_first", DeploymentState::InProgress).await;
-    let (second, _) = harness.expect(1, "dep_first", DeploymentState::Active).await;
+    let (first, _) = harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    let (second, _) = harness.expect(1, "dep_a", DeploymentState::Active).await;
     assert!(first < second);
-    assert!(harness.serves("dep_first").await);
 
-    let rejected = artifact(&harness.management, &harness.url, "rejected", invalid());
-    harness.desire(2, "dep_second", rejected);
-    harness.expect(2, "dep_second", DeploymentState::InProgress).await;
-    let (_, DeploymentProgress { message, .. }) = harness.expect(2, "dep_second", DeploymentState::Failed).await;
+    // dep_b activates, but its report fails until dep_c has superseded it.
+    *harness.management.refused.lock().unwrap() = Some("dep_b".into());
+    harness.deploy("dep_b", harness.valid());
+    harness.expect(2, "dep_b", DeploymentState::InProgress).await;
+    harness.management.refusal.notified().await;
+    harness.deploy("dep_c", artifact(&harness.management, &harness.url, "rejected", invalid()));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_a").await && harness.serves("dep_b").await);
+    *harness.management.refused.lock().unwrap() = None;
+
+    // Attached again, the core reports dep_b before it starts on dep_c.
+    harness.expect(3, "dep_b", DeploymentState::Active).await;
+    harness.expect(3, "dep_c", DeploymentState::InProgress).await;
+    let (_, DeploymentProgress { message, .. }) = harness.expect(3, "dep_c", DeploymentState::Failed).await;
     assert!(
         message.starts_with("release rejected fails verification") && message.len() <= super::MAX_MESSAGE_BYTES,
         "{message}"
     );
 
-    // Management records the failure and falls back to the deployment that kept serving.
-    harness.desire(3, "dep_first", valid);
-    harness.expect(3, "dep_first", DeploymentState::Active).await;
-    assert!(harness.serves("dep_first").await);
+    // Management falls back to dep_b, which keeps serving without deploying again, and dep_a retires.
+    harness.expect(4, "dep_b", DeploymentState::Active).await;
+    harness.released("dep_a").await;
+    assert!(harness.serves("dep_b").await);
     assert!(!harness.state().join("releases/rejected").exists());
     assert!(!running.is_finished());
 
@@ -313,15 +421,15 @@ async fn deploys_a_valid_release_and_keeps_serving_it_when_a_later_one_is_reject
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deployment_superseded_mid_download_never_activates_and_a_fenced_core_stops() {
     let mut harness = Harness::new().await;
-    harness.desire(1, "dep_a", harness.valid());
+    harness.deploy("dep_a", harness.valid());
     let (_stop, running) = harness.start();
     harness.expect(1, "dep_a", DeploymentState::InProgress).await;
     harness.expect(1, "dep_a", DeploymentState::Active).await;
 
-    harness.desire(2, "dep_b", harness.stalled());
+    harness.deploy("dep_b", harness.stalled());
     harness.expect(2, "dep_b", DeploymentState::InProgress).await;
     harness.management.stalled.notified().await;
-    harness.desire(3, "dep_c", harness.valid());
+    harness.deploy("dep_c", harness.valid());
     // Had dep_b activated, its report would arrive first.
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
     harness.expect(3, "dep_c", DeploymentState::Active).await;
@@ -334,27 +442,30 @@ async fn a_deployment_superseded_mid_download_never_activates_and_a_fenced_core_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_after_an_interrupted_deployment_retires_what_it_no_longer_serves() {
+async fn a_restart_retires_what_it_no_longer_serves_before_its_first_activation() {
     let mut harness = Harness::new().await;
-    harness.desire(1, "dep_a", harness.valid());
+    harness.deploy("dep_a", harness.valid());
     let (stop, running) = harness.start();
     harness.expect(1, "dep_a", DeploymentState::InProgress).await;
     harness.expect(1, "dep_a", DeploymentState::Active).await;
-    harness.desire(2, "dep_b", harness.stalled());
+    harness.deploy("dep_b", harness.stalled());
     harness.expect(2, "dep_b", DeploymentState::InProgress).await;
     harness.management.stalled.notified().await;
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    // With dep_a, these fill the backend's 16 versions, so dep_c deploys only once they retire.
+    harness.abandon(15).await;
 
     let abandoned = harness.state().join("releases/.unpack-abandoned");
     fs::create_dir_all(&abandoned).unwrap();
     let unused = harness.state().join("releases/unused");
     fs::create_dir_all(&unused).unwrap();
-    harness.desire(3, "dep_c", harness.valid());
+    harness.deploy("dep_c", harness.valid());
     let (stop, running) = harness.start();
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
     harness.expect(3, "dep_c", DeploymentState::Active).await;
     harness.released("dep_a").await;
+    harness.released("dep_abandoned_0").await;
     assert!(harness.serves("dep_c").await);
     assert!(!abandoned.exists() && !unused.exists());
     assert!(harness.state().join("releases").join(&harness.release.0).exists());
