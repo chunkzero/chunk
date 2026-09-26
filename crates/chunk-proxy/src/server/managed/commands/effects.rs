@@ -16,7 +16,7 @@ pub(super) async fn apply(tasks: &Tasks, origin: &Origin, follow: bool, effect: 
     }
     let effect_request: Effect = serde_json::from_slice(&effect.request_json).map_err(invalid_data)?;
     let current = tasks.current(origin, follow)?;
-    current.inspect(&tasks.platform).await?;
+    current.check(&tasks.platform).await?;
     match effect_request {
         Effect::Message { text } => {
             tasks

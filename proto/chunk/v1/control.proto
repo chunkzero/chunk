@@ -10,12 +10,12 @@ import "chunk/v1/supervision.proto";
 // One authenticated local proxy group and one durable ownership authority.
 service LocalControl {
   rpc Claim(ClaimRequest) returns (Assignment);
-  rpc Inspect(ClaimRequest) returns (Assignment);
   rpc Activate(ActivateClaim) returns (Assignment);
   rpc Cancel(ClaimRequest) returns (ClaimIdentity);
   rpc ReconcileDeparture(ClaimRequest) returns (DepartureStatus);
   rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
-  rpc PollMove(ClaimRequest) returns (PendingMove);
+  // Streams the proxy's open claims: a snapshot, then changes. A slow reader receives only each claim's latest state.
+  rpc Watch(WatchRequest) returns (stream ClaimUpdate);
   // Acknowledges the durable failure; reconciliation completes withdrawal before releasing capacity.
   rpc AbandonMove(AbandonMoveRequest) returns (ClaimIdentity);
   rpc Drain(DrainRequest) returns (DrainStatus);
@@ -52,8 +52,27 @@ message MovePlayerRequest {
   string expected_connection_id = 5;
 }
 
-message PendingMove {
-  ClaimRequest claim = 1;
+message WatchRequest {
+  string proxy_id = 1;
+}
+
+// An open claim and the move queued from it, as its proxy sees them.
+message WatchedClaim {
+  ClaimIdentity claim = 1;
+  ClaimPhase phase = 2;
+  // The destination of the move pending for this arrived claim, if any.
+  ClaimRequest pending_move = 3;
+}
+
+message ClaimUpdate {
+  // The control commit this update reflects, in the wire form of claim generations. A claim created at or before it
+  // and absent from the view has been released.
+  uint64 position = 1;
+  // Replaces the whole view instead of changing it.
+  bool snapshot = 2;
+  repeated WatchedClaim claims = 3;
+  // Operation IDs of claims released since the previous update.
+  repeated string released = 4;
 }
 
 // Records a preparation failure and schedules this exact move's fenced withdrawal.

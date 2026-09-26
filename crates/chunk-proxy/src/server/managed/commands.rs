@@ -189,7 +189,7 @@ impl Commands {
             let result = tokio::select! {
                 () = tasks.connection.cancelled() => return,
                 () = origin.cancellation.cancelled() => return,
-                result = async { origin.inspect(&tasks.platform).await?; backend::catalog(&tasks.platform, &origin.scope, &descriptors).await } => result,
+                result = async { origin.check(&tasks.platform).await?; backend::catalog(&tasks.platform, &origin.scope, &descriptors).await } => result,
             };
             let _ = tasks.output.send(Output::Permissions { scope: origin.scope.scope_id, result }).await;
         });

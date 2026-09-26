@@ -47,7 +47,7 @@ pub struct Config {
     pub seconds: u32,
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
-    /// Total operations/second. Defaults: relay 2000, population 2/player, churn 10, backend query 1000,
+    /// Total operations/second. Defaults: relay 2000, population 100, churn 10, backend query 1000,
     /// mutation 100, fan-out 10.
     #[arg(long)]
     pub rate: Option<u32>,
@@ -101,10 +101,9 @@ impl Config {
     pub fn rate(&self) -> u32 {
         self.rate.unwrap_or(match self.scenario {
             Scenario::ProxyRelay => 2000,
-            Scenario::ControlPopulation => self.population * 2,
             Scenario::ControlChurn | Scenario::BackendFanout => 10,
             Scenario::BackendQuery => 1000,
-            Scenario::BackendMutation => 100,
+            Scenario::ControlPopulation | Scenario::BackendMutation => 100,
         })
     }
 

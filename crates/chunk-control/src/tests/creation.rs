@@ -158,6 +158,6 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
         Err(Error::Invalid("session configuration differs from its implementation schema"))
     ));
     assert!(control.state().unwrap().moves.is_empty());
-    assert!(control.poll_move(&source).unwrap().claim.is_none());
+    assert!(pending_move(&control, &source).await.is_none());
     fixture.close().await;
 }

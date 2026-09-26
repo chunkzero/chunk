@@ -14,7 +14,7 @@ impl Control {
     /// Recovers the same delivery from runtime inventory; never replaces its TCP connection.
     /// # Errors
     /// An unavailable runtime leaves ownership unresolved and retained.
-    pub async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
+    pub(crate) async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
         let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;

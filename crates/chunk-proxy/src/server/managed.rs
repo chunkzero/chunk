@@ -145,7 +145,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         )
         .await
         .map_err(io::Error::other)??;
-        check_move(&guard, &next.0.claim).await?;
+        check_move(platform, &next.0.claim).await?;
         // The client's acknowledgment fences all remaining source PLAY input.
         if let Err(error) = withdraw(&guard, &identity).await {
             let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
@@ -279,38 +279,22 @@ fn validate(assignment: &Assignment, guard: &ClaimGuard) -> io::Result<()> {
     Ok(())
 }
 
+/// Waits until the claim view shows the claim arrived.
 async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let activation = ActivateClaim { claim: Some(identity.clone()) };
-    let mut activated = true;
-    while Instant::now() < deadline {
-        let mut client = guard.platform.control.clone();
-        let result = if activated {
-            client.inspect(guard.platform.control_request(guard.claim.clone())?).await
-        } else {
-            client.activate(guard.platform.control_request(activation.clone())?).await
-        };
-        match result {
-            Ok(response) => {
-                let assignment = response.into_inner();
-                if assignment.claim.as_ref() != Some(&identity) {
-                    return Err(invalid_data("activation claim mismatch"));
-                }
-                match ClaimPhase::try_from(assignment.phase).map_err(invalid_data)? {
-                    ClaimPhase::Arrived => return Ok(()),
-                    ClaimPhase::Activating | ClaimPhase::Attached => activated = true,
-                    ClaimPhase::Reserved => {}
-                    _ => return Err(io::Error::other("claim withdrawn during activation")),
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.code(),
-                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown
-                ) => {}
-            Err(error) => return Err(io::Error::other(error)),
+    let arrived = guard.platform.claims(|view| {
+        if view.released(&identity) {
+            return Some(false);
         }
-        sleep(Duration::from_millis(500)).await;
+        match view.claim(&identity).and_then(|claim| ClaimPhase::try_from(claim.phase).ok())? {
+            ClaimPhase::Arrived => Some(true),
+            ClaimPhase::Withdrawing => Some(false),
+            _ => None,
+        }
+    });
+    match timeout(Duration::from_secs(20), arrived).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err(io::Error::other("claim withdrawn during activation")),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "session arrival timed out")),
     }
-    Err(io::Error::new(io::ErrorKind::TimedOut, "session arrival timed out"))
 }

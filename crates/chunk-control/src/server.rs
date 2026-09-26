@@ -48,6 +48,13 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
         let _ = ready.send(connection);
+        let shutdown = {
+            let (stop, service) = (stop.clone(), service.clone());
+            async move {
+                stop.cancelled().await;
+                service.close_watches();
+            }
+        };
         let server = tonic::transport::Server::builder()
             .add_service(
                 LocalControlServer::new(service.clone())
@@ -58,7 +65,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
                 chunk_proto::v1::supervisor_server::SupervisorServer::new(service.clone())
                     .max_decoding_message_size(65_536),
             )
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop.clone().cancelled_owned());
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown);
         tokio::pin!(server);
         let reconcile = async {
             let mut timer = tokio::time::interval(Duration::from_secs(2));
@@ -76,9 +83,12 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         tokio::pin!(reconcile);
         let health = monitor_health(&control, &stop);
         tokio::pin!(health);
+        let arrivals = monitor_arrivals(&control, &stop);
+        tokio::pin!(arrivals);
         tracing::info!(%address, "control ready");
         let result = tokio::select! {
             () = &mut health => Ok(()),
+            () = &mut arrivals => Ok(()),
             result = &mut server => result.map_err(io::Error::other),
             reconciled = &mut reconcile => {
                 stop.cancel();
@@ -98,6 +108,18 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     operations.wait().await;
     let stopped = control.shutdown().await.map_err(io::Error::other);
     result.and(stopped)
+}
+
+/// Reads the runtime inventory for each activated claim, so arrivals reach watching proxies promptly.
+async fn monitor_arrivals(control: &Arc<Control>, stop: &CancellationToken) {
+    let mut timer = tokio::time::interval(Duration::from_millis(250));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
+        if let Err(error) = control.reconcile_arrivals().await {
+            tracing::debug!(%error, "claim arrival refresh unavailable");
+        }
+    }
 }
 
 pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationToken) {
