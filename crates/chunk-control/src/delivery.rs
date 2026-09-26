@@ -164,25 +164,37 @@ impl Control {
     /// be treated as a fencing acknowledgment.
     pub async fn shutdown(&self) -> Result<()> {
         self.draining.store(true, std::sync::atomic::Ordering::Release);
-        let state = self.state()?;
         let mut result = Ok(());
-        let mut hosts: BTreeSet<_> = state.hosts.keys().filter(|id| !state.released(id)).cloned().collect();
-        match self.host.unowned() {
-            Ok(unowned) => hosts.extend(unowned),
-            Err(error) => result = Err(error),
-        }
-        match self.recovery.pending() {
-            Ok(pending) => hosts.extend(pending),
-            Err(error) => result = Err(error),
-        }
-        for id in &hosts {
-            match self.host.release(id).await {
-                Ok(true) => {}
-                Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
+        let mut stopped = BTreeSet::new();
+        // Repeats until a pass finds no host it hasn't stopped, so hosts that a placement or recovery transition
+        // recorded during a pass are stopped too.
+        loop {
+            // Read in the order a surviving JVM moves through them, unowned launch to pending recovery to host row, so
+            // one moving during the reads is still seen.
+            let mut hosts = BTreeSet::new();
+            match self.host.unowned() {
+                Ok(unowned) => hosts.extend(unowned),
                 Err(error) => result = Err(error),
             }
+            match self.recovery.pending() {
+                Ok(pending) => hosts.extend(pending),
+                Err(error) => result = Err(error),
+            }
+            let state = self.state()?;
+            hosts.extend(state.hosts.keys().filter(|id| !state.released(id)).cloned());
+            let pass: Vec<_> = hosts.into_iter().filter(|id| !stopped.contains(id)).collect();
+            if pass.is_empty() {
+                return result;
+            }
+            for id in pass {
+                match self.host.release(&id).await {
+                    Ok(true) => {}
+                    Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
+                    Err(error) => result = Err(error),
+                }
+                stopped.insert(id);
+            }
         }
-        result
     }
 }
 

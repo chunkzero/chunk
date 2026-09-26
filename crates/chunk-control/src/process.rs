@@ -276,6 +276,8 @@ impl ProcessHost {
     /// # Errors
     /// Reports unconfirmed process exits, including those of launches this host does not own.
     pub async fn shutdown(&self) -> Result<()> {
+        // Read before the running processes: adoption moves a launch from unowned to running, so it can't escape both.
+        let unowned = self.unowned()?;
         let ids: Vec<_> =
             self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
         let mut result = Ok(());
@@ -286,7 +288,7 @@ impl ProcessHost {
                 Err(error) => result = Err(error),
             }
         }
-        if !self.unowned()?.is_empty() {
+        if !unowned.is_empty() || !self.unowned()?.is_empty() {
             return Err(Error::Unresolved("an unowned JVM may still run"));
         }
         result
