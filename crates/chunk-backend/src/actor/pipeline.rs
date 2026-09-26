@@ -247,6 +247,14 @@ impl Actor {
         let (update, snapshot, jobs) = match result {
             Ok(value) => value,
             Err(error) if error.is_rejected_commit() => {
+                // A full job queue refuses this mutation itself; the rest of the suffix retries.
+                if let Error::Overloaded(Limit::Jobs) = error
+                    && let Some(mutation) = self.mutations.remove(id)
+                {
+                    for reply in mutation.waiters {
+                        reply.finish(Err(error.clone()));
+                    }
+                }
                 self.reset_pending(&Error::Retry);
                 self.recovering = self.outstanding != 0;
                 return;

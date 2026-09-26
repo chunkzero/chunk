@@ -35,6 +35,8 @@ pub enum Limit {
     SubscriptionMemory,
     #[error("live actions reached 256 MiB of engine heap")]
     ActionMemory,
+    #[error("scheduled jobs reached the store's job budget; retry once jobs finish or expire")]
+    Jobs,
 }
 
 impl Limit {

@@ -208,10 +208,10 @@ code: releasing their deployment makes later retries fail. The queue retains at 
 (`JobLimits` in `chunk-store`), with 16 intents per mutation, 64 KiB per encoded intent and 64 KiB for captured caller
 data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's captured time; times
 already due become immediately eligible. Expired terminal records are removed before a new job is admitted, and a full
-queue rejects the whole mutation: the store reports a distinct `JobBudget` error, which the backend currently surfaces
-as a retryable rejection (`ABORTED`). There is no recurring schedule or automatic action retry. Host HTTP/secret grants
-must be supplied again after restart; grants and secret values are never part of a job record unless application code
-explicitly puts such values in its arguments/result.
+queue rejects the whole mutation with `Error::Overloaded(Limit::Jobs)` (`RESOURCE_EXHAUSTED`); retry once jobs finish or
+expire. There is no recurring schedule or automatic action retry. Host HTTP/secret grants must be supplied again after
+restart; grants and secret values are never part of a job record unless application code explicitly puts such values in
+its arguments/result.
 
 ### Host alarm handoff
 
