@@ -151,10 +151,9 @@ the separate `feat/self-hosted-dashboard-assets` branch and is not part of this 
 ## Transport status
 
 `proto/chunk/v1` generates matching Rust and Java bindings. `Backend`, `LocalControl`, `Gameplay`, `Supervisor`,
-`NodeControl`, `ProcessControl` and `Players` have implementations. These internal RPCs cover backend calls/watches,
-placement, process/session lifecycle, delivery preparation and player operations. The remaining `Directory`, `Runtime`
-and `EdgeCall` services remain proposals. Application code uses session and typed backend APIs instead of issuing
-provisioning commands directly.
+`NodeControl` and `ProcessControl` have implementations. These internal RPCs cover backend calls/watches, placement,
+process/session lifecycle, delivery preparation and player operations. Application code uses session and typed backend
+APIs instead of issuing provisioning commands directly.
 
 Service credentials authenticate trusted platform processes. Deployment, process/session generations and player
 ownership accompany version-sensitive operations and are checked against registered state. Mutation outcome recovery,
