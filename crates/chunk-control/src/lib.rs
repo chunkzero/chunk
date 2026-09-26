@@ -169,7 +169,7 @@ impl Control {
     /// and their sockets are owned separately.
     /// # Errors
     /// Rejects changed configuration, invalid limits, corrupt state, or a stopped environment store.
-    pub fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
+    pub(crate) fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
         let authority = Authority::open(system, &config)?;
         // A restore can lose a host's row while the JVM launched for it still runs.

@@ -67,11 +67,12 @@ impl Control {
         match host.capacity {
             // An exit nothing asked for; only the host's affirmative evidence releases ready capacity.
             Capacity::Ready if self.host.stopped(id) => self.update(|state| released(state, id, Capacity::Ready)),
-            Capacity::Releasing => {
+            // Retired capacity that never became ready is released without starting it.
+            from @ (Capacity::Releasing | Capacity::Requested) if from == Capacity::Releasing || host.retired => {
                 if !self.host.release(id).await? {
                     return Ok(());
                 }
-                self.update(|state| released(state, id, Capacity::Releasing))
+                self.update(|state| released(state, id, from))
             }
             _ => self.ensure(id, host).await,
         }
@@ -102,13 +103,9 @@ impl Control {
     }
 }
 
-/// Whether `host`'s capacity intent needs a host call. Retired capacity that never became ready is never started.
+/// Whether `host`'s capacity intent needs a host call.
 fn called(host: &HostState) -> bool {
-    match host.capacity {
-        Capacity::Requested => !host.retired,
-        Capacity::Ready | Capacity::Releasing => true,
-        Capacity::Released => false,
-    }
+    host.capacity != Capacity::Released
 }
 
 /// Records that `id`'s runtime exited while its capacity was `from`: retires the host, finishes its sessions and
