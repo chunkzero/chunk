@@ -19,8 +19,10 @@ import org.jetbrains.annotations.Nullable;
 
 import tools.jackson.databind.JsonNode;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -44,6 +46,18 @@ public final class SessionManager {
     private final @Nullable BiFunction<String, String, BackendSession> backend;
     private final ComponentRegistry components;
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
+
+    /** Sessions that failed to start or were never created, as reported to control. */
+    private final Map<String, SessionInventory> outcomes =
+            Collections.synchronizedMap(
+                    new LinkedHashMap<>() {
+                        @Override
+                        protected boolean removeEldestEntry(
+                                Map.Entry<String, SessionInventory> eldest) {
+                            return size() > 256;
+                        }
+                    });
+
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
 
@@ -102,43 +116,59 @@ public final class SessionManager {
         this.withdraw = withdraw;
     }
 
+    /** Creates the session, or reports it failed if it cannot start. */
     public CompletableFuture<SessionInventory> create(SessionCommand command) {
         return ticks.submit(
                         () -> {
-                            if (!SESSION_ID.matcher(command.getSession().getId()).matches()
-                                    || command.getGeneration() <= 0
-                                    || command.getOperationId().isEmpty()
-                                    || command.getOperationId().length() > 128
-                                    || command.getCapacity() < 1
-                                    || command.getCapacity() > 128) {
-                                throw new IllegalArgumentException("Invalid session command");
+                            try {
+                                return start(command);
+                            } catch (RuntimeException error) {
+                                if (!sessions.containsKey(command.getSession().getId()))
+                                    outcome(command, SessionPhase.SESSION_PHASE_FAILED);
+                                throw error;
                             }
-                            var configuration = configuration(command);
-                            var previous = sessions.get(command.getSession().getId());
-                            if (previous != null) {
-                                if (!previous.command.toBuilder()
-                                                .clearConfigurationJson()
-                                                .build()
-                                                .equals(
-                                                        command.toBuilder()
-                                                                .clearConfigurationJson()
-                                                                .build())
-                                        || !configuration(previous.command).equals(configuration))
-                                    throw new IllegalArgumentException("Session creation changed");
-                                return previous;
-                            }
-                            if (sessions.size() >= 256)
-                                throw new IllegalStateException("Session history full");
-                            var factory = factories.get(command.getSessionType());
-                            if (factory == null)
-                                throw new IllegalArgumentException("Unknown session type");
-                            var session =
-                                    new ManagedSession(command, factory, configuration.toString());
-                            sessions.put(command.getSession().getId(), session);
-                            session.start();
-                            return session;
                         })
                 .thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
+    }
+
+    /** Reports a session this process will not create, such as one requested while draining. */
+    public void reject(SessionCommand command) {
+        ticks.submit(
+                () -> {
+                    if (!sessions.containsKey(command.getSession().getId()))
+                        outcome(command, SessionPhase.SESSION_PHASE_FAILED);
+                    return null;
+                });
+    }
+
+    private ManagedSession start(SessionCommand command) {
+        if (!SESSION_ID.matcher(command.getSession().getId()).matches()
+                || command.getGeneration() <= 0
+                || command.getOperationId().isEmpty()
+                || command.getOperationId().length() > 128
+                || command.getCapacity() < 1
+                || command.getCapacity() > 128) {
+            throw new IllegalArgumentException("Invalid session command");
+        }
+        var configuration = configuration(command);
+        var previous = sessions.get(command.getSession().getId());
+        if (previous != null) {
+            if (!previous.command.toBuilder()
+                            .clearConfigurationJson()
+                            .build()
+                            .equals(command.toBuilder().clearConfigurationJson().build())
+                    || !configuration(previous.command).equals(configuration))
+                throw new IllegalArgumentException("Session creation changed");
+            return previous;
+        }
+        if (sessions.size() >= 256) throw new IllegalStateException("Session history full");
+        var factory = factories.get(command.getSessionType());
+        if (factory == null) throw new IllegalArgumentException("Unknown session type");
+        var session = new ManagedSession(command, factory, configuration.toString());
+        outcomes.remove(command.getSession().getId());
+        sessions.put(command.getSession().getId(), session);
+        session.start();
+        return session;
     }
 
     private static JsonNode configuration(SessionCommand command) {
@@ -158,13 +188,28 @@ public final class SessionManager {
         return ticks.submit(
                         () -> {
                             var session = sessions.get(command.getSession().getId());
-                            if (session == null
-                                    || session.command.getGeneration() != command.getGeneration()) {
+                            // A session that never started has nothing to end.
+                            if (session == null)
+                                return CompletableFuture.completedFuture(
+                                        outcome(command, SessionPhase.SESSION_PHASE_ENDED));
+                            if (session.command.getGeneration() != command.getGeneration())
                                 throw new IllegalArgumentException("Unknown session generation");
-                            }
-                            return session;
+                            return session.finish().thenApply(ignored -> session.inventory());
                         })
-                .thenCompose(session -> session.finish().thenApply(ignored -> session.inventory()));
+                .thenCompose(Function.identity());
+    }
+
+    private SessionInventory outcome(SessionCommand command, SessionPhase phase) {
+        var inventory =
+                SessionInventory.newBuilder()
+                        .setSession(command.getSession())
+                        .setGeneration(command.getGeneration())
+                        .setSessionType(command.getSessionType())
+                        .setCapacity(command.getCapacity())
+                        .setPhase(phase)
+                        .build();
+        outcomes.put(command.getSession().getId(), inventory);
+        return inventory;
     }
 
     public ManagedSession get(String id, long generation) {
@@ -178,7 +223,12 @@ public final class SessionManager {
     }
 
     public List<SessionInventory> inventory() {
-        return sessions.values().stream().map(ManagedSession::inventory).toList();
+        var inventory = new ArrayList<SessionInventory>();
+        sessions.values().forEach(session -> inventory.add(session.inventory()));
+        synchronized (outcomes) {
+            inventory.addAll(outcomes.values());
+        }
+        return inventory;
     }
 
     int activeCount() {

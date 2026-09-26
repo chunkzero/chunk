@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import chunk.v1.Common.SessionRef;
 import chunk.v1.Supervision.SessionCommand;
+import chunk.v1.Supervision.SessionInventory;
+import chunk.v1.Supervision.SessionPhase;
 
 import com.google.protobuf.ByteString;
 
@@ -20,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 class SessionCreationTest {
     public record Config(String map, String mode) {
@@ -125,6 +128,42 @@ class SessionCreationTest {
             manager.finish(second);
             manager.finish(command("legacy", 16, "{}"));
             flush(ticks);
+        } finally {
+            process.stop();
+        }
+    }
+
+    @Test
+    void failedCreationAndUnknownFinishAreReported() {
+        var process = ServerProcess.create();
+        var ticks = new TickExecutor();
+        var manager =
+                new SessionManager(
+                        process,
+                        ticks,
+                        Map.of(
+                                "arena/default",
+                                new SessionRegistration(
+                                        "arena",
+                                        () -> {
+                                            throw new IllegalStateException("provider failed");
+                                        })),
+                        null);
+        try {
+            var failed = manager.create(command("failed", 16, "{}"));
+            var unknown = manager.finish(command("unknown", 16, "{}"));
+            flush(ticks);
+            assertTrue(failed.isCompletedExceptionally());
+            assertEquals(SessionPhase.SESSION_PHASE_ENDED, unknown.join().getPhase());
+            assertEquals(
+                    Map.of(
+                            "failed", SessionPhase.SESSION_PHASE_FAILED,
+                            "unknown", SessionPhase.SESSION_PHASE_ENDED),
+                    manager.inventory().stream()
+                            .collect(
+                                    Collectors.toMap(
+                                            session -> session.getSession().getId(),
+                                            SessionInventory::getPhase)));
         } finally {
             process.stop();
         }

@@ -70,12 +70,7 @@ impl Control {
         self.fence_deliveries(&runtime, &report).await?;
         let now = crate::now_ms();
         self.update(|state| {
-            for binding in &report.deliveries {
-                crate::delivery::apply(state, host, &runtime.identity, binding)?;
-            }
-            for observed in &report.sessions {
-                apply(state, host, observed);
-            }
+            self.reapply(state, host, &runtime.identity)?;
             let open: std::collections::BTreeSet<_> = state
                 .claims
                 .values()
@@ -119,7 +114,7 @@ impl Control {
 }
 
 /// Records the phase a JVM reported for one of `host`'s sessions. A session that ended, is ending or failed is retired;
-/// one that ended with no open claim or delivery is finished.
+/// one that ended or failed with no open claim or delivery is finished, which frees its capacity.
 pub(crate) fn apply(state: &mut State, host: &str, observed: &SessionInventory) {
     let Some(id) = observed.session.as_ref().map(|session| session.id.clone()) else {
         return;
@@ -133,12 +128,12 @@ pub(crate) fn apply(state: &mut State, host: &str, observed: &SessionInventory) 
         return;
     }
     match SessionPhase::try_from(observed.phase) {
-        Ok(SessionPhase::Ended) => {
+        Ok(SessionPhase::Ended | SessionPhase::Failed) => {
             session.retired = true;
             session.finish_requested = true;
             session.finished = empty && observed.prepared == 0 && observed.attached == 0;
         }
-        Ok(SessionPhase::Ending | SessionPhase::Failed) => {
+        Ok(SessionPhase::Ending) => {
             session.retired = true;
             session.finish_requested = true;
         }

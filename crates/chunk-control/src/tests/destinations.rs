@@ -144,7 +144,7 @@ async fn empty_expiry_counts_reservations_and_waits_for_the_jvm_to_confirm_the_f
 }
 
 #[tokio::test]
-async fn failed_unknown_creation_is_retained_until_host_fencing_and_finish_requires_current_claim() {
+async fn failed_creation_frees_its_capacity_and_finish_requires_current_claim() {
     let mut fixture = Fixture::new().await;
     policy(&mut fixture, "reject");
     let control = fixture.control().await;
@@ -153,21 +153,11 @@ async fn failed_unknown_creation_is_retained_until_host_fencing_and_finish_requi
     assert!(control.claim(claim.clone()).await.is_err());
     control.cancel(claim).await.unwrap();
     let session = control.state().unwrap().claims["failed"].session.clone();
-    control
-        .update(|state| {
-            state.sessions.get_mut(&session).unwrap().empty_since_ms = Some(0);
-            Ok(())
-        })
-        .unwrap();
     control.reconcile_all().await.unwrap();
-    assert!(!control.state().unwrap().sessions[&session].finished);
-    assert!(matches!(
-        control.claim(request("duplicate", &uuid::Uuid::new_v4().to_string())).await,
-        Err(Error::Capacity)
-    ));
-    fixture.runtime.stopped.store(true, Ordering::Release);
-    control.reconcile_all().await.unwrap();
-    assert!(!control.state().unwrap().sessions.contains_key(&session));
+    assert!(control.state().unwrap().sessions.get(&session).is_none_or(|session| session.finished));
+    fixture.runtime.failed_creation.store(false, Ordering::Release);
+    let next = control.claim(request("next", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    assert_ne!(next.delivery.unwrap().session.unwrap().id, session);
     fixture.close().await;
 
     let fixture = Fixture::new().await;

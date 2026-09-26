@@ -87,5 +87,15 @@ async fn stale_generations_and_replaced_processes_cannot_write_back() {
     assert!(control.report(&host, stream, &replaced).await.is_err());
     assert!(control.attach(&host, "another-credential", fixture.runtime.report()).await.is_err());
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Reserved);
+
+    // Once a replacement stream reports an arrival, neither the old stream nor an older phase can undo it.
+    let mut attached = fixture.runtime.report();
+    attached.deliveries[0].phase = DeliveryPhase::Attached as i32;
+    let mut arrived = attached.clone();
+    arrived.deliveries[0].phase = DeliveryPhase::Arrived as i32;
+    let replacement = control.attach(&host, "test-runtime-credential", arrived).await.unwrap();
+    assert!(control.report(&host, stream, &attached).await.is_err());
+    control.report(&host, replacement, &attached).await.unwrap();
+    assert!(control.state().unwrap().claims["claimed"].phase == Phase::Arrived);
     fixture.close().await;
 }

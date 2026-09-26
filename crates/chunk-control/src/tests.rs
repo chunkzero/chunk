@@ -142,7 +142,7 @@ impl FakeRuntime {
 }
 
 /// Plays the JVM of every host `control` launched: attaches once its host has registered, then follows control's
-/// desired sessions and reports its whole state after each change, until `stop`.
+/// desired changes and reports what changed in its state, until `stop`.
 async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationToken) {
     let mut positions = control.subscribe();
     let mut streams = BTreeMap::new();
@@ -155,14 +155,15 @@ async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationTo
             {
                 continue;
             }
-            let stream = match streams.get(&id) {
-                Some(stream) => *stream,
-                None => match control.attach(&id, "test-runtime-credential", runtime.report()).await {
-                    Ok(stream) => *streams.entry(id.clone()).or_insert(stream),
-                    Err(_) => continue,
-                },
-            };
-            match control.desired(&id, &mut None) {
+            if !streams.contains_key(&id) {
+                let report = runtime.report();
+                let Ok(stream) = control.attach(&id, "test-runtime-credential", report.clone()).await else {
+                    continue;
+                };
+                streams.insert(id.clone(), (stream, None, report));
+            }
+            let (stream, sent, reported) = streams.get_mut(&id).unwrap();
+            match control.desired(&id, sent) {
                 Ok(Some(desired)) => runtime.apply(desired),
                 Ok(None) => {}
                 Err(_) => {
@@ -170,7 +171,16 @@ async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationTo
                     continue;
                 }
             }
-            if control.report(&id, stream, &runtime.report()).await.is_err() {
+            let report = runtime.report();
+            let changes = ProcessReport {
+                identity: report.identity.clone(),
+                sessions: report.sessions.iter().filter(|s| !reported.sessions.contains(s)).cloned().collect(),
+                deliveries: report.deliveries.iter().filter(|d| !reported.deliveries.contains(d)).cloned().collect(),
+            };
+            *reported = report;
+            if !(changes.sessions.is_empty() && changes.deliveries.is_empty())
+                && control.report(&id, *stream, &changes).await.is_err()
+            {
                 streams.remove(&id);
             }
         }

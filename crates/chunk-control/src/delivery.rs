@@ -198,8 +198,8 @@ pub(crate) fn apply(
         Ok(DeliveryPhase::Withdrawing) => Phase::Withdrawing,
         _ => return Ok(()),
     };
-    let phase = if claim.phase == Phase::Withdrawing && phase != Phase::Released { Phase::Withdrawing } else { phase };
-    if phase == claim.phase {
+    // A delivery only moves forward; an older report of the same generation cannot undo a newer phase.
+    if phase <= claim.phase {
         return Ok(());
     }
     if phase == Phase::Released {

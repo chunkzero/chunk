@@ -6,6 +6,7 @@ use tokio::sync::watch;
 use crate::{Error, Result};
 
 /// The actual state each attached JVM last reported, kept in memory: a JVM reports it again whenever it reconnects.
+/// Attaching and merging happen inside the commit that applies the report, so links change in commit order.
 #[derive(Default)]
 pub(crate) struct Links {
     hosts: Mutex<BTreeMap<String, Link>>,
@@ -50,15 +51,15 @@ impl Links {
         Ok(stream)
     }
 
-    /// Merges a later report from `stream`, returning its process. Rejects a replaced stream or another process.
-    pub fn merge(&self, host: &str, stream: u64, report: &ProcessReport) -> Result<ProcessIdentity> {
+    /// Merges a later report from `stream`. Rejects a replaced stream or another process.
+    pub fn merge(&self, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
         let mut links = self.lock()?;
         let link = links
             .get_mut(host)
             .filter(|link| link.stream == stream && report.identity.as_ref() == Some(&link.identity))
             .ok_or(Error::Invalid("stale process report"))?;
         link.merge(report);
-        Ok(link.identity.clone())
+        Ok(())
     }
 
     pub fn detach(&self, host: &str, stream: u64) {

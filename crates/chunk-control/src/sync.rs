@@ -72,26 +72,31 @@ impl Control {
     /// # Errors
     /// Rejects an unregistered, replaced or stopped process.
     pub(crate) async fn attach(&self, host: &str, token: &str, report: ProcessReport) -> Result<u64> {
-        let runtime = self.registered(host, report.identity.as_ref())?;
-        if runtime.token != token {
-            return Err(Error::Invalid("invalid process credential"));
-        }
-        let stream = self.links.attach(host, runtime.identity.clone(), &report)?;
-        let applied = self.apply(host, &runtime.identity, &report);
-        let fenced = self.fence_deliveries(&runtime, &report).await.map(|_| ());
+        let attached = self.update(|state| {
+            let runtime = self.registered(state, host, report.identity.as_ref())?;
+            if runtime.token != token {
+                return Err(Error::Invalid("invalid process credential"));
+            }
+            apply(state, host, &runtime.identity, &report)?;
+            Ok((self.links.attach(host, runtime.identity.clone(), &report)?, runtime))
+        });
         self.links.applied();
-        applied.and(fenced)?;
+        let (stream, runtime) = attached?;
+        self.fence_deliveries(&runtime, &report).await?;
         self.resolve_recovery().await?;
         Ok(stream)
     }
 
-    /// Commits the changes a JVM reported on `stream`.
+    /// Commits the changes a JVM reported on `stream`. The stream is checked in the same commit, so a replaced
+    /// stream cannot overwrite what its replacement reported.
     /// # Errors
     /// Rejects reports from a replaced stream or process; stale deliveries within a report are ignored.
     pub(crate) async fn report(&self, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
-        let runtime = self.registered(host, report.identity.as_ref())?;
-        self.links.merge(host, stream, report)?;
-        let applied = self.apply(host, &runtime.identity, report);
+        let applied = self.update(|state| {
+            let runtime = self.registered(state, host, report.identity.as_ref())?;
+            apply(state, host, &runtime.identity, report)?;
+            self.links.merge(host, stream, report)
+        });
         self.links.applied();
         applied?;
         if !self.recovery.open()? {
@@ -101,13 +106,13 @@ impl Control {
     }
 
     /// The process currently registered for `host`, if `identity` names it.
-    fn registered(&self, host: &str, identity: Option<&ProcessIdentity>) -> Result<RuntimeConnection> {
+    fn registered(&self, state: &State, host: &str, identity: Option<&ProcessIdentity>) -> Result<RuntimeConnection> {
         let runtime = self
             .host
             .connection(host)
             .filter(|runtime| Some(&runtime.identity) == identity && !self.host.stopped(host))
             .ok_or(Error::Invalid("unregistered or replaced process"))?;
-        if let Some(expected) = self.state()?.hosts.get(host)
+        if let Some(expected) = state.hosts.get(host)
             && !self.runs_host(&runtime, expected)
         {
             return Err(Error::Invalid("process runs another host"));
@@ -115,34 +120,35 @@ impl Control {
         Ok(runtime)
     }
 
-    fn apply(&self, host: &str, identity: &ProcessIdentity, report: &ProcessReport) -> Result<()> {
-        self.update(|state| {
-            for binding in &report.deliveries {
-                crate::delivery::apply(state, host, identity, binding)?;
-            }
-            for observed in &report.sessions {
-                crate::sessions::apply(state, host, observed);
-            }
-            Ok(())
-        })
-    }
-
     /// Applies the latest phase `operation`'s JVM reported, which it may have reported before control recorded the
     /// claim's assignment.
     pub(crate) fn apply_reported(&self, operation: &str) -> Result<()> {
-        let state = self.state()?;
-        let Some(host) =
-            state.claims.get(operation).and_then(|claim| state.sessions.get(&claim.session)).map(|s| &s.host)
-        else {
-            return Ok(());
-        };
-        let Some(runtime) = self.host.connection(host) else {
-            return Ok(());
-        };
-        let Some(binding) = self.links.delivery(host, &runtime.identity, operation) else {
-            return Ok(());
-        };
-        self.update(|state| crate::delivery::apply(state, host, &runtime.identity, &binding))
+        self.update(|state| {
+            let Some(host) = state
+                .claims
+                .get(operation)
+                .and_then(|claim| state.sessions.get(&claim.session))
+                .map(|s| s.host.clone())
+            else {
+                return Ok(());
+            };
+            let Some(runtime) = self.host.connection(&host) else {
+                return Ok(());
+            };
+            match self.links.delivery(&host, &runtime.identity, operation) {
+                Some(binding) => crate::delivery::apply(state, &host, &runtime.identity, &binding),
+                None => Ok(()),
+            }
+        })
+    }
+
+    /// Reapplies everything `identity` reported on `host`'s current stream. Reading the link inside the commit keeps
+    /// it from overwriting a newer report.
+    pub(crate) fn reapply(&self, state: &mut State, host: &str, identity: &ProcessIdentity) -> Result<()> {
+        match self.links.report(host, identity) {
+            Some(report) => apply(state, host, identity, &report),
+            None => Ok(()),
+        }
     }
 
     /// Waits until `runtime` reports session `id` ready.
@@ -191,6 +197,17 @@ impl Control {
         *sent = Some(desired);
         Ok((first || !update.create.is_empty() || !update.finish.is_empty()).then_some(update))
     }
+}
+
+/// Records one report. Only a commit that also checks the report's stream, or reads the link, may call this.
+fn apply(state: &mut State, host: &str, identity: &ProcessIdentity, report: &ProcessReport) -> Result<()> {
+    for binding in &report.deliveries {
+        crate::delivery::apply(state, host, identity, binding)?;
+    }
+    for observed in &report.sessions {
+        crate::sessions::apply(state, host, observed);
+    }
+    Ok(())
 }
 
 fn desired(state: &State, host: &str, identity: &ProcessIdentity) -> Result<Desired> {

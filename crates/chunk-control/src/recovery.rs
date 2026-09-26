@@ -133,8 +133,8 @@ impl Control {
         let Some(inventory) = self.links.report(id, &runtime.identity) else {
             return Ok(false);
         };
-        self.retire_unknown_operations(&inventory)?;
-        self.retire_unknown_sessions(id, &inventory)?;
+        self.retire_unknown_operations(id, &runtime.identity)?;
+        self.retire_unknown_sessions(id, &runtime.identity)?;
         if !self.fence_deliveries(&runtime, &inventory).await? {
             return Ok(false);
         }
@@ -147,11 +147,11 @@ impl Control {
     /// Records each session a logged host's JVM runs without a log row, such as one whose creation a restore lost, as
     /// a retired session to finish. Until the JVM confirms it ended, its row counts toward the host's capacity. A lost
     /// orphan host's sessions end with its JVM instead.
-    fn retire_unknown_sessions(&self, id: &str, inventory: &ProcessReport) -> Result<()> {
+    fn retire_unknown_sessions(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
-            if !state.hosts.contains_key(id) {
+            let Some(inventory) = self.links.report(id, identity).filter(|_| state.hosts.contains_key(id)) else {
                 return Ok(());
-            }
+            };
             for observed in &inventory.sessions {
                 let Some(session) = &observed.session else {
                     continue;
@@ -230,8 +230,11 @@ impl Control {
     /// Records a released tombstone for each delivery whose operation the log does not know, such as deliveries
     /// prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
     /// player again under an operation ID the JVM already holds.
-    fn retire_unknown_operations(&self, inventory: &ProcessReport) -> Result<()> {
+    fn retire_unknown_operations(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
+            let Some(inventory) = self.links.report(id, identity) else {
+                return Ok(());
+            };
             for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
                 state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
             }

@@ -34,12 +34,13 @@ public final class ProcessService implements ProcessState {
         return gameplay.inventory();
     }
 
-    /** Failures surface in later reports, or as a session that never becomes ready. */
+    /** Outcomes, including failures, surface in later reports. */
     @Override
     public void apply(DesiredSessions desired) {
         for (var command : desired.getCreateList()) {
-            if (command.getIdentity().equals(identity) && process.isReady())
-                sessions.create(command);
+            if (!command.getIdentity().equals(identity)) continue;
+            if (process.isReady()) sessions.create(command);
+            else sessions.reject(command);
         }
         for (var command : desired.getFinishList()) {
             if (command.getIdentity().equals(identity)) sessions.finish(command);
