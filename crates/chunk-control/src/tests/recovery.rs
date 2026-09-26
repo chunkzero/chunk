@@ -99,3 +99,34 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
     control.claim(newcomer).await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_jvm_re_attaching_while_recovery_finds_no_connection_is_still_fenced() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let assignment = control.claim(request("served", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["served"].session].host.clone();
+    drop(control);
+    // The JVM also holds a delivery the log does not own, such as one a restore lost.
+    let stray = PlayerDelivery { operation_id: "stray".into(), ..assignment.delivery.unwrap() };
+    let binding = Binding { delivery: stray, phase: DeliveryPhase::Prepared };
+    fixture.runtime.bindings.lock().unwrap().insert("stray".into(), binding);
+    fixture.host.forgotten.store(true, Ordering::Release);
+
+    let control = fixture.control();
+    let registering = control.clone();
+    let registration = ProcessRegistration {
+        identity: Some(ProcessIdentity { runtime_id: host, ..fixture.runtime.identity.clone() }),
+        control_endpoint: fixture.host.endpoint.clone(),
+        player_endpoint: "127.0.0.1:1".into(),
+    };
+    // The JVM re-attaches after recovery finds no connection and before it checks for an unowned launch.
+    *fixture.host.missed.lock().unwrap() = Some(Box::new(move || {
+        registering.register("Bearer test-runtime-credential", registration).unwrap();
+    }));
+    assert!(matches!(control.admit().await, Err(Error::Busy)));
+    control.admit().await.unwrap();
+    assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
+    fixture.close().await;
+}

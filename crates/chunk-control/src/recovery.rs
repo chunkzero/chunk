@@ -5,7 +5,7 @@
 //! players.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -34,14 +34,18 @@ pub(crate) struct Recovery {
 }
 
 struct Pending {
-    hosts: BTreeSet<String>,
+    /// Each pending host, with the re-attachment count when it last became pending. A resolution that started before a
+    /// later re-attachment does not complete it.
+    hosts: BTreeMap<String, u64>,
+    attachments: u64,
     /// When admission next warns that hosts are still pending.
     deadline: Instant,
 }
 
 impl Recovery {
     pub fn new(hosts: BTreeSet<String>) -> Self {
-        let pending = Pending { hosts, deadline: Instant::now() + RECOVERY_WARNING };
+        let hosts = hosts.into_iter().map(|host| (host, 0)).collect();
+        let pending = Pending { hosts, attachments: 0, deadline: Instant::now() + RECOVERY_WARNING };
         Self { pending: Mutex::new(pending), resolving: AsyncMutex::new(()) }
     }
 
@@ -59,7 +63,10 @@ impl Recovery {
     }
 
     fn reopen(&self, host: &str) -> Result<()> {
-        self.lock()?.hosts.insert(host.into());
+        let mut pending = self.lock()?;
+        pending.attachments += 1;
+        let attachment = pending.attachments;
+        pending.hosts.insert(host.into(), attachment);
         Ok(())
     }
 }
@@ -82,7 +89,7 @@ impl Control {
             return Ok(());
         };
         let hosts = self.recovery.lock()?.hosts.clone();
-        for id in hosts {
+        for (id, attachment) in hosts {
             let resolved = match self.recover_host(&id).await {
                 Ok(resolved) => resolved,
                 Err(error) => {
@@ -90,15 +97,16 @@ impl Control {
                     false
                 }
             };
-            if resolved {
-                self.recovery.lock()?.hosts.remove(&id);
+            let mut pending = self.recovery.lock()?;
+            if resolved && pending.hosts.get(&id) == Some(&attachment) {
+                pending.hosts.remove(&id);
             }
         }
         let mut pending = self.recovery.lock()?;
         if !pending.hosts.is_empty() && Instant::now() >= pending.deadline {
             pending.deadline = Instant::now() + RECOVERY_WARNING;
             tracing::warn!(
-                hosts = ?pending.hosts,
+                hosts = ?pending.hosts.keys().collect::<Vec<_>>(),
                 "new claims wait until surviving JVMs re-attach or their hosts confirm they stopped"
             );
         }

@@ -249,11 +249,17 @@ struct FakeHost {
     terminated: Mutex<BTreeSet<String>>,
     /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
     forgotten: AtomicBool,
+    /// Runs once when a forgotten host is asked for its connection, after answering none.
+    missed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
     fn connection(&self, _: &str) -> Option<RuntimeConnection> {
         if self.forgotten.load(Ordering::Acquire) {
+            let missed = self.missed.lock().unwrap().take();
+            if let Some(missed) = missed {
+                missed();
+            }
             return None;
         }
         Some(RuntimeConnection {
@@ -364,6 +370,7 @@ impl Fixture {
             ids: Mutex::default(),
             terminated: Mutex::default(),
             forgotten: AtomicBool::new(false),
+            missed: Mutex::default(),
         });
         let config = Config {
             contracts: Contracts::default(),
