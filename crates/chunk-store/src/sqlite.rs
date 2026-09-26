@@ -80,8 +80,11 @@ impl SqliteStore {
     /// Creates the database at `path` as `environment` from the latest state
     /// replicated to `source` as `source_environment`, and replicates it to the
     /// empty storage of `replication` under a new lineage starting at epoch 1.
-    /// Returns once that storage holds the fork's first snapshot. Pending jobs,
-    /// operation outcomes and retry contexts are copied with the documents.
+    /// Returns once that storage holds the fork's first snapshot.
+    ///
+    /// Documents and operation outcomes are copied. Retry contexts are dropped,
+    /// and so are pending and running jobs unless `keep_jobs` is set, so a fork
+    /// never runs work scheduled by the source.
     /// # Errors
     /// Fails like [`Self::open_replicated`], and with [`Error::Invalid`] when
     /// `path` already holds a database, the target storage is not empty or the
@@ -92,6 +95,7 @@ impl SqliteStore {
         path: impl AsRef<Path>,
         environment: &str,
         replication: Replication,
+        keep_jobs: bool,
     ) -> Result<(Self, Replicator)> {
         validate_environment(source_environment)?;
         validate_environment(environment)?;
@@ -102,7 +106,16 @@ impl SqliteStore {
         let target = replication.storage();
         replication::fork(&path, source.storage(), source_environment, environment, target)?;
         let remote = replication::Remote::load(target)?;
-        let (store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
+        let (mut store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
+        log::write(&store.connection, store.log.as_mut(), &[], |transaction| {
+            transaction.execute("DELETE FROM _chunk_retry_contexts", [])?;
+            if !keep_jobs
+                && transaction.execute("DELETE FROM _chunk_jobs WHERE state IN ('pending', 'running')", [])? > 0
+            {
+                jobs::changed(transaction)?;
+            }
+            Ok(())
+        })?;
         replicator.flush()?;
         Ok((store, replicator))
     }
@@ -267,7 +280,11 @@ impl Storage for SqliteStore {
                         operations::prepare(transaction, &operation, context).map(Reply::Prepared)
                     }
                     Request::Commit { commit, intents } => {
-                        write::commit(transaction, schema, commit, &intents, now).map(Reply::Committed)
+                        // Expired finished jobs must not hold capacity a new job needs.
+                        let scheduling = intents.iter().any(|intent| matches!(intent, JobIntent::Schedule(_)));
+                        (if scheduling { retention::prune_jobs(transaction, retention, now) } else { Ok(false) })
+                            .and_then(|_| write::commit(transaction, schema, commit, &intents, now))
+                            .map(Reply::Committed)
                     }
                 };
                 match &result {

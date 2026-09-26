@@ -1,4 +1,8 @@
-use crate::{Commit, DatabaseSchema, DocumentKey, Error, IndexRange, KeyRange, Operation, Revision, Storage, Write};
+use crate::{
+    Commit, DatabaseSchema, DocumentKey, Error, IndexRange, Job, JobState, KeyRange, Operation, Revision, Storage,
+    Write,
+};
+use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use serde_json::json;
 
 pub(crate) fn schema() -> DatabaseSchema {
@@ -33,6 +37,43 @@ pub(crate) fn committed(result: &crate::Result<crate::Reply>) -> Revision {
     match result {
         Ok(crate::Reply::Committed(outcome)) => outcome.revision,
         other => panic!("expected a commit, found {other:?}"),
+    }
+}
+
+/// A retained deployment whose `work` action jobs may target.
+pub(crate) fn target() -> Deployment {
+    Deployment {
+        contract_version: 2,
+        runtime_profile: RuntimeProfile::TransactionalV1,
+        contracts: Contracts::default(),
+        id: "v1".into(),
+        source: "export function work() { return null; }".into(),
+        tables: crate::tests::schema(),
+        functions: [(
+            "work".into(),
+            Function {
+                kind: FunctionKind::Action,
+                visibility: Visibility::Internal,
+                export: "work".into(),
+                arguments: Schema::Null,
+                result: Schema::Null,
+            },
+        )]
+        .into(),
+    }
+}
+/// A pending job due at 10 that runs `work` for alice.
+pub(crate) fn job(id: &str) -> Job {
+    Job {
+        id: id.into(),
+        deployment: "v1".into(),
+        function: "work".into(),
+        arguments: json!(null),
+        caller: json!({"player":"alice"}),
+        due_at: 10,
+        attempt: 1,
+        state: JobState::Pending,
+        result: None,
     }
 }
 

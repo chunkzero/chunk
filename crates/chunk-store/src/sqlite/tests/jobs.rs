@@ -1,41 +1,7 @@
 use super::*;
-use crate::{Job, JobCommand, JobIntent, JobState};
-use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
-
-fn target() -> Deployment {
-    Deployment {
-        contract_version: 2,
-        runtime_profile: RuntimeProfile::TransactionalV1,
-        contracts: Contracts::default(),
-        id: "v1".into(),
-        source: "export function work() { return null; }".into(),
-        tables: crate::tests::schema(),
-        functions: [(
-            "work".into(),
-            Function {
-                kind: FunctionKind::Action,
-                visibility: Visibility::Internal,
-                export: "work".into(),
-                arguments: Schema::Null,
-                result: Schema::Null,
-            },
-        )]
-        .into(),
-    }
-}
-fn job(id: &str) -> Job {
-    Job {
-        id: id.into(),
-        deployment: "v1".into(),
-        function: "work".into(),
-        arguments: json!(null),
-        caller: json!({"player":"alice"}),
-        due_at: 10,
-        attempt: 1,
-        state: JobState::Pending,
-        result: None,
-    }
-}
+use crate::tests::{job, target};
+use crate::{JobCommand, JobIntent, JobState};
+use chunk_contract::Schema;
 
 #[test]
 fn document_job_and_wake_roll_back_and_commit_as_one_batch() {
@@ -199,4 +165,27 @@ fn finished_jobs_expire_on_later_job_commands() {
     let jobs = store.job_command(JobCommand::Recover).unwrap();
     assert_eq!(jobs.records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
     assert!(jobs.wake.generation > generation);
+}
+
+#[test]
+fn expired_finished_jobs_free_scheduling_capacity() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let caller = json!({"player":"alice"});
+    let mut expected = 1;
+    for batch in 0..16 {
+        let ids: Vec<_> = (0..16).map(|index| format!("job-{batch}-{index}")).collect();
+        let scheduled = ids.iter().map(|id| JobIntent::Schedule(job(id))).collect();
+        store.commit_with_jobs(commit(&format!("schedule-{batch}"), expected, vec![]), scheduled).unwrap();
+        let cancelled = ids.into_iter().map(|id| JobIntent::Cancel { id, caller: caller.clone() }).collect();
+        store.commit_with_jobs(commit(&format!("cancel-{batch}"), expected + 1, vec![]), cancelled).unwrap();
+        expected += 2;
+    }
+    let late = || vec![JobIntent::Schedule(job("late"))];
+    assert!(matches!(store.commit_with_jobs(commit("late", expected, vec![]), late()), Err(Error::Capacity)));
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store.set_retention(crate::Retention { jobs: std::time::Duration::ZERO, ..crate::Retention::default() });
+    store.commit_with_jobs(commit("late", expected, vec![]), late()).unwrap();
+    assert_eq!(store.jobs().unwrap().records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["late"]);
 }

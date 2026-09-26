@@ -12,6 +12,9 @@ use crate::{
     replication::{Entry, Shared},
 };
 
+/// The first store format with a replicated log.
+const REPLICATED_FORMAT: i64 = 7;
+
 /// Present while the store is replicated.
 pub(super) struct Log {
     shared: Arc<Shared>,
@@ -127,10 +130,13 @@ pub(crate) struct Replica {
 }
 
 impl Replica {
+    /// Accepts snapshots of any replicated store format. Their segments were
+    /// written in the same format, so they replay first; the restored store
+    /// migrates when it opens.
     pub fn open(path: &std::path::Path, environment: &str, epoch: u64, sequence: u64) -> Result<Self> {
         let connection = Connection::open(path)?;
-        if super::bootstrap::version(&connection)? != super::bootstrap::FORMAT {
-            return Err(Error::Corrupt("snapshot has an unexpected store format"));
+        if !(REPLICATED_FORMAT..=super::bootstrap::FORMAT).contains(&super::bootstrap::version(&connection)?) {
+            return Err(Error::Corrupt("snapshot has an unsupported store format"));
         }
         let stored: String =
             connection

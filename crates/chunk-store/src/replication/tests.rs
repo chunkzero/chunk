@@ -12,7 +12,7 @@ use serde_json::json;
 use super::*;
 use crate::{
     Epoch, Error, Operation, RetryContext, Revision, SqliteStore, Storage,
-    tests::{commit, operation, request, schema, write},
+    tests::{commit, job, operation, request, schema, target, write},
 };
 
 #[derive(Default)]
@@ -436,7 +436,7 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
     let target = Arc::new(Memory::default());
     let forked = directory.path().join("fork.db");
     let (mut fork, fork_replicator) =
-        SqliteStore::fork(&manual(&source), "local", &forked, "preview", manual(&target)).unwrap();
+        SqliteStore::fork(&manual(&source), "local", &forked, "preview", manual(&target), false).unwrap();
     assert_eq!(fork.epoch(), Epoch(1));
     assert_eq!(count(&target, "/snapshots/"), 1);
     fork.commit(commit("fork-only", 2, vec![write("b", Some(json!({"coins": 2})))])).unwrap();
@@ -454,7 +454,14 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
     assert_eq!(dump(&restored), dump(&forked));
 
     assert!(matches!(
-        SqliteStore::fork(&manual(&source), "local", directory.path().join("again.db"), "preview", manual(&target)),
+        SqliteStore::fork(
+            &manual(&source),
+            "local",
+            directory.path().join("again.db"),
+            "preview",
+            manual(&target),
+            false
+        ),
         Err(Error::Invalid(_))
     ));
     assert!(matches!(
@@ -463,10 +470,108 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
             "local",
             directory.path().join("wrong.db"),
             "other",
-            manual(&Arc::default())
+            manual(&Arc::default()),
+            false
         ),
         Err(Error::EnvironmentMismatch)
     ));
+}
+
+#[test]
+fn a_fork_drops_retry_contexts_and_unfinished_jobs_unless_asked_to_keep_jobs() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("source.db"), manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    store.retain_deployment(&target()).unwrap();
+    let scheduled = vec![crate::JobIntent::Schedule(job("later"))];
+    store.commit_with_jobs(commit("schedule", 1, vec![write("a", Some(json!({"coins": 1})))]), scheduled).unwrap();
+    let inherited = RetryContext { deployment: "v1".into(), timestamp: 1, seed: 2 };
+    store.prepare_operation(&operation("unfinished"), inherited.clone()).unwrap();
+    replicator.flush().unwrap();
+
+    let fresh = RetryContext { deployment: "v1".into(), timestamp: 3, seed: 4 };
+    let fork = |name: &str, keep_jobs| {
+        let (store, _replicator) = SqliteStore::fork(
+            &manual(&source),
+            "local",
+            directory.path().join(name),
+            "preview",
+            manual(&Arc::default()),
+            keep_jobs,
+        )
+        .unwrap();
+        store
+    };
+    let mut dropped = fork("dropped.db", false);
+    assert!(dropped.jobs().unwrap().records.is_empty());
+    assert!(dropped.outcome(&operation("schedule")).unwrap().is_some());
+    assert_eq!(dropped.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+    let mut kept = fork("kept.db", true);
+    assert_eq!(kept.jobs().unwrap().records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["later"]);
+    assert_eq!(kept.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+    assert_eq!(store.prepare_operation(&operation("unfinished"), fresh).unwrap(), inherited);
+}
+
+#[test]
+fn format_7_snapshots_and_segments_restore_and_fork_before_migrating() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    // A format-7 host's objects: a snapshot at sequence 1, then one logged commit.
+    let legacy = directory.path().join("legacy.db");
+    let mut store = SqliteStore::open(&legacy, "local").unwrap();
+    store.apply_schema(&schema()).unwrap();
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    drop(store);
+    let connection = Connection::open(&legacy).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             DROP INDEX _chunk_operations_committed;
+             ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+             ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+             ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             DELETE FROM _chunk_log;
+             UPDATE _chunk_metadata SET epoch = 1, log_sequence = 1;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+    storage.create(&segment::claim_key(1), b"legacy".to_vec()).unwrap();
+    storage.put(&segment::snapshot_key(1, 1), std::fs::read(&legacy).unwrap()).unwrap();
+    let mut session = rusqlite::session::Session::new(&connection).unwrap();
+    session.attach(None::<&str>).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE _chunk_metadata SET revision = 3, log_sequence = 2;
+             INSERT INTO _chunk_operations SELECT 'two', fingerprint, 3, 'null' FROM _chunk_operations;",
+        )
+        .unwrap();
+    let mut changeset = Vec::new();
+    session.changeset_strm(&mut changeset).unwrap();
+    drop(session);
+    let entry = Entry { sequence: 2, revision: 3, statements: Vec::new(), changeset }.encode().unwrap();
+    storage.put(&segment::segment_key(1, 2, 2), segment::encode(1, [entry.as_slice()]).unwrap()).unwrap();
+
+    let (fork, _replicator) = SqliteStore::fork(
+        &manual(&storage),
+        "local",
+        directory.path().join("fork.db"),
+        "preview",
+        manual(&Arc::default()),
+        false,
+    )
+    .unwrap();
+    assert!(fork.outcome(&operation("two")).unwrap().is_some());
+
+    let (mut store, replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.snapshot().unwrap().revision), (Epoch(2), Revision(3)));
+    assert!(store.outcome(&operation("one")).unwrap().is_some() && store.outcome(&operation("two")).unwrap().is_some());
+    store.commit(commit("three", 3, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // The next restore starts from the migrated epoch's snapshot.
+    let (store, _replicator) = open(&directory.path().join("again.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.outcome(&operation("three")).unwrap().is_some()), (Epoch(3), true));
 }
 
 #[test]
