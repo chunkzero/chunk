@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 const blockSize = 512;
 const maxLongNameBytes = 4096;
+/** The file and directory paths a scan retains, in UTF-16 code units, so deep paths cannot amplify memory. */
+export const maxPathChars = 16 * 1024 * 1024;
 
 export interface ArchiveLimits {
   /** Decompressed bytes, tar headers and padding included. */
@@ -32,6 +34,11 @@ export async function scanArchive(
   const entries = new Map<string, ArchiveEntry>();
   /** Every ancestor of a file seen so far; none of them may also be a file. */
   const directories = new Set<string>();
+  let pathChars = 0;
+  const retain = (path: string) => {
+    pathChars += path.length;
+    if (pathChars > maxPathChars) throw new Error(`the archive's paths exceed the ${maxPathChars}-character budget`);
+  };
   try {
     let longName: string | undefined;
     let count = 0;
@@ -63,9 +70,13 @@ export async function scanArchive(
       if (!portablePath(path)) throw new Error(`the archive holds an invalid path: ${JSON.stringify(path)}`);
       if (entries.has(path)) throw new Error(`the archive holds ${path} twice`);
       if (directories.has(path)) throw new Error(`the archive holds ${path} as both a file and a directory`);
-      for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
+      retain(path);
+      // Deepest first: a known directory's ancestors are already known, so each directory is checked once.
+      for (let slash = path.lastIndexOf("/"); slash > 0; slash = path.lastIndexOf("/", slash - 1)) {
         const ancestor = path.slice(0, slash);
+        if (directories.has(ancestor)) break;
         if (entries.has(ancestor)) throw new Error(`the archive holds ${ancestor} as both a file and a directory`);
+        retain(ancestor);
         directories.add(ancestor);
       }
       const limit = keep(path);

@@ -1,4 +1,13 @@
-import { Code, ConnectError, createContextKey, type HandlerContext, type Interceptor } from "@connectrpc/connect";
+import type { DescMethod } from "@bufbuild/protobuf";
+import {
+  Code,
+  ConnectError,
+  type ContextValues,
+  createContextKey,
+  createContextValues,
+  type HandlerContext,
+  type Interceptor,
+} from "@connectrpc/connect";
 
 import { AuthService } from "../gen/chunk/management/v1/auth_pb.ts";
 
@@ -28,17 +37,33 @@ const publicMethods = new Set<string>(
   ),
 );
 
-export function authInterceptor(authenticator: Authenticator): Interceptor {
-  return (next) => async (request) => {
-    if (!publicMethods.has(`${request.service.typeName}/${request.method.name}`)) {
-      const bearer = /^Bearer (\S+)$/i.exec(request.header.get("authorization") ?? "")?.[1];
-      const caller = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
-      if (!caller) throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
-      request.contextValues.set(callerKey, caller);
-    }
-    return next(request);
-  };
+const isPublic = (method: DescMethod) => publicMethods.has(`${method.parent.typeName}/${method.name}`);
+
+/**
+ * Authenticates a call from its headers alone, so the server can turn it away before Connect reads its body. Returns
+ * the context values the call runs with, or undefined when a protected method has no valid bearer token.
+ */
+export async function authenticate(
+  authenticator: Authenticator,
+  method: DescMethod,
+  header: Headers,
+): Promise<ContextValues | undefined> {
+  const values = createContextValues();
+  if (isPublic(method)) return values;
+  const bearer = /^Bearer (\S+)$/i.exec(header.get("authorization") ?? "")?.[1];
+  const caller = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
+  if (!caller) return undefined;
+  values.set(callerKey, caller);
+  return values;
 }
+
+/** Rejects protected calls that `authenticate` did not admit. */
+export const authInterceptor: Interceptor = (next) => async (request) => {
+  if (!isPublic(request.method) && request.contextValues.get(callerKey) === undefined) {
+    throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
+  }
+  return next(request);
+};
 
 export function callerOf(context: HandlerContext): Caller {
   const caller = context.values.get(callerKey);

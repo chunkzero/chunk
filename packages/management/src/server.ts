@@ -1,5 +1,18 @@
-import { ConnectError, type ConnectRouter, createConnectRouter, type Interceptor } from "@connectrpc/connect";
-import { createFetchHandler } from "@connectrpc/connect/protocol";
+import {
+  ConnectError,
+  type ConnectRouter,
+  createConnectRouter,
+  createContextValues,
+  type Interceptor,
+} from "@connectrpc/connect";
+import {
+  createAsyncIterable,
+  encodeEnvelope,
+  type UniversalHandler,
+  type UniversalServerRequest,
+  universalServerRequestFromFetch,
+  universalServerResponseToFetch,
+} from "@connectrpc/connect/protocol";
 
 import { authService } from "./auth/service.ts";
 import { tokenAuthenticator } from "./auth/tokens.ts";
@@ -13,7 +26,7 @@ import { LogService } from "./gen/chunk/management/v1/logs_pb.ts";
 import { ProjectService } from "./gen/chunk/management/v1/projects_pb.ts";
 import { SecretService } from "./gen/chunk/management/v1/secrets_pb.ts";
 import { projectService } from "./projects/service.ts";
-import { type Authenticator, authInterceptor } from "./rpc/caller.ts";
+import { authenticate, type Authenticator, authInterceptor } from "./rpc/caller.ts";
 import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
@@ -22,10 +35,15 @@ export interface HandlerOptions {
   extend?: (router: ConnectRouter) => void;
 }
 
+/** The largest RPC message a client may send; release archives go to the release store instead. */
+export const maxRpcBytes = 4 * 1024 * 1024;
+
 /** Serves chunk.management.v1 over Connect, gRPC-Web and gRPC, plus the release store's own URLs. */
 export function createHandler(deps: Deps, options: HandlerOptions = {}): (request: Request) => Promise<Response> {
+  const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
   const router = createConnectRouter({
-    interceptors: [logUnexpectedErrors, authInterceptor(options.authenticator ?? tokenAuthenticator(deps.sql))],
+    interceptors: [logUnexpectedErrors, authInterceptor],
+    readMaxBytes: maxRpcBytes,
   });
   router
     .service(AuthService, authService(deps))
@@ -35,12 +53,22 @@ export function createHandler(deps: Deps, options: HandlerOptions = {}): (reques
     .service(DomainService, domainService(deps))
     .service(LogService, {});
   options.extend?.(router);
-  const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, createFetchHandler(handler)]));
+  const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
+
+  /** Connect reads a unary request's whole body before interceptors run, so authentication comes first. */
+  async function serveRpc(handler: UniversalHandler, request: Request): Promise<Response> {
+    const contextValues = await authenticate(authenticator, handler.method, request.headers);
+    const universal = universalServerRequestFromFetch(request, {});
+    const call = contextValues
+      ? { ...universal, contextValues }
+      : { ...emptyMessage(universal), contextValues: createContextValues() };
+    return universalServerResponseToFetch(await handler(call));
+  }
 
   return async (request) => {
     const { pathname } = new URL(request.url);
     const rpc = rpcs.get(pathname);
-    if (rpc) return rpc(request);
+    if (rpc) return serveRpc(rpc, request);
     if (pathname === "/healthz") return new Response("ok\n");
     return (await deps.releases.fetch?.(request)) ?? new Response("not found\n", { status: 404 });
   };
@@ -55,3 +83,17 @@ const logUnexpectedErrors: Interceptor = (next) => async (request) => {
     throw error;
   }
 };
+
+/**
+ * The request with an empty message in place of the client's body, which is never read. `authInterceptor` then
+ * answers it in the client's protocol.
+ */
+function emptyMessage(request: UniversalServerRequest): UniversalServerRequest {
+  const header = new Headers(request.header);
+  for (const name of ["content-length", "content-encoding", "connect-content-encoding", "grpc-encoding"])
+    header.delete(name);
+  const type = header.get("content-type") ?? "";
+  const message = new TextEncoder().encode(/[/+]json\b/.test(type) ? "{}" : "");
+  const enveloped = /^application\/(?:connect\+|grpc)/.test(type);
+  return { ...request, header, body: createAsyncIterable([enveloped ? encodeEnvelope(0, message) : message]) };
+}
