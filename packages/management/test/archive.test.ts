@@ -101,3 +101,16 @@ test("rejects archives that differ from their declaration or exceed the budget",
   await expect(verify(archive, { maxExpandedBytes: 64 * 1024 })).rejects.toThrow("expands past 65536 bytes");
   await expect(verify(archive, { maxEntries: 3 })).rejects.toThrow("more than 3 entries");
 });
+
+test("rejects archive path metadata amplification within the entry and expanded byte limits", async () => {
+  const files: [string, string][] = [
+    ["release.json", JSON.stringify({ id: "r1", version: 3, apps: [], profiles: {} })],
+  ];
+  for (let i = 0; i < 499; i++) files.push([`${i}/${"a/".repeat(1900)}f`, ""]);
+  // 999 headers including GNU long names, but 948,599 distinct ancestors.
+  const archive = rawArchive(files);
+  expect(Bun.gunzipSync(archive.bytes).byteLength).toBeLessThan(3 * 1024 * 1024);
+  await expect(verify(archive, { maxExpandedBytes: 3 * 1024 * 1024, maxEntries: 1000 })).rejects.toThrow(
+    /(?:path|metadata|ancest).*(?:budget|limit|exceed|too many|too large)/i,
+  );
+});

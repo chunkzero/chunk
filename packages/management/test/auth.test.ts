@@ -19,6 +19,47 @@ describe.skipIf(!databaseUrl)("AuthService", () => {
     expect(await codeOf(h.client(AuthService, "chunk_wrong").getCurrentPrincipal({}))).toBe(Code.Unauthenticated);
   });
 
+  test("rejects oversized protected RPC bodies by size or authenticates before reading them", async () => {
+    const bytes = new TextEncoder().encode(`${" ".repeat(8 * 1024 * 1024)}{}`);
+    let bytesRead = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const chunk = bytes.subarray(bytesRead, bytesRead + 64 * 1024);
+          bytesRead += chunk.byteLength;
+          controller.enqueue(chunk);
+          if (bytesRead === bytes.byteLength) controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const response = await h.fetch(
+      new Request(`${h.url}/${AuthService.typeName}/GetCurrentPrincipal`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "connect-protocol-version": "1" },
+        body,
+      }),
+    );
+    if (response.status === 413) return;
+    const error = (await response.json()) as { code?: string };
+    if (error.code === "unauthenticated") {
+      expect(bytesRead, "unauthenticated RPC must be rejected before consuming its body").toBe(0);
+    } else {
+      expect(["resource_exhausted", "invalid_argument"]).toContain(error.code ?? `HTTP ${response.status}`);
+    }
+  });
+
+  test("rejects oversized public login RPC bodies by size", async () => {
+    const response = await fetch(`${h.url}/${AuthService.typeName}/StartLogin`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "connect-protocol-version": "1" },
+      body: JSON.stringify({ clientName: "a".repeat(8 * 1024 * 1024) }),
+    });
+    if (response.status === 413) return;
+    const error = (await response.json()) as { code?: string };
+    expect(["resource_exhausted", "invalid_argument"]).toContain(error.code ?? `HTTP ${response.status}`);
+  });
+
   test("device login issues a token once, after approval", async () => {
     const anonymous = h.client(AuthService, null);
     const login = await anonymous.startLogin({ clientName: "chunk CLI on laptop" });

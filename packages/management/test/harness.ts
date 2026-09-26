@@ -29,6 +29,8 @@ export interface Harness {
   beforeRead: (() => Promise<void>) | undefined;
   /** A client sending `token` as its bearer, or none when null. */
   client<T extends DescService>(service: T, token?: string | null): Client<T>;
+  /** Calls the same handler directly so tests can observe consumption of a request body. */
+  fetch(request: Request): Promise<Response>;
   close(): Promise<void>;
 }
 
@@ -59,6 +61,7 @@ export async function startHarness(): Promise<Harness> {
     releases,
     beforeRead: undefined,
     client,
+    fetch: (request) => handler(request),
     close,
   };
   handler = createHandler({
