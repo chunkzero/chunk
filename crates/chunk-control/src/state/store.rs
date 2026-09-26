@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, path::Path};
 
 use chunk_store::{
-    Commit, DatabaseSchema, DocumentKey, KeyRange, Operation, Revision, Snapshot, SqliteStore, Storage, Write,
+    Commit, DatabaseSchema, DocumentKey, KeyRange, Operation, ReadBudget, Revision, Snapshot, SqliteStore, Storage,
+    Write,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -44,23 +45,26 @@ impl Store {
         Ok(Self { store })
     }
 
+    /// Loads every row. Control holds its whole state in memory and commits accept any size, so no read budget
+    /// applies: a smaller one could stop control from reopening state it already accepted.
     pub fn load(&mut self) -> Result<State> {
         let snapshot = self.store.snapshot()?;
+        let budget = &mut ReadBudget::new(usize::MAX, usize::MAX);
         let meta: Option<Meta> = snapshot
-            .get(&DocumentKey::new(META, META_ID)?)?
+            .get_bounded(&DocumentKey::new(META, META_ID)?, budget)?
             .map(|document| serde_json::from_value(document.value))
             .transpose()?;
         let meta = meta.unwrap_or_default();
         Ok(State {
             config: meta.config,
             method_sequence: meta.method_sequence,
-            hosts: scan(&snapshot, HOSTS)?,
-            sessions: scan(&snapshot, SESSIONS)?,
-            players: scan(&snapshot, PLAYERS)?,
-            claims: scan(&snapshot, CLAIMS)?,
-            moves: scan(&snapshot, MOVES)?,
-            drains: scan(&snapshot, DRAINS)?,
-            rosters: scan(&snapshot, ROSTERS)?,
+            hosts: scan(&snapshot, HOSTS, budget)?,
+            sessions: scan(&snapshot, SESSIONS, budget)?,
+            players: scan(&snapshot, PLAYERS, budget)?,
+            claims: scan(&snapshot, CLAIMS, budget)?,
+            moves: scan(&snapshot, MOVES, budget)?,
+            drains: scan(&snapshot, DRAINS, budget)?,
+            rosters: scan(&snapshot, ROSTERS, budget)?,
             epoch: self.store.epoch().0,
             revision: snapshot.revision.0,
         })
@@ -79,10 +83,10 @@ impl Store {
     }
 }
 
-fn scan<T: DeserializeOwned>(snapshot: &Snapshot, table: &str) -> Result<BTreeMap<String, T>> {
+fn scan<T: DeserializeOwned>(snapshot: &Snapshot, table: &str, budget: &mut ReadBudget) -> Result<BTreeMap<String, T>> {
     let range = KeyRange { table: table.into(), start: None, end: None };
     let mut rows = BTreeMap::new();
-    for (id, document) in snapshot.scan(&range)? {
+    for (id, document) in snapshot.scan_bounded(&range, budget)? {
         rows.insert(id, serde_json::from_value(document.value)?);
     }
     Ok(rows)
