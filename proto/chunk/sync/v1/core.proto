@@ -1,0 +1,136 @@
+// The sync protocol: the one contract between an environment's core and everything that dials it (gateways, JVMs,
+// exec and the CLI). Call runs one method; Subscribe follows one topic.
+//
+// Names. Methods and topics are strings. A method is an app function path from the deployment's contract, or a
+// platform method named `chunk:<name>`; function paths never contain `:`. Planned topic families, not normative:
+// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<id>`, `method/<op>`, `nodes`, `players`.
+//
+// Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
+// messages declared by each `chunk:*` method or platform topic otherwise. `caller` is always JSON, because app code
+// receives it as-is.
+//
+// Operation IDs. Methods that write require an operation ID; reads ignore it. IDs are unique per environment, so
+// generate them randomly. When a write commits, core records its result and position, and a retry with the same ID
+// returns that outcome without running again. Outcomes are retained for a bounded window (24 hours by default);
+// after it, a retry runs as a new operation. A retry whose method, arguments, deployment or caller differ from the
+// first request with that ID fails with OPERATION_MISMATCH. A failed call records nothing, so its retry runs again.
+//
+// Positions. A position names a commit in the environment's log, ordered by epoch, then revision. Both start at 1,
+// and an unset position means none. A restore starts a new epoch, whose revisions may repeat numbers from a lost tail
+// of the previous one, so a pair is never reused. A claim generation is the position of the commit that created it.
+//
+// Subscriptions. A topic's state is a map from key to value. Without `after`, or when `after` is from another epoch,
+// older than retained history, or ahead of the current position, the stream starts with a snapshot. Otherwise it
+// starts with the changes after `after`, possibly none. Either way the first update reflects the current position.
+// Once a client applies an update, its view equals the topic's state at that update's position, so a slow
+// subscriber gets the latest value of each key, never an intermediate one, and positions never decrease. Core may
+// send a fresh snapshot at any time. An update with `continued` is followed by more at the same position: apply the
+// sequence together, and discard it if the stream breaks. To resume, subscribe with `after` set to the last applied
+// position and the same topic and arguments.
+//
+// Errors. Protocol errors are values: `CallResponse.error`, `Entry.error` for a query that failed while its
+// subscription continues, and `Update.error` on a stream's final update. A non-OK gRPC status means core may not
+// have handled the request: UNAUTHENTICATED for a missing or rejected credential, otherwise a transport failure with
+// an unknown outcome. Retry the call with the same operation ID, or resume the subscription.
+//
+// Auth. Every request carries `authorization: Bearer <credential>` metadata. Core derives the credential's class
+// (gateway, jvm, exec or cli) and identity from it, and checks each method, topic and deployment against them;
+// request fields are never authority. Only a gateway credential may set `caller`, asserting the player a request
+// acts for.
+//
+// Limits. Operation IDs are at most 128 bytes; methods, topics, deployments and keys at most 256 bytes. `arguments`
+// and `caller` together are at most 1 MiB. Every message is at most 2 MiB, so a result or entry must fit in one;
+// core splits larger snapshots and changes across continued updates.
+syntax = "proto3";
+
+package chunk.sync.v1;
+
+service Core {
+  rpc Call(CallRequest) returns (CallResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream Update);
+}
+
+message Position {
+  uint64 epoch = 1;
+  uint64 revision = 2;
+}
+
+message CallRequest {
+  // Required for methods that write.
+  string operation_id = 1;
+  string method = 2;
+  bytes arguments = 3;
+  // The deployment an app function runs in. Empty for `chunk:*` methods unless one says otherwise.
+  string deployment = 4;
+  // Gateway credentials only.
+  bytes caller = 5;
+}
+
+message CallResponse {
+  // The commit a write created, or the state a read observed. Unset on error and for methods that touch no state.
+  Position position = 1;
+  oneof outcome {
+    bytes result = 2;
+    Error error = 3;
+  }
+}
+
+message SubscribeRequest {
+  string topic = 1;
+  bytes arguments = 2;
+  // The last position the client applied for this topic and arguments. Unset to start from a snapshot.
+  Position after = 3;
+  // As in CallRequest, for topics that run app functions.
+  string deployment = 4;
+  bytes caller = 5;
+}
+
+message Update {
+  Position position = 1;
+  // Replaces the client's whole view instead of changing it.
+  bool snapshot = 2;
+  // Each key appears at most once per update, in either list.
+  repeated Entry upserts = 3;
+  repeated string removed = 4;
+  // More updates at this position follow and belong to this one.
+  bool continued = 5;
+  // Set only on the stream's final update, which carries nothing else.
+  Error error = 6;
+}
+
+message Entry {
+  string key = 1;
+  oneof state {
+    bytes value = 2;
+    // The key's query failed. A later update may replace it with a value.
+    Error error = 3;
+  }
+}
+
+message Error {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    // Retryable with the same operation ID, which returns the recorded outcome if the write did commit. Core, exec
+    // or storage can't take the request right now.
+    CODE_UNAVAILABLE = 1;
+    // Retryable after backing off. An admission limit or storage budget refused the request; the message names it.
+    CODE_OVERLOADED = 2;
+    // The rest are not retryable as sent. Bad encoding, a missing operation ID, an unknown method or topic, or an
+    // exceeded size limit.
+    CODE_INVALID = 3;
+    // The credential may not use this method, topic or deployment, or set `caller`.
+    CODE_DENIED = 4;
+    // The deployment isn't active, has no such function, or the arguments or result break its contract.
+    CODE_CONTRACT = 5;
+    // The operation ID was first used for a different request.
+    CODE_OPERATION_MISMATCH = 6;
+    // The app function threw or ran past its deadline. The message is what it threw.
+    CODE_APPLICATION = 7;
+    // The session, JVM or host the request addresses has stopped.
+    CODE_STOPPED = 8;
+    // An action may or may not have taken effect, and core can't tell. Never retry it under a new ID.
+    CODE_OUTCOME_UNKNOWN = 9;
+  }
+  Code code = 1;
+  string message = 2;
+}
