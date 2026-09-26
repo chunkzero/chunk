@@ -78,6 +78,21 @@ impl Control {
             && !state.hosts.values().any(|host| host.release == deployment && host.capacity != Capacity::Released))
     }
 
+    /// The artifact digests of the releases control still knows, retired or not. It forgets a release only once none
+    /// of its hosts remain and every launch that may still run a JVM has a host row naming its release.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn release_artifacts(&self) -> Result<BTreeSet<String>> {
+        Ok(self.state()?.releases.values().map(|release| release.release.artifact_digest.clone()).collect())
+    }
+
+    /// The deployment of the current release, where new players are placed.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn current_release(&self) -> Result<Option<String>> {
+        Ok(self.state()?.current.clone())
+    }
+
     pub(crate) fn launches(&self) -> Result<Launches> {
         let unowned = self.host.unowned()?;
         Ok(Launches { recovered: self.recovery.open()?, unowned })

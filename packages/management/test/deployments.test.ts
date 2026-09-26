@@ -4,7 +4,8 @@ import * as fs from "node:fs/promises";
 
 import { Code } from "@connectrpc/connect";
 
-import { activateDeployment } from "../src/deployments/store.ts";
+import { activateDeployment, failDeployment } from "../src/deployments/store.ts";
+import { desiredDeployment } from "../src/environments/desired.ts";
 import { DeploymentState } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService, DeploymentTrigger, ReleaseState } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
@@ -144,6 +145,39 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
     expect(await codeOf(complete())).toBe(Code.FailedPrecondition);
     await declare("r6", archive);
     expect((await complete()).release?.archiveSizeBytes).toBe(archive.sizeBytes);
+  });
+
+  test("a superseded deployment the environment activated replaces an older active one", async () => {
+    const deployments = h.client(DeploymentService);
+    const projects = h.client(ProjectService);
+    const environmentId =
+      (await projects.createEnvironment({ requestId: crypto.randomUUID(), projectId, name: "canary" })).environment
+        ?.id ?? "";
+    await upload("r7");
+    const deploy = async () =>
+      (await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r7" })).deployment?.id ??
+      "";
+    const states = (...ids: string[]) =>
+      Promise.all(
+        ids.map(async (deploymentId) => (await deployments.getDeployment({ deploymentId })).deployment?.state),
+      );
+
+    const a = await deploy();
+    await activateDeployment(h.sql, a);
+    const b = await deploy();
+    const c = await deploy();
+    await activateDeployment(h.sql, b);
+    await activateDeployment(h.sql, a);
+    expect(await states(a, b, c)).toEqual([
+      DeploymentState.SUPERSEDED,
+      DeploymentState.ACTIVE,
+      DeploymentState.PENDING,
+    ]);
+    expect((await projects.getEnvironment({ environmentId })).environment?.activeDeploymentId).toBe(b);
+    expect((await desiredDeployment(h.sql, environmentId))?.id).toBe(c);
+
+    await failDeployment(h.sql, c, "rejected");
+    expect((await desiredDeployment(h.sql, environmentId))?.id).toBe(b);
   });
 
   test("deploy, promote and rollback move releases between environments", async () => {

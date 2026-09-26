@@ -146,7 +146,7 @@ pub async fn serve(init: Init) -> Result<()> {
         chunk_backend::observe(backend::observe);
         let (ready, receiver) = oneshot::channel();
         let config = chunk_backend::server::Config {
-            bundle: init.backend.clone().into(),
+            bundle: Some(init.backend.clone().into()),
             environment: backend::ENVIRONMENT.into(),
             state: init.state.join("backend"),
             connection: init.state.join("backend-connection.json"),

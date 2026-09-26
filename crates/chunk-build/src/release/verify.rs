@@ -22,6 +22,8 @@ pub struct VerifiedRelease {
     pub id: String,
     pub java_version: u32,
     pub apps: Vec<AppArtifact>,
+    /// The machine profiles its sessions and destinations run on; empty when it was built without `[local]`.
+    pub profiles: BTreeMap<String, MachineProfile>,
     pub backend: Deployment,
 }
 
@@ -80,7 +82,13 @@ pub(super) fn check(files: &Files) -> io::Result<VerifiedRelease> {
             return Err(io::Error::other(format!("asset {name} is missing or differs from the release")));
         }
     }
-    Ok(VerifiedRelease { id, java_version: metadata.java_version, apps: metadata.apps, backend })
+    Ok(VerifiedRelease {
+        id,
+        java_version: metadata.java_version,
+        apps: metadata.apps,
+        profiles: metadata.profiles,
+        backend,
+    })
 }
 
 pub(super) fn deployment(source: String, contract: BackendMetadata) -> Deployment {

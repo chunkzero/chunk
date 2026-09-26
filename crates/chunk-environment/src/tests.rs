@@ -31,7 +31,7 @@ fn config(directory: &Path, bind: SocketAddr) -> Config {
     Config {
         services: Services::default(),
         core: CoreConfig {
-            bundle: path,
+            bundle: Some(path),
             environment: "test".into(),
             backend_record: state.join("backend.json"),
             control_record: state.join("control.json"),
@@ -41,6 +41,7 @@ fn config(directory: &Path, bind: SocketAddr) -> Config {
             fresh: false,
         },
         gateway: GatewayConfig::new(bind),
+        management: None,
     }
 }
 

@@ -30,7 +30,7 @@ The `chunk-environment` binary hosts the proxy as its gateway service, targeting
 same process (see the [root README](../../README.md) for its variables):
 
 ```sh
-CHUNK_BUNDLE=bundle.json CHUNK_ENVIRONMENT=local CHUNK_STATE=.chunk/environment CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-environment
+CHUNK_BUNDLE=bundle.json CHUNK_ENVIRONMENT_ID=local CHUNK_STATE=.chunk/environment CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-environment
 ```
 
 Library callers can omit `Config::platform` to use the waiting-world fixture, or replace the platform for later

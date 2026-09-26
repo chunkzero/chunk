@@ -616,18 +616,26 @@ dependencies = [
 name = "chunk-environment"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chunk-backend",
+ "chunk-build",
  "chunk-contract",
  "chunk-control",
  "chunk-js",
+ "chunk-management",
  "chunk-proto",
  "chunk-proxy",
  "chunk-service",
  "chunk-store",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "prost",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -635,6 +643,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use chunk_management::v1::{
@@ -20,6 +21,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 type Body = BoxBody<Bytes, Infallible>;
+
+/// Requests that reached `/landed` with a bearer token.
+static CREDENTIALED_LANDINGS: AtomicUsize = AtomicUsize::new(0);
 
 fn full(status: u16, content_type: &str, body: impl Into<Bytes>) -> Response<Body> {
     Response::builder()
@@ -55,13 +59,27 @@ fn chunked(bytes: Vec<u8>, size: usize) -> Response<Body> {
 async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible> {
     let path = request.uri().path().to_owned();
     let uri = request.uri().to_string();
+    let query = request.uri().query().unwrap_or_default().to_owned();
     let authorized = request.headers().get("authorization").is_some_and(|value| value == "Bearer secret");
     let content_type = request.headers().get("content-type").cloned();
     let credentialed = request.headers().contains_key("authorization");
     let body = request.into_body().collect().await.expect("request body").to_bytes();
+    if path == "/redirect" {
+        return Ok(Response::builder()
+            .status(307)
+            .header("location", query)
+            .body(Full::default().boxed())
+            .expect("response"));
+    }
     if path == "/upload" && uri.contains("refuse") {
         let body = format!("<Error><Code>AccessDenied</Code><Resource>{uri}</Resource></Error>");
         return Ok(full(403, "application/xml", body));
+    }
+    if path == "/landed" {
+        if credentialed {
+            CREDENTIALED_LANDINGS.fetch_add(1, Ordering::SeqCst);
+        }
+        return Ok(full(200, "application/octet-stream", "archive"));
     }
     if path == "/upload" {
         let status = if credentialed || body.as_ref() != b"archive" { 403 } else { 200 };
@@ -231,7 +249,7 @@ async fn archive_uploads_carry_no_credentials_of_the_service_client() {
     let address = serve().await;
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("authorization", "Bearer secret".parse().expect("header"));
-    let http = reqwest::Client::builder().default_headers(headers).build().expect("http client");
+    let http = reqwest::Client::builder().default_headers(headers);
     let client = Client::with_http(http, format!("http://{address}")).with_token("secret");
 
     client.deploy(&DeployRequest::default()).await.expect("service calls keep the default header");
@@ -291,4 +309,20 @@ async fn upload_errors_never_show_the_presigned_url() {
             error => assert!(matches!(error, Error::Transport(_)), "{error}"),
         }
     }
+}
+
+#[tokio::test]
+async fn the_token_follows_a_redirect_only_within_the_origin() {
+    let (address, other) = (serve().await, serve().await);
+    let client = Client::new(format!("http://{address}")).with_token("secret");
+    client.download_archive(&format!("http://{address}/redirect?/landed")).await.expect("a redirect within the origin");
+    assert_eq!(CREDENTIALED_LANDINGS.load(Ordering::SeqCst), 1);
+
+    let (port, host, scheme) = (other.port(), format!("localhost:{}", address.port()), format!("https://{address}"));
+    for target in [format!("http://127.0.0.1:{port}"), format!("http://{host}"), scheme] {
+        let url = format!("http://{address}/redirect?{target}/landed");
+        let Err(error) = client.download_archive(&url).await else { panic!("{target} was followed") };
+        assert!(matches!(&error, Error::Status(status) if status.message.contains("307")), "{target}: {error}");
+    }
+    assert_eq!(CREDENTIALED_LANDINGS.load(Ordering::SeqCst), 1);
 }

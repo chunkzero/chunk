@@ -153,7 +153,11 @@ message ReportStatusRequest {
   uint32 online_players = 3;
   // The latest `server.ping` hook result for each hostname.
   repeated PingStatus pings = 4;
-  // Progress of the deployment from the latest desired state.
+  // Progress of the deployment from the latest desired state. It may instead
+  // report ACTIVE for a previously desired deployment the environment
+  // switched to whose ACTIVE the management plane has not accepted yet,
+  // repeated under the current lease until it is; desired_revision still
+  // names the desired state the environment observed.
   DeploymentProgress deployment = 5;
   // No players remain, the log is flushed and the wake alarm is handed off.
   // The management plane may suspend the environment only while this report
@@ -178,7 +182,10 @@ message PingStatus {
 
 message DeploymentProgress {
   string deployment_id = 1;
-  // IN_PROGRESS, ACTIVE or FAILED.
+  // IN_PROGRESS, ACTIVE or FAILED. The management plane records ACTIVE for a
+  // pending or in-progress deployment, and for a superseded one that is newer
+  // than its current active deployment: it becomes active and newer
+  // unfinished deployments stay desired. It ignores ACTIVE otherwise.
   DeploymentState state = 2;
   // Why the deployment failed.
   string message = 3;

@@ -95,11 +95,20 @@ export async function createDeployment(
   return toDeployment(row);
 }
 
-/** Records that the environment serves a deployment, superseding the one it replaced. */
+/**
+ * Records that the environment serves a deployment, superseding the one it replaced. A superseded deployment the
+ * environment activated anyway counts when it is newer than the active one; newer unfinished deployments stay desired.
+ */
 export async function activateDeployment(db: Db, id: string): Promise<void> {
   const [row] = await db<{ environment_id: string }[]>`
-    update deployments set state = ${DeploymentState.ACTIVE}, activate_time = now(), update_time = now()
-    where id = ${id} and state in ${db(unfinished)}
+    update deployments d set state = ${DeploymentState.ACTIVE}, activate_time = now(), update_time = now()
+    where d.id = ${id} and (
+      d.state in ${db(unfinished)}
+      or (d.state = ${DeploymentState.SUPERSEDED} and d.seq > coalesce((
+        select max(a.seq) from deployments a
+        where a.environment_id = d.environment_id and a.state = ${DeploymentState.ACTIVE}
+      ), 0))
+    )
     returning environment_id`;
   if (!row) return;
   await db`

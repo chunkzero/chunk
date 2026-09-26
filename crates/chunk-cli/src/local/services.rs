@@ -116,7 +116,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
     let bundle = settings.state.join("deployment.json");
     std::fs::write(&bundle, serde_json::to_vec(&staged.bundle).map_err(io::Error::other)?)?;
     let config = CoreConfig {
-        bundle,
+        bundle: Some(bundle),
         environment: staged.control.deployment.environment.clone(),
         state: settings.state.clone(),
         backend_record: settings.state.join("backend.json"),

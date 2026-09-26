@@ -13,7 +13,8 @@ pub struct Ready {
 }
 
 pub struct Config {
-    pub bundle: PathBuf,
+    /// The deployment served first. Without one, the backend serves only the deployments it retained.
+    pub bundle: Option<PathBuf>,
     pub environment: String,
     pub state: PathBuf,
     pub connection: PathBuf,
@@ -34,7 +35,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     let connection_path = config.connection.clone();
     let (backend, bundle, token, platform_token, replicator) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
-        let bundle: Deployment = chunk_service::read(&config.bundle)?;
+        let bundle: Option<Deployment> = config.bundle.as_deref().map(chunk_service::read).transpose()?;
         let database = config.state.join("environment.sqlite");
         if !database.exists() {
             chunk_service::private_file(&database)?;
@@ -56,8 +57,10 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     .await
     .map_err(io::Error::other)??;
     let result = async {
-        let deployment = bundle.id.clone();
-        backend.deploy(bundle).await.map_err(io::Error::other)?;
+        let deployment = bundle.as_ref().map(|bundle| bundle.id.clone()).unwrap_or_default();
+        if let Some(bundle) = bundle {
+            backend.deploy(bundle).await.map_err(io::Error::other)?;
+        }
         let connection = BackendConnection {
             endpoint: format!("http://{address}"),
             token: token.clone(),

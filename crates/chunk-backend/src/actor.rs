@@ -295,6 +295,7 @@ impl Actor {
             }
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
+            Command::Deployments { reply } => reply.finish(Ok(self.versions.keys().cloned().collect())),
             Command::Query { mut call, reply } => match self.normalize_call(&mut call) {
                 Ok(()) => self.query(call, reply),
                 Err(error) => reply.finish(Err(error)),

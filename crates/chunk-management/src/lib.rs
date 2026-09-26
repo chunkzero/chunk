@@ -9,6 +9,8 @@
 //! - the CLI: `start_login`, `poll_login`, `upload_release`, `complete_release_upload`, `deploy`, `promote`,
 //!   `rollback`, `get_deployment`, `list_deployments` and `read_logs`, plus `upload_archive` for release bytes.
 //!
+//! Environments fetch the release archives `attach` names with `download_archive`.
+//!
 //! The other methods, such as projects, secrets, domains, tokens and the remaining reports, follow as callers need
 //! them; each is one line in `methods.rs`.
 
@@ -17,7 +19,7 @@ mod error;
 mod methods;
 mod stream;
 
-pub use client::Client;
+pub use client::{Client, Download};
 pub use error::{Code, Error, Status};
 pub use stream::Stream;
 

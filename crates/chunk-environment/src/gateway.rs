@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use chunk_proxy::PlatformTarget;
 
+#[derive(Clone)]
 pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub motd: String,
