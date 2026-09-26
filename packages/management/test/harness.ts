@@ -8,11 +8,15 @@ import { type Client, createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
 
 import { ensureOperatorToken } from "../src/auth/tokens.ts";
+import { listenForChanges } from "../src/changes.ts";
 import { deriveKeys, type Keys, randomToken } from "../src/crypto.ts";
 import { connect, migrate, type Sql } from "../src/db.ts";
+import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
+import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
 import type { ReleaseStore } from "../src/releases/store.ts";
 import { createHandler } from "../src/server.ts";
+import { releaseArchive } from "./fixtures.ts";
 
 /** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
 export const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -48,8 +52,10 @@ export async function startHarness(): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "chunk-management-"));
   const txt = new Map<string, string[]>();
 
-  let handler: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => handler(request) });
+  const changes = await listenForChanges(sql);
+
+  let handler: ReturnType<typeof createHandler> = async () => new Response(null, { status: 503 });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request, bun) => handler(request, bun) });
   const url = server.url.origin;
   const releases = await localReleaseStore({ directory, keys, publicUrl: url });
   const harness: Harness = {
@@ -82,6 +88,8 @@ export async function startHarness(): Promise<Harness> {
     },
     publicUrl: url,
     edge: { domain: "play.example.net", port: 25565 },
+    logStore: undefined,
+    changes,
   });
 
   function client<T extends DescService>(service: T, token: string | null = operatorToken): Client<T> {
@@ -120,4 +128,32 @@ export async function codeOf(call: Promise<unknown>): Promise<number | undefined
   } catch (error) {
     return (error as { code?: number }).code;
   }
+}
+
+/** Creates a project holding one environment. */
+export async function createEnvironment(h: Harness, name = "main") {
+  const projects = h.client(ProjectService);
+  const project = await projects.createProject({
+    requestId: crypto.randomUUID(),
+    name: `game-${randomBytes(4).toString("hex")}`,
+  });
+  const projectId = project.project?.id ?? "";
+  const created = await projects.createEnvironment({ requestId: crypto.randomUUID(), projectId, name });
+  return { projectId, environmentId: created.environment?.id ?? "" };
+}
+
+/** Uploads a fixture release and deploys it; returns the deployment ID. */
+export async function deployRelease(h: Harness, projectId: string, environmentId: string, releaseId: string) {
+  const deployments = h.client(DeploymentService);
+  const archive = releaseArchive(releaseId);
+  const started = await deployments.uploadRelease({
+    projectId,
+    releaseId,
+    archiveSha256: archive.sha256,
+    archiveSizeBytes: archive.sizeBytes,
+  });
+  await fetch(started.upload?.url ?? "", { method: "PUT", body: archive.bytes });
+  await deployments.completeReleaseUpload({ projectId, releaseId });
+  const deployed = await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
+  return deployed.deployment?.id ?? "";
 }

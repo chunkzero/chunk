@@ -1,4 +1,5 @@
-import type { Edge } from "./config.ts";
+import type { Changes } from "./changes.ts";
+import type { Edge, LogStore } from "./config.ts";
 import type { Keys } from "./crypto.ts";
 import type { Sql } from "./db.ts";
 import type { ArchiveLimits } from "./releases/archive.ts";
@@ -16,4 +17,7 @@ export interface Deps {
   publicUrl: string;
   /** Where players reach environments; unset leaves environments without hostnames. */
   edge: Edge | undefined;
+  /** Where environments replicate their logs; unset turns replication off. */
+  logStore: LogStore | undefined;
+  changes: Changes;
 }
