@@ -135,9 +135,7 @@ impl Actor {
     }
 
     fn operation(&self, id: String, call: &Call) -> Result<Operation> {
-        if id.is_empty() || id.len() > 256 {
-            return Err(Error::Invalid("operation identity"));
-        }
+        crate::service::validate_operation(&id)?;
         self.resolve(call, Mode::Mutation)?;
         // Identity describes the business request; a durable result survives redeployment.
         let request =

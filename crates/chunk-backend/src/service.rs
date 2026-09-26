@@ -40,7 +40,7 @@ impl Call {
 
     /// Input bytes a request for this call charges against admission.
     pub(crate) fn bytes(&self) -> usize {
-        self.arguments.as_str().len() + self.caller.as_str().len()
+        self.function.len() + self.arguments.as_str().len() + self.caller.as_str().len()
     }
 
     pub(crate) fn validate_limit(&self, name_limit: usize) -> Result<()> {
@@ -55,6 +55,13 @@ impl Call {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_operation(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 {
+        return Err(Error::Invalid("operation identity"));
+    }
+    Ok(())
 }
 
 /// A result whose revision has reached durable storage.
@@ -383,7 +390,7 @@ impl Backend {
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
     pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
         deployment.validate().map_err(Error::Invalid)?;
-        let bytes = deployment.source.len();
+        let bytes = serde_json::to_vec(&deployment)?.len();
         self.submit_sized(bytes, |reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
     }
 
@@ -460,7 +467,7 @@ impl Backend {
         if id.incarnation != self.0.incarnation {
             return Err(Error::ActionOutcomeUnknown);
         }
-        let bytes = call.bytes();
+        let bytes = id.incarnation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::StartAction {
             purpose: crate::commands::Purpose::Function,
             id,
@@ -480,8 +487,9 @@ impl Backend {
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
         call.validate_limit(512)?;
         let id = self.allocate_action_id()?;
+        let bytes = id.incarnation.len() + call.bytes();
         let mut handle = self
-            .submit_sized(call.bytes(), |reply| Command::StartAction {
+            .submit_sized(bytes, |reply| Command::StartAction {
                 purpose: crate::commands::Purpose::Hook,
                 id,
                 call,
@@ -495,24 +503,30 @@ impl Backend {
     /// # Errors
     /// Returns unknown after restart, retention expiry or a caller mismatch.
     pub async fn action_status(&self, id: ActionId, caller: Json) -> Result<ActionStatus> {
-        self.submit(|reply| Command::ActionStatus { id, caller, reply }).await
+        let bytes = id.incarnation.len() + caller.as_str().len();
+        self.submit_sized(bytes, |reply| Command::ActionStatus { id, caller, reply }).await
     }
 
     /// Reads a durable job record using its originating caller authority.
     /// # Errors
     /// Rejects unknown jobs, caller mismatches and unavailable service.
     pub async fn job(&self, id: String, caller: Json) -> Result<chunk_store::Job> {
-        self.submit(|reply| Command::JobStatus { id, caller, reply }).await
+        let bytes = id.len() + caller.as_str().len();
+        self.submit_sized(bytes, |reply| Command::JobStatus { id, caller, reply }).await
     }
 
     /// Forget a terminal record. This does not reverse earlier effects.
     /// # Errors
     /// Rejects live jobs, caller mismatches and persistence failures.
     pub async fn forget_job(&self, id: String, caller: Json) -> Result<()> {
+        let bytes = id.len() + caller.as_str().len();
         let caller = serde_json::from_str(caller.as_str())?;
-        self.submit(|reply| Command::JobControl { command: chunk_store::JobCommand::Forget { id, caller }, reply })
-            .await
-            .map(|_| ())
+        self.submit_sized(bytes, |reply| Command::JobControl {
+            command: chunk_store::JobCommand::Forget { id, caller },
+            reply,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Host-adapter handoff: durably install this exact alarm before acknowledging it.
@@ -547,8 +561,10 @@ impl Backend {
     /// # Errors
     /// Reports mismatched identities, admission, execution and commit failures.
     pub async fn mutate(&self, operation: String, call: Call) -> Result<Update> {
+        validate_operation(&operation)?;
         call.validate()?;
-        self.submit_sized(call.bytes(), |reply| Command::Mutate { operation, call, reply }).await
+        let bytes = operation.len() + call.bytes();
+        self.submit_sized(bytes, |reply| Command::Mutate { operation, call, reply }).await
     }
 
     /// Subscribes against the durable snapshot. Slow consumers coalesce updates;
@@ -567,14 +583,15 @@ impl Backend {
         if calls.is_empty() || calls.len() > 16 {
             return Err(Error::Invalid("query group limit"));
         }
-        let mut bytes = 0;
+        let mut input = 0;
         for call in &calls {
             call.validate()?;
-            bytes += call.arguments.as_str().len() + call.caller.as_str().len();
+            input += call.arguments.as_str().len() + call.caller.as_str().len();
         }
-        if bytes > 1024 * 1024 {
+        if input > 1024 * 1024 {
             return Err(Error::Invalid("query group input limit"));
         }
+        let bytes = calls.iter().map(Call::bytes).sum();
         self.submit_sized(bytes, |reply| Command::Subscribe { calls, reply }).await
     }
 }
