@@ -68,7 +68,8 @@ impl Client {
     /// so neither the bearer token nor any default header of the service's HTTP client goes along.
     ///
     /// # Errors
-    /// The store's refusal, with a code from its HTTP status, or a transport failure.
+    /// The store's refusal, with a code from its HTTP status, or a transport failure. Errors never include the URL,
+    /// whose query carries the upload's signature.
     pub async fn upload_archive(
         &self,
         target: &crate::v1::UploadTarget,
@@ -83,12 +84,12 @@ impl Client {
             let value = HeaderValue::try_from(value).map_err(|error| Error::Protocol(error.to_string()))?;
             request = request.header(name, value);
         }
-        let response = request.send().await?;
+        let response = request.send().await.map_err(without_url)?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
         }
-        Err(error::from_response(status, &response.bytes().await?))
+        Err(error::from_response(status, &response.bytes().await.map_err(without_url)?))
     }
 
     fn post(&self, path: &str, content_type: &'static str, body: Vec<u8>) -> reqwest::RequestBuilder {
@@ -103,6 +104,10 @@ impl Client {
             None => request,
         }
     }
+}
+
+fn without_url(error: reqwest::Error) -> Error {
+    Error::Transport(error.without_url())
 }
 
 /// A Connect success is HTTP 200 with the expected content type. Anything else is an error: the Connect error it

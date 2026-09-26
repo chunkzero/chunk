@@ -90,10 +90,14 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
             full(200, "application/proto; charset=binary", Vec::new())
         }
         "/chunk.management.v1.LogService/ReadLogs" => {
-            let entry = ReadLogsResponse { entries: vec![LogEntry::default()] };
-            let mut stream = envelope(0, &[0xff, 0xff]);
-            stream.extend(envelope(0, &entry.encode_to_vec()));
-            stream.extend(envelope(2, b"{}"));
+            let request = ReadLogsRequest::decode(&body[5..]).expect("read logs request");
+            let entry = envelope(0, &ReadLogsResponse { entries: vec![LogEntry::default()] }.encode_to_vec());
+            let stream = match request.environment_id.as_str() {
+                "malformed" => [envelope(0, &[0xff, 0xff]), entry, envelope(2, b"{}")].concat(),
+                "no_end" => entry,
+                "mid_frame" => [entry.clone(), entry[..entry.len() - 1].to_vec()].concat(),
+                other => panic!("unexpected environment {other}"),
+            };
             chunked(stream, 1024)
         }
         "/chunk.management.v1.EnvironmentService/Attach" => {
@@ -243,10 +247,37 @@ async fn only_http_200_with_the_connect_content_type_succeeds() {
     client.report_failed_auth(&ReportFailedAuthRequest { failures }).await.expect("a parameterized content type");
 }
 
+async fn read_logs(environment_id: &str) -> chunk_management::Stream<ReadLogsResponse> {
+    let request = ReadLogsRequest { environment_id: environment_id.into(), ..ReadLogsRequest::default() };
+    client().await.read_logs(&request).await.expect("read logs")
+}
+
 #[tokio::test]
 async fn a_malformed_message_ends_the_stream() {
-    let client = client().await;
-    let mut stream = client.read_logs(&ReadLogsRequest::default()).await.expect("read logs");
+    let mut stream = read_logs("malformed").await;
     assert!(matches!(stream.message().await, Err(Error::Protocol(_))));
     assert!(stream.message().await.expect("after the error").is_none());
+}
+
+#[tokio::test]
+async fn a_truncated_stream_fails_then_ends() {
+    for environment_id in ["no_end", "mid_frame"] {
+        let mut stream = read_logs(environment_id).await;
+        assert_eq!(stream.message().await.expect("a whole message").expect("a message").entries.len(), 1);
+        assert!(matches!(stream.message().await, Err(Error::Protocol(_))), "{environment_id}");
+        assert!(stream.message().await.expect("after the error").is_none(), "{environment_id}");
+    }
+}
+
+#[tokio::test]
+async fn upload_errors_never_show_the_presigned_url() {
+    let client = Client::new("http://127.0.0.1:9");
+    let target = UploadTarget {
+        url: "http://127.0.0.1:9/upload?X-Amz-Signature=sentinel-signature-51c2".into(),
+        ..UploadTarget::default()
+    };
+    let error = client.upload_archive(&target, "archive").await.unwrap_err();
+    assert!(matches!(error, Error::Transport(_)));
+    let output = format!("{error} {error:?} {error:#?}");
+    assert!(!output.contains("sentinel-signature-51c2"), "{output}");
 }
