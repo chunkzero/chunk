@@ -122,6 +122,33 @@ async fn a_login_routed_with_a_retired_release_is_rejected_for_routing_again() {
 }
 
 #[tokio::test]
+async fn a_release_is_not_retired_while_a_launch_without_a_host_row_may_run_it() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control().await;
+    arrived(&fixture, &control, "first").await;
+    control.activate_release(next(&fixture)).unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["first"].session].host.clone();
+    // A restore loses the host row while its JVM still holds its launch, before recovery records it again.
+    control
+        .update(|state| {
+            let session = state.claims.remove("first").unwrap().session;
+            state.sessions.remove(&session);
+            state.players.clear();
+            state.hosts.remove(&host);
+            Ok(())
+        })
+        .unwrap();
+    fixture.host.forgotten.store(true, Ordering::Release);
+    assert!(!control.retire_release("build").unwrap());
+    control.retire_idle_hosts().unwrap();
+    assert!(control.state().unwrap().releases.contains_key("build"));
+    fixture.host.terminated.lock().unwrap().insert(host);
+    assert!(control.retire_release("build").unwrap());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn an_orphan_whose_release_a_restore_lost_re_attaches_after_another_restart_and_stops() {
     use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
 

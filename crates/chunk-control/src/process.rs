@@ -274,7 +274,7 @@ impl ProcessHost {
     }
     /// Stops all owned JVMs, including launches awaiting readiness.
     /// # Errors
-    /// Reports unconfirmed process exits.
+    /// Reports unconfirmed process exits, including those of launches this host does not own.
     pub async fn shutdown(&self) -> Result<()> {
         let ids: Vec<_> =
             self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
@@ -285,6 +285,9 @@ impl ProcessHost {
                 Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
                 Err(error) => result = Err(error),
             }
+        }
+        if !self.unowned()?.is_empty() {
+            return Err(Error::Unresolved("an unowned JVM may still run"));
         }
         result
     }

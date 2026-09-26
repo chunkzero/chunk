@@ -1,13 +1,27 @@
 //! The releases one control runs side by side. A login is placed on the release its proxy routed it with; every other
 //! placement, and recovery, uses the release of the host a row runs on. A release is forgotten once none of its hosts
-//! remain.
+//! remain and every launch that may still run a JVM has a host row naming its release.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     Control, Error, Release, Result,
-    state::{Capacity, ReleaseState},
+    state::{Capacity, ReleaseState, State},
 };
+
+/// The launches whose release control may not know, read before the state they are checked against.
+pub(crate) struct Launches {
+    recovered: bool,
+    unowned: BTreeSet<String>,
+}
+
+impl Launches {
+    /// Whether `state`'s host rows name the release of every launch that may still run a JVM. While recovery is
+    /// pending, a surviving JVM may belong to any release.
+    pub fn attributed(&self, state: &State) -> bool {
+        self.recovered && self.unowned.iter().all(|id| state.hosts.contains_key(id))
+    }
+}
 
 impl Control {
     /// Records `release` if it is new, and makes it current. Sessions of earlier releases keep running.
@@ -37,7 +51,8 @@ impl Control {
     }
 
     /// Retires `deployment`'s release, which places nothing new from then on, and stops each of its hosts at once,
-    /// disconnecting their players. Returns whether every one of its hosts has stopped, as for an unknown release.
+    /// disconnecting their players. Returns whether every one of its hosts has stopped, as for an unknown release, and
+    /// no launch of an unknown release may still run.
     /// # Errors
     /// Rejects the current release and reports a stopped store.
     pub fn retire_release(&self, deployment: &str) -> Result<bool> {
@@ -57,7 +72,14 @@ impl Control {
             Ok(())
         })?;
         self.wake_capacity();
+        let launches = self.launches()?;
         let state = self.state()?;
-        Ok(!state.hosts.values().any(|host| host.release == deployment && host.capacity != Capacity::Released))
+        Ok(launches.attributed(&state)
+            && !state.hosts.values().any(|host| host.release == deployment && host.capacity != Capacity::Released))
+    }
+
+    pub(crate) fn launches(&self) -> Result<Launches> {
+        let unowned = self.host.unowned()?;
+        Ok(Launches { recovered: self.recovery.open()?, unowned })
     }
 }

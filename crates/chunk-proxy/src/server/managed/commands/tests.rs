@@ -449,3 +449,29 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
     assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_login_control_rejects_for_routing_again_is_claimed_once_through_the_current_release() {
+    let fixture = Fixture::new().await;
+    fixture.service.logins.lock().unwrap().retired = Some("deployment".into());
+    let current = crate::server::Retarget(Arc::new(std::sync::RwLock::new(fixture.commands.tasks.platform.clone())));
+    let reload = async {
+        while fixture.service.logins.lock().unwrap().deployments.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut target = current.platform().target;
+        target.backend.deployment = "next".into();
+        current.replace(target).unwrap();
+    };
+    let claiming = async { tokio::join!(super::super::claim_destination(&fixture.claim, &current), reload).0 };
+    let claimed = tokio::time::timeout(Duration::from_secs(10), claiming).await.unwrap();
+    let (mut guard, assignment) = claimed.unwrap();
+    guard.armed = false;
+    assert_eq!(guard.claim.deployment, "next");
+    assert_eq!(assignment.configuration.unwrap().deployment.unwrap().deployment, "next");
+    let logins = fixture.service.logins.lock().unwrap().deployments.clone();
+    let (reserved, rejected) = logins.split_last().unwrap();
+    assert_eq!(reserved, "next");
+    assert!(!rejected.is_empty() && rejected.iter().all(|deployment| deployment == "deployment"));
+    fixture.close().await;
+}

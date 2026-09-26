@@ -3,6 +3,7 @@ use chunk_proto::v1::{
     PlayerDelivery, PlayerWithdrawal, ProcessIdentity, gameplay_client::GameplayClient,
 };
 use prost::Message;
+use std::collections::BTreeSet;
 
 use crate::{
     Control, Error, Result,
@@ -159,12 +160,18 @@ impl Control {
     /// Stops the owned runtime processes directly, without recording it, since the environment store may have
     /// stopped. Dropping control alone preserves them for recovery.
     /// # Errors
-    /// Reports unresolved hosts; a failed stop must not be treated as a fencing acknowledgment.
+    /// Reports unresolved hosts, including launches without a host row whose JVM may still run; a failed stop must not
+    /// be treated as a fencing acknowledgment.
     pub async fn shutdown(&self) -> Result<()> {
         self.draining.store(true, std::sync::atomic::Ordering::Release);
         let state = self.state()?;
         let mut result = Ok(());
-        for id in state.hosts.keys().filter(|id| !state.released(id)) {
+        let mut hosts: BTreeSet<_> = state.hosts.keys().filter(|id| !state.released(id)).cloned().collect();
+        match self.host.unowned() {
+            Ok(unowned) => hosts.extend(unowned),
+            Err(error) => result = Err(error),
+        }
+        for id in &hosts {
             match self.host.release(id).await {
                 Ok(true) => {}
                 Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),

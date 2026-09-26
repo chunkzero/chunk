@@ -82,43 +82,15 @@ impl ClaimGuard {
     }
 }
 
-/// Serves a login routed and claimed through one release: `routed`, or the release `current` names once control
-/// asks for the login to be routed again.
+/// Serves a login routed and claimed through the release `current` names, routing it again whenever that release
+/// becomes obsolete before control reserves it.
 pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     authenticated: Authenticated<S>,
-    routed: &Platform,
     current: &Retarget,
     deadline: Duration,
 ) -> io::Result<()> {
     let login = login_claim(&authenticated.profile);
-    let destination = async {
-        let mut platform = routed.clone();
-        loop {
-            let mut claim = ClaimRequest {
-                proxy_id: platform.proxy_id.clone(),
-                deployment: platform.target.backend.deployment.clone(),
-                ..login.clone()
-            };
-            claim.demand = Some(platform.route_claim(&claim).await?);
-            // Construct before sending: cancellation must cover a claim whose reply was lost.
-            let mut guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
-            let mut message = platform.control_request(guard.claim.clone())?;
-            message.set_timeout(WAIT_TIMEOUT);
-            match platform.control.clone().claim(message).await {
-                Ok(assignment) => {
-                    let assignment = assignment.into_inner();
-                    validate(&assignment, &guard)?;
-                    return Ok((guard, assignment));
-                }
-                Err(error) if error.code() == tonic::Code::Unavailable && error.message() == ROUTE_AGAIN => {
-                    guard.armed = false;
-                    sleep(Duration::from_millis(100)).await;
-                    platform = current.platform();
-                }
-                Err(error) => return Err(claim_error(error)),
-            }
-        }
-    };
+    let destination = claim_destination(&login, current);
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
     let platform = guard.platform.clone();
@@ -179,6 +151,39 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
+    }
+}
+
+/// Routes and claims `login` through the current release. A failed routing through a release that is no longer
+/// current, which a reload may have released meanwhile, is routed again, as is a claim control rejects because its
+/// release no longer accepts logins. The caller bounds the retries.
+async fn claim_destination(login: &ClaimRequest, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
+    loop {
+        let platform = current.platform();
+        let deployment = &platform.target.backend.deployment;
+        let mut claim =
+            ClaimRequest { proxy_id: platform.proxy_id.clone(), deployment: deployment.clone(), ..login.clone() };
+        claim.demand = match platform.route_claim(&claim).await {
+            Ok(demand) => Some(demand),
+            Err(_) if current.platform().target.backend.deployment != *deployment => continue,
+            Err(error) => return Err(error),
+        };
+        // Construct before sending: cancellation must cover a claim whose reply was lost.
+        let mut guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
+        let mut message = platform.control_request(guard.claim.clone())?;
+        message.set_timeout(WAIT_TIMEOUT);
+        match platform.control.clone().claim(message).await {
+            Ok(assignment) => {
+                let assignment = assignment.into_inner();
+                validate(&assignment, &guard)?;
+                return Ok((guard, assignment));
+            }
+            Err(error) if error.code() == tonic::Code::Unavailable && error.message() == ROUTE_AGAIN => {
+                guard.armed = false;
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(claim_error(error)),
+        }
     }
 }
 

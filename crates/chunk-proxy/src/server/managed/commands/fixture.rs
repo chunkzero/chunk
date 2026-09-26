@@ -35,6 +35,7 @@ pub(super) struct Service {
     /// Ends open watches at their next publication and refuses new ones.
     pub watch_down: Arc<AtomicBool>,
     pub refused_watches: Arc<AtomicUsize>,
+    pub logins: Arc<Mutex<Logins>>,
     watches: CancellationToken,
 }
 
@@ -57,6 +58,14 @@ impl Service {
 }
 
 #[derive(Default)]
+pub(super) struct Logins {
+    /// The deployment of each login claim, in order.
+    pub deployments: Vec<String>,
+    /// Logins routed with this deployment are rejected for routing again.
+    pub retired: Option<String>,
+}
+
+#[derive(Default)]
 pub(super) struct Movement {
     pub pending: Option<ClaimRequest>,
     pub error: Option<Status>,
@@ -72,15 +81,18 @@ impl backend_hooks_server::BackendHooks for Service {
     async fn manifest(&self, request: Request<()>) -> Result<Response<HookManifest>, Status> {
         auth(&request, "application")?;
         Ok(Response::new(HookManifest {
-            deployment: "deployment".into(),
+            deployment: request.metadata().get("x-chunk-deployment").unwrap().to_str().unwrap().into(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
-                "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}}, "hooks":{}
+                "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}},
+                "hooks":{"shared/domains/hooks/route":{"domain":"","event":"player.route","export":"route"}}
             }))
             .unwrap(),
         }))
     }
-    async fn invoke(&self, _: Request<InvokeHook>) -> Result<Response<HookResult>, Status> {
-        Err(Status::unimplemented("unused"))
+    async fn invoke(&self, request: Request<InvokeHook>) -> Result<Response<HookResult>, Status> {
+        auth(&request, "platform")?;
+        let route = serde_json::json!({"key":"lobby","session_type":"lobby/default","machine_profile":"local"});
+        Ok(Response::new(HookResult { result_json: serde_json::to_vec(&route).unwrap() }))
     }
 }
 fn auth<T>(request: &Request<T>, token: &str) -> Result<(), Status> {
@@ -223,6 +235,15 @@ impl local_control_server::LocalControl for Service {
     }
     async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
         auth(&request, "control")?;
+        if request.get_ref().source.is_none() {
+            let login = request.into_inner();
+            let mut logins = self.logins.lock().unwrap();
+            logins.deployments.push(login.deployment.clone());
+            if logins.retired.as_ref() == Some(&login.deployment) {
+                return Err(Status::unavailable(super::super::ROUTE_AGAIN));
+            }
+            return Ok(Response::new(reservation(&login)));
+        }
         let (error, stall) = {
             let mut movement = self.movement.lock().unwrap();
             assert_eq!(movement.pending.as_ref(), Some(request.get_ref()));
@@ -335,6 +356,7 @@ impl Fixture {
             published: Arc::new(watch::Sender::new(1)),
             watch_down: Arc::default(),
             refused_watches: Arc::default(),
+            logins: Arc::default(),
             watches: CancellationToken::new(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -463,5 +485,41 @@ fn claim() -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
+    }
+}
+
+/// A reservation of `login` on a runtime of the deployment it was routed with.
+fn reservation(login: &ClaimRequest) -> Assignment {
+    let deployment = Some(DeploymentRef { environment: "environment".into(), deployment: login.deployment.clone() });
+    let (operation_id, proxy_id) = (login.operation_id.clone(), login.proxy_id.clone());
+    Assignment {
+        claim: Some(ClaimIdentity {
+            operation_id: operation_id.clone(),
+            proxy_id: proxy_id.clone(),
+            membership_generation: 1,
+            delivery_generation: 1,
+        }),
+        phase: i32::from(ClaimPhase::Reserved),
+        delivery: Some(PlayerDelivery {
+            operation_id: operation_id.clone(),
+            proxy_id,
+            connection_id: login.connection_id.clone(),
+            membership_generation: 1,
+            owner_generation: 1,
+            session_generation: 1,
+            player: login.identity.as_ref().map(|identity| PlayerRef { id: identity.uuid.clone() }),
+            session: Some(SessionRef { id: "session".into() }),
+            deployment: deployment.clone(),
+            runtime_id: "runtime".into(),
+            process_generation: 1,
+            ..Default::default()
+        }),
+        configuration: Some(ConfigurationResponse {
+            deployment,
+            runtime_id: "runtime".into(),
+            process_generation: 1,
+            ..Default::default()
+        }),
+        preparation: Some(PlayerPreparation { operation_id, capability: vec![0; 32], endpoint: "127.0.0.1:1".into() }),
     }
 }

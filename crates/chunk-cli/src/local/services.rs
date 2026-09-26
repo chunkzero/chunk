@@ -204,8 +204,18 @@ impl Shared {
         }
     }
 
-    /// Stops control, which asks each JVM to stop before terminating it.
-    pub async fn stop_control(&mut self) -> io::Result<()> {
+    /// Stops every JVM, then control, retrying until each JVM has confirmed its exit, however long that takes. The
+    /// host and backend stay until then.
+    pub async fn stop_control(&mut self, reporter: &Reporter) -> io::Result<()> {
+        let mut waiting = false;
+        if let Ok(control) = self.control() {
+            // While control serves, a JVM that outlived an earlier control can still re-attach and be stopped.
+            while let Err(error) = control.shutdown().await
+                && !self.control_failed()
+            {
+                wait_for_jvms(reporter, &mut waiting, &error).await;
+            }
+        }
         self.authority = None;
         let mut result = Ok(());
         if let Some(control) = self.control.take()
@@ -214,17 +224,18 @@ impl Shared {
             tracing::error!(%error, "control shutdown failed");
             result = Err(error);
         }
-        if let Some(host) = self.host.take()
-            && let Err(error) = host.shutdown().await
-        {
-            result = Err(io::Error::other(error));
+        if let Some(host) = &self.host {
+            while let Err(error) = host.shutdown().await {
+                wait_for_jvms(reporter, &mut waiting, &error).await;
+            }
         }
+        self.host = None;
         result
     }
 
-    pub async fn stop(mut self) -> io::Result<()> {
+    pub async fn stop(mut self, reporter: &Reporter) -> io::Result<()> {
         let mut result = self.stop_proxy().await;
-        if let Err(error) = self.stop_control().await {
+        if let Err(error) = self.stop_control(reporter).await {
             result = Err(error);
         }
         // The service joins the backend engine only once this last outside handle is gone.
@@ -238,6 +249,15 @@ impl Shared {
         }
         result
     }
+}
+
+/// Waits before the next attempt to stop the JVMs, telling the user once that it waits for them.
+async fn wait_for_jvms(reporter: &Reporter, waiting: &mut bool, error: &chunk_control::Error) {
+    if !std::mem::replace(waiting, true) {
+        tracing::warn!(%error, "JVM exit unconfirmed; retrying until every JVM stops");
+        reporter.running("Stop", "waiting for JVMs to stop");
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
 /// One deployment version: its release, its backend version, and its release in control.
@@ -266,7 +286,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
     let mut shared = Shared::default();
     reporter.running("Backend", settings.backend_bind);
     if let Err(error) = shared.start_backend(settings, &staged, reporter).await {
-        return Err(abandon(error, shared).await);
+        return Err(abandon(error, shared, reporter).await);
     }
     reporter.running("Control", settings.control_bind);
     let environment = staged.control.deployment.environment.clone();
@@ -276,7 +296,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         Err(error) => Err(error),
     };
     if let Err(error) = started {
-        return Err(abandon(error, shared).await);
+        return Err(abandon(error, shared, reporter).await);
     }
     if let Ok(connection) = shared.control_connection() {
         reporter.done("Control", &connection.endpoint);
@@ -287,14 +307,14 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         Err(error) => Err(error),
     };
     if let Err(error) = proxy {
-        return Err(abandon(error, shared).await);
+        return Err(abandon(error, shared, reporter).await);
     }
     reporter.done("Proxy", settings.bind);
     Ok((shared, version))
 }
 
-async fn abandon(error: io::Error, shared: Shared) -> io::Error {
-    if let Err(error) = shared.stop().await {
+async fn abandon(error: io::Error, shared: Shared, reporter: &Reporter) -> io::Error {
+    if let Err(error) = shared.stop(reporter).await {
         tracing::error!(%error, "service shutdown failed");
     }
     error

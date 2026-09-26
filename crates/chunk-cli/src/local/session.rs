@@ -423,25 +423,20 @@ impl<'a> Session<'a> {
         while let Some(finished) = self.retiring.join_next().await {
             unreleased.extend(finished.ok().flatten());
         }
-        // Stopping control stops every JVM left; only its confirmation frees their backend versions.
-        match self.shared.stop_control().await {
-            Ok(()) => {
-                let stopping = self.stopping.drain(..);
-                let versions = self.live.drain(..).map(|live| live.version).chain(stopping);
-                unreleased.extend(versions.map(|version| version.deployment));
-            }
-            Err(error) => {
-                tracing::warn!("backend versions of JVMs whose exit is unconfirmed stay deployed");
-                result = Err(error);
-            }
+        // Stopping control returns only once every JVM left has confirmed its exit, which frees their backend versions.
+        if let Err(error) = self.shared.stop_control(self.reporter).await {
+            result = Err(error);
         }
+        let stopping = self.stopping.drain(..);
+        let versions = self.live.drain(..).map(|live| live.version).chain(stopping);
+        unreleased.extend(versions.map(|version| version.deployment));
         if let Some(backend) = self.shared.backend() {
             for deployment in unreleased {
                 release_before_exit(&backend, &deployment).await;
             }
         }
         self.pointer = None;
-        let stopped = self.shared.stop().await;
+        let stopped = self.shared.stop(self.reporter).await;
         result.and(stopped)
     }
 }

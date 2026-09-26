@@ -99,7 +99,8 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
 }
 
 async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unconfirmed: &str) {
-    host.shutdown().await.unwrap();
+    // The unconfirmed launch's JVM may still run.
+    assert!(matches!(host.shutdown().await, Err(Error::Unresolved(_))));
     host.prune(&BTreeSet::from([retained.into()])).unwrap();
     assert!(host.stopped(retained));
     host.prune(&BTreeSet::new()).unwrap();

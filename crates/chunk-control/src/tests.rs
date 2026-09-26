@@ -351,7 +351,8 @@ impl Host for FakeHost {
     }
     fn unowned(&self) -> Result<BTreeSet<String>> {
         let forgotten = self.forgotten.load(Ordering::Acquire);
-        Ok(if forgotten { self.ids.lock().unwrap().clone() } else { BTreeSet::new() })
+        let ids = self.ids.lock().unwrap().clone();
+        Ok(if forgotten { ids.into_iter().filter(|id| !self.stopped(id)).collect() } else { BTreeSet::new() })
     }
     fn adopt(&self, token: &str, registration: chunk_proto::v1::ProcessRegistration) -> Result<()> {
         let process = registration.identity.map(|identity| identity.process_id);

@@ -41,13 +41,15 @@ profiles and limits, and makes it current. A login is placed on the release its 
 if it names none; a login routed with a retired release is rejected as unavailable, and the proxy routes it again.
 Moves, existing sessions and recovery stay on the release of the host they run on, and each release launches JVMs of its
 own apps. `Control::retire_release` stops placing on a release other than the current one and stops its hosts at once. A
-release other than the current one is forgotten once none of its hosts remain. `chunk dev` registers each reload that
-changes the release as current, and retires earlier releases as they empty or reach their drain deadline. The tables
-retain requests, reservations and activation intent before external effects. A lost activation reply is reconciled
-against the runtime's inventory. Configuration packets travel over the native Minecraft connection; control carries
-destination metadata. A player row exists only while it owns a claim. Released claims, and moves that only reference
-them, are forgotten five minutes after release. `Control::changes_after` lists claim and move changes after a log
-position, and `Control::subscribe` announces new positions.
+release other than the current one is forgotten once none of its hosts remain. While recovery is pending, or a launch
+whose JVM may still run has no host row, neither retirement nor forgetting is confirmed, since that JVM may run any
+release. `chunk dev` registers each reload that changes the release as current, and retires earlier releases as they
+empty or reach their drain deadline. On exit it retries stopping every JVM until each confirms its exit before releasing
+backend versions. The tables retain requests, reservations and activation intent before external effects. A lost
+activation reply is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft
+connection; control carries destination metadata. A player row exists only while it owns a claim. Released claims, and
+moves that only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move
+changes after a log position, and `Control::subscribe` announces new positions.
 
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
@@ -63,16 +65,17 @@ deadline. Zero seconds requests immediate termination. `chunk nodes --control-fi
 `shutdown HOST --operation ID --timeout-seconds 60` queues an idempotent shutdown. A queued request is not an exit
 acknowledgment.
 
-Graceful control shutdown stops owned JVMs. After an abrupt control-process failure, local child handles cannot be
-recovered: durable launch markers retain unresolved ownership and prevent duplicate launches, and such nodes report
-unreachable until their JVM re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its
-process identity and the SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file
-descriptor 3, which no Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3
-from app code, for example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only
-when the host's marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a
-process by PID. A launch without a child handle, re-attached or not, is confirmed exited only when control can take its
-marker's lock, which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers
-will need durable provider identities to confirm termination across control restarts.
+Graceful control shutdown stops owned JVMs, and reports their exit unconfirmed while any launch it does not own may
+still run. After an abrupt control-process failure, local child handles cannot be recovered: durable launch markers
+retain unresolved ownership and prevent duplicate launches, and such nodes report unreachable until their JVM
+re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its process identity and the
+SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file descriptor 3, which no
+Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3 from app code, for
+example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only when the host's
+marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a process by PID. A
+launch without a child handle, re-attached or not, is confirmed exited only when control can take its marker's lock,
+which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers will need
+durable provider identities to confirm termination across control restarts.
 
 After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving launch is
 fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generations no open claim in the log matches,
