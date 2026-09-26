@@ -19,7 +19,7 @@ describe.skipIf(!databaseUrl)("AuthService", () => {
     expect(await codeOf(h.client(AuthService, "chunk_wrong").getCurrentPrincipal({}))).toBe(Code.Unauthenticated);
   });
 
-  test("rejects oversized protected RPC bodies by size or authenticates before reading them", async () => {
+  test("rejects unauthenticated oversized protected RPC bodies without reading them", async () => {
     const bytes = new TextEncoder().encode(`${" ".repeat(8 * 1024 * 1024)}{}`);
     let bytesRead = 0;
     const body = new ReadableStream<Uint8Array>(
@@ -40,13 +40,25 @@ describe.skipIf(!databaseUrl)("AuthService", () => {
         body,
       }),
     );
-    if (response.status === 413) return;
     const error = (await response.json()) as { code?: string };
-    if (error.code === "unauthenticated") {
-      expect(bytesRead, "unauthenticated RPC must be rejected before consuming its body").toBe(0);
-    } else {
-      expect(["resource_exhausted", "invalid_argument"]).toContain(error.code ?? `HTTP ${response.status}`);
-    }
+    expect(error.code).toBe("unauthenticated");
+    expect(bytesRead, "unauthenticated RPC must be rejected before consuming its body").toBe(0);
+  });
+
+  test("rejects authenticated oversized protected RPC bodies by size", async () => {
+    const response = await h.fetch(
+      new Request(`${h.url}/${AuthService.typeName}/GetCurrentPrincipal`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "connect-protocol-version": "1",
+          authorization: `Bearer ${h.operatorToken}`,
+        },
+        body: `${" ".repeat(8 * 1024 * 1024)}{}`,
+      }),
+    );
+    const error = (await response.json()) as { code?: string };
+    expect(error.code).toBe("resource_exhausted");
   });
 
   test("rejects oversized public login RPC bodies by size", async () => {

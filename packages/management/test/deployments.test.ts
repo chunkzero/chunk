@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 
 import { Code } from "@connectrpc/connect";
 
@@ -70,6 +71,52 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
       archiveSizeBytes: ready.release?.archiveSizeBytes ?? 0n,
     });
     expect(again.upload).toBeUndefined();
+  });
+
+  test("an incomplete short write fails without publishing and a correct upload can complete", async () => {
+    const id = "short-write";
+    const archive = releaseArchive(id);
+    const url = await declare(id, archive);
+    const open = fs.open;
+    let written = 0;
+    const opening = spyOn(fs, "open").mockImplementation(async (...args) => {
+      const file = await open(...args);
+      if (String(args[0]).endsWith(".partial")) {
+        // Write only part of the chunk, then fail any attempt to finish it.
+        file.write = new Proxy(file.write, {
+          async apply(write, receiver, args) {
+            if (written > 0) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+            const chunk = args[0] as Uint8Array;
+            const result = await Reflect.apply(write, receiver, [chunk, 0, Math.floor(chunk.byteLength / 2)]);
+            written = result.bytesWritten;
+            return result;
+          },
+        });
+      }
+      return file;
+    });
+    let accepted: boolean;
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(archive.bytes);
+          controller.close();
+        },
+      });
+      accepted = await h.fetch(new Request(url, { method: "PUT", body })).then(
+        (response) => response.ok,
+        () => false,
+      );
+    } finally {
+      opening.mockRestore();
+    }
+    expect(written).toBeGreaterThan(0);
+    expect(written).toBeLessThan(archive.bytes.byteLength);
+    expect(accepted).toBe(false);
+    expect(await h.releases.read(releaseKey(projectId, id, archive.sha256))).toBeUndefined();
+    expect(await put(url, archive)).toBe(204);
+    const completed = await h.client(DeploymentService).completeReleaseUpload({ projectId, releaseId: id });
+    expect(completed.release?.state).toBe(ReleaseState.READY);
   });
 
   test("an upload URL from an earlier declaration never replaces the READY archive", async () => {
