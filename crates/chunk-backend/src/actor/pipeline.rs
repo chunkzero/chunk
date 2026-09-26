@@ -212,6 +212,7 @@ impl Actor {
         timer.stop(Phase::Mutation);
         self.send_commit(Job::Commit {
             expected: snapshot.revision,
+            system: self.system,
             operation: mutation.operation.clone(),
             writes: writes.clone(),
             result: execution.value.into(),
@@ -229,6 +230,38 @@ impl Actor {
         });
         self.pending_bytes += bytes;
         Ok(())
+    }
+
+    /// System commits took the next revisions, so every staged commit moves past them. The
+    /// base snapshot then includes every system commit seen, as each commit's expected revision assumes.
+    pub(super) fn system_committed(&mut self, count: u64, revision: Revision, snapshot: Result<Snapshot>) {
+        if self.failure.is_some() {
+            return;
+        }
+        let Ok(snapshot) = snapshot else {
+            self.fail(&Error::CommitFailed);
+            return;
+        };
+        self.system += count;
+        for pending in &mut self.pending {
+            pending.revision.0 += count;
+        }
+        // Only replies that read staged writes wait for durability.
+        for (update, _) in &mut self.deferred {
+            update.revision.0 += count;
+        }
+        let durable = snapshot.revision;
+        let mut view = View::new(snapshot);
+        for next in self.pending.iter().filter(|next| next.revision > durable) {
+            view.apply(next.revision, &next.writes);
+        }
+        self.view = std::sync::Arc::new(view);
+        if !self.pending.is_empty() {
+            // Queries running against staged writes would report their old revisions.
+            self.epoch += 1;
+        }
+        // Apps cannot read system tables, so no query is affected.
+        self.watches.changed(revision, std::sync::Arc::from([]), 0);
     }
 
     pub(super) fn committed(&mut self, id: &str, result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>) {

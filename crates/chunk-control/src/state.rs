@@ -4,7 +4,6 @@ mod store;
 
 use std::{
     collections::BTreeMap,
-    path::Path,
     sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 
@@ -16,6 +15,7 @@ pub use entities::Generation;
 pub(crate) use entities::{
     Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
 };
+pub use store::clear;
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
@@ -30,12 +30,14 @@ pub(crate) struct State {
     pub rosters: BTreeMap<String, Roster>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
-    /// The revision of the last commit this state includes.
+    /// The revision of the last commit this state includes. App commits share the log, so later revisions may
+    /// belong to them.
     pub revision: u64,
 }
 
 impl State {
-    /// The generation of the commit that will apply the current update.
+    /// A generation after every earlier control commit and no later than the commit that will apply the current
+    /// update, which may follow app commits.
     pub fn next_generation(&self) -> Result<Generation> {
         Generation::new(self.epoch, self.revision + 1)
     }
@@ -80,8 +82,10 @@ impl State {
     }
 }
 
-/// The durable control state. Reads share the last committed state; writers serialize on the store.
+/// The durable control state. Reads share the last committed state; writers serialize here, then commit through the
+/// environment's system lane.
 pub(crate) struct Authority {
+    system: chunk_backend::System,
     store: Mutex<Writable>,
     current: RwLock<Arc<State>>,
     feed: feed::Feed,
@@ -94,12 +98,12 @@ struct Writable {
 }
 
 impl Authority {
-    pub fn open(path: &Path, config: &Config) -> Result<Self> {
-        let mut store = store::Store::open(path, &config.deployment.environment)?;
+    pub fn open(system: chunk_backend::System, config: &Config) -> Result<Self> {
+        let store = store::Store::new(system.clone(), &config.deployment.deployment)?;
         let state = store.load()?;
         let feed = feed::Feed::new(state.position());
-        let authority =
-            Self { store: Mutex::new(Writable { store, stale: false }), current: RwLock::new(Arc::new(state)), feed };
+        let store = Mutex::new(Writable { store, stale: false });
+        let authority = Self { system, store, current: RwLock::new(Arc::new(state)), feed };
         let fingerprint = Sha256::digest(serde_json::to_vec(config)?).to_vec();
         authority.update(|state| {
             if state.config.is_empty() {
@@ -131,6 +135,11 @@ impl Authority {
         &self.feed
     }
 
+    /// Whether the environment store can no longer commit.
+    pub fn stopped(&self) -> bool {
+        self.system.stopped()
+    }
+
     fn publish(&self, state: State) -> Result<()> {
         *self.current.write().map_err(|_| Error::Unresolved("control state poisoned"))? = Arc::new(state);
         Ok(())
@@ -149,13 +158,13 @@ impl Writer<'_> {
         let previous = self.authority.read()?;
         let mut next = State::clone(&previous);
         let result = change(&mut next)?;
-        let writes = store::writes(&previous, &next)?;
+        let writes = self.store.store.writes(&previous, &next)?;
         if writes.is_empty() {
             return Ok(result);
         }
-        let rows = feed::rows(&writes);
-        match self.store.store.commit(&previous, writes) {
-            Ok(revision) if revision == previous.revision + 1 => {
+        let rows = feed::rows(&writes, self.store.store.scope());
+        match self.store.store.commit(writes) {
+            Ok(revision) if revision > previous.revision => {
                 next.revision = revision;
                 let position = next.position();
                 self.authority.publish(next)?;
@@ -165,7 +174,7 @@ impl Writer<'_> {
             outcome => {
                 self.store.stale = true;
                 let _ = self.recover();
-                Err(outcome.err().unwrap_or(Error::Unresolved("control commit revision skipped")))
+                Err(outcome.err().unwrap_or(Error::Unresolved("control commit revision went back")))
             }
         }
     }

@@ -15,6 +15,7 @@ chunk-contract = { path = "../chunk-contract" }
 chunk-control = { path = "../chunk-control" }
 chunk-proto = { path = "../chunk-proto" }
 chunk-proxy = { path = "../chunk-proxy", features = ["bench-support"] }
+chunk-store = { path = "../chunk-store" }
 clap = { version = "4", features = ["derive"] }
 hdrhistogram = { version = "7", default-features = false, features = ["serialization"] }
 serde = { version = "1", features = ["derive"] }

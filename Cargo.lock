@@ -502,6 +502,7 @@ dependencies = [
  "chunk-control",
  "chunk-proto",
  "chunk-proxy",
+ "chunk-store",
  "clap",
  "hdrhistogram",
  "serde",
@@ -587,13 +588,13 @@ name = "chunk-control"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chunk-backend",
  "chunk-contract",
  "chunk-proto",
  "chunk-service",
  "chunk-store",
  "command-fds",
  "prost",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",

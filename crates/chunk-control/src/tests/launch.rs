@@ -22,7 +22,7 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     let host = Arc::new(crate::ProcessHost::new(host_config()));
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let path = fixture.directory.path().join("launch.sqlite");
-    let control = Control::open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
     // The app JAR is missing, so launch fails before a marker or child exists.
     for operation in ["first", "second"] {
         assert!(matches!(
@@ -41,7 +41,7 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
 
     let host = Arc::new(crate::ProcessHost::new(host_config()));
     host.configure("http://127.0.0.1:1".into()).unwrap();
-    let control = Control::open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
     assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();

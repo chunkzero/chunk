@@ -316,6 +316,13 @@ impl Host for FakeHost {
     }
 }
 
+/// Opens control on an environment store of its own at `path`, through that store's backend.
+fn open(path: &std::path::Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Control>> {
+    let store = chunk_store::SqliteStore::open(path, &config.deployment.environment)?;
+    let backend = chunk_backend::Backend::new(config.deployment.environment.clone(), Box::new(store))?;
+    Control::open(backend.system(), config, host)
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     config: Config,
@@ -395,7 +402,7 @@ impl Fixture {
         Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server }
     }
     fn control(&self) -> Arc<Control> {
-        Control::open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap()
+        open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap()
     }
     async fn close(self) {
         let _ = self.stop.send(());
@@ -489,10 +496,33 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
         ClaimPhase::Arrived as i32
     );
     assert!(matches!(
-        Control::open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
-        Err(Error::Locked)
+        open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
+        Err(Error::Store(chunk_store::Error::WriterLocked))
     ));
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn duplicate_control_open_on_same_backend_is_rejected() {
+    let fixture = Fixture::new().await;
+    let store = chunk_store::SqliteStore::open(
+        fixture.directory.path().join("control.sqlite"),
+        &fixture.config.deployment.environment,
+    )
+    .unwrap();
+    let backend = chunk_backend::Backend::new(fixture.config.deployment.environment.clone(), Box::new(store)).unwrap();
+    let first = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone()).unwrap();
+    let second = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let rejected = second.is_err();
+    drop(second);
+    drop(first);
+    let reopened = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let released = reopened.is_ok();
+    drop(reopened);
+    drop(backend);
+    fixture.close().await;
+    assert!(rejected, "second Control::open on the same backend and deployment must be rejected");
+    assert!(released, "dropping the first control must release its deployment");
 }
 
 #[tokio::test]

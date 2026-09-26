@@ -73,5 +73,3 @@ pub struct ProcessHostConfig {
     pub profiles: BTreeMap<String, MachineProfile>,
     pub backend: chunk_contract::BackendConnection,
 }
-
-pub(crate) use chunk_service::private_file;

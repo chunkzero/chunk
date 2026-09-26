@@ -1,19 +1,14 @@
 # Local control
 
-`chunk-control` is an environment-configured service; `chunk_control::server::run` is its embeddable entry point. Build
-with `cargo build -p chunk-control`. Required environment variables:
+`chunk_control::server::run` serves control in the same process as the environment backend, writing through the
+backend's `System` handle; `chunk dev` embeds it. There is no standalone binary, because control shares the backend's
+store. `server::Config.state` holds the credential and the host's local files.
 
-- `CHUNK_STATE`, `CHUNK_CONNECTION`: durable state directory and discovery record.
-- `CHUNK_CONFIG`: JSON `chunk_control::Config` with deployment, external app manifests, profiles and session types.
-- `CHUNK_DISTRIBUTION`, `CHUNK_JAVA`: release directory and Java 25 executable.
-- `CHUNK_BACKEND_FILE`: backend connection bound to the same deployment.
-- Optional `CHUNK_BIND` (default `127.0.0.1:25567`).
-
-`chunk dev` and standalone control use `ProcessHost` to launch each app with `java -jar`. It owns the child handle and
-waits for exit; there is no per-server sidecar. External app manifests supply session type IDs, placement and capacity
-requirements, and JAR hashes. Control verifies the selected artifact and sends the JVM session creation instructions;
-the JVM resolves factories locally and enforces the supplied capacity. Future container/machine providers implement the
-same `Host` boundary.
+`chunk dev` uses `ProcessHost` to launch each app with `java -jar`. It owns the child handle and waits for exit; there
+is no per-server sidecar. External app manifests supply session type IDs, placement and capacity requirements, and JAR
+hashes. Control verifies the selected artifact and sends the JVM session creation instructions; the JVM resolves
+factories locally and enforces the supplied capacity. Future container/machine providers implement the same `Host`
+boundary.
 
 The private `.chunk/local/control.json` connection file authorizes gRPC calls; under `chunk dev` it names the control of
 the current deployment version. `Claim` accepts authenticated identity, proxy incarnation, connection identity and a
@@ -23,23 +18,27 @@ native Minecraft connection using the capability. `Inspect` reconciles the same 
 releasing the reservation. Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
-profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
-of the commit that created it; its membership generation is that of the login it continues. Generations compare as
-pairs, because a restore starts a new epoch and may reuse revisions. The current wire contract carries a pair as one
-`uint64`, the epoch above 40 revision bits. The session and process have their own incarnations. Duplicate login is
-rejected while an earlier owner remains unresolved. An old cancellation cannot release a newer connection. Unactivated
-reservations expire after 60 seconds; active membership never expires solely because a control channel becomes
-unavailable.
+profile. A prepared slot is a reservation, not a second attached player. A claim's generation is an `(epoch, revision)`
+after every earlier control commit and no later than the commit that created it, since app commits share the log; its
+membership generation is that of the login it continues. Generations compare as pairs, because a restore starts a new
+epoch and may reuse revisions. The current wire contract carries a pair as one `uint64`, the epoch above 40 revision
+bits. The session and process have their own incarnations. Duplicate login is rejected while an earlier owner remains
+unresolved. An old cancellation cannot release a newer connection. Unactivated reservations expire after 60 seconds;
+active membership never expires solely because a control channel becomes unavailable.
 
 Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chunk_players`, `chunk_claims`,
-`chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` row) in a `chunk-store` database under
-`.chunk/control/`, with its exclusive writer lock. Each update is one commit with its own operation ID and revision; an
-in-memory copy serves reads and is rebuilt from the tables on open. Gameplay data still belongs to the environment
-backend. The tables retain requests, reservations and activation intent before external effects. A lost activation reply
-is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft connection;
-control carries destination metadata. A player row exists only while it owns a claim. Released claims, and moves that
-only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move changes
-after a log position, and `Control::subscribe` announces new positions.
+`chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment backend's store, so an
+environment has one log. Each update is one commit through the backend's system lane, which takes it into the next
+durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt from the tables on open. Apps
+cannot declare, read or write `chunk_` tables. Each deployment version's control prefixes its row IDs with a scope
+derived from the deployment and holds that scope exclusively, so a second control for the same deployment on one backend
+fails to open until the first drops, and `chunk dev` releases running side by side keep separate state; a new
+`chunk dev` session clears every scope. When the backend's commit pipeline fails or stops, as after another store fences
+this one, control stops too. The tables retain requests, reservations and activation intent before external effects. A
+lost activation reply is reconciled against the runtime's inventory. Configuration packets travel over the native
+Minecraft connection; control carries destination metadata. A player row exists only while it owns a claim. Released
+claims, and moves that only reference them, are forgotten five minutes after release. `Control::changes_after` lists
+claim and move changes after a log position, and `Control::subscribe` announces new positions.
 
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,

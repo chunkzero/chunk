@@ -139,6 +139,26 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
 }
 
 #[test]
+fn deployments_cannot_declare_system_tables() {
+    let (_directory, mut store) = open();
+    let mut deployment = crate::tests::target();
+    let table = deployment.tables["profiles"].clone();
+    deployment.tables.insert("Chunk_claims".into(), table);
+    assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
+    assert!(matches!(store.retain_deployment(&deployment), Err(Error::Invalid(_))));
+    assert!(store.deployments().unwrap().is_empty());
+    // A deployment stored before the prefix was reserved is refused when it reloads.
+    store
+        .connection
+        .execute(
+            "INSERT INTO _chunk_deployments VALUES (?1, ?2)",
+            [&deployment.id, &serde_json::to_string(&deployment).unwrap()],
+        )
+        .unwrap();
+    assert!(matches!(store.deployments(), Err(Error::Corrupt(_))));
+}
+
+#[test]
 fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
     for version in [3, 4, 5, 6, 7] {
         let (directory, mut store) = open();

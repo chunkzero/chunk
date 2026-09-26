@@ -12,7 +12,7 @@ use serde_json::json;
 use super::*;
 use crate::{
     Epoch, Error, Operation, RetryContext, Revision, SqliteStore, Storage,
-    tests::{commit, job, operation, request, schema, target, write},
+    tests::{commit, job, operation, request, schema, target, write, write_to},
 };
 
 #[derive(Default)]
@@ -486,14 +486,17 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
 }
 
 #[test]
-fn a_fork_drops_retry_contexts_and_unfinished_jobs_unless_asked_to_keep_jobs() {
+fn a_fork_drops_retry_contexts_system_rows_and_unfinished_jobs_unless_asked_to_keep_jobs() {
     let source = Arc::new(Memory::default());
     let directory = tempfile::tempdir().unwrap();
     let (mut store, replicator) = open(&directory.path().join("source.db"), manual(&source));
     store.apply_schema(&schema()).unwrap();
+    let system = serde_json::from_value(json!({"chunk_hosts": {"fields": {"name": {"schema": {"type": "string"}}}}}));
+    store.apply_schema(&system.unwrap()).unwrap();
     store.retain_deployment(&target()).unwrap();
     let scheduled = vec![crate::JobIntent::Schedule(job("later"))];
-    store.commit_with_jobs(commit("schedule", 1, vec![write("a", Some(json!({"coins": 1})))]), scheduled).unwrap();
+    let writes = vec![write("a", Some(json!({"coins": 1}))), write_to("chunk_hosts", "h", Some(json!({"name": "h"})))];
+    store.commit_with_jobs(commit("schedule", 2, writes), scheduled).unwrap();
     let inherited = RetryContext { deployment: "v1".into(), timestamp: 1, seed: 2 };
     store.prepare_operation(&operation("unfinished"), inherited.clone()).unwrap();
     replicator.flush().unwrap();
@@ -512,6 +515,9 @@ fn a_fork_drops_retry_contexts_and_unfinished_jobs_unless_asked_to_keep_jobs() {
         store
     };
     let mut dropped = fork("dropped.db", false);
+    let snapshot = dropped.snapshot().unwrap();
+    assert!(snapshot.get(&crate::DocumentKey::new("profiles", "a").unwrap()).unwrap().is_some());
+    assert!(snapshot.get(&crate::DocumentKey::new("chunk_hosts", "h").unwrap()).unwrap().is_none());
     assert!(dropped.jobs().unwrap().records.is_empty());
     assert!(dropped.outcome(&operation("schedule")).unwrap().is_some());
     assert_eq!(dropped.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);

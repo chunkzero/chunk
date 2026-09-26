@@ -179,11 +179,12 @@ automatic rebuilds. Reloads do not preserve gameplay state. Development releases
 is deleted once no running version uses it, and a new session first clears the previous one's control state and JVM
 logs.
 
-Standalone `chunk-backend`, `chunk-control` and `chunk-edge` binaries read environment variables and call the same
-libraries. They have no CLI argument parser. The proxy remains the reusable listener implementation hosted by edge.
-Backend requires `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_CONNECTION`, and optional `CHUNK_BIND`
-(default `127.0.0.1:25568`). See the [control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md),
-and [runtime](jvm/runtime/README.md) docs for the other service environments.
+Standalone `chunk-backend` and `chunk-edge` binaries read environment variables and call the same libraries. They have
+no CLI argument parser. Control has no binary of its own: it shares the backend's store, so it runs embedded beside it.
+The proxy remains the reusable listener implementation hosted by edge. Backend requires `CHUNK_BUNDLE`,
+`CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_CONNECTION`, and optional `CHUNK_BIND` (default `127.0.0.1:25568`). See the
+[control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and [runtime](jvm/runtime/README.md)
+docs for the other service environments.
 
 ## License
 

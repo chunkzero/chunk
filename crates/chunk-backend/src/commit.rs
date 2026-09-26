@@ -3,12 +3,13 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_store::{Commit, Operation, Reply, Request, Revision, Snapshot, Storage, Write};
+use chunk_store::{Commit, DatabaseSchema, Epoch, Operation, Reply, Request, Revision, Snapshot, Storage, Write};
 use tokio::sync::mpsc::Sender;
 
 use crate::{
     Error, Result,
     service::{Event, Update},
+    system::{Lane, OPERATION_PREFIX, SystemJob},
     timing::{Phase, Timer},
 };
 
@@ -25,6 +26,8 @@ pub(crate) enum Job {
     },
     Commit {
         expected: Revision,
+        /// System commits the sender had seen when it chose `expected`.
+        system: u64,
         operation: Operation,
         writes: Vec<Write>,
         result: Arc<str>,
@@ -33,14 +36,28 @@ pub(crate) enum Job {
     Scheduling {
         command: chunk_store::JobCommand,
     },
+    /// Drains the system lane.
+    Wake,
 }
 
 /// Prepares and commits that may share one durable write, bounded to keep
 /// acknowledgement latency low.
 const MAX_BATCH: usize = 64;
 
+/// Every system commit records an operation with a unique ID, so they share one request fingerprint.
+const FINGERPRINT: [u8; 32] = *b"chunk-environment-system-commit!";
+
+/// How far the log has advanced.
+struct Sequence {
+    revision: Revision,
+    /// System commits so far. An app commit's expected revision moves past those its sender had not seen.
+    system: u64,
+    epoch: Epoch,
+}
+
 pub(crate) struct Committer {
     jobs: Option<mpsc::SyncSender<Job>>,
+    lane: Arc<Lane>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -51,33 +68,56 @@ impl Committer {
     ) -> Result<(Self, Snapshot, Vec<chunk_contract::Deployment>, chunk_store::Jobs)> {
         let (jobs, incoming) = mpsc::sync_channel::<Job>(64);
         let (ready, initialized) = mpsc::sync_channel(1);
+        let lane = Arc::new(Lane::default());
+        let (wake, thread_lane) = (jobs.clone(), lane.clone());
         let thread = std::thread::Builder::new().name("chunk-commit".into()).spawn(move || {
+            let lane = Closing(thread_lane);
             let initial = (|| -> Result<_> {
                 Ok((store.snapshot()?, store.deployments()?, store.job_command(chunk_store::JobCommand::Recover)?))
             })();
+            let Ok((snapshot, ..)) = &initial else {
+                let _ = ready.send(initial);
+                return;
+            };
+            let revision = snapshot.revision;
+            let mut sequence = Sequence { revision, system: 0, epoch: store.epoch() };
+            lane.0.start(wake, sequence.epoch);
             if ready.send(initial).is_err() {
                 return;
             }
             let mut failed = false;
             let mut next = None;
             while let Some(job) = next.take().or_else(|| incoming.recv().ok()) {
-                let batch = if matches!(job, Job::Prepare { .. } | Job::Commit { .. }) {
-                    // Prepares and commits already queued share one durable write.
-                    let mut batch = vec![job];
-                    while batch.len() < MAX_BATCH {
-                        match incoming.try_recv() {
-                            Ok(job @ (Job::Prepare { .. } | Job::Commit { .. })) => batch.push(job),
-                            Ok(other) => {
-                                next = Some(other);
-                                break;
+                let system = lane.0.take();
+                let healthy = !failed;
+                let mut batch = match job {
+                    job @ (Job::Prepare { .. } | Job::Commit { .. }) => {
+                        // Prepares and commits already queued share one durable write.
+                        let mut batch = vec![job];
+                        while batch.len() < MAX_BATCH {
+                            match incoming.try_recv() {
+                                Ok(job @ (Job::Prepare { .. } | Job::Commit { .. })) => batch.push(job),
+                                Ok(other) => {
+                                    next = Some(other);
+                                    break;
+                                }
+                                Err(_) => break,
                             }
-                            Err(_) => break,
                         }
+                        durable(store.as_mut(), &mut sequence, system, batch, &mut failed)
                     }
-                    durable(store.as_mut(), batch, &mut failed)
-                } else {
-                    vec![run(store.as_mut(), job, &mut failed)]
+                    Job::Wake => durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed),
+                    job => {
+                        let mut events = durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed);
+                        events.push(run(store.as_mut(), &mut sequence, job, &mut failed));
+                        events
+                    }
                 };
+                // The first fatal failure stops the system lane and the engine together.
+                if failed && healthy {
+                    lane.0.fail();
+                    batch.push(Event::Failed);
+                }
                 for event in batch {
                     if events.blocking_send(event).is_err() {
                         return;
@@ -85,9 +125,13 @@ impl Committer {
                 }
             }
         })?;
-        let committer = Self { jobs: Some(jobs), thread: Some(thread) };
+        let committer = Self { jobs: Some(jobs), lane, thread: Some(thread) };
         let (snapshot, deployments, scheduled) = initialized.recv().map_err(|_| Error::Closed)??;
         Ok((committer, snapshot, deployments, scheduled))
+    }
+
+    pub fn lane(&self) -> Arc<Lane> {
+        self.lane.clone()
     }
 
     pub fn send(&self, job: Job) -> Result<()> {
@@ -98,7 +142,16 @@ impl Committer {
     }
 }
 
-fn run(store: &mut dyn Storage, job: Job, failed: &mut bool) -> Event {
+/// Closes the lane however the commit thread exits, so no system caller waits forever.
+struct Closing(Arc<Lane>);
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut bool) -> Event {
     match job {
         Job::Release { id } => {
             let result =
@@ -111,6 +164,7 @@ fn run(store: &mut dyn Storage, job: Job, failed: &mut bool) -> Event {
                 Err(Error::CommitFailed)
             } else {
                 store.activate_deployment(&deployment).map_err(Error::from).and_then(|revision| {
+                    sequence.revision = revision;
                     let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
                     if snapshot.revision != revision {
                         return Err(Error::CommitFailed);
@@ -130,10 +184,100 @@ fn run(store: &mut dyn Storage, job: Job, failed: &mut bool) -> Event {
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Scheduled { command, result }
         }
-        job @ (Job::Prepare { .. } | Job::Commit { .. }) => {
-            durable(store, vec![job], failed).pop().expect("one event per job")
+        Job::Prepare { .. } | Job::Commit { .. } | Job::Wake => unreachable!("durable writes run in batches"),
+    }
+}
+
+/// Installs system tables, reporting whether that advanced the revision, and reads the store.
+fn open(
+    store: &mut dyn Storage,
+    sequence: &mut Sequence,
+    schema: &DatabaseSchema,
+    failed: &mut bool,
+) -> (bool, Result<Snapshot>) {
+    if *failed {
+        return (false, Err(Error::CommitFailed));
+    }
+    let revision = match store.apply_schema(schema) {
+        Ok(revision) => revision,
+        Err(error) => {
+            let error = Error::from(error);
+            *failed |= !error.is_rejected_commit();
+            return (false, Err(error));
+        }
+    };
+    let advanced = revision != sequence.revision;
+    if advanced {
+        sequence.revision = revision;
+        sequence.system += 1;
+    }
+    let snapshot = store.snapshot().map_err(Error::from);
+    *failed |= advanced && snapshot.is_err();
+    (advanced, snapshot)
+}
+
+type Replies = Vec<mpsc::SyncSender<Result<Revision>>>;
+
+/// Installs system tables at once, reporting any revision that advanced, and turns system
+/// commits into the leading requests of the next durable write.
+fn system_requests(
+    store: &mut dyn Storage,
+    sequence: &mut Sequence,
+    system: Vec<SystemJob>,
+    failed: &mut bool,
+) -> (Vec<Event>, Vec<Request>, Replies) {
+    let mut events = Vec::new();
+    let (opens, commits): (Vec<_>, Vec<_>) = system.into_iter().partition(|job| matches!(job, SystemJob::Open { .. }));
+    for job in opens {
+        if let SystemJob::Open { schema, reply } = job {
+            let (advanced, result) = open(store, sequence, &schema, failed);
+            if advanced {
+                let (revision, snapshot) = (sequence.revision, result.clone());
+                events.push(Event::System { count: 1, revision, snapshot });
+            }
+            let _ = reply.send(result);
         }
     }
+    let mut requests = Vec::new();
+    let mut replies = Vec::new();
+    let mut expected = sequence.revision;
+    for job in commits {
+        if let SystemJob::Commit { writes, reply } = job {
+            let Some(revision) = expected.0.checked_add(1).filter(|_| !*failed) else {
+                let _ = reply.send(Err(Error::CommitFailed));
+                continue;
+            };
+            let id = format!("{OPERATION_PREFIX}{}/{revision}", sequence.epoch.0);
+            let operation = Operation { id, fingerprint: FINGERPRINT };
+            let commit = Commit { expected, operation, writes, result: serde_json::Value::Null };
+            requests.push(Request::Commit { commit, intents: Vec::new() });
+            replies.push(reply);
+            expected = Revision(revision);
+        }
+    }
+    (events, requests, replies)
+}
+
+/// Replies to system commits in order, returning how many committed and the last one's revision.
+fn acknowledge(
+    replies: Replies,
+    results: &mut impl Iterator<Item = chunk_store::Result<Reply>>,
+    failed: &mut bool,
+) -> (u64, Revision) {
+    let mut committed = (0, Revision(0));
+    for reply in replies {
+        let result = match results.next().filter(|_| !*failed) {
+            Some(Ok(Reply::Committed(outcome))) => Ok(outcome.revision),
+            Some(Err(error)) => Err(Error::from(error)),
+            _ => Err(Error::CommitFailed),
+        };
+        if let Ok(revision) = result {
+            committed = (committed.0 + 1, revision);
+        }
+        *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+        let _ = reply.send(result);
+    }
+    committed
 }
 
 enum Queued {
@@ -141,13 +285,23 @@ enum Queued {
     Commit { id: String, expected: Revision, json: Arc<str>, has_jobs: bool },
 }
 
-/// Applies prepares and commits in one batch and reports one event per job, in
+/// Installs system tables, then applies prepares and commits in one batch. System commits come first,
+/// and each app commit's expected revision moves past the system commits its sender had not
+/// seen. Reports one [`Event::System`] for system commits, then one event per app job, in
 /// order. Every commit acknowledged by a batch shares the snapshot taken after it.
-fn durable(store: &mut dyn Storage, batch: Vec<Job>, failed: &mut bool) -> Vec<Event> {
-    let mut requests = Vec::new();
+fn durable(
+    store: &mut dyn Storage,
+    sequence: &mut Sequence,
+    system: Vec<SystemJob>,
+    batch: Vec<Job>,
+    failed: &mut bool,
+) -> Vec<Event> {
+    let (mut events, mut requests, replies) = system_requests(store, sequence, system, failed);
+    // App commits follow every system commit in this batch.
+    let system_total = sequence.system + requests.len() as u64;
     let mut queued = Vec::with_capacity(batch.len());
     for job in batch {
-        let submitted = !*failed && requests.len() == queued.len();
+        let submitted = !*failed && requests.len() == replies.len() + queued.len();
         match job {
             Job::Prepare { operation, context } => {
                 queued.push(Queued::Prepare { id: operation.id.clone() });
@@ -155,7 +309,8 @@ fn durable(store: &mut dyn Storage, batch: Vec<Job>, failed: &mut bool) -> Vec<E
                     requests.push(Request::Prepare { operation, context });
                 }
             }
-            Job::Commit { expected, operation, writes, result, intents } => {
+            Job::Commit { expected, system, operation, writes, result, intents } => {
+                let expected = Revision(expected.0 + system_total.saturating_sub(system));
                 let has_jobs = !intents.is_empty();
                 queued.push(Queued::Commit { id: operation.id.clone(), expected, json: result.clone(), has_jobs });
                 // Storage currently takes Value; only the durable boundary decodes results.
@@ -169,7 +324,10 @@ fn durable(store: &mut dyn Storage, batch: Vec<Job>, failed: &mut bool) -> Vec<E
             _ => unreachable!("only prepares and commits share a batch"),
         }
     }
-    let submitted = requests.len();
+    if requests.is_empty() && queued.is_empty() {
+        return events;
+    }
+    let submitted = requests.len() - replies.len();
     let timer = Timer::start();
     let results = store.batch(requests);
     let committed = |result: &chunk_store::Result<Reply>| match result {
@@ -177,59 +335,65 @@ fn durable(store: &mut dyn Storage, batch: Vec<Job>, failed: &mut bool) -> Vec<E
         _ => None,
     };
     let last = results.iter().filter_map(committed).max();
+    if let Some(last) = last {
+        sequence.revision = last;
+    }
     let snapshot = last.map(|last| match store.snapshot() {
         Ok(snapshot) if snapshot.revision == last => Ok(snapshot),
         _ => Err(Error::CommitFailed),
     });
-    let with_jobs = results
-        .iter()
-        .zip(&queued)
-        .any(|(result, queued)| committed(result).is_some() && matches!(queued, Queued::Commit { has_jobs: true, .. }));
+    let with_jobs =
+        results.iter().skip(replies.len()).zip(&queued).any(|(result, queued)| {
+            committed(result).is_some() && matches!(queued, Queued::Commit { has_jobs: true, .. })
+        });
     let jobs = with_jobs.then(|| store.jobs().map_err(|_| Error::CommitFailed));
     // Every submitted job waited for the whole durable write.
     for queued in &queued[..submitted] {
         timer.stop(if matches!(queued, Queued::Prepare { .. }) { Phase::Prepare } else { Phase::Commit });
     }
     let mut results = results.into_iter();
-    queued
-        .into_iter()
-        .map(|queued| {
-            let reply = results.next().filter(|_| !*failed);
-            match queued {
-                Queued::Prepare { id } => {
-                    let result = match reply {
-                        Some(Ok(Reply::Prepared(context))) => Ok(context),
-                        Some(Err(error)) => Err(Error::from(error)),
-                        _ => Err(Error::CommitFailed),
-                    };
-                    *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-                    Event::Prepared { operation: id, result }
-                }
-                Queued::Commit { id, expected, json, has_jobs } => {
-                    let result = match reply {
-                        Some(Ok(Reply::Committed(outcome)))
-                            if expected.0.checked_add(1) == Some(outcome.revision.0) =>
-                        {
-                            (|| {
-                                let snapshot = snapshot.clone().ok_or(Error::CommitFailed)??;
-                                let jobs =
-                                    if has_jobs { Some(jobs.clone().ok_or(Error::CommitFailed)??) } else { None };
-                                Ok((Update { revision: outcome.revision, json }, snapshot, jobs))
-                            })()
-                        }
-                        Some(Err(error)) => Err(Error::from(error)),
-                        _ => Err(Error::CommitFailed),
-                    };
-                    *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-                    Event::Committed { operation: id, result }
-                }
+    if let (count @ 1.., revision) = acknowledge(replies, &mut results, failed) {
+        sequence.system += count;
+        let snapshot = snapshot.clone().unwrap_or(Err(Error::CommitFailed));
+        *failed |= snapshot.is_err();
+        events.push(Event::System { count, revision, snapshot });
+    }
+    events.extend(queued.into_iter().map(|queued| {
+        let reply = results.next().filter(|_| !*failed);
+        match queued {
+            Queued::Prepare { id } => {
+                let result = match reply {
+                    Some(Ok(Reply::Prepared(context))) => Ok(context),
+                    Some(Err(error)) => Err(Error::from(error)),
+                    _ => Err(Error::CommitFailed),
+                };
+                *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                Event::Prepared { operation: id, result }
             }
-        })
-        .collect()
+            Queued::Commit { id, expected, json, has_jobs } => {
+                let result = match reply {
+                    Some(Ok(Reply::Committed(outcome))) if expected.0.checked_add(1) == Some(outcome.revision.0) => {
+                        (|| {
+                            let snapshot = snapshot.clone().ok_or(Error::CommitFailed)??;
+                            let jobs = if has_jobs { Some(jobs.clone().ok_or(Error::CommitFailed)??) } else { None };
+                            Ok((Update { revision: outcome.revision, json }, snapshot, jobs))
+                        })()
+                    }
+                    Some(Err(error)) => Err(Error::from(error)),
+                    _ => Err(Error::CommitFailed),
+                };
+                *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+                Event::Committed { operation: id, result }
+            }
+        }
+    }));
+    events
 }
 
 impl Drop for Committer {
     fn drop(&mut self) {
+        // The lane holds a sender too; the thread stops only once both are gone.
+        self.lane.close();
         self.jobs.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
