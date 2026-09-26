@@ -59,7 +59,11 @@ impl ObjectStorage for Memory {
 
 /// Uploads only on flush, so tests control every object.
 fn manual(storage: &Arc<Memory>) -> Replication {
-    Replication { batch_delay: Duration::from_secs(3600), ..Replication::new(storage.clone()) }
+    manual_on(storage.clone())
+}
+
+fn manual_on(storage: Arc<dyn ObjectStorage>) -> Replication {
+    Replication { batch_delay: Duration::from_secs(3600), ..Replication::new(storage) }
 }
 
 fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
@@ -191,8 +195,56 @@ fn successive_crashes_lose_only_unsent_tails_and_never_reuse_a_generation() {
     assert_eq!(store.snapshot().unwrap().revision, Revision(3));
 }
 
+/// Runs a competing host's actions just before this host's next epoch claim.
+struct Racing {
+    storage: Arc<Memory>,
+    before_claim: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Racing {
+    fn new(storage: &Arc<Memory>, before_claim: impl FnOnce() + Send + 'static) -> Arc<Self> {
+        Arc::new(Self { storage: storage.clone(), before_claim: Mutex::new(Some(Box::new(before_claim))) })
+    }
+}
+
+impl ObjectStorage for Racing {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.storage.put(key, bytes)
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        let hook = self.before_claim.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.storage.create(key, bytes)
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.storage.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+        self.storage.list(prefix)
+    }
+}
+
+type Host = Arc<Mutex<Option<(SqliteStore, Replicator)>>>;
+
+/// Asserts a superseded writer can neither upload nor commit.
+fn assert_fenced(host: &Host, storage: &Memory, id: &str) {
+    let (mut store, replicator) = host.lock().unwrap().take().unwrap();
+    let keys = storage.keys();
+    let revision = store.snapshot().unwrap().revision.0;
+    store.commit(commit(id, revision, vec![])).unwrap();
+    assert!(matches!(replicator.flush(), Err(Error::Fenced)));
+    assert!(replicator.fenced());
+    assert_eq!(storage.keys(), keys);
+    assert!(matches!(store.commit(commit(&format!("{id}-again"), revision + 1, vec![])), Err(Error::Fenced)));
+}
+
 #[test]
-fn competing_restores_claim_distinct_epochs() {
+fn a_restore_that_loses_its_claim_replays_the_winner_s_history() {
     let storage = Arc::new(Memory::default());
     let directory = tempfile::tempdir().unwrap();
     let (mut store, replicator) = open(&directory.path().join("data.db"), manual(&storage));
@@ -200,23 +252,68 @@ fn competing_restores_claim_distinct_epochs() {
     replicator.flush().unwrap();
     drop((store, replicator));
 
-    // Both restores list storage before either claims an epoch.
-    let remote = Remote::load(storage.as_ref()).unwrap();
-    let epochs: Vec<_> = ["first", "second"]
-        .into_iter()
-        .map(|name| {
-            let path = directory.path().join(name);
-            std::fs::File::create(&path).unwrap();
-            restore(&path, "local", storage.as_ref(), &remote).unwrap();
-            let (store, _replicator) = open(&path, manual(&storage));
-            store.epoch()
-        })
-        .collect();
-    assert_eq!(epochs, [Epoch(2), Epoch(3)]);
-    assert!(matches!(
-        SqliteStore::open_replicated(directory.path().join("first"), "local", manual(&storage)),
-        Err(Error::StaleReplica)
-    ));
+    // The winner restores, commits and flushes while the loser is about to claim.
+    let winner: Host = Arc::default();
+    let hook = {
+        let (winner, storage, path) = (winner.clone(), storage.clone(), directory.path().join("winner.db"));
+        move || {
+            let (mut store, replicator) = open(&path, manual(&storage));
+            store.commit(commit("winner", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+            replicator.flush().unwrap();
+            *winner.lock().unwrap() = Some((store, replicator));
+        }
+    };
+    let loser = directory.path().join("loser.db");
+    let (store, _replicator) = open(&loser, manual_on(Racing::new(&storage, hook)));
+    assert_eq!(store.epoch(), Epoch(3));
+    assert!(store.outcome(&operation("winner")).unwrap().is_some());
+    drop(store);
+    assert_fenced(&winner, &storage, "after-takeover");
+}
+
+#[test]
+fn a_restore_includes_uploads_that_race_its_claim_and_fences_their_writer() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("data.db"), manual(&storage));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+
+    // The running writer flushes after the restore listed storage but before it claims.
+    let writer: Host = Arc::new(Mutex::new(Some((store, replicator))));
+    let hook = {
+        let writer = writer.clone();
+        move || {
+            let mut writer = writer.lock().unwrap();
+            let (store, replicator) = writer.as_mut().unwrap();
+            store.commit(commit("raced", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+            replicator.flush().unwrap();
+        }
+    };
+    let restored = directory.path().join("restored.db");
+    let (store, _replicator) = open(&restored, manual_on(Racing::new(&storage, hook)));
+    assert_eq!(store.epoch(), Epoch(3));
+    assert!(store.outcome(&operation("raced")).unwrap().is_some());
+    drop(store);
+    assert_fenced(&writer, &storage, "after-takeover");
+}
+
+#[test]
+fn losing_a_new_database_before_its_first_upload_still_allows_a_fresh_start() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("lost.db"), manual(&storage));
+    assert_eq!(store.epoch(), Epoch(1));
+    store.apply_schema(&schema()).unwrap();
+    drop((store, replicator));
+
+    let (mut store, replicator) = open(&directory.path().join("fresh.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.snapshot().unwrap().revision), (Epoch(2), Revision(0)));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    let (mut store, _replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.snapshot().unwrap().revision), (Epoch(3), Revision(1)));
 }
 
 #[test]

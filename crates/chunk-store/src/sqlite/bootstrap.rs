@@ -37,7 +37,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 pub(super) const FORMAT: i64 = 7;
 
 /// Reports whether an existing database was migrated from an older format.
-pub(super) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
+pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version = version(&connection)?;

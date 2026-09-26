@@ -7,7 +7,7 @@ use std::{
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::{Remote, Replication, Shared, segment};
+use super::{Ended, Remote, Replication, Shared, segment};
 use crate::{Error, Result, sqlite::log};
 
 const SEGMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -46,9 +46,23 @@ impl Uploader {
         let _exit = Exit(&shared);
         let mut backoff = Duration::from_secs(1);
         while let Some(target) = self.wait() {
-            let Err(error) = self.upload(target) else {
-                backoff = Duration::from_secs(1);
-                continue;
+            // Progress counts only once no newer epoch claimed the environment by
+            // the end of the upload, so a flush never reports superseded objects.
+            let result = self.fence().and_then(|()| self.upload(target)).and_then(|reached| {
+                self.fence()?;
+                Ok(reached)
+            });
+            let error = match result {
+                Ok(reached) => {
+                    self.advance(reached);
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
+                Err(Error::Fenced) => {
+                    shared.lock().ended = Some(Ended::Fenced);
+                    return;
+                }
+                Err(error) => error,
             };
             let mut state = shared.lock();
             state.failures += 1;
@@ -90,7 +104,15 @@ impl Uploader {
         }
     }
 
-    fn upload(&mut self, target: u64) -> Result<()> {
+    /// Fails with [`Error::Fenced`] once the next epoch is claimed. Epochs are
+    /// claimed in order, so any newer claim implies that one.
+    fn fence(&self) -> Result<()> {
+        let next = segment::epoch_key(self.epoch + 1);
+        if self.replication.storage.list(&next)?.is_empty() { Ok(()) } else { Err(Error::Fenced) }
+    }
+
+    /// Uploads entries through `target` and returns the last sequence stored.
+    fn upload(&mut self, target: u64) -> Result<u64> {
         if !self.based
             || self.segments >= self.replication.snapshot_segments
             || self.bytes >= self.replication.snapshot_bytes
@@ -112,10 +134,9 @@ impl Uploader {
             self.replication.storage.put(&segment::segment_key(self.epoch, uploaded + 1, last), segment)?;
             self.segments += 1;
             self.bytes += size;
-            self.advance(last);
             uploaded = last;
         }
-        Ok(())
+        Ok(uploaded)
     }
 
     /// Reads entries after `after`, stopping at `through` or about one segment.
@@ -134,7 +155,7 @@ impl Uploader {
         Ok(entries)
     }
 
-    fn snapshot(&mut self) -> Result<()> {
+    fn snapshot(&mut self) -> Result<u64> {
         let copy = super::sibling(&self.path, "snapshot");
         let _ = fs::remove_file(&copy);
         let result = self.upload_snapshot(&copy);
@@ -143,8 +164,7 @@ impl Uploader {
         self.based = true;
         self.segments = 0;
         self.bytes = 0;
-        self.advance(sequence);
-        Ok(())
+        Ok(sequence)
     }
 
     fn upload_snapshot(&self, copy: &Path) -> Result<u64> {
@@ -182,7 +202,7 @@ struct Exit<'a>(&'a Shared);
 
 impl Drop for Exit<'_> {
     fn drop(&mut self) {
-        self.0.lock().exited = true;
+        self.0.lock().ended.get_or_insert(Ended::Stopped);
         self.0.changed.notify_all();
     }
 }

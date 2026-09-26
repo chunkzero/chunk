@@ -116,7 +116,12 @@ pub(crate) fn snapshot_key(epoch: u64, sequence: u64) -> String {
 }
 
 pub(crate) fn claim_key(epoch: u64) -> String {
-    format!("epochs/{epoch:020}/claim")
+    format!("{}/claim", epoch_key(epoch))
+}
+
+/// The directory holding every object of `epoch`.
+pub(crate) fn epoch_key(epoch: u64) -> String {
+    format!("epochs/{epoch:020}")
 }
 
 pub(crate) fn segment_key(epoch: u64, first: u64, last: u64) -> String {

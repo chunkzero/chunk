@@ -10,7 +10,7 @@ use crate::{
     Snapshot, Storage, replication,
 };
 
-mod bootstrap;
+pub(crate) mod bootstrap;
 mod codec;
 mod deployments;
 mod jobs;
@@ -54,7 +54,8 @@ impl SqliteStore {
     /// the latest snapshot and later log segments, under a new epoch.
     /// # Errors
     /// Fails like [`Self::open`], on object storage or restore failures, and with
-    /// [`Error::StaleReplica`] when object storage holds a newer history.
+    /// [`Error::StaleReplica`] when object storage holds a newer history. Writes
+    /// fail with [`Error::Fenced`] once another store claims a newer epoch.
     pub fn open_replicated(
         path: impl AsRef<Path>,
         environment: &str,
@@ -62,10 +63,10 @@ impl SqliteStore {
     ) -> Result<(Self, Replicator)> {
         validate_environment(environment)?;
         let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
-        let remote = replication::Remote::load(replication.storage())?;
         if bootstrap::version(&Connection::open(&path)?)? == 0 {
-            replication::restore(&path, environment, replication.storage(), &remote)?;
+            replication::restore(&path, environment, replication.storage())?;
         }
+        let remote = replication::Remote::load(replication.storage())?;
         let (connection, migrated) = bootstrap::open(&path, environment)?;
         if migrated {
             log::mark_unlogged(&connection)?;

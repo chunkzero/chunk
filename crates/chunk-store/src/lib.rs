@@ -170,6 +170,8 @@ pub enum Error {
     StaleReplica,
     #[error("replication: {0}")]
     Replication(String),
+    #[error("another store claimed a newer epoch of this environment; stop serving it")]
+    Fenced,
     #[error("storage I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("SQLite: {0}")]

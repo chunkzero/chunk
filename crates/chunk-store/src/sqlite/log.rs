@@ -33,6 +33,9 @@ pub(super) fn write<T>(
     statements: &[String],
     change: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
+    if log.as_ref().is_some_and(|log| log.shared.fenced()) {
+        return Err(Error::Fenced);
+    }
     let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let Some(log) = log else {
         let value = change(&transaction)?;

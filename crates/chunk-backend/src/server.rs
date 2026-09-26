@@ -27,6 +27,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     if !config.bind.ip().is_loopback() {
         return Err(io::Error::other("backend must bind loopback"));
     }
+    // Cancelled on a fence as well as by the caller, without cancelling the caller's token.
+    let stop = stop.child_token();
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let connection_path = config.connection.clone();
@@ -92,7 +94,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         tokio::pin!(server);
         let result = tokio::select! {
             result = &mut server => result.map_err(io::Error::other),
-            () = stop.cancelled() => {
+            () = stopped(&stop, replicator.as_ref()) => {
                 shutdown.cancel();
                 command_shutdown.cancel();
                 match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
@@ -118,4 +120,23 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     .await
     .map_err(io::Error::other)?;
     result.and(flushed.map_err(io::Error::other))
+}
+
+/// Resolves once `stop` is cancelled, cancelling it when another store claims a
+/// newer epoch of this environment.
+async fn stopped(stop: &CancellationToken, replicator: Option<&chunk_store::Replicator>) {
+    let fenced = async {
+        let Some(replicator) = replicator else {
+            return std::future::pending().await;
+        };
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        while !replicator.fenced() {
+            interval.tick().await;
+        }
+        tracing::error!("another store took over this environment; stopping");
+    };
+    tokio::select! {
+        () = stop.cancelled() => {}
+        () = fenced => stop.cancel(),
+    }
 }

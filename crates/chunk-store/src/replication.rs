@@ -17,7 +17,9 @@
 //! whenever the local log has a gap (writes made without replication or a store
 //! format migration) or after `snapshot_segments` segments or `snapshot_bytes`
 //! bytes of segments. Restore takes the newest epoch's latest snapshot, replays
-//! its later segments and continues under the next unused epoch.
+//! its later segments and continues under the next unused epoch. A writer
+//! checks for the next epoch's claim before and after each upload; once it
+//! exists, the writer is fenced and its commits and flushes fail.
 
 use std::{
     io,
@@ -130,25 +132,38 @@ impl Replicator {
     /// # Errors
     /// Reports the first failed upload attempt after the call; the uploader keeps
     /// retrying in the background, so callers may flush again.
+    /// Fails with [`Error::Fenced`] once another store claimed a newer epoch.
     pub fn flush(&self) -> Result<()> {
         let mut state = self.shared.lock();
         let target = state.committed;
         let failures = state.failures;
+        if state.ended == Some(Ended::Fenced) {
+            return Err(Error::Fenced);
+        }
         if state.uploaded >= target {
             return Ok(());
         }
         state.flush = true;
         self.shared.changed.notify_all();
         while state.uploaded < target {
+            match state.ended {
+                Some(Ended::Fenced) => return Err(Error::Fenced),
+                Some(Ended::Stopped) => return Err(Error::Replication("uploader stopped".into())),
+                None => {}
+            }
             if state.failures != failures {
                 return Err(Error::Replication(state.error.clone()));
-            }
-            if state.exited {
-                return Err(Error::Replication("uploader stopped".into()));
             }
             state = self.shared.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
         }
         Ok(())
+    }
+
+    /// Whether another store claimed a newer epoch. A fenced store's writes are
+    /// no longer replicated, so its process should stop serving.
+    #[must_use]
+    pub fn fenced(&self) -> bool {
+        self.shared.fenced()
     }
 }
 
@@ -181,7 +196,15 @@ struct State {
     failures: u64,
     error: String,
     stop: bool,
-    exited: bool,
+    ended: Option<Ended>,
+}
+
+/// Why the uploader thread exited.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// Another store claimed a newer epoch.
+    Fenced,
+    Stopped,
 }
 
 impl Shared {
@@ -191,6 +214,10 @@ impl Shared {
 
     pub(crate) fn uploaded(&self) -> u64 {
         self.lock().uploaded
+    }
+
+    pub(crate) fn fenced(&self) -> bool {
+        self.lock().ended == Some(Ended::Fenced)
     }
 
     pub(crate) fn committed(&self, sequence: u64, bytes: usize) {
