@@ -321,7 +321,11 @@ export type ReportStatusRequest = Message<"chunk.management.v1.ReportStatusReque
   pings: PingStatus[];
 
   /**
-   * Progress of the deployment from the latest desired state.
+   * Progress of the deployment from the latest desired state. It may instead
+   * report ACTIVE for a previously desired deployment the environment
+   * switched to whose ACTIVE the management plane has not accepted yet,
+   * repeated under the current lease until it is; desired_revision still
+   * names the desired state the environment observed.
    *
    * @generated from field: chunk.management.v1.DeploymentProgress deployment = 5;
    */
@@ -406,7 +410,10 @@ export type DeploymentProgress = Message<"chunk.management.v1.DeploymentProgress
   deploymentId: string;
 
   /**
-   * IN_PROGRESS, ACTIVE or FAILED.
+   * IN_PROGRESS, ACTIVE or FAILED. The management plane records ACTIVE for a
+   * pending or in-progress deployment, and for a superseded one that is newer
+   * than its current active deployment: it becomes active and newer
+   * unfinished deployments stay desired. It ignores ACTIVE otherwise.
    *
    * @generated from field: chunk.management.v1.DeploymentState state = 2;
    */

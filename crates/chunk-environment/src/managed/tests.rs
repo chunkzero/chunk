@@ -365,6 +365,11 @@ impl Harness {
         (report.sequence, progress)
     }
 
+    /// Waits until management refuses an ACTIVE report.
+    async fn refused(&self) {
+        tokio::time::timeout(Duration::from_secs(60), self.management.refusal.notified()).await.unwrap();
+    }
+
     async fn serves(&self, deployment: &str) -> bool {
         serves(&self.state().join("backend.json"), deployment).await
     }
@@ -392,7 +397,7 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     *harness.management.refused.lock().unwrap() = Some("dep_b".into());
     harness.deploy("dep_b", harness.valid());
     harness.expect(2, "dep_b", DeploymentState::InProgress).await;
-    harness.management.refusal.notified().await;
+    harness.refused().await;
     harness.deploy("dep_c", artifact(&harness.management, &harness.url, "rejected", invalid()));
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(harness.serves("dep_a").await && harness.serves("dep_b").await);
@@ -442,7 +447,7 @@ async fn a_deployment_superseded_mid_download_never_activates_and_a_fenced_core_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_retires_what_it_no_longer_serves_before_its_first_activation() {
+async fn restarts_retire_only_what_management_no_longer_needs() {
     let mut harness = Harness::new().await;
     harness.deploy("dep_a", harness.valid());
     let (stop, running) = harness.start();
@@ -469,6 +474,30 @@ async fn a_restart_retires_what_it_no_longer_serves_before_its_first_activation(
     assert!(harness.serves("dep_c").await);
     assert!(!abandoned.exists() && !unused.exists());
     assert!(harness.state().join("releases").join(&harness.release.0).exists());
+
+    // dep_d activates, but the core stops before management accepts it, and dep_e supersedes it meanwhile.
+    *harness.management.refused.lock().unwrap() = Some("dep_d".into());
+    harness.deploy("dep_d", harness.valid());
+    harness.expect(4, "dep_d", DeploymentState::InProgress).await;
+    harness.refused().await;
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    harness.deploy("dep_e", artifact(&harness.management, &harness.url, "rejected", invalid()));
+
+    // Restarted, the core keeps dep_c until management accepts dep_d, which it falls back to once dep_e fails.
+    let (stop, running) = harness.start();
+    harness.refused().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_c").await && harness.serves("dep_d").await);
+    *harness.management.refused.lock().unwrap() = None;
+    harness.expect(5, "dep_d", DeploymentState::Active).await;
+    harness.expect(5, "dep_e", DeploymentState::InProgress).await;
+    harness.expect(5, "dep_e", DeploymentState::Failed).await;
+    harness.expect(6, "dep_d", DeploymentState::InProgress).await;
+    harness.expect(6, "dep_d", DeploymentState::Active).await;
+    harness.released("dep_c").await;
+    assert!(harness.serves("dep_d").await);
+    assert!(!harness.state().join("managed.json").exists());
 
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();

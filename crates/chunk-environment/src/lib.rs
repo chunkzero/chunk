@@ -70,12 +70,12 @@ impl Config {
 /// Reports startup errors, a service that stopped on its own, a fenced core, and shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     let environment = config.core.environment.clone();
-    let releases = config.core.state.join("releases");
+    let state = config.core.state.clone();
     let core = Core::start(config.core, |_| {}).await?;
     let gateway = OnceLock::new();
     let gateway_config = config.services.contains(Service::Gateway).then_some(config.gateway);
     let managed = if let Some(management) = config.management {
-        Some(managed::Managed::new(management, environment, releases, &core, &gateway, gateway_config))
+        Some(managed::Managed::new(management, environment, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {
             let started = match core.target() {

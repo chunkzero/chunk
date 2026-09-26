@@ -40,9 +40,9 @@ desired deployment cancels one still loading, which then never serves. The gatew
 deployment. A core that management fences stops.
 
 Once the first desired state arrives, core retires every version the backend holds except the latest desired one, the
-one control serves, and the one it replaced until management accepts the replacement as `ACTIVE`; that includes versions
-a restart or a rejected deployment left behind. Retiring stops a version's JVMs, then releases it. An unpacked release
-is removed once control no longer runs or may run its JVMs and no load uses it, and unfinished downloads and unpacks are
-removed at startup.
+one control serves, and the one it replaced until management accepts the replacement as `ACTIVE`, which
+`$CHUNK_STATE/managed.json` keeps across restarts; that includes versions a restart or a rejected deployment left
+behind. Retiring stops a version's JVMs, then releases it. An unpacked release is removed once control no longer runs or
+may run its JVMs and no load uses it, and unfinished downloads and unpacks are removed at startup.
 
 SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.

@@ -1,13 +1,15 @@
 //! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
 
+mod activation;
 mod release;
 mod retire;
 
 use crate::{Core, Gateway, GatewayConfig};
+use activation::Activation;
 use chunk_management::{Client, Code, v1};
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Mutex, MutexGuard, OnceLock, PoisonError,
@@ -38,6 +40,8 @@ pub(crate) struct Managed<'a> {
     instance_id: String,
     environment: String,
     releases: PathBuf,
+    /// Where the activation management has not yet accepted is recorded.
+    activation: PathBuf,
     core: &'a Core,
     gateway: &'a OnceLock<Gateway>,
     /// The gateway to start once a deployment is active.
@@ -54,9 +58,8 @@ struct Deployments {
     desired: Option<String>,
     /// The deployment players are routed to.
     serving: Option<String>,
-    /// The deployment control made current while management has not yet accepted it as active, and the one current
-    /// before it.
-    unacknowledged: Option<(String, Option<String>)>,
+    /// The activation management has not yet accepted, as recorded at `Managed::activation`.
+    unacknowledged: Option<Activation>,
     /// The deployment being loaded.
     loading: Option<String>,
     /// The latest deployment this core rejected, and why.
@@ -68,7 +71,7 @@ impl Deployments {
     /// Before the first desired state arrives, every deployment is kept.
     fn kept(&self, deployment: &str) -> bool {
         let Some(desired) = &self.desired else { return true };
-        let previous = self.unacknowledged.as_ref().and_then(|(_, previous)| previous.as_deref());
+        let previous = self.unacknowledged.as_ref().and_then(|pending| pending.predecessor.as_deref());
         [Some(desired.as_str()), self.serving.as_deref(), previous, self.loading.as_deref()].contains(&Some(deployment))
     }
 }
@@ -112,7 +115,7 @@ impl<'a> Managed<'a> {
     pub(crate) fn new(
         config: ManagementConfig,
         environment: String,
-        releases: PathBuf,
+        state: &Path,
         core: &'a Core,
         gateway: &'a OnceLock<Gateway>,
         gateway_config: Option<GatewayConfig>,
@@ -121,7 +124,8 @@ impl<'a> Managed<'a> {
             client: Client::new(config.url).with_token(config.token),
             instance_id: uuid::Uuid::new_v4().to_string(),
             environment,
-            releases,
+            releases: state.join("releases"),
+            activation: state.join("managed.json"),
             core,
             gateway,
             gateway_config,
@@ -134,12 +138,27 @@ impl<'a> Managed<'a> {
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
     /// Meanwhile, it retires the deployments it no longer serves.
     pub(crate) async fn run(self) -> io::Error {
+        if let Err(error) = self.recover() {
+            return error;
+        }
         if let Err(error) = release::sweep(&self.releases).await {
             tracing::warn!(%error, "abandoned release downloads not removed");
         }
         tokio::select! {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
+        }
+    }
+
+    /// Protects an activation an earlier run recorded until management accepts it, if control made it current.
+    fn recover(&self) -> io::Result<()> {
+        let Some(recorded) = activation::read(&self.activation)? else { return Ok(()) };
+        let current = self.core.control()?.current_release().map_err(io::Error::other)?;
+        if current.as_ref() == Some(&recorded.activated) {
+            lock(&self.deployments).unacknowledged = Some(recorded);
+            Ok(())
+        } else {
+            activation::clear(&self.activation)
         }
     }
 
@@ -224,7 +243,7 @@ impl<'a> Managed<'a> {
     /// management has not accepted yet, since the deployment served before it is kept until then.
     async fn apply(&self, desired: v1::AttachResponse, cancel: CancellationToken) -> Result<(), Interrupted> {
         let deployment = desired.deployment_id.as_str();
-        let unacknowledged = lock(&self.deployments).unacknowledged.as_ref().map(|(active, _)| active.clone());
+        let unacknowledged = lock(&self.deployments).unacknowledged.as_ref().map(|pending| pending.activated.clone());
         if let Some(active) = unacknowledged.filter(|active| active != deployment) {
             self.report(&desired, Some(progress(&active, v1::DeploymentState::Active, String::new()))).await?;
         }
@@ -277,10 +296,21 @@ impl<'a> Managed<'a> {
         if cancel.is_cancelled() {
             return Ok(false);
         }
-        let previous = self.core.control()?.current_release().map_err(io::Error::other)?;
-        self.core.activate(deployment, loaded.distribution(), loaded.control(&self.environment, deployment))?;
-        let previous = previous.filter(|previous| previous != deployment);
-        lock(&self.deployments).unacknowledged = Some((deployment.clone(), previous));
+        // Recorded first, so a crash once control has activated it still protects the predecessor. Activating the
+        // unaccepted deployment again keeps its predecessor.
+        let current = self.core.control()?.current_release().map_err(io::Error::other)?;
+        let predecessor = match &lock(&self.deployments).unacknowledged {
+            Some(pending) if pending.activated == *deployment => pending.predecessor.clone(),
+            _ => current.filter(|current| current != deployment),
+        };
+        let pending = Activation { predecessor, activated: deployment.clone() };
+        activation::write(&self.activation, &pending)?;
+        let release = loaded.control(&self.environment, deployment);
+        if let Err(error) = self.core.activate(deployment, loaded.distribution(), release) {
+            _ = activation::clear(&self.activation);
+            return Err(error);
+        }
+        lock(&self.deployments).unacknowledged = Some(pending);
         Ok(true)
     }
 
@@ -319,8 +349,11 @@ impl<'a> Managed<'a> {
         deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
         let mut deployments = lock(&self.deployments);
         if let Some(active) = active
-            && deployments.unacknowledged.as_ref().is_some_and(|(unacknowledged, _)| *unacknowledged == active)
+            && deployments.unacknowledged.as_ref().is_some_and(|pending| pending.activated == active)
         {
+            if let Err(error) = activation::clear(&self.activation) {
+                tracing::warn!(%error, "accepted activation still recorded");
+            }
             deployments.unacknowledged = None;
         }
         Ok(())
