@@ -506,7 +506,12 @@ function scopesProblem(scopes: Json): Problem {
 function appsProblem(apps: Json, scopes: Json): Problem {
   const names = new Set<string>();
   for (const [app, domain] of Object.entries(apps)) {
-    if (typeof domain !== "string" || !isIdentifier(app) || !insert(names, fold(app)) || !Object.hasOwn(scopes, domain)) {
+    if (
+      typeof domain !== "string" ||
+      !isIdentifier(app) ||
+      !insert(names, fold(app)) ||
+      !Object.hasOwn(scopes, domain)
+    ) {
       return `has an invalid app binding ${app}`;
     }
   }
@@ -630,8 +635,7 @@ function commandsProblem(
   for (const domain of Object.keys(scopes)) {
     const occupied = new Set<string>();
     for (const command of Object.values(commands)) {
-      const visible =
-        command.domain === "" || command.domain === domain || domain.startsWith(`${command.domain}/`);
+      const visible = command.domain === "" || command.domain === domain || domain.startsWith(`${command.domain}/`);
       if (visible && ![command.name, ...command.aliases].every((root) => insert(occupied, fold(root)))) {
         return `has command roots with several owners in scope ${JSON.stringify(domain)}`;
       }
@@ -679,7 +683,8 @@ function commandProblem(command: Command, functions: Record<string, FunctionDecl
     if (
       next !== undefined &&
       command.routes.some(
-        (other) => other.literals[depth] === next && route.literals.every((literal, i) => other.literals[i] === literal),
+        (other) =>
+          other.literals[depth] === next && route.literals.every((literal, i) => other.literals[i] === literal),
       )
     ) {
       return `has an argument ${next} that is also a literal`;
@@ -691,7 +696,8 @@ function commandProblem(command: Command, functions: Record<string, FunctionDecl
         return `has an invalid or repeated argument ${argument.name}`;
       }
       // commands.rs: Command::validate, greedy command argument must be last
-      if (argument.parser === "greedy" && index + 1 !== route.arguments.length) return "has a greedy argument before others";
+      if (argument.parser === "greedy" && index + 1 !== route.arguments.length)
+        return "has a greedy argument before others";
       const problem = argumentProblem(argument, functions);
       if (problem !== undefined) return within(`has an invalid argument ${argument.name}`, problem);
     }
@@ -713,7 +719,11 @@ function argumentProblem(argument: Argument, functions: Record<string, FunctionD
   }
   if (Array.isArray(suggestions)) {
     // commands.rs: CommandArgument::validate and valid_suggestion, static suggestions
-    if (suggestions.length > 64 || !suggestions.every(isSuggestion) || new Set(suggestions).size !== suggestions.length) {
+    if (
+      suggestions.length > 64 ||
+      !suggestions.every(isSuggestion) ||
+      new Set(suggestions).size !== suggestions.length
+    ) {
       return "has invalid static suggestions";
     }
   } else if (suggestions !== null) {
