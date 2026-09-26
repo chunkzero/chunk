@@ -226,6 +226,7 @@ impl Gameplay for RuntimeService {
         self.check(&request)?;
         let withdrawal = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
+        // Like the JVM: an operation it never prepared is not found, and another generation is refused.
         let binding = bindings.get_mut(&withdrawal.operation_id).ok_or(Status::not_found("binding"))?;
         if binding.delivery.owner_generation != withdrawal.owner_generation {
             return Err(Status::failed_precondition("generation"));

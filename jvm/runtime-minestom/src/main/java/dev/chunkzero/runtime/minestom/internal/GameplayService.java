@@ -269,8 +269,11 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
         synchronized (preparations) {
             stream = preparations.get(request.getOperationId());
         }
-        if (stream == null
-                || stream.getDelivery().getOwnerGeneration() != request.getOwnerGeneration()) {
+        if (stream == null) {
+            response.onError(Status.NOT_FOUND.asRuntimeException());
+            return;
+        }
+        if (stream.getDelivery().getOwnerGeneration() != request.getOwnerGeneration()) {
             response.onError(Status.FAILED_PRECONDITION.asRuntimeException());
             return;
         }

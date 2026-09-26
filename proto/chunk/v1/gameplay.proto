@@ -8,6 +8,7 @@ import "chunk/v1/common.proto";
 service Gameplay {
   rpc Configuration(ConfigurationRequest) returns (ConfigurationResponse);
   rpc PreparePlayer(PlayerDelivery) returns (PlayerPreparation);
+  // NOT_FOUND when the operation was never prepared; FAILED_PRECONDITION for another owner generation.
   rpc WithdrawPlayer(PlayerWithdrawal) returns (PlayerWithdrawal);
 }
 

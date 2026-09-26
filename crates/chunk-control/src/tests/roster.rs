@@ -150,3 +150,20 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
     assert_eq!(failure.as_ref().unwrap().reason, "roster member left");
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn canceling_a_roster_before_preparation_releases_its_reservations() {
+    let fixture = fixture().await;
+    let control = fixture.control();
+    let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
+    let destinations = control.move_roster(&roster("party", 1, &members)).unwrap();
+    control.cancel_roster("party").unwrap();
+    control.reconcile_all().await.unwrap();
+    let state = control.state().unwrap();
+    for (destination, (player, source)) in destinations.iter().zip(&members) {
+        assert!(state.claims[&destination.operation_id].phase == Phase::Released);
+        assert_eq!(state.players[player].current.as_ref(), Some(&source.operation_id));
+        assert!(state.players[player].pending.is_none());
+    }
+    fixture.close().await;
+}
