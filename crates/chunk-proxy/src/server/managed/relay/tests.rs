@@ -123,8 +123,13 @@ async fn active_destination_failure_sends_a_play_disconnect() {
     assert_eq!(server.await.unwrap().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
 
-/// Relays gameplay output to a player reading `chunk` bytes per `period`, for at most a minute.
-async fn relay_to_reader(period: std::time::Duration, chunk: usize) -> (Option<io::Error>, usize) {
+const PACKET: [u8; 16_384] = [0x7f; 16_384];
+const PACKETS: usize = 8 * BACKLOG_LIMIT / PACKET.len();
+
+/// Relays `PACKETS` gameplay packets to a player reading `chunk` bytes per `period`, who
+/// leaves once all of them arrive. Returns the relay's error, the bytes the JVM sent,
+/// and the packets the player decoded.
+async fn relay_to_reader(period: std::time::Duration, chunk: usize) -> (io::Error, usize, Vec<bytes::Bytes>) {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -149,36 +154,44 @@ async fn relay_to_reader(period: std::time::Duration, chunk: usize) -> (Option<i
         let sent = sent.clone();
         async move {
             let mut jvm = Transport::new(jvm);
-            while sent.load(Ordering::Relaxed) < 8 * BACKLOG_LIMIT && jvm.write_body(&[0x7f; 16_384]).await.is_ok() {
-                sent.fetch_add(16_384, Ordering::Relaxed);
+            while sent.load(Ordering::Relaxed) < PACKETS * PACKET.len() && jvm.write_body(&PACKET).await.is_ok() {
+                sent.fetch_add(PACKET.len(), Ordering::Relaxed);
             }
             std::future::pending::<()>().await;
         }
     });
     let reader = tokio::spawn(async move {
+        let mut received = bytes::BytesMut::new();
+        let mut packets = Vec::new();
         let mut bytes = vec![0; chunk];
-        loop {
+        while packets.len() < PACKETS {
             tokio::time::sleep(period).await;
-            if matches!(client.read(&mut bytes).await, Ok(0) | Err(_)) {
-                return;
+            match client.read(&mut bytes).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => received.extend_from_slice(&bytes[..count]),
+            }
+            while let Some(packet) = chunk_protocol::decode_frame(&mut received, INPUT_LIMIT).unwrap() {
+                packets.push(packet);
             }
         }
+        packets
     });
-    let result = tokio::time::timeout(std::time::Duration::from_secs(60), relay).await;
+    let error = tokio::time::timeout(std::time::Duration::from_secs(120), relay).await.unwrap().unwrap().unwrap_err();
     writer.abort();
-    reader.abort();
-    (result.ok().map(|result| result.unwrap().unwrap_err()), sent.load(Ordering::Relaxed))
+    (error, sent.load(Ordering::Relaxed), reader.await.unwrap())
 }
 
 #[tokio::test(start_paused = true)]
 async fn slow_players_bound_gameplay_reads_and_only_trickling_ones_time_out() {
     use std::time::Duration;
 
-    let (error, sent) = relay_to_reader(Duration::from_secs(1), 256).await;
-    assert_eq!(error.unwrap().kind(), io::ErrorKind::TimedOut);
+    let (error, sent, _) = relay_to_reader(Duration::from_secs(1), 256).await;
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(sent < 2 * BACKLOG_LIMIT);
     // About 10 KiB/s: slow, but drains faster than the minimum write progress.
-    let (error, sent) = relay_to_reader(Duration::from_millis(100), 1024).await;
-    assert!(error.is_none());
-    assert!(sent > 2 * BACKLOG_LIMIT);
+    let (error, sent, packets) = relay_to_reader(Duration::from_millis(100), 1024).await;
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "the player leaves only after receiving everything");
+    assert_eq!(sent, PACKETS * PACKET.len());
+    assert_eq!(packets.len(), PACKETS);
+    assert!(packets.iter().all(|packet| packet.as_ref() == PACKET));
 }

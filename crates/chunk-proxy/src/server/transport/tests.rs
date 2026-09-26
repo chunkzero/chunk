@@ -100,3 +100,31 @@ async fn encryption_switch_decrypts_buffered_bytes_and_keeps_cipher_state_betwee
     };
     tokio::join!(sender, receiver);
 }
+
+#[tokio::test]
+async fn sent_output_is_released_while_a_peer_keeps_reading_and_writing() {
+    use tokio::io::AsyncReadExt;
+
+    let (peer, server) = tokio::io::duplex(4096);
+    let (mut peer_read, mut peer_write) = tokio::io::split(peer);
+    let peer = tokio::spawn(async move {
+        let mut bytes = vec![0; 1024];
+        loop {
+            peer_write.write_all(&[1, 0x7f]).await?;
+            if peer_read.read(&mut bytes).await? == 0 {
+                return io::Result::Ok(());
+            }
+        }
+    });
+    let mut server = Transport::new(server);
+    let mut sent = 0;
+    while sent < 16 * 1024 * 1024 {
+        if server.queued() < RETAINED_CAPACITY {
+            server.queue(&[0x7f; 16_384]).unwrap();
+            sent += 16_384;
+        }
+        server.pump(Some(64)).await.unwrap();
+        assert!(server.output.len() <= 3 * RETAINED_CAPACITY, "output grew to {} bytes", server.output.len());
+    }
+    peer.abort();
+}

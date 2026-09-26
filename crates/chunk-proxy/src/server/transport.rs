@@ -39,7 +39,8 @@ pub(super) struct Transport<S> {
     input: BytesMut,
     output: Vec<u8>,
     written: usize,
-    /// When queued output was last emptied or drained by `MIN_WRITE_PROGRESS`, and its offset then.
+    /// When queued output was last emptied or drained by `MIN_WRITE_PROGRESS`,
+    /// and the bytes written since.
     progress: Instant,
     progressed: usize,
     encrypt: Option<CipherCtx>,
@@ -119,6 +120,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
 
     /// Encodes a frame body for the next flush or pump.
     pub(super) fn queue(&mut self, body: &[u8]) -> io::Result<()> {
+        self.compact();
         let start = self.output.len();
         encode_frame(&mut self.output, body, self.compression)?;
         self.seal(start)
@@ -156,6 +158,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
         if packets.compression != self.compression {
             return Err(invalid_data("prepared packets have a different compression threshold"));
         }
+        self.compact();
         let start = self.output.len();
         self.output.extend_from_slice(&packets.wire);
         self.seal(start)?;
@@ -219,9 +222,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
             self.written += count;
-            if self.written - self.progressed >= MIN_WRITE_PROGRESS {
+            self.progressed += count;
+            if self.progressed >= MIN_WRITE_PROGRESS {
                 self.progress = Instant::now();
-                self.progressed = self.written;
+                self.progressed = 0;
             }
         }
         ready!(Pin::new(&mut self.stream).poll_flush(cx))?;
@@ -232,10 +236,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
         Poll::Ready(Ok(()))
     }
 
+    /// Drops output the socket already accepted once it outweighs what remains,
+    /// so a peer that never fully drains cannot grow the buffer past twice its backlog.
+    fn compact(&mut self) {
+        if self.written > 0 && self.written >= self.queued() {
+            self.output.drain(..self.written);
+            self.written = 0;
+        }
+    }
+
     /// Encrypts output queued from `start`.
     fn seal(&mut self, start: usize) -> io::Result<()> {
         if start == 0 {
             self.progress = Instant::now();
+            self.progressed = 0;
         }
         if let Some(encrypt) = &mut self.encrypt {
             apply(encrypt, &mut self.output[start..])?;
