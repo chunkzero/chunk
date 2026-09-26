@@ -95,6 +95,11 @@ impl Retarget {
         *platform = platform.retarget(target)?;
         Ok(())
     }
+
+    /// The platform later connections use.
+    fn platform(&self) -> platform::Platform {
+        self.0.read().unwrap_or_else(PoisonError::into_inner).clone()
+    }
 }
 
 impl Proxy {
@@ -181,13 +186,14 @@ impl Proxy {
                     let deadline = self.config.connection_timeout;
                     let compression = self.config.compression_threshold;
                     let configuration_timeout = self.config.configuration_timeout;
-                    let platform = self.platform.as_ref().map(|p| p.read().unwrap_or_else(PoisonError::into_inner).clone());
+                    let current = self.retarget();
+                    let platform = current.as_ref().map(Retarget::platform);
                     let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
                             Ok(Some(authenticated)) => {
-                                if let Some(platform) = platform {
-                                    if let Err(error) = Box::pin(managed::serve(authenticated, &platform, configuration_timeout)).await {
+                                if let Some(current) = current {
+                                    if let Err(error) = Box::pin(managed::serve(authenticated, &current, configuration_timeout)).await {
                                         tracing::debug!(%peer, %error, "managed connection closed");
                                     }
                                     return;

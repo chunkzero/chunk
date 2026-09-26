@@ -13,6 +13,7 @@ mod players;
 mod process;
 mod reconcile;
 mod recovery;
+mod releases;
 mod roster;
 mod rpc;
 pub mod server;
@@ -31,13 +32,13 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
+pub use host::{Distribution, Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
+pub use state::Generation;
 pub use state::feed::{Change, Table};
 use state::{Authority, State};
-pub use state::{Generation, clear};
 
 pub use chunk_contract::ControlConnection;
 
@@ -51,14 +52,28 @@ pub struct SessionType {
 
 pub const DEFAULT_IDLE_NODE_TIMEOUT_SECONDS: u32 = 60;
 
+/// Control's reply to a login routed with a release that no longer accepts logins. Nothing was reserved, so the proxy
+/// routes the login again through the current release.
+pub const ROUTE_AGAIN: &str = "routed release no longer accepts logins";
+
+/// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    pub environment: String,
+}
+
+/// One deployment version's apps, profiles and limits. Control runs every release that still has hosts, and new
+/// logins route through the current one.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Release {
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
     pub artifact_digest: String,
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
+    /// JVMs this release may run at once.
     pub max_processes: u16,
     /// Seconds a node may run without unfinished sessions before it is stopped; zero keeps idle nodes.
     pub idle_node_timeout_seconds: u32,
@@ -80,8 +95,16 @@ pub struct Contracts {
 
 impl Config {
     fn validate(&self) -> Result<()> {
+        if self.environment.is_empty() || self.environment.len() > 100 {
+            return Err(Error::Invalid("invalid control environment"));
+        }
+        Ok(())
+    }
+}
+
+impl Release {
+    fn validate(&self) -> Result<()> {
         if self.deployment.environment.is_empty()
-            || self.deployment.environment.len() > 100
             || self.deployment.deployment.is_empty()
             || self.artifact_digest.is_empty()
             || self.max_processes == 0
@@ -98,7 +121,7 @@ impl Config {
                     || !self.profiles.contains_key(&s.machine_profile)
             })
         {
-            return Err(Error::Invalid("invalid local control configuration"));
+            return Err(Error::Invalid("invalid release configuration"));
         }
         let mut expected = BTreeMap::new();
         for (id, app) in &self.apps {
@@ -165,13 +188,18 @@ pub struct Control {
 }
 
 impl Control {
-    /// Opens one durable authority over its deployment's rows in the environment's system tables. Runtime processes
-    /// and their sockets are owned separately.
+    /// Opens the environment's one durable authority over control's system tables, first dropping every row when
+    /// `fresh`. Runtime processes and their sockets are owned separately.
     /// # Errors
-    /// Rejects changed configuration, invalid limits, corrupt state, or a stopped environment store.
-    pub(crate) fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
+    /// Rejects changed configuration, corrupt state, another authority, or a stopped environment store.
+    pub(crate) fn open(
+        system: chunk_backend::System,
+        config: Config,
+        host: Arc<dyn Host>,
+        fresh: bool,
+    ) -> Result<Arc<Self>> {
         config.validate()?;
-        let authority = Authority::open(system, &config)?;
+        let authority = Authority::open(system, &config, fresh)?;
         // A restore can lose a host's row while the JVM launched for it still runs.
         let mut surviving: BTreeSet<_> = authority.read()?.hosts.keys().cloned().collect();
         surviving.extend(host.unowned()?);

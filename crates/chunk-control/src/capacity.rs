@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Control, Result,
     host::Progress,
+    placement::runs_host,
     state::{Capacity, HostState, Phase, State},
 };
 
@@ -76,14 +77,18 @@ impl Control {
             }
             // A retired host never starts again under its ID; its drain releases it.
             _ if host.retired => Ok(()),
-            _ => self.ensure(id, host).await,
+            _ => self.ensure(&state, id, host).await,
         }
     }
 
-    async fn ensure(&self, id: &str, host: &HostState) -> Result<()> {
-        let failure = match self.host.ensure(id, &host.app, &host.profile).await? {
+    async fn ensure(&self, state: &State, id: &str, host: &HostState) -> Result<()> {
+        let progress = match state.host_release(id) {
+            Ok(release) => self.host.ensure(id, release, &host.app, &host.profile).await?,
+            Err(_) => Progress::Failed("unknown release".into()),
+        };
+        let failure = match progress {
             Progress::Pending => return Ok(()),
-            Progress::Ready(runtime) if self.runs_host(&runtime, host) => None,
+            Progress::Ready(runtime) if runs_host(state, &runtime, host) => None,
             Progress::Ready(_) => Some("host returned incompatible runtime".to_owned()),
             Progress::Failed(reason) => Some(reason),
         };
@@ -97,7 +102,7 @@ impl Control {
         };
         tracing::warn!(host = id, reason, "host cannot provide its capacity; releasing it");
         self.update(|state| {
-            fail(state, id, reason);
+            stop(state, id, Some(reason));
             Ok(())
         })?;
         self.wake_capacity();
@@ -135,13 +140,13 @@ fn released(state: &mut State, id: &str, from: Capacity) -> Result<()> {
     Ok(())
 }
 
-/// Releases `id`'s capacity after its host failed to provide it, retiring the host and its sessions.
-fn fail(state: &mut State, id: &str, reason: String) {
+/// Releases `id`'s capacity at once, retiring the host and its sessions, with the reason its host failed to provide it.
+pub(crate) fn stop(state: &mut State, id: &str, failure: Option<String>) {
     let Some(host) = state.hosts.get_mut(id).filter(|host| host.capacity < Capacity::Releasing) else {
         return;
     };
     host.capacity = Capacity::Releasing;
-    host.failure = Some(reason);
+    host.failure = failure;
     host.retired = true;
     for session in state.sessions.values_mut().filter(|session| session.host == id) {
         session.retired = true;

@@ -41,6 +41,10 @@ message ClaimRequest {
   Identity identity = 4;
   SessionDemand demand = 5;
   ClaimIdentity source = 6;
+  // The deployment version whose routing chose a login's demand. Control reserves the login on that release while it
+  // accepts logins, and otherwise rejects it as unavailable so the proxy routes it again. Empty uses the current
+  // release; a move stays on its source's release.
+  string deployment = 7;
 }
 
 message MovePlayerRequest {
@@ -155,6 +159,8 @@ message NodeStatus {
   ProcessHealth health = 5;
   uint64 observed_at_ms = 6;
   uint32 consecutive_failures = 7;
+  // The deployment version whose release the node runs.
+  string deployment = 8;
 }
 message PlayersRequest {}
 message PlayerList {

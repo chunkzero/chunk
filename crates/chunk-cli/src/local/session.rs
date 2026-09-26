@@ -1,12 +1,7 @@
 use std::{
     collections::BTreeSet,
     io,
-    net::SocketAddr,
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
     time::{Duration, Instant},
 };
 
@@ -21,7 +16,7 @@ use super::{
     Command, Options, Settings, Staged,
     reload::{self, Change, Retirement},
     report::{self, Deployment, Reporter},
-    services::{self, Generation, Shared},
+    services::{self, Shared, Version},
     short,
 };
 use crate::building;
@@ -39,10 +34,16 @@ enum Trigger {
 
 /// A running release; the current one has no retirement.
 struct Live {
-    generation: Generation,
+    version: Version,
     retirement: Option<Retirement>,
     nodes: Option<Vec<NodeStatus>>,
     players: Vec<PlayerStatus>,
+}
+
+impl Live {
+    fn new(version: Version) -> Self {
+        Self { version, retirement: None, nodes: None, players: Vec::new() }
+    }
 }
 
 /// Owns the shared services and every running release, rebuilding and replacing releases on request.
@@ -54,12 +55,13 @@ pub(super) struct Session<'a> {
     shared: Shared,
     live: Vec<Live>,
     pointer: Option<chunk_service::Record>,
-    /// Stops and backend releases in flight; each yields a deployment the backend still uses.
+    /// Backend releases in flight; each yields a deployment the backend still uses.
     retiring: JoinSet<Option<String>>,
     /// Stopped backend versions retried until no call, subscription or job still uses them.
     unreleased: Vec<String>,
-    /// Retired releases whose JVMs are still stopping and may still read their release directory.
-    stopping: Arc<AtomicUsize>,
+    /// Retired releases whose JVMs have not all confirmed their exit. They keep their backend version and release
+    /// directory until they have, however long that takes.
+    stopping: Vec<Version>,
     /// Whether a release directory may have lost its last running version since the last prune.
     stale: bool,
 }
@@ -71,7 +73,7 @@ impl<'a> Session<'a> {
         reporter: &'a Reporter,
         environment: String,
         shared: Shared,
-        generation: Generation,
+        version: Version,
     ) -> Self {
         Self {
             settings,
@@ -79,11 +81,11 @@ impl<'a> Session<'a> {
             reporter,
             environment,
             shared,
-            live: vec![Live { generation, retirement: None, nodes: None, players: Vec::new() }],
+            live: vec![Live::new(version)],
             pointer: None,
             retiring: JoinSet::new(),
             unreleased: Vec::new(),
-            stopping: Arc::default(),
+            stopping: Vec::new(),
             stale: true,
         }
     }
@@ -114,15 +116,16 @@ impl<'a> Session<'a> {
         commands: &mut mpsc::UnboundedReceiver<Command>,
         stop: &CancellationToken,
     ) -> io::Result<()> {
-        self.publish()?;
-        let deployment = &self.live[0].generation.deployment;
+        // Points `control.json` at control for `chunk players` and `chunk nodes`.
+        let connection = self.shared.control_connection()?;
+        self.pointer = Some(chunk_service::Record::publish(&self.settings.state.join("control.json"), connection)?);
         let reload = if self.options.no_watch { "r restarts" } else { "reloads on save · r restarts" };
         self.reporter.done(
             "Ready",
             format!(
                 "connect to {} · {reload} · JVM logs in {}",
                 self.settings.bind,
-                self.settings.state.join("control").join(deployment).join("nodes").display()
+                self.settings.state.join("control").join("nodes").display()
             ),
         );
         let mut build: Option<(Build, bool)> = None;
@@ -222,8 +225,8 @@ impl<'a> Session<'a> {
     async fn deploy(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
         let current = self.live.iter().position(|live| live.retirement.is_none());
-        let change = current
-            .map_or(Change::Jvm, |index| reload::classify(&self.live[index].generation.release, &staged.release));
+        let change =
+            current.map_or(Change::Jvm, |index| reload::classify(&self.live[index].version.release, &staged.release));
         let drain = Duration::from_secs(self.options.drain_seconds);
         let (deadline, summary) = match change {
             Change::Unchanged => return Ok("no changes".into()),
@@ -234,14 +237,15 @@ impl<'a> Session<'a> {
             ),
         };
         let id = staged.release.id.clone();
-        let resumed = self.live.iter().position(|live| live.generation.release.id == id);
+        let resumed = self.live.iter().position(|live| live.version.release.id == id);
         let next = if let Some(index) = resumed {
-            self.shared.route(&self.live[index].generation)?;
+            self.shared.activate(&self.live[index].version)?;
+            self.shared.route(&self.live[index].version)?;
             self.live[index].retirement = None;
             index
         } else {
-            let generation = self.launch(staged).await?;
-            self.live.push(Live { generation, retirement: None, nodes: None, players: Vec::new() });
+            let version = self.launch(staged).await?;
+            self.live.push(Live::new(version));
             self.live.len() - 1
         };
         for (index, live) in self.live.iter_mut().enumerate().filter(|(index, _)| *index != next) {
@@ -251,32 +255,22 @@ impl<'a> Session<'a> {
                 retirement.drain_by(deadline);
             }
         }
-        self.publish()?;
         let resumed = if resumed.is_some() { " resumed" } else { "" };
         Ok(format!("{}{resumed} · {summary}", short(&id)))
     }
 
-    /// Stops every running release, disconnecting its players, then starts `staged`. The backend
-    /// activates `staged` first, so a release it rejects leaves the running ones untouched.
+    /// Makes `staged` current and routes new players to it, then stops every earlier release, disconnecting its
+    /// players. The backend and control activate `staged` first, so a release either rejects leaves the running ones
+    /// untouched.
     async fn restart(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
-        self.shared.deploy(staged.bundle.clone()).await?;
         let id = staged.release.id.clone();
-        let mut stopped = Vec::new();
-        for live in self.live.drain(..) {
-            stopped.push(live.generation.deployment.clone());
-            if let Err(error) = live.generation.stop().await {
-                tracing::error!(%error, "control shutdown failed");
-            }
+        let version = self.launch(staged).await?;
+        for live in std::mem::take(&mut self.live) {
+            self.retire(live.version);
         }
-        self.pointer = None;
-        for deployment in stopped {
-            self.release(deployment);
-        }
-        let generation = self.launch(staged).await?;
-        self.live.push(Live { generation, retirement: None, nodes: None, players: Vec::new() });
-        self.publish()?;
-        Ok(format!("{} · restarted; previous sessions ended", short(&id)))
+        self.live.push(Live::new(version));
+        Ok(format!("{} · restarted; previous sessions end", short(&id)))
     }
 
     fn check_environment(&self, staged: &Staged) -> io::Result<()> {
@@ -286,26 +280,16 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// Activates the backend version and starts its control, routing new players to it.
-    async fn launch(&mut self, staged: Staged) -> io::Result<Generation> {
+    /// Activates the backend version and makes it control's current release, routing new players to it.
+    async fn launch(&mut self, staged: Staged) -> io::Result<Version> {
         let deployment = staged.bundle.id.clone();
         self.shared.deploy(staged.bundle.clone()).await?;
-        let bind = SocketAddr::new(self.settings.control_bind.ip(), 0);
-        let started = Generation::start(self.settings, &self.shared, staged, bind).await;
-        let routed = match started {
-            Ok(generation) => match self.shared.route(&generation) {
-                Ok(()) => return Ok(generation),
-                Err(error) => {
-                    if let Err(error) = generation.stop().await {
-                        tracing::error!(%error, "control shutdown failed");
-                    }
-                    error
-                }
-            },
-            Err(error) => error,
-        };
-        self.release(deployment);
-        Err(routed)
+        let version = Version::new(staged);
+        if let Err(error) = self.shared.activate(&version).and_then(|()| self.shared.route(&version)) {
+            self.release(deployment);
+            return Err(error);
+        }
+        Ok(version)
     }
 
     /// Polls every release's nodes and stops retiring releases that are due.
@@ -313,15 +297,27 @@ impl<'a> Session<'a> {
         if self.shared.failed() {
             return Err(io::Error::other("local backend or proxy stopped"));
         }
-        for live in &mut self.live {
-            let observed = match live.generation.connection() {
-                Some(connection) => services::observe(connection).await.ok(),
-                None => None,
-            };
-            (live.nodes, live.players) = observed.map_or((None, Vec::new()), |(nodes, players)| (Some(nodes), players));
-        }
-        if self.live.iter().any(|live| live.retirement.is_none() && live.generation.failed()) {
+        if self.shared.control_failed() {
             return Err(io::Error::other("local control stopped"));
+        }
+        let observed = match self.shared.control_connection() {
+            Ok(connection) => services::observe(connection).await.ok(),
+            Err(_) => None,
+        };
+        for live in &mut self.live {
+            (live.nodes, live.players) = match &observed {
+                Some((nodes, players)) => {
+                    let nodes: Vec<_> =
+                        nodes.iter().filter(|node| node.deployment == live.version.deployment).cloned().collect();
+                    let players = players
+                        .iter()
+                        .filter(|player| nodes.iter().any(|node| node.host_id == player.host_id))
+                        .cloned()
+                        .collect();
+                    (Some(nodes), players)
+                }
+                None => (None, Vec::new()),
+            };
         }
         while let Some(finished) = self.retiring.try_join_next() {
             self.unreleased.extend(finished.ok().flatten());
@@ -333,25 +329,25 @@ impl<'a> Session<'a> {
         let mut index = 0;
         while index < self.live.len() {
             let live = &mut self.live[index];
-            let due = live.generation.failed()
-                || live.retirement.as_mut().is_some_and(|retirement| retirement.due(live.nodes.as_deref(), now));
+            let due = live.retirement.as_mut().is_some_and(|retirement| retirement.due(live.nodes.as_deref(), now));
             if due {
                 let live = self.live.remove(index);
-                self.retire(live.generation);
+                self.retire(live.version);
             } else {
                 index += 1;
             }
         }
+        self.confirm_stopped();
         self.reporter.deployments(
             self.live
                 .iter()
                 .rev()
                 .map(|live| Deployment {
-                    id: live.generation.release.id.clone(),
+                    id: live.version.release.id.clone(),
                     state: live.retirement.as_ref().map_or_else(|| "current".into(), |r| r.describe(now)),
                     nodes: live.nodes.clone().unwrap_or_default(),
                     players: live.players.clone(),
-                    destinations: live.generation.destinations.clone(),
+                    destinations: live.version.destinations.clone(),
                 })
                 .collect(),
         );
@@ -361,8 +357,8 @@ impl<'a> Session<'a> {
     fn move_player(&self, deployment: &str, player: String, name: &str, demand: SessionDemand) {
         let reporter = self.reporter.clone();
         let target = format!("{name} → {}:{}", demand.session_type, demand.key);
-        let live = self.live.iter().find(|live| live.generation.release.id == deployment);
-        let Some(connection) = live.and_then(|live| live.generation.connection()).cloned() else {
+        let live = self.live.iter().any(|live| live.version.release.id == deployment);
+        let Some(connection) = self.shared.control_connection().ok().filter(|_| live).cloned() else {
             reporter.failed("Move", format!("{target}: release {} is no longer running", short(deployment)));
             return;
         };
@@ -375,20 +371,30 @@ impl<'a> Session<'a> {
         });
     }
 
-    fn retire(&mut self, generation: Generation) {
-        let (backend, reporter, stopping) = (self.shared.backend(), self.reporter.clone(), self.stopping.clone());
-        self.stale = true;
-        stopping.fetch_add(1, Ordering::AcqRel);
-        self.retiring.spawn(async move {
-            let (release_id, deployment) = (generation.release.id.clone(), generation.deployment.clone());
-            match generation.stop().await {
-                Ok(()) => reporter.done("Retire", format!("{} stopped", short(&release_id))),
-                Err(error) => reporter.failed("Retire", format!("{}: {error}", short(&release_id))),
+    /// Retires `version` in control, which stops its JVMs at once.
+    fn retire(&mut self, version: Version) {
+        self.stopping.push(version);
+        self.confirm_stopped();
+    }
+
+    /// Asks control to stop each retired release's JVMs, and releases the backend version of each release whose JVMs
+    /// have all confirmed their exit. Only that confirmation ends a release's stop.
+    fn confirm_stopped(&mut self) {
+        let Ok(control) = self.shared.control() else { return };
+        for version in std::mem::take(&mut self.stopping) {
+            match control.retire_release(&version.deployment) {
+                Ok(true) => {
+                    self.reporter.done("Retire", format!("{} stopped", short(&version.release.id)));
+                    self.stale = true;
+                    self.release(version.deployment);
+                }
+                Ok(false) => self.stopping.push(version),
+                Err(error) => {
+                    tracing::warn!(%error, deployment = version.deployment, "retired release not yet stopping");
+                    self.stopping.push(version);
+                }
             }
-            stopping.fetch_sub(1, Ordering::AcqRel);
-            let backend = backend?;
-            (!release(&backend, &deployment).await).then_some(deployment)
-        });
+        }
     }
 
     fn release(&mut self, deployment: String) {
@@ -397,51 +403,40 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Deletes release directories no running version uses. Called only between builds, and waits for retired JVMs to
-    /// stop, since both may still read a release that is no longer live.
+    /// Deletes release directories no running or stopping version uses. Called only between builds, since a build may
+    /// still read a release that is no longer live.
     fn prune(&mut self) {
-        if !self.stale || self.stopping.load(Ordering::Acquire) > 0 {
+        if !self.stale {
             return;
         }
         self.stale = false;
-        let live: BTreeSet<_> = self.live.iter().map(|live| live.generation.release.id.as_str()).collect();
+        let versions = self.live.iter().map(|live| &live.version).chain(&self.stopping);
+        let live: BTreeSet<_> = versions.map(|version| version.release.id.as_str()).collect();
         if let Err(error) = crate::cleaning::prune(&self.settings.state.join("releases"), &live) {
             tracing::warn!(%error, "unused releases not pruned");
         }
     }
 
-    /// Points `control.json` at the current release for `chunk players` and `chunk nodes`.
-    fn publish(&mut self) -> io::Result<()> {
-        let current = self.live.iter().find(|live| live.retirement.is_none());
-        self.pointer = match current.and_then(|live| live.generation.connection()) {
-            Some(connection) => {
-                Some(chunk_service::Record::publish(&self.settings.state.join("control.json"), connection)?)
-            }
-            None => None,
-        };
-        Ok(())
-    }
-
     async fn stop(mut self) -> io::Result<()> {
         let mut result = self.shared.stop_proxy().await;
-        for live in std::mem::take(&mut self.live) {
-            let deployment = live.generation.deployment.clone();
-            if let Err(error) = live.generation.stop().await {
-                result = Err(error);
-            }
-            self.release(deployment);
-        }
         let mut unreleased = std::mem::take(&mut self.unreleased);
         while let Some(finished) = self.retiring.join_next().await {
             unreleased.extend(finished.ok().flatten());
         }
+        // Stopping control returns only once every JVM left has confirmed its exit, which frees their backend versions.
+        if let Err(error) = self.shared.stop_control(self.reporter).await {
+            result = Err(error);
+        }
+        let stopping = self.stopping.drain(..);
+        let versions = self.live.drain(..).map(|live| live.version).chain(stopping);
+        unreleased.extend(versions.map(|version| version.deployment));
         if let Some(backend) = self.shared.backend() {
             for deployment in unreleased {
                 release_before_exit(&backend, &deployment).await;
             }
         }
         self.pointer = None;
-        let stopped = self.shared.stop().await;
+        let stopped = self.shared.stop(self.reporter).await;
         result.and(stopped)
     }
 }

@@ -63,7 +63,7 @@ impl SessionMethods for RuntimeService {
 #[tokio::test]
 async fn captured_methods_require_live_authority_and_keep_operation_identity_across_retries() {
     let mut fixture = Fixture::new().await;
-    fixture.config.contracts.session_methods = Some(method_contract());
+    fixture.release.contracts.session_methods = Some(method_contract());
     let control = fixture.control().await;
     let claim = request("method-caller", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(claim.clone()).await.unwrap();

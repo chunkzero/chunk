@@ -25,29 +25,14 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     ));
     std::fs::write(directory.path().join(&artifact.jar), &launcher).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&launcher));
-    let host = ProcessHost::new(ProcessHostConfig {
-        distribution: directory.path().into(),
-        java,
-        directory: directory.path().join("nodes"),
-        deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
-        apps: BTreeMap::from([("bridge".into(), artifact)]),
-        profiles: BTreeMap::from([
-            ("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 }),
-            ("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 2 }),
-        ]),
-        backend: chunk_contract::BackendConnection {
-            platform_token: None,
-            environment: "test".into(),
-            deployment: "build".into(),
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-        },
-    });
+    let mut release = release(artifact);
+    release.profiles.insert("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 2 });
+    let host = host(directory.path(), java);
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let process = host.launch(&id, "bridge", "local").unwrap().unwrap();
+    let process = host.launch(&id, &release, "bridge", "local").unwrap().unwrap();
     // Destinations may host an app's session on a profile other than the session's default.
-    host.launch(&uuid::Uuid::new_v4().to_string(), "bridge", "large").unwrap();
+    host.launch(&uuid::Uuid::new_v4().to_string(), &release, "bridge", "large").unwrap();
     host.prune(&BTreeSet::new()).unwrap();
     assert!(host.process(&id).unwrap().is_some());
     let registration = ProcessRegistration {
@@ -73,11 +58,11 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     assert!(
         host.register(&token, ProcessRegistration { player_endpoint: "127.0.0.1:3".into(), ..registration }).is_err()
     );
-    assert!(matches!(host.ensure(&id, "changed", "local").await, Ok(Progress::Failed(_))));
-    assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Ready(_))));
+    assert!(matches!(host.ensure(&id, &release, "changed", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&id, &release, "bridge", "local").await, Ok(Progress::Ready(_))));
     assert!(host.release(&id).await.unwrap());
     assert!(host.stopped(&id));
-    assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&id, &release, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(host.release(&id).await.unwrap());
     let stale = uuid::Uuid::new_v4().to_string();
     std::fs::write(host.path(&stale, "launch").unwrap(), b"").unwrap();
@@ -88,24 +73,24 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     let invalid = uuid::Uuid::new_v4().to_string();
     let jar = directory.path().join("app.jar");
     std::fs::write(&jar, b"changed artifact").unwrap();
-    assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&invalid, &release, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(!host.path(&invalid, "launch").unwrap().exists());
     assert!(host.release(&invalid).await.unwrap());
     assert!(host.stopped(&invalid));
     std::fs::write(&jar, &launcher).unwrap();
-    assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&invalid, &release, "bridge", "local").await, Ok(Progress::Failed(_))));
     // A classpath JAR replaced under its digest name no longer matches the app identity.
     let replaced = uuid::Uuid::new_v4().to_string();
     std::fs::write(&library_path, manifest_jar("Manifest-Version: 1.0\r\nCreated-By: replacement\r\n\r\n")).unwrap();
     assert!(matches!(
-        host.ensure(&replaced, "bridge", "local").await,
+        host.ensure(&replaced, &release, "bridge", "local").await,
         Ok(Progress::Failed(reason)) if reason.ends_with("app classpath digest mismatch")
     ));
     assert!(!host.path(&replaced, "launch").unwrap().exists());
     std::fs::write(&library_path, &library).unwrap();
     let failed_log = uuid::Uuid::new_v4().to_string();
     std::fs::create_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
-    assert!(matches!(host.ensure(&failed_log, "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&failed_log, &release, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(host.stopped(&failed_log));
     assert!(host.release(&failed_log).await.unwrap());
     std::fs::remove_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
@@ -114,7 +99,8 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
 }
 
 async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unconfirmed: &str) {
-    host.shutdown().await.unwrap();
+    // The unconfirmed launch's JVM may still run.
+    assert!(matches!(host.shutdown().await, Err(Error::Unresolved(_))));
     host.prune(&BTreeSet::from([retained.into()])).unwrap();
     assert!(host.stopped(retained));
     host.prune(&BTreeSet::new()).unwrap();
@@ -136,25 +122,11 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
     std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
-    let config = || ProcessHostConfig {
-        distribution: directory.path().into(),
-        java: java.clone(),
-        directory: directory.path().join("nodes"),
-        deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
-        apps: BTreeMap::from([("bridge".into(), artifact.clone())]),
-        profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
-        backend: chunk_contract::BackendConnection {
-            platform_token: None,
-            environment: "test".into(),
-            deployment: "build".into(),
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-        },
-    };
-    let crashed = ProcessHost::new(config());
+    let release = release(artifact);
+    let crashed = host(directory.path(), java.clone());
     crashed.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let process = crashed.launch(&id, "bridge", "local").unwrap().unwrap();
+    let process = crashed.launch(&id, &release, "bridge", "local").unwrap().unwrap();
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
         control_endpoint: "http://127.0.0.1:1".into(),
@@ -164,7 +136,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     // Control dies after acknowledging registration and before committing anything; the JVM survives.
     std::mem::forget(crashed);
 
-    let host = ProcessHost::new(config());
+    let host = host(directory.path(), java);
     assert!(host.unresolved(&id));
     assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
     assert!(host.adopt("another-credential", registration.clone()).is_err());
@@ -191,15 +163,20 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert!(host.stopped(&id));
 }
 
-/// A host that launches nothing in `directory`.
-fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
-    ProcessHost::new(ProcessHostConfig {
-        distribution: directory.path().into(),
-        java: directory.path().join("java"),
-        directory: directory.path().join("nodes"),
+/// The test environment's release `build`, running `artifact`.
+fn release(artifact: chunk_contract::AppArtifact) -> Release {
+    Release {
+        apps: BTreeMap::from([("bridge".into(), artifact)]),
         deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
-        apps: BTreeMap::from([("bridge".into(), crate::tests::test_app())]),
         profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
+        ..crate::tests::release()
+    }
+}
+
+/// A host in `directory` that launches release `build` with `java`.
+fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
+    let host = ProcessHost::new(ProcessHostConfig {
+        directory: directory.join("nodes"),
         backend: chunk_contract::BackendConnection {
             platform_token: None,
             environment: "test".into(),
@@ -207,7 +184,14 @@ fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
             endpoint: "http://127.0.0.1:1".into(),
             token: "unused".into(),
         },
-    })
+    });
+    host.add_release("build", Distribution { directory: directory.into(), java }).unwrap();
+    host
+}
+
+/// A host that launches nothing in `directory`.
+fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
+    host(directory.path(), directory.path().join("java"))
 }
 
 /// Publishes a launch marker for a new host ID, returning the lock control holds until it spawns the JVM.

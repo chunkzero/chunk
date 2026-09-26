@@ -5,7 +5,7 @@ use crate::state::Capacity;
 async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launches() {
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
-    let control = open(&path, fixture.config.clone(), fixture.host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let waiting = request("waiting", &uuid::Uuid::new_v4().to_string());
     let claim = tokio::spawn({
         let (control, waiting) = (control.clone(), waiting.clone());
@@ -35,7 +35,7 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
 async fn a_restart_resumes_requested_and_releasing_capacity() {
     let fixture = Fixture::new().await;
     let path = fixture.directory.path().join("control.sqlite");
-    let control = open(&path, fixture.config.clone(), fixture.host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let claim = tokio::spawn({
         let control = control.clone();
         async move { control.claim(request("waiting", &uuid::Uuid::new_v4().to_string())).await }
@@ -51,7 +51,7 @@ async fn a_restart_resumes_requested_and_releasing_capacity() {
             let host = crate::state::HostState {
                 capacity: Capacity::Releasing,
                 retired: true,
-                ..crate::state::HostState::requested("bridge", "local")
+                ..crate::state::HostState::requested("build", "bridge", "local")
             };
             state.hosts.insert(releasing.clone(), host);
             Ok(())
@@ -91,5 +91,37 @@ async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
     fixture.host.unconfirmed.store(false, Ordering::Release);
     eventually(|| control.state().unwrap().released(&host)).await;
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_stops_the_host_of_a_placement_committing_while_it_drains() {
+    let fixture = Fixture::new().await;
+    let control =
+        open(&fixture.directory.path().join("control.sqlite"), fixture.release.clone(), fixture.host.clone()).unwrap();
+    let (committing, paused) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    *control.authority.committing.lock().unwrap() = Some(Box::new(move || {
+        committing.send(()).unwrap();
+        resumed.recv().unwrap();
+    }));
+    let claim = tokio::spawn({
+        let control = control.clone();
+        async move { control.claim(request("late", &uuid::Uuid::new_v4().to_string())).await }
+    });
+    // The placement passed the draining check and reserved a new host, but has not published it.
+    tokio::task::spawn_blocking(move || paused.recv().unwrap()).await.unwrap();
+    let shutdown = tokio::spawn({
+        let control = control.clone();
+        async move { control.shutdown().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!shutdown.is_finished());
+    resume.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    let state = control.state().unwrap();
+    let host = &state.sessions[&state.claims["late"].session].host;
+    assert!(fixture.host.terminated.lock().unwrap().contains(host));
+    claim.abort();
     fixture.close().await;
 }

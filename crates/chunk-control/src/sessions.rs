@@ -4,7 +4,7 @@ use chunk_proto::v1::{ClaimIdentity, SessionInventory, SessionPhase};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
-    Control, Error, Result, RuntimeConnection,
+    Control, Error, Result,
     state::{Phase, SessionState, State},
 };
 
@@ -62,7 +62,10 @@ impl Control {
         let Some(runtime) = self.host.connection(host) else {
             return Ok(());
         };
-        self.validate_session_runtime(&state, host, &runtime)?;
+        let expected = state.hosts.get(host).ok_or(Error::Invalid("missing host"))?;
+        if !crate::placement::runs_host(&state, &runtime, expected) {
+            return Err(Error::Invalid("session cleanup runtime mismatch"));
+        }
         let Some(report) = self.links.report(host, &runtime.identity) else {
             return Ok(());
         };
@@ -71,6 +74,8 @@ impl Control {
         let now = crate::now_ms();
         self.update(|state| {
             self.reapply(state, host, &runtime.identity)?;
+            // A host whose release a restore lost only stops, so no destination policy applies to it.
+            let release = state.host_release(host).ok().cloned();
             let open: std::collections::BTreeSet<_> = state
                 .claims
                 .values()
@@ -86,7 +91,7 @@ impl Control {
                 } else {
                     session.empty_since_ms = None;
                 }
-                let destinations = self.config.contracts.destinations.as_ref();
+                let destinations = release.as_ref().and_then(|release| release.contracts.destinations.as_ref());
                 let policy =
                     destinations.and_then(|policies| policies.policy(&session.session_type, &session.demand_key));
                 let expired = empty
@@ -102,14 +107,6 @@ impl Control {
             }
             Ok(())
         })
-    }
-
-    fn validate_session_runtime(&self, state: &State, host: &str, runtime: &RuntimeConnection) -> Result<()> {
-        let expected = state.hosts.get(host).ok_or(Error::Invalid("missing host"))?;
-        if !self.runs_host(runtime, expected) {
-            return Err(Error::Invalid("session cleanup runtime mismatch"));
-        }
-        Ok(())
     }
 }
 

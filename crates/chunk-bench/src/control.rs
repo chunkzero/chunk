@@ -26,7 +26,7 @@ impl SyntheticHost {
 
 #[tonic::async_trait]
 impl Host for SyntheticHost {
-    async fn ensure(&self, id: &str, _: &str, _: &str) -> chunk_control::Result<Progress> {
+    async fn ensure(&self, id: &str, _: &chunk_control::Release, _: &str, _: &str) -> chunk_control::Result<Progress> {
         if self.stopped(id) {
             return Ok(Progress::Failed("synthetic runtime stopped".into()));
         }
@@ -52,7 +52,7 @@ impl Host for SyntheticHost {
     }
 }
 
-pub fn configuration() -> Result<chunk_control::Config> {
+pub fn release() -> Result<chunk_control::Release> {
     Ok(serde_json::from_value(serde_json::json!({
         "apps": {"bench": {"id":"bench", "jar":"bench.jar", "sha256":"bench", "java_version":25,
             "sessions":{"default":{"machine_profile":"bench","capacity":128}}}},
@@ -79,6 +79,7 @@ pub fn claim(index: u64) -> ClaimRequest {
             machine_profile: "bench".into(),
         }),
         source: None,
+        deployment: String::new(),
     }
 }
 

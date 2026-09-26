@@ -10,12 +10,12 @@ hashes. Control verifies the selected artifact and sends the JVM session creatio
 factories locally and enforces the supplied capacity. Future container/machine providers implement the same `Host`
 boundary.
 
-The private `.chunk/local/control.json` connection file authorizes gRPC calls; under `chunk dev` it names the control of
-the current deployment version. `Claim` accepts authenticated identity, proxy incarnation, connection identity and a
-session demand key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and
-returns configuration plus a single-use TCP capability. The proxy records admission intent with `Activate` and opens the
-native Minecraft connection using the capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before
-releasing the reservation. Runtime credentials remain inside control.
+The private `.chunk/local/control.json` connection file authorizes gRPC calls; under `chunk dev` it names the
+environment's control. `Claim` accepts authenticated identity, proxy incarnation, connection identity and a session
+demand key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and returns
+configuration plus a single-use TCP capability. The proxy records admission intent with `Activate` and opens the native
+Minecraft connection using the capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before releasing
+the reservation. Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
 profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
@@ -27,19 +27,29 @@ rejected while an earlier owner remains unresolved. An old cancellation cannot r
 reservations expire after 60 seconds; active membership never expires solely because a control channel becomes
 unavailable.
 
-Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chunk_players`, `chunk_claims`,
-`chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment backend's store, so an
-environment has one log. Each update is one commit through the backend's system lane, which takes it into the next
-durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt from the tables on open. Apps
-cannot declare, read or write `chunk_` tables. Each deployment version's control prefixes its row IDs with a scope
-derived from the deployment and holds that scope exclusively, so a second control for the same deployment on one backend
-fails to open until the first drops, and `chunk dev` releases running side by side keep separate state; a new
-`chunk dev` session clears every scope. When the backend's commit pipeline fails or stops, as after another store fences
-this one, control stops too. The tables retain requests, reservations and activation intent before external effects. A
-lost activation reply is reconciled against the runtime's inventory. Configuration packets travel over the native
-Minecraft connection; control carries destination metadata. A player row exists only while it owns a claim. Released
-claims, and moves that only reference them, are forgotten five minutes after release. `Control::changes_after` lists
-claim and move changes after a log position, and `Control::subscribe` announces new positions.
+Control keeps its state as system tables (`chunk_releases`, `chunk_hosts`, `chunk_sessions`, `chunk_players`,
+`chunk_claims`, `chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment
+backend's store, so an environment has one log. Each update is one commit through the backend's system lane, which takes
+it into the next durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt from the
+tables on open. Apps cannot declare, read or write `chunk_` tables. One control authority runs per environment and holds
+it exclusively, so a second control on one backend fails to open until the first drops. A new `chunk dev` session drops
+every row as its control opens. When the backend's commit pipeline fails or stops, as after another store fences this
+one, control stops too.
+
+Control runs every release that still has hosts. `Control::activate_release` records a deployment version's apps,
+profiles and limits, and makes it current. A login is placed on the release its proxy routed it with, or the current one
+if it names none; a login routed with a retired release is rejected as unavailable, and the proxy routes it again.
+Moves, existing sessions and recovery stay on the release of the host they run on, and each release launches JVMs of its
+own apps. `Control::retire_release` stops placing on a release other than the current one and stops its hosts at once. A
+release other than the current one is forgotten once none of its hosts remain. While recovery is pending, or a launch
+whose JVM may still run has no host row, neither retirement nor forgetting is confirmed, since that JVM may run any
+release. `chunk dev` registers each reload that changes the release as current, and retires earlier releases as they
+empty or reach their drain deadline. On exit it retries stopping every JVM until each confirms its exit before releasing
+backend versions. The tables retain requests, reservations and activation intent before external effects. A lost
+activation reply is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft
+connection; control carries destination metadata. A player row exists only while it owns a claim. Released claims, and
+moves that only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move
+changes after a log position, and `Control::subscribe` announces new positions.
 
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
@@ -55,24 +65,26 @@ deadline. Zero seconds requests immediate termination. `chunk nodes --control-fi
 `shutdown HOST --operation ID --timeout-seconds 60` queues an idempotent shutdown. A queued request is not an exit
 acknowledgment.
 
-Graceful control shutdown stops owned JVMs. After an abrupt control-process failure, local child handles cannot be
-recovered: durable launch markers retain unresolved ownership and prevent duplicate launches, and such nodes report
-unreachable until their JVM re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its
-process identity and the SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file
-descriptor 3, which no Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3
-from app code, for example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only
-when the host's marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a
-process by PID. A launch without a child handle, re-attached or not, is confirmed exited only when control can take its
-marker's lock, which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers
-will need durable provider identities to confirm termination across control restarts.
+Graceful control shutdown stops owned JVMs, and reports their exit unconfirmed while any launch it does not own may
+still run. After an abrupt control-process failure, local child handles cannot be recovered: durable launch markers
+retain unresolved ownership and prevent duplicate launches, and such nodes report unreachable until their JVM
+re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its process identity and the
+SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file descriptor 3, which no
+Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3 from app code, for
+example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only when the host's
+marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a process by PID. A
+launch without a child handle, re-attached or not, is confirmed exited only when control can take its marker's lock,
+which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers will need
+durable provider identities to confirm termination across control restarts.
 
 After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving launch is
 fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generations no open claim in the log matches,
 using the generation the JVM holds. Operations the log does not know, such as those a restore lost, become released
 tombstones that reject retries. Sessions the JVM runs on a logged host without a log row are recorded as retired and
-count against the host's capacity; admission waits until the JVM confirms they ended. No timeout reopens admission:
-while a launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets
-or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this release.
+count against the host's capacity; admission waits until the JVM confirms they ended. A JVM whose host names a release
+the log lost re-attaches by its launch record alone and is only ever stopped. No timeout reopens admission: while a
+launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets or
+worlds are replayed. State from the previous shared-classpath runtime is incompatible with this release.
 
 Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
 sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation

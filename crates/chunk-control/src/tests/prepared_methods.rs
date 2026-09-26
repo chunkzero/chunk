@@ -16,7 +16,7 @@ fn auth<T>(value: T, token: &str) -> Request<T> {
 #[tokio::test]
 async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
     let mut fixture = Fixture::new().await;
-    fixture.config.contracts.session_methods = Some(super::session_methods::method_contract());
+    fixture.release.contracts.session_methods = Some(super::session_methods::method_contract());
     let control = fixture.control().await;
     let source = request("method-source", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(source.clone()).await.unwrap();
@@ -119,7 +119,7 @@ async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
 #[tokio::test]
 async fn prepared_methods_bound_pending_handles_and_cancel_before_shutdown_wait() {
     let mut fixture = Fixture::new().await;
-    fixture.config.contracts.session_methods = Some(super::session_methods::method_contract());
+    fixture.release.contracts.session_methods = Some(super::session_methods::method_contract());
     let control = fixture.control().await;
     let source = request("method-capacity", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(source.clone()).await.unwrap();
@@ -215,16 +215,16 @@ async fn captured_moves_reject_replaced_connections_even_for_existing_operations
 #[tokio::test]
 async fn pinned_method_configuration_validates_declarations_and_keeps_empty_compatibility() {
     let mut fixture = Fixture::new().await;
-    let serialized = serde_json::to_value(&fixture.config).unwrap();
+    let serialized = serde_json::to_value(&fixture.release).unwrap();
     assert!(serialized.get("session_methods").is_none());
-    let decoded: Config = serde_json::from_value(serialized).unwrap();
+    let decoded: Release = serde_json::from_value(serialized).unwrap();
     assert!(decoded.contracts.session_methods.is_none());
     let mut methods = super::session_methods::method_contract();
-    fixture.config.contracts.session_methods = Some(methods.clone());
-    assert!(fixture.config.validate().is_ok());
+    fixture.release.contracts.session_methods = Some(methods.clone());
+    assert!(fixture.release.validate().is_ok());
     methods.methods[0].session = "missing".into();
-    fixture.config.contracts.session_methods = Some(methods);
-    assert!(fixture.config.validate().is_err());
+    fixture.release.contracts.session_methods = Some(methods);
+    assert!(fixture.release.validate().is_err());
     fixture.close().await;
 }
 

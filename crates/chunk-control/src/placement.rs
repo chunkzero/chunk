@@ -1,15 +1,15 @@
 mod select;
 
 use chunk_proto::v1::{
-    Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, PlayerDelivery, PlayerRef,
-    SessionRef, gameplay_client::GameplayClient,
+    Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery,
+    PlayerRef, SessionRef, gameplay_client::GameplayClient,
 };
 use prost::Message;
 use std::time::Duration;
 use tonic::transport::Channel;
 
 use crate::{
-    Config, Control, Error, Result, RuntimeConnection,
+    Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     state::{Capacity, Claim, Generation, HostState, Phase, State},
 };
@@ -30,7 +30,7 @@ impl Control {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Invalid("control draining"));
             }
-            reserve(state, &self.config, &request, &unavailable)
+            reserve(state, &request, &unavailable)
         })?;
         self.wake_capacity();
         let _guard = operation.lock().await;
@@ -41,9 +41,10 @@ impl Control {
             return Err(Error::Invalid("claim closed"));
         }
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
+        let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
         let channel = channel(&runtime).await?;
-        let config = self.configuration(&runtime, channel.clone()).await?;
+        let config = configuration(deployment, &runtime, channel.clone()).await?;
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
@@ -51,7 +52,7 @@ impl Control {
         }
         // Control's desired state already asks the JVM for this session.
         self.session_ready(&session.host, &runtime, &claim.session).await?;
-        let assignment = self.prepare_assignment(&runtime, channel, config, claim, &request).await?;
+        let assignment = prepare_assignment(deployment, &runtime, channel, config, claim, &request).await?;
         self.update(|state| {
             // A host released while preparing never gets a new prepared claim, which only its release would end.
             if state.released(&session.host) {
@@ -67,63 +68,6 @@ impl Control {
             Ok(())
         })?;
         Ok(assignment)
-    }
-
-    async fn prepare_assignment(
-        &self,
-        runtime: &RuntimeConnection,
-        channel: Channel,
-        config: ConfigurationResponse,
-        claim: &Claim,
-        request: &ClaimRequest,
-    ) -> Result<Assignment> {
-        let mut gameplay = GameplayClient::new(channel);
-        let mut delivery = PlayerDelivery {
-            deployment: Some(self.config.deployment.clone()),
-            process_generation: runtime.identity.generation,
-            operation_id: request.operation_id.clone(),
-            session: Some(SessionRef { id: claim.session.clone() }),
-            session_generation: 1,
-            membership_generation: claim.membership.wire(),
-            proxy_id: claim.proxy.clone(),
-            connection_id: request.connection_id.clone(),
-            player: Some(PlayerRef { id: claim.player.clone() }),
-            owner_generation: claim.generation.wire(),
-            identity: request.identity.clone(),
-            protocol: config.protocol,
-            runtime_id: runtime.identity.runtime_id.clone(),
-        };
-        let preparation = gameplay.prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
-        if preparation.operation_id != request.operation_id
-            || preparation.capability.len() != 32
-            || preparation.endpoint != runtime.player_endpoint
-        {
-            return Err(Error::Invalid("invalid preparation"));
-        }
-        delivery.identity = None;
-        let assignment = Assignment {
-            claim: Some(claim.identity(&request.operation_id)),
-            phase: ClaimPhase::Reserved as i32,
-            delivery: Some(delivery),
-            configuration: Some(config),
-            preparation: Some(preparation),
-        };
-        Ok(assignment)
-    }
-
-    async fn configuration(&self, runtime: &RuntimeConnection, channel: Channel) -> Result<ConfigurationResponse> {
-        let mut gameplay = GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
-        let config = gameplay
-            .configuration(auth(runtime, ConfigurationRequest { deployment: Some(self.config.deployment.clone()) }, 3)?)
-            .await?
-            .into_inner();
-        if config.deployment.as_ref() != Some(&self.config.deployment)
-            || config.runtime_id != runtime.identity.runtime_id
-            || config.process_generation != runtime.identity.generation
-        {
-            return Err(Error::Invalid("configuration identity mismatch"));
-        }
-        Ok(config)
     }
 
     /// Waits until `id`'s capacity is ready and its runtime has registered. Starts nothing: the capacity executor
@@ -142,7 +86,7 @@ impl Control {
                 if host.capacity == Capacity::Ready
                     && let Some(runtime) = self.host.connection(id)
                 {
-                    if !self.runs_host(&runtime, host) {
+                    if !runs_host(&state, &runtime, host) {
                         return Err(Error::Invalid("host returned incompatible runtime"));
                     }
                     return Ok(runtime);
@@ -154,15 +98,86 @@ impl Control {
             .await
             .unwrap_or(Err(Error::Unresolved("app did not become ready within 35 seconds")))
     }
+}
 
-    /// Whether `runtime` runs this deployment's current artifact for `host`'s app and profile.
-    pub(crate) fn runs_host(&self, runtime: &RuntimeConnection, host: &HostState) -> bool {
-        let identity = &runtime.identity;
-        identity.deployment.as_ref() == Some(&self.config.deployment)
-            && identity.app_id == host.app
-            && identity.machine_profile == host.profile
-            && self.config.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
+/// Whether `runtime` runs `host`'s app and profile under its release, and that release's artifact. A host whose release
+/// a restore lost is its JVM's by the launch record its host adopted it with alone; no placement uses such a host, so
+/// it only reports and stops.
+pub(crate) fn runs_host(state: &State, runtime: &RuntimeConnection, host: &HostState) -> bool {
+    let identity = &runtime.identity;
+    let deployment = identity.deployment.as_ref();
+    if deployment.map_or("", |deployment| deployment.deployment.as_str()) != host.release
+        || identity.app_id != host.app
+        || identity.machine_profile != host.profile
+    {
+        return false;
     }
+    let Some(release) = state.releases.get(&host.release) else {
+        return true;
+    };
+    let release = &release.release;
+    deployment == Some(&release.deployment)
+        && release.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
+}
+
+async fn prepare_assignment(
+    deployment: &DeploymentRef,
+    runtime: &RuntimeConnection,
+    channel: Channel,
+    config: ConfigurationResponse,
+    claim: &Claim,
+    request: &ClaimRequest,
+) -> Result<Assignment> {
+    let mut gameplay = GameplayClient::new(channel);
+    let mut delivery = PlayerDelivery {
+        deployment: Some(deployment.clone()),
+        process_generation: runtime.identity.generation,
+        operation_id: request.operation_id.clone(),
+        session: Some(SessionRef { id: claim.session.clone() }),
+        session_generation: 1,
+        membership_generation: claim.membership.wire(),
+        proxy_id: claim.proxy.clone(),
+        connection_id: request.connection_id.clone(),
+        player: Some(PlayerRef { id: claim.player.clone() }),
+        owner_generation: claim.generation.wire(),
+        identity: request.identity.clone(),
+        protocol: config.protocol,
+        runtime_id: runtime.identity.runtime_id.clone(),
+    };
+    let preparation = gameplay.prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
+    if preparation.operation_id != request.operation_id
+        || preparation.capability.len() != 32
+        || preparation.endpoint != runtime.player_endpoint
+    {
+        return Err(Error::Invalid("invalid preparation"));
+    }
+    delivery.identity = None;
+    Ok(Assignment {
+        claim: Some(claim.identity(&request.operation_id)),
+        phase: ClaimPhase::Reserved as i32,
+        delivery: Some(delivery),
+        configuration: Some(config),
+        preparation: Some(preparation),
+    })
+}
+
+async fn configuration(
+    deployment: &DeploymentRef,
+    runtime: &RuntimeConnection,
+    channel: Channel,
+) -> Result<ConfigurationResponse> {
+    let mut gameplay = GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
+    let config = gameplay
+        .configuration(auth(runtime, ConfigurationRequest { deployment: Some(deployment.clone()) }, 3)?)
+        .await?
+        .into_inner();
+    if config.deployment.as_ref() != Some(deployment)
+        || config.runtime_id != runtime.identity.runtime_id
+        || config.process_generation != runtime.identity.generation
+    {
+        return Err(Error::Invalid("configuration identity mismatch"));
+    }
+    Ok(config)
 }
 
 fn validate(request: &ClaimRequest) -> Result<()> {
@@ -187,17 +202,14 @@ fn validate(request: &ClaimRequest) -> Result<()> {
     Ok(())
 }
 
-fn reserve(
-    state: &mut State,
-    config: &Config,
-    request: &ClaimRequest,
-    unavailable: &std::collections::BTreeSet<String>,
-) -> Result<()> {
+fn reserve(state: &mut State, request: &ClaimRequest, unavailable: &std::collections::BTreeSet<String>) -> Result<()> {
     if reserved(state, request)? {
         return Ok(());
     }
     let owner = owner(state, request)?;
-    let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
+    let (name, release) = state.placing(request)?;
+    let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;
+    let session = select_session(state, &name, &release, demand, unavailable)?;
     insert_claim(state, request, owner, session, None)
 }
 

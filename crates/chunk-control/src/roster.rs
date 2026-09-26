@@ -84,14 +84,23 @@ impl Control {
             let destinations = commands
                 .into_iter()
                 .map(|command| {
-                    let destination = crate::moves::queue(state, &self.config, command)?;
+                    let destination = crate::moves::queue(state, command)?;
                     if reserved(state, &destination)? {
                         return Err(Error::Invalid("roster member operation already claimed"));
                     }
                     Ok(destination)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let session = select_room(state, &self.config, &request.demand, &unavailable, destinations.len())?;
+            // Every member moves within its source's release, so all of them must share one.
+            let releases =
+                destinations.iter().map(|destination| state.placing(destination)).collect::<Result<Vec<_>>>()?;
+            let [(name, release), rest @ ..] = releases.as_slice() else {
+                return Err(Error::Invalid("invalid roster"));
+            };
+            if rest.iter().any(|(other, _)| other != name) {
+                return Err(Error::Invalid("roster members run different releases"));
+            }
+            let session = select_room(state, name, release, &request.demand, &unavailable, destinations.len())?;
             for destination in &destinations {
                 let owner = owner(state, destination)?;
                 insert_claim(state, destination, owner, session.clone(), Some(request.operation_id.clone()))?;

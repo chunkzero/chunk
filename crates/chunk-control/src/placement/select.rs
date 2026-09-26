@@ -3,48 +3,53 @@ use std::collections::BTreeSet;
 use chunk_proto::v1::SessionDemand;
 
 use crate::{
-    Config, Error, Result,
+    Error, Release, Result,
     state::{HostState, Phase, SessionState, State},
 };
 
-pub(crate) fn validate_demand(config: &Config, demand: &SessionDemand) -> Result<()> {
+pub(crate) fn validate_demand(release: &Release, demand: &SessionDemand) -> Result<()> {
     if demand.key.is_empty() || demand.key.len() > 128 {
         return Err(Error::Invalid("invalid destination key"));
     }
-    let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
+    let spec = release.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
     let policy =
-        config.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
-    resolve_creation(config, demand, spec, policy).map(|_| ())
+        release.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    resolve_creation(release, demand, spec, policy).map(|_| ())
 }
 
-/// Reuses a compatible session with room, or creates one on a compatible host or a new host.
+/// Reuses a compatible session of release `name` with room, or creates one on a compatible host or a new host.
 pub(super) fn select_session(
     state: &mut State,
-    config: &Config,
+    name: &str,
+    release: &Release,
     demand: &SessionDemand,
     unavailable: &BTreeSet<String>,
 ) -> Result<String> {
-    select_room(state, config, demand, unavailable, 1)
+    select_room(state, name, release, demand, unavailable, 1)
 }
 
 /// Like [`select_session`], but the session must have room for `slots` more claims.
 pub(crate) fn select_room(
     state: &mut State,
-    config: &Config,
+    name: &str,
+    release: &Release,
     demand: &SessionDemand,
     unavailable: &BTreeSet<String>,
     slots: usize,
 ) -> Result<String> {
-    let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
+    let spec = release.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
     let policy =
-        config.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
-    let creation = resolve_creation(config, demand, spec, policy)?;
-    if let Some(id) = reuse_session(state, demand, &creation, unavailable, slots) {
+        release.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    let creation = resolve_creation(release, demand, spec, policy)?;
+    if let Some(id) = reuse_session(state, name, demand, &creation, unavailable, slots) {
         return Ok(id);
     }
     if policy.is_some_and(|policy| policy.overflow == chunk_contract::DestinationOverflow::Reject)
         && state.sessions.values().any(|session| {
-            !session.finished && session.session_type == demand.session_type && session.demand_key == demand.key
+            !session.finished
+                && session.session_type == demand.session_type
+                && session.demand_key == demand.key
+                && state.hosts.get(&session.host).is_some_and(|host| host.release == name)
         })
     {
         return Err(Error::Capacity);
@@ -52,7 +57,7 @@ pub(crate) fn select_room(
     if state.sessions.len() >= 256 || (creation.capacity as usize) < slots {
         return Err(Error::Capacity);
     }
-    let host = place_host(state, config, &spec.app, &creation, unavailable)?;
+    let host = place_host(state, name, release, &spec.app, &creation, unavailable)?;
     let id = uuid::Uuid::new_v4().to_string();
     state.sessions.insert(
         id.clone(),
@@ -73,6 +78,7 @@ pub(crate) fn select_room(
 
 fn reuse_session(
     state: &State,
+    name: &str,
     demand: &SessionDemand,
     creation: &Creation,
     unavailable: &BTreeSet<String>,
@@ -88,7 +94,10 @@ fn reuse_session(
                 && session.demand_key == demand.key
                 && session.capacity == creation.capacity
                 && session.configuration == creation.configuration
-                && state.hosts.get(&session.host).is_some_and(|host| host.profile == creation.profile)
+                && state
+                    .hosts
+                    .get(&session.host)
+                    .is_some_and(|host| host.release == name && host.profile == creation.profile)
                 && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count() + slots
                     <= session.capacity as usize
         })
@@ -97,15 +106,17 @@ fn reuse_session(
 
 fn place_host(
     state: &mut State,
-    config: &Config,
+    name: &str,
+    release: &Release,
     app: &str,
     creation: &Creation,
     unavailable: &BTreeSet<String>,
 ) -> Result<String> {
-    let limit = config.profiles.get(creation.profile).ok_or(Error::Invalid("missing profile"))?.max_sessions;
+    let limit = release.profiles.get(creation.profile).ok_or(Error::Invalid("missing profile"))?.max_sessions;
     let existing = state.hosts.iter().find(|(id, host)| {
         let sessions: Vec<_> = state.sessions.values().filter(|s| s.host == **id && !s.finished).collect();
         !host.retired
+            && host.release == name
             && !unavailable.contains(*id)
             && host.app == app
             && host.profile == creation.profile
@@ -116,11 +127,11 @@ fn place_host(
         state.hosts.get_mut(&id).ok_or(Error::Invalid("missing host"))?.idle_since_ms = None;
         return Ok(id);
     }
-    if state.hosts.values().filter(|h| !h.retired).count() >= usize::from(config.max_processes) {
+    if state.hosts.values().filter(|h| !h.retired && h.release == name).count() >= usize::from(release.max_processes) {
         return Err(Error::Capacity);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    state.hosts.insert(id.clone(), HostState::requested(app, creation.profile));
+    state.hosts.insert(id.clone(), HostState::requested(name, app, creation.profile));
     Ok(id)
 }
 
@@ -131,7 +142,7 @@ struct Creation<'a> {
 }
 
 fn resolve_creation<'a>(
-    config: &Config,
+    release: &Release,
     demand: &SessionDemand,
     spec: &'a crate::SessionType,
     policy: Option<&'a chunk_contract::DestinationPolicy>,
@@ -144,7 +155,7 @@ fn resolve_creation<'a>(
     let capacity = declared.map_or(spec.capacity, |creation| creation.capacity);
     let mut configuration = declared.map_or_else(|| serde_json::json!({}), |creation| creation.configuration.clone());
     chunk_contract::validate_session_configuration(
-        config.contracts.session_configurations.as_ref(),
+        release.contracts.session_configurations.as_ref(),
         &demand.session_type,
         &configuration,
     )

@@ -5,12 +5,7 @@ use chunk_proto::v1::NodePhase;
 async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     let fixture = Fixture::new().await;
     let host_config = || crate::ProcessHostConfig {
-        distribution: fixture.directory.path().into(),
-        java: "unused-java".into(),
         directory: fixture.directory.path().join("nodes"),
-        deployment: fixture.config.deployment.clone(),
-        apps: fixture.config.apps.clone(),
-        profiles: fixture.config.profiles.clone(),
         backend: chunk_contract::BackendConnection {
             environment: "test".into(),
             deployment: "build".into(),
@@ -19,10 +14,12 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
             platform_token: None,
         },
     };
+    let distribution = crate::Distribution { directory: fixture.directory.path().into(), java: "unused-java".into() };
     let host = Arc::new(crate::ProcessHost::new(host_config()));
+    host.add_release("build", distribution.clone()).unwrap();
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let path = fixture.directory.path().join("launch.sqlite");
-    let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
     let executor = Executor::start(&control);
     // The app JAR is missing, so launch fails before a marker or child exists.
     for operation in ["first", "second"] {
@@ -42,8 +39,9 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     drop(host);
 
     let host = Arc::new(crate::ProcessHost::new(host_config()));
+    host.add_release("build", distribution).unwrap();
     host.configure("http://127.0.0.1:1".into()).unwrap();
-    let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
     let executor = Executor::start(&control);
     assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
     control.reconcile_all().await.unwrap();

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chunk_contract::{Schema, validate_wire_value};
 use chunk_proto::v1::{
@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Control, Error, Generation, Result, RuntimeConnection,
+    Control, Error, Generation, Release, Result, RuntimeConnection,
     client::{auth, channel},
 };
 
@@ -23,6 +23,8 @@ pub struct CapturedSession {
     delivery: PlayerDelivery,
     identity: ProcessIdentity,
     session_type: String,
+    /// The release the session's host runs, which declares its methods.
+    release: Arc<Release>,
 }
 
 /// An immutable, server-minted operation. Retrying this value never allocates another operation.
@@ -75,17 +77,14 @@ impl Control {
         if host.retired {
             return Err(Error::Invalid("method host retired"));
         }
+        let release = state.host_release(&session.host)?.clone();
         let runtime = self.host.connection(&session.host).ok_or(Error::Unresolved("method process unavailable"))?;
         let assignment = Assignment::decode(claim.assignment.as_deref().ok_or(Error::Invalid("missing assignment"))?)?;
         let delivery = assignment.delivery.ok_or(Error::Invalid("missing delivered identity"))?;
-        if !self.runs_host(&runtime, host)
+        if !crate::placement::runs_host(&state, &runtime, host)
             || runtime.identity.runtime_id != delivery.runtime_id
             || runtime.identity.generation != delivery.process_generation
-            || self
-                .config
-                .session_types
-                .get(&session.session_type)
-                .is_none_or(|spec| spec.app != runtime.identity.app_id)
+            || release.session_types.get(&session.session_type).is_none_or(|spec| spec.app != runtime.identity.app_id)
         {
             return Err(Error::Invalid("method process changed"));
         }
@@ -94,6 +93,7 @@ impl Control {
             delivery,
             identity: runtime.identity,
             session_type: session.session_type.clone(),
+            release,
         })
     }
 
@@ -108,8 +108,8 @@ impl Control {
         timeout: Duration,
     ) -> Result<PreparedSessionMethod> {
         self.method_runtime(target)?;
-        let method = self
-            .config
+        let method = target
+            .release
             .contracts
             .session_methods
             .as_ref()

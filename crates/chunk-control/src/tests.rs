@@ -19,7 +19,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Progress, Result, SessionType, state::Phase};
+use crate::{
+    Config, Contracts, Control, Error, Host, MachineProfile, Progress, Release, Result, SessionType, state::Phase,
+};
 
 struct Binding {
     delivery: PlayerDelivery,
@@ -156,7 +158,7 @@ async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationTo
                 continue;
             }
             if !streams.contains_key(&id) {
-                let report = runtime.report();
+                let report = host.report(&id);
                 let Ok(stream) = control.attach(&id, "test-runtime-credential", report.clone()).await else {
                     continue;
                 };
@@ -171,7 +173,7 @@ async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationTo
                     continue;
                 }
             }
-            let report = runtime.report();
+            let report = host.report(&id);
             let changes = ProcessReport {
                 identity: report.identity.clone(),
                 sessions: report.sessions.iter().filter(|s| !reported.sessions.contains(s)).cloned().collect(),
@@ -211,7 +213,8 @@ impl Gameplay for RuntimeService {
     ) -> std::result::Result<Response<ConfigurationResponse>, Status> {
         self.check(&request)?;
         Ok(Response::new(ConfigurationResponse {
-            deployment: self.identity.deployment.clone(),
+            // The JVM of every host serves here, each running the release control asks about.
+            deployment: request.into_inner().deployment,
             process_generation: 1,
             runtime_id: self.identity.runtime_id.clone(),
             protocol: 776,
@@ -280,10 +283,28 @@ struct FakeHost {
     missed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once when an adoption has published its process, before the adoption returns.
     adopted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The release each host runs, where it differs from the runtime's.
+    deployments: Mutex<BTreeMap<String, DeploymentRef>>,
+}
+
+impl FakeHost {
+    /// The runtime's identity as host `id`'s JVM, which runs that host's release.
+    fn identity(&self, id: &str) -> ProcessIdentity {
+        let deployment = self.deployments.lock().unwrap().get(id).cloned();
+        ProcessIdentity {
+            deployment: deployment.or_else(|| self.runtime.identity.deployment.clone()),
+            ..self.runtime.identity.clone()
+        }
+    }
+
+    /// Everything host `id`'s JVM holds, as it reports it to control.
+    fn report(&self, id: &str) -> ProcessReport {
+        ProcessReport { identity: Some(self.identity(id)), ..self.runtime.report() }
+    }
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
-    fn connection(&self, _: &str) -> Option<RuntimeConnection> {
+    fn connection(&self, id: &str) -> Option<RuntimeConnection> {
         if self.forgotten.load(Ordering::Acquire) {
             let missed = self.missed.lock().unwrap().take();
             if let Some(missed) = missed {
@@ -295,12 +316,13 @@ impl Host for FakeHost {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
             token: "test-runtime-credential".into(),
-            identity: self.runtime.identity.clone(),
+            identity: self.identity(id),
         })
     }
 
-    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<Progress> {
+    async fn ensure(&self, id: &str, release: &Release, _: &str, _: &str) -> Result<Progress> {
         self.ids.lock().unwrap().insert(id.into());
+        self.deployments.lock().unwrap().insert(id.into(), release.deployment.clone());
         if self.stopped(id) {
             return Ok(Progress::Failed("JVM exited".into()));
         }
@@ -311,7 +333,7 @@ impl Host for FakeHost {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
             token: "test-runtime-credential".into(),
-            identity: self.runtime.identity.clone(),
+            identity: self.identity(id),
         })))
     }
     async fn release(&self, id: &str) -> Result<bool> {
@@ -329,7 +351,8 @@ impl Host for FakeHost {
     }
     fn unowned(&self) -> Result<BTreeSet<String>> {
         let forgotten = self.forgotten.load(Ordering::Acquire);
-        Ok(if forgotten { self.ids.lock().unwrap().clone() } else { BTreeSet::new() })
+        let ids = self.ids.lock().unwrap().clone();
+        Ok(if forgotten { ids.into_iter().filter(|id| !self.stopped(id)).collect() } else { BTreeSet::new() })
     }
     fn adopt(&self, token: &str, registration: chunk_proto::v1::ProcessRegistration) -> Result<()> {
         let process = registration.identity.map(|identity| identity.process_id);
@@ -361,16 +384,23 @@ impl Executor {
     }
 }
 
-/// Opens control on an environment store of its own at `path`, through that store's backend.
-fn open(path: &std::path::Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Control>> {
-    let store = chunk_store::SqliteStore::open(path, &config.deployment.environment)?;
-    let backend = chunk_backend::Backend::new(config.deployment.environment.clone(), Box::new(store))?;
-    Control::open(backend.system(), config, host)
+/// The environment `release` belongs to.
+fn environment(release: &Release) -> Config {
+    Config { environment: release.deployment.environment.clone() }
+}
+
+/// Opens control on an environment store of its own at `path`, through that store's backend, with `release` current.
+fn open(path: &std::path::Path, release: Release, host: Arc<dyn Host>) -> Result<Arc<Control>> {
+    let store = chunk_store::SqliteStore::open(path, &release.deployment.environment)?;
+    let backend = chunk_backend::Backend::new(release.deployment.environment.clone(), Box::new(store))?;
+    let control = Control::open(backend.system(), environment(&release), host, false)?;
+    control.activate_release(release)?;
+    Ok(control)
 }
 
 struct Fixture {
     directory: tempfile::TempDir,
-    config: Config,
+    release: Release,
     runtime: Arc<FakeRuntime>,
     host: Arc<FakeHost>,
     stop: oneshot::Sender<()>,
@@ -379,11 +409,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let deployment = DeploymentRef { environment: "test".into(), deployment: "build".into() };
         let runtime = Arc::new(FakeRuntime {
             identity: ProcessIdentity {
                 app_id: "bridge".into(),
-                deployment: Some(deployment.clone()),
+                deployment: Some(DeploymentRef { environment: "test".into(), deployment: "build".into() }),
                 runtime_id: "runtime".into(),
                 process_id: "jvm".into(),
                 generation: 1,
@@ -430,29 +459,18 @@ impl Fixture {
             forgotten: AtomicBool::new(false),
             missed: Mutex::default(),
             adopted: Mutex::default(),
+            deployments: Mutex::default(),
         });
-        let config = Config {
-            contracts: Contracts::default(),
-            apps: BTreeMap::from([("bridge".into(), test_app())]),
-            deployment,
-            artifact_digest: "artifact".into(),
-            profiles: BTreeMap::from([("local".into(), MachineProfile { memory_mib: 512, max_sessions: 2 })]),
-            session_types: BTreeMap::from([(
-                "bridge/default".into(),
-                SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 2 },
-            )]),
-            max_processes: 1,
-            idle_node_timeout_seconds: 0,
-        };
+        let release = release();
         let follower = Mutex::default();
-        Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server, follower }
+        Self { directory: tempfile::tempdir().unwrap(), release, runtime, host, stop, server, follower }
     }
     /// Opens control with its capacity executor and the fake JVM following it, once the previous control's JVM stream
     /// has closed. A reachable JVM re-attaches before this returns.
     async fn control(&self) -> Arc<Control> {
         self.detach().await;
         let control =
-            open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap();
+            open(&self.directory.path().join("control.sqlite"), self.release.clone(), self.host.clone()).unwrap();
         let stop = CancellationToken::new();
         let task = tokio::spawn({
             let (control, host, stop) = (control.clone(), self.host.clone(), stop.clone());
@@ -513,6 +531,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
             machine_profile: "local".into(),
         }),
         source: None,
+        deployment: String::new(),
     }
 }
 
@@ -600,7 +619,7 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
         ClaimPhase::Arrived as i32
     );
     assert!(matches!(
-        open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
+        open(&fixture.directory.path().join("control.sqlite"), fixture.release.clone(), fixture.host.clone()),
         Err(Error::Store(chunk_store::Error::WriterLocked))
     ));
     fixture.close().await;
@@ -609,24 +628,23 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
 #[tokio::test]
 async fn duplicate_control_open_on_same_backend_is_rejected() {
     let fixture = Fixture::new().await;
-    let store = chunk_store::SqliteStore::open(
-        fixture.directory.path().join("control.sqlite"),
-        &fixture.config.deployment.environment,
-    )
-    .unwrap();
-    let backend = chunk_backend::Backend::new(fixture.config.deployment.environment.clone(), Box::new(store)).unwrap();
-    let first = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone()).unwrap();
-    let second = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let environment = environment(&fixture.release);
+    let store =
+        chunk_store::SqliteStore::open(fixture.directory.path().join("control.sqlite"), &environment.environment)
+            .unwrap();
+    let backend = chunk_backend::Backend::new(environment.environment.clone(), Box::new(store)).unwrap();
+    let first = Control::open(backend.system(), environment.clone(), fixture.host.clone(), false).unwrap();
+    let second = Control::open(backend.system(), environment.clone(), fixture.host.clone(), false);
     let rejected = second.is_err();
     drop(second);
     drop(first);
-    let reopened = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let reopened = Control::open(backend.system(), environment, fixture.host.clone(), false);
     let released = reopened.is_ok();
     drop(reopened);
     drop(backend);
     fixture.close().await;
-    assert!(rejected, "second Control::open on the same backend and deployment must be rejected");
-    assert!(released, "dropping the first control must release its deployment");
+    assert!(rejected, "second Control::open on the same backend must be rejected");
+    assert!(released, "dropping the first control must release the environment");
 }
 
 #[tokio::test]
@@ -873,7 +891,7 @@ async fn leave(control: &Arc<Control>, claim: ClaimRequest) -> String {
 #[tokio::test]
 async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() {
     let mut fixture = Fixture::new().await;
-    fixture.config.idle_node_timeout_seconds = 1;
+    fixture.release.idle_node_timeout_seconds = 1;
     let control = fixture.control().await;
     let first = request("first", &uuid::Uuid::new_v4().to_string());
     control.claim(first.clone()).await.unwrap();
@@ -894,6 +912,23 @@ async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() 
     assert!(control.state().unwrap().drains.is_empty());
     assert!(control.state().unwrap().hosts.is_empty());
     fixture.close().await;
+}
+
+/// Release `build` of environment `test`, running app `bridge` on one JVM.
+pub(crate) fn release() -> Release {
+    Release {
+        contracts: Contracts::default(),
+        apps: BTreeMap::from([("bridge".into(), test_app())]),
+        deployment: DeploymentRef { environment: "test".into(), deployment: "build".into() },
+        artifact_digest: "artifact".into(),
+        profiles: BTreeMap::from([("local".into(), MachineProfile { memory_mib: 512, max_sessions: 2 })]),
+        session_types: BTreeMap::from([(
+            "bridge/default".into(),
+            SessionType { app: "bridge".into(), machine_profile: "local".into(), capacity: 2 },
+        )]),
+        max_processes: 1,
+        idle_node_timeout_seconds: 0,
+    }
 }
 
 pub(crate) fn test_app() -> chunk_contract::AppArtifact {
@@ -1066,6 +1101,7 @@ mod destinations;
 mod launch;
 mod log;
 mod recovery;
+mod releases;
 mod retention;
 mod roster;
 mod server;

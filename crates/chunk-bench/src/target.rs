@@ -134,8 +134,8 @@ pub async fn serve(init: Init) -> Result<()> {
         Ready { endpoint: connection.endpoint.clone(), control: None, backend: Some(connection) }
     } else {
         let (ready, receiver) = oneshot::channel();
-        let control = control::configuration()?;
-        let (path, environment) = (init.state.join("environment.sqlite"), control.deployment.environment.clone());
+        let release = control::release()?;
+        let (path, environment) = (init.state.join("environment.sqlite"), release.deployment.environment.clone());
         let system = tokio::task::spawn_blocking(move || -> Result<_> {
             let store = chunk_store::SqliteStore::open(path, &environment)?;
             Ok(chunk_backend::Backend::new(environment, Box::new(store))?.system())
@@ -146,12 +146,15 @@ pub async fn serve(init: Init) -> Result<()> {
             state: init.state.clone(),
             system,
             bind: "127.0.0.1:0".parse()?,
-            control,
+            control: chunk_control::Config { environment: release.deployment.environment.clone() },
             host: Arc::new(control::SyntheticHost::new(init.backend)),
+            fresh: false,
         };
         let token = stop.clone();
         tasks.spawn(async move { Ok(chunk_control::server::run(config, ready, token).await?) });
-        let connection = receiver.await.context("control startup failed")?;
+        let started = receiver.await.context("control startup failed")?;
+        started.control.activate_release(release)?;
+        let connection = started.connection;
         Ready { endpoint: connection.endpoint.clone(), control: Some(connection), backend: None }
     };
     println!("{}", serde_json::to_string(&ready)?);
