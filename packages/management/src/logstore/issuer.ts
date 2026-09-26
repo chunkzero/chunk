@@ -22,8 +22,8 @@ export interface LogStoreIssuer {
   grant(environmentId: string): Promise<LogStoreGrant>;
 }
 
-/** Credentials are replaced once less than this much of their lifetime is left. */
-const refreshBeforeMs = 15 * 60 * 1000;
+/** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
+const maxRefreshBeforeMs = 15 * 60 * 1000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
   return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
@@ -49,8 +49,9 @@ function sharedIssuer(store: LogStore): LogStoreIssuer {
  * with AWS S3 and MinIO.
  */
 function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
-  const cache = new Map<string, Promise<LogStoreGrant>>();
-  const assume = async (environmentId: string): Promise<LogStoreGrant> => {
+  const cache = new Map<string, Promise<{ grant: LogStoreGrant; refreshAt: number }>>();
+  const assume = async (environmentId: string) => {
+    const issuedAt = Date.now();
     const target = location(store, environmentId);
     const body = new URLSearchParams({
       Action: "AssumeRole",
@@ -70,25 +71,24 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
     if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}: ${xml.slice(0, 500)}`);
     const expiration = new Date(element(xml, "Expiration"));
     if (Number.isNaN(expiration.getTime())) throw new Error("STS AssumeRole returned no expiration");
-    return {
+    const grant: LogStoreGrant = {
       ...target,
       accessKeyId: element(xml, "AccessKeyId"),
       secretAccessKey: element(xml, "SecretAccessKey"),
       sessionToken: element(xml, "SessionToken"),
       expireTime: expiration,
     };
+    const lifetime = expiration.getTime() - issuedAt;
+    return { grant, refreshAt: expiration.getTime() - Math.min(maxRefreshBeforeMs, lifetime / 3) };
   };
   return {
     async grant(environmentId) {
-      const cached = cache.get(environmentId);
-      if (cached) {
-        const grant = await cached.catch(() => undefined);
-        if (grant && (grant.expireTime?.getTime() ?? 0) - Date.now() > refreshBeforeMs) return grant;
-      }
+      const cached = await cache.get(environmentId)?.catch(() => undefined);
+      if (cached && Date.now() < cached.refreshAt) return cached.grant;
       const issued = assume(environmentId);
       cache.set(environmentId, issued);
       issued.catch(() => cache.delete(environmentId));
-      return issued;
+      return (await issued).grant;
     },
   };
 }

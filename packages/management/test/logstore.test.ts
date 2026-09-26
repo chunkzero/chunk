@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 
 import { loadConfig } from "../src/config.ts";
 import type { LogStore } from "../src/config.ts";
@@ -54,7 +54,7 @@ describe.skipIf(!databaseUrl)("STS log store credentials", () => {
       async fetch(request) {
         const form = new URLSearchParams(await request.text());
         calls.push({ authorization: request.headers.get("authorization") ?? "", form });
-        const expiration = new Date(Date.now() + 3600_000).toISOString();
+        const expiration = new Date(Date.now() + Number(form.get("DurationSeconds")) * 1000).toISOString();
         return new Response(
           `<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>temp-${calls.length}</AccessKeyId>` +
             `<SecretAccessKey>s&amp;cret</SecretAccessKey><SessionToken>token</SessionToken>` +
@@ -120,5 +120,34 @@ describe.skipIf(!databaseUrl)("STS log store credentials", () => {
     expect(await issuer.grant("env_a")).toBe(first);
     await issuer.grant("env_b");
     expect(calls.length).toBe(before + 2);
+  });
+
+  test("short-lived credentials are reused for the first two thirds of their lifetime", async () => {
+    const issuer = logStoreIssuer({
+      endpoint: "http://127.0.0.1:9000",
+      region: "us-east-1",
+      bucket: "logs",
+      prefix: "p/",
+      accessKeyId: "operator",
+      secretAccessKey: "secret",
+      sharedCredentials: false,
+      stsEndpoint: sts.url.origin,
+      roleArn: "arn:aws:iam::123456789012:role/chunk-logs",
+      credentialSeconds: 900,
+    });
+    const start = Date.now();
+    try {
+      setSystemTime(start);
+      const before = calls.length;
+      const first = await issuer.grant("env_short");
+      setSystemTime(start + 590_000);
+      expect(await issuer.grant("env_short")).toBe(first);
+      expect(calls.length).toBe(before + 1);
+      setSystemTime(start + 610_000);
+      expect(await issuer.grant("env_short")).not.toBe(first);
+      expect(calls.length).toBe(before + 2);
+    } finally {
+      setSystemTime();
+    }
   });
 });
