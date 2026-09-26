@@ -52,7 +52,7 @@ pub fn read_jvm_descriptor(path: &Path) -> io::Result<JvmDescriptor> {
         if sessions.is_empty()
             || sessions.len() > 128
             || sessions.len() != app.sessions.len()
-            || sessions.iter().any(|id| !crate::project::valid_id(id))
+            || sessions.iter().any(|id| !crate::valid_id(id))
         {
             return Err(io::Error::other("JVM descriptor requires 1–128 unique session type IDs per app"));
         }
