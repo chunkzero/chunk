@@ -20,7 +20,7 @@ impl GatewayConfig {
     }
 }
 
-/// The player listener, which admits and routes players through core's backend and control.
+/// The player listener, which admits and routes players through core.
 pub struct Gateway {
     running: Running,
     retarget: Option<chunk_proxy::Retarget>,
@@ -52,7 +52,7 @@ impl Gateway {
 
     /// Sends later player connections to `target`.
     /// # Errors
-    /// Rejects backend or control endpoints the proxy cannot use.
+    /// Rejects core or backend endpoints the proxy cannot use.
     pub fn retarget(&self, target: PlatformTarget) -> io::Result<()> {
         self.retarget.as_ref().ok_or_else(|| io::Error::other("proxy is not running"))?.replace(target)
     }

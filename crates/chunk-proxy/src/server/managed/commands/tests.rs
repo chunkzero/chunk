@@ -11,12 +11,13 @@ use tokio::io::DuplexStream;
 
 #[tokio::test]
 async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_report() {
-    for error in [
-        tonic::Status::failed_precondition("destination configuration rejected"),
-        tonic::Status::failed_precondition("runtime stopped"),
-        tonic::Status::unavailable("app did not become ready within 35 seconds"),
+    use chunk_proto::sync::v1::{Error, GatewayMove, SessionDemand, error::Code};
+    for (code, message) in [
+        (Code::Invalid, "destination configuration rejected"),
+        (Code::Stopped, "runtime stopped"),
+        (Code::Unavailable, "app did not become ready within 35 seconds"),
     ] {
-        let transient = error.code() == tonic::Code::Unavailable;
+        let transient = code == Code::Unavailable;
         let fixture = Fixture::new().await;
         let source = super::super::ClaimGuard {
             platform: fixture.commands.tasks.platform.clone(),
@@ -24,17 +25,20 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
             armed: false,
             failure: None,
         };
-        let identity = fixture.assignment.claim.clone().unwrap();
-        let destination = ClaimRequest {
+        let identity = fixture.identity.clone();
+        let destination = GatewayMove {
             operation_id: "failed-move".into(),
-            source: Some(identity.clone()),
-            ..fixture.claim.clone()
+            destination: Some(SessionDemand {
+                key: "lobby".into(),
+                session_type: "lobby/default".into(),
+                machine_profile: "local".into(),
+            }),
         };
         let movement = fixture.service.movement.clone();
         {
             let mut state = movement.lock().unwrap();
-            state.pending = Some(destination.clone());
-            state.error = Some(error.clone());
+            state.pending = Some(destination);
+            state.error = Some(Error { code: code.into(), message: message.into() });
             state.lose_report = true;
             state.stall_retries = transient;
         }
@@ -66,12 +70,12 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
             assert_eq!(state.attempts, if transient { 2 } else { 1 });
             assert_eq!(state.reports, 2);
             assert!(state.pending.is_none());
-            let failure = state.failure.as_ref().unwrap();
-            assert_eq!(failure.claim.as_ref(), Some(&destination));
+            let (operation, reason) = state.failure.as_ref().unwrap();
+            assert_eq!(operation, "failed-move");
             if transient {
-                assert_eq!(failure.reason, format!("move preparation timed out after 45 seconds: {}", error.message()));
+                assert_eq!(*reason, format!("move preparation timed out after 45 seconds: {message}"));
             } else {
-                assert_eq!(failure.reason, error.message());
+                assert_eq!(reason, message);
             }
         }
         assert!(!running.is_finished()); // Keeps waiting for another move on the same source.
@@ -250,16 +254,18 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     fixture.commands.input(&unsigned("follow")).unwrap();
     wait_count(&fixture.service.waiting, 2).await;
     let origin = fixture.commands.origin.clone().unwrap();
+    let moved = fixture::Held {
+        operation: "moved".into(),
+        generation: chunk_proto::sync::v1::Position { epoch: 1, revision: 2 },
+        phase: chunk_proto::sync::v1::ClaimPhase::Arrived,
+    };
     fixture.claim.operation_id = "moved".into();
-    fixture.assignment.claim.as_mut().unwrap().operation_id = "moved".into();
-    fixture.assignment.claim.as_mut().unwrap().delivery_generation = 2;
-    let delivery = fixture.assignment.delivery.as_mut().unwrap();
-    delivery.operation_id = "moved".into();
-    delivery.owner_generation = 2;
-    delivery.session.as_mut().unwrap().id = "new-session".into();
-    *fixture.service.assignment.lock().unwrap() = fixture.assignment.clone();
+    fixture.identity.operation_id = "moved".into();
+    fixture.identity.delivery_generation = crate::server::platform::generation(&moved.generation);
+    fixture.session = "new-session".into();
+    *fixture.service.claim.lock().unwrap() = moved;
     fixture.sync().await;
-    fixture.commands.bind(&fixture.claim, &fixture.assignment).unwrap();
+    fixture.commands.bind(&fixture.claim, &fixture.identity, &fixture.session).unwrap();
     assert!(origin.cancellation.is_cancelled());
     assert!(fixture.commands.tasks.current(&origin, true).is_err()); // Configuration rejects effects.
     fixture.commands.tree(&CommandTree::empty()).unwrap();
@@ -288,7 +294,7 @@ async fn claim_view_resyncs_from_a_snapshot_after_its_stream_drops() {
     fixture.sync().await;
     origin.check(&platform).await.unwrap();
     fixture.service.watch_down.store(true, Ordering::SeqCst);
-    fixture.service.assignment.lock().unwrap().phase = i32::from(chunk_proto::v1::ClaimPhase::Withdrawing);
+    fixture.service.claim.lock().unwrap().phase = chunk_proto::sync::v1::ClaimPhase::Withdrawing;
     fixture.service.publish();
     wait_count(&fixture.service.refused_watches, 1).await;
     // A stale view answers nothing, so no command acts on the claim's last known phase.
@@ -296,6 +302,22 @@ async fn claim_view_resyncs_from_a_snapshot_after_its_stream_drops() {
     fixture.service.watch_down.store(false, Ordering::SeqCst);
     fixture.sync().await;
     assert!(origin.check(&platform).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_call_on_a_superseded_stream_runs_again_on_its_replacement_under_the_same_operation() {
+    use chunk_proto::sync::v1::WithdrawResult;
+    let fixture = Fixture::new().await;
+    let platform = fixture.commands.tasks.platform.clone();
+    fixture.sync().await;
+    // Core drops the stream, then stops the call once the gateway resubscribes, before the new stream's first update.
+    fixture.service.supersede.store(true, Ordering::SeqCst);
+    let withdrawal = platform.call::<WithdrawResult>("withdraw", "claim", &(), crate::server::platform::RPC_TIMEOUT);
+    tokio::time::timeout(Duration::from_secs(3), withdrawal).await.unwrap().unwrap();
+    // Only the retry on the replacement stream reached the claim.
+    assert_eq!(fixture.service.logins.lock().unwrap().cancels, ["claim"]);
+    fixture.sync().await;
     fixture.close().await;
 }
 
@@ -312,7 +334,7 @@ async fn session_method_lost_start_polls_same_capture_and_never_retargets_after_
     assert_eq!(fixture.service.starts.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.service.polls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.service.methods.lock().unwrap()[0].claim.as_ref(), Some(&origin.identity));
-    fixture.service.assignment.lock().unwrap().claim.as_mut().unwrap().delivery_generation += 1;
+    fixture.service.claim.lock().unwrap().generation.revision += 1;
     fixture.sync().await;
     assert!(session::invoke(&fixture.commands.tasks, &origin, method(), serde_json::json!({}), false).await.is_err());
     assert_eq!(fixture.service.methods.lock().unwrap().len(), 1);
@@ -429,24 +451,17 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
         failure: None,
     };
     fixture.service.roster_waits.store(3, Ordering::SeqCst);
-    crate::server::managed::activate(&guard, fixture.assignment.claim.clone()).await.unwrap();
+    crate::server::managed::activate(&guard).await.unwrap();
     assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
-    let target = &fixture.commands.tasks.platform.target;
+    let mut target = fixture.commands.tasks.platform.target.clone();
+    target.gateway.credential = "wrong".into();
     let unauthorized = crate::server::managed::ClaimGuard {
-        platform: crate::server::platform::Platform::new(crate::PlatformTarget {
-            gateway: None,
-            backend: target.backend.clone(),
-            control: chunk_contract::ControlConnection {
-                endpoint: target.control.endpoint.clone(),
-                token: "wrong".into(),
-            },
-        })
-        .unwrap(),
+        platform: crate::server::platform::Platform::new(target).unwrap(),
         claim: fixture.claim.clone(),
         armed: false,
         failure: None,
     };
-    assert!(crate::server::managed::activate(&unauthorized, fixture.assignment.claim.clone()).await.is_err());
+    assert!(crate::server::managed::activate(&unauthorized).await.is_err());
     assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
     fixture.close().await;
 }
@@ -468,7 +483,7 @@ async fn a_login_routed_again_keeps_its_operation_until_the_connection_deadline_
         },
         transport: Transport::new(public),
     };
-    // After control rejects the login, its next routing fails once the release it used is no longer current.
+    // After core refuses the login, its next routing fails once the release it used is no longer current.
     let reload = async {
         let (fail, unroutable) = tokio::sync::oneshot::channel();
         while logins.lock().unwrap().claims.is_empty() {
@@ -497,14 +512,14 @@ async fn a_login_routed_again_keeps_its_operation_until_the_connection_deadline_
         (logins.claims.clone(), logins.cancels.clone())
     };
     let (reserved, rejected) = claims.split_last().unwrap();
-    assert_eq!(reserved.deployment, "next");
-    assert!(!rejected.is_empty() && rejected.iter().all(|claim| claim.deployment == "deployment"));
+    assert_eq!(reserved.1.deployment, "next");
+    assert!(!rejected.is_empty() && rejected.iter().all(|(_, login)| login.deployment == "deployment"));
     assert!(
-        claims.iter().all(|claim| {
-            claim.operation_id == reserved.operation_id && claim.connection_id == reserved.connection_id
-        })
+        claims
+            .iter()
+            .all(|(operation, login)| *operation == reserved.0 && login.connection_id == reserved.1.connection_id)
     );
-    // Rejected attempts reserved nothing; only the reservation the deadline abandoned is canceled.
-    assert_eq!(cancels, std::slice::from_ref(reserved));
+    // Rejected attempts reserved nothing; only the reservation the deadline abandoned is withdrawn.
+    assert_eq!(cancels, std::slice::from_ref(&reserved.0));
     fixture.close().await;
 }

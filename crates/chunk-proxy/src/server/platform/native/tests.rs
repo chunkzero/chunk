@@ -28,17 +28,15 @@ impl Fixture {
         backend.deploy(deployment()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let platform = Platform::new(PlatformTarget {
-            gateway: None,
+            core: "http://127.0.0.1:1".into(),
+            gateway: crate::GatewayCredential { id: "proxy".into(), credential: "unused".into() },
+            control_token: "unused".into(),
             backend: chunk_contract::BackendConnection {
                 endpoint: format!("http://{}", listener.local_addr().unwrap()),
                 environment: "test".into(),
                 deployment: "candidate".into(),
                 token: "application-only-token-for-tests".into(),
                 platform_token: Some("trusted-platform-token-for-tests".into()),
-            },
-            control: chunk_contract::ControlConnection {
-                endpoint: "http://127.0.0.1:1".into(),
-                token: "unused".into(),
             },
         })
         .unwrap();

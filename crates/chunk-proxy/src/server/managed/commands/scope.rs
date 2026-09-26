@@ -1,6 +1,9 @@
 use std::io;
 
-use chunk_proto::v1::{Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, CommandScope};
+use chunk_proto::{
+    sync::v1::ClaimPhase,
+    v1::{ClaimIdentity, ClaimRequest, CommandScope},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::server::{
@@ -16,12 +19,9 @@ pub(in crate::server::managed) struct Origin {
     pub cancellation: CancellationToken,
 }
 impl Origin {
-    pub fn new(claim: &ClaimRequest, assignment: &Assignment, domain: String) -> io::Result<Self> {
+    pub fn new(claim: &ClaimRequest, identity: &ClaimIdentity, session: &str, domain: String) -> io::Result<Self> {
         let player = claim.identity.as_ref().ok_or_else(|| invalid_data("missing command player"))?;
         let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing command destination"))?;
-        let identity = assignment.claim.clone().ok_or_else(|| invalid_data("missing command claim"))?;
-        let delivery = assignment.delivery.as_ref().ok_or_else(|| invalid_data("missing command delivery"))?;
-        let session = delivery.session.as_ref().ok_or_else(|| invalid_data("missing command session"))?;
         let (app, _) = demand.session_type.split_once('/').ok_or_else(|| invalid_data("missing command app"))?;
         Ok(Self {
             claim: claim.clone(),
@@ -29,7 +29,7 @@ impl Origin {
                 proxy_id: claim.proxy_id.clone(),
                 player_uuid: player.uuid.clone(),
                 username: player.username.clone(),
-                session_id: session.id.clone(),
+                session_id: session.into(),
                 app: app.into(),
                 session_type: demand.session_type.clone(),
                 domain,
@@ -39,7 +39,7 @@ impl Origin {
                 membership_generation: identity.membership_generation,
                 delivery_generation: identity.delivery_generation,
             },
-            identity,
+            identity: identity.clone(),
             cancellation: CancellationToken::new(),
         })
     }

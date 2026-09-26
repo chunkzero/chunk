@@ -9,6 +9,8 @@ mod transport;
 
 #[cfg(feature = "bench-support")]
 pub use managed::benchmark;
+#[cfg(feature = "test-support")]
+pub use managed::testing;
 
 use authentication::Authentication;
 
@@ -89,7 +91,7 @@ pub struct Retarget(Arc<RwLock<platform::Platform>>);
 
 impl Retarget {
     /// # Errors
-    /// Rejects backend or control endpoints that are not loopback HTTP.
+    /// Rejects core or backend endpoints that are not loopback HTTP.
     pub fn replace(&self, target: PlatformTarget) -> io::Result<()> {
         let mut platform = self.0.write().unwrap_or_else(PoisonError::into_inner);
         *platform = platform.retarget(target)?;

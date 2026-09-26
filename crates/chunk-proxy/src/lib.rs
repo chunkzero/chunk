@@ -12,6 +12,10 @@ pub use server::{Proxy, Retarget};
 #[doc(hidden)]
 pub use server::benchmark;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use server::testing;
+
 #[cfg(not(feature = "mc-26-2"))]
 mod disabled;
 #[cfg(not(feature = "mc-26-2"))]
@@ -69,13 +73,17 @@ impl std::fmt::Debug for GameplayTarget {
     }
 }
 
-/// Private local connections for JavaScript hooks and session placement.
+/// Core's endpoint and this gateway's identity in it, with the backend connection hooks and commands still use.
 #[derive(Clone)]
 pub struct PlatformTarget {
+    /// Core's endpoint, which serves the sync protocol.
+    pub core: String,
+    /// This gateway's identity in core; its credential authenticates every sync request.
+    pub gateway: GatewayCredential,
     pub backend: chunk_contract::BackendConnection,
-    pub control: chunk_contract::ControlConnection,
-    /// This gateway's identity in core; without one the proxy picks its own ID.
-    pub gateway: Option<GatewayCredential>,
+    /// Control's credential, which command effects present on core's endpoint to move players and call session
+    /// methods.
+    pub control_token: String,
 }
 
 /// The ID core knows a gateway by, which names the claims it holds, and the credential core minted for it.
@@ -88,9 +96,9 @@ pub struct GatewayCredential {
 impl std::fmt::Debug for PlatformTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlatformTarget")
+            .field("core", &self.core)
+            .field("gateway", &self.gateway.id)
             .field("backend", &self.backend.endpoint)
-            .field("control", &self.control.endpoint)
-            .field("gateway", &self.gateway.as_ref().map(|gateway| &gateway.id))
             .finish_non_exhaustive()
     }
 }
