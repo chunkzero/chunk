@@ -11,8 +11,6 @@ use crate::{
 
 /// Long enough for callers to retry an operation after its release, short enough to bound history.
 const RELEASED_RETENTION_MS: u64 = 300_000;
-/// Rows one tidying commit may remove, keeping it well within a store commit.
-const REMOVALS_PER_COMMIT: usize = 128;
 
 impl Control {
     /// Drains hosts that have had no unfinished session or open claim for the idle timeout,
@@ -21,7 +19,7 @@ impl Control {
     pub(crate) fn retire_idle_hosts(&self) -> Result<()> {
         let now = crate::now_ms();
         let mut writer = self.authority.writer()?;
-        while writer.update(|state| self.tidy(state, now))? {}
+        writer.update(|state| self.tidy(state, now))?;
         let retained = self.state()?.hosts.keys().cloned().collect();
         // Keep placement excluded until pruning finishes, so a newly allocated host cannot be removed.
         if let Err(error) = self.host.prune(&retained) {
@@ -34,10 +32,8 @@ impl Control {
         Ok(())
     }
 
-    /// Forgets unreferenced rows, at most [`REMOVALS_PER_COMMIT`] at a time, and reports whether more remain.
-    /// Only the final pass tracks idle hosts.
-    fn tidy(&self, state: &mut State, now: u64) -> Result<bool> {
-        let mut budget = REMOVALS_PER_COMMIT;
+    /// Forgets unreferenced rows and tracks idle hosts.
+    fn tidy(&self, state: &mut State, now: u64) -> Result<()> {
         // A released move claim stays while the other end is open: the source's move checks
         // read its destination's outcome, and a destination's activation checks its fenced source.
         let source = |request: &[u8]| ClaimRequest::decode(request).ok().and_then(|request| request.source);
@@ -55,39 +51,35 @@ impl Control {
                 .filter(|(_, intent)| source(&intent.request).is_some_and(|source| open(&source.operation_id)))
                 .map(|(destination, _)| destination.clone()),
         );
-        let claims = select(&state.claims, &mut budget, |operation, claim| {
+        let claims = select(&state.claims, |operation, claim| {
             claim.released_at_ms.is_some_and(|at| now.saturating_sub(at) >= RELEASED_RETENTION_MS)
                 && !referenced.contains(operation)
         });
         remove(&mut state.claims, claims);
-        let moves = select(&state.moves, &mut budget, |operation, intent| {
+        let moves = select(&state.moves, |operation, intent| {
             !state.claims.contains_key(operation)
                 && source(&intent.request).is_none_or(|source| !state.claims.contains_key(&source.operation_id))
         });
         remove(&mut state.moves, moves);
-        let rosters = select(&state.rosters, &mut budget, |_, roster| {
-            roster.members.iter().all(|member| !state.claims.contains_key(member))
-        });
+        let rosters =
+            select(&state.rosters, |_, roster| roster.members.iter().all(|member| !state.claims.contains_key(member)));
         remove(&mut state.rosters, rosters);
         let open: BTreeSet<_> =
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
-        let sessions = select(&state.sessions, &mut budget, |id, session| session.finished && !open.contains(id));
+        let sessions = select(&state.sessions, |id, session| session.finished && !open.contains(id));
         remove(&mut state.sessions, sessions);
-        let drains = select(&state.drains, &mut budget, |_, drain| drain.automatic && self.host.stopped(&drain.host));
+        let drains = select(&state.drains, |_, drain| drain.automatic && self.host.stopped(&drain.host));
         remove(&mut state.drains, drains);
-        let hosts = select(&state.hosts, &mut budget, |id, host| {
+        let hosts = select(&state.hosts, |id, host| {
             host.retired
                 && self.host.stopped(id)
                 && !state.sessions.values().any(|session| session.host == *id)
                 && !state.drains.values().any(|drain| drain.host == *id)
         });
         remove(&mut state.hosts, hosts);
-        if budget == 0 {
-            return Ok(true);
-        }
         let timeout = u64::from(self.config.idle_node_timeout_seconds) * 1000;
         if timeout == 0 {
-            return Ok(false);
+            return Ok(());
         }
         let busy: BTreeSet<_> = state
             .sessions
@@ -109,15 +101,13 @@ impl Control {
                 ShutdownNodeRequest { operation_id: operation.clone(), host_id: id.clone(), timeout_seconds: 0 };
             retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id))?;
         }
-        Ok(false)
+        Ok(())
     }
 }
 
-/// Up to `budget` IDs whose rows `forget` accepts, charged against the budget.
-fn select<T>(rows: &BTreeMap<String, T>, budget: &mut usize, mut forget: impl FnMut(&str, &T) -> bool) -> Vec<String> {
-    let ids: Vec<_> = rows.iter().filter(|(id, row)| forget(id, row)).map(|(id, _)| id.clone()).take(*budget).collect();
-    *budget -= ids.len();
-    ids
+/// The IDs of rows `forget` accepts.
+fn select<T>(rows: &BTreeMap<String, T>, mut forget: impl FnMut(&str, &T) -> bool) -> Vec<String> {
+    rows.iter().filter(|(id, row)| forget(id, row)).map(|(id, _)| id.clone()).collect()
 }
 
 fn remove<T>(rows: &mut BTreeMap<String, T>, ids: Vec<String>) {

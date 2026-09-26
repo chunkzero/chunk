@@ -18,9 +18,6 @@ use crate::{
     state::{MoveFailure, Phase, Roster, State},
 };
 
-/// Writes per member (move, claim, player) must fit one store commit.
-const MAX_MEMBERS: usize = 64;
-
 pub struct RosterMember {
     /// The member's destination claim operation.
     pub operation_id: String,
@@ -41,14 +38,14 @@ pub struct RosterMove {
 impl Control {
     /// Reserves one destination session slot and queues a move for every member, or changes nothing.
     /// # Errors
-    /// Rejects stale or moving members, changed retries and oversized rosters; reports `Capacity` when no
-    /// session can hold every member and `Busy` when too much work is in flight.
+    /// Rejects stale or moving members and changed retries; reports `Capacity` when no session can hold every
+    /// member and `Busy` when too much work is in flight.
     pub fn move_roster(&self, request: &RosterMove) -> Result<Vec<ClaimRequest>> {
         let players: BTreeSet<_> = request.members.iter().map(|member| &member.player_id).collect();
         let operations: BTreeSet<_> = request.members.iter().map(|member| &member.operation_id).collect();
         if request.operation_id.is_empty()
             || request.operation_id.len() > 128
-            || !(1..=MAX_MEMBERS).contains(&request.members.len())
+            || request.members.is_empty()
             || players.len() != request.members.len()
             || operations.len() != request.members.len()
             || i64::try_from(request.version).is_err()

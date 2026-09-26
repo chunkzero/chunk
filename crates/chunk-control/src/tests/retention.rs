@@ -106,7 +106,7 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
 }
 
 #[tokio::test]
-async fn players_are_forgotten_on_release_and_pruning_spans_as_many_commits_as_it_needs() {
+async fn players_are_forgotten_on_release_and_expired_claims_are_pruned() {
     let fixture = Fixture::new().await;
     let control = fixture.control();
     let player = uuid::Uuid::new_v4().to_string();
@@ -115,18 +115,15 @@ async fn players_are_forgotten_on_release_and_pruning_spans_as_many_commits_as_i
     assert!(control.state().unwrap().players.contains_key(&player));
     control.cancel(claim).await.unwrap();
     assert!(!control.state().unwrap().players.contains_key(&player));
-    // More expired claims than one store commit can remove.
-    for batch in 0..3 {
-        control
-            .update(|state| {
-                let expired = crate::state::Claim { released_at_ms: Some(0), ..state.claims["only"].clone() };
-                for index in 0..100 {
-                    state.claims.insert(format!("expired-{batch}-{index}"), expired.clone());
-                }
-                Ok(())
-            })
-            .unwrap();
-    }
+    control
+        .update(|state| {
+            let expired = crate::state::Claim { released_at_ms: Some(0), ..state.claims["only"].clone() };
+            for index in 0..300 {
+                state.claims.insert(format!("expired-{index}"), expired.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
     control.retire_idle_hosts().unwrap();
     drop(control);
     let state = fixture.control().state().unwrap();
@@ -139,17 +136,15 @@ async fn open_claims_are_unbounded_and_only_in_flight_work_is_refused_as_busy() 
     let fixture = Fixture::new().await;
     let control = fixture.control();
     control.claim(request("template", &uuid::Uuid::new_v4().to_string())).await.unwrap();
-    for batch in 0..11 {
-        control
-            .update(|state| {
-                let open = crate::state::Claim { session: "elsewhere".into(), ..state.claims["template"].clone() };
-                for index in 0..100 {
-                    state.claims.insert(format!("open-{batch}-{index}"), open.clone());
-                }
-                Ok(())
-            })
-            .unwrap();
-    }
+    control
+        .update(|state| {
+            let open = crate::state::Claim { session: "elsewhere".into(), ..state.claims["template"].clone() };
+            for index in 0..1100 {
+                state.claims.insert(format!("open-{index}"), open.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
     let held: Vec<_> = (0..1024).map(|index| control.operation(&format!("held-{index}")).unwrap()).collect();
     let next = request("next", &uuid::Uuid::new_v4().to_string());
     assert!(matches!(control.claim(next.clone()).await, Err(Error::Busy)));

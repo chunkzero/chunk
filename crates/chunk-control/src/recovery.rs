@@ -23,8 +23,6 @@ use crate::{
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
 const RECOVERY_WARNING: Duration = Duration::from_secs(30);
-/// Tombstones one commit may add, keeping it well within a store commit.
-const TOMBSTONES_PER_COMMIT: usize = 128;
 
 /// Hosts whose surviving deliveries are not yet fenced.
 pub(crate) struct Recovery {
@@ -162,22 +160,12 @@ impl Control {
     /// prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
     /// player again under an operation ID the JVM already holds.
     fn retire_unknown_operations(&self, inventory: &ProcessInventory) -> Result<()> {
-        let state = self.state()?;
-        let unknown: Vec<_> = inventory
-            .deliveries
-            .iter()
-            .filter_map(|binding| binding.delivery.as_ref())
-            .filter(|delivery| !state.claims.contains_key(&delivery.operation_id))
-            .collect();
-        for batch in unknown.chunks(TOMBSTONES_PER_COMMIT) {
-            self.update(|state| {
-                for delivery in batch {
-                    state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
+        self.update(|state| {
+            for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
+                state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
+            }
+            Ok(())
+        })
     }
 
     /// Withdraws open deliveries that no open claim in the log owns with the same generations, using the generation
