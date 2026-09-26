@@ -74,8 +74,8 @@ with `TEST_MINIO_URL=http://127.0.0.1:59000`.
 
 With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
 machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
-for accepted wakes and due wake alarms. Every machine runs the environment image; `CHUNK_WORKLOAD` (`core`, `jvm`,
-`gateway` or `exec`) selects the role.
+for accepted wakes and due wake alarms. Every machine runs the environment image, and `CHUNK_SERVICES` selects what it
+runs: `core,gateway,exec` on the core machine, and `jvm`, `gateway` or `exec` on an extra machine.
 
 Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID` and its `CHUNK_ENVIRONMENT_TOKEN`. Extra machines never call
 this service. They get `CHUNK_CORE_ADDRESS` and a `CHUNK_JOIN_TOKEN` valid for 15 minutes, plus the request's

@@ -7,7 +7,7 @@ import type { CapacityRow } from "./capacity.ts";
 
 /** How machines are built for environments. */
 export interface MachineOptions {
-  /** The environment image; every workload runs it and `CHUNK_WORKLOAD` says which role to take. */
+  /** The environment image; every workload runs it and `CHUNK_SERVICES` says which services to run. */
   image: string;
   /** Where machines reach this service. */
   managementUrl: string;
@@ -45,7 +45,7 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
     name: coreMachineName(environmentId),
     image: options.image,
     env: {
-      CHUNK_WORKLOAD: "core",
+      CHUNK_SERVICES: "core,gateway,exec",
       CHUNK_ENVIRONMENT_ID: environmentId,
       CHUNK_MANAGEMENT_URL: options.managementUrl,
       CHUNK_ENVIRONMENT_TOKEN: token,
@@ -72,7 +72,7 @@ export function capacityMachineSpec(
     name: capacityMachineName(request),
     image: options.image,
     env: {
-      CHUNK_WORKLOAD: workload,
+      CHUNK_SERVICES: workload,
       CHUNK_ENVIRONMENT_ID: request.environment_id,
       CHUNK_CAPACITY_REQUEST_ID: request.request_id,
       CHUNK_RELEASE_ID: request.release_id,
