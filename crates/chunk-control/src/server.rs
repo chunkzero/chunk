@@ -103,6 +103,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
         result.and(reconcile.await)
     }
     .await;
+    // Every exit closes open watches, so none keeps this authority's scope after `run` returns.
+    service.close_watches();
     service.close_methods();
     operations.close();
     operations.wait().await;
