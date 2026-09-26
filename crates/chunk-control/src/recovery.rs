@@ -5,17 +5,16 @@ use chunk_proto::v1::{
     DeliveryPhase, PlayerWithdrawal, ProcessIdentity, ProcessInventory, ProcessRegistration,
     gameplay_client::GameplayClient,
 };
-use sha2::{Digest, Sha256};
 
 use crate::{
     Control, Result, RuntimeConnection,
     client::{auth, channel},
-    state::{Phase, ProcessRecord},
+    state::Phase,
 };
 
 impl Control {
-    /// Accepts a JVM registration. A JVM launched before control restarted re-attaches only by presenting the
-    /// credential whose digest the log recorded for its host, with the exact logged process identity.
+    /// Accepts a JVM registration. A JVM launched before control restarted re-attaches only if its host adopts it,
+    /// which requires the credential recorded before launch, and it still runs this host's app.
     pub(crate) fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
         let error = match self.host.register(token, registration.clone()) {
             Ok(identity) => return Ok(identity),
@@ -34,26 +33,12 @@ impl Control {
             identity: identity.clone(),
             player_endpoint: registration.player_endpoint.clone(),
         };
-        if host.process.as_ref() != Some(&record(&connection)) || !self.runs_host(&connection, host) {
+        if !self.runs_host(&connection, host) {
             return Err(error);
         }
         self.host.adopt(secret, registration)?;
         tracing::info!(host = identity.runtime_id, "re-attached a JVM that outlived control");
         Ok(identity)
-    }
-
-    /// Logs which process serves `id`, so it can re-attach after a restart.
-    pub(crate) fn record_process(&self, id: &str, runtime: &RuntimeConnection) -> Result<()> {
-        let process = record(runtime);
-        if self.state()?.hosts.get(id).is_some_and(|host| host.process.as_ref() == Some(&process)) {
-            return Ok(());
-        }
-        self.update(|state| {
-            if let Some(host) = state.hosts.get_mut(id) {
-                host.process = Some(process);
-            }
-            Ok(())
-        })
     }
 
     /// Withdraws open deliveries that no open claim in the log owns with the same generations, such as deliveries
@@ -91,13 +76,5 @@ impl Control {
             }
         }
         Ok(())
-    }
-}
-
-fn record(runtime: &RuntimeConnection) -> ProcessRecord {
-    ProcessRecord {
-        id: runtime.identity.process_id.clone(),
-        generation: runtime.identity.generation,
-        token_sha256: format!("{:x}", Sha256::digest(runtime.token.as_bytes())),
     }
 }

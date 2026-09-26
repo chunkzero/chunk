@@ -126,8 +126,6 @@ impl ProcessHost {
         }
         classpath::verify(&distribution, &jar, &bytes)?;
         std::fs::create_dir_all(&self.config.directory)?;
-        // A launch marker without an owned Child leaves termination unconfirmed instead of stopped.
-        let _marker = chunk_service::private_file(&self.path(id, "launch")?)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
         let process = Arc::new(Process {
@@ -146,6 +144,9 @@ impl ProcessHost {
             stopped: AtomicBool::new(false),
             adopted: false,
         });
+        // A launch marker without an owned Child leaves termination unconfirmed instead of stopped. It records the
+        // process's identity and credential digest before the JVM exists, so the JVM can re-attach after a restart.
+        self.record_launch(id, &process)?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
             Command::new(&self.config.java)
@@ -184,6 +185,14 @@ impl ProcessHost {
             }
         });
         Ok(process)
+    }
+    fn record_launch(&self, id: &str, process: &Process) -> Result<()> {
+        let record = LaunchRecord::of(&process.identity, &process.token);
+        let mut marker = chunk_service::private_file(&self.path(id, "launch")?)?;
+        marker.write_all(&serde_json::to_vec(&record)?)?;
+        marker.sync_all()?;
+        std::fs::File::open(&self.config.directory)?.sync_all()?;
+        Ok(())
     }
     /// Stops all owned JVMs, including launches awaiting readiness.
     /// # Errors
@@ -256,6 +265,10 @@ impl Host for ProcessHost {
             || self.path(&id, "exit")?.try_exists()?
         {
             return Err(Error::Invalid("process is not awaiting re-attachment"));
+        }
+        let recorded: Option<LaunchRecord> = serde_json::from_slice(&std::fs::read(self.path(&id, "launch")?)?).ok();
+        if recorded != Some(LaunchRecord::of(&identity, token)) {
+            return Err(Error::Invalid("process credential does not match its launch record"));
         }
         let process = Process {
             identity,
@@ -373,6 +386,24 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         child.wait().await?;
     }
     Ok(())
+}
+
+/// What a launch marker records: the JVM's process identity and the SHA-256 digest of its credential.
+#[derive(PartialEq, serde::Serialize, serde::Deserialize)]
+struct LaunchRecord {
+    process_id: String,
+    generation: u64,
+    token_sha256: String,
+}
+
+impl LaunchRecord {
+    fn of(identity: &ProcessIdentity, token: &str) -> Self {
+        Self {
+            process_id: identity.process_id.clone(),
+            generation: identity.generation,
+            token_sha256: format!("{:x}", Sha256::digest(token.as_bytes())),
+        }
+    }
 }
 
 async fn stop_gracefully(process: &Process) {

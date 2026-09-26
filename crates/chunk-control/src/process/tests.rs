@@ -123,7 +123,60 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
 }
 
 #[tokio::test]
-async fn only_an_unowned_launch_can_be_adopted_and_its_exit_stays_unconfirmed() {
+async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let java = directory.path().join("java");
+    std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut artifact = crate::tests::test_app();
+    let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
+    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
+    let config = || ProcessHostConfig {
+        distribution: directory.path().into(),
+        java: java.clone(),
+        directory: directory.path().join("nodes"),
+        deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
+        apps: BTreeMap::from([("bridge".into(), artifact.clone())]),
+        profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
+        backend: chunk_contract::BackendConnection {
+            platform_token: None,
+            environment: "test".into(),
+            deployment: "build".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            token: "unused".into(),
+        },
+    };
+    let crashed = ProcessHost::new(config());
+    crashed.configure("http://127.0.0.1:1".into()).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let process = crashed.launch(&id, "bridge", "local").unwrap();
+    let registration = ProcessRegistration {
+        identity: Some(process.identity.clone()),
+        control_endpoint: "http://127.0.0.1:1".into(),
+        player_endpoint: "127.0.0.1:2".into(),
+    };
+    crashed.register(&format!("Bearer {}", process.token), registration.clone()).unwrap();
+    // Control dies after acknowledging registration and before committing anything; the JVM survives.
+    std::mem::forget(crashed);
+
+    let host = ProcessHost::new(config());
+    assert!(host.unresolved(&id));
+    assert!(host.adopt("another-credential", registration.clone()).is_err());
+    let mut changed = registration.clone();
+    changed.identity.as_mut().unwrap().process_id = "another-process".into();
+    assert!(host.adopt(&process.token, changed).is_err());
+    assert!(host.unresolved(&id));
+    host.adopt(&process.token, registration.clone()).unwrap();
+    assert!(!host.unresolved(&id));
+    assert_eq!(host.connection(&id).unwrap().token, process.token);
+    assert!(host.adopt(&process.token, registration).is_err());
+    assert!(matches!(host.terminate(&id).await, Err(Error::Unresolved(_))));
+    assert!(!host.stopped(&id));
+}
+
+#[tokio::test]
+async fn a_launch_marker_without_a_record_is_never_adopted() {
     let directory = tempfile::tempdir().unwrap();
     let host = ProcessHost::new(ProcessHostConfig {
         distribution: directory.path().into(),
@@ -149,11 +202,6 @@ async fn only_an_unowned_launch_can_be_adopted_and_its_exit_stays_unconfirmed() 
     assert!(host.adopt("credential", registration.clone()).is_err());
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
     std::fs::write(host.path(&id, "launch").unwrap(), b"").unwrap();
-    assert!(host.unresolved(&id));
-    host.adopt("credential", registration.clone()).unwrap();
-    assert!(!host.unresolved(&id));
-    assert_eq!(host.connection(&id).unwrap().token, "credential");
     assert!(host.adopt("credential", registration).is_err());
-    assert!(matches!(host.terminate(&id).await, Err(Error::Unresolved(_))));
-    assert!(!host.stopped(&id));
+    assert!(host.unresolved(&id));
 }

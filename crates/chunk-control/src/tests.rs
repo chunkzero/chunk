@@ -292,8 +292,11 @@ impl Host for FakeHost {
     fn unresolved(&self, _: &str) -> bool {
         self.forgotten.load(Ordering::Acquire)
     }
-    fn adopt(&self, token: &str, _: chunk_proto::v1::ProcessRegistration) -> Result<()> {
-        assert_eq!(token, "test-runtime-credential");
+    fn adopt(&self, token: &str, registration: chunk_proto::v1::ProcessRegistration) -> Result<()> {
+        let process = registration.identity.map(|identity| identity.process_id);
+        if token != "test-runtime-credential" || process.as_ref() != Some(&self.runtime.identity.process_id) {
+            return Err(Error::Invalid("process credential does not match its launch record"));
+        }
         assert!(self.forgotten.swap(false, Ordering::AcqRel));
         Ok(())
     }
