@@ -73,9 +73,9 @@ impl Core {
     /// launched has confirmed its exit.
     async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
         if config.fresh {
+            self.stop_survivors(config).await?;
             // The record names the previous control's credential, which is deleted with its files.
             if_present(fs::remove_file(&config.control_record))?;
-            self.stop_survivors(config).await?;
             if_present(fs::remove_dir_all(config.state.join("control")))?;
         }
         let listener = TcpListener::bind(config.control_bind).await?;
@@ -83,20 +83,39 @@ impl Core {
     }
 
     /// Stops the JVMs of the previous control that may still hold their launch locks, since only a control on its
-    /// files can confirm they exited. Each re-attaches only at the endpoint its launch record names, so control serves
-    /// there, waiting while another process holds that address.
+    /// files can confirm they exited. Each re-attaches only at the endpoint its launch record names, or at the previous
+    /// discovery record's endpoint when the record names none, so control serves there, waiting while another process
+    /// holds that address.
     async fn stop_survivors(&mut self, config: &CoreConfig) -> io::Result<()> {
         let launches = chunk_control::ProcessHost::new(self.host_config(config)?);
+        let previous =
+            chunk_service::read::<ControlConnection>(&config.control_record).ok().map(|record| record.endpoint);
+        let backend = address(&self.backend_connection()?.endpoint);
         let mut waiting = false;
         loop {
             let endpoints = launches.unowned_endpoints().map_err(io::Error::other)?;
             if endpoints.is_empty() {
                 return Ok(());
             }
-            let bind = survivor_bind(&endpoints, config.control_bind)?;
+            // JVMs whose launch records name no endpoint re-attach at the record's, which recovery republishes.
+            if !endpoints.contains(&None) {
+                if_present(fs::remove_file(&config.control_record))?;
+            }
+            let known = survivor_bind(&endpoints, previous.as_deref())?;
+            let bind = known.unwrap_or(config.control_bind);
+            if backend.is_some_and(|backend| overlaps(backend, bind)) {
+                return Err(io::Error::other(format!(
+                    "JVMs that outlived the previous control re-attach only at {bind}, where the backend now serves; \
+                     choose another backend address"
+                )));
+            }
             match TcpListener::bind(bind).await {
                 Ok(listener) => {
-                    tracing::warn!(%bind, "stopping JVMs that outlived the previous control");
+                    if known.is_some() {
+                        tracing::warn!(%bind, "stopping JVMs that outlived the previous control");
+                    } else {
+                        tracing::warn!(%bind, "stopping JVMs that outlived the previous control at an address they may not know");
+                    }
                     self.serve_control(config, listener).await?;
                     return self.stop_control(|| {}).await;
                 }
@@ -267,18 +286,28 @@ impl Core {
     }
 }
 
-/// Where control recovers JVMs launched with `endpoints`: the endpoint they share, or `fallback` when their launch
-/// records name none. A control launches JVMs only after every earlier one has exited, so they share at most one.
-fn survivor_bind(endpoints: &BTreeSet<Option<String>>, fallback: SocketAddr) -> io::Result<SocketAddr> {
-    let mut known = endpoints.iter().flatten();
+/// Where control recovers JVMs launched with `endpoints`: the endpoint they share, taking `previous` for launch records
+/// that name none, or `None` when no endpoint is known. A control launches JVMs only after every earlier one has
+/// exited, so they share at most one.
+fn survivor_bind(endpoints: &BTreeSet<Option<String>>, previous: Option<&str>) -> io::Result<Option<SocketAddr>> {
+    let known: BTreeSet<_> = endpoints.iter().filter_map(|endpoint| endpoint.as_deref().or(previous)).collect();
+    let mut known = known.into_iter();
     match (known.next(), known.next()) {
-        (None, _) => Ok(fallback),
-        (Some(endpoint), None) => endpoint
-            .strip_prefix("http://")
-            .and_then(|address| address.parse().ok())
+        (None, _) => Ok(None),
+        (Some(endpoint), None) => address(endpoint)
+            .map(Some)
             .ok_or_else(|| io::Error::other(format!("surviving JVM has invalid control endpoint {endpoint}"))),
         (Some(_), Some(_)) => Err(io::Error::other("surviving JVMs were given different control endpoints")),
     }
+}
+
+fn address(endpoint: &str) -> Option<SocketAddr> {
+    endpoint.strip_prefix("http://")?.parse().ok()
+}
+
+/// Whether a listener on `served` keeps `bind` from binding.
+fn overlaps(served: SocketAddr, bind: SocketAddr) -> bool {
+    served.port() == bind.port() && (served.ip() == bind.ip() || served.ip().is_unspecified())
 }
 
 fn if_present(removed: io::Result<()>) -> io::Result<()> {

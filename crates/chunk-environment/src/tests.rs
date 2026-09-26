@@ -134,6 +134,30 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
     core.stop(|| {}).await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_refuses_a_backend_on_the_address_surviving_jvms_re_attach_at() {
+    let directory = tempfile::tempdir().unwrap();
+    let previous = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+    (config.fresh, config.backend_bind) = (true, previous);
+    let nodes = config.state.join("control").join("nodes");
+    std::fs::create_dir_all(&nodes).unwrap();
+    let marker = nodes.join("5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f.launch");
+    let launch = serde_json::json!({"process_id": "jvm", "generation": 1, "token_sha256": "",
+        "control_endpoint": format!("http://{previous}")});
+    std::fs::write(&marker, launch.to_string()).unwrap();
+    let lock = std::fs::File::open(&marker).unwrap();
+    lock.try_lock().unwrap();
+    let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
+
+    let started = tokio::time::timeout(Duration::from_secs(30), Core::start(config, |_| {})).await.unwrap();
+    assert!(started.is_err());
+    assert!(marker.exists());
+    jvm.kill().unwrap();
+    jvm.wait().unwrap();
+}
+
 /// A JVM of the previous control that exits once control stops it.
 struct Survivor {
     jvm: Mutex<std::process::Child>,
@@ -159,7 +183,17 @@ impl NodeControl for Survivor {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_its_control_address_once_that_is_free() {
+async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_its_launch_records_address_once_that_is_free() {
+    stops_a_survivor_at_its_previous_control_address(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_stops_a_survivor_without_a_recorded_address_at_the_previous_discovery_address() {
+    stops_a_survivor_at_its_previous_control_address(false).await;
+}
+
+async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
     config.fresh = true;
@@ -167,18 +201,26 @@ async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_its_control_address_
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let previous = occupied.local_addr().unwrap();
     let endpoint = format!("http://{previous}");
-    // A stale discovery record names neither that address nor a credential this start has.
-    let record = ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "previous".into() };
-    std::fs::create_dir_all(&config.state).unwrap();
-    std::fs::write(&config.control_record, serde_json::to_vec(&record).unwrap()).unwrap();
-    let id = "5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f";
     let nodes = config.state.join("control").join("nodes");
     std::fs::create_dir_all(&nodes).unwrap();
+    let record = if recorded {
+        // A stale discovery record names neither that address nor a credential this start has.
+        ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "stale".into() }
+    } else {
+        // An older launch record names no address, so the previous control's discovery record is its only evidence.
+        let token = "previous".repeat(8);
+        std::fs::write(config.state.join("control").join("token"), &token).unwrap();
+        ControlConnection { endpoint: endpoint.clone(), token }
+    };
+    std::fs::write(&config.control_record, serde_json::to_vec(&record).unwrap()).unwrap();
+    let id = "5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f";
     let marker = nodes.join(format!("{id}.launch"));
     // The launch record of process `survivor`, whose credential is `survivor-credential`.
     let digest = "f81f7f42445b7b8d50607fb2be1213427da19382f3aa9bbd41d0c56c050fcc74";
-    let launch = serde_json::json!({"process_id": "survivor", "generation": 1, "token_sha256": digest,
-        "control_endpoint": endpoint});
+    let mut launch = serde_json::json!({"process_id": "survivor", "generation": 1, "token_sha256": digest});
+    if recorded {
+        launch["control_endpoint"] = endpoint.clone().into();
+    }
     std::fs::write(&marker, launch.to_string()).unwrap();
     let lock = std::fs::File::open(&marker).unwrap();
     lock.try_lock().unwrap();
