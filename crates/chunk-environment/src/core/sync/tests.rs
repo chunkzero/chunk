@@ -1,3 +1,4 @@
+mod claims;
 mod runtime;
 
 use super::*;

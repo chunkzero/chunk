@@ -4,11 +4,13 @@ use chunk_proto::v1::local_control_server::LocalControlServer;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// Builds services served beside control's own on its listener, from control, its credential, and a token cancelled
-/// when the transport begins shutting down, which must end their open streams.
-pub type Services = Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken) -> tonic::service::Routes + Send>;
+/// Builds services served beside control's own on its listener, from control, its credential, a token cancelled when
+/// the transport begins shutting down, which must end their open streams, and the tracker of accepted operations,
+/// which control awaits before it stops hosts.
+pub type Services =
+    Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, TaskTracker) -> tonic::service::Routes + Send>;
 
 pub struct Config {
     /// Holds the credential and the host's local files; durable state lives in the environment's store.
@@ -69,7 +71,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
         let routes = services.map_or_else(tonic::service::Routes::default, |services| {
-            services(&control, &connection.token, stop.clone())
+            services(&control, &connection.token, stop.clone(), operations.clone())
         });
         let _ = ready.send(Ready { connection, control: control.clone() });
         let shutdown = {

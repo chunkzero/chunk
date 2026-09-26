@@ -59,3 +59,17 @@ pub(super) fn control(failure: &chunk_control::Error) -> Error {
         _ => error(Code::Unavailable, failure.to_string()),
     }
 }
+
+/// Maps a failed control operation: a reused operation ID with another request mismatches, a request control rejects
+/// is invalid, and a failure that may pass is unavailable.
+pub(super) fn operation(failure: &chunk_control::Error) -> Error {
+    use chunk_control::Error as Control;
+    let code = match failure {
+        Control::Invalid(chunk_control::OPERATION_CHANGED) => Code::OperationMismatch,
+        Control::Invalid(_) => Code::Invalid,
+        Control::Capacity | Control::Busy => Code::Overloaded,
+        Control::Stopped => Code::Stopped,
+        _ => Code::Unavailable,
+    };
+    error(code, failure.to_string())
+}

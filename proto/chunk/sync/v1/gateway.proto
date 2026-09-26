@@ -50,3 +50,113 @@ message SessionDemand {
   // The machine profile the session runs on.
   string machine_profile = 3;
 }
+
+// Methods a gateway calls to admit players and move them, with its own credential only; core takes the gateway's ID
+// from that credential. Each call names the gateway's current `gateway/<id>` stream in `CallRequest.stream`, and
+// fails with STOPPED once that stream is superseded or if it names another. It carries no deployment or caller. Its
+// operation ID is the claim's own: `chunk:claim` creates the claim under it, and the other methods act on that claim
+// or queued move, which must be the gateway's. Each is idempotent, so a retry returns the claim's current outcome, and
+// `chunk:claim` repeated with other arguments fails with OPERATION_MISMATCH. A result's position is control's state
+// after the call, which the gateway's topic reaches.
+// - `chunk:claim` takes ClaimArguments and returns ClaimResult.
+// - `chunk:activate` takes no arguments and returns ActivateResult.
+// - `chunk:withdraw` takes no arguments and returns WithdrawResult.
+// - `chunk:abandon_move` takes AbandonMoveArguments and returns WithdrawResult.
+// - `chunk:depart` takes no arguments and returns DepartResult.
+
+// Arguments of `chunk:claim`.
+message ClaimArguments {
+  // The player a login admits. Unset to claim the destination of the move control queued under the operation ID,
+  // which the gateway saw as a GatewayMove.
+  GatewayLogin login = 1;
+}
+
+// A player the gateway authenticated and routed.
+message GatewayLogin {
+  // Names the player's connection to this gateway; its moves keep it.
+  string connection_id = 1;
+  // Who the player authenticated as.
+  PlayerIdentity player = 2;
+  // The session routing chose.
+  SessionDemand demand = 3;
+  // The deployment whose routing chose `demand`. Empty places the login with the current one.
+  string deployment = 4;
+}
+
+// A player as their login authenticated them.
+message PlayerIdentity {
+  // The player's UUID, lowercase and hyphenated.
+  string uuid = 1;
+  // The player's name: 1 to 16 letters, digits or underscores.
+  string username = 2;
+  // The profile's properties, such as its skin, which the JVM receives.
+  repeated PlayerProperty properties = 3;
+}
+
+// A property of a player's profile.
+message PlayerProperty {
+  // The property's name.
+  string name = 1;
+  // The property's value.
+  string value = 2;
+  // The value's signature, when the session service signed it.
+  optional string signature = 3;
+}
+
+// The result of `chunk:claim`.
+message ClaimResult {
+  oneof outcome {
+    // The claim holds a slot, and the destination JVM expects the player.
+    ClaimAssignment assignment = 1;
+    // Why control refused the claim, which reserved nothing.
+    ClaimRefusal refusal = 2;
+  }
+}
+
+// Where a claim's player joins.
+message ClaimAssignment {
+  // The commit that created the claim, as in GatewayClaim.
+  Position generation = 1;
+  // The session the player joins.
+  string session = 2;
+  // The Minecraft protocol version the destination JVM speaks.
+  int32 protocol = 3;
+  // The loopback address the gateway connects the player to.
+  string endpoint = 4;
+  // The 32-byte secret that presents the player to the JVM at login.
+  bytes capability = 5;
+}
+
+// Why control refused a claim.
+enum ClaimRefusal {
+  CLAIM_REFUSAL_UNSPECIFIED = 0;
+  // The login's deployment no longer accepts logins. Route it again and claim again under the same operation ID.
+  CLAIM_REFUSAL_ROUTE_AGAIN = 1;
+  // The player already holds a claim, such as through another connection.
+  CLAIM_REFUSAL_ALREADY_CONNECTED = 2;
+}
+
+// The result of `chunk:activate`.
+message ActivateResult {
+  // Other members of the player's roster have yet to activate, so none was admitted. Call again.
+  bool waiting = 1;
+}
+
+// Arguments of `chunk:abandon_move`.
+message AbandonMoveArguments {
+  // Why preparing the move failed, in 1 to 4096 bytes.
+  string reason = 1;
+}
+
+// The result of `chunk:withdraw` and `chunk:abandon_move`.
+message WithdrawResult {
+  // Control holds no claim or queued move under the operation ID, such as while its claim is still reserving, so
+  // nothing changed.
+  bool unknown = 1;
+}
+
+// The result of `chunk:depart`.
+message DepartResult {
+  // The player's membership ended with this claim, and they hold no newer claim.
+  bool departed = 1;
+}

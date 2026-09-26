@@ -23,7 +23,7 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
-pub use callers::SessionScope;
+pub use callers::{SessionScope, StoredClaim};
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
@@ -57,6 +57,15 @@ pub const DEFAULT_IDLE_NODE_TIMEOUT_SECONDS: u32 = 60;
 /// Control's reply to a login routed with a release that no longer accepts logins. Nothing was reserved, so the proxy
 /// routes the login again through the current release.
 pub const ROUTE_AGAIN: &str = "routed release no longer accepts logins";
+
+/// Control's reply to a login whose player already owns a claim.
+pub const ALREADY_OWNED: &str = "player already owned";
+
+/// Control's reply to an activation while other members of its roster have yet to activate. Nothing was admitted.
+pub const ROSTER_WAITING: &str = "roster awaiting members";
+
+/// Control's reply to an operation ID first used for a different claim request.
+pub const OPERATION_CHANGED: &str = "claim operation changed";
 
 /// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]

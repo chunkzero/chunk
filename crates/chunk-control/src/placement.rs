@@ -239,7 +239,7 @@ pub(crate) fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
     let Some(source) = &request.source else {
         if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
-            return Err(Error::Invalid("player already owned"));
+            return Err(Error::Invalid(crate::ALREADY_OWNED));
         }
         return Ok(Owner { player: player.clone(), membership: None });
     };

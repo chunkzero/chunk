@@ -1,10 +1,11 @@
-//! The sync protocol's `Core` service, served on control's listener: app function calls and topic subscriptions for
-//! gateways, JVMs and the CLI.
+//! The sync protocol's `Core` service, served on control's listener: app function calls, platform methods and topic
+//! subscriptions for gateways, JVMs and the CLI.
 
 mod app;
 mod auth;
 mod caller;
 mod errors;
+mod platform;
 mod streams;
 mod topics;
 
@@ -19,7 +20,7 @@ use chunk_store::Revision;
 use prost::Message;
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::{Request, Response, Status};
 
 /// Every message's size limit.
@@ -34,7 +35,7 @@ pub(crate) use auth::Gateways;
 /// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. Each gateway presents the
 /// credential `gateways` minted for it, the CLI presents control's credential, and each JVM its process credential.
 pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_control::server::Services {
-    Box::new(move |control, token, stop| {
+    Box::new(move |control, token, stop, operations| {
         let service = SyncService {
             credentials: Arc::new(auth::Credentials {
                 gateways: gateways.clone(),
@@ -47,6 +48,7 @@ pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_contr
             streams: streams::StreamKey::new(),
             fences: streams::Fences::default(),
             stop,
+            operations,
         };
         let server =
             CoreServer::new(service).max_decoding_message_size(MESSAGE_BYTES).max_encoding_message_size(MESSAGE_BYTES);
@@ -64,6 +66,8 @@ pub(crate) struct SyncService {
     epoch: u64,
     /// Ends open streams when control's transport shuts down.
     stop: CancellationToken,
+    /// Runs control operations a dropped call must not abandon, which control awaits before it stops.
+    operations: TaskTracker,
 }
 
 impl SyncService {
@@ -78,7 +82,13 @@ impl SyncService {
         Ok((id, caller::derive(&self.control, &principal.class, deployment, caller)?))
     }
 
-    async fn call_app(&self, principal: &auth::Principal, request: CallRequest) -> Result<Outcome, Error> {
+    /// Runs `request`'s app function or platform method, returning its encoded result and the position it committed at
+    /// or observed.
+    async fn dispatch(
+        &self,
+        principal: &auth::Principal,
+        request: CallRequest,
+    ) -> Result<(Option<Position>, Vec<u8>), Error> {
         check_names(&[&request.method, &request.deployment, &request.stream], request.caller.as_ref())?;
         if request.operation_id.len() > OPERATION_BYTES {
             return Err(errors::invalid("the operation ID exceeds 256 bytes"));
@@ -86,6 +96,14 @@ impl SyncService {
         if request.arguments.len() > ARGUMENT_BYTES {
             return Err(errors::invalid("arguments exceed 1 MiB"));
         }
+        if let Some(method) = request.method.strip_prefix("chunk:") {
+            return platform::call(self, principal, method, &request).await;
+        }
+        let outcome = self.call_app(principal, request).await?;
+        Ok((position(self.epoch, outcome.revision), outcome.json.as_bytes().to_vec()))
+    }
+
+    async fn call_app(&self, principal: &auth::Principal, request: CallRequest) -> Result<Outcome, Error> {
         if request.method.is_empty() || request.method.contains(':') {
             return Err(errors::invalid("unknown method"));
         }
@@ -126,11 +144,8 @@ fn position(epoch: u64, revision: Revision) -> Option<Position> {
 impl Core for SyncService {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         let principal = self.credentials.authenticate(&request)?;
-        let response = match self.call_app(&principal, request.into_inner()).await {
-            Ok(outcome) => CallResponse {
-                position: position(self.epoch, outcome.revision),
-                outcome: Some(call_response::Outcome::Result(outcome.json.as_bytes().to_vec())),
-            },
+        let response = match self.dispatch(&principal, request.into_inner()).await {
+            Ok((position, result)) => CallResponse { position, outcome: Some(call_response::Outcome::Result(result)) },
             Err(error) => CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) },
         };
         if response.encoded_len() > MESSAGE_BYTES {
