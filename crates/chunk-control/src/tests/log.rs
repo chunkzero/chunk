@@ -1,6 +1,59 @@
 use super::*;
 use crate::{Generation, Table};
 use chunk_store::{Listed, ObjectStorage, Replication, SqliteStore, Storage};
+use prost::Message;
+
+#[tokio::test]
+async fn reopens_state_larger_than_the_default_scan_budget() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let mut first = request("claim-0", &uuid::Uuid::new_v4().to_string());
+    first.identity.as_mut().unwrap().properties.push(chunk_proto::v1::Property {
+        name: "textures".into(),
+        value: "a".repeat(60 * 1024),
+        signature: None,
+    });
+    control.claim(first.clone()).await.unwrap();
+    control.cancel(first.clone()).await.unwrap();
+
+    // Batch retained, released claims: base64 requests alone occupy over 40 MiB on disk.
+    control
+        .update(|state| {
+            let template = state.claims["claim-0"].clone();
+            let generation = state.next_generation()?;
+            for index in 1..512 {
+                let mut request = first.clone();
+                request.operation_id = format!("claim-{index}");
+                request.connection_id = format!("connection-{index}");
+                let player = uuid::Uuid::new_v4().to_string();
+                request.identity.as_mut().unwrap().uuid.clone_from(&player);
+                assert!(request.encoded_len() <= 65_536);
+                state.claims.insert(
+                    request.operation_id.clone(),
+                    crate::state::Claim {
+                        request: request.encode_to_vec(),
+                        player,
+                        membership: generation,
+                        generation,
+                        assignment: None,
+                        ..template.clone()
+                    },
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    let expected = control.state().unwrap();
+    assert_eq!(expected.claims.len(), 512);
+    drop(control);
+
+    let reopened =
+        Control::open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone())
+            .and_then(|control| control.state());
+    fixture.close().await;
+    let actual = reopened.expect("control must reopen state exceeding the default scan byte budget");
+    assert!(actual.claims == expected.claims);
+}
 
 #[derive(Default)]
 struct Memory(Mutex<BTreeMap<String, Vec<u8>>>);
