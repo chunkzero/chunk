@@ -60,6 +60,61 @@ test("rejects backend metadata chunk build would not write", async () => {
   await expect(broken({ replace: backend({ functions: { f: {} } }) })).rejects.toThrow("does not match contract.json");
 });
 
+test("rejects table and function declarations chunk_contract cannot read, even when both files agree", async () => {
+  const both = (declarations: { tables?: object; functions?: object }) => {
+    const contract = {
+      contract_version: 2,
+      runtime_profile: "transactional_v1",
+      tables: {},
+      functions: {},
+      ...declarations,
+    };
+    const source = "export default {};\n";
+    return {
+      replace: {
+        "contract.json": JSON.stringify(contract),
+        "backend.json": JSON.stringify({ ...contract, id: "r1", source }),
+      },
+    };
+  };
+  await expect(broken(both({ tables: { players: 42 }, functions: { login: {} } }))).rejects.toThrow(
+    "invalid table players",
+  );
+  await expect(broken(both({ functions: { login: {} } }))).rejects.toThrow("invalid function login");
+  const field = (schema: object) => ({ players: { fields: { name: { schema } } } });
+  await expect(broken(both({ tables: field({ type: "strng" }) }))).rejects.toThrow("unknown schema type");
+  await expect(broken(both({ tables: field({ type: "array" }) }))).rejects.toThrow("invalid array schema");
+  await expect(broken(both({ tables: field({ type: "string", max: 3 }) }))).rejects.toThrow("invalid string schema");
+
+  const valid = both({
+    tables: {
+      players: {
+        fields: {
+          name: { schema: { type: "string" } },
+          rank: { schema: { type: "nullable", value: { type: "enum", values: ["gold"] } }, optional: true },
+          state: {
+            schema: {
+              type: "union",
+              variants: { online: { type: "object", fields: { at: { schema: { type: "number" } } } } },
+            },
+          },
+        },
+        indexes: { by_name: ["name"] },
+      },
+    },
+    functions: {
+      "players/get": {
+        kind: "query",
+        visibility: "public",
+        export: "get",
+        arguments: { type: "object", fields: { id: { schema: { type: "id", table: "players" } } } },
+        result: { type: "array", items: { type: "literal", value: 1 } },
+      },
+    },
+  });
+  expect(JSON.parse(await broken(valid)).id).toBe("r1");
+});
+
 test("keeps only the named metadata files, never entries named like Object properties", async () => {
   expect(keepLimit("backend.json")).toBe(5 * 1024 * 1024);
   for (const path of ["constructor", "__proto__", "toString", "hasOwnProperty"])

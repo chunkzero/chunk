@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { type ArchiveLimits, scanArchive } from "./archive.ts";
+import { contractProblem } from "./contract.ts";
 
 /** `release.json` as `chunk build` writes it (crates/chunk-build/src/release.rs, chunk_contract::AppArtifact). */
 export interface ReleaseManifest {
@@ -27,12 +28,6 @@ const backendFiles = new Map([
   ["contract.json", 2 * 1024 * 1024],
   ["source.mjs", 4 * 1024 * 1024],
 ]);
-/** chunk_contract::CONTRACT_VERSION and the runtime profiles it knows. */
-const contractVersion = 2;
-const runtimeProfiles = ["transactional_v1"];
-/** Fields of `contract.json`; `backend.json` adds `id` and `source`. */
-const contractFields = ["contract_version", "runtime_profile", "tables", "functions"];
-const optionalContractFields = ["domains", "session_methods", "session_configurations", "destinations"];
 
 /**
  * Checks a stored archive in one pass: its size and digest against the declaration, its tar structure within
@@ -110,20 +105,6 @@ function backendProblem(releaseId: string, read: (path: string) => Uint8Array): 
   if (id !== releaseId) return `backend.json names release ${JSON.stringify(id)}, not ${releaseId}`;
   if (backendSource !== source) return "backend.json does not carry source.mjs";
   if (!sameJson(metadata, contract)) return "backend.json does not match contract.json";
-  return undefined;
-}
-
-function contractProblem(contract: Record<string, unknown>): string | undefined {
-  const known = [...contractFields, ...optionalContractFields];
-  const unknown = Object.keys(contract).find((key) => !known.includes(key));
-  if (unknown !== undefined) return `has an unexpected field ${unknown}`;
-  if (contract.contract_version !== contractVersion) return `is not contract version ${contractVersion}`;
-  if (!runtimeProfiles.includes(contract.runtime_profile as string)) return "has an unknown runtime_profile";
-  if (!isRecord(contract.tables)) return "has no tables";
-  if (!isRecord(contract.functions) || Object.keys(contract.functions).length > 256) return "has invalid functions";
-  for (const field of optionalContractFields) {
-    if (Object.hasOwn(contract, field) && !isRecord(contract[field])) return `has an invalid ${field}`;
-  }
   return undefined;
 }
 
