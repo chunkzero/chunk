@@ -83,12 +83,17 @@ impl Control {
             return Ok(identity);
         }
         let host = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host.clone();
-        self.update(|s| {
-            set_phase(
-                s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?,
-                Phase::Withdrawing,
-            )
+        // The claim may have been released since it was read, such as with its host's capacity.
+        let released = self.update(|s| {
+            let claim = s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            if claim.phase == Phase::Released {
+                return Ok(true);
+            }
+            set_phase(claim, Phase::Withdrawing).map(|()| false)
         })?;
+        if released {
+            return Ok(identity);
+        }
         // The recorded failure fences activation; reconciliation owns the remaining withdrawal.
         if abandoned {
             return Ok(identity);
@@ -112,7 +117,12 @@ impl Control {
                 Err(error) => return Err(error.into()),
             }
         }
-        self.update(|state| release(state, &request.operation_id))?;
+        self.update(|state| {
+            if state.claims.get(&request.operation_id).is_some_and(|claim| claim.phase == Phase::Released) {
+                return Ok(());
+            }
+            release(state, &request.operation_id)
+        })?;
         Ok(identity)
     }
 

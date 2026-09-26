@@ -151,7 +151,9 @@ impl Control {
     /// orphan host's sessions end with its JVM instead.
     fn retire_unknown_sessions(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
-            let Some(inventory) = self.links.report(id, identity).filter(|_| state.hosts.contains_key(id)) else {
+            // A released host's JVM has exited, and its sessions with it.
+            let live = state.hosts.get(id).is_some_and(|host| host.capacity != Capacity::Released);
+            let Some(inventory) = self.links.report(id, identity).filter(|_| live) else {
                 return Ok(());
             };
             for observed in &inventory.sessions {
