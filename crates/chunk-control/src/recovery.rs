@@ -118,6 +118,8 @@ impl Control {
 
     async fn recover_host(&self, id: &str) -> Result<bool> {
         let state = self.state()?;
+        // Only a host missing now is an orphan; one removed later, after its capacity was released, is not.
+        let orphan = !state.hosts.contains_key(id);
         // The log has no capacity record for a host a restore lost, so only the host can confirm its JVM exited.
         if state.hosts.get(id).map_or_else(|| self.host.stopped(id), |host| host.capacity == Capacity::Released) {
             return Ok(true);
@@ -140,7 +142,9 @@ impl Control {
         if !self.fence_deliveries(&runtime, &inventory).await? {
             return Ok(false);
         }
-        self.retire_orphan(id, &runtime.identity)?;
+        if orphan {
+            self.retire_orphan(id, &runtime.identity)?;
+        }
         // Control's desired state asks the JVM to end the sessions the log lost; its reports finish them.
         let state = self.state()?;
         Ok(!state.sessions.values().any(|session| session.host == id && session.recovered() && !session.finished))

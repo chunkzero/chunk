@@ -74,6 +74,8 @@ impl Control {
                 }
                 self.update(|state| released(state, id, from))
             }
+            // A retired host never starts again under its ID; its drain releases it.
+            _ if host.retired => Ok(()),
             _ => self.ensure(id, host).await,
         }
     }
