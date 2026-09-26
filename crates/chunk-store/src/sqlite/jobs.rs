@@ -1,5 +1,5 @@
 use chunk_contract::{Deployment, FunctionKind, validate_wire_value};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Error, Job, JobCommand, JobIntent, JobState, Jobs, Result, WakeHandoff};
 
@@ -99,7 +99,7 @@ fn changed(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn apply(connection: &Transaction<'_>, intents: &[JobIntent]) -> Result<()> {
+pub(super) fn apply(connection: &Connection, intents: &[JobIntent]) -> Result<()> {
     if intents.len() > 16 {
         return Err(Error::Capacity);
     }
@@ -169,38 +169,37 @@ pub(super) fn apply(connection: &Transaction<'_>, intents: &[JobIntent]) -> Resu
     Ok(())
 }
 
-pub(super) fn command(connection: &mut Connection, command: JobCommand) -> Result<Jobs> {
-    let transaction = connection.transaction()?;
+pub(super) fn command(transaction: &Connection, command: JobCommand) -> Result<Jobs> {
     match command {
         JobCommand::Recover => {
-            let jobs = load(&transaction)?;
+            let jobs = load(transaction)?;
             let mut recovered = false;
             for mut job in jobs.records {
                 if job.state == JobState::Running {
                     job.state = JobState::Unknown;
-                    save(&transaction, &job)?;
+                    save(transaction, &job)?;
                     recovered = true;
                 }
             }
             if recovered {
-                changed(&transaction)?;
+                changed(transaction)?;
             }
         }
         JobCommand::Claim { id, attempt, now } => {
-            let mut job = get(&transaction, &id)?;
+            let mut job = get(transaction, &id)?;
             if job.state != JobState::Pending || job.attempt != attempt || job.due_at > now {
                 return Err(Error::Invalid("job is not due"));
             }
-            target(&transaction, &job)?;
+            target(transaction, &job)?;
             job.state = JobState::Running;
-            save(&transaction, &job)?;
-            changed(&transaction)?;
+            save(transaction, &job)?;
+            changed(transaction)?;
         }
         JobCommand::Finish { id, attempt, state, result } => {
             if !matches!(state, JobState::Succeeded | JobState::Failed | JobState::Unknown) {
                 return Err(Error::Invalid("job completion state"));
             }
-            let mut job = get(&transaction, &id)?;
+            let mut job = get(transaction, &id)?;
             if job.state == JobState::Running && job.attempt == attempt {
                 let previous = charge(&job)?;
                 if let Some(value) = &result {
@@ -209,30 +208,29 @@ pub(super) fn command(connection: &mut Connection, command: JobCommand) -> Resul
                 let result_bytes = result.as_ref().map(serde_json::to_vec).transpose()?.map_or(0, |bytes| bytes.len());
                 job.state = state;
                 job.result = result;
-                if result_bytes > 64 * 1024 || totals(&transaction)?.1 - previous + charge(&job)? > MAX_BYTES {
+                if result_bytes > 64 * 1024 || totals(transaction)?.1 - previous + charge(&job)? > MAX_BYTES {
                     job.state = JobState::Failed;
                     job.result = None;
                 }
-                save(&transaction, &job)?;
-                changed(&transaction)?;
+                save(transaction, &job)?;
+                changed(transaction)?;
             }
         }
         JobCommand::Forget { id, caller } => {
-            let job = get(&transaction, &id)?;
+            let job = get(transaction, &id)?;
             if !job.state.terminal() || job.caller != caller {
                 return Err(Error::Invalid("only owner may forget terminal job"));
             }
             transaction.execute("DELETE FROM _chunk_jobs WHERE id=?1", [id])?;
-            changed(&transaction)?;
+            changed(transaction)?;
         }
         JobCommand::AcknowledgeWake { generation, due_at } => {
-            let wake = load(&transaction)?.wake;
+            let wake = load(transaction)?.wake;
             if wake.generation != generation || wake.due_at != due_at {
                 return Err(Error::Invalid("stale wake acknowledgement"));
             }
             transaction.execute("UPDATE _chunk_job_wake SET ack_generation=?1 WHERE singleton=1", [generation])?;
         }
     }
-    transaction.commit()?;
-    load(connection)
+    load(transaction)
 }

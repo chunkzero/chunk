@@ -471,6 +471,31 @@ async fn rejected_operation_preserves_time_seed_and_deployment_across_restart() 
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_stops_both_wait_for_a_pending_commit() {
+    let mut harness = Harness::new(false).await;
+    let mut first = Box::pin(harness.backend.mutate("first".into(), call("bump", json!({"id": "p"}))));
+    pending(first.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    let returned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stoppers: Vec<_> = (0..2)
+        .map(|_| {
+            let (backend, returned) = (harness.backend.clone(), returned.clone());
+            std::thread::spawn(move || {
+                backend.stop();
+                returned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(returned.load(std::sync::atomic::Ordering::SeqCst), 0, "a stop returned before the pending commit");
+    harness.controls.commits[0].send(()).unwrap();
+    for stopper in stoppers {
+        stopper.join().unwrap();
+    }
+    assert_eq!(first.await.unwrap().revision, Revision(harness.base.0 + 1));
+}
+
 mod actions;
 mod context;
 mod documents;

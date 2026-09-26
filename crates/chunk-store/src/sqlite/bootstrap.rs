@@ -33,11 +33,15 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
     Ok((canonical, WriterLock(writer_lock)))
 }
 
-pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
+/// The current store format, recorded as SQLite's `user_version`.
+pub(super) const FORMAT: i64 = 7;
+
+/// Reports whether an existing database was migrated from an older format.
+pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
-    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 0 | 2 | 3 | 4 | 5 | 6) {
+    let version = version(&connection)?;
+    if !matches!(version, 0 | 2..=FORMAT) {
         return Err(Error::SchemaVersion(version));
     }
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -103,7 +107,23 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
             INSERT INTO _chunk_job_wake VALUES (1,0,0,NULL);
             PRAGMA user_version = 6; COMMIT;")?;
     }
-    Ok(connection)
+    if version < 7 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE _chunk_metadata ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0);
+             ALTER TABLE _chunk_metadata ADD COLUMN log_sequence INTEGER NOT NULL DEFAULT 0 CHECK (log_sequence >= 0);
+             ALTER TABLE _chunk_metadata ADD COLUMN claim TEXT NOT NULL DEFAULT '';
+             UPDATE _chunk_metadata SET claim = lower(hex(randomblob(16)));
+             CREATE TABLE _chunk_log (sequence INTEGER PRIMARY KEY, entry BLOB NOT NULL) STRICT;
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
+    Ok((connection, version != 0 && version < FORMAT))
+}
+
+pub(super) fn version(connection: &Connection) -> Result<i64> {
+    Ok(connection.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
 #[cfg(test)]

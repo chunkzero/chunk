@@ -229,17 +229,25 @@ struct Owner {
     events: queue::Sender<Event>,
     slots: Arc<Semaphore>,
     stopped: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    thread: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Owner {
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        // A full queue already guarantees the engine will wake and see shutdown.
+        let _ = self.events.try_send(Event::Wake);
+        // Joining under the lock makes concurrent callers wait for the same drain.
+        let mut thread = self.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(thread) = thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        // A full queue already guarantees the engine will wake and see shutdown.
-        let _ = self.events.try_send(Event::Wake);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.stop();
     }
 }
 
@@ -293,10 +301,17 @@ impl Backend {
             events,
             slots: Arc::new(Semaphore::new(REQUESTS)),
             stopped,
-            thread: Some(thread),
+            thread: std::sync::Mutex::new(Some(thread)),
         }));
         initialized.recv().map_err(|_| Error::Closed)??;
         Ok(backend)
+    }
+
+    /// Stops admitting requests, drains accepted commits and joins both threads,
+    /// even while other handles exist; their later requests fail with
+    /// [`Error::Closed`]. Blocks, so call it from a blocking task in async code.
+    pub fn stop(&self) {
+        self.0.stop();
     }
 
     #[must_use]

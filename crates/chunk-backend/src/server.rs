@@ -27,10 +27,12 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     if !config.bind.ip().is_loopback() {
         return Err(io::Error::other("backend must bind loopback"));
     }
+    // Cancelled on a fence as well as by the caller, without cancelling the caller's token.
+    let stop = stop.child_token();
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let connection_path = config.connection.clone();
-    let (backend, bundle, token, platform_token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+    let (backend, bundle, token, platform_token, replicator) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let bundle: Deployment = chunk_service::read(&config.bundle)?;
         let database = config.state.join("environment.sqlite");
@@ -39,9 +41,17 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         }
         let token = chunk_service::secret(&config.state.join("token"))?;
         let platform_token = chunk_service::secret(&config.state.join("platform-token"))?;
-        let store = chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?;
+        let (store, replicator) = match chunk_store::Replication::from_env().map_err(io::Error::other)? {
+            Some(replication) => {
+                let (store, replicator) =
+                    chunk_store::SqliteStore::open_replicated(database, &config.environment, replication)
+                        .map_err(io::Error::other)?;
+                (store, Some(replicator))
+            }
+            None => (chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?, None),
+        };
         let backend = Backend::new(config.environment, Box::new(store)).map_err(io::Error::other)?;
-        Ok((backend, bundle, token, platform_token))
+        Ok((backend, bundle, token, platform_token, replicator))
     })
     .await
     .map_err(io::Error::other)??;
@@ -84,7 +94,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         tokio::pin!(server);
         let result = tokio::select! {
             result = &mut server => result.map_err(io::Error::other),
-            () = stop.cancelled() => {
+            () = stopped(&stop, replicator.as_ref()) => {
                 shutdown.cancel();
                 command_shutdown.cancel();
                 match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
@@ -103,6 +113,31 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         result
     }
     .await;
-    tokio::task::spawn_blocking(move || drop(backend)).await.map_err(io::Error::other)?;
-    result
+    let flushed = tokio::task::spawn_blocking(move || {
+        // Embedders may still hold handles from `Ready`; nothing commits after this.
+        backend.stop();
+        replicator.as_ref().map_or(Ok(()), chunk_store::Replicator::flush)
+    })
+    .await
+    .map_err(io::Error::other)?;
+    result.and(flushed.map_err(io::Error::other))
+}
+
+/// Resolves once `stop` is cancelled, cancelling it when another store claims a
+/// newer epoch of this environment.
+async fn stopped(stop: &CancellationToken, replicator: Option<&chunk_store::Replicator>) {
+    let fenced = async {
+        let Some(replicator) = replicator else {
+            return std::future::pending().await;
+        };
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        while !replicator.fenced() {
+            interval.tick().await;
+        }
+        tracing::error!("another store took over this environment; stopping");
+    };
+    tokio::select! {
+        () = stop.cancelled() => {}
+        () = fenced => stop.cancel(),
+    }
 }

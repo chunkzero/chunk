@@ -25,14 +25,7 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<Deployment>> {
     Ok(deployments)
 }
 
-pub(super) fn retain(connection: &mut Connection, deployment: &Deployment) -> Result<()> {
-    let transaction = connection.transaction()?;
-    insert(&transaction, deployment)?;
-    transaction.commit()?;
-    Ok(())
-}
-
-pub(super) fn insert(transaction: &rusqlite::Transaction<'_>, deployment: &Deployment) -> Result<()> {
+pub(super) fn insert(transaction: &Connection, deployment: &Deployment) -> Result<()> {
     deployment.validate().map_err(Error::Invalid)?;
     let encoded = serde_json::to_string(deployment)?;
     let retired: bool = transaction.query_row(
@@ -57,8 +50,7 @@ pub(super) fn insert(transaction: &rusqlite::Transaction<'_>, deployment: &Deplo
     Ok(())
 }
 
-pub(super) fn release(connection: &mut Connection, id: &str) -> Result<bool> {
-    let transaction = connection.transaction()?;
+pub(super) fn release(transaction: &Connection, id: &str) -> Result<bool> {
     let referenced: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM _chunk_jobs WHERE deployment=?1 AND state IN ('pending','running'))",
         [id],
@@ -71,6 +63,5 @@ pub(super) fn release(connection: &mut Connection, id: &str) -> Result<bool> {
     if removed {
         transaction.execute("INSERT INTO _chunk_retired_deployments VALUES (?1)", [id])?;
     }
-    transaction.commit()?;
     Ok(removed)
 }

@@ -49,14 +49,17 @@
 
 mod jobs;
 mod model;
+mod replication;
 mod snapshot;
 mod sqlite;
 
 pub use chunk_contract::DatabaseSchema;
 pub use jobs::{Job, JobCommand, JobIntent, JobState, Jobs, WakeHandoff};
 pub use model::{
-    Commit, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, RetryContext, Revision, Write,
+    Commit, Document, DocumentKey, Epoch, IndexRange, KeyRange, Operation, Outcome, ReadBudget, RetryContext, Revision,
+    Write,
 };
+pub use replication::{ObjectStorage, Replication, Replicator};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::SqliteStore;
 
@@ -163,6 +166,12 @@ pub enum Error {
     Corrupt(&'static str),
     #[error("snapshot connection was poisoned")]
     Poisoned,
+    #[error("object storage holds a newer history of this environment than the local database")]
+    StaleReplica,
+    #[error("replication: {0}")]
+    Replication(String),
+    #[error("another store claimed a newer epoch of this environment; stop serving it")]
+    Fenced,
     #[error("storage I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("SQLite: {0}")]

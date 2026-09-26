@@ -140,7 +140,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
 
 #[test]
 fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
-    for version in [3, 4, 5] {
+    for version in [3, 4, 5, 6] {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
@@ -156,7 +156,18 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let outcome = store.commit(commit("committed", 1, vec![write("a", Some(json!({"coins": 7})))])).unwrap();
         let context = RetryContext { deployment: "old".into(), timestamp: 123, seed: 456 };
         store.prepare_operation(&operation("failed"), context.clone()).unwrap();
-        store.connection.execute_batch("DROP TABLE _chunk_jobs; DROP TABLE _chunk_job_wake;").unwrap();
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE _chunk_metadata DROP COLUMN epoch;
+                 ALTER TABLE _chunk_metadata DROP COLUMN log_sequence;
+                 ALTER TABLE _chunk_metadata DROP COLUMN claim;
+                 DROP TABLE _chunk_log;",
+            )
+            .unwrap();
+        if version < 6 {
+            store.connection.execute_batch("DROP TABLE _chunk_jobs; DROP TABLE _chunk_job_wake;").unwrap();
+        }
         if version < 5 {
             store.connection.execute_batch("DROP TABLE _chunk_retired_deployments;").unwrap();
         }
@@ -167,6 +178,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         drop(store);
 
         let mut store = SqliteStore::open(&path, "local").unwrap();
+        assert_eq!(store.epoch(), crate::Epoch(1));
         assert!(store.jobs().unwrap().records.is_empty());
         assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));

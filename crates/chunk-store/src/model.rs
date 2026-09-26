@@ -38,6 +38,12 @@ impl Default for ReadBudget {
 #[serde(transparent)]
 pub struct Revision(pub u64);
 
+/// Advances whenever the environment is restored from object storage, so an
+/// `(epoch, revision)` pair is never reused even when a restore loses a tail of revisions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Epoch(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DocumentKey {
     pub table: String,
