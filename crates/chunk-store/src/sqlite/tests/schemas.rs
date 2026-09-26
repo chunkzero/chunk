@@ -140,7 +140,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
 
 #[test]
 fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
-    for version in [3, 4, 5, 6] {
+    for version in [3, 4, 5, 6, 7] {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
@@ -159,12 +159,23 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE _chunk_metadata DROP COLUMN epoch;
-                 ALTER TABLE _chunk_metadata DROP COLUMN log_sequence;
-                 ALTER TABLE _chunk_metadata DROP COLUMN claim;
-                 DROP TABLE _chunk_log;",
+                "DROP INDEX _chunk_operations_committed;
+                 ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+                 ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+                 ALTER TABLE _chunk_jobs DROP COLUMN updated_at;",
             )
             .unwrap();
+        if version < 7 {
+            store
+                .connection
+                .execute_batch(
+                    "ALTER TABLE _chunk_metadata DROP COLUMN epoch;
+                     ALTER TABLE _chunk_metadata DROP COLUMN log_sequence;
+                     ALTER TABLE _chunk_metadata DROP COLUMN claim;
+                     DROP TABLE _chunk_log;",
+                )
+                .unwrap();
+        }
         if version < 6 {
             store.connection.execute_batch("DROP TABLE _chunk_jobs; DROP TABLE _chunk_job_wake;").unwrap();
         }

@@ -20,24 +20,30 @@
 //! its later segments and continues under the next unused epoch. A writer
 //! checks for the next epoch's claim before and after each upload, on every
 //! flush and every `fence_interval` while idle; once it exists, the writer is
-//! fenced and its commits and flushes fail.
+//! fenced and its commits and flushes fail. A fork rebuilds the same state from
+//! another prefix and starts epoch 1 in its own, empty prefix.
+//!
+//! Once a snapshot is `retention` old, the uploader deletes the snapshots and
+//! segments it supersedes, one at a time between uploads and ownership checks.
+//! Claims stay, so epochs are never reused.
 
 use std::{
     io,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{Error, Result};
 
+mod prune;
 mod restore;
 mod s3;
 mod segment;
 mod uploader;
 
-pub(crate) use restore::{Remote, restore};
+pub(crate) use restore::{Remote, fork, restore};
 pub(crate) use segment::Entry;
 
 /// An S3-compatible bucket, or a stand-in for tests. Keys use `/` separators.
@@ -55,10 +61,22 @@ pub trait ObjectStorage: Send + Sync {
     /// Reports missing objects, transport or storage failures.
     fn get(&self, key: &str) -> io::Result<Vec<u8>>;
 
-    /// Lists every key below the `prefix` directory with its size in bytes.
+    /// Lists every object below the `prefix` directory.
     /// # Errors
     /// Reports transport or storage failures.
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>>;
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>>;
+
+    /// Deletes `key`, succeeding when it is already absent.
+    /// # Errors
+    /// Reports transport or storage failures.
+    fn delete(&self, key: &str) -> io::Result<()>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub key: String,
+    pub size: u64,
+    pub modified: SystemTime,
 }
 
 pub struct Replication {
@@ -67,12 +85,14 @@ pub struct Replication {
     batch_bytes: usize,
     snapshot_segments: usize,
     snapshot_bytes: u64,
+    retention: Duration,
     fence_interval: Duration,
 }
 
 impl Replication {
     /// Uploads within about five seconds of a commit, snapshots after 720
-    /// segments or 64 MiB of segments and checks ownership every 10 seconds.
+    /// segments or 64 MiB of segments, checks ownership every 10 seconds and
+    /// keeps superseded objects for 7 days.
     #[must_use]
     pub fn new(storage: Arc<dyn ObjectStorage>) -> Self {
         Self {
@@ -81,8 +101,16 @@ impl Replication {
             batch_bytes: 8 * 1024 * 1024,
             snapshot_segments: 720,
             snapshot_bytes: 64 * 1024 * 1024,
+            retention: Duration::from_hours(7 * 24),
             fence_interval: Duration::from_secs(10),
         }
+    }
+
+    /// Keeps snapshots and segments for `retention` after a newer snapshot
+    /// replaces them, so restores that already listed them can finish.
+    #[must_use]
+    pub fn with_retention(self, retention: Duration) -> Self {
+        Self { retention, ..self }
     }
 
     /// Reads S3-compatible storage settings. Replication is off unless
@@ -93,7 +121,15 @@ impl Replication {
     /// # Errors
     /// Rejects incomplete or invalid settings.
     pub fn from_env() -> Result<Option<Self>> {
-        Ok(s3::S3::from_env()?.map(|storage| Self::new(Arc::new(storage))))
+        Ok(s3::S3::from_env(None)?.map(|storage| Self::new(Arc::new(storage))))
+    }
+
+    /// Reads settings like [`Self::from_env`] but stores objects below `prefix`,
+    /// for example to fork an environment within the same bucket.
+    /// # Errors
+    /// Rejects incomplete or invalid settings.
+    pub fn from_env_with_prefix(prefix: &str) -> Result<Option<Self>> {
+        Ok(s3::S3::from_env(Some(prefix))?.map(|storage| Self::new(Arc::new(storage))))
     }
 
     pub(crate) fn storage(&self) -> &dyn ObjectStorage {

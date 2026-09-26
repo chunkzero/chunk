@@ -34,10 +34,9 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 }
 
 /// The current store format, recorded as SQLite's `user_version`.
-pub(super) const FORMAT: i64 = 7;
+pub(super) const FORMAT: i64 = 8;
 
-/// Reports whether an existing database was migrated from an older format.
-pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
+pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version = version(&connection)?;
@@ -75,6 +74,12 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
         connection.query_row("SELECT environment FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?;
     if stored != environment {
         return Err(Error::EnvironmentMismatch);
+    }
+    if (7..FORMAT).contains(&version) {
+        // Segments written after a migration cannot apply to a snapshot taken
+        // before it. Require a new snapshot before migrating, so a crash at any
+        // point either repeats the migration or already left this marker.
+        super::log::mark_unlogged(&connection)?;
     }
     if version < 3 {
         connection.execute_batch(
@@ -119,7 +124,20 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
              COMMIT;",
         )?;
     }
-    Ok((connection, version != 0 && version < FORMAT))
+    if version < 8 {
+        // Existing records get a full retention window from the upgrade.
+        let now = super::retention::now();
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE _chunk_operations ADD COLUMN committed_at INTEGER NOT NULL DEFAULT {now};
+             CREATE INDEX _chunk_operations_committed ON _chunk_operations(committed_at);
+             ALTER TABLE _chunk_retry_contexts ADD COLUMN prepared_at INTEGER NOT NULL DEFAULT {now};
+             ALTER TABLE _chunk_jobs ADD COLUMN updated_at INTEGER NOT NULL DEFAULT {now};
+             PRAGMA user_version = 8;
+             COMMIT;"
+        ))?;
+    }
+    Ok(connection)
 }
 
 pub(super) fn version(connection: &Connection) -> Result<i64> {

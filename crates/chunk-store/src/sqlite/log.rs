@@ -12,6 +12,9 @@ use crate::{
     replication::{Entry, Shared},
 };
 
+/// The first store format with a replicated log.
+const REPLICATED_FORMAT: i64 = 7;
+
 /// Present while the store is replicated.
 pub(super) struct Log {
     shared: Arc<Shared>,
@@ -127,10 +130,13 @@ pub(crate) struct Replica {
 }
 
 impl Replica {
+    /// Accepts snapshots of any replicated store format. Their segments were
+    /// written in the same format, so they replay first; the restored store
+    /// migrates when it opens.
     pub fn open(path: &std::path::Path, environment: &str, epoch: u64, sequence: u64) -> Result<Self> {
         let connection = Connection::open(path)?;
-        if super::bootstrap::version(&connection)? != super::bootstrap::FORMAT {
-            return Err(Error::Corrupt("snapshot has an unexpected store format"));
+        if !(REPLICATED_FORMAT..=super::bootstrap::FORMAT).contains(&super::bootstrap::version(&connection)?) {
+            return Err(Error::Corrupt("snapshot has an unsupported store format"));
         }
         let stored: String =
             connection
@@ -163,11 +169,24 @@ impl Replica {
         Ok(self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?)
     }
 
-    /// Commits the replayed entries under a claimed `epoch`, leaving a single durable file.
-    pub fn finish(self, epoch: u64, claim: &str) -> Result<()> {
+    /// Drops the source's retry contexts and, unless `keep_jobs`, its pending and
+    /// running jobs, so a fork never resumes work the source scheduled.
+    pub fn discard_inherited(&self, keep_jobs: bool) -> Result<()> {
+        self.connection.execute("DELETE FROM _chunk_retry_contexts", [])?;
+        if !keep_jobs
+            && self.connection.execute("DELETE FROM _chunk_jobs WHERE state IN ('pending', 'running')", [])? > 0
+        {
+            super::jobs::changed(&self.connection)?;
+        }
+        Ok(())
+    }
+
+    /// Commits the replayed entries as `environment` under a claimed `epoch`,
+    /// leaving a single durable file.
+    pub fn finish(self, epoch: u64, claim: &str, environment: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE _chunk_metadata SET epoch = ?1, claim = ?2 WHERE singleton = 1",
-            rusqlite::params![epoch, claim],
+            "UPDATE _chunk_metadata SET epoch = ?1, claim = ?2, environment = ?3 WHERE singleton = 1",
+            rusqlite::params![epoch, claim, environment],
         )?;
         self.connection.execute_batch("DELETE FROM _chunk_log; COMMIT;")?;
         self.connection.close().map_err(|(_, error)| error)?;

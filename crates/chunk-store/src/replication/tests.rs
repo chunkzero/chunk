@@ -3,7 +3,7 @@ use std::{
     io,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use rusqlite::{Connection, types::Value};
@@ -12,11 +12,11 @@ use serde_json::json;
 use super::*;
 use crate::{
     Epoch, Error, Operation, RetryContext, Revision, SqliteStore, Storage,
-    tests::{commit, operation, schema, write},
+    tests::{commit, job, operation, request, schema, target, write},
 };
 
 #[derive(Default)]
-struct Memory(Mutex<BTreeMap<String, Vec<u8>>>);
+struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
 
 impl Memory {
     fn keys(&self) -> Vec<String> {
@@ -30,7 +30,7 @@ impl Memory {
 
 impl ObjectStorage for Memory {
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
-        self.0.lock().unwrap().insert(key.into(), bytes);
+        self.0.lock().unwrap().insert(key.into(), (bytes, SystemTime::now()));
         Ok(())
     }
 
@@ -39,21 +39,26 @@ impl ObjectStorage for Memory {
         if objects.contains_key(key) {
             return Ok(false);
         }
-        objects.insert(key.into(), bytes);
+        objects.insert(key.into(), (bytes, SystemTime::now()));
         Ok(true)
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
-        self.0.lock().unwrap().get(key).cloned().ok_or_else(|| io::ErrorKind::NotFound.into())
+        self.0.lock().unwrap().get(key).map(|(bytes, _)| bytes.clone()).ok_or_else(|| io::ErrorKind::NotFound.into())
     }
 
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
         let objects = self.0.lock().unwrap();
         Ok(objects
             .iter()
             .filter(|(key, _)| key.starts_with(&format!("{prefix}/")))
-            .map(|(key, bytes)| (key.clone(), bytes.len() as u64))
+            .map(|(key, (bytes, modified))| Listed { key: key.clone(), size: bytes.len() as u64, modified: *modified })
             .collect())
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
     }
 }
 
@@ -68,6 +73,18 @@ fn manual_on(storage: Arc<dyn ObjectStorage>) -> Replication {
 
 fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
+}
+
+fn epoch_objects(storage: &Memory, epoch: u64) -> Vec<String> {
+    storage.keys().into_iter().filter(|key| key.starts_with(&format!("epochs/{epoch:020}/"))).collect()
+}
+
+fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn count(storage: &Memory, kind: &str) -> usize {
@@ -94,7 +111,7 @@ fn dump(path: &Path) -> Vec<String> {
         let mut cursor = rows.query([]).unwrap();
         while let Some(row) = cursor.next().unwrap() {
             let values: Vec<String> = (0..columns.len())
-                .filter(|index| !matches!(columns[*index].as_str(), "epoch" | "claim" | "log_sequence"))
+                .filter(|index| !matches!(columns[*index].as_str(), "epoch" | "claim" | "log_sequence" | "environment"))
                 .map(|index| format!("{:?}", row.get::<_, Value>(index).unwrap()))
                 .collect();
             lines.push(format!("  {}", values.join(", ")));
@@ -134,19 +151,31 @@ fn restore_replays_the_latest_snapshot_and_later_segments_exactly() {
     store.prepare_operation(&operation("pending"), context).unwrap();
     store.commit(commit("two", 4, vec![write("a", None)])).unwrap();
     replicator.flush().unwrap();
+    // A batch shares one entry; its rejected commit's savepoint rollback must not replicate.
+    let rejected = crate::JobIntent::Cancel { id: "missing".into(), caller: json!(null) };
+    let results = store.batch(vec![
+        request(commit("batch-a", 5, vec![write("f", Some(json!({"coins": 7})))]), vec![]),
+        request(commit("batch-rejected", 6, vec![write("g", Some(json!({"coins": 8})))]), vec![rejected]),
+        request(commit("batch-b", 6, vec![write("f", None), write("h", Some(json!({"coins": 9})))]), vec![]),
+    ]);
+    assert!(results[1].is_err() && results[2].is_ok());
+    replicator.flush().unwrap();
+    let batch_replayed = directory.path().join("batch.db");
+    drop(open(&batch_replayed, manual(&storage.copy())));
+    assert_eq!(dump(&batch_replayed), dump(&path));
     drop((store, replicator));
 
     // Writes made without replication reach storage through the next snapshot.
     let mut store = SqliteStore::open(&path, "local").unwrap();
-    store.commit(commit("unlogged", 5, vec![write("d", Some(json!({"coins": 4})))])).unwrap();
+    store.commit(commit("unlogged", 7, vec![write("d", Some(json!({"coins": 4})))])).unwrap();
     drop(store);
     let (mut store, replicator) = open(&path, manual(&storage));
-    store.commit(commit("five", 6, vec![write("b", Some(json!({"coins": 5})))])).unwrap();
+    store.commit(commit("five", 8, vec![write("b", Some(json!({"coins": 5})))])).unwrap();
     replicator.flush().unwrap();
-    store.commit(commit("six", 7, vec![write("e", Some(json!({"coins": 6})))])).unwrap();
+    store.commit(commit("six", 9, vec![write("e", Some(json!({"coins": 6})))])).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
-    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (3, 3));
+    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (3, 4));
 
     let restored = directory.path().join("restored.db");
     let (store, _replicator) = open(&restored, manual(&storage));
@@ -224,8 +253,12 @@ impl ObjectStorage for Racing {
         self.storage.get(key)
     }
 
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
         self.storage.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.storage.delete(key)
     }
 }
 
@@ -310,11 +343,7 @@ fn idle_writers_detect_a_takeover_and_never_upload_afterwards() {
     // The idle writer notices the takeover without any commit or flush.
     let (mut taken, taken_replicator) = open(&directory.path().join("taken.db"), manual(&storage));
     assert_eq!(taken.epoch(), Epoch(2));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !idle_replicator.fenced() {
-        assert!(Instant::now() < deadline, "idle writer was never fenced");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    eventually("idle writer was never fenced", || idle_replicator.fenced());
     assert!(matches!(idle.commit(commit("idle", 1, vec![])), Err(Error::Fenced)));
 
     // A commit accepted before the next check is never uploaded.
@@ -401,6 +430,335 @@ fn uploads_follow_commits_and_an_idle_store_uploads_nothing() {
 }
 
 #[test]
+fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_source() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.db");
+    let (mut store, replicator) = open(&path, manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    replicator.flush().unwrap();
+    let before = source.keys();
+
+    let target = Arc::new(Memory::default());
+    let forked = directory.path().join("fork.db");
+    let (mut fork, fork_replicator) =
+        SqliteStore::fork(&manual(&source), "local", &forked, "preview", manual(&target), false).unwrap();
+    assert_eq!(fork.epoch(), Epoch(1));
+    assert_eq!(count(&target, "/snapshots/"), 1);
+    fork.commit(commit("fork-only", 2, vec![write("b", Some(json!({"coins": 2})))])).unwrap();
+    fork_replicator.flush().unwrap();
+    store.commit(commit("source-only", 2, vec![write("c", Some(json!({"coins": 3})))])).unwrap();
+    assert_eq!(source.keys(), before);
+    drop((fork, fork_replicator));
+
+    let restored = directory.path().join("restored.db");
+    let (store, _replicator) = SqliteStore::open_replicated(&restored, "preview", manual(&target)).unwrap();
+    assert_eq!(store.epoch(), Epoch(2));
+    assert!(store.outcome(&operation("fork-only")).unwrap().is_some());
+    assert!(store.outcome(&operation("source-only")).unwrap().is_none());
+    drop(store);
+    assert_eq!(dump(&restored), dump(&forked));
+
+    assert!(matches!(
+        SqliteStore::fork(
+            &manual(&source),
+            "local",
+            directory.path().join("again.db"),
+            "preview",
+            manual(&target),
+            false
+        ),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        SqliteStore::fork(
+            &manual(&target),
+            "local",
+            directory.path().join("wrong.db"),
+            "other",
+            manual(&Arc::default()),
+            false
+        ),
+        Err(Error::EnvironmentMismatch)
+    ));
+}
+
+#[test]
+fn a_fork_drops_retry_contexts_and_unfinished_jobs_unless_asked_to_keep_jobs() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("source.db"), manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    store.retain_deployment(&target()).unwrap();
+    let scheduled = vec![crate::JobIntent::Schedule(job("later"))];
+    store.commit_with_jobs(commit("schedule", 1, vec![write("a", Some(json!({"coins": 1})))]), scheduled).unwrap();
+    let inherited = RetryContext { deployment: "v1".into(), timestamp: 1, seed: 2 };
+    store.prepare_operation(&operation("unfinished"), inherited.clone()).unwrap();
+    replicator.flush().unwrap();
+
+    let fresh = RetryContext { deployment: "v1".into(), timestamp: 3, seed: 4 };
+    let fork = |name: &str, keep_jobs| {
+        let (store, _replicator) = SqliteStore::fork(
+            &manual(&source),
+            "local",
+            directory.path().join(name),
+            "preview",
+            manual(&Arc::default()),
+            keep_jobs,
+        )
+        .unwrap();
+        store
+    };
+    let mut dropped = fork("dropped.db", false);
+    assert!(dropped.jobs().unwrap().records.is_empty());
+    assert!(dropped.outcome(&operation("schedule")).unwrap().is_some());
+    assert_eq!(dropped.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+    let mut kept = fork("kept.db", true);
+    assert_eq!(kept.jobs().unwrap().records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["later"]);
+    assert_eq!(kept.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+
+    // Failing after the database is installed still leaves no inherited work in it.
+    let interrupted = directory.path().join("interrupted.db");
+    let failing = Arc::new(FailingLists { storage: Arc::default(), remaining: Mutex::new(1) });
+    assert!(SqliteStore::fork(&manual(&source), "local", &interrupted, "preview", manual_on(failing), false).is_err());
+    let mut reopened = SqliteStore::open(&interrupted, "preview").unwrap();
+    assert!(reopened.jobs().unwrap().records.is_empty());
+    assert_eq!(reopened.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+    assert_eq!(store.prepare_operation(&operation("unfinished"), fresh).unwrap(), inherited);
+}
+
+/// Fails every listing after the first `remaining`.
+struct FailingLists {
+    storage: Arc<Memory>,
+    remaining: Mutex<usize>,
+}
+
+impl ObjectStorage for FailingLists {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.storage.put(key, bytes)
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        self.storage.create(key, bytes)
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.storage.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
+        let mut remaining = self.remaining.lock().unwrap();
+        if *remaining == 0 {
+            return Err(io::Error::other("listing failed"));
+        }
+        *remaining -= 1;
+        self.storage.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.storage.delete(key)
+    }
+}
+
+#[test]
+fn a_crash_right_after_a_format_migration_still_forces_a_new_snapshot() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let (mut store, replicator) = open(&path, manual(&storage));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // A format-7 database as an older binary left it, migrated by a process
+    // that stops before replication resumes.
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "DROP INDEX _chunk_operations_committed;
+             ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+             ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+             ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+    drop(crate::sqlite::bootstrap::open(&path, "local").unwrap());
+
+    let snapshots = count(&storage, "/snapshots/");
+    let (mut store, replicator) = open(&path, manual(&storage));
+    store.commit(commit("after", 1, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // The migrated state reaches storage as a snapshot, never as segments on the old one.
+    assert_eq!(count(&storage, "/snapshots/"), snapshots + 1);
+    let (store, _replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert!(store.outcome(&operation("after")).unwrap().is_some());
+}
+
+#[test]
+fn format_7_snapshots_and_segments_restore_and_fork_before_migrating() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    // A format-7 host's objects: a snapshot at sequence 1, then one logged commit.
+    let legacy = directory.path().join("legacy.db");
+    let mut store = SqliteStore::open(&legacy, "local").unwrap();
+    store.apply_schema(&schema()).unwrap();
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    drop(store);
+    let connection = Connection::open(&legacy).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             DROP INDEX _chunk_operations_committed;
+             ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+             ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+             ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             DELETE FROM _chunk_log;
+             UPDATE _chunk_metadata SET epoch = 1, log_sequence = 1;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+    storage.create(&segment::claim_key(1), b"legacy".to_vec()).unwrap();
+    storage.put(&segment::snapshot_key(1, 1), std::fs::read(&legacy).unwrap()).unwrap();
+    let mut session = rusqlite::session::Session::new(&connection).unwrap();
+    session.attach(None::<&str>).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE _chunk_metadata SET revision = 3, log_sequence = 2;
+             INSERT INTO _chunk_operations SELECT 'two', fingerprint, 3, 'null' FROM _chunk_operations;",
+        )
+        .unwrap();
+    let mut changeset = Vec::new();
+    session.changeset_strm(&mut changeset).unwrap();
+    drop(session);
+    let entry = Entry { sequence: 2, revision: 3, statements: Vec::new(), changeset }.encode().unwrap();
+    storage.put(&segment::segment_key(1, 2, 2), segment::encode(1, [entry.as_slice()]).unwrap()).unwrap();
+
+    let (fork, _replicator) = SqliteStore::fork(
+        &manual(&storage),
+        "local",
+        directory.path().join("fork.db"),
+        "preview",
+        manual(&Arc::default()),
+        false,
+    )
+    .unwrap();
+    assert!(fork.outcome(&operation("two")).unwrap().is_some());
+
+    let (mut store, replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.snapshot().unwrap().revision), (Epoch(2), Revision(3)));
+    assert!(store.outcome(&operation("one")).unwrap().is_some() && store.outcome(&operation("two")).unwrap().is_some());
+    store.commit(commit("three", 3, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // The next restore starts from the migrated epoch's snapshot.
+    let (store, _replicator) = open(&directory.path().join("again.db"), manual(&storage));
+    assert_eq!((store.epoch(), store.outcome(&operation("three")).unwrap().is_some()), (Epoch(3), true));
+}
+
+#[test]
+fn superseded_objects_are_deleted_once_a_newer_snapshot_is_old_enough() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let replication = || Replication { snapshot_segments: 1, ..manual(&storage) }.with_retention(Duration::ZERO);
+    let (mut store, replicator) = open(&path, replication());
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    for (index, id) in ["one", "two", "three"].into_iter().enumerate() {
+        store.commit(commit(id, index as u64 + 1, vec![write(id, Some(json!({"coins": 1})))])).unwrap();
+        replicator.flush().unwrap();
+    }
+    eventually("superseded objects were never pruned", || {
+        (count(&storage, "/snapshots/"), count(&storage, "/segments/")) == (1, 1)
+    });
+    drop((store, replicator));
+
+    let restored = directory.path().join("restored.db");
+    let (mut store, replicator) = open(&restored, replication());
+    store.commit(commit("four", 4, vec![])).unwrap();
+    replicator.flush().unwrap();
+    // The new epoch's first snapshot supersedes every object of epoch 1 except its claim.
+    eventually("epoch 1 was never pruned", || epoch_objects(&storage, 1) == [segment::claim_key(1)]);
+    drop((store, replicator));
+    let (store, _replicator) = open(&directory.path().join("again.db"), manual(&storage));
+    assert!(store.outcome(&operation("four")).unwrap().is_some());
+    drop(store);
+    assert_eq!(dump(&directory.path().join("again.db")), dump(&restored));
+
+    // Within the window nothing is deleted.
+    let kept = Arc::new(Memory::default());
+    let (mut store, replicator) =
+        open(&directory.path().join("kept.db"), Replication { snapshot_segments: 1, ..manual(&kept) });
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("one", 1, vec![])).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("two", 2, vec![])).unwrap();
+    replicator.flush().unwrap();
+    assert_eq!(count(&kept, "/snapshots/"), 2);
+}
+
+/// Takes `delay` for every delete, like a slow bucket.
+struct SlowDeletes(Arc<Memory>, Duration);
+
+impl ObjectStorage for SlowDeletes {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.0.put(key, bytes)
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        self.0.create(key, bytes)
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.0.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
+        self.0.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        std::thread::sleep(self.1);
+        self.0.delete(key)
+    }
+}
+
+#[test]
+fn a_deletion_backlog_never_holds_up_uploads_or_fencing() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) =
+        open(&directory.path().join("data.db"), Replication { snapshot_segments: 1, ..manual(&storage) });
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    for revision in 1..=20 {
+        store.commit(commit(&format!("old-{revision}"), revision, vec![])).unwrap();
+        replicator.flush().unwrap();
+    }
+    drop((store, replicator));
+    let backlog = epoch_objects(&storage, 1).len();
+    assert!(backlog > 20);
+
+    // Deleting the backlog takes seconds; uploads and fence checks go between deletes.
+    let slow = Arc::new(SlowDeletes(storage.clone(), Duration::from_millis(200)));
+    let replication =
+        Replication { fence_interval: Duration::from_millis(10), ..manual_on(slow) }.with_retention(Duration::ZERO);
+    let (mut store, replicator) = open(&directory.path().join("restored.db"), replication);
+    assert_eq!(store.epoch(), Epoch(2));
+    store.commit(commit("new", 21, vec![])).unwrap();
+    replicator.flush().unwrap();
+    assert!(epoch_objects(&storage, 1).len() > backlog / 2, "the upload waited for the backlog");
+    eventually("deletions stopped after the upload", || epoch_objects(&storage, 1).len() < backlog);
+
+    assert!(storage.create(&segment::claim_key(3), Vec::new()).unwrap());
+    eventually("the writer was never fenced", || replicator.fenced());
+    assert!(epoch_objects(&storage, 1).len() > backlog / 2, "fencing waited for the backlog");
+}
+
+#[test]
 fn segments_round_trip_and_reject_corruption() {
     let entry = segment::Entry {
         sequence: 7,
@@ -426,6 +784,12 @@ fn s3_round_trip() {
     let claim = "probes/claim";
     assert!(replication.storage().create(claim, vec![1]).unwrap());
     assert!(!replication.storage().create(claim, vec![2]).unwrap());
+    let listed = replication.storage().list("probes").unwrap();
+    assert!(listed.iter().any(|object| object.key == claim
+        && SystemTime::now().duration_since(object.modified).unwrap_or_default() < Duration::from_secs(600)));
+    replication.storage().delete(claim).unwrap();
+    replication.storage().delete(claim).unwrap();
+    assert!(replication.storage().list("probes").unwrap().is_empty());
     let (mut store, replicator) = open(&path, Replication::from_env().unwrap().unwrap());
     let epoch = store.epoch();
     store.apply_schema(&schema()).unwrap();

@@ -6,7 +6,9 @@ use std::{
 };
 
 use chunk_js::{DeploymentId, Limits};
-use chunk_store::{Commit, DatabaseSchema, DocumentKey, Operation, Outcome, Revision, Snapshot, SqliteStore, Storage};
+use chunk_store::{
+    Commit, DatabaseSchema, DocumentKey, Operation, Outcome, Reply, Request, Revision, Snapshot, SqliteStore, Storage,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc as signals;
 
@@ -75,6 +77,9 @@ async fn pending<F: Future>(mut future: Pin<&mut F>) {
 enum Notice {
     Preparing,
     Commit(usize),
+    Scheduling,
+    /// The requests of one shared durable write, as `prepare {id}` or `commit {id}`.
+    Batch(Vec<String>),
 }
 
 struct ControlledStore {
@@ -86,9 +91,103 @@ struct ControlledStore {
     ambiguous: bool,
     rejected: bool,
     attempts: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
+    /// Holds the first scheduling command, keeping the commit thread busy.
+    scheduling: Option<mpsc::Receiver<()>>,
+    /// Sends shared writes to the inner store whole, reporting each one and
+    /// rejecting the commit of operation `rejected` with `Capacity`.
+    batched: bool,
+    /// Holds the first shared write that contains a commit.
+    batch: Option<mpsc::Receiver<()>>,
+    /// The most successful commits one underlying write has persisted.
+    largest_write: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ControlledStore {
+    fn new(inner: SqliteStore, notices: signals::UnboundedSender<Notice>) -> Self {
+        Self {
+            inner,
+            prepare: None,
+            commits: Vec::new(),
+            committed: 0,
+            notices,
+            ambiguous: false,
+            rejected: false,
+            attempts: None,
+            scheduling: None,
+            batched: false,
+            batch: None,
+            largest_write: std::sync::Arc::default(),
+        }
+    }
+
+    fn shared(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        let names = requests
+            .iter()
+            .map(|request| match request {
+                Request::Prepare { operation, .. } => format!("prepare {}", operation.id),
+                Request::Commit { commit, .. } => format!("commit {}", commit.operation.id),
+            })
+            .collect();
+        let _ = self.notices.send(Notice::Batch(names));
+        if requests.iter().any(|request| matches!(request, Request::Commit { .. }))
+            && let Some(gate) = self.batch.take()
+        {
+            let _ = gate.recv();
+        }
+        let (mut results, mut run) = (Vec::new(), Vec::new());
+        for request in requests {
+            if matches!(&request, Request::Commit { commit, .. } if commit.operation.id == "rejected") {
+                results.extend(self.write(std::mem::take(&mut run)));
+                results.push(Err(chunk_store::Error::Capacity));
+            } else {
+                run.push(request);
+            }
+        }
+        results.extend(self.write(run));
+        results
+    }
+
+    fn write(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        let results = self.inner.batch(requests);
+        let committed = results.iter().filter(|result| matches!(result, Ok(Reply::Committed(_)))).count();
+        self.largest_write.fetch_max(committed, std::sync::atomic::Ordering::SeqCst);
+        results
+    }
 }
 
 impl Storage for ControlledStore {
+    fn batch(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        if self.batched {
+            return self.shared(requests);
+        }
+        let mut results = Vec::new();
+        for request in requests {
+            let result = match request {
+                Request::Prepare { operation, context } => {
+                    self.prepare_operation(&operation, context).map(Reply::Prepared)
+                }
+                Request::Commit { commit, intents } => self.commit_with_jobs(commit, intents).map(Reply::Committed),
+            };
+            let stop = result.as_ref().is_err_and(|error| !error.rejected());
+            results.push(result);
+            if stop {
+                break;
+            }
+        }
+        results
+    }
+
+    fn job_command(&mut self, command: chunk_store::JobCommand) -> chunk_store::Result<chunk_store::Jobs> {
+        if matches!(command, chunk_store::JobCommand::Recover) {
+            return self.jobs();
+        }
+        if let Some(gate) = self.scheduling.take() {
+            let _ = self.notices.send(Notice::Scheduling);
+            let _ = gate.recv();
+        }
+        Err(chunk_store::Error::Invalid("durable scheduling unsupported"))
+    }
+
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
         self.inner.activate_deployment(deployment)
     }
@@ -123,6 +222,9 @@ impl Storage for ControlledStore {
     }
     fn outcome(&self, operation: &Operation) -> chunk_store::Result<Option<Outcome>> {
         self.inner.outcome(operation)
+    }
+    fn epoch(&self) -> chunk_store::Epoch {
+        self.inner.epoch()
     }
     fn commit(&mut self, commit: Commit) -> chunk_store::Result<Outcome> {
         if let Some(attempts) = &self.attempts {
@@ -181,14 +283,11 @@ impl Harness {
             (None, None)
         };
         let store = ControlledStore {
-            inner: store,
             prepare: prepare_receiver,
             commits: receivers,
-            committed: 0,
-            notices,
             ambiguous,
             rejected,
-            attempts: None,
+            ..ControlledStore::new(store, notices)
         };
         let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
@@ -404,30 +503,49 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
 
 #[tokio::test]
 async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
-    let mut harness = Harness::with_options(false, false, true).await;
-    let backend = &harness.backend;
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, mut notice) = signals::unbounded_channel();
+    let (scheduling, scheduling_gate) = mpsc::channel();
+    let (commits, gates): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
+    let store = ControlledStore {
+        scheduling: Some(scheduling_gate),
+        commits: gates,
+        ..ControlledStore::new(open(&directory), notices)
+    };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let barrier = || backend.query(call("get", json!({"id":"unrelated"})));
     let mut watch = backend.subscribe(call("indexed", json!({}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    // Both prepares share one durable write, so both mutations stage before either commits.
+    let mut blocker = Box::pin(backend.acknowledge_wake(0, None));
+    pending(blocker.as_mut()).await;
+    assert_eq!(notice.recv().await.unwrap(), Notice::Scheduling);
     let mut seed = Box::pin(backend.mutate("seed-index".into(), call("seedIndex", json!({}))));
     pending(seed.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Preparing);
     let mut shift = Box::pin(backend.mutate("shift-index".into(), call("shiftIndex", json!({}))));
     pending(shift.as_mut()).await;
-    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
-    harness.controls.prepare.take().unwrap().send(()).unwrap();
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    barrier().await.unwrap();
+    scheduling.send(()).unwrap();
+    assert!(blocker.await.is_err());
+    assert_eq!(notice.recv().await.unwrap(), Notice::Commit(0));
+    barrier().await.unwrap();
     let mut query = Box::pin(backend.query(call("indexed", json!({}))));
     pending(query.as_mut()).await;
-    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
-    harness.controls.commits[0].send(()).unwrap();
-    seed.await.unwrap();
-    assert_eq!(value(&watch.next().await.unwrap()), json!([["a", {"coins":1}]]));
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    commits[0].send(()).unwrap();
+    assert_eq!(notice.recv().await.unwrap(), Notice::Commit(1));
     pending(query.as_mut()).await;
-    harness.controls.commits[1].send(()).unwrap();
+    pending(shift.as_mut()).await;
+    commits[1].send(()).unwrap();
+    seed.await.unwrap();
     assert_eq!(value(&shift.await.unwrap()), json!([["c", {"coins":3}]]));
     assert_eq!(value(&query.await.unwrap()), json!([["c", {"coins":3}]]));
-    assert_eq!(value(&watch.next().await.unwrap()), json!([["c", {"coins":3}]]));
+    // Subscribers see the seeded state only if the two commits were written separately.
+    let mut published = value(&watch.next().await.unwrap());
+    if published == json!([["a", {"coins":1}]]) {
+        published = value(&watch.next().await.unwrap());
+    }
+    assert_eq!(published, json!([["c", {"coins":3}]]));
     backend.mutate("leave-range".into(), call("put", json!({"id":"c", "value":{"coins":9}}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
     backend.mutate("enter-range".into(), call("put", json!({"id":"z", "value":{"coins":2}}))).await.unwrap();
@@ -440,14 +558,9 @@ async fn rejected_operation_preserves_time_seed_and_deployment_across_restart() 
     let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (notices, _) = signals::unbounded_channel();
     let store = ControlledStore {
-        inner: open(&directory),
-        prepare: None,
-        commits: Vec::new(),
-        committed: 0,
-        notices,
-        ambiguous: false,
         rejected: true,
         attempts: Some(attempts.clone()),
+        ..ControlledStore::new(open(&directory), notices)
     };
     let source = "export function attempt(ctx) { ctx.db.put('profiles','p',{coins:1}); return {time:Date.now(), random:Math.random(), id:crypto.randomUUID()}; }";
     let backend = Backend::new("local".into(), Box::new(store)).unwrap();
@@ -497,6 +610,7 @@ async fn concurrent_stops_both_wait_for_a_pending_commit() {
 }
 
 mod actions;
+mod batching;
 mod context;
 mod documents;
 mod effects;

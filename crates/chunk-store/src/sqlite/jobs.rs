@@ -3,8 +3,20 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Error, Job, JobCommand, JobIntent, JobState, Jobs, Result, WakeHandoff};
 
-const MAX_JOBS: usize = 256;
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// How many job records, of any state, the store keeps and how many bytes they
+/// may take. Scheduling beyond either fails with [`Error::JobBudget`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobLimits {
+    pub jobs: usize,
+    pub bytes: usize,
+}
+
+impl Default for JobLimits {
+    /// Four retained jobs per player for 5,000 players.
+    fn default() -> Self {
+        Self { jobs: 20_000, bytes: 64 * 1024 * 1024 }
+    }
+}
 
 fn state(state: JobState) -> &'static str {
     match state {
@@ -20,18 +32,9 @@ fn state(state: JobState) -> &'static str {
 pub(super) fn load(connection: &Connection) -> Result<Jobs> {
     let mut statement = connection.prepare("SELECT payload FROM _chunk_jobs ORDER BY id")?;
     let values = statement.query_map([], |row| row.get::<_, String>(0))?;
-    let mut records: Vec<Job> = Vec::new();
-    let mut bytes = 0;
-    for value in values {
-        let value = value?;
-        bytes += value.len();
-        if records.len() >= MAX_JOBS || bytes > MAX_BYTES {
-            return Err(Error::Corrupt("job capacity"));
-        }
-        records.push(serde_json::from_str(&value)?);
-    }
-    let running =
-        u32::try_from(records.iter().filter(|job| job.state == JobState::Running).count()).expect("bounded jobs");
+    let records = values.map(|value| Ok(serde_json::from_str(&value?)?)).collect::<Result<Vec<Job>>>()?;
+    let running = u32::try_from(records.iter().filter(|job| job.state == JobState::Running).count())
+        .map_err(|_| Error::Corrupt("job count"))?;
     let wake = connection.query_row(
         "SELECT generation,next_due,ack_generation=generation FROM _chunk_job_wake WHERE singleton=1",
         [],
@@ -51,7 +54,7 @@ fn save(connection: &Connection, job: &Job) -> Result<()> {
     if payload.len() > 256 * 1024 {
         return Err(Error::Capacity);
     }
-    connection.execute("INSERT INTO _chunk_jobs VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET state=excluded.state,due_at=excluded.due_at,payload=excluded.payload",params![job.id,job.deployment,state(job.state),job.due_at,payload])?;
+    connection.execute("INSERT INTO _chunk_jobs (id,deployment,state,due_at,payload,updated_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,due_at=excluded.due_at,payload=excluded.payload,updated_at=excluded.updated_at",params![job.id,job.deployment,state(job.state),job.due_at,payload,super::retention::now()])?;
     Ok(())
 }
 
@@ -90,16 +93,12 @@ fn charge(job: &Job) -> Result<usize> {
     Ok(serde_json::to_vec(job)?.len() + 9 - state(job.state).len())
 }
 
-fn changed(connection: &Connection) -> Result<()> {
-    let (count, bytes) = totals(connection)?;
-    if count > MAX_JOBS || bytes > MAX_BYTES {
-        return Err(Error::Capacity);
-    }
+pub(super) fn changed(connection: &Connection) -> Result<()> {
     connection.execute("UPDATE _chunk_job_wake SET generation=generation+1,next_due=(SELECT min(due_at) FROM _chunk_jobs WHERE state='pending') WHERE singleton=1",[])?;
     Ok(())
 }
 
-pub(super) fn apply(connection: &Connection, intents: &[JobIntent]) -> Result<()> {
+pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &JobLimits) -> Result<()> {
     if intents.len() > 16 {
         return Err(Error::Capacity);
     }
@@ -163,13 +162,19 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent]) -> Result<()
             }
         }
     }
+    if intents.iter().any(|intent| matches!(intent, JobIntent::Schedule(_))) {
+        let (count, bytes) = totals(connection)?;
+        if count > limits.jobs || bytes > limits.bytes {
+            return Err(Error::JobBudget);
+        }
+    }
     if !intents.is_empty() {
         changed(connection)?;
     }
     Ok(())
 }
 
-pub(super) fn command(transaction: &Connection, command: JobCommand) -> Result<Jobs> {
+pub(super) fn command(transaction: &Connection, command: JobCommand, limits: &JobLimits) -> Result<Jobs> {
     match command {
         JobCommand::Recover => {
             let jobs = load(transaction)?;
@@ -208,7 +213,7 @@ pub(super) fn command(transaction: &Connection, command: JobCommand) -> Result<J
                 let result_bytes = result.as_ref().map(serde_json::to_vec).transpose()?.map_or(0, |bytes| bytes.len());
                 job.state = state;
                 job.result = result;
-                if result_bytes > 64 * 1024 || totals(transaction)?.1 - previous + charge(&job)? > MAX_BYTES {
+                if result_bytes > 64 * 1024 || totals(transaction)?.1 - previous + charge(&job)? > limits.bytes {
                     job.state = JobState::Failed;
                     job.result = None;
                 }

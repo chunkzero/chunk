@@ -59,13 +59,14 @@ pub use model::{
     Commit, Document, DocumentKey, Epoch, IndexRange, KeyRange, Operation, Outcome, ReadBudget, RetryContext, Revision,
     Write,
 };
-pub use replication::{ObjectStorage, Replication, Replicator};
+pub use replication::{Listed, ObjectStorage, Replication, Replicator};
 pub use snapshot::{Snapshot, SnapshotReader};
-pub use sqlite::SqliteStore;
+pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
     /// Durably fixes invocation time, seed and deployment before evaluation.
+    /// A retry within the retry-context retention window gets the stored context.
     /// # Errors
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
@@ -102,7 +103,8 @@ pub trait Storage: Send {
     /// Returns I/O or corruption errors.
     fn snapshot(&mut self) -> Result<Snapshot>;
 
-    /// Recovers an operation's durable result, including after backend restart.
+    /// Recovers an operation's durable result, including after backend restart,
+    /// until its outcome retention expires.
     /// # Errors
     /// Rejects reuse of an ID for a different request and reports storage failures.
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>>;
@@ -136,10 +138,48 @@ pub trait Storage: Send {
 
     /// Atomically applies changes and records their outcome, or changes nothing.
     /// An already committed operation returns its original outcome before checking
-    /// the expected revision. Other stale revisions return `Conflict`.
+    /// the expected revision, while that outcome is retained; afterwards it commits
+    /// again as a new operation. Other stale revisions return `Conflict`.
     /// # Errors
     /// Returns conflicts, invalid batches, mismatched operations or storage failures.
     fn commit(&mut self, commit: Commit) -> Result<Outcome>;
+
+    /// Applies requests in order as if one at a time, each commit with its own
+    /// revision and outcome, returning one result per request until the first
+    /// failure that is not a [rejection](Error::rejected). Requests after it have
+    /// no result and were not applied. Adapters may share one durable write.
+    fn batch(&mut self, requests: Vec<Request>) -> Vec<Result<Reply>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let result = match request {
+                Request::Prepare { operation, context } => {
+                    self.prepare_operation(&operation, context).map(Reply::Prepared)
+                }
+                Request::Commit { commit, intents } => self.commit_with_jobs(commit, intents).map(Reply::Committed),
+            };
+            let stop = result.as_ref().is_err_and(|error| !error.rejected());
+            results.push(result);
+            if stop {
+                break;
+            }
+        }
+        results
+    }
+
+    /// Advances on every restore, so `(epoch, revision)` identifies a commit across restores.
+    fn epoch(&self) -> Epoch;
+}
+
+/// A durable write that may share a transaction and fsync with others.
+pub enum Request {
+    Prepare { operation: Operation, context: RetryContext },
+    Commit { commit: Commit, intents: Vec<JobIntent> },
+}
+
+#[derive(Debug)]
+pub enum Reply {
+    Prepared(RetryContext),
+    Committed(Outcome),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -160,6 +200,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("local database size limit reached")]
     Capacity,
+    #[error("scheduled job budget reached; retry once jobs finish or expire")]
+    JobBudget,
     #[error("snapshot read budget exceeded")]
     ReadLimit,
     #[error("corrupt storage: {0}")]
@@ -178,6 +220,17 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl Error {
+    /// A rejected request changed nothing and leaves storage usable.
+    #[must_use]
+    pub fn rejected(&self) -> bool {
+        matches!(
+            self,
+            Self::Conflict { .. } | Self::Invalid(_) | Self::Capacity | Self::JobBudget | Self::OperationMismatch
+        )
+    }
 }
 
 #[cfg(test)]

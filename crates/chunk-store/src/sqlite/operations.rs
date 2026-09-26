@@ -25,8 +25,13 @@ pub(super) fn prepare(connection: &Connection, operation: &Operation, proposed: 
         return Ok(context);
     }
     connection.execute(
-        "INSERT INTO _chunk_retry_contexts VALUES (?1, ?2, ?3)",
-        params![operation.id, operation.fingerprint.as_slice(), serde_json::to_string(&proposed)?],
+        "INSERT INTO _chunk_retry_contexts (operation_id, fingerprint, context, prepared_at) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            operation.id,
+            operation.fingerprint.as_slice(),
+            serde_json::to_string(&proposed)?,
+            super::retention::now()
+        ],
     )?;
     Ok(proposed)
 }
