@@ -1,12 +1,26 @@
 //! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
 
 mod release;
+mod retire;
 
 use crate::{Core, Gateway, GatewayConfig};
 use chunk_management::{Client, Code, v1};
-use std::{io, path::PathBuf, sync::OnceLock, time::Duration};
+use std::{
+    io,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
 const REATTACH: Duration = Duration::from_secs(5);
+/// Management resends the desired state at least every 30 seconds, so a quieter stream is stalled.
+const ATTACH_IDLE: Duration = Duration::from_secs(90);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a deployment failed, as reported, is cut to this many bytes.
 const MAX_MESSAGE_BYTES: usize = 1024;
 
@@ -28,20 +42,25 @@ pub(crate) struct Managed<'a> {
     gateway: &'a OnceLock<Gateway>,
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
+    deployments: Mutex<Deployments>,
+    /// The sequence of the latest report under the current lease.
+    sequence: AtomicU64,
+}
+
+#[derive(Default)]
+struct Deployments {
     /// The deployment players are routed to.
     serving: Option<String>,
+    /// The deployment being loaded and its release, which retirement and storage reclamation leave alone.
+    loading: Option<(String, String)>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
-    /// Deployments whose JVMs or backend version are not yet stopped.
-    retiring: Vec<String>,
-    lease: u64,
-    sequence: u64,
 }
 
 /// Why following the desired state stopped.
 enum Interrupted {
     /// Attaching again may succeed.
-    Retry(chunk_management::Error),
+    Retry(io::Error),
     /// This core must stop serving.
     Fatal(io::Error),
 }
@@ -51,8 +70,25 @@ impl From<chunk_management::Error> for Interrupted {
         if error.code() == Code::FailedPrecondition {
             Self::Fatal(io::Error::other(format!("management fenced this core: {error}")))
         } else {
-            Self::Retry(error)
+            Self::Retry(io::Error::other(error))
         }
+    }
+}
+
+type Future<'a> = Pin<Box<dyn std::future::Future<Output = Result<(), Interrupted>> + Send + 'a>>;
+
+/// The work of applying one desired revision. Dropping it stops the work and lets its deployment be retired.
+struct Work<'a> {
+    revision: u64,
+    deployment: String,
+    cancel: CancellationToken,
+    future: Future<'a>,
+    deployments: &'a Mutex<Deployments>,
+}
+
+impl Drop for Work<'_> {
+    fn drop(&mut self) {
+        lock(self.deployments).loading = None;
     }
 }
 
@@ -73,16 +109,24 @@ impl<'a> Managed<'a> {
             core,
             gateway,
             gateway_config,
-            serving: None,
-            rejected: None,
-            retiring: Vec::new(),
-            lease: 0,
-            sequence: 0,
+            deployments: Mutex::default(),
+            sequence: AtomicU64::new(0),
         }
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
-    pub(crate) async fn run(mut self) -> io::Error {
+    /// Meanwhile, it retires the deployments it no longer serves.
+    pub(crate) async fn run(self) -> io::Error {
+        if let Err(error) = release::sweep(&self.releases).await {
+            tracing::warn!(%error, "abandoned release downloads not removed");
+        }
+        tokio::select! {
+            error = self.follow() => error,
+            never = self.reclaim() => match never {},
+        }
+    }
+
+    async fn follow(&self) -> io::Error {
         loop {
             match self.attach().await {
                 Ok(()) => tracing::warn!("management ended the attach"),
@@ -93,151 +137,179 @@ impl<'a> Managed<'a> {
         }
     }
 
-    async fn attach(&mut self) -> Result<(), Interrupted> {
+    /// Applies each new desired revision beside the stream, so a newer one or a fence is seen at once. A newer
+    /// revision naming another deployment cancels the work on the one before.
+    async fn attach(&self) -> Result<(), Interrupted> {
         let request = v1::AttachRequest {
             instance_id: self.instance_id.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             core: true,
             epoch: self.core.epoch().map_err(Interrupted::Fatal)?,
         };
-        let mut stream = self.client.attach(&request).await?;
-        let mut applied = None;
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut stream = deadline(REQUEST_TIMEOUT, self.client.attach(&request)).await?;
+        self.sequence.store(0, Ordering::Relaxed);
+        let (mut latest, mut applied, mut work) = (None::<v1::AttachResponse>, None, None::<Work>);
         loop {
-            let desired = tokio::select! {
-                desired = stream.message() => desired?,
-                _ = tick.tick() => {
-                    self.retire().await;
-                    continue;
+            if work.is_none()
+                && let Some(desired) = latest.as_ref().filter(|desired| applied != Some(desired.revision))
+            {
+                work = Some(self.start(desired.clone()));
+            }
+            let running = async {
+                match &mut work {
+                    Some(work) => work.future.as_mut().await,
+                    None => std::future::pending().await,
                 }
             };
-            let Some(desired) = desired else { return Ok(()) };
-            if desired.lease != self.lease {
-                (self.lease, self.sequence) = (desired.lease, 0);
-            }
-            // A resent revision is a keepalive.
-            if applied != Some(desired.revision) {
-                self.apply(&desired).await?;
-                applied = Some(desired.revision);
+            tokio::select! {
+                biased;
+                message = deadline(ATTACH_IDLE, stream.message()) => {
+                    let Some(desired) = message? else { return Ok(()) };
+                    self.check(&desired)?;
+                    if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
+                        work.cancel.cancel();
+                    }
+                    latest = Some(desired);
+                }
+                finished = running => {
+                    finished?;
+                    applied = work.take().map(|work| work.revision);
+                }
             }
         }
     }
 
-    /// Serves `desired`'s deployment unless it already serves or rejected it, then reports its progress.
-    async fn apply(&mut self, desired: &v1::AttachResponse) -> Result<(), Interrupted> {
-        if desired.environment_id != self.environment {
-            return Err(Interrupted::Fatal(io::Error::other(format!(
-                "management attached this core to environment {:?}, not {:?}",
-                desired.environment_id, self.environment
-            ))));
+    fn check(&self, desired: &v1::AttachResponse) -> Result<(), Interrupted> {
+        if desired.environment_id == self.environment {
+            return Ok(());
         }
+        Err(Interrupted::Fatal(io::Error::other(format!(
+            "management attached this core to environment {:?}, not {:?}",
+            desired.environment_id, self.environment
+        ))))
+    }
+
+    fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
+        let release = desired.release.as_ref().map(|release| release.release_id.clone()).unwrap_or_default();
+        lock(&self.deployments).loading = Some((desired.deployment_id.clone(), release));
+        let cancel = CancellationToken::new();
+        Work {
+            revision: desired.revision,
+            deployment: desired.deployment_id.clone(),
+            cancel: cancel.clone(),
+            future: Box::pin(self.apply(desired, cancel)),
+            deployments: &self.deployments,
+        }
+    }
+
+    /// Serves `desired`'s deployment unless it already serves or rejected it, then reports its progress. Work that
+    /// `cancel` superseded ends without switching traffic or reporting.
+    async fn apply(&self, desired: v1::AttachResponse, cancel: CancellationToken) -> Result<(), Interrupted> {
         let deployment = desired.deployment_id.as_str();
         if deployment.is_empty() {
-            return self.report(desired, None).await;
+            return self.report(&desired, None).await;
         }
-        let (state, message) = if self.serving.as_deref() == Some(deployment) {
-            (v1::DeploymentState::Active, String::new())
-        } else if let Some((_, message)) = self.rejected.as_ref().filter(|(rejected, _)| rejected == deployment) {
-            (v1::DeploymentState::Failed, message.clone())
+        let known = {
+            let deployments = lock(&self.deployments);
+            if deployments.serving.as_deref() == Some(deployment) {
+                Some((v1::DeploymentState::Active, String::new()))
+            } else {
+                let rejected = deployments.rejected.as_ref().filter(|(rejected, _)| rejected == deployment);
+                rejected.map(|(_, message)| (v1::DeploymentState::Failed, message.clone()))
+            }
+        };
+        let (state, message) = if let Some(known) = known {
+            known
         } else {
-            self.report(desired, Some(progress(deployment, v1::DeploymentState::InProgress, String::new()))).await?;
-            match self.deploy(desired).await {
-                Ok(()) => {
+            self.report(&desired, Some(progress(deployment, v1::DeploymentState::InProgress, String::new()))).await?;
+            match self.deploy(&desired, &cancel).await {
+                Ok(false) => return Ok(()),
+                Ok(true) => {
                     self.route(deployment).await.map_err(Interrupted::Fatal)?;
                     (v1::DeploymentState::Active, String::new())
                 }
                 Err(error) => {
                     tracing::warn!(%error, deployment, "deployment rejected; the previous one keeps serving");
                     let message = bounded(error.to_string());
-                    self.rejected = Some((deployment.into(), message.clone()));
+                    lock(&self.deployments).rejected = Some((deployment.into(), message.clone()));
                     (v1::DeploymentState::Failed, message)
                 }
             }
         };
-        self.report(desired, Some(progress(deployment, state, message))).await
+        self.report(&desired, Some(progress(deployment, state, message))).await
     }
 
-    /// Loads the deployment's release, makes it resident in the backend, and makes it control's current release.
-    async fn deploy(&mut self, desired: &v1::AttachResponse) -> io::Result<()> {
+    /// Loads the deployment's release, makes it resident in the backend, and, unless `cancel` superseded it by then,
+    /// makes it control's current release. Returns whether it did.
+    async fn deploy(&self, desired: &v1::AttachResponse, cancel: &CancellationToken) -> io::Result<bool> {
         let artifact = desired.release.as_ref().ok_or_else(|| io::Error::other("the deployment names no release"))?;
-        let loaded = release::load(&self.client, &self.releases, artifact).await?;
+        let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
+            return Ok(false);
+        };
         let deployment = &desired.deployment_id;
-        self.core.deploy(loaded.bundle(deployment)).await?;
-        let activated =
-            self.core.activate(deployment, loaded.distribution(), loaded.control(&self.environment, deployment));
-        if activated.is_err() {
-            self.retiring.push(deployment.clone());
+        if cancel.is_cancelled() {
+            return Ok(false);
         }
-        activated
+        self.core.deploy(loaded.bundle(deployment)).await?;
+        // Nothing awaits between this check and switching traffic, so the attach loop cannot supersede it meanwhile.
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        self.core.activate(deployment, loaded.distribution(), loaded.control(&self.environment, deployment))?;
+        Ok(true)
     }
 
-    /// Sends later player connections to `deployment`, starting the gateway for the first one, and retires the
-    /// deployment served before.
-    async fn route(&mut self, deployment: &str) -> io::Result<()> {
+    /// Sends later player connections to `deployment`, starting the gateway for the first one.
+    async fn route(&self, deployment: &str) -> io::Result<()> {
         let mut target = self.core.target()?;
         target.backend.deployment = deployment.into();
         if let Some(gateway) = self.gateway.get() {
             gateway.retarget(target)?;
-        } else if let Some(config) = self.gateway_config.take() {
-            _ = self.gateway.set(Gateway::start(config, target).await?);
+        } else if let Some(config) = &self.gateway_config {
+            _ = self.gateway.set(Gateway::start(config.clone(), target).await?);
         }
-        self.retiring.extend(self.serving.replace(deployment.into()));
+        lock(&self.deployments).serving = Some(deployment.into());
         Ok(())
-    }
-
-    /// Stops retired deployments' JVMs, then releases their backend versions once every JVM has exited.
-    async fn retire(&mut self) {
-        if self.retiring.is_empty() {
-            return;
-        }
-        let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
-        let mut retiring = Vec::new();
-        for deployment in std::mem::take(&mut self.retiring) {
-            let stopped = control.retire_release(&deployment).unwrap_or_else(|error| {
-                tracing::warn!(%error, deployment, "release not yet retired");
-                false
-            });
-            if !stopped || !released(&backend, &deployment).await {
-                retiring.push(deployment);
-            }
-        }
-        self.retiring = retiring;
     }
 
     async fn report(
-        &mut self,
+        &self,
         desired: &v1::AttachResponse,
         deployment: Option<v1::DeploymentProgress>,
     ) -> Result<(), Interrupted> {
-        self.sequence += 1;
         let request = v1::ReportStatusRequest {
             observe_time: Some(std::time::SystemTime::now().into()),
             deployment,
-            lease: self.lease,
-            sequence: self.sequence,
+            lease: desired.lease,
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
             desired_revision: desired.revision,
             ..Default::default()
         };
-        self.client.report_status(&request).await?;
+        deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
         Ok(())
     }
+}
+
+/// `call`'s result, or a retryable interruption once `limit` passes.
+async fn deadline<T>(
+    limit: Duration,
+    call: impl std::future::Future<Output = Result<T, chunk_management::Error>>,
+) -> Result<T, Interrupted> {
+    match tokio::time::timeout(limit, call).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(Interrupted::Retry(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("management did not answer within {}s", limit.as_secs()),
+        ))),
+    }
+}
+
+fn lock(deployments: &Mutex<Deployments>) -> MutexGuard<'_, Deployments> {
+    deployments.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn progress(deployment: &str, state: v1::DeploymentState, message: String) -> v1::DeploymentProgress {
     v1::DeploymentProgress { deployment_id: deployment.into(), state: state.into(), message }
-}
-
-/// Whether the backend no longer holds `deployment`, retrying later only while it is busy.
-async fn released(backend: &chunk_backend::Backend, deployment: &str) -> bool {
-    let Ok(id) = chunk_backend::DeploymentId::new(deployment) else { return true };
-    match backend.release(id).await {
-        Err(chunk_backend::Error::Busy) => false,
-        Err(error) => {
-            tracing::warn!(%error, deployment, "backend version not released");
-            true
-        }
-        Ok(_) => true,
-    }
 }
 
 fn bounded(mut message: String) -> String {

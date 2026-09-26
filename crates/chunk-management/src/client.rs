@@ -33,11 +33,17 @@ impl fmt::Debug for Client {
 impl Client {
     /// A client for the service at `base_url`, such as `https://manage.example.net`, without credentials.
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_http(reqwest::Client::new(), base_url)
+        Self::with_http(reqwest::Client::builder(), base_url)
     }
 
-    /// Like `new`, calling the service over an existing HTTP client. Archive transfers still use a client of their own.
-    pub fn with_http(http: reqwest::Client, base_url: impl Into<String>) -> Self {
+    /// Like `new`, calling the service over an HTTP client built from `http`. Since calls carry the bearer token, that
+    /// client follows a redirect only within the origin (scheme, host and port) it was sent to. Archive transfers to
+    /// other origins use a client of their own.
+    ///
+    /// # Panics
+    /// When the HTTP client cannot be built, as `reqwest::Client::new` does.
+    pub fn with_http(http: reqwest::ClientBuilder, base_url: impl Into<String>) -> Self {
+        let http = http.redirect(reqwest::redirect::Policy::custom(same_origin)).build().expect("HTTP client");
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         Self { http, presigned: reqwest::Client::new(), base_url, token: None }
     }
@@ -94,7 +100,8 @@ impl Client {
     }
 
     /// Starts fetching a release archive from the URL an `AttachResponse` names. The bearer token goes along only to
-    /// this service's own origin; other URLs are presigned.
+    /// this service's own origin, whose redirects are followed only within it; other URLs are presigned, and any
+    /// redirect of theirs is followed without credentials.
     ///
     /// # Errors
     /// The server's refusal, with a code from its HTTP status, or a transport failure. Errors never include the URL,
@@ -140,6 +147,17 @@ impl Download {
     /// A transport failure, without the URL.
     pub async fn chunk(&mut self) -> Result<Option<bytes::Bytes>, Error> {
         self.0.chunk().await.map_err(without_url)
+    }
+}
+
+/// Follows a redirect only to the origin the request was first sent to, and at most 10 of them. A refused redirect is
+/// the response.
+fn same_origin(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    let first = attempt.previous().first().map(reqwest::Url::origin);
+    if attempt.previous().len() > 10 || first != Some(attempt.url().origin()) {
+        attempt.stop()
+    } else {
+        attempt.follow()
     }
 }
 

@@ -184,6 +184,9 @@ pub(crate) enum Command {
         id: DeploymentId,
         reply: Request<()>,
     },
+    Deployments {
+        reply: Request<Vec<DeploymentId>>,
+    },
     Query {
         call: Call,
         reply: Request<Update>,
@@ -217,6 +220,7 @@ impl Command {
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
+            Self::Deployments { reply } => reply.finish(Err(error)),
             Self::Query { reply, .. } | Self::Mutate { reply, .. } => reply.finish(Err(error)),
             Self::Subscribe { reply, .. } => reply.finish(Err(error)),
         }
@@ -475,6 +479,13 @@ impl Backend {
     /// Rejects release while mutations or live subscriptions still reference the version.
     pub async fn release(&self, id: DeploymentId) -> Result<bool> {
         self.submit(|reply| Command::Release { id, reply }).await
+    }
+
+    /// The deployments resident beside each other, including one being released.
+    /// # Errors
+    /// Reports an unavailable service.
+    pub async fn deployments(&self) -> Result<Vec<DeploymentId>> {
+        self.submit(|reply| Command::Deployments { reply }).await
     }
 
     /// Checks that the exact deployment is resident and accepting calls.
