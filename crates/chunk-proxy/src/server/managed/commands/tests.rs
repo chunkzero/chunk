@@ -396,3 +396,34 @@ async fn accepted_sends_survive_success_but_abort_with_failed_invocation() {
         fixture.close().await;
     }
 }
+
+#[tokio::test]
+async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_connection() {
+    let fixture = Fixture::new().await;
+    let guard = crate::server::managed::ClaimGuard {
+        platform: fixture.commands.tasks.platform.clone(),
+        claim: fixture.claim.clone(),
+        armed: false,
+        failure: None,
+    };
+    fixture.service.roster_waits.store(3, Ordering::SeqCst);
+    crate::server::managed::activate(&guard, fixture.assignment.claim.clone()).await.unwrap();
+    assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
+    let target = &fixture.commands.tasks.platform.target;
+    let unauthorized = crate::server::managed::ClaimGuard {
+        platform: crate::server::platform::Platform::new(crate::PlatformTarget {
+            backend: target.backend.clone(),
+            control: chunk_contract::ControlConnection {
+                endpoint: target.control.endpoint.clone(),
+                token: "wrong".into(),
+            },
+        })
+        .unwrap(),
+        claim: fixture.claim.clone(),
+        armed: false,
+        failure: None,
+    };
+    assert!(crate::server::managed::activate(&unauthorized, fixture.assignment.claim.clone()).await.is_err());
+    assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
+    fixture.close().await;
+}

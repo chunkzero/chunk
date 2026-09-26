@@ -24,11 +24,22 @@ pub(super) fn select_session(
     demand: &SessionDemand,
     unavailable: &BTreeSet<String>,
 ) -> Result<String> {
+    select_room(state, config, demand, unavailable, 1)
+}
+
+/// Like [`select_session`], but the session must have room for `slots` more claims.
+pub(crate) fn select_room(
+    state: &mut State,
+    config: &Config,
+    demand: &SessionDemand,
+    unavailable: &BTreeSet<String>,
+    slots: usize,
+) -> Result<String> {
     let spec = config.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
     let policy =
         config.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
     let creation = resolve_creation(config, demand, spec, policy)?;
-    if let Some(id) = reuse_session(state, demand, &creation, unavailable) {
+    if let Some(id) = reuse_session(state, demand, &creation, unavailable, slots) {
         return Ok(id);
     }
     if policy.is_some_and(|policy| policy.overflow == chunk_contract::DestinationOverflow::Reject)
@@ -38,7 +49,7 @@ pub(super) fn select_session(
     {
         return Err(Error::Capacity);
     }
-    if state.sessions.len() >= 256 {
+    if state.sessions.len() >= 256 || (creation.capacity as usize) < slots {
         return Err(Error::Capacity);
     }
     let host = place_host(state, config, &spec.app, &creation, unavailable)?;
@@ -65,6 +76,7 @@ fn reuse_session(
     demand: &SessionDemand,
     creation: &Creation,
     unavailable: &BTreeSet<String>,
+    slots: usize,
 ) -> Option<String> {
     state
         .sessions
@@ -77,8 +89,8 @@ fn reuse_session(
                 && session.capacity == creation.capacity
                 && session.configuration == creation.configuration
                 && state.hosts.get(&session.host).is_some_and(|host| host.profile == creation.profile)
-                && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count()
-                    < session.capacity as usize
+                && state.claims.values().filter(|c| c.session == **id && c.phase != Phase::Released).count() + slots
+                    <= session.capacity as usize
         })
         .map(|(id, _)| id.clone())
 }

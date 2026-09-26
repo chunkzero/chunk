@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chunk_proto::v1::{ClaimRequest, ShutdownNodeRequest};
 use prost::Message;
@@ -32,6 +32,7 @@ impl Control {
         Ok(())
     }
 
+    /// Forgets unreferenced rows and tracks idle hosts.
     fn tidy(&self, state: &mut State, now: u64) -> Result<()> {
         // A released move claim stays while the other end is open: the source's move checks
         // read its destination's outcome, and a destination's activation checks its fenced source.
@@ -50,27 +51,32 @@ impl Control {
                 .filter(|(_, intent)| source(&intent.request).is_some_and(|source| open(&source.operation_id)))
                 .map(|(destination, _)| destination.clone()),
         );
-        state.claims.retain(|operation, claim| {
-            claim.released_at_ms.is_none_or(|at| now.saturating_sub(at) < RELEASED_RETENTION_MS)
-                || referenced.contains(operation)
+        let claims = select(&state.claims, |operation, claim| {
+            claim.released_at_ms.is_some_and(|at| now.saturating_sub(at) >= RELEASED_RETENTION_MS)
+                && !referenced.contains(operation)
         });
-        state.moves.retain(|operation, intent| {
-            state.claims.contains_key(operation)
-                || ClaimRequest::decode(intent.request.as_slice())
-                    .ok()
-                    .and_then(|request| request.source)
-                    .is_some_and(|source| state.claims.contains_key(&source.operation_id))
+        remove(&mut state.claims, claims);
+        let moves = select(&state.moves, |operation, intent| {
+            !state.claims.contains_key(operation)
+                && source(&intent.request).is_none_or(|source| !state.claims.contains_key(&source.operation_id))
         });
+        remove(&mut state.moves, moves);
+        let rosters =
+            select(&state.rosters, |_, roster| roster.members.iter().all(|member| !state.claims.contains_key(member)));
+        remove(&mut state.rosters, rosters);
         let open: BTreeSet<_> =
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
-        state.sessions.retain(|id, session| !session.finished || open.contains(id));
-        state.drains.retain(|_, drain| !drain.automatic || !self.host.stopped(&drain.host));
-        state.hosts.retain(|id, host| {
-            !host.retired
-                || !self.host.stopped(id)
-                || state.sessions.values().any(|session| session.host == *id)
-                || state.drains.values().any(|drain| drain.host == *id)
+        let sessions = select(&state.sessions, |id, session| session.finished && !open.contains(id));
+        remove(&mut state.sessions, sessions);
+        let drains = select(&state.drains, |_, drain| drain.automatic && self.host.stopped(&drain.host));
+        remove(&mut state.drains, drains);
+        let hosts = select(&state.hosts, |id, host| {
+            host.retired
+                && self.host.stopped(id)
+                && !state.sessions.values().any(|session| session.host == *id)
+                && !state.drains.values().any(|drain| drain.host == *id)
         });
+        remove(&mut state.hosts, hosts);
         let timeout = u64::from(self.config.idle_node_timeout_seconds) * 1000;
         if timeout == 0 {
             return Ok(());
@@ -96,5 +102,16 @@ impl Control {
             retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id))?;
         }
         Ok(())
+    }
+}
+
+/// The IDs of rows `forget` accepts.
+fn select<T>(rows: &BTreeMap<String, T>, mut forget: impl FnMut(&str, &T) -> bool) -> Vec<String> {
+    rows.iter().filter(|(id, row)| forget(id, row)).map(|(id, _)| id.clone()).collect()
+}
+
+fn remove<T>(rows: &mut BTreeMap<String, T>, ids: Vec<String>) {
+    for id in ids {
+        rows.remove(&id);
     }
 }

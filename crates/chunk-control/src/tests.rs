@@ -199,6 +199,7 @@ impl Gameplay for RuntimeService {
         self.check(&request)?;
         let delivery = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
+        // Like the JVM, an operation keeps its first delivery, even after it closes.
         if let Some(previous) = bindings.get(&delivery.operation_id) {
             if previous.delivery != delivery {
                 return Err(Status::failed_precondition("changed preparation"));
@@ -225,6 +226,7 @@ impl Gameplay for RuntimeService {
         self.check(&request)?;
         let withdrawal = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
+        // Like the JVM: an operation it never prepared is not found, and another generation is refused.
         let binding = bindings.get_mut(&withdrawal.operation_id).ok_or(Status::not_found("binding"))?;
         if binding.delivery.owner_generation != withdrawal.owner_generation {
             return Err(Status::failed_precondition("generation"));
@@ -245,10 +247,23 @@ struct FakeHost {
     endpoint: String,
     ids: Mutex<BTreeSet<String>>,
     terminated: Mutex<BTreeSet<String>>,
+    /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
+    forgotten: AtomicBool,
+    /// Runs once when a forgotten host is asked for its connection, after answering none.
+    missed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once when an adoption has published its process, before the adoption returns.
+    adopted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
     fn connection(&self, _: &str) -> Option<RuntimeConnection> {
+        if self.forgotten.load(Ordering::Acquire) {
+            let missed = self.missed.lock().unwrap().take();
+            if let Some(missed) = missed {
+                missed();
+            }
+            return None;
+        }
         Some(RuntimeConnection {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
@@ -261,6 +276,9 @@ impl Host for FakeHost {
         self.ids.lock().unwrap().insert(id.into());
         if self.stopped(id) {
             return Err(Error::Stopped);
+        }
+        if self.forgotten.load(Ordering::Acquire) {
+            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
         }
         Ok(RuntimeConnection {
             endpoint: self.endpoint.clone(),
@@ -276,6 +294,25 @@ impl Host for FakeHost {
     }
     fn stopped(&self, id: &str) -> bool {
         self.runtime.stopped.load(Ordering::Acquire) || self.terminated.lock().unwrap().contains(id)
+    }
+    fn unresolved(&self, _: &str) -> bool {
+        self.forgotten.load(Ordering::Acquire)
+    }
+    fn unowned(&self) -> Result<BTreeSet<String>> {
+        let forgotten = self.forgotten.load(Ordering::Acquire);
+        Ok(if forgotten { self.ids.lock().unwrap().clone() } else { BTreeSet::new() })
+    }
+    fn adopt(&self, token: &str, registration: chunk_proto::v1::ProcessRegistration) -> Result<()> {
+        let process = registration.identity.map(|identity| identity.process_id);
+        if token != "test-runtime-credential" || process.as_ref() != Some(&self.runtime.identity.process_id) {
+            return Err(Error::Invalid("process credential does not match its launch record"));
+        }
+        assert!(self.forgotten.swap(false, Ordering::AcqRel));
+        let adopted = self.adopted.lock().unwrap().take();
+        if let Some(adopted) = adopted {
+            adopted();
+        }
+        Ok(())
     }
 }
 
@@ -338,6 +375,9 @@ impl Fixture {
             endpoint,
             ids: Mutex::default(),
             terminated: Mutex::default(),
+            forgotten: AtomicBool::new(false),
+            missed: Mutex::default(),
+            adopted: Mutex::default(),
         });
         let config = Config {
             contracts: Contracts::default(),
@@ -437,8 +477,9 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
     recovered.cancel(first.clone()).await.unwrap();
     let second = request("second", &uuid);
     let next = recovered.claim(second.clone()).await.unwrap();
-    assert_eq!(next.claim.as_ref().unwrap().membership_generation, 2);
-    assert_eq!(next.claim.as_ref().unwrap().delivery_generation, 2);
+    let (previous, next_claim) = (assignment.claim.as_ref().unwrap(), next.claim.as_ref().unwrap());
+    assert!(next_claim.membership_generation > previous.membership_generation);
+    assert!(next_claim.delivery_generation > previous.delivery_generation);
     recovered.cancel(first).await.unwrap();
     assert_eq!(recovered.state().unwrap().players[&uuid].current.as_deref(), Some("second"));
     assert!(recovered.activate(ActivateClaim { claim: assignment.claim }).await.is_err());
@@ -509,7 +550,7 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
         second.claim.as_ref().unwrap().membership_generation,
         first.claim.as_ref().unwrap().membership_generation
     );
-    assert_eq!(second.claim.as_ref().unwrap().delivery_generation, 2);
+    assert!(second.claim.as_ref().unwrap().delivery_generation > first.claim.as_ref().unwrap().delivery_generation);
     assert_ne!(second.delivery.as_ref().unwrap().session, first.delivery.as_ref().unwrap().session);
     assert_eq!(fixture.host.ids.lock().unwrap().len(), 1);
     let owner = control.state().unwrap().players[&uuid].clone();
@@ -665,7 +706,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         let status = control.drain(command).unwrap();
         assert!(status.stopped);
         assert_eq!(status.remaining_claims, 0);
-        assert!(control.state().unwrap().players[&uuid].current.is_none());
+        assert!(!control.state().unwrap().players.contains_key(&uuid));
         if !available {
             assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([drained.host_id.clone()]));
             let other_host = &state.sessions[&state.claims["new-login"].session].host;
@@ -853,6 +894,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
+    let membership = first.claim.as_ref().unwrap().membership_generation;
     fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
     let destination = control
@@ -872,7 +914,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     assert!(control.reconcile_departure(destination).await.unwrap().departed);
     let replacement = request("replacement", &uuid);
     let next = control.claim(replacement.clone()).await.unwrap();
-    assert_eq!(next.claim.as_ref().unwrap().membership_generation, 2);
+    assert!(next.claim.as_ref().unwrap().membership_generation > membership);
     assert!(!control.reconcile_departure(source).await.unwrap().departed);
     assert_eq!(control.state().unwrap().players[&uuid].current.as_deref(), Some("replacement"));
     assert!(control.reconcile_departure(replacement).await.unwrap().departed);
@@ -882,4 +924,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
 mod creation;
 mod destinations;
 mod launch;
+mod log;
+mod recovery;
 mod retention;
+mod roster;

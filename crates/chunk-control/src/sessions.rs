@@ -56,7 +56,7 @@ impl Control {
         Ok(())
     }
 
-    async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
+    pub(crate) async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
         let state = self.state()?;
         if self.host.stopped(host) {
             return Ok(());
@@ -70,6 +70,8 @@ impl Control {
         if inventory.identity.as_ref() != Some(&runtime.identity) {
             return Err(Error::Invalid("session inventory process mismatch"));
         }
+        // Unfenced deliveries are retried on the next pass.
+        self.fence_deliveries(&runtime, &inventory).await?;
         let now = crate::now_ms();
         let finish = self.update(|state| {
             let mut finish = Vec::new();

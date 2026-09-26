@@ -48,15 +48,25 @@ public final class ProcessService extends ProcessControlGrpc.ProcessControlImplB
                             .asRuntimeException());
             return;
         }
-        response.onNext(
-                ProcessInventory.newBuilder()
-                        .setIdentity(identity)
-                        .setTickCount(ticks.getAsLong())
-                        .setDraining(!process.isReady())
-                        .addAllDeliveries(gameplay.deliveries())
-                        .addAllSessions(gameplay.sessions())
-                        .build());
-        response.onCompleted();
+        // Session creations queued before this call run first, so the inventory includes them.
+        sessions.afterQueued()
+                .thenRun(
+                        () -> {
+                            response.onNext(
+                                    ProcessInventory.newBuilder()
+                                            .setIdentity(identity)
+                                            .setTickCount(ticks.getAsLong())
+                                            .setDraining(!process.isReady())
+                                            .addAllDeliveries(gameplay.deliveries())
+                                            .addAllSessions(gameplay.sessions())
+                                            .build());
+                            response.onCompleted();
+                        })
+                .exceptionally(
+                        error -> {
+                            response.onError(Status.INTERNAL.asRuntimeException());
+                            return null;
+                        });
     }
 
     @Override

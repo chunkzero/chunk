@@ -11,6 +11,8 @@ mod placement;
 mod players;
 mod process;
 mod reconcile;
+mod recovery;
+mod roster;
 mod rpc;
 pub mod server;
 mod session_methods;
@@ -19,7 +21,7 @@ mod state;
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -30,7 +32,10 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
 pub use process::ProcessHost;
+pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
+pub use state::Generation;
+pub use state::feed::{Change, Table};
 use state::{Authority, State};
 
 pub use chunk_contract::ControlConnection;
@@ -152,6 +157,7 @@ pub struct Control {
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
+    recovery: recovery::Recovery,
 }
 
 impl Control {
@@ -161,7 +167,12 @@ impl Control {
     pub fn open(path: &Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
         let authority = Authority::open(path, &config)?;
+        // A restore can lose a host's row while the JVM launched for it still runs.
+        let mut surviving: BTreeSet<_> = authority.read()?.hosts.keys().cloned().collect();
+        surviving.extend(host.unowned()?);
+        surviving.retain(|id| !host.stopped(id));
         Ok(Arc::new(Self {
+            recovery: recovery::Recovery::new(surviving),
             config,
             host,
             observations: Mutex::default(),
@@ -179,16 +190,31 @@ impl Control {
         self.authority.update(change)
     }
 
+    /// The lock serializing work on one operation. At most 1024 operations are in flight; beyond that, new work
+    /// is refused as busy rather than queued.
     fn operation(&self, id: &str) -> Result<Arc<AsyncMutex<()>>> {
         let mut operations = self.operations.lock().map_err(|_| Error::Unresolved("operation mutex poisoned"))?;
         if operations.len() >= 1024 && !operations.contains_key(id) {
             // Only the map holds an idle lock, so dropping it cannot split a caller from its waiters.
             operations.retain(|_, lock| Arc::strong_count(lock) > 1);
             if operations.len() >= 1024 {
-                return Err(Error::Capacity);
+                return Err(Error::Busy);
             }
         }
         Ok(operations.entry(id.into()).or_default().clone())
+    }
+
+    /// Claim and move changes committed after `position`. `None` means the position is outside retained history
+    /// (another epoch, too old, or ahead); reload current state instead.
+    #[must_use]
+    pub fn changes_after(&self, position: Generation) -> Option<Vec<Change>> {
+        self.authority.feed().after(position)
+    }
+
+    /// The position of the latest commit, updated after each one is readable.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Generation> {
+        self.authority.feed().subscribe()
     }
 }
 
@@ -202,12 +228,17 @@ pub enum Error {
     Unresolved(&'static str),
     #[error("local control capacity reached")]
     Capacity,
+    /// Too much work is in flight; retry later.
+    #[error("control busy")]
+    Busy,
     #[error("runtime and JVM have stopped")]
     Stopped,
     #[error("control state is open in another process")]
     Locked,
     #[error("control storage: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[error("control store: {0}")]
+    Store(chunk_store::Error),
     #[error("local host I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("control state: {0}")]
@@ -216,6 +247,16 @@ pub enum Error {
     Decode(#[from] prost::DecodeError),
     #[error("runtime RPC: {0}")]
     Rpc(#[from] tonic::Status),
+}
+
+impl From<chunk_store::Error> for Error {
+    fn from(error: chunk_store::Error) -> Self {
+        match error {
+            chunk_store::Error::WriterLocked => Self::Locked,
+            chunk_store::Error::Capacity => Self::Capacity,
+            error => Self::Store(error),
+        }
+    }
 }
 
 #[cfg(test)]

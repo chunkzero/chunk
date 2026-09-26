@@ -14,6 +14,8 @@ import chunk.v1.Supervision.DeliveryPhase
 import chunk.v1.Supervision.SessionCommand
 import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.minestom.internal.GameplayService
+import io.grpc.Status
+import io.grpc.StatusRuntimeException
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import net.minestom.server.MinecraftConstants
@@ -283,6 +285,16 @@ class GameplayLifecycleTest {
                     .build()
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
             assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
+            val unprepared =
+                assertThrows(StatusRuntimeException::class.java) {
+                    stub().withdrawPlayer(withdrawal.toBuilder().setOperationId(UUID.randomUUID().toString()).build())
+                }
+            assertEquals(Status.Code.NOT_FOUND, unprepared.status.code)
+            val stale =
+                assertThrows(StatusRuntimeException::class.java) {
+                    stub().withdrawPlayer(withdrawal.toBuilder().setOwnerGeneration(2).build())
+                }
+            assertEquals(Status.Code.FAILED_PRECONDITION, stale.status.code)
             assertThrows(IllegalArgumentException::class.java) { service.authorizeMethodCaller(methodCaller) }
             assertTrue(oldPlayer.isRemoved)
             assertTrue(oldPlayer in closedPlayers)

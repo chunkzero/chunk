@@ -10,13 +10,12 @@ impl Control {
     /// # Errors
     /// Reports durable-state errors. Individual unavailable runtimes are retained for a later pass.
     pub async fn reconcile_all(self: &Arc<Self>) -> Result<()> {
+        self.resolve_recovery().await?;
         let state = self.state()?;
         let stopped: Vec<_> = state.hosts.keys().filter(|id| self.host.stopped(id)).cloned().collect();
-        if !stopped.is_empty() {
+        for id in &stopped {
             self.update(|state| {
-                for id in &stopped {
-                    state.retire_stopped_host(id);
-                }
+                state.retire_stopped_host(id);
                 Ok(())
             })?;
         }

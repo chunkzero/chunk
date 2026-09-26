@@ -104,3 +104,52 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
     control.activate(activation).await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn players_are_forgotten_on_release_and_expired_claims_are_pruned() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let player = uuid::Uuid::new_v4().to_string();
+    let claim = request("only", &player);
+    control.claim(claim.clone()).await.unwrap();
+    assert!(control.state().unwrap().players.contains_key(&player));
+    control.cancel(claim).await.unwrap();
+    assert!(!control.state().unwrap().players.contains_key(&player));
+    control
+        .update(|state| {
+            let expired = crate::state::Claim { released_at_ms: Some(0), ..state.claims["only"].clone() };
+            for index in 0..300 {
+                state.claims.insert(format!("expired-{index}"), expired.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+    control.retire_idle_hosts().unwrap();
+    drop(control);
+    let state = fixture.control().state().unwrap();
+    assert_eq!(state.claims.keys().collect::<Vec<_>>(), ["only"]);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn open_claims_are_unbounded_and_only_in_flight_work_is_refused_as_busy() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    control.claim(request("template", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    control
+        .update(|state| {
+            let open = crate::state::Claim { session: "elsewhere".into(), ..state.claims["template"].clone() };
+            for index in 0..1100 {
+                state.claims.insert(format!("open-{index}"), open.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+    let held: Vec<_> = (0..1024).map(|index| control.operation(&format!("held-{index}")).unwrap()).collect();
+    let next = request("next", &uuid::Uuid::new_v4().to_string());
+    assert!(matches!(control.claim(next.clone()).await, Err(Error::Busy)));
+    drop(held);
+    control.claim(next).await.unwrap();
+    assert!(control.state().unwrap().claims.values().filter(|claim| claim.phase != Phase::Released).count() > 1100);
+    fixture.close().await;
+}

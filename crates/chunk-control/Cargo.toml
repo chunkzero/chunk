@@ -8,11 +8,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 chunk-service = { path = "../chunk-service" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-proto = { path = "../chunk-proto" }
+chunk-store = { path = "../chunk-store" }
 prost = "0.14.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +26,9 @@ tonic = "0.14.6"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(unix)'.dependencies]
+command-fds = { version = "0.3", features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

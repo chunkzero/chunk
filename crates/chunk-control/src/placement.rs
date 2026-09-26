@@ -10,17 +10,20 @@ use tonic::transport::Channel;
 use crate::{
     Config, Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
-    state::{Claim, HostState, Phase, State},
+    state::{Claim, Generation, HostState, Phase, State},
 };
 use select::select_session;
-pub(crate) use select::validate_demand;
+pub(crate) use select::{select_room, validate_demand};
 
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.
     /// # Errors
-    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts.
+    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts. Reports `Busy`
+    /// until recovery has fenced surviving JVMs, even for a restored claim: the log may have lost its cancellation.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         validate(&request)?;
+        let operation = self.operation(&request.operation_id)?;
+        self.admit().await?;
         let unavailable = self.unavailable()?;
         self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
@@ -28,7 +31,6 @@ impl Control {
             }
             reserve(state, &self.config, &request, &unavailable)
         })?;
-        let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
         let state = self.state()?;
         let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
@@ -103,11 +105,11 @@ impl Control {
             operation_id: request.operation_id.clone(),
             session: Some(SessionRef { id: claim.session.clone() }),
             session_generation: 1,
-            membership_generation: claim.membership_generation,
+            membership_generation: claim.membership.wire(),
             proxy_id: claim.proxy.clone(),
             connection_id: request.connection_id.clone(),
             player: Some(PlayerRef { id: claim.player.clone() }),
-            owner_generation: claim.delivery_generation,
+            owner_generation: claim.generation.wire(),
             identity: request.identity.clone(),
             protocol: config.protocol,
             runtime_id: runtime.identity.runtime_id.clone(),
@@ -209,59 +211,91 @@ fn reserve(
     request: &ClaimRequest,
     unavailable: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
+    if reserved(state, request)? {
+        return Ok(());
+    }
+    let owner = owner(state, request)?;
+    let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
+    insert_claim(state, request, owner, session, None)
+}
+
+/// Whether `request` already has its claim. Rejects changed claims and canceled or changed moves.
+pub(crate) fn reserved(state: &State, request: &ClaimRequest) -> Result<bool> {
     if let Some(intent) = state.moves.get(&request.operation_id)
         && (intent.canceled || intent.failure.is_some() || intent.request != request.encode_to_vec())
     {
         return Err(Error::Invalid("move canceled or changed"));
     }
-    if let Some(claim) = state.claims.get(&request.operation_id) {
-        return claim.matches(request);
-    }
-    if state.claims.values().filter(|claim| claim.phase != Phase::Released).count() >= 1024 {
-        return Err(Error::Capacity);
-    }
+    let Some(claim) = state.claims.get(&request.operation_id) else {
+        return Ok(false);
+    };
+    claim.matches(request)?;
+    Ok(true)
+}
+
+/// The player a new claim may own, and the membership a move continues.
+pub(crate) struct Owner {
+    player: String,
+    membership: Option<Generation>,
+}
+
+/// Checks that `request` may take ownership of its player: a login needs an unowned player, a move needs its exact
+/// arrived source with no other move pending.
+pub(crate) fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
-    if let Some(source) = &request.source {
-        let owner = state.players.get(player).ok_or(Error::Invalid("missing move owner"))?;
-        let previous = state.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
-        let original = ClaimRequest::decode(previous.request.as_slice())?;
-        if owner.current.as_ref() != Some(&source.operation_id)
-            || owner.pending.is_some()
-            || previous.identity(&source.operation_id) != *source
-            || previous.phase != Phase::Arrived
-            || request.identity != original.identity
-            || request.proxy_id != original.proxy_id
-            || request.connection_id != original.connection_id
-        {
-            return Err(Error::Invalid("stale or competing move"));
+    let Some(source) = &request.source else {
+        if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
+            return Err(Error::Invalid("player already owned"));
         }
-    } else if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
-        return Err(Error::Invalid("player already owned"));
+        return Ok(Owner { player: player.clone(), membership: None });
+    };
+    let owner = state.players.get(player).ok_or(Error::Invalid("missing move owner"))?;
+    let previous = state.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
+    let original = ClaimRequest::decode(previous.request.as_slice())?;
+    if owner.current.as_ref() != Some(&source.operation_id)
+        || owner.pending.is_some()
+        || previous.identity(&source.operation_id) != *source
+        || previous.phase != Phase::Arrived
+        || request.identity != original.identity
+        || request.proxy_id != original.proxy_id
+        || request.connection_id != original.connection_id
+    {
+        return Err(Error::Invalid("stale or competing move"));
     }
-    let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
+    Ok(Owner { player: player.clone(), membership: Some(previous.membership) })
+}
+
+/// Reserves a slot in `session` for `request`, created by the commit applying this update.
+pub(crate) fn insert_claim(
+    state: &mut State,
+    request: &ClaimRequest,
+    owner: Owner,
+    session: String,
+    roster: Option<String>,
+) -> Result<()> {
+    let generation = state.next_generation()?;
     state.sessions.get_mut(&session).ok_or(Error::Invalid("missing selected session"))?.empty_since_ms = None;
-    let owner = state.players.entry(player.clone()).or_default();
+    let player = state.players.entry(owner.player.clone()).or_default();
     if request.source.is_none() {
-        owner.membership_generation = owner.membership_generation.checked_add(1).ok_or(Error::Capacity)?;
-        owner.current = Some(request.operation_id.clone());
+        player.current = Some(request.operation_id.clone());
     } else {
-        owner.pending = Some(request.operation_id.clone());
+        player.pending = Some(request.operation_id.clone());
     }
-    owner.delivery_generation = owner.delivery_generation.checked_add(1).ok_or(Error::Capacity)?;
     state.claims.insert(
         request.operation_id.clone(),
         Claim {
             request: request.encode_to_vec(),
-            player: player.clone(),
+            player: owner.player,
             proxy: request.proxy_id.clone(),
-            membership_generation: owner.membership_generation,
-            delivery_generation: owner.delivery_generation,
+            membership: owner.membership.unwrap_or(generation),
+            generation,
             session,
             phase: Phase::Reserved,
             assignment: None,
             activated: false,
             created_at_ms: crate::now_ms(),
             released_at_ms: None,
+            roster,
         },
     );
     Ok(())

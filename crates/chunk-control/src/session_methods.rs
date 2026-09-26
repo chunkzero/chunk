@@ -128,14 +128,10 @@ impl Control {
         if !(1..=30_000).contains(&timeout_ms) || json.len() > MAX_JSON || !method.arguments.accepts(&arguments) {
             return Err(Error::Invalid("invalid session method arguments or timeout"));
         }
+        // The allocating commit's generation increases across restores, as JVMs require of sequences.
         let sequence = self.update(|state| {
-            let sequence = state
-                .method_sequence
-                .checked_add(1)
-                .filter(|value| i64::try_from(*value).is_ok())
-                .ok_or(Error::Capacity)?;
-            state.method_sequence = sequence;
-            Ok(sequence)
+            state.method_sequence = state.next_generation()?.wire();
+            Ok(state.method_sequence)
         })?;
         let issued_at_ms = crate::now_ms();
         let request = SessionMethodRequest {

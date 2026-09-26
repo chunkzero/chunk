@@ -1,3 +1,5 @@
+mod entities;
+pub(crate) mod feed;
 mod store;
 
 use std::{
@@ -6,12 +8,14 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 
-use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
-use prost::Message;
-use serde::{Deserialize, Serialize};
+use chunk_proto::v1::ClaimIdentity;
 use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Result};
+pub use entities::Generation;
+pub(crate) use entities::{
+    Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
@@ -23,117 +27,23 @@ pub(crate) struct State {
     pub method_sequence: u64,
     pub moves: BTreeMap<String, MoveIntent>,
     pub drains: BTreeMap<String, Drain>,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Drain {
-    pub request: Vec<u8>,
-    pub host: String,
-    pub deadline_ms: u64,
-    /// Started by control itself, so no caller retries it and it can be forgotten once the host stops.
-    pub automatic: bool,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MoveIntent {
-    pub request: Vec<u8>,
-    pub canceled: bool,
-    pub sequence: u64,
-    pub failure: Option<MoveFailure>,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MoveFailure {
-    pub reason: String,
-    pub at_ms: u64,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct HostState {
-    pub app: String,
-    pub profile: String,
-    pub retired: bool,
-    pub idle_since_ms: Option<u64>,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SessionState {
-    pub empty_since_ms: Option<u64>,
-    pub finish_requested: bool,
-    pub finished: bool,
-    pub host: String,
-    pub session_type: String,
-    pub demand_key: String,
-    pub capacity: u32,
-    pub configuration: serde_json::Value,
-    pub retired: bool,
-}
-
-#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PlayerState {
-    pub membership_generation: u64,
-    pub delivery_generation: u64,
-    pub current: Option<String>,
-    pub pending: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Phase {
-    Reserved,
-    Activating,
-    Attached,
-    Arrived,
-    Withdrawing,
-    Released,
-}
-
-impl From<Phase> for ClaimPhase {
-    fn from(phase: Phase) -> Self {
-        match phase {
-            Phase::Reserved => Self::Reserved,
-            Phase::Activating => Self::Activating,
-            Phase::Attached => Self::Attached,
-            Phase::Arrived => Self::Arrived,
-            Phase::Withdrawing => Self::Withdrawing,
-            Phase::Released => Self::Released,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Claim {
-    pub request: Vec<u8>,
-    pub player: String,
-    pub proxy: String,
-    pub membership_generation: u64,
-    pub delivery_generation: u64,
-    pub session: String,
-    pub phase: Phase,
-    pub assignment: Option<Vec<u8>>,
-    pub activated: bool,
-    pub created_at_ms: u64,
-    pub released_at_ms: Option<u64>,
-}
-
-impl Claim {
-    pub fn identity(&self, operation: &str) -> ClaimIdentity {
-        ClaimIdentity {
-            operation_id: operation.into(),
-            proxy_id: self.proxy.clone(),
-            membership_generation: self.membership_generation,
-            delivery_generation: self.delivery_generation,
-        }
-    }
-
-    pub fn matches(&self, request: &ClaimRequest) -> Result<()> {
-        if self.request != request.encode_to_vec() {
-            return Err(Error::Invalid("claim operation changed"));
-        }
-        Ok(())
-    }
+    pub rosters: BTreeMap<String, Roster>,
+    /// The store epoch, fixed while control runs.
+    pub epoch: u64,
+    /// The revision of the last commit this state includes.
+    pub revision: u64,
 }
 
 impl State {
+    /// The generation of the commit that will apply the current update.
+    pub fn next_generation(&self) -> Result<Generation> {
+        Generation::new(self.epoch, self.revision + 1)
+    }
+
+    pub fn position(&self) -> Generation {
+        Generation { epoch: self.epoch, revision: self.revision }
+    }
+
     pub fn retire_stopped_host(&mut self, id: &str) {
         if let Some(host) = self.hosts.get_mut(id) {
             host.retired = true;
@@ -153,12 +63,28 @@ impl State {
                 && self.players.get(&claim.player).and_then(|owner| owner.current.as_ref()) == Some(operation)
         })
     }
+
+    /// Clears `operation` from its player's ownership, forgetting players that no longer own a claim.
+    pub fn disown(&mut self, player: &str, operation: &str) {
+        if let Some(owner) = self.players.get_mut(player) {
+            if owner.current.as_deref() == Some(operation) {
+                owner.current = None;
+            }
+            if owner.pending.as_deref() == Some(operation) {
+                owner.pending = None;
+            }
+            if owner.current.is_none() && owner.pending.is_none() {
+                self.players.remove(player);
+            }
+        }
+    }
 }
 
 /// The durable control state. Reads share the last committed state; writers serialize on the store.
 pub(crate) struct Authority {
     store: Mutex<Writable>,
     current: RwLock<Arc<State>>,
+    feed: feed::Feed,
 }
 
 struct Writable {
@@ -169,9 +95,11 @@ struct Writable {
 
 impl Authority {
     pub fn open(path: &Path, config: &Config) -> Result<Self> {
-        let store = store::Store::open(path)?;
-        let current = RwLock::new(Arc::new(store.load()?));
-        let authority = Self { store: Mutex::new(Writable { store, stale: false }), current };
+        let mut store = store::Store::open(path, &config.deployment.environment)?;
+        let state = store.load()?;
+        let feed = feed::Feed::new(state.position());
+        let authority =
+            Self { store: Mutex::new(Writable { store, stale: false }), current: RwLock::new(Arc::new(state)), feed };
         let fingerprint = Sha256::digest(serde_json::to_vec(config)?).to_vec();
         authority.update(|state| {
             if state.config.is_empty() {
@@ -199,6 +127,10 @@ impl Authority {
         Ok(Writer { authority: self, store })
     }
 
+    pub fn feed(&self) -> &feed::Feed {
+        &self.feed
+    }
+
     fn publish(&self, state: State) -> Result<()> {
         *self.current.write().map_err(|_| Error::Unresolved("control state poisoned"))? = Arc::new(state);
         Ok(())
@@ -211,28 +143,39 @@ pub(crate) struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    /// Applies `change` to the current state and commits only the entities it touched.
+    /// Applies `change` to the current state and commits the rows it touched as one transaction.
     pub fn update<T>(&mut self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
         self.recover()?;
         let previous = self.authority.read()?;
         let mut next = State::clone(&previous);
         let result = change(&mut next)?;
-        let changes = store::changes(&previous, &next)?;
-        if changes.is_empty() {
+        let writes = store::writes(&previous, &next)?;
+        if writes.is_empty() {
             return Ok(result);
         }
-        if let Err(error) = self.store.store.write(&changes) {
-            self.store.stale = true;
-            let _ = self.recover();
-            return Err(error);
+        let rows = feed::rows(&writes);
+        match self.store.store.commit(&previous, writes) {
+            Ok(revision) if revision == previous.revision + 1 => {
+                next.revision = revision;
+                let position = next.position();
+                self.authority.publish(next)?;
+                self.authority.feed.record(position, rows);
+                Ok(result)
+            }
+            outcome => {
+                self.store.stale = true;
+                let _ = self.recover();
+                Err(outcome.err().unwrap_or(Error::Unresolved("control commit revision skipped")))
+            }
         }
-        self.authority.publish(next)?;
-        Ok(result)
     }
 
     fn recover(&mut self) -> Result<()> {
         if self.store.stale {
-            self.authority.publish(self.store.store.load()?)?;
+            let state = self.store.store.load()?;
+            let position = state.position();
+            self.authority.publish(state)?;
+            self.authority.feed.reset(position);
             self.store.stale = false;
         }
         Ok(())
