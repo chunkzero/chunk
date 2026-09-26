@@ -1,5 +1,5 @@
 use crate::{
-    Error, Host, ProcessHostConfig, Result, RuntimeConnection,
+    Error, Host, ProcessHostConfig, Progress, Result, RuntimeConnection,
     client::{auth, channel},
 };
 use chunk_proto::v1::{ProcessIdentity, ProcessRegistration, node_control_client::NodeControlClient};
@@ -39,6 +39,7 @@ struct Process {
     stopped: AtomicBool,
     /// Re-attached after control restarted, so no child handle can confirm its exit.
     adopted: bool,
+    launched: Instant,
 }
 impl Process {
     fn connection(&self) -> Option<RuntimeConnection> {
@@ -72,24 +73,26 @@ impl ProcessHost {
     fn process(&self, id: &str) -> Result<Option<Arc<Process>>> {
         Ok(self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.get(id).cloned())
     }
-    fn launch(&self, id: &str, app: &str, profile: &str) -> Result<Arc<Process>> {
+    /// The process running `id`, launching it if `id` never launched. `None` while a launch this host does not own
+    /// may still run.
+    fn launch(&self, id: &str, app: &str, profile: &str) -> Result<Option<Arc<Process>>> {
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
         if let Some(process) = processes.running.get(id) {
             if process.identity.app_id != app || process.identity.machine_profile != profile {
                 return Err(Error::Invalid("host binding changed"));
             }
-            return Ok(process.clone());
+            return Ok(Some(process.clone()));
         }
         if processes.failed.contains(id) || self.path(id, "exit")?.try_exists()? {
             return Err(Error::Stopped);
         }
         if self.path(id, "launch")?.try_exists()? {
-            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+            return Ok(None);
         }
         match self.start(id, app, profile) {
             Ok(process) => {
                 processes.running.insert(id.into(), process.clone());
-                Ok(process)
+                Ok(Some(process))
             }
             Err(error) => {
                 // No child was spawned, and the launch lock excludes another attempt for this ID.
@@ -144,6 +147,7 @@ impl ProcessHost {
             stop: CancellationToken::new(),
             stopped: AtomicBool::new(false),
             adopted: false,
+            launched: Instant::now(),
         });
         // The launch marker records the process's identity and credential digest before the JVM exists, so the JVM can
         // re-attach after a restart. The JVM inherits the marker's lock, and control's handle closes once the spawn
@@ -257,8 +261,10 @@ impl ProcessHost {
             self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
         let mut result = Ok(());
         for id in ids {
-            if let Err(error) = self.terminate(&id).await {
-                result = Err(error);
+            match self.release(&id).await {
+                Ok(true) => {}
+                Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
+                Err(error) => result = Err(error),
             }
         }
         result
@@ -269,25 +275,29 @@ impl Host for ProcessHost {
     fn configure(&self, endpoint: String) -> Result<()> {
         self.endpoint.set(endpoint).map_err(|_| Error::Invalid("control endpoint already set"))
     }
-    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<RuntimeConnection> {
-        let process = self.launch(id, app, profile)?;
-        let deadline = Instant::now() + Duration::from_secs(35);
-        loop {
-            if process.stopped.load(Ordering::Acquire) {
-                return Err(Error::Stopped);
-            }
-            if process.stop.is_cancelled() {
-                return Err(Error::Unresolved("process stopping"));
-            }
-            if let Some(connection) = process.connection() {
-                return Ok(connection);
-            }
-            if Instant::now() >= deadline {
-                process.stop.cancel();
-                return Err(Error::Unresolved("app did not become ready within 35 seconds"));
-            }
-            sleep(Duration::from_millis(25)).await;
+    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<Progress> {
+        let process = match self.launch(id, app, profile) {
+            Ok(Some(process)) => process,
+            // Only the JVM's re-attachment or its free launch lock resolves a launch from before control restarted.
+            Ok(None) if self.stopped(id) => return Ok(Progress::Failed("JVM exited while unowned".into())),
+            Ok(None) => return Ok(Progress::Pending),
+            Err(error @ Error::Unresolved(_)) => return Err(error),
+            Err(error) => return Ok(Progress::Failed(error.to_string())),
+        };
+        if process.stopped.load(Ordering::Acquire) {
+            return Ok(Progress::Failed("JVM exited".into()));
         }
+        if process.stop.is_cancelled() {
+            return Ok(Progress::Pending);
+        }
+        if let Some(connection) = process.connection() {
+            return Ok(Progress::Ready(Box::new(connection)));
+        }
+        if process.launched.elapsed() >= Duration::from_secs(35) {
+            process.stop.cancel();
+            return Ok(Progress::Failed("app did not become ready within 35 seconds".into()));
+        }
+        Ok(Progress::Pending)
     }
     fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
         let identity = registration.identity.as_ref().ok_or(Error::Invalid("missing process identity"))?;
@@ -331,6 +341,7 @@ impl Host for ProcessHost {
             stop: CancellationToken::new(),
             stopped: AtomicBool::new(false),
             adopted: true,
+            launched: Instant::now(),
         };
         processes.running.insert(id, Arc::new(process));
         Ok(())
@@ -338,9 +349,9 @@ impl Host for ProcessHost {
     fn connection(&self, id: &str) -> Option<RuntimeConnection> {
         self.process(id).ok()??.connection()
     }
-    async fn terminate(&self, id: &str) -> Result<()> {
+    async fn release(&self, id: &str) -> Result<bool> {
         if self.stopped(id) {
-            return Ok(());
+            return Ok(true);
         }
         let process = {
             let processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
@@ -348,14 +359,15 @@ impl Host for ProcessHost {
                 process.clone()
             } else {
                 if self.path(id, "exit")?.is_file() {
-                    return Ok(());
+                    return Ok(true);
                 }
+                // An unowned launch's JVM still holds its marker's lock.
                 if self.path(id, "launch")?.try_exists()? {
-                    return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+                    return Ok(false);
                 }
                 // Launch holds this same lock and checks the exit record before spawning.
                 self.record_exit(id, b"never launched")?;
-                return Ok(());
+                return Ok(true);
             }
         };
         process.stop.cancel();
@@ -366,11 +378,11 @@ impl Host for ProcessHost {
         let deadline = Instant::now() + Duration::from_secs(12);
         while !self.stopped(id) {
             if Instant::now() >= deadline {
-                return Err(Error::Unresolved("JVM shutdown not confirmed"));
+                return Ok(false);
             }
             sleep(Duration::from_millis(25)).await;
         }
-        Ok(())
+        Ok(true)
     }
     fn unresolved(&self, id: &str) -> bool {
         // A marker that cannot be looked up may exist.

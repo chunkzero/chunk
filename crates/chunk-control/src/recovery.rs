@@ -21,7 +21,7 @@ use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     drain::retire_host,
-    state::{Claim, Generation, HostState, Phase, SessionState},
+    state::{Capacity, Claim, Generation, HostState, Phase, SessionState},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -117,14 +117,18 @@ impl Control {
     }
 
     async fn recover_host(&self, id: &str) -> Result<bool> {
-        if self.host.stopped(id) {
+        let state = self.state()?;
+        // Only a host missing now is an orphan; one removed later, after its capacity was released, is not.
+        let orphan = !state.hosts.contains_key(id);
+        // The log has no capacity record for a host a restore lost, so only the host can confirm its JVM exited.
+        if state.hosts.get(id).map_or_else(|| self.host.stopped(id), |host| host.capacity == Capacity::Released) {
             return Ok(true);
         }
         let Some(runtime) = self.host.connection(id) else {
             // Without an unowned launch, no JVM from before the restart can run on this host.
             return Ok(!self.host.unresolved(id));
         };
-        if let Some(host) = self.state()?.hosts.get(id)
+        if let Some(host) = state.hosts.get(id)
             && !self.runs_host(&runtime, host)
         {
             return Err(Error::Invalid("recovered runtime mismatch"));
@@ -138,7 +142,9 @@ impl Control {
         if !self.fence_deliveries(&runtime, &inventory).await? {
             return Ok(false);
         }
-        self.retire_orphan(id, &runtime.identity)?;
+        if orphan {
+            self.retire_orphan(id, &runtime.identity)?;
+        }
         // Control's desired state asks the JVM to end the sessions the log lost; its reports finish them.
         let state = self.state()?;
         Ok(!state.sessions.values().any(|session| session.host == id && session.recovered() && !session.finished))
@@ -149,7 +155,9 @@ impl Control {
     /// orphan host's sessions end with its JVM instead.
     fn retire_unknown_sessions(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
-            let Some(inventory) = self.links.report(id, identity).filter(|_| state.hosts.contains_key(id)) else {
+            // A released host's JVM has exited, and its sessions with it.
+            let live = state.hosts.get(id).is_some_and(|host| host.capacity != Capacity::Released);
+            let Some(inventory) = self.links.report(id, identity).filter(|_| live) else {
                 return Ok(());
             };
             for observed in &inventory.sessions {
@@ -178,18 +186,16 @@ impl Control {
         })
     }
 
-    /// Records a fenced JVM whose host row a restore lost as a retiring host, so the host lifecycle stops it: its
-    /// drain terminates it at once, and control shutdown stops it like any logged host.
+    /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity, so the host lifecycle stops it:
+    /// its drain releases it at once, and control shutdown stops it like any logged host.
     fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
             if state.hosts.contains_key(id) {
                 return Ok(());
             }
             let host = HostState {
-                app: identity.app_id.clone(),
-                profile: identity.machine_profile.clone(),
-                retired: false,
-                idle_since_ms: None,
+                capacity: Capacity::Ready,
+                ..HostState::requested(&identity.app_id, &identity.machine_profile)
             };
             state.hosts.insert(id.into(), host);
             let operation = format!("orphan/{id}");
@@ -205,7 +211,10 @@ impl Control {
     /// recovery withdraws them all.
     pub(crate) fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
         let error = match self.host.register(token, registration.clone()) {
-            Ok(identity) => return Ok(identity),
+            Ok(identity) => {
+                self.wake_capacity();
+                return Ok(identity);
+            }
             Err(error) => error,
         };
         let (Some(identity), Some(secret)) = (registration.identity.clone(), token.strip_prefix("Bearer ")) else {
@@ -223,6 +232,7 @@ impl Control {
             }
         }
         self.recovery.reattach(&identity.runtime_id, || self.host.adopt(secret, registration))?;
+        self.wake_capacity();
         tracing::info!(host = identity.runtime_id, "re-attached a JVM that outlived control");
         Ok(identity)
     }

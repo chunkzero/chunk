@@ -110,7 +110,7 @@ impl Control {
         let runtime = self
             .host
             .connection(host)
-            .filter(|runtime| Some(&runtime.identity) == identity && !self.host.stopped(host))
+            .filter(|runtime| Some(&runtime.identity) == identity && !state.released(host))
             .ok_or(Error::Invalid("unregistered or replaced process"))?;
         if let Some(expected) = state.hosts.get(host)
             && !self.runs_host(&runtime, expected)

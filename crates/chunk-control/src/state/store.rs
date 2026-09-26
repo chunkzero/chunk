@@ -6,7 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{Meta, Phase, State};
+use super::{Capacity, Meta, Phase, State};
 use crate::{Error, Result};
 
 pub(crate) const CLAIMS: &str = "chunk_claims";
@@ -173,6 +173,7 @@ fn schema() -> DatabaseSchema {
         META: {"config": string, "method_sequence": integer},
         HOSTS: {
             "app": string, "profile": string, "retired": boolean, "idle_since_ms?": integer,
+            "capacity?": {"type": "enum", "values": Capacity::NAMES}, "failure?": string,
         },
         SESSIONS: {
             "empty_since_ms?": integer, "finish_requested": boolean, "finished": boolean, "host": string,

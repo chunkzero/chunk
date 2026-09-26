@@ -5,7 +5,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     Control, Error, Result,
-    state::{Claim, Drain, Phase, State},
+    state::{Capacity, Claim, Drain, Phase, State},
 };
 
 /// Records a drain once per operation, retiring the resolved host and its sessions until the deadline.
@@ -72,7 +72,7 @@ impl Control {
             host_id: drain.host.clone(),
             deadline_ms: drain.deadline_ms,
             remaining_claims: open_claims(&state, &drain.host).count().try_into().map_err(|_| Error::Capacity)?,
-            stopped: self.host.stopped(&drain.host),
+            stopped: state.released(&drain.host),
         })
     }
 
@@ -82,20 +82,23 @@ impl Control {
         while !tasks.is_empty() {
             tokio::select! {
                 _ = tasks.join_next() => {}
-                _ = drains.tick() => self.progress_drains().await?,
+                _ = drains.tick() => self.progress_drains()?,
             }
         }
         Ok(())
     }
 
-    pub(crate) async fn progress_drains(&self) -> Result<()> {
+    /// Moves each draining host's arrived players away, and releases the host's capacity once it is empty or its
+    /// deadline passed.
+    pub(crate) fn progress_drains(&self) -> Result<()> {
         let state = self.state()?;
-        for drain in state.drains.values().filter(|d| !self.host.stopped(&d.host)) {
+        let mut releasing = Vec::new();
+        for drain in
+            state.drains.values().filter(|d| state.hosts.get(&d.host).is_some_and(|h| h.capacity < Capacity::Releasing))
+        {
             let claims: Vec<_> = open_claims(&state, &drain.host).collect();
             if claims.is_empty() || crate::now_ms() >= drain.deadline_ms {
-                if let Err(error) = self.host.terminate(&drain.host).await {
-                    tracing::warn!(%error, host = %drain.host, "drain termination unresolved; retaining ownership");
-                }
+                releasing.push(drain.host.clone());
             } else {
                 for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {
                     let source = ClaimRequest::decode(claim.request.as_slice())?;
@@ -112,6 +115,18 @@ impl Control {
                 }
             }
         }
+        if releasing.is_empty() {
+            return Ok(());
+        }
+        self.update(|state| {
+            for id in &releasing {
+                if let Some(host) = state.hosts.get_mut(id).filter(|host| host.capacity < Capacity::Releasing) {
+                    host.capacity = Capacity::Releasing;
+                }
+            }
+            Ok(())
+        })?;
+        self.wake_capacity();
         Ok(())
     }
 }

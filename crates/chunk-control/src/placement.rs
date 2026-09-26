@@ -5,12 +5,13 @@ use chunk_proto::v1::{
     SessionRef, gameplay_client::GameplayClient,
 };
 use prost::Message;
+use std::time::Duration;
 use tonic::transport::Channel;
 
 use crate::{
     Config, Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
-    state::{Claim, Generation, HostState, Phase, State},
+    state::{Capacity, Claim, Generation, HostState, Phase, State},
 };
 use select::select_session;
 pub(crate) use select::{select_room, validate_demand};
@@ -31,6 +32,7 @@ impl Control {
             }
             reserve(state, &self.config, &request, &unavailable)
         })?;
+        self.wake_capacity();
         let _guard = operation.lock().await;
         let state = self.state()?;
         let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
@@ -39,7 +41,7 @@ impl Control {
             return Err(Error::Invalid("claim closed"));
         }
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
-        let runtime = self.runtime(&state, &session.host).await?;
+        let runtime = self.runtime(&session.host).await?;
         let channel = channel(&runtime).await?;
         let config = self.configuration(&runtime, channel.clone()).await?;
         if let Some(bytes) = &claim.assignment {
@@ -51,6 +53,10 @@ impl Control {
         self.session_ready(&session.host, &runtime, &claim.session).await?;
         let assignment = self.prepare_assignment(&runtime, channel, config, claim, &request).await?;
         self.update(|state| {
+            // A host released while preparing never gets a new prepared claim, which only its release would end.
+            if state.released(&session.host) {
+                return Err(Error::Stopped);
+            }
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
                 return Err(Error::Invalid("claim no longer reserved"));
@@ -120,26 +126,33 @@ impl Control {
         Ok(config)
     }
 
-    pub(crate) async fn runtime(&self, state: &State, id: &str) -> Result<RuntimeConnection> {
-        let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
-        let runtime = match self.host.ensure(id, &host.app, &host.profile).await {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                if self.host.stopped(id)
-                    && let Err(retirement) = self.update(|state| {
-                        state.retire_stopped_host(id);
-                        Ok(())
-                    })
-                {
-                    tracing::error!(%retirement, host = id, "cannot retire stopped host");
+    /// Waits until `id`'s capacity is ready and its runtime has registered. Starts nothing: the capacity executor
+    /// makes every host call.
+    /// # Errors
+    /// Reports `Stopped` once the host's capacity is released, and `Unresolved` after 35 seconds.
+    pub(crate) async fn runtime(&self, id: &str) -> Result<RuntimeConnection> {
+        let mut positions = self.subscribe();
+        let ready = async {
+            loop {
+                let state = self.state()?;
+                let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
+                if host.capacity == Capacity::Released {
+                    return Err(Error::Stopped);
                 }
-                return Err(error);
+                if host.capacity == Capacity::Ready
+                    && let Some(runtime) = self.host.connection(id)
+                {
+                    if !self.runs_host(&runtime, host) {
+                        return Err(Error::Invalid("host returned incompatible runtime"));
+                    }
+                    return Ok(runtime);
+                }
+                positions.changed().await.map_err(|_| Error::Unresolved("control stopped"))?;
             }
         };
-        if !self.runs_host(&runtime, host) {
-            return Err(Error::Invalid("host returned incompatible runtime"));
-        }
-        Ok(runtime)
+        tokio::time::timeout(Duration::from_secs(35), ready)
+            .await
+            .unwrap_or(Err(Error::Unresolved("app did not become ready within 35 seconds")))
     }
 
     /// Whether `runtime` runs this deployment's current artifact for `host`'s app and profile.

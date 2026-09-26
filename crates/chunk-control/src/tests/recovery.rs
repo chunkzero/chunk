@@ -15,7 +15,8 @@ async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_u
     control.recovery.pass_deadline();
     control.reconcile_all().await.unwrap();
     assert!(matches!(control.admit().await, Err(Error::Busy)));
-    fixture.host.terminated.lock().unwrap().insert(host);
+    fixture.host.terminated.lock().unwrap().insert(host.clone());
+    eventually(|| control.state().unwrap().released(&host)).await;
     control.admit().await.unwrap();
     fixture.close().await;
 }

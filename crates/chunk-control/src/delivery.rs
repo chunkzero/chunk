@@ -83,18 +83,23 @@ impl Control {
             return Ok(identity);
         }
         let host = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host.clone();
-        self.update(|s| {
-            set_phase(
-                s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?,
-                Phase::Withdrawing,
-            )
+        // The claim may have been released since it was read, such as with its host's capacity.
+        let released = self.update(|s| {
+            let claim = s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            if claim.phase == Phase::Released {
+                return Ok(true);
+            }
+            set_phase(claim, Phase::Withdrawing).map(|()| false)
         })?;
+        if released {
+            return Ok(identity);
+        }
         // The recorded failure fences activation; reconciliation owns the remaining withdrawal.
         if abandoned {
             return Ok(identity);
         }
-        if !self.host.stopped(&host) {
-            let runtime = self.runtime(&state, &host).await?;
+        if !state.released(&host) {
+            let runtime = self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
             let withdrawn = GameplayClient::new(channel(&runtime).await?)
                 .withdraw_player(auth(
                     &runtime,
@@ -112,7 +117,12 @@ impl Control {
                 Err(error) => return Err(error.into()),
             }
         }
-        self.update(|state| release(state, &request.operation_id))?;
+        self.update(|state| {
+            if state.claims.get(&request.operation_id).is_some_and(|claim| claim.phase == Phase::Released) {
+                return Ok(());
+            }
+            release(state, &request.operation_id)
+        })?;
         Ok(identity)
     }
 
@@ -127,21 +137,16 @@ impl Control {
         Ok(chunk_proto::v1::DepartureStatus { claim: Some(identity), departed })
     }
 
-    /// The claim's current assignment, after releasing it if its host stopped.
+    /// The claim's current assignment. Releasing its host's capacity released it.
     fn reconcile(&self, operation: &str) -> Result<Assignment> {
-        let state = self.state()?;
-        let claim = state.claims.get(operation).ok_or(Error::Invalid("unknown claim"))?;
-        claim.assignment.as_ref().ok_or(Error::Unresolved("claim preparation incomplete"))?;
-        let host = &state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host;
-        if claim.phase != Phase::Released && self.host.stopped(host) {
-            self.update(|state| release(state, operation))?;
-        }
         let state = self.state()?;
         let bytes = state
             .claims
             .get(operation)
-            .and_then(|c| c.assignment.as_ref())
-            .ok_or(Error::Unresolved("assignment missing"))?;
+            .ok_or(Error::Invalid("unknown claim"))?
+            .assignment
+            .as_ref()
+            .ok_or(Error::Unresolved("claim preparation incomplete"))?;
         Ok(Assignment::decode(bytes.as_slice())?)
     }
 
@@ -151,18 +156,19 @@ impl Control {
         self.authority.close()
     }
 
-    /// Stops the owned runtime processes. Dropping control alone preserves them for recovery.
+    /// Stops the owned runtime processes directly, without recording it, since the environment store may have
+    /// stopped. Dropping control alone preserves them for recovery.
     /// # Errors
     /// Reports unresolved hosts; a failed stop must not be treated as a fencing acknowledgment.
     pub async fn shutdown(&self) -> Result<()> {
         self.draining.store(true, std::sync::atomic::Ordering::Release);
         let state = self.state()?;
         let mut result = Ok(());
-        for id in state.hosts.keys() {
-            if !self.host.stopped(id)
-                && let Err(error) = self.host.terminate(id).await
-            {
-                result = Err(error);
+        for id in state.hosts.keys().filter(|id| !state.released(id)) {
+            match self.host.release(id).await {
+                Ok(true) => {}
+                Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
+                Err(error) => result = Err(error),
             }
         }
         result

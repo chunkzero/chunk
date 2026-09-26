@@ -19,7 +19,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Result, SessionType, state::Phase};
+use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Progress, Result, SessionType, state::Phase};
 
 struct Binding {
     delivery: PlayerDelivery,
@@ -272,6 +272,8 @@ struct FakeHost {
     endpoint: String,
     ids: Mutex<BTreeSet<String>>,
     terminated: Mutex<BTreeSet<String>>,
+    /// Cannot confirm that a released runtime exited.
+    unconfirmed: AtomicBool,
     /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
     forgotten: AtomicBool,
     /// Runs once when a forgotten host is asked for its connection, after answering none.
@@ -297,25 +299,27 @@ impl Host for FakeHost {
         })
     }
 
-    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<RuntimeConnection> {
+    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<Progress> {
         self.ids.lock().unwrap().insert(id.into());
         if self.stopped(id) {
-            return Err(Error::Stopped);
+            return Ok(Progress::Failed("JVM exited".into()));
         }
         if self.forgotten.load(Ordering::Acquire) {
-            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+            return Ok(Progress::Pending);
         }
-        Ok(RuntimeConnection {
+        Ok(Progress::Ready(Box::new(RuntimeConnection {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
             token: "test-runtime-credential".into(),
             identity: self.runtime.identity.clone(),
-        })
+        })))
     }
-    async fn terminate(&self, id: &str) -> Result<()> {
-        assert!(self.ids.lock().unwrap().contains(id));
+    async fn release(&self, id: &str) -> Result<bool> {
+        if self.unconfirmed.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         self.terminated.lock().unwrap().insert(id.into());
-        Ok(())
+        Ok(true)
     }
     fn stopped(&self, id: &str) -> bool {
         self.runtime.stopped.load(Ordering::Acquire) || self.terminated.lock().unwrap().contains(id)
@@ -338,6 +342,22 @@ impl Host for FakeHost {
             adopted();
         }
         Ok(())
+    }
+}
+
+/// Control's capacity executor, running until stopped.
+struct Executor(CancellationToken, JoinHandle<()>);
+
+impl Executor {
+    fn start(control: &Arc<Control>) -> Self {
+        let (control, stop) = (control.clone(), CancellationToken::new());
+        let task = stop.clone();
+        Self(stop, tokio::spawn(async move { control.run_capacity(&task).await }))
+    }
+
+    async fn stop(self) {
+        self.0.cancel();
+        self.1.await.unwrap();
     }
 }
 
@@ -406,6 +426,7 @@ impl Fixture {
             endpoint,
             ids: Mutex::default(),
             terminated: Mutex::default(),
+            unconfirmed: AtomicBool::new(false),
             forgotten: AtomicBool::new(false),
             missed: Mutex::default(),
             adopted: Mutex::default(),
@@ -426,21 +447,26 @@ impl Fixture {
         let follower = Mutex::default();
         Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server, follower }
     }
-    /// Opens control with the fake JVM following it, once the previous control's JVM stream has closed. A reachable
-    /// JVM re-attaches before this returns.
+    /// Opens control with its capacity executor and the fake JVM following it, once the previous control's JVM stream
+    /// has closed. A reachable JVM re-attaches before this returns.
     async fn control(&self) -> Arc<Control> {
         self.detach().await;
         let control =
             open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap();
         let stop = CancellationToken::new();
-        let task = tokio::spawn(follow(control.clone(), self.host.clone(), stop.clone()));
+        let task = tokio::spawn({
+            let (control, host, stop) = (control.clone(), self.host.clone(), stop.clone());
+            async move {
+                tokio::join!(follow(control.clone(), host, stop.clone()), control.run_capacity(&stop));
+            }
+        });
         *self.follower.lock().unwrap() = Some((stop, task));
         if self.runtime.available.load(Ordering::Acquire) && !self.host.forgotten.load(Ordering::Acquire) {
             self.recovered(&control).await;
         }
         control
     }
-    /// Closes the fake JVM's stream, so it no longer holds its control.
+    /// Stops the capacity executor and closes the fake JVM's stream, so neither holds its control.
     async fn detach(&self) {
         let follower = self.follower.lock().unwrap().take();
         if let Some((stop, task)) = follower {
@@ -625,9 +651,9 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
     assert!(control.state().unwrap().claims["waiting"].phase == Phase::Released);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
     fixture.runtime.stopped.store(true, Ordering::Release);
+    eventually(|| control.state().unwrap().claims["active"].phase == Phase::Released).await;
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
-    assert!(state.claims["active"].phase == Phase::Released);
     assert!(state.players.values().all(|p| p.current.is_none()));
     assert!(state.hosts.values().all(|h| h.retired));
     fixture.close().await;
@@ -820,7 +846,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
             assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([drained.host_id.clone()]));
             let other_host = &state.sessions[&state.claims["new-login"].session].host;
             assert!(!fixture.host.stopped(other_host));
-            fixture.host.terminate(&drained.host_id).await.unwrap();
+            assert!(fixture.host.release(&drained.host_id).await.unwrap());
         }
         fixture.close().await;
     }
@@ -861,6 +887,7 @@ async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() 
     assert!(!fixture.host.stopped(&host));
     tokio::time::sleep(Duration::from_millis(1100)).await;
     control.reconcile_all().await.unwrap();
+    eventually(|| control.state().unwrap().released(&host)).await;
     assert!(fixture.host.stopped(&host));
     assert!(control.state().unwrap().hosts[&host].retired);
     control.reconcile_all().await.unwrap();
@@ -940,13 +967,14 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopping as i32);
     assert!(!fixture.host.stopped(&online.host_id));
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
-    control.progress_drains().await.unwrap();
+    control.progress_drains().unwrap();
+    eventually(|| control.state().unwrap().released(&online.host_id)).await;
     let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
     let mut retry = Request::new(request);
     retry.metadata_mut().insert("authorization", "Bearer control-group-credential-with-32-characters".parse().unwrap());
     let error = chunk_proto::v1::local_control_server::LocalControl::claim(&service, retry).await.unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(error.message(), "runtime stopped");
+    assert_eq!(error.message(), "claim closed");
     control.reconcile_all().await.unwrap();
     assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopped as i32);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
@@ -1032,6 +1060,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     fixture.close().await;
 }
 
+mod capacity;
 mod creation;
 mod destinations;
 mod launch;

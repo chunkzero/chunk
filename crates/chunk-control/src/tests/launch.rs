@@ -23,25 +23,28 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let path = fixture.directory.path().join("launch.sqlite");
     let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let executor = Executor::start(&control);
     // The app JAR is missing, so launch fails before a marker or child exists.
     for operation in ["first", "second"] {
         assert!(matches!(
             control.claim(request(operation, &uuid::Uuid::new_v4().to_string())).await,
-            Err(Error::Io(_))
+            Err(Error::Stopped)
         ));
         let state = control.state().unwrap();
-        assert!(state.hosts.values().all(|host| host.retired));
+        assert!(state.hosts.values().all(|host| host.retired && host.failure.is_some()));
         assert!(state.sessions.values().all(|session| session.retired));
         assert!(state.drains.is_empty());
         assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
     }
     assert_eq!(control.nodes().unwrap().nodes.len(), 2);
+    executor.stop().await;
     drop(control);
     drop(host);
 
     let host = Arc::new(crate::ProcessHost::new(host_config()));
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let control = open(&path, fixture.config.clone(), host.clone()).unwrap();
+    let executor = Executor::start(&control);
     assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
@@ -54,7 +57,7 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
 
     for operation in ["third", "fourth"] {
         let claim = request(operation, &uuid::Uuid::new_v4().to_string());
-        assert!(matches!(control.claim(claim.clone()).await, Err(Error::Io(_))));
+        assert!(matches!(control.claim(claim.clone()).await, Err(Error::Stopped)));
         let nodes = control.nodes().unwrap().nodes;
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].phase, NodePhase::Stopped as i32);
@@ -65,5 +68,6 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
         assert!(control.claim(claim).await.is_err());
         assert!(control.nodes().unwrap().nodes.is_empty());
     }
+    executor.stop().await;
     fixture.close().await;
 }

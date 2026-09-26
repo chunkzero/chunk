@@ -20,12 +20,25 @@ pub struct RuntimeConnection {
     pub player_endpoint: String,
 }
 
-/// Host effects use a stable ID allocated by the durable control authority.
+/// How far a host has come toward providing a runtime for its capacity request.
+pub enum Progress {
+    Pending,
+    Ready(Box<RuntimeConnection>),
+    /// The host can never provide this runtime.
+    Failed(String),
+}
+
+/// Host effects use a stable ID allocated by the durable control authority. Each ID is one capacity request: one JVM
+/// lifetime, never relaunched.
 #[tonic::async_trait]
 pub trait Host: Send + Sync {
-    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<RuntimeConnection>;
-    /// Success requires affirmative evidence of complete process shutdown.
-    async fn terminate(&self, id: &str) -> Result<()>;
+    /// Starts providing `id`'s runtime if it has not started yet, and reports its progress without waiting. Repeated
+    /// calls with the same ID never start a second runtime.
+    async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<Progress>;
+    /// Stops `id`'s runtime, or confirms it never started. `true` only with affirmative evidence that no process for
+    /// `id` runs; `false` asks the caller to try again.
+    async fn release(&self, id: &str) -> Result<bool>;
+    /// Whether `id`'s runtime is confirmed to have exited.
     fn stopped(&self, id: &str) -> bool;
     /// Removes stopped host resources absent from durable state. The caller must exclude concurrent placement.
     /// # Errors

@@ -1,5 +1,6 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
+mod capacity;
 mod client;
 mod delivery;
 mod drain;
@@ -30,7 +31,7 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
+pub use host::{Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
@@ -159,6 +160,8 @@ pub struct Control {
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     recovery: recovery::Recovery,
     links: sync::Links,
+    /// Wakes the capacity executor.
+    capacity: tokio::sync::Notify,
 }
 
 impl Control {
@@ -166,7 +169,7 @@ impl Control {
     /// and their sockets are owned separately.
     /// # Errors
     /// Rejects changed configuration, invalid limits, corrupt state, or a stopped environment store.
-    pub fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
+    pub(crate) fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
         let authority = Authority::open(system, &config)?;
         // A restore can lose a host's row while the JVM launched for it still runs.
@@ -182,6 +185,7 @@ impl Control {
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
+            capacity: tokio::sync::Notify::new(),
         }))
     }
 

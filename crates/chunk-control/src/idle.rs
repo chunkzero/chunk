@@ -6,7 +6,7 @@ use prost::Message;
 use crate::{
     Control, Error, Result,
     drain::retire_host,
-    state::{Phase, State},
+    state::{Capacity, Phase, State},
 };
 
 /// Long enough for callers to retry an operation after its release, short enough to bound history.
@@ -14,7 +14,7 @@ const RELEASED_RETENTION_MS: u64 = 300_000;
 
 impl Control {
     /// Drains hosts that have had no unfinished session or open claim for the idle timeout,
-    /// and forgets finished sessions, stopped hosts, its own drains and old released claims once
+    /// and forgets finished sessions, released hosts, its own drains and old released claims once
     /// nothing references them.
     pub(crate) fn retire_idle_hosts(&self) -> Result<()> {
         let now = crate::now_ms();
@@ -68,11 +68,10 @@ impl Control {
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
         let sessions = select(&state.sessions, |id, session| session.finished && !open.contains(id));
         remove(&mut state.sessions, sessions);
-        let drains = select(&state.drains, |_, drain| drain.automatic && self.host.stopped(&drain.host));
+        let drains = select(&state.drains, |_, drain| drain.automatic && state.released(&drain.host));
         remove(&mut state.drains, drains);
         let hosts = select(&state.hosts, |id, host| {
-            host.retired
-                && self.host.stopped(id)
+            host.capacity == Capacity::Released
                 && !state.sessions.values().any(|session| session.host == *id)
                 && !state.drains.values().any(|drain| drain.host == *id)
         });

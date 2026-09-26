@@ -120,10 +120,7 @@ fn place_host(
         return Err(Error::Capacity);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    state.hosts.insert(
-        id.clone(),
-        HostState { app: app.into(), profile: creation.profile.into(), retired: false, idle_since_ms: None },
-    );
+    state.hosts.insert(id.clone(), HostState::requested(app, creation.profile));
     Ok(id)
 }
 
