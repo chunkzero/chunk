@@ -21,4 +21,6 @@ export interface Deps {
   /** Where environments replicate their logs; unset turns replication off. */
   logStore: LogStoreIssuer | undefined;
   changes: Changes;
+  /** Aborts when the service shuts down; open streams end then. */
+  shutdown: AbortSignal;
 }

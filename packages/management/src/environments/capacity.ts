@@ -69,7 +69,8 @@ export function capacityServices({ sql }: Deps): CapacityServices {
         if (release.state !== ReleaseState.READY || !release.manifest) {
           throw failedPrecondition("the release has not finished uploading");
         }
-        const profile = release.manifest.profiles[machineProfile];
+        const { profiles } = release.manifest;
+        const profile = Object.hasOwn(profiles, machineProfile) ? profiles[machineProfile] : undefined;
         if (!profile) throw invalid(`release ${releaseId} has no machine profile ${JSON.stringify(machineProfile)}`);
         if (workload === Workload.JVM && !release.manifest.apps.some((app) => app.id === appId)) {
           throw invalid(`release ${releaseId} has no app ${JSON.stringify(appId)}`);

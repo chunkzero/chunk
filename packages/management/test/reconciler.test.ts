@@ -185,6 +185,25 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
+  test("deleting an environment whose core create reply was lost still removes the machine", async () => {
+    const { projectId, environmentId } = await createEnvironment(h);
+    await deployRelease(h, projectId, environmentId, "r1");
+    const name = coreMachineName(environmentId);
+    hooks.create = (id) => {
+      if (id === name) throw new Error("connection reset");
+    };
+    await pass();
+    hooks.create = undefined;
+    expect(machines.has(name)).toBe(true);
+
+    await h.client(ProjectService).deleteEnvironment({ environmentId });
+    const state = h.client(ProjectService).getEnvironment({ environmentId });
+    expect((await state).environment?.state).toBe(EnvironmentState.DELETING);
+    await pass();
+    expect(machines.has(name)).toBe(false);
+    expect(await codeOf(h.client(ProjectService).getEnvironment({ environmentId }))).toBe(Code.NotFound);
+  });
+
   test("deleting an environment revokes its token and removes its machines", async () => {
     const env = await running();
     env.close();

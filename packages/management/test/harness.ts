@@ -81,6 +81,7 @@ export async function startHarness(): Promise<Harness> {
     edge: { domain: "play.example.net", port: 25565 },
     logStore: undefined,
     changes,
+    shutdown: new AbortController().signal,
   };
   const harness: Harness = {
     sql,

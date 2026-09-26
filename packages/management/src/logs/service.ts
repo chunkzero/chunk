@@ -7,7 +7,7 @@ import type { LogSeverity, LogSource } from "../gen/chunk/management/v1/common_p
 import { type LogService, ReadLogsResponseSchema } from "../gen/chunk/management/v1/logs_pb.ts";
 import { loadEnvironment } from "../projects/store.ts";
 import { callerOf } from "../rpc/caller.ts";
-import { timestamp } from "../rpc/validate.ts";
+import { endIfShuttingDown, streamSignal, timestamp } from "../rpc/validate.ts";
 
 interface LogRow {
   seq: bigint;
@@ -26,7 +26,7 @@ const maxLimit = 10_000;
 const batchSize = 500;
 const keepaliveMs = 30_000;
 
-export function logService({ sql, changes }: Deps): Partial<ServiceImpl<typeof LogService>> {
+export function logService({ sql, changes, shutdown }: Deps): Partial<ServiceImpl<typeof LogService>> {
   return {
     /** Entries come in the order the service stored them. */
     async *readLogs(request, context) {
@@ -39,14 +39,15 @@ export function logService({ sql, changes }: Deps): Partial<ServiceImpl<typeof L
         const matching = sql`
           environment_id = ${environment.id}
           ${request.deploymentId ? sql`and deployment_id = ${request.deploymentId}` : sql``}
-          ${request.appId ? sql`and app_id = ${request.appId}` : sql``}`;
+          ${request.appId ? sql`and app_id = ${request.appId}` : sql``}
+          ${request.startTime ? sql`and time >= ${timestampDate(request.startTime)}` : sql``}`;
         // Following resumes after the newest entry that existed when the stored ones were read, so none repeats.
         const [{ last } = { last: 0n }] = await sql<{ last: bigint }[]>`
           select coalesce(max(seq), 0) as last from log_entries where environment_id = ${environment.id}`;
         const stored = request.startTime
           ? await sql<LogRow[]>`
               select * from log_entries
-              where ${matching} and seq <= ${last} and time >= ${timestampDate(request.startTime)}
+              where ${matching} and seq <= ${last}
               order by seq limit ${limit}`
           : (
               await sql<LogRow[]>`
@@ -59,9 +60,10 @@ export function logService({ sql, changes }: Deps): Partial<ServiceImpl<typeof L
 
         let after = last;
         let sentAt = Date.now();
-        while (!context.signal.aborted) {
-          await subscription.next(keepaliveMs - (Date.now() - sentAt), context.signal);
-          if (context.signal.aborted) break;
+        const signal = streamSignal(context.signal, shutdown);
+        while (!signal.aborted) {
+          await subscription.next(keepaliveMs - (Date.now() - sentAt), signal);
+          if (signal.aborted) break;
           let rows: LogRow[];
           do {
             rows = await sql<LogRow[]>`
@@ -74,6 +76,7 @@ export function logService({ sql, changes }: Deps): Partial<ServiceImpl<typeof L
             }
           } while (rows.length === batchSize);
         }
+        endIfShuttingDown(shutdown);
       } finally {
         subscription?.close();
       }

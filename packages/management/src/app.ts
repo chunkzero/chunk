@@ -21,6 +21,7 @@ export async function start(config: Config) {
   if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
   if (config.edgeToken) await ensureEdgeToken(sql, config.edgeToken);
   const keys = deriveKeys(config.secretKey);
+  const shutdown = new AbortController();
   const deps: Deps = {
     sql,
     keys,
@@ -35,6 +36,7 @@ export async function start(config: Config) {
     edge: config.edge,
     logStore: config.logStore && logStoreIssuer(config.logStore),
     changes: await listenForChanges(sql),
+    shutdown: shutdown.signal,
   };
   const { machines } = config;
   const [installation] = await sql<{ id: string }[]>`select id from installation`;
@@ -57,6 +59,8 @@ export async function start(config: Config) {
   return {
     url: server.url,
     async stop() {
+      // Streams never end on their own, and stopping the server waits for every open request.
+      shutdown.abort();
       await server.stop();
       await reconciler?.stop();
       await sql.end({ timeout: 5 });

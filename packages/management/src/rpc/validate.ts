@@ -76,3 +76,13 @@ export async function unique<T>(message: string, write: () => Promise<T>): Promi
     throw error;
   }
 }
+
+/** Aborts when the client goes away or the service shuts down. */
+export function streamSignal(request: AbortSignal, shutdown: AbortSignal): AbortSignal {
+  return AbortSignal.any([request, shutdown]);
+}
+
+/** Ends a stream the service is shutting down with UNAVAILABLE, so the client reconnects to another instance. */
+export function endIfShuttingDown(shutdown: AbortSignal): void {
+  if (shutdown.aborted) throw new ConnectError("the service is shutting down", Code.Unavailable);
+}

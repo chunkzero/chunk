@@ -178,4 +178,31 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     abort.abort();
     env.close();
   });
+
+  test("following with start_time skips entries that arrive late with earlier times", async () => {
+    const env = await running();
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const entry = (sequence: bigint, seconds: bigint) => ({
+      time: { seconds },
+      source: LogSource.CORE,
+      severity: LogSeverity.INFO,
+      message: `at ${seconds - now}`,
+      instanceId: "core-a",
+      sequence,
+    });
+    await env.client.reportLogs({ entries: [entry(1n, now)] });
+    const abort = new AbortController();
+    const stream = h
+      .client(LogService)
+      .readLogs(
+        { environmentId: env.environmentId, startTime: { seconds: now }, follow: true },
+        { signal: abort.signal },
+      );
+    const following = stream[Symbol.asyncIterator]();
+    expect((await next(following)).entries.map((line) => line.message)).toEqual(["at 0"]);
+    await env.client.reportLogs({ entries: [entry(2n, now - 60n), entry(3n, now + 1n)] });
+    expect((await next(following)).entries.map((line) => line.message)).toEqual(["at 1"]);
+    abort.abort();
+    env.close();
+  });
 });

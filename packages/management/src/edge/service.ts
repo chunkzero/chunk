@@ -14,14 +14,14 @@ import {
   WatchRoutesResponseSchema,
 } from "../gen/chunk/management/v1/edge_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
-import { failedPrecondition, invalid, notFound, required } from "../rpc/validate.ts";
+import { endIfShuttingDown, failedPrecondition, invalid, notFound, required, streamSignal } from "../rpc/validate.ts";
 import { routeTable } from "./routes.ts";
 
 const keepaliveMs = 30_000;
 /** Accepted wakes that advance an environment's revision, per minute. */
 export const wakesPerMinute = 30;
 
-export function edgeService({ sql, changes }: Deps): Partial<ServiceImpl<typeof EdgeService>> {
+export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceImpl<typeof EdgeService>> {
   return {
     async *watchRoutes(_request, context) {
       const subscription = changes.subscribe((change) => change.kind === "environment");
@@ -30,9 +30,10 @@ export function edgeService({ sql, changes }: Deps): Partial<ServiceImpl<typeof 
         let routes = await routeTable(sql);
         yield create(WatchRoutesResponseSchema, { revision, reset: true, routes: [...routes.values()] });
         let sentAt = Date.now();
-        while (!context.signal.aborted) {
-          await subscription.next(keepaliveMs - (Date.now() - sentAt), context.signal);
-          if (context.signal.aborted) break;
+        const signal = streamSignal(context.signal, shutdown);
+        while (!signal.aborted) {
+          await subscription.next(keepaliveMs - (Date.now() - sentAt), signal);
+          if (signal.aborted) break;
           const next = await routeTable(sql);
           const changed = [...next.values()].filter((route) => {
             const previous = routes.get(route.hostname);
@@ -46,6 +47,7 @@ export function edgeService({ sql, changes }: Deps): Partial<ServiceImpl<typeof 
           yield create(WatchRoutesResponseSchema, { revision, routes: changed, removedHostnames });
           sentAt = Date.now();
         }
+        endIfShuttingDown(shutdown);
       } finally {
         subscription.close();
       }

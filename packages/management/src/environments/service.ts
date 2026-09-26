@@ -13,7 +13,7 @@ import {
 } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { environmentOf } from "../rpc/caller.ts";
-import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
+import { endIfShuttingDown, failedPrecondition, invalid, notFound, streamSignal } from "../rpc/validate.ts";
 import { capacityServices } from "./capacity.ts";
 import { desiredState } from "./desired.ts";
 import { reportServices } from "./reports.ts";
@@ -26,7 +26,7 @@ const maxStatusJsonBytes = 64 * 1024;
 const gatewayPattern = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})$/;
 
 export function environmentService(deps: Deps): Partial<ServiceImpl<typeof EnvironmentService>> {
-  const { sql, changes } = deps;
+  const { sql, changes, shutdown } = deps;
   return {
     async *attach(request, context) {
       const environmentId = environmentOf(context);
@@ -41,7 +41,8 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
         const lease = request.core ? await claimLease(sql, environmentId, request.instanceId, request.epoch) : 0n;
         let sentRevision: bigint | undefined;
         let sentAt = 0;
-        while (!context.signal.aborted) {
+        const signal = streamSignal(context.signal, shutdown);
+        while (!signal.aborted) {
           const { message, lease: current } = await desiredState(deps, environmentId);
           if (request.core) fenceLease(current, lease);
           if (message.revision !== sentRevision || Date.now() - sentAt >= keepaliveMs) {
@@ -50,8 +51,9 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
             sentRevision = message.revision;
             sentAt = Date.now();
           }
-          await subscription.next(keepaliveMs - (Date.now() - sentAt), context.signal);
+          await subscription.next(keepaliveMs - (Date.now() - sentAt), signal);
         }
+        endIfShuttingDown(shutdown);
       } finally {
         subscription.close();
       }

@@ -53,18 +53,16 @@ export function fenceLease(current: bigint, lease: bigint): void {
 }
 
 /**
- * Deletes an environment at once when it has no machines; otherwise marks it DELETING, revokes its tokens and leaves
- * the machines and the row to the reconciler.
+ * Deletes an environment at once when it never had machines; otherwise marks it DELETING, revokes its tokens and
+ * leaves removing the machines, then the row, to the reconciler. Core's token is saved before any machine is created,
+ * so an environment without one has none, even ones whose create reply was lost.
  */
 export async function deleteEnvironment(sql: Sql, environmentId: string): Promise<void> {
   await sql.begin(async (tx) => {
-    const [environment] = await tx<{ machine_id: string; machines: bigint }[]>`
-      select machine_id,
-        (select count(*) from capacity_requests c
-          where c.environment_id = e.id and c.machine_id <> '' and not c.torn_down) as machines
-      from environments e where id = ${environmentId} for update`;
+    const [environment] = await tx<{ provisioned: boolean }[]>`
+      select machine_token is not null as provisioned from environments where id = ${environmentId} for update`;
     if (!environment) return;
-    if (!environment.machine_id && environment.machines === 0n) {
+    if (!environment.provisioned) {
       await tx`delete from environments where id = ${environmentId}`;
     } else {
       await tx`update environments set state = ${EnvironmentState.DELETING} where id = ${environmentId}`;
