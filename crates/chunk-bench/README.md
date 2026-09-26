@@ -84,12 +84,15 @@ gateway (platform) credential, `--streams-per-connection` to a connection, then 
 `Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams only
 advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
 writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
-record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read. The
-`fanout` summary reports stream updates, position-only updates, changed entries and encoded update bytes per second
-(excluding gRPC and HTTP/2 framing), streams that ended, and `reply_to_observed_us`: from a write's reply reaching the
-generator until each prompt stream observes its position, once per write and stream (slow readers excluded; a stream
-that got there before the reply counts as zero). `measured-observed.hdr` holds that histogram. `target_cpu_cores` is
-core's CPU time over wall time. No control state changes during the run, so streams never recheck their grant.
+record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read. Setup
+fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an ended stream. The `fanout`
+summary reports stream updates, position-only updates, changed entries and encoded update bytes per second (excluding
+gRPC and HTTP/2 framing), query errors, streams that ended, and `reply_to_observed_us`: from a measured write's reply
+reaching the generator until each prompt stream observes its position, once per write and stream (slow readers
+excluded). After the last write, the runner waits up to two seconds for those observations; pairs still missing are
+`unobserved_pairs`. The fan-out summary and resource sampling then stop at the same instant. `measured-observed.hdr`
+holds the lag histogram, and `target_cpu_cores` is core's CPU time over wall time. No control state changes during the
+run, but core still checks each stream's grant before every update, so position-only fan-out includes that check.
 
 Backend targets build `chunk-backend` with its `bench-support` feature, which exposes phase timings from the engine and
 commit threads without changing behavior. Phases are recorded after warmup: `queue` (admission until the engine thread

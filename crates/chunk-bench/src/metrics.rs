@@ -77,6 +77,11 @@ impl Stats {
     }
 }
 
+pub fn save(histogram: &Histogram<u64>, path: &Path) -> Result<()> {
+    V2Serializer::new().serialize(histogram, &mut File::create(path)?)?;
+    Ok(())
+}
+
 pub fn histogram() -> Result<Histogram<u64>> {
     // Fixed storage, microseconds, 3 significant digits, up to two hours.
     Ok(Histogram::new_with_bounds(1, 7_200_000_000, 3)?)

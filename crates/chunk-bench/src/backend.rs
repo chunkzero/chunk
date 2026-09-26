@@ -216,15 +216,16 @@ impl Fanout {
         self.errors.store(0, Ordering::Relaxed);
     }
 
-    pub fn summary(&self, output: &Path) -> Result<Value> {
+    /// The measurement at this instant and its delivery histogram.
+    pub fn freeze(&self) -> (Value, Histogram<u64>) {
         let histogram = self.after_reply.lock().expect("fan-out histogram");
-        V2Serializer::new().serialize(&*histogram, &mut fs::File::create(output.join("measured-delivery.hdr"))?)?;
-        Ok(json!({
+        let summary = json!({
             "streams": self.deliveries.lock().expect("fan-out state").seen.len(),
             "updates_received": self.updates.load(Ordering::Relaxed),
             "updates_with_query_errors": self.errors.load(Ordering::Relaxed),
             "reply_to_all_delivered_us": metrics::distribution(&histogram),
-        }))
+        });
+        (summary, histogram.clone())
     }
 }
 

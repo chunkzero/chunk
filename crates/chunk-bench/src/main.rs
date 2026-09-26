@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
+use hdrhistogram::Histogram;
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -124,17 +125,27 @@ enum Subscriptions {
 }
 
 impl Subscriptions {
-    fn reset(&self) {
+    fn reset(&self) -> Result<()> {
         match self {
             Self::Backend(fanout) => fanout.reset(),
-            Self::Sync(streams) => streams.reset(),
+            Self::Sync(streams) => streams.reset()?,
         }
+        Ok(())
     }
 
-    fn summary(&self, output: &Path) -> Result<Value> {
+    /// Waits for outstanding deliveries, then returns the measurement at that instant, its delivery histogram and
+    /// the file name for it.
+    async fn freeze(&self) -> (Value, Histogram<u64>, &'static str) {
         match self {
-            Self::Backend(fanout) => fanout.summary(output),
-            Self::Sync(streams) => streams.summary(output),
+            Self::Backend(fanout) => {
+                let (summary, histogram) = fanout.freeze();
+                (summary, histogram, "measured-delivery.hdr")
+            }
+            Self::Sync(streams) => {
+                streams.drain().await;
+                let (summary, histogram) = streams.freeze();
+                (summary, histogram, "measured-observed.hdr")
+            }
         }
     }
 }
@@ -212,7 +223,7 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     ensure!(warmup.errors.is_empty(), "warmup operations failed: {:?}", warmup.errors);
     target.reset().await?;
     if let Some(subscriptions) = &subscriptions {
-        subscriptions.reset();
+        subscriptions.reset()?;
     }
     let monitor_stop = CancellationToken::new();
     let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone());
@@ -224,11 +235,18 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
             u64::from(config.warmup) * u64::from(config.rate()),
         )
         .await;
+        let fanout = match &subscriptions {
+            Some(subscriptions) => Some(subscriptions.freeze().await),
+            None => None,
+        };
         monitor_stop.cancel();
-        result
+        (result, fanout)
     };
-    let (stats, samples) = tokio::join!(workload, monitor);
+    let ((stats, fanout), samples) = tokio::join!(workload, monitor);
     let stats = stats?;
+    let fanout = fanout
+        .map(|(summary, histogram, file)| metrics::save(&histogram, &output.join(file)).map(|()| summary))
+        .transpose()?;
     stats.write(&output, "measured")?;
     let samples = samples?;
     let target_cpu_ms = samples.last().and_then(|sample| sample["target"]["cpu_ms"].as_u64()).unwrap_or_default();
@@ -238,7 +256,7 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
         "target_cpu_cores": samples.last().map(|sample| sample["target"]["average_cpu_cores"].clone()),
         "target_cpu_us_per_completed": metrics::count(target_cpu_ms * 1000) / metrics::count(stats.completed.max(1)),
         "phases_us": target.report().await?,
-        "fanout": subscriptions.map(|subscriptions| subscriptions.summary(&output)).transpose()?,
+        "fanout": fanout,
     });
     let mut report = json!({"schema_version":1, "warmup":warmup.summary(config.warmup, bytes), "resources":samples});
     report.as_object_mut().context("report object")?.extend(result.as_object().context("result object")?.clone());
