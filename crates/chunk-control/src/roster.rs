@@ -117,6 +117,7 @@ fn retried(state: &State, roster: &Roster, request: &RosterMove) -> Result<Vec<C
             if destination.identity.as_ref().map(|identity| &identity.uuid) != Some(&member.player_id)
                 || destination.demand.as_ref() != Some(&request.demand)
                 || destination.source.as_ref() != Some(&member.expected_source)
+                || destination.connection_id != member.expected_connection_id
             {
                 return Err(Error::Invalid("roster operation changed"));
             }

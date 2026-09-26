@@ -114,6 +114,9 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
     assert!(
         control.move_roster(&RosterMove { version: 2, ..roster("pair", 1, &[first.clone(), second.clone()]) }).is_err()
     );
+    let mut reconnected = roster("pair", 1, &[first.clone(), second.clone()]);
+    reconnected.members[1].expected_connection_id = "connection-other".into();
+    assert!(control.move_roster(&reconnected).is_err());
     let mut activations = Vec::new();
     for (destination, (player, source)) in destinations.iter().zip([&first, &second]) {
         let prepared = control.claim(destination.clone()).await.unwrap();
