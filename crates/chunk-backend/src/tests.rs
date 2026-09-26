@@ -489,15 +489,23 @@ async fn invalid_results_leave_backend_usable_and_watches_recover_from_data_erro
 #[tokio::test]
 async fn foreground_queries_run_between_subscription_reevaluations() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
-    backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=0; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
+    // One read engine, so its counter sees every rerun and the query competes with them.
+    let backend = Backend::with_readers("local".into(), Box::new(open(&directory)), 1).unwrap();
+    backend.register(id(), format!("{SOURCE} let evaluations=0; export function slow(ctx, args) {{ const value=ctx.db.get('profiles','p'); if(value) {{ let n=args.n; for(let i=0;i<12000000;i++) n += Math.sqrt(i); evaluations++; return n; }} return 0; }} export function count() {{ return evaluations; }}"), Limits::default()).await.unwrap();
     let mut watches = Vec::new();
-    for _ in 0..16 {
-        watches.push(backend.subscribe(call("slow", json!({}))).await.unwrap());
+    for n in 0..16 {
+        let mut watch = backend.subscribe(call("slow", json!({ "n": n }))).await.unwrap();
+        watch.next().await.unwrap();
+        watches.push(watch);
     }
     backend.mutate("start".into(), call("bump", json!({"id":"p"}))).await.unwrap();
-    let count = value(&backend.query(call("count", json!({}))).await.unwrap());
-    assert!(count.as_u64().unwrap() < 16, "foreground query ran after every subscriber: {count}");
+    // Each rerun takes tens of milliseconds; the query queues during the first and runs next.
+    let count = value(&backend.query(call("count", json!({}))).await.unwrap()).as_u64().unwrap();
+    assert!(count <= 2, "foreground query waited for {count} of 16 reruns");
+    for watch in &mut watches {
+        watch.next().await.unwrap();
+    }
+    assert_eq!(value(&backend.query(call("count", json!({}))).await.unwrap()), json!(16));
 }
 
 #[tokio::test]

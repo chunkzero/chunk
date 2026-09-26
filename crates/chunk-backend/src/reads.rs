@@ -136,12 +136,14 @@ pub(crate) struct Change {
 }
 
 /// What one evaluation read. Reading the caller counts: the result may then differ per caller.
+/// Reading the time counts too: every commit advances the snapshot time.
 #[derive(Default)]
 pub(crate) struct Dependencies {
     pub points: BTreeSet<DocumentKey>,
     pub ranges: Vec<KeyRange>,
     pub indexes: Vec<(IndexQuery, Vec<String>)>,
     pub caller: bool,
+    pub time: bool,
 }
 
 impl Dependencies {
@@ -151,6 +153,13 @@ impl Dependencies {
                 || self.ranges.iter().any(|range| covers(range, &change.key))
                 || self.indexes.iter().any(|(query, fields)| change.matches(query, fields))
         })
+    }
+
+    /// Whether any read covers one of `tables`.
+    pub fn touches(&self, tables: &BTreeSet<String>) -> bool {
+        self.points.iter().any(|point| tables.contains(&point.table))
+            || self.ranges.iter().any(|range| tables.contains(&range.table))
+            || self.indexes.iter().any(|(query, _)| tables.contains(&query.table))
     }
 }
 
@@ -207,6 +216,10 @@ impl Host {
 impl ReadHost for Host {
     fn read_caller(&mut self) {
         self.trace.borrow_mut().caller = true;
+    }
+
+    fn read_time(&mut self) {
+        self.trace.borrow_mut().time = true;
     }
 
     fn schedule_id(&self, sequence: u32) -> std::result::Result<String, String> {

@@ -288,6 +288,6 @@ impl Actor {
                 self.deferred.push_back((query, reply));
             }
         }
-        self.watches.changed(update.revision, pending.changes);
+        self.watches.changed(update.revision, pending.changes, pending.bytes);
     }
 }

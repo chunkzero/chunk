@@ -11,6 +11,8 @@ pub(super) type QueryId = u64;
 #[derive(Default)]
 pub(super) struct ReadIndex {
     tables: BTreeMap<String, Table>,
+    /// Queries that read the snapshot time, which every commit changes.
+    timed: BTreeSet<QueryId>,
 }
 
 #[derive(Default)]
@@ -32,6 +34,9 @@ fn key(query: &IndexQuery) -> String {
 
 impl ReadIndex {
     pub fn insert(&mut self, id: QueryId, reads: &Dependencies) {
+        if reads.time {
+            self.timed.insert(id);
+        }
         for point in &reads.points {
             self.table(&point.table).points.entry(point.id.clone()).or_default().insert(id);
         }
@@ -46,6 +51,7 @@ impl ReadIndex {
     }
 
     pub fn remove(&mut self, id: QueryId, reads: &Dependencies) {
+        self.timed.remove(&id);
         for point in &reads.points {
             if let Some(table) = self.tables.get_mut(&point.table)
                 && let Some(ids) = table.points.get_mut(&point.id)
@@ -91,8 +97,9 @@ impl ReadIndex {
         }
     }
 
-    /// Adds every query whose reads intersect the changes.
+    /// Adds every query a commit with these changes affects.
     pub fn affected(&self, changes: &[Change], found: &mut BTreeSet<QueryId>) {
+        found.extend(&self.timed);
         for change in changes {
             let Some(table) = self.tables.get(&change.key.table) else {
                 continue;

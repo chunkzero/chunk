@@ -12,6 +12,7 @@ export function board(ctx) {
   return coins > 1 ? ctx.caller.player : coins;
 }
 export function evaluated() { return evaluations; }
+export function clock() { return Date.now(); }
 export function put(ctx, args) { ctx.db.put('profiles', args.id, args.value); return null; }
 ";
 
@@ -69,4 +70,19 @@ async fn identical_subscriptions_share_one_evaluation_until_they_read_the_caller
     let mut late = backend.subscribe_group(vec![player("p0"), player("p0")]).await.unwrap();
     assert_eq!(results(&mut late).await, vec![json!("p0"); 2]);
     assert_eq!(evaluated(&backend).await, 1 + 12);
+}
+
+#[tokio::test]
+async fn cached_results_that_read_the_time_rerun_with_every_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let mut group = backend.subscribe_group(vec![call("clock", json!({})), player("p0")]).await.unwrap();
+    let [before, coins] = <[Value; 2]>::try_from(results(&mut group).await).unwrap();
+    assert_eq!(coins, json!(0));
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    put(&backend, "board", 1).await;
+    let [after, coins] = <[Value; 2]>::try_from(results(&mut group).await).unwrap();
+    assert_eq!(coins, json!(1));
+    assert!(after.as_i64() > before.as_i64(), "the clock kept its old snapshot time: {before} then {after}");
 }

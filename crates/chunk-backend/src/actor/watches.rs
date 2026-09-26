@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use super::index::{QueryId, ReadIndex};
 use crate::{
     Error, Result,
+    limits::{Limit, SUBSCRIPTION_BYTES},
     reads::{Change, Dependencies, View},
     service::{Call, GroupSubscription, GroupUpdate, Request},
     timing::{Phase, Timer},
@@ -18,11 +19,13 @@ use crate::{
 type GroupId = u64;
 
 const GROUP_RESULT_BYTES: usize = 1024 * 1024;
-/// Bookkeeping charged per subscribed call and per query, beyond their inputs and results.
+/// Bookkeeping charged per subscribed call, per query and per logged commit, beyond their payloads.
 const ENTRY_BYTES: usize = 256;
+/// Commits logged in full during a batch; beyond this they are kept only by table.
+const RECENT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Memory a group of `calls` holds while subscribed, not counting shared query results.
-pub(super) fn cost(calls: &[Call]) -> usize {
+fn cost(calls: &[Call]) -> usize {
     calls.iter().map(|call| call.bytes() + ENTRY_BYTES).sum()
 }
 
@@ -97,6 +100,13 @@ struct Batch {
     commits: Vec<Timer>,
 }
 
+/// A commit after the current batch's snapshot.
+enum Commit {
+    Changes(Arc<[Change]>),
+    /// Collapsed history: any read of these tables may have missed a change.
+    Tables(BTreeSet<String>),
+}
+
 pub(crate) struct Job {
     pub id: QueryId,
     pub call: Call,
@@ -115,11 +125,13 @@ pub(super) struct Watches {
     next_commits: Vec<Timer>,
     /// Commits after the current batch's snapshot. A completed evaluation checks its
     /// new reads against them, since the index only knew its previous reads.
-    recent: Vec<(Revision, Option<Arc<[Change]>>)>,
+    recent: Vec<(Revision, Commit)>,
+    recent_bytes: usize,
     durable: Revision,
     ids: u64,
-    /// Estimated memory held by groups and queries.
+    /// Estimated memory held by groups and queries, limited to `budget`.
     bytes: usize,
+    budget: usize,
 }
 
 impl Watches {
@@ -133,10 +145,17 @@ impl Watches {
             next: Vec::new(),
             next_commits: Vec::new(),
             recent: Vec::new(),
+            recent_bytes: 0,
             durable,
             ids: 0,
             bytes: 0,
+            budget: SUBSCRIPTION_BYTES,
         }
+    }
+
+    #[cfg(test)]
+    fn with_budget(durable: Revision, budget: usize) -> Self {
+        Self { budget, ..Self::new(durable) }
     }
 
     fn id(&mut self) -> u64 {
@@ -144,8 +163,8 @@ impl Watches {
         self.ids
     }
 
-    pub fn bytes(&self) -> usize {
-        self.bytes
+    pub fn admits(&self, calls: &[Call]) -> bool {
+        self.bytes + cost(calls) <= self.budget
     }
 
     pub fn references(&self, deployment: &DeploymentId) -> bool {
@@ -209,8 +228,8 @@ impl Watches {
         }
     }
 
-    /// Marks the queries a durable commit affected for the next batch.
-    pub fn changed(&mut self, revision: Revision, changes: Arc<[Change]>) {
+    /// Marks the queries a durable commit affected for the next batch. `bytes` estimates its changes.
+    pub fn changed(&mut self, revision: Revision, changes: Arc<[Change]>, bytes: usize) {
         self.durable = revision;
         let mut affected = BTreeSet::new();
         self.index.affected(&changes, &mut affected);
@@ -218,7 +237,7 @@ impl Watches {
             self.invalidate(*id, revision);
         }
         if self.batch.is_some() {
-            self.recent.push((revision, Some(changes)));
+            self.log(revision, changes, bytes);
         }
         if !affected.is_empty() {
             self.next_commits.push(Timer::start());
@@ -231,13 +250,38 @@ impl Watches {
         if let Some(batch) = self.batch.take() {
             self.next_commits.extend(batch.commits);
         }
-        self.recent.clear();
+        self.clear_log();
         let ids: Vec<_> = self.queries.keys().copied().collect();
         for id in ids {
             let query = self.queries.get_mut(&id).expect("query");
             query.scheduled = false;
             self.invalidate(id, revision);
         }
+    }
+
+    /// Logs a commit for the running batch. Past `RECENT_BYTES`, the log collapses to the
+    /// tables changed since its first commit, which conservatively covers every change.
+    fn log(&mut self, revision: Revision, changes: Arc<[Change]>, bytes: usize) {
+        self.recent_bytes += bytes + ENTRY_BYTES;
+        self.recent.push((revision, Commit::Changes(changes)));
+        if self.recent_bytes <= RECENT_BYTES {
+            return;
+        }
+        let first = self.recent[0].0;
+        let mut tables = BTreeSet::new();
+        for (_, commit) in self.recent.drain(..) {
+            match commit {
+                Commit::Changes(changes) => tables.extend(changes.iter().map(|change| change.key.table.clone())),
+                Commit::Tables(names) => tables.extend(names),
+            }
+        }
+        self.recent_bytes = tables.iter().map(|table| table.len() + ENTRY_BYTES).sum();
+        self.recent.push((first, Commit::Tables(tables)));
+    }
+
+    fn clear_log(&mut self) {
+        self.recent.clear();
+        self.recent_bytes = 0;
     }
 
     fn invalidate(&mut self, id: QueryId, revision: Revision) {
@@ -254,6 +298,7 @@ impl Watches {
     /// Takes the next evaluation, starting a batch against `latest` when none is running.
     pub fn next_job(&mut self, latest: impl FnOnce() -> Arc<View>) -> Option<Job> {
         if self.batch.is_none() && !self.next.is_empty() {
+            self.sweep();
             self.start(latest());
         }
         let batch = self.batch.as_mut()?;
@@ -288,7 +333,7 @@ impl Watches {
             }
             return;
         }
-        self.recent.clear();
+        self.clear_log();
         self.batch = Some(Batch {
             generation: self.id(),
             view,
@@ -304,7 +349,7 @@ impl Watches {
             for commit in batch.commits {
                 commit.stop(Phase::FanOut);
             }
-            self.recent.clear();
+            self.clear_log();
         }
     }
 
@@ -325,7 +370,13 @@ impl Watches {
         let missed = self
             .recent
             .iter()
-            .find(|(_, changes)| changes.as_ref().is_none_or(|changes| reads.affected(changes)))
+            .find(|(_, commit)| {
+                reads.time
+                    || match commit {
+                        Commit::Changes(changes) => reads.affected(changes),
+                        Commit::Tables(tables) => reads.touches(tables),
+                    }
+            })
             .map(|(revision, _)| *revision);
         let version = self.id();
         let query = self.queries.get_mut(&id).expect("stored query");
@@ -341,12 +392,22 @@ impl Watches {
         let split = reads.caller && query.identity.caller.is_none();
         query.reads = reads;
         query.evaluated = evaluated;
+        let mut grew = false;
         if query.result.as_ref().is_none_or(|previous| !same(previous, &result)) {
-            self.bytes = self.bytes + result_bytes(Some(&result)) - result_bytes(query.result.as_ref());
+            let (before, after) = (result_bytes(query.result.as_ref()), result_bytes(Some(&result)));
+            grew = after > before;
+            self.bytes = self.bytes + after - before;
             query.result = Some(result);
             query.version = version;
         }
         let groups: Vec<_> = query.groups.keys().copied().collect();
+        if grew && self.bytes > self.budget {
+            let error = Limit::SubscriptionMemory.exceeded();
+            for group in groups {
+                self.close(group, Some(&error));
+            }
+            return;
+        }
         if split {
             self.split(id);
         }
@@ -440,11 +501,21 @@ impl Watches {
     pub fn sweep(&mut self) {
         let closed: Vec<_> = self.groups.iter().filter(|(_, group)| group.closed()).map(|(id, _)| *id).collect();
         for id in closed {
-            let group = self.groups.remove(&id).expect("closed group");
-            self.bytes -= cost(&group.calls);
-            for query in group.queries {
-                self.detach(query, id);
-            }
+            self.close(id, None);
+        }
+    }
+
+    /// Removes a group, first sending `error` to its subscriber.
+    fn close(&mut self, id: GroupId, error: Option<&Error>) {
+        let Some(group) = self.groups.remove(&id) else {
+            return;
+        };
+        self.bytes -= cost(&group.calls);
+        for query in &group.queries {
+            self.detach(*query, id);
+        }
+        if let Some(error) = error {
+            reject(group, error);
         }
     }
 
@@ -467,13 +538,17 @@ impl Watches {
 
     pub fn fail(&mut self, error: &Error) {
         for (_, group) in std::mem::take(&mut self.groups) {
-            if let Some(sender) = group.sender {
-                let _ = sender.send_replace(Err(error.clone()));
-            } else if let Some(reply) = group.reply {
-                reply.finish(Err(error.clone()));
-            }
+            reject(group, error);
         }
-        *self = Self::new(self.durable);
+        *self = Self { budget: self.budget, ..Self::new(self.durable) };
+    }
+}
+
+fn reject(group: Group, error: &Error) {
+    if let Some(sender) = group.sender {
+        let _ = sender.send_replace(Err(error.clone()));
+    } else if let Some(reply) = group.reply {
+        reply.finish(Err(error.clone()));
     }
 }
 
