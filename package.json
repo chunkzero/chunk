@@ -6,9 +6,10 @@
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
-    "typecheck": "tsc --project crates/chunk-build/sdk/tsconfig.json && pnpm --filter @chunkzero/management typecheck",
+    "typecheck": "tsc --project crates/chunk-build/sdk/tsconfig.json && pnpm --filter @chunkzero/management typecheck && pnpm --filter @chunkzero/dashboard typecheck",
     "test": "node --test crates/chunk-build/sdk/test/*.test.mjs",
-    "test:management": "pnpm --filter @chunkzero/management test"
+    "test:management": "pnpm --filter @chunkzero/management test",
+    "build:dashboard": "pnpm --filter @chunkzero/dashboard build"
   },
   "devDependencies": {
     "oxfmt": "0.67.0",
