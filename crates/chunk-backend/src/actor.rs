@@ -147,8 +147,7 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let due = [self.scheduled.next_due(), self.watches.advance_due()].into_iter().flatten().min();
-            let event = if let Some(wait) = due {
+            let event = if let Some(wait) = self.scheduled.next_due() {
                 self.timer
                     .block_on(async { tokio::time::timeout(wait, incoming.recv()).await })
                     .unwrap_or(Some(Event::Wake))
@@ -218,7 +217,6 @@ impl Actor {
                 self.dispatch_jobs();
             }
             self.dispatch();
-            self.watches.advance();
         }
         incoming.close();
         while let Ok(event) = incoming.try_recv() {

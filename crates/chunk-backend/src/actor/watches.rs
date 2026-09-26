@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use chunk_js::DeploymentId;
@@ -13,7 +12,7 @@ use crate::{
     Error, Result,
     limits::{Limit, SUBSCRIPTION_BYTES},
     reads::{Change, Dependencies, View},
-    service::{Call, GroupSubscription, GroupUpdate, Request},
+    service::{Call, GroupSubscription, GroupUpdate, Hold, Request},
     timing::{Phase, Timer},
 };
 
@@ -26,8 +25,6 @@ const ENTRY_BYTES: usize = 256;
 const KEY_BYTES: usize = 64;
 /// Commits logged in full during a batch; beyond this they are kept only by table.
 const RECENT_BYTES: usize = 16 * 1024 * 1024;
-/// Least time between sweeps that raise the revision of groups whose results still hold.
-const ADVANCE: Duration = Duration::from_millis(100);
 
 /// Memory a group of `calls` holds while subscribed, not counting shared query results.
 fn cost(calls: &[Call]) -> usize {
@@ -80,7 +77,11 @@ struct Group {
     queries: Vec<QueryId>,
     versions: Vec<u64>,
     revision: Revision,
+    /// The version of the last published update.
+    published: u64,
     sender: Option<watch::Sender<Result<GroupUpdate>>>,
+    /// How far the published results hold, which subscribers read without being woken for each commit.
+    hold: watch::Sender<Option<Hold>>,
     /// Held until every query has a result for the initial update.
     reply: Option<Request<GroupSubscription>>,
 }
@@ -135,9 +136,8 @@ pub(super) struct Watches {
     durable: Revision,
     /// Groups holding results evaluated past the durable revision, published once it catches up.
     withheld: BTreeSet<GroupId>,
-    /// The durable revision at the last advance sweep, and when it ran.
-    advanced: Revision,
-    swept: Instant,
+    /// Announces `durable` once the holds it affects are recorded.
+    announced: watch::Sender<Revision>,
     ids: u64,
     /// Estimated memory held by groups and queries, limited to `budget`.
     bytes: usize,
@@ -158,8 +158,7 @@ impl Watches {
             recent_bytes: 0,
             durable,
             withheld: BTreeSet::new(),
-            advanced: durable,
-            swept: Instant::now(),
+            announced: watch::Sender::new(durable),
             ids: 0,
             bytes: 0,
             budget: SUBSCRIPTION_BYTES,
@@ -191,7 +190,16 @@ impl Watches {
         let queries = calls.iter().map(|call| self.attach(call, group)).collect();
         self.groups.insert(
             group,
-            Group { calls, queries, versions: Vec::new(), revision: Revision(0), sender: None, reply: Some(reply) },
+            Group {
+                calls,
+                queries,
+                versions: Vec::new(),
+                revision: Revision(0),
+                published: 0,
+                sender: None,
+                hold: watch::Sender::new(None),
+                reply: Some(reply),
+            },
         );
         self.publish(group);
     }
@@ -261,6 +269,7 @@ impl Watches {
                 self.publish(group);
             }
         }
+        self.announced.send_replace(revision);
     }
 
     /// A schema activation invalidates every query and restarts at the new snapshot.
@@ -276,6 +285,7 @@ impl Watches {
             query.scheduled = false;
             self.invalidate(id, revision);
         }
+        self.announced.send_replace(revision);
     }
 
     /// Logs a commit for the running batch. Past `RECENT_BYTES`, the log collapses to the
@@ -307,10 +317,16 @@ impl Watches {
         let Some(query) = self.queries.get_mut(&id) else {
             return;
         };
-        query.stale.get_or_insert(revision);
         if query.dirty.is_none() {
             query.dirty = Some(revision);
             self.next.push(id);
+        }
+        if query.stale.is_none() {
+            query.stale = Some(revision);
+            let groups: Vec<_> = query.groups.keys().copied().collect();
+            for group in groups {
+                self.hold(group);
+            }
         }
     }
 
@@ -477,8 +493,14 @@ impl Watches {
         }
     }
 
-    /// Publishes the group if its queries agree on a revision and any result changed.
+    /// Publishes the group if its queries agree on a revision and any result changed, then records how far its
+    /// published results hold.
     fn publish(&mut self, id: GroupId) {
+        self.publish_changed(id);
+        self.hold(id);
+    }
+
+    fn publish_changed(&mut self, id: GroupId) {
         let group = &self.groups[&id];
         let mut first = Revision(0);
         let mut last = self.durable;
@@ -521,53 +543,44 @@ impl Watches {
         let group = self.groups.get_mut(&id).expect("published group");
         group.versions = versions;
         group.revision = last;
+        group.published = version;
         if let Some(sender) = &group.sender {
             let _ = sender.send_replace(Ok(update));
         } else if let Some(reply) = group.reply.take() {
             let (sender, receiver) = watch::channel(Ok(update));
             group.sender = Some(sender);
-            reply.finish(Ok(GroupSubscription::new(receiver)));
+            reply.finish(Ok(GroupSubscription::new(receiver, group.hold.subscribe(), self.announced.subscribe())));
         }
     }
 
-    /// How long until [`Self::advance`] sweeps, once a commit arrived since its last sweep.
-    pub fn advance_due(&self) -> Option<Duration> {
-        (self.durable > self.advanced).then(|| ADVANCE.saturating_sub(self.swept.elapsed()))
-    }
-
-    /// Republishes each group whose published results still hold at a later durable revision at that revision, at
-    /// most once per [`ADVANCE`], so its subscribers learn their view is current without a message per commit.
-    pub fn advance(&mut self) {
-        if self.advance_due().is_none_or(|wait| !wait.is_zero()) {
+    /// Records the revisions at which the group's published results hold: none once a result changed, otherwise from
+    /// the latest evaluation of any of them until a commit invalidates one.
+    fn hold(&self, id: GroupId) {
+        let Some(group) = self.groups.get(&id).filter(|group| group.sender.is_some()) else {
             return;
-        }
-        self.advanced = self.durable;
-        self.swept = Instant::now();
-        for group in self.groups.values_mut() {
-            let Some(sender) = &group.sender else {
-                continue;
-            };
-            let mut last = self.durable;
-            for (query, version) in group.queries.iter().zip(&group.versions) {
-                let query = &self.queries[query];
-                if query.version != *version {
-                    // A changed result publishes on its own.
-                    last = Revision(0);
-                    break;
-                }
-                if let Some(stale) = query.stale {
-                    last = last.min(Revision(stale.0.saturating_sub(1)));
-                }
+        };
+        let hold = self.holding(group);
+        group.hold.send_if_modified(|current| {
+            let changed = *current != hold;
+            *current = hold;
+            changed
+        });
+    }
+
+    fn holding(&self, group: &Group) -> Option<Hold> {
+        let mut hold = Hold { version: group.published, from: Revision(0), until: None };
+        for (query, version) in group.queries.iter().zip(&group.versions) {
+            let query = &self.queries[query];
+            if query.version != *version {
+                return None;
             }
-            if last > group.revision {
-                group.revision = last;
-                sender.send_modify(|update| {
-                    if let Ok(update) = update {
-                        update.revision = last;
-                    }
-                });
+            hold.from = hold.from.max(query.evaluated);
+            if let Some(stale) = query.stale {
+                let last = Revision(stale.0.saturating_sub(1));
+                hold.until = Some(hold.until.map_or(last, |until| until.min(last)));
             }
         }
+        Some(hold)
     }
 
     /// Drops groups whose subscribers went away, and queries nobody subscribes to.

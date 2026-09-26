@@ -1,6 +1,6 @@
 //! App function calls: queries read through the backend, mutations commit once per operation ID.
 
-use super::errors;
+use super::{errors, streams::Nudges};
 use chunk_backend::{Backend, Call, Update};
 use chunk_contract::FunctionKind;
 use chunk_proto::sync::v1::{Error, error::Code};
@@ -13,25 +13,37 @@ pub(super) struct App {
     backend: Backend,
     /// Each deployment's public functions by kind. A deployment ID names one immutable version.
     functions: Mutex<HashMap<String, Arc<BTreeMap<String, FunctionKind>>>>,
+    nudges: Nudges,
 }
 
 impl App {
     pub fn new(backend: Backend) -> Self {
-        Self { backend, functions: Mutex::default() }
+        Self { backend, functions: Mutex::default(), nudges: Nudges::default() }
     }
 
     pub fn backend(&self) -> &Backend {
         &self.backend
     }
 
-    /// Runs a query, or a mutation under `operation`, which a retry repeats to get the committed outcome back.
-    pub async fn call(&self, operation: String, call: Call) -> Result<Update, Error> {
+    pub fn nudges(&self) -> &Nudges {
+        &self.nudges
+    }
+
+    /// Runs a query, or a mutation under `operation`, which a retry repeats to get the committed outcome back. A
+    /// committed mutation nudges the streams `credential` opened.
+    pub async fn call(&self, credential: &str, operation: String, call: Call) -> Result<Update, Error> {
         let result = match self.kind(&call).await? {
             FunctionKind::Query => self.backend.query(call).await,
             FunctionKind::Mutation if operation.is_empty() => {
                 return Err(errors::invalid("a mutation requires an operation ID"));
             }
-            FunctionKind::Mutation => self.backend.mutate(operation, call).await,
+            FunctionKind::Mutation => {
+                let result = self.backend.mutate(operation, call).await;
+                if let Ok(update) = &result {
+                    self.nudges.nudge(credential, update.revision);
+                }
+                result
+            }
             FunctionKind::Action => return Err(errors::invalid("actions are not served over the sync protocol yet")),
         };
         result.map_err(|failure| errors::backend(&failure))

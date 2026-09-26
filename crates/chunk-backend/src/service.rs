@@ -77,7 +77,16 @@ pub struct GroupUpdate {
     pub revision: Revision,
     pub results: Vec<Result<Arc<str>>>,
     /// Changes whenever `results` do.
-    pub(crate) version: u64,
+    pub version: u64,
+}
+
+/// The revisions at which a group's published update holds: from the latest evaluation of any of its results until
+/// the revision before a commit invalidates one, or the durable revision while none did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hold {
+    pub version: u64,
+    pub from: Revision,
+    pub until: Option<Revision>,
 }
 
 pub(crate) struct Request<T> {
@@ -644,36 +653,70 @@ impl Drop for CancelOnDrop {
 pub struct GroupSubscription {
     receiver: watch::Receiver<Result<GroupUpdate>>,
     initial: bool,
-    /// The version of the results `next` last returned.
-    returned: Option<u64>,
+    progress: Progress,
 }
 
 impl GroupSubscription {
-    pub(crate) fn new(receiver: watch::Receiver<Result<GroupUpdate>>) -> Self {
-        Self { receiver, initial: true, returned: None }
+    pub(crate) fn new(
+        receiver: watch::Receiver<Result<GroupUpdate>>,
+        hold: watch::Receiver<Option<Hold>>,
+        durable: watch::Receiver<Revision>,
+    ) -> Self {
+        Self { receiver, initial: true, progress: Progress { hold, durable } }
+    }
+
+    /// Follows the later durable revisions at which this group's results hold.
+    #[must_use]
+    pub fn progress(&self) -> Progress {
+        self.progress.clone()
     }
 
     /// Returns the initial result, then waits for changed results or an error.
     /// # Errors
     /// Reports execution, commit failure or backend shutdown.
     pub async fn next(&mut self) -> Result<GroupUpdate> {
-        loop {
-            let update = self.next_revision().await?;
-            if self.returned.replace(update.version) != Some(update.version) {
-                return Ok(update);
-            }
-        }
-    }
-
-    /// Returns the initial result, then waits for changed results, a later revision at which the results still hold,
-    /// or an error. Later revisions are published at most every 100 ms, not for every commit.
-    /// # Errors
-    /// Reports execution, commit failure or backend shutdown.
-    pub async fn next_revision(&mut self) -> Result<GroupUpdate> {
         if !std::mem::take(&mut self.initial) {
             self.receiver.changed().await.map_err(|_| Error::Closed)?;
         }
         self.receiver.borrow_and_update().clone()
+    }
+}
+
+/// Tells a group's subscriber how far its results hold at later durable revisions, without waking it for each commit
+/// unless it waits.
+#[derive(Clone)]
+pub struct Progress {
+    hold: watch::Receiver<Option<Hold>>,
+    durable: watch::Receiver<Revision>,
+}
+
+impl Progress {
+    /// The latest durable revision at which the update with `version` holds, if it still holds at any.
+    pub fn holds(&mut self, version: u64) -> Option<Revision> {
+        // The durable revision is announced after the holds it affects, so it is read first.
+        let durable = *self.durable.borrow_and_update();
+        let hold = (*self.hold.borrow_and_update()).filter(|hold| hold.version == version)?;
+        let last = hold.until.map_or(durable, |until| until.min(durable));
+        (last >= hold.from).then_some(last)
+    }
+
+    /// Waits until the durable revision passes `revision`.
+    pub async fn durable_after(&mut self, revision: Revision) {
+        if self.durable.wait_for(|durable| *durable > revision).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Waits for a commit, or a change in how far the results hold, since [`Self::holds`] last looked.
+    pub async fn changed(&mut self) {
+        let changed = tokio::select! {
+            changed = self.durable.changed() => changed,
+            changed = self.hold.changed() => changed,
+        };
+        if changed.is_err() {
+            // The group or backend is gone, which its results report.
+            std::future::pending::<()>().await;
+        }
     }
 }
 

@@ -36,17 +36,20 @@ impl Credentials {
             .and_then(|value| value.strip_prefix("Bearer "))
             .filter(|credential| !credential.is_empty())
             .ok_or_else(|| Status::unauthenticated("missing credential"))?;
+        let class = self.class(credential).ok_or_else(|| Status::unauthenticated("unknown credential"))?;
+        Ok(Principal { class, credential: credential.to_owned() })
+    }
+
+    /// The class `credential` currently grants; a JVM's lapses once its process stops.
+    pub fn class(&self, credential: &str) -> Option<Class> {
         let gateway = self.gateway.as_deref().is_some_and(|gateway| same_secret(credential, gateway));
         let cli = same_secret(credential, &self.cli);
-        let class = if gateway {
-            Class::Gateway
+        if gateway {
+            Some(Class::Gateway)
         } else if cli {
-            Class::Cli
-        } else if let Some(host) = self.control.authenticate(credential) {
-            Class::Jvm { host }
+            Some(Class::Cli)
         } else {
-            return Err(Status::unauthenticated("unknown credential"));
-        };
-        Ok(Principal { class, credential: credential.to_owned() })
+            self.control.authenticate(credential).map(|host| Class::Jvm { host })
+        }
     }
 }

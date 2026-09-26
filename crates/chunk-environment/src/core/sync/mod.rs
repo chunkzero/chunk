@@ -16,6 +16,7 @@ use chunk_proto::sync::v1::{
     core_server::{Core, CoreServer},
 };
 use chunk_store::Revision;
+use prost::Message;
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -33,7 +34,11 @@ const ARGUMENT_BYTES: usize = 1024 * 1024;
 pub(crate) fn services(backend: Backend, platform_token: Option<String>) -> chunk_control::server::Services {
     Box::new(move |control, token, stop| {
         let service = SyncService {
-            credentials: auth::Credentials { gateway: platform_token, cli: token.to_owned(), control: control.clone() },
+            credentials: Arc::new(auth::Credentials {
+                gateway: platform_token,
+                cli: token.to_owned(),
+                control: control.clone(),
+            }),
             control: control.clone(),
             epoch: backend.system().epoch().0,
             app: app::App::new(backend),
@@ -47,7 +52,7 @@ pub(crate) fn services(backend: Backend, platform_token: Option<String>) -> chun
 }
 
 pub(crate) struct SyncService {
-    credentials: auth::Credentials,
+    credentials: Arc<auth::Credentials>,
     control: Arc<Control>,
     app: app::App,
     streams: streams::StreamKey,
@@ -83,10 +88,11 @@ impl SyncService {
         let (deployment, caller) = self.scope(principal, &request.deployment, request.caller.as_ref())?;
         let arguments = std::str::from_utf8(&request.arguments).ok().and_then(|text| Json::parse(text).ok());
         let arguments = arguments.ok_or_else(|| errors::invalid("arguments are not JSON"))?;
-        self.app.call(request.operation_id, Call { deployment, function: request.method, arguments, caller }).await
+        let call = Call { deployment, function: request.method, arguments, caller };
+        self.app.call(&principal.credential, request.operation_id, call).await
     }
 
-    async fn open(&self, principal: &auth::Principal, request: &SubscribeRequest) -> Result<topics::Topic, Error> {
+    async fn open(&self, principal: auth::Principal, request: &SubscribeRequest) -> Result<topics::Topic, Error> {
         let after = request.after.as_ref().map_or("", |after| after.stream.as_str());
         check_names(&[&request.topic, &request.deployment, after], request.caller.as_ref())?;
         if request.arguments.len() > ARGUMENT_BYTES {
@@ -120,6 +126,13 @@ impl Core for SyncService {
             },
             Err(error) => CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) },
         };
+        if response.encoded_len() > MESSAGE_BYTES {
+            let error = errors::invalid("the result exceeds the 16 MiB message limit");
+            return Ok(Response::new(CallResponse {
+                position: None,
+                outcome: Some(call_response::Outcome::Error(error)),
+            }));
+        }
         Ok(Response::new(response))
     }
 
@@ -129,7 +142,7 @@ impl Core for SyncService {
         let principal = self.credentials.authenticate(&request)?;
         let request = request.into_inner();
         let (sender, stream) = streams::channel();
-        match self.open(&principal, &request).await {
+        match self.open(principal, &request).await {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),
         }

@@ -1,3 +1,5 @@
+mod runtime;
+
 use super::*;
 use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_proto::sync::v1::{Entry, call_response::Outcome, core_client::CoreClient, entry::State, error::Code};
@@ -11,6 +13,7 @@ const SOURCE: &str = r"
 export function get(ctx) { return ctx.db.get('counters', 'count')?.value ?? 0; }
 export function add(ctx, by) { const value = get(ctx) + by; ctx.db.put('counters', 'count', {value}); return value; }
 export function touch(ctx) { ctx.db.put('counters', 'other', {value: 1}); return 1; }
+export function boom(ctx) { throw 'x'.repeat(17 * 1024 * 1024); }
 ";
 
 fn deployment() -> Deployment {
@@ -25,6 +28,7 @@ fn deployment() -> Deployment {
         ("get", function(FunctionKind::Query, Schema::Null)),
         ("add", function(FunctionKind::Mutation, Schema::Integer)),
         ("touch", function(FunctionKind::Mutation, Schema::Null)),
+        ("boom", function(FunctionKind::Query, Schema::Null)),
     ];
     Deployment {
         contracts: Contracts::default(),
@@ -75,13 +79,18 @@ struct Fixture {
     _directory: tempfile::TempDir,
     backend: Backend,
     stop: CancellationToken,
-    control: JoinHandle<io::Result<()>>,
+    task: JoinHandle<io::Result<()>>,
+    control: Arc<Control>,
     client: CoreClient<Channel>,
     cli: String,
 }
 
 impl Fixture {
     async fn start() -> Self {
+        Self::with_host(Arc::new(Host)).await
+    }
+
+    async fn with_host(host: Arc<dyn chunk_control::Host>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = chunk_store::SqliteStore::open(directory.path().join("environment.sqlite"), "test").unwrap();
         let backend = Backend::new("test".into(), Box::new(store)).unwrap();
@@ -94,14 +103,22 @@ impl Fixture {
             connection: directory.path().join("control.json"),
             bind: "127.0.0.1:0".parse().unwrap(),
             control: chunk_control::Config { environment: "test".into() },
-            host: Arc::new(Host),
+            host,
             fresh: false,
             services: Some(services(backend.clone(), Some(PLATFORM.into()))),
         };
-        let control = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
-        let connection = started.await.unwrap().connection;
-        let client = CoreClient::connect(connection.endpoint).await.unwrap();
-        Self { _directory: directory, backend, stop, control, client, cli: connection.token }
+        let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
+        let started = started.await.unwrap();
+        let client = CoreClient::connect(started.connection.endpoint).await.unwrap();
+        Self {
+            _directory: directory,
+            backend,
+            stop,
+            task,
+            control: started.control,
+            client,
+            cli: started.connection.token,
+        }
     }
 
     async fn call(&mut self, credential: &str, operation: &str, method: &str, arguments: &str) -> CallResponse {
@@ -129,7 +146,7 @@ impl Fixture {
 
     async fn stop(self) {
         self.stop.cancel();
-        self.control.await.unwrap().unwrap();
+        self.task.await.unwrap().unwrap();
         let backend = self.backend;
         tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
     }
@@ -199,6 +216,8 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
     let snapshot = next(&mut updates).await;
     assert!(snapshot.snapshot && !snapshot.stream.is_empty());
     assert_eq!(snapshot.upserts, [entry("0")]);
+    // Idle streams advance at most once a second; this one catches up to its own credential's writes sooner.
+    let prompt = tokio::time::Instant::now() + Duration::from_millis(900);
 
     let added = fixture.call(&cli, "add", "add", "5").await;
     let mut update = next(&mut updates).await;
@@ -210,7 +229,8 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
 
     let touched = fixture.call(&cli, "touch", "touch", "null").await;
     loop {
-        let update = next(&mut updates).await;
+        let update = tokio::time::timeout_at(prompt, updates.message()).await.expect("a prompt advance");
+        let update = update.unwrap().expect("an update");
         assert!(update.upserts.is_empty() && update.removed.is_empty() && !update.snapshot);
         if revision(update.position.as_ref()) >= revision(touched.position.as_ref()) {
             break;
@@ -218,4 +238,84 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
     }
     drop(updates);
     fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_errors_stay_in_band() {
+    let mut fixture = Fixture::start().await;
+    let cli = fixture.cli.clone();
+    let bounded = |error: &Error| {
+        assert_eq!(error.code(), Code::Application);
+        assert!(error.message.len() < 65 * 1024 && error.message.ends_with("(truncated)"));
+    };
+    match &fixture.call(&cli, "", "boom", "null").await.outcome {
+        Some(Outcome::Error(error)) => bounded(error),
+        outcome => panic!("expected an error, got {outcome:?}"),
+    }
+
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"boom": {"function": "boom"}, "count": {"function": "get"}}"#.to_vec(),
+        deployment: "test".into(),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = fixture.client.subscribe(authorized(subscription, &cli)).await.unwrap().into_inner();
+    let snapshot = next(&mut updates).await;
+    match &snapshot.upserts[0] {
+        Entry { key, state: Some(State::Error(error)) } if key == "boom" => bounded(error),
+        entry => panic!("expected an error entry, got {:?}", entry.key),
+    }
+    fixture.call(&cli, "add", "add", "5").await;
+    let mut update = next(&mut updates).await;
+    while update.upserts.is_empty() {
+        update = next(&mut updates).await;
+    }
+    assert_eq!(update.upserts, [Entry { key: "count".into(), state: Some(State::Value("5".into())) }]);
+    drop(updates);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
+    use chunk_proto::v1::{ActivateClaim, MovePlayerRequest};
+    let (jvm, server) = runtime::Runtime::start();
+    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let control = fixture.control.clone();
+    control.activate_release(runtime::release()).unwrap();
+    let assignment = control.claim(runtime::login()).await.unwrap();
+    let session = assignment.delivery.and_then(|delivery| delivery.session).unwrap().id;
+    let host = jvm.host().unwrap();
+    // The JVM reports the arrival on its own stream.
+    while control.session_scope(&host, &session, Some(runtime::PLAYER)).is_err() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"count": {"function": "get"}}"#.to_vec(),
+        deployment: "test".into(),
+        caller: Some(Caller { session, player: runtime::PLAYER.into() }),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = fixture.client.subscribe(authorized(subscription, JVM)).await.unwrap().into_inner();
+    assert!(next(&mut updates).await.snapshot);
+
+    let request = MovePlayerRequest {
+        operation_id: "move".into(),
+        player_id: runtime::PLAYER.into(),
+        demand: Some(runtime::demand("arena")),
+        ..MovePlayerRequest::default()
+    };
+    let moved = control.claim(control.move_player(request).unwrap()).await.unwrap();
+    // Control's change feed ends the stream at once, not at its next idle advance.
+    let prompt = tokio::time::Instant::now() + Duration::from_millis(500);
+    control.cancel(runtime::login()).await.unwrap();
+    control.activate(ActivateClaim { claim: moved.claim }).await.unwrap();
+    let update = tokio::time::timeout_at(prompt, updates.message()).await.expect("a prompt end");
+    let update = update.unwrap().expect("an update");
+    assert_eq!(update.error.map(|error| error.code()), Some(Code::Denied));
+    assert!(updates.message().await.unwrap().is_none());
+    drop(updates);
+    fixture.stop().await;
+    server.abort();
 }

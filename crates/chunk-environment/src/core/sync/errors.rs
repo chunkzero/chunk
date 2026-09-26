@@ -2,8 +2,16 @@
 
 use chunk_proto::sync::v1::{Error, error::Code};
 
+/// The longest error message sent; a longer one is cut here and marked.
+const MESSAGE_BYTES: usize = 64 * 1024;
+
 pub(super) fn error(code: Code, message: impl Into<String>) -> Error {
-    Error { code: code.into(), message: message.into() }
+    let mut message = message.into();
+    if message.len() > MESSAGE_BYTES {
+        message.truncate(message.floor_char_boundary(MESSAGE_BYTES));
+        message.push_str("… (truncated)");
+    }
+    Error { code: code.into(), message }
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> Error {
