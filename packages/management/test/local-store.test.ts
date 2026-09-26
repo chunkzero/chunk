@@ -2,20 +2,22 @@ import { expect, spyOn, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { deriveKeys } from "../src/crypto.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
 import { releaseKey } from "../src/releases/store.ts";
 
-test("a first run syncs the directories it creates, and an upload syncs its directories after the archive", async () => {
+test("a start syncs the whole store path after an interrupted one, and an upload syncs after the archive", async () => {
   const base = await fs.mkdtemp(join(tmpdir(), "chunk-local-store-"));
   const synced: string[] = [];
+  let failSync = false;
   const open = fs.open;
   const opening = spyOn(fs, "open").mockImplementation(async (...args) => {
     const handle = await open(...args);
     const sync = handle.sync.bind(handle);
     handle.sync = () => {
+      if (failSync) return Promise.reject(new Error("interrupted"));
       synced.push(String(args[0]));
       return sync();
     };
@@ -23,12 +25,17 @@ test("a first run syncs the directories it creates, and an upload syncs its dire
   });
   try {
     const root = join(base, "data", "releases");
-    const store = await localReleaseStore({
-      directory: root,
-      keys: deriveKeys(randomBytes(32)),
-      publicUrl: "http://x",
-    });
-    expect(synced).toEqual([root, join(base, "data"), base]);
+    const start = () =>
+      localReleaseStore({ directory: root, keys: deriveKeys(randomBytes(32)), publicUrl: "http://x" });
+    failSync = true;
+    await expect(start()).rejects.toThrow("interrupted");
+    failSync = false;
+    expect(await fs.stat(root)).toBeDefined();
+
+    const store = await start();
+    const ancestry = [root];
+    for (let dir = root; dir !== dirname(dir);) ancestry.push((dir = dirname(dir)));
+    expect(synced).toEqual(ancestry);
 
     synced.length = 0;
     const bytes = new TextEncoder().encode("archive");

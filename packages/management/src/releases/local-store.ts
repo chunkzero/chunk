@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { link, mkdir, open, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 
 import { type Keys, randomToken } from "../crypto.ts";
 import type { ReleaseStore } from "./store.ts";
@@ -36,9 +36,9 @@ export async function localReleaseStore({
   publicUrl: string;
 }): Promise<ReleaseStore> {
   const root = resolve(directory);
-  const created = await mkdir(root, { recursive: true });
-  // Each new directory's entry lives in its parent, up to the first ancestor that already existed.
-  if (created) await syncDirectories(root, dirname(created));
+  await mkdir(root, { recursive: true });
+  // Every start, since an earlier one may have created directories and stopped before syncing their entries.
+  await syncDirectories(root, parse(root).root);
   const signed = (key: string, sha256: string, size: string, expires: string) =>
     ["upload", key, sha256, size, expires].join("\n");
 
