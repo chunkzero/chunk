@@ -51,4 +51,27 @@ impl Control {
         self.progress_drains().await?;
         Ok(())
     }
+
+    /// Refreshes activated claims from their runtimes, so watchers see arrivals without waiting for a full pass.
+    /// # Errors
+    /// Reports unreadable control state. Unavailable runtimes are retried on the next call.
+    pub async fn reconcile_arrivals(self: &Arc<Self>) -> Result<()> {
+        let state = self.state()?;
+        let mut tasks = JoinSet::new();
+        let permits = Arc::new(Semaphore::new(8));
+        for claim in state.claims.values().filter(|claim| matches!(claim.phase, Phase::Activating | Phase::Attached)) {
+            let request = chunk_proto::v1::ClaimRequest::decode(claim.request.as_slice())?;
+            let (control, permits) = (self.clone(), permits.clone());
+            tasks.spawn(async move {
+                let Ok(_permit) = permits.acquire_owned().await else {
+                    return;
+                };
+                if let Err(error) = control.inspect(request).await {
+                    tracing::debug!(%error, "claim arrival unresolved");
+                }
+            });
+        }
+        tasks.join_all().await;
+        Ok(())
+    }
 }

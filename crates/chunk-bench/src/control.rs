@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, sync::Mutex};
 use anyhow::{Result, ensure};
 use chunk_control::{ControlConnection, Host, RuntimeConnection};
 use chunk_proto::v1::{
-    ActivateClaim, ClaimPhase, ClaimRequest, Identity, SessionDemand, local_control_client::LocalControlClient,
+    ActivateClaim, ClaimPhase, ClaimRequest, Identity, SessionDemand, WatchRequest,
+    local_control_client::LocalControlClient,
 };
 use tonic::{Request, transport::Channel};
 
@@ -110,11 +111,10 @@ impl Client {
 
     pub async fn execute(&mut self, sequence: u64, config: &Config) -> Result<()> {
         if config.scenario == Scenario::ControlPopulation {
-            let request = claim(sequence % u64::from(config.population));
-            ensure!(
-                self.client.poll_move(self.request(request)).await?.into_inner().claim.is_none(),
-                "unexpected move"
-            );
+            let request = self.request(WatchRequest { proxy_id: "bench-proxy".into() });
+            let snapshot = self.client.watch(request).await?.into_inner().message().await?;
+            let snapshot = snapshot.ok_or_else(|| anyhow::anyhow!("claim stream closed"))?;
+            ensure!(snapshot.snapshot && snapshot.claims.len() == config.population as usize, "incomplete snapshot");
         } else {
             let request = claim(sequence + u64::from(config.population));
             self.arrive(request.clone()).await?;

@@ -14,7 +14,7 @@ impl Control {
     /// Recovers the same delivery from runtime inventory; never replaces its TCP connection.
     /// # Errors
     /// An unavailable runtime leaves ownership unresolved and retained.
-    pub async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
+    pub(crate) async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
         let operation = self.operation(&request.operation_id)?;
         let _guard = operation.lock().await;
         let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;
@@ -201,6 +201,12 @@ impl Control {
             .and_then(|c| c.assignment.as_ref())
             .ok_or(Error::Unresolved("assignment missing"))?;
         Ok(Assignment::decode(bytes.as_slice())?)
+    }
+
+    /// Stops committing and releases the deployment's scope, so another authority can open it while tasks of this one
+    /// still finish.
+    pub(crate) fn close(&self) -> Result<()> {
+        self.authority.close()
     }
 
     /// Stops the owned runtime processes. Dropping control alone preserves them for recovery.

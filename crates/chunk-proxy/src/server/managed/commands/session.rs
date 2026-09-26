@@ -57,7 +57,7 @@ async fn invoke_inner(
     }
     let permit =
         tasks.methods.clone().try_acquire_owned().map_err(|_| invalid_data("session method capacity exhausted"))?;
-    origin.inspect(&tasks.platform).await?;
+    origin.check(&tasks.platform).await?;
     let handle = tasks
         .platform
         .control

@@ -30,6 +30,30 @@ pub(super) struct Service {
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
+    /// Counts claim-state changes; open watches send a new snapshot for each.
+    pub published: Arc<watch::Sender<u64>>,
+    /// Ends open watches at their next publication and refuses new ones.
+    pub watch_down: Arc<AtomicBool>,
+    pub refused_watches: Arc<AtomicUsize>,
+    watches: CancellationToken,
+}
+
+impl Service {
+    /// Announces changed claim state to open watches, returning its position.
+    pub fn publish(&self) -> u64 {
+        self.published.send_modify(|position| *position += 1);
+        *self.published.borrow()
+    }
+
+    fn snapshot(&self, position: u64) -> ClaimUpdate {
+        let assignment = self.assignment.lock().unwrap().clone();
+        let claim = WatchedClaim {
+            claim: assignment.claim,
+            phase: assignment.phase,
+            pending_move: self.movement.lock().unwrap().pending.clone(),
+        };
+        ClaimUpdate { position, snapshot: true, claims: vec![claim], released: vec![] }
+    }
 }
 
 #[derive(Default)]
@@ -117,19 +141,32 @@ impl backend_commands_server::BackendCommands for Service {
 }
 #[tonic::async_trait]
 impl local_control_server::LocalControl for Service {
-    async fn inspect(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
+    type WatchStream = ReceiverStream<Result<ClaimUpdate, Status>>;
+    async fn watch(&self, request: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
         auth(&request, "control")?;
-        if self
-            .assignment
-            .lock()
-            .unwrap()
-            .claim
-            .as_ref()
-            .is_none_or(|claim| claim.operation_id != request.get_ref().operation_id)
-        {
-            return Err(Status::failed_precondition("stale"));
+        if self.watch_down.load(Ordering::SeqCst) {
+            self.refused_watches.fetch_add(1, Ordering::SeqCst);
+            return Err(Status::unavailable("watch unavailable"));
         }
-        Ok(Response::new(self.assignment.lock().unwrap().clone()))
+        let (sender, receiver) = mpsc::channel(1);
+        let service = self.clone();
+        let mut published = self.published.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let position = *published.borrow_and_update();
+                if service.watch_down.load(Ordering::SeqCst)
+                    || sender.send(Ok(service.snapshot(position))).await.is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    () = service.watches.cancelled() => return,
+                    () = sender.closed() => return,
+                    _ = published.changed() => {}
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
     async fn prepare_session_method(
         &self,
@@ -214,10 +251,6 @@ impl local_control_server::LocalControl for Service {
     async fn move_player(&self, _: Request<MovePlayerRequest>) -> Result<Response<ClaimRequest>, Status> {
         Err(Status::unimplemented("unused"))
     }
-    async fn poll_move(&self, request: Request<ClaimRequest>) -> Result<Response<PendingMove>, Status> {
-        auth(&request, "control")?;
-        Ok(Response::new(PendingMove { claim: self.movement.lock().unwrap().pending.clone() }))
-    }
     async fn abandon_move(&self, request: Request<AbandonMoveRequest>) -> Result<Response<ClaimIdentity>, Status> {
         auth(&request, "control")?;
         let mut movement = self.movement.lock().unwrap();
@@ -230,6 +263,8 @@ impl local_control_server::LocalControl for Service {
         assert_eq!(request.get_ref().claim.as_ref(), expected);
         movement.pending = None;
         movement.failure = Some(request.into_inner());
+        drop(movement);
+        self.publish();
         Ok(Response::new(ClaimIdentity::default()))
     }
     async fn drain(&self, _: Request<DrainRequest>) -> Result<Response<DrainStatus>, Status> {
@@ -297,6 +332,10 @@ impl Fixture {
             release: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
+            published: Arc::new(watch::Sender::new(1)),
+            watch_down: Arc::default(),
+            refused_watches: Arc::default(),
+            watches: CancellationToken::new(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -350,11 +389,18 @@ impl Fixture {
         commands.bind(&claim, &assignment).unwrap();
         Self { commands, service, claim, assignment, stop, server }
     }
+    /// Publishes the current claim state and waits until the platform's view reflects it.
+    pub async fn sync(&self) {
+        let position = self.service.publish();
+        let synced = self.commands.tasks.platform.claims(|view| (view.position() >= position).then_some(()));
+        tokio::time::timeout(std::time::Duration::from_secs(3), synced).await.unwrap().unwrap();
+    }
     pub async fn close(self) {
         let platform = self.commands.tasks.platform.clone();
         drop(self.commands);
         platform.cleanup.close();
         tokio::time::timeout(std::time::Duration::from_secs(3), platform.cleanup.wait()).await.unwrap();
+        self.service.watches.cancel();
         self.stop.cancel();
         self.server.await.unwrap();
     }

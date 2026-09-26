@@ -208,7 +208,7 @@ async fn captured_moves_reject_replaced_connections_even_for_existing_operations
             .is_err()
     );
     assert!(control.move_player(MovePlayerRequest { operation_id: "new-stale-move".into(), ..expected }).is_err());
-    assert!(control.poll_move(&replacement).unwrap().claim.is_none());
+    assert!(pending_move(&control, &replacement).await.is_none());
     fixture.close().await;
 }
 

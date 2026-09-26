@@ -425,6 +425,19 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
     }
 }
 
+/// The move pending for `source`, from the snapshot its proxy's watch opens with.
+async fn pending_move(control: &Control, source: &ClaimRequest) -> Option<ClaimRequest> {
+    let (sender, mut updates) = tokio::sync::mpsc::channel(1);
+    let watch = control.watch(source.proxy_id.clone(), sender, tokio_util::sync::CancellationToken::new());
+    let update = tokio::select! {
+        () = watch => panic!("watch ended"),
+        update = updates.recv() => update.unwrap().unwrap(),
+    };
+    let claim =
+        update.claims.into_iter().find(|claim| claim.claim.as_ref().unwrap().operation_id == source.operation_id);
+    claim?.pending_move
+}
+
 #[tokio::test]
 async fn concurrent_demand_coalesces_and_reservations_release_once() {
     let fixture = Fixture::new().await;
@@ -572,7 +585,7 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
         demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
     };
     let destination = control.move_player(command.clone()).unwrap();
-    assert_eq!(control.poll_move(&source).unwrap().claim.as_ref(), Some(&destination));
+    assert_eq!(pending_move(&control, &source).await.as_ref(), Some(&destination));
     let second = control.claim(destination.clone()).await.unwrap();
     let activation = ActivateClaim { claim: second.claim.clone() };
     assert!(control.activate(activation.clone()).await.is_err());
@@ -657,7 +670,7 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
             control.abandon_move(abandoned.clone()).await.unwrap();
             assert!(control.state().unwrap().players[&uuid].pending.is_some());
             assert!(control.state().unwrap().claims[operation].phase == Phase::Withdrawing);
-            assert!(control.poll_move(&source).unwrap().claim.is_none());
+            assert!(pending_move(&control, &source).await.is_none());
             assert!(control.players().unwrap().players[0].last_move_failure.is_some());
             control.reconcile_all().await.unwrap();
             assert!(control.state().unwrap().claims[operation].phase == Phase::Withdrawing);
@@ -675,7 +688,7 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
         assert_eq!(control.players().unwrap().players[0].last_move_failure.as_ref(), Some(&failure));
         previous = Some(abandoned);
         assert!(control.claim(destination).await.is_err());
-        assert!(control.poll_move(&source).unwrap().claim.is_none());
+        assert!(pending_move(&control, &source).await.is_none());
         assert_eq!(control.inspect(source.clone()).await.unwrap().phase, ClaimPhase::Arrived as i32);
         assert!(control.state().unwrap().players[&uuid].pending.is_none());
     }
@@ -700,7 +713,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         };
         let drained = control.drain(command.clone()).unwrap();
         control.reconcile_all().await.unwrap();
-        assert!(control.poll_move(&source).unwrap().claim.is_some());
+        assert!(pending_move(&control, &source).await.is_some());
         assert!(!fixture.runtime.stopped.load(Ordering::Acquire));
         control.claim(request("new-login", &uuid::Uuid::new_v4().to_string())).await.unwrap();
         let state = control.state().unwrap();
@@ -958,3 +971,5 @@ mod log;
 mod recovery;
 mod retention;
 mod roster;
+mod server;
+mod watch;

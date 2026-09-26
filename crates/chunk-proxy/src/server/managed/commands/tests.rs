@@ -38,6 +38,7 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
             state.lose_report = true;
             state.stall_retries = transient;
         }
+        fixture.service.publish();
         let running = tokio::spawn(async move { super::super::next_move(&source, &identity, 776).await.map(|_| ()) });
         if transient {
             tokio::time::timeout(Duration::from_secs(3), async {
@@ -257,6 +258,7 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     delivery.owner_generation = 2;
     delivery.session.as_mut().unwrap().id = "new-session".into();
     *fixture.service.assignment.lock().unwrap() = fixture.assignment.clone();
+    fixture.sync().await;
     fixture.commands.bind(&fixture.claim, &fixture.assignment).unwrap();
     assert!(origin.cancellation.is_cancelled());
     assert!(fixture.commands.tasks.current(&origin, true).is_err()); // Configuration rejects effects.
@@ -274,7 +276,26 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 1);
     assert!(fixture.commands.tasks.current(&origin, false).is_err());
     assert_eq!(fixture.commands.tasks.current(&origin, true).unwrap().scope.session_id, "new-session");
-    assert!(origin.inspect(&fixture.commands.tasks.platform).await.is_err());
+    assert!(origin.check(&fixture.commands.tasks.platform).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn claim_view_resyncs_from_a_snapshot_after_its_stream_drops() {
+    let fixture = Fixture::new().await;
+    let origin = fixture.commands.origin.clone().unwrap();
+    let platform = fixture.commands.tasks.platform.clone();
+    fixture.sync().await;
+    origin.check(&platform).await.unwrap();
+    fixture.service.watch_down.store(true, Ordering::SeqCst);
+    fixture.service.assignment.lock().unwrap().phase = i32::from(chunk_proto::v1::ClaimPhase::Withdrawing);
+    fixture.service.publish();
+    wait_count(&fixture.service.refused_watches, 1).await;
+    // A stale view answers nothing, so no command acts on the claim's last known phase.
+    assert!(tokio::time::timeout(Duration::from_millis(100), platform.claims(|_| Some(()))).await.is_err());
+    fixture.service.watch_down.store(false, Ordering::SeqCst);
+    fixture.sync().await;
+    assert!(origin.check(&platform).await.is_err());
     fixture.close().await;
 }
 
@@ -292,6 +313,7 @@ async fn session_method_lost_start_polls_same_capture_and_never_retargets_after_
     assert_eq!(fixture.service.polls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.service.methods.lock().unwrap()[0].claim.as_ref(), Some(&origin.identity));
     fixture.service.assignment.lock().unwrap().claim.as_mut().unwrap().delivery_generation += 1;
+    fixture.sync().await;
     assert!(session::invoke(&fixture.commands.tasks, &origin, method(), serde_json::json!({}), false).await.is_err());
     assert_eq!(fixture.service.methods.lock().unwrap().len(), 1);
     fixture.close().await;

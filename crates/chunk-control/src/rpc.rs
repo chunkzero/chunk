@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
-use chunk_proto::v1::{ActivateClaim, Assignment, ClaimIdentity, ClaimRequest, local_control_server::LocalControl};
+use chunk_proto::v1::{
+    ActivateClaim, Assignment, ClaimIdentity, ClaimRequest, ClaimUpdate, WatchRequest,
+    local_control_server::LocalControl,
+};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::{Control, Error};
 
 mod methods;
+mod watch;
 
 #[derive(Clone)]
 pub struct Service {
@@ -13,6 +19,7 @@ pub struct Service {
     token: String,
     operations: tokio_util::task::TaskTracker,
     methods: Arc<methods::Methods>,
+    watches: CancellationToken,
 }
 
 impl Service {
@@ -22,11 +29,22 @@ impl Service {
         if token.len() < 32 {
             return Err(Error::Invalid("control credential too short"));
         }
-        Ok(Self { control, token, operations: tokio_util::task::TaskTracker::new(), methods: Arc::default() })
+        Ok(Self {
+            control,
+            token,
+            operations: tokio_util::task::TaskTracker::new(),
+            methods: Arc::default(),
+            watches: CancellationToken::new(),
+        })
     }
 
     pub(crate) fn close_methods(&self) {
         self.methods.close();
+    }
+
+    /// Ends every claim watch, so the transport can finish shutting down.
+    pub(crate) fn close_watches(&self) {
+        self.watches.cancel();
     }
 
     pub(crate) fn operations(&self) -> tokio_util::task::TaskTracker {
@@ -132,12 +150,18 @@ impl LocalControl for Service {
         self.control.move_player(request.into_inner()).map(Response::new).map_err(status)
     }
 
-    async fn poll_move(
-        &self,
-        request: Request<ClaimRequest>,
-    ) -> Result<Response<chunk_proto::v1::PendingMove>, Status> {
+    type WatchStream = ReceiverStream<Result<ClaimUpdate, Status>>;
+
+    async fn watch(&self, request: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
         self.authorize(&request)?;
-        self.control.poll_move(request.get_ref()).map(Response::new).map_err(status)
+        let proxy = request.into_inner().proxy_id;
+        if proxy.is_empty() || proxy.len() > 128 {
+            return Err(status(Error::Invalid("invalid proxy identity")));
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (control, closed) = (self.control.clone(), self.watches.clone());
+        tokio::spawn(async move { control.watch(proxy, sender, closed).await });
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
     async fn abandon_move(
@@ -164,11 +188,6 @@ impl LocalControl for Service {
             .map_err(|_| Status::internal("claim task failed"))?
             .map(Response::new)
             .map_err(status)
-    }
-
-    async fn inspect(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
-        self.authorize(&request)?;
-        self.control.inspect(request.into_inner()).await.map(Response::new).map_err(status)
     }
 
     async fn activate(&self, request: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {

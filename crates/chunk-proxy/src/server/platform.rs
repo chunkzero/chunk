@@ -1,4 +1,8 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{
+    io,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use chunk_proto::v1::{
     BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
@@ -12,7 +16,9 @@ use tonic::{Request, transport::Channel};
 use super::transport::invalid_data;
 use crate::PlatformTarget;
 
+mod claims;
 mod native;
+pub(in crate::server) use claims::View;
 pub(in crate::server) use native::Lifecycle;
 
 pub(super) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,6 +34,7 @@ pub(super) struct Platform {
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
     native: native::Native,
+    claims: Arc<OnceLock<(tokio::sync::watch::Receiver<View>, tokio_util::sync::DropGuard)>>,
 }
 
 impl Platform {
@@ -44,6 +51,7 @@ impl Platform {
             proxy_id: uuid::Uuid::new_v4().to_string(),
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),
+            claims: Arc::default(),
         })
     }
 
@@ -54,6 +62,15 @@ impl Platform {
 
     pub fn control_request<T>(&self, body: T) -> io::Result<Request<T>> {
         request(body, &self.target.control.token)
+    }
+
+    /// Waits for a live view of this proxy's claims in which `ready` returns a value. The first call opens the stream,
+    /// which stays open while any clone of this platform remains.
+    pub async fn claims<T>(&self, ready: impl FnMut(&View) -> Option<T>) -> io::Result<T> {
+        let (view, _) = self.claims.get_or_init(|| {
+            claims::follow(self.control.clone(), self.proxy_id.clone(), self.target.control.token.clone())
+        });
+        claims::wait(view.clone(), ready).await
     }
 
     /// Authenticates `body` with `token` for this platform's backend environment and deployment.
@@ -157,9 +174,14 @@ struct Status {
 }
 
 pub(super) fn request<T>(body: T, token: &str) -> io::Result<Request<T>> {
+    let mut request = authorized(body, token)?;
+    request.set_timeout(RPC_TIMEOUT);
+    Ok(request)
+}
+
+fn authorized<T>(body: T, token: &str) -> io::Result<Request<T>> {
     let mut request = Request::new(body);
     request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().map_err(invalid_data)?);
-    request.set_timeout(RPC_TIMEOUT);
     Ok(request)
 }
 

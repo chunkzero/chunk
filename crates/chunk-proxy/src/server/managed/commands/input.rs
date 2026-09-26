@@ -57,7 +57,7 @@ impl Commands {
             let _permit = permit;
             let work = async {
                 tasks.current(&origin, false)?;
-                origin.inspect(&tasks.platform).await?;
+                origin.check(&tasks.platform).await?;
                 let allowed = backend::catalog(&tasks.platform, &origin.scope, &descriptors).await?;
                 if let Some(transaction_id) = suggestion {
                     let cursor = u32::try_from(input.encode_utf16().count()).map_err(invalid_data)?;
@@ -75,7 +75,7 @@ impl Commands {
                 }
                 if !allowed.contains(&id) { return Err(invalid_data("command permission denied")); }
                 tasks.current(&origin, false)?;
-                origin.inspect(&tasks.platform).await?;
+                origin.check(&tasks.platform).await?;
                 let prepared = backend::client(&tasks.platform).prepare(backend::authenticated(&tasks.platform, PrepareCommand {
                     scope: Some(origin.scope.clone()), command_id: id, input,
                 })?).await.map_err(io::Error::other)?.into_inner();

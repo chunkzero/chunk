@@ -27,14 +27,14 @@ repeat each point. Use the same build, payload, duration and hardware when compa
 | Workload             | One operation                                                        | Included work                                                                                                    |
 | -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `proxy-relay`        | Client packet → relay → synthetic gameplay response → relay → client | Production managed PLAY relay, framing, AES-128-CFB8 encryption and zlib compression over real TCP               |
-| `control-population` | `PollMove` for an arrived player without a pending move              | Real authenticated gRPC, durable state reads, normal reconciliation and health tasks                             |
+| `control-population` | Open a `Watch` stream and read its snapshot of every seeded claim    | Real authenticated gRPC, in-memory state reads, normal reconciliation, arrival and health tasks                  |
 | `control-churn`      | New `Claim` → `Activate` → `ReconcileDeparture`                      | Real authenticated gRPC, placement, runtime RPCs, ownership changes, durable SQLite commits and background tasks |
 | `backend-query`      | Load one player's profile through a `by_player` index                | Real authenticated backend gRPC, engine queue, JS evaluation, SQLite snapshot reads, contract validation         |
 | `backend-mutation`   | Save one player's profile (load, patch, return save count)           | As above, plus retry-context preparation and durable SQLite commit before the reply                              |
 | `backend-fanout`     | Raise one player's best score, then wait until every stream has it   | As above, plus reevaluation of every subscription and delivery over each watch stream                            |
 
 The proxy uses pre-established connections. It excludes Mojang login, configuration, command handling, admission,
-movement between servers and control polling. A feature-gated adapter calls the existing packet pump; normal proxy
+movement between servers and control streams. A feature-gated adapter calls the existing packet pump; normal proxy
 listeners and authentication policy are unchanged. Each request and response is checked byte-for-byte, including its
 sequence number. Default packet bodies are 32 bytes upstream and 1 KiB downstream with mixed compressibility. Try
 `--payload repeated`, `mixed` and `random`, and `--no-compression` / `--no-encryption` to distinguish costs.
@@ -51,8 +51,8 @@ identities, session inventories and instant player arrival; they do not launch J
 network failures. The target uses `chunk_control::server::run`, including its normal background tasks and on-disk SQLite
 settings. The fixture declares 128-player sessions, one session per process, and at most 32 processes.
 
-Population defaults to two polls per player per second, approximating the proxy's 500 ms move polling cadence. This is
-deliberately an open-loop offered rate; production polling waits for each reply, so it self-throttles under overload.
+Population defaults to 100 snapshots per second, each what a proxy reads when it opens or resumes its claim stream. This
+is deliberately an open-loop offered rate; production proxies open one stream each and reconnect only after a failure.
 Churn reports complete player lifecycles per second, not individual RPCs. Control holds at most 1,024 open claims, so
 the runner rejects churn configurations where `population + concurrency > 1024`. Released claims are retained for five
 minutes, so runs shorter than that measure churn with growing history. Every run starts with fresh state. Setup reports

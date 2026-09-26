@@ -131,6 +131,12 @@ impl Authority {
         Ok(Writer { authority: self, store })
     }
 
+    /// Stops committing and releases this authority's scope, so another can open it.
+    pub fn close(&self) -> Result<()> {
+        self.store.lock().map_err(|_| Error::Unresolved("control authority poisoned"))?.store.close();
+        Ok(())
+    }
+
     pub fn feed(&self) -> &feed::Feed {
         &self.feed
     }

@@ -1,4 +1,4 @@
-use chunk_proto::v1::{AbandonMoveRequest, ClaimIdentity, ClaimRequest, MovePlayerRequest, PendingMove};
+use chunk_proto::v1::{AbandonMoveRequest, ClaimIdentity, ClaimRequest, MovePlayerRequest};
 use prost::Message;
 
 use crate::{
@@ -13,31 +13,6 @@ impl Control {
     pub fn move_player(&self, request: MovePlayerRequest) -> Result<ClaimRequest> {
         validate(&request)?;
         self.update(|state| queue(state, &self.config, request))
-    }
-
-    /// Returns the pending move only to the exact current claim.
-    /// # Errors
-    /// Rejects unknown or changed claims.
-    pub fn poll_move(&self, request: &ClaimRequest) -> Result<PendingMove> {
-        let state = self.state()?;
-        let source = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown source"))?;
-        source.matches(request)?;
-        let mut result = PendingMove::default();
-        if source.phase == Phase::Arrived {
-            for intent in state.moves.values().filter(|intent| !intent.canceled && intent.failure.is_none()) {
-                let destination = ClaimRequest::decode(intent.request.as_slice())?;
-                if destination.source.as_ref() == Some(&source.identity(&request.operation_id))
-                    && state
-                        .claims
-                        .get(&destination.operation_id)
-                        .is_none_or(|c| !matches!(c.phase, Phase::Withdrawing | Phase::Released))
-                {
-                    result.claim = Some(destination);
-                    break;
-                }
-            }
-        }
-        Ok(result)
     }
 
     /// Records why preparation ended, leaving fenced withdrawal to reconciliation.
