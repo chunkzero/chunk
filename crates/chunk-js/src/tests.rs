@@ -77,11 +77,14 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
 }
 
 #[test]
-fn hosts_learn_when_the_caller_is_read() {
+fn hosts_learn_when_the_caller_or_time_is_read() {
     struct Tracked(std::rc::Rc<std::cell::Cell<u32>>);
     impl ReadHost for Tracked {
         fn read_caller(&mut self) {
             self.0.set(self.0.get() + 1);
+        }
+        fn read_time(&mut self) {
+            self.0.set(self.0.get() + 100);
         }
         fn get(&mut self, key: &Key) -> Result<Option<Value>, String> {
             Snapshot.get(key)
@@ -91,7 +94,7 @@ fn hosts_learn_when_the_caller_is_read() {
         }
     }
     let mut engine = deployment(
-        "if (args.id === 'caller') throw new Error(ctx.caller.player + ctx.caller.player); return ctx.db.get('profiles','p');",
+        "if (args.id === 'caller') throw new Error(ctx.caller.player + ctx.caller.player); if (args.id === 'time') return new Date().getTime(); return ctx.db.get('profiles','p');",
         Limits::default(),
     );
     let reads = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -101,6 +104,10 @@ fn hosts_learn_when_the_caller_is_read() {
     read.arguments = json!({"id":"caller"}).into();
     assert!(engine.execute(read, Box::new(Tracked(reads.clone())), &Cancellation::default()).is_err());
     assert_eq!(reads.get(), 1);
+    let mut time = invocation();
+    time.arguments = json!({"id":"time"}).into();
+    engine.execute(time, Box::new(Tracked(reads.clone())), &Cancellation::default()).unwrap();
+    assert_eq!(reads.get(), 101);
 }
 
 #[test]
