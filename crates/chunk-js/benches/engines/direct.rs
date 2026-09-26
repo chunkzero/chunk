@@ -218,10 +218,10 @@ impl Direct {
             v8::scope!(let scope, &mut isolate);
             let template = v8::ObjectTemplate::new(scope);
             let functions = [
-                ("__chunk_read", v8::FunctionTemplate::new(scope, read)),
-                ("__chunk_write", v8::FunctionTemplate::new(scope, write)),
-                ("__chunk_now", v8::FunctionTemplate::new(scope, now)),
-                ("__chunk_random", v8::FunctionTemplate::new(scope, random)),
+                ("chunkRead", v8::FunctionTemplate::new(scope, read)),
+                ("chunkWrite", v8::FunctionTemplate::new(scope, write)),
+                ("chunkNow", v8::FunctionTemplate::new(scope, now)),
+                ("chunkRandom", v8::FunctionTemplate::new(scope, random)),
             ];
             for (name, function) in functions {
                 let name = v8::String::new(scope, name).ok_or("heap")?;

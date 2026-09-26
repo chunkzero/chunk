@@ -1,11 +1,11 @@
 // The transactional part of chunk-js's bootstrap, with host functions instead of deno_core ops.
 (() => {
   "use strict";
-  const read = globalThis.__chunk_read;
-  const write = globalThis.__chunk_write;
-  const now = globalThis.__chunk_now;
-  const random = globalThis.__chunk_random;
-  for (const name of ["__chunk_read", "__chunk_write", "__chunk_now", "__chunk_random"]) delete globalThis[name];
+  const read = globalThis.chunkRead;
+  const write = globalThis.chunkWrite;
+  const now = globalThis.chunkNow;
+  const random = globalThis.chunkRandom;
+  for (const name of ["chunkRead", "chunkWrite", "chunkNow", "chunkRandom"]) delete globalThis[name];
   const freeze = Object.freeze;
   const parse = JSON.parse;
   const stringify = JSON.stringify;

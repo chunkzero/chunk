@@ -34,7 +34,7 @@ export const load = query({
   handler: (ctx) => {
     const found = own(ctx);
     if (!found) return null;
-    const { _id, rank, ...rest } = found;
+    const { _id, rank: _rank, ...rest } = found;
     return rest;
   },
 });
