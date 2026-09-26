@@ -15,7 +15,7 @@ export async function start(config: Config) {
   await migrate(sql);
   if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
   const keys = deriveKeys(config.secretKey);
-  const releases = localReleaseStore({
+  const releases = await localReleaseStore({
     directory: join(config.dataDir, "releases"),
     keys,
     publicUrl: config.publicUrl,

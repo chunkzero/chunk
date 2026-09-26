@@ -22,11 +22,11 @@ async function syncDirectories(from: string, to: string) {
 }
 
 /**
- * Stores archives in a local directory. Uploads go to this service through URLs signed for one archive's key, digest
- * and size, so they need no bearer token. Bytes that do not match are never stored, and a stored object is never
- * replaced.
+ * Stores archives in a local directory, which it creates durably first. Uploads go to this service through URLs signed
+ * for one archive's key, digest and size, so they need no bearer token. Bytes that do not match are never stored, and
+ * a stored object is never replaced.
  */
-export function localReleaseStore({
+export async function localReleaseStore({
   directory,
   keys,
   publicUrl,
@@ -34,9 +34,11 @@ export function localReleaseStore({
   directory: string;
   keys: Keys;
   publicUrl: string;
-}): ReleaseStore {
-  // Also syncs the entry for the store's own directory, which the first upload may create.
-  const top = dirname(resolve(directory));
+}): Promise<ReleaseStore> {
+  const root = resolve(directory);
+  const created = await mkdir(root, { recursive: true });
+  // Each new directory's entry lives in its parent, up to the first ancestor that already existed.
+  if (created) await syncDirectories(root, dirname(created));
   const signed = (key: string, sha256: string, size: string, expires: string) =>
     ["upload", key, sha256, size, expires].join("\n");
 
@@ -57,11 +59,11 @@ export function localReleaseStore({
     },
 
     async read(key) {
-      const path = join(directory, key);
+      const path = join(root, key);
       const file = Bun.file(path);
       if (!(await file.exists())) return undefined;
       // A concurrent upload may have linked the archive without syncing its directories yet.
-      await syncDirectories(dirname(resolve(path)), top);
+      await syncDirectories(dirname(path), root);
       return file.stream();
     },
 
@@ -86,8 +88,13 @@ export function localReleaseStore({
       if (Number(expires) * 1000 < Date.now()) return new Response("upload URL expired\n", { status: 403 });
       if (!request.body) return new Response("missing body\n", { status: 400 });
 
-      const path = join(directory, key);
-      await mkdir(dirname(path), { recursive: true });
+      const path = join(root, key);
+      // Only below the root, so uploads fail instead of recreating a deleted root that was never synced.
+      for (const dir of [dirname(dirname(path)), dirname(path)]) {
+        await mkdir(dir).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST") throw error;
+        });
+      }
       const partial = `${path}.${randomToken(8)}.partial`;
       const file = await open(partial, "w");
       const hash = createHash("sha256");
@@ -113,7 +120,7 @@ export function localReleaseStore({
         await link(partial, path).catch((error: NodeJS.ErrnoException) => {
           if (error.code !== "EEXIST") throw error;
         });
-        await syncDirectories(dirname(resolve(path)), top);
+        await syncDirectories(dirname(path), root);
         return new Response(null, { status: 204 });
       } finally {
         await file.close().catch(() => {});
