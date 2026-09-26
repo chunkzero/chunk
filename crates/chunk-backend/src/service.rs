@@ -75,6 +75,8 @@ pub(crate) struct Request<T> {
     pub queued: crate::timing::Timer,
     reply: oneshot::Sender<Result<T>>,
     _permit: OwnedSemaphorePermit,
+    /// Request memory held by a reply retained until its revision is durable.
+    retained: Option<OwnedSemaphorePermit>,
 }
 
 impl<T> Request<T> {
@@ -83,7 +85,11 @@ impl<T> Request<T> {
         reply: oneshot::Sender<Result<T>>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit }
+        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit, retained: None }
+    }
+
+    pub fn retain(&mut self, permit: OwnedSemaphorePermit) {
+        self.retained = Some(permit);
     }
 
     pub fn finish(self, result: Result<T>) {
@@ -307,6 +313,8 @@ impl Backend {
         let (events, incoming) = queue::channel(EVENTS);
         let engine_queue = Arc::new(EngineQueue::default());
         let dequeued = engine_queue.clone();
+        let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
+        let retained = memory.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let outgoing = events.clone();
@@ -314,7 +322,7 @@ impl Backend {
         let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, action_incarnation, effects, readers, dequeued) {
+            match Actor::new(store, outgoing, action_incarnation, effects, readers, dequeued, retained) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
@@ -330,7 +338,7 @@ impl Backend {
             incarnation,
             action_sequence: AtomicU64::new(1),
             events,
-            memory: Arc::new(Semaphore::new(REQUEST_BYTES)),
+            memory,
             queue: engine_queue,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),

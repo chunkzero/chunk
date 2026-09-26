@@ -21,6 +21,8 @@ type GroupId = u64;
 const GROUP_RESULT_BYTES: usize = 1024 * 1024;
 /// Bookkeeping charged per subscribed call, per query and per logged commit, beyond their payloads.
 const ENTRY_BYTES: usize = 256;
+/// Bookkeeping charged per read key, in the query and in the index.
+const KEY_BYTES: usize = 64;
 /// Commits logged in full during a batch; beyond this they are kept only by table.
 const RECENT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -390,12 +392,14 @@ impl Watches {
         self.index.remove(id, &query.reads);
         self.index.insert(id, &reads);
         let split = reads.caller && query.identity.caller.is_none();
+        let (before, after) = (reads_bytes(&query.reads), reads_bytes(&reads));
+        let mut grew = after > before;
+        self.bytes = self.bytes + after - before;
         query.reads = reads;
         query.evaluated = evaluated;
-        let mut grew = false;
         if query.result.as_ref().is_none_or(|previous| !same(previous, &result)) {
             let (before, after) = (result_bytes(query.result.as_ref()), result_bytes(Some(&result)));
-            grew = after > before;
+            grew |= after > before;
             self.bytes = self.bytes + after - before;
             query.result = Some(result);
             query.version = version;
@@ -528,7 +532,8 @@ impl Watches {
         }
         if query.groups.is_empty() {
             let query = self.queries.remove(&id).expect("unsubscribed query");
-            self.bytes -= query.call.bytes() + ENTRY_BYTES + result_bytes(query.result.as_ref());
+            self.bytes -=
+                query.call.bytes() + ENTRY_BYTES + result_bytes(query.result.as_ref()) + reads_bytes(&query.reads);
             if self.identities.get(&query.identity) == Some(&id) {
                 self.identities.remove(&query.identity);
             }
@@ -555,8 +560,34 @@ fn reject(group: Group, error: &Error) {
 fn result_bytes(result: Option<&Result<Arc<str>>>) -> usize {
     match result {
         Some(Ok(json)) => json.len(),
-        _ => 0,
+        Some(Err(error)) => error.to_string().len(),
+        None => 0,
     }
+}
+
+/// Estimates what a query's reads hold, here and in the index: each key plus bookkeeping.
+fn reads_bytes(reads: &Dependencies) -> usize {
+    let points: usize = reads.points.iter().map(|key| key.table.len() + key.id.len() + KEY_BYTES).sum();
+    let ranges: usize = reads
+        .ranges
+        .iter()
+        .map(|range| {
+            range.table.len()
+                + range.start.as_ref().map_or(0, String::len)
+                + range.end.as_ref().map_or(0, String::len)
+                + KEY_BYTES
+        })
+        .sum();
+    let indexes: usize = reads
+        .indexes
+        .iter()
+        .map(|(query, fields)| {
+            serde_json::to_vec(query).map_or(0, |key| key.len())
+                + fields.iter().map(String::len).sum::<usize>()
+                + KEY_BYTES
+        })
+        .sum();
+    points + ranges + indexes
 }
 
 fn same(a: &Result<Arc<str>>, b: &Result<Arc<str>>) -> bool {

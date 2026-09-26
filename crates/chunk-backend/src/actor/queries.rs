@@ -132,8 +132,16 @@ impl Actor {
         let update = Update { revision: if independent { view.base.revision } else { view.revision }, json };
         if update.revision <= self.view.base.revision {
             reply.finish(Ok(update));
-        } else {
-            self.deferred.push_back((update, reply));
+            return;
+        }
+        let bytes = u32::try_from(update.json.len()).unwrap_or(u32::MAX);
+        match self.memory.clone().try_acquire_many_owned(bytes) {
+            Ok(permit) => {
+                let mut reply = reply;
+                reply.retain(permit);
+                self.deferred.push_back((update, reply));
+            }
+            Err(_) => reply.finish(Err(Limit::RequestMemory.exceeded())),
         }
     }
 }

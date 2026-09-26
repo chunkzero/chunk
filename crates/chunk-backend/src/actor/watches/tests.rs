@@ -91,17 +91,28 @@ async fn overlapping_commit(bytes: usize) {
 }
 
 #[tokio::test]
-async fn results_that_outgrow_the_budget_after_admission_close_their_subscriptions() {
-    let mut watches = Watches::with_budget(Revision(1), 4096);
-    let receiver = subscribe(&mut watches);
-    let job = watches.next_job(|| view(1)).unwrap();
-    watches.complete(&job, Ok("0".into()), reads());
-    let mut group = receiver.await.unwrap().unwrap();
-    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
-    watches.changed(Revision(2), change(), 64);
-    let job = watches.next_job(|| view(2)).unwrap();
-    watches.complete(&job, Ok("x".repeat(4096).into()), reads());
-    assert!(matches!(group.next().await, Err(Error::Overloaded(Limit::SubscriptionMemory))));
-    assert!(watches.next_job(|| view(2)).is_none());
-    assert_eq!(watches.bytes, 0);
+async fn subscriptions_that_outgrow_the_budget_after_admission_are_closed() {
+    let large = "x".repeat(4096);
+    let error = Error::JavaScript(Arc::new(chunk_js::Error::JavaScript(large.clone())));
+    let keys = (0..64).map(|id| DocumentKey::new("profiles", id.to_string()).unwrap()).collect();
+    // A larger result, a larger error, then many reads behind an unchanged result.
+    let growth = [
+        (Ok(large.into()), reads()),
+        (Err(error), reads()),
+        (Ok("0".into()), Dependencies { points: keys, ..Dependencies::default() }),
+    ];
+    for (result, grown) in growth {
+        let mut watches = Watches::with_budget(Revision(1), 4096);
+        let receiver = subscribe(&mut watches);
+        let job = watches.next_job(|| view(1)).unwrap();
+        watches.complete(&job, Ok("0".into()), reads());
+        let mut group = receiver.await.unwrap().unwrap();
+        assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+        watches.changed(Revision(2), change(), 64);
+        let job = watches.next_job(|| view(2)).unwrap();
+        watches.complete(&job, result, grown);
+        assert!(matches!(group.next().await, Err(Error::Overloaded(Limit::SubscriptionMemory))));
+        assert!(watches.next_job(|| view(2)).is_none());
+        assert_eq!(watches.bytes, 0);
+    }
 }

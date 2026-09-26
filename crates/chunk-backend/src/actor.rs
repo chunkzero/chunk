@@ -79,6 +79,8 @@ pub(crate) struct Actor {
     pending_bytes: usize,
     deferred: VecDeque<(Update, Request<Update>)>,
     queue: Arc<EngineQueue>,
+    /// Request memory, charged for query replies retained until durable.
+    memory: Arc<tokio::sync::Semaphore>,
     failure: Option<Error>,
 }
 
@@ -90,6 +92,7 @@ impl Actor {
         effects: crate::ActionEffects,
         readers: usize,
         queue: Arc<EngineQueue>,
+        memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, snapshot, deployments, scheduled) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
@@ -128,6 +131,7 @@ impl Actor {
             pending_bytes: 0,
             deferred: VecDeque::new(),
             queue,
+            memory,
             failure: None,
         })
     }

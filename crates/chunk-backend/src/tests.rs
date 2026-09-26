@@ -12,7 +12,7 @@ use chunk_store::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc as signals;
 
-use crate::{Backend, Call, Error, Update};
+use crate::{Backend, Call, Error, Limit, Update};
 
 const SOURCE: &str = r"
 export function get(ctx, args) { return ctx.db.get('profiles', args.id)?.coins ?? 0; }
@@ -363,6 +363,42 @@ async fn duplicate_waiters_share_one_mutation_and_cancelled_waiter_does_not_stag
     }
     let result = harness.backend.query(call("get", json!({"id": "p"}))).await.unwrap();
     assert_eq!(value(&result), json!(1));
+}
+
+#[tokio::test]
+async fn query_replies_waiting_for_a_stalled_commit_hold_request_memory() {
+    let mut harness = Harness::new(false).await;
+    let large = DeploymentId::new("large").unwrap();
+    let source = format!(
+        "{SOURCE} export function large(ctx) {{ return ctx.db.get('profiles','p') ? 'x'.repeat(1000000) : ''; }}"
+    );
+    harness.backend.register(large.clone(), source, Limits::default()).await.unwrap();
+    let mut stalled = Box::pin(harness.backend.mutate("stalled".into(), call("bump", json!({"id": "p"}))));
+    pending(stalled.as_mut()).await;
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    // Each 1 MB reply reads the staged write, so it waits for the commit; 64 MiB holds about 67.
+    let queries: Vec<_> = (0..100)
+        .map(|_| {
+            let backend = harness.backend.clone();
+            let call = Call { deployment: large.clone(), ..call("large", json!({})) };
+            tokio::spawn(async move { backend.query(call).await })
+        })
+        .collect();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while queries.iter().filter(|query| query.is_finished()).count() < 30 {
+        assert!(tokio::time::Instant::now() < deadline, "retained replies were not charged");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    harness.controls.commits[0].send(()).unwrap();
+    stalled.await.unwrap();
+    let mut delivered = 0;
+    for query in queries {
+        match query.await.unwrap() {
+            Ok(_) => delivered += 1,
+            Err(error) => assert!(matches!(error, Error::Overloaded(Limit::RequestMemory)), "{error}"),
+        }
+    }
+    assert!((1..=70).contains(&delivered), "{delivered} replies delivered");
 }
 
 #[tokio::test]
