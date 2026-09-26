@@ -3,7 +3,7 @@ use crate::{Error, Result, commit::Job, reads::View, service::Request};
 use chunk_contract::Deployment;
 use chunk_js::{DeploymentId, Limits};
 use chunk_store::Snapshot;
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 impl Actor {
     pub(super) fn schema_ready(deployment: &Deployment, installed: &chunk_contract::DatabaseSchema) -> Result<()> {
@@ -34,7 +34,10 @@ impl Actor {
             return Err(Error::Busy);
         }
         self.js.register(id.clone(), deployment.source.clone(), Limits::default())?;
+        let source = super::readers::Source { code: deployment.source.clone(), limits: Limits::default() };
+        self.sources.insert(id.clone(), Arc::new(source));
         if let Err(error) = self.send(Job::Activate { deployment: deployment.clone() }) {
+            self.sources.remove(&id);
             self.js.release(&id);
             return Err(error);
         }
@@ -48,7 +51,7 @@ impl Actor {
         let id = DeploymentId::new(&deployment.id).expect("validated deployment");
         match result {
             Ok(snapshot) => {
-                self.view = Rc::new(View::new(snapshot));
+                self.view = Arc::new(View::new(snapshot));
                 self.versions.insert(id, Some(deployment));
                 // Schema activation is a revision barrier; replace older reevaluation work.
                 self.watches.barrier(self.view.base.revision);
@@ -56,6 +59,7 @@ impl Actor {
             }
             Err(error) => {
                 self.js.release(&id);
+                self.sources.remove(&id);
                 if !error.is_rejected_commit() {
                     self.fail(&Error::CommitFailed);
                 }
@@ -80,6 +84,8 @@ impl Actor {
             || self.deploying.is_some()
             || self.releasing.is_some()
             || self.watches.references(&id)
+            || self.readers.references(&id)
+            || self.reads.iter().any(|waiting| waiting.references(&id))
             || self.mutations.values().any(|m| m.call.deployment == id)
             || self.actions.references(&id)
             || self.scheduled.references(&id)
@@ -105,6 +111,8 @@ impl Actor {
         match result {
             Ok(_) => {
                 self.versions.remove(&id);
+                self.sources.remove(&id);
+                self.readers.release(&id);
                 reply.finish(Ok(self.js.release(&id)));
             }
             Err(error) => {

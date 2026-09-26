@@ -349,7 +349,7 @@ impl Actor {
             return;
         }
         match mode {
-            Mode::Query => self.query(&call, reply),
+            Mode::Query => self.query(call, reply),
             Mode::Mutation => self.mutate(operation, call, reply),
         }
     }

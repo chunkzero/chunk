@@ -199,7 +199,7 @@ impl Actor {
             intents,
         })?;
         drop(snapshot);
-        std::rc::Rc::make_mut(&mut self.view).apply(revision, &writes);
+        std::sync::Arc::make_mut(&mut self.view).apply(revision, &writes);
         self.pending.push_back(Pending {
             operation: mutation.operation.id.clone(),
             revision,
@@ -251,7 +251,7 @@ impl Actor {
         for next in self.pending.iter().filter(|next| next.revision > durable) {
             view.apply(next.revision, &next.writes);
         }
-        self.view = std::rc::Rc::new(view);
+        self.view = std::sync::Arc::new(view);
         if let Some(jobs) = jobs {
             self.scheduled.snapshot = jobs;
         }
@@ -260,9 +260,12 @@ impl Actor {
                 reply.finish(Ok(update.clone()));
             }
         }
-        while self.deferred.front().is_some_and(|(query, _)| query.revision <= update.revision) {
-            let (query, reply) = self.deferred.pop_front().expect("ready query");
-            reply.finish(Ok(query));
+        for (query, reply) in std::mem::take(&mut self.deferred) {
+            if query.revision <= update.revision {
+                reply.finish(Ok(query));
+            } else {
+                self.deferred.push_back((query, reply));
+            }
         }
         self.watches.changed(update.revision, pending.changes);
     }

@@ -1,30 +1,34 @@
 # Environment backend
 
-`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread and a local job
-timer. Supply a store with exclusive writer authority. `deploy` validates and initializes a versioned
-`chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains the bundle before
-enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`, `subscribe`, or
-`subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform processes may supply
-caller identity. Internal functions are inaccessible through this ingress. Activation waits for the commit pipeline to
-drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during activation. Schema
-changes advance the revision; every successful activation reevaluates existing subscriptions.
+`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread, a local job timer
+and one read engine per core (up to four). Supply a store with exclusive writer authority. `deploy` validates and
+initializes a versioned `chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains
+the bundle before enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`,
+`subscribe`, or `subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform
+processes may supply caller identity. Internal functions are inaccessible through this ingress. Activation waits for the
+commit pipeline to drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during
+activation. Schema changes advance the revision; every successful activation reevaluates existing subscriptions.
 
-The engine thread owns `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription dependencies. Each
-mutation executes against the latest view, validates its writes against the snapshot's schema, and applies them to a
-bounded overlay. Execution and validation are serialized, so another mutation cannot change the read revision between
-them. The commit thread persists batches in order while the engine can continue evaluating requests.
+The engine thread owns the mutation `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription state.
+Queries and subscription reevaluations run on the read engines, which load deployments on first use; module-level
+JavaScript state is not shared between engines. Each mutation executes against the latest view, validates its writes
+against the snapshot's schema, and applies them to a bounded overlay. Execution and validation are serialized, so
+another mutation cannot change the read revision between them. The commit thread persists batches in order while the
+engine can continue evaluating requests.
 
 Mutation responses wait for durable commits. Queries may read staged writes, and responses that depend on those writes
 wait for durability. Queries whose dependencies do not intersect pending writes return immediately at the base revision.
 Subscriptions read only acknowledged snapshots, track point misses and empty ranges, and reevaluate after relevant
 commits. Dependencies refresh even when the JSON result is unchanged. Result changes use JSON text equality; object key
 order can cause an extra update. Application errors remain reactive results, retaining reads collected before failure;
-an error-to-success transition always publishes. Reevaluations run one group (at most 16 queries) per actor scheduling
-boundary, with at most two retained durable snapshots. Queued revisions may coalesce conservatively to the latest
-snapshot. Slow subscribers coalesce updates through a watch channel, so they receive the latest durable result rather
-than every intermediate revision. Each group evaluates all queries against one snapshot. Per-query failures occupy their
-original result positions, retain dependencies, and recover reactively. Transport errors close the stream; clients mark
-retained results stale until a fresh full group arrives on reconnect.
+an error-to-success transition always publishes. Subscribed queries with the same deployment, function and arguments
+share one evaluation. The caller joins that identity only after an evaluation reads `ctx.caller`; the query then splits
+so each caller gets its own. A read index finds the queries a commit affects. They rerun in batches, each against one
+durable snapshot, and commits during a batch coalesce into the next one. Foreground queries take idle read engines
+before reevaluations. Slow subscribers coalesce updates through a watch channel, so they receive the latest durable
+result rather than every intermediate revision. A group publishes once all its queries hold for one revision. Per-query
+failures occupy their original result positions, retain dependencies, and recover reactively. Transport errors close the
+stream; clients mark retained results stale until a fresh full group arrives on reconnect.
 
 Give every mutation a stable operation ID. Its fingerprint includes the function, canonical arguments and caller,
 independent of bundle and deployment identity. Duplicate requests recover the stored outcome without executing again,
@@ -60,7 +64,7 @@ new operation IDs for those requests. Committed outcomes remain recoverable thro
 same mutation. If a retained bundle prevents startup, open the store with exclusive writer authority and call
 `Storage::release_deployment` with its ID before constructing the backend again.
 
-The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the engine thread. A
+The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
 fails the read instead of returning a silently truncated result. `scanIndex` supports declared ascending indexes,
 equality prefixes and a half-open range on the next field, with 1–1,024 results. Both pending and invocation-local

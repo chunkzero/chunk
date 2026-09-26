@@ -163,7 +163,7 @@ impl Change {
 
 pub(crate) struct Host {
     pub operation: Option<String>,
-    pub view: Rc<View>,
+    pub view: Arc<View>,
     pub trace: Rc<RefCell<Dependencies>>,
     pub contract: Option<Arc<chunk_contract::Deployment>>,
     pub budget: ReadBudget,

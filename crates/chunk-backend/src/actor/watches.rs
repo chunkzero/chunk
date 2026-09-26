@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    rc::Rc,
     sync::Arc,
 };
 
@@ -84,17 +83,17 @@ impl Group {
 /// can publish a consistent update when the batch completes, however commits interleave.
 struct Batch {
     generation: u64,
-    view: Rc<View>,
+    view: Arc<View>,
     queue: VecDeque<QueryId>,
     running: usize,
     /// Commit acknowledgments this batch covers.
     commits: Vec<Timer>,
 }
 
-pub(super) struct Job {
+pub(crate) struct Job {
     pub id: QueryId,
     pub call: Call,
-    pub view: Rc<View>,
+    pub view: Arc<View>,
     generation: u64,
 }
 
@@ -141,13 +140,6 @@ impl Watches {
 
     pub fn references(&self, deployment: &DeploymentId) -> bool {
         self.groups.values().any(|group| group.calls.iter().any(|call| &call.deployment == deployment))
-    }
-
-    pub fn has_work(&self) -> bool {
-        match &self.batch {
-            Some(batch) => !batch.queue.is_empty(),
-            None => !self.next.is_empty(),
-        }
     }
 
     /// Registers a group. The reply completes once every query has a result.
@@ -248,7 +240,7 @@ impl Watches {
     }
 
     /// Takes the next evaluation, starting a batch against `latest` when none is running.
-    pub fn next_job(&mut self, latest: impl FnOnce() -> Rc<View>) -> Option<Job> {
+    pub fn next_job(&mut self, latest: impl FnOnce() -> Arc<View>) -> Option<Job> {
         if self.batch.is_none() && !self.next.is_empty() {
             self.start(latest());
         }
@@ -268,7 +260,7 @@ impl Watches {
         None
     }
 
-    fn start(&mut self, view: Rc<View>) {
+    fn start(&mut self, view: Arc<View>) {
         let mut queue = VecDeque::new();
         for id in std::mem::take(&mut self.next) {
             if let Some(query) = self.queries.get_mut(&id)
@@ -477,3 +469,6 @@ fn same(a: &Result<Arc<str>>, b: &Result<Arc<str>>) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests;

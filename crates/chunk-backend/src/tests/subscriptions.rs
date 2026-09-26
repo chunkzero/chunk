@@ -39,7 +39,8 @@ async fn results(group: &mut GroupSubscription) -> Vec<Value> {
 #[tokio::test]
 async fn identical_subscriptions_share_one_evaluation_until_they_read_the_caller() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
+    // One read engine, so the evaluation counter covers every query.
+    let backend = Backend::with_readers("local".into(), Box::new(open(&directory)), 1).unwrap();
     backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
     put(&backend, "board", 1).await;
     let mut groups = Vec::new();

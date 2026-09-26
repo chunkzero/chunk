@@ -1,11 +1,13 @@
-//! One environment engine thread owns JS execution and speculative state. Durable
-//! storage runs on a commit thread; replies and updates wait for its ordered acks.
+//! One environment engine thread owns mutations and speculative state, and read engines
+//! run queries and subscriptions. Durable storage runs on a commit thread; replies and
+//! updates wait for its ordered acks.
 
 mod actions;
 mod actor;
 mod commands;
 mod commit;
 mod effects;
+mod evaluate;
 mod hooks;
 mod reads;
 pub mod server;

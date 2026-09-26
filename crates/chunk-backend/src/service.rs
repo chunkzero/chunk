@@ -17,6 +17,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch
 use crate::{ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result, actor::Actor};
 
 const REQUESTS: usize = 64;
+/// Query engines beyond this rarely pay for their memory: one engine per core, up to four.
+const MAX_READERS: usize = 4;
 
 #[derive(Clone)]
 pub struct Call {
@@ -219,6 +221,7 @@ pub(crate) enum Event {
     Released {
         result: Result<bool>,
     },
+    Evaluated(Box<crate::actor::Evaluated>),
     Wake,
 }
 
@@ -270,6 +273,18 @@ impl Backend {
     /// # Errors
     /// Reports invalid scope, thread, snapshot or JS initialization failures.
     pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
+        let readers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get).min(MAX_READERS);
+        Self::start(environment, store, effects, readers)
+    }
+
+    /// Starts with exactly `readers` query engines.
+    #[cfg(test)]
+    pub(crate) fn with_readers(environment: String, store: Box<dyn Storage>, readers: usize) -> Result<Self> {
+        let effects = ActionEffects::new(environment.clone())?;
+        Self::start(environment, store, effects, readers)
+    }
+
+    fn start(environment: String, store: Box<dyn Storage>, effects: ActionEffects, readers: usize) -> Result<Self> {
         effects.validate_environment(&environment)?;
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("environment identity"));
@@ -283,7 +298,7 @@ impl Backend {
         let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, action_incarnation, effects) {
+            match Actor::new(store, outgoing, action_incarnation, effects, readers) {
                 Ok(actor) => {
                     if ready.send(Ok(())).is_ok() {
                         actor.run(incoming, &stop);
