@@ -28,6 +28,7 @@ export async function start(config: Config) {
       sql,
       keys,
       releases,
+      archiveLimits: config.archiveLimits,
       resolveTxt,
       publicUrl: config.publicUrl,
       edge: config.edge,

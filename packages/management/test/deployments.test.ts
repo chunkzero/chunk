@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { Code } from "@connectrpc/connect";
 
@@ -6,6 +7,7 @@ import { activateDeployment } from "../src/deployments/store.ts";
 import { DeploymentState } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService, DeploymentTrigger, ReleaseState } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
+import { releaseKey } from "../src/releases/store.ts";
 import { releaseArchive } from "./fixtures.ts";
 import { codeOf, databaseUrl, type Harness, startHarness } from "./harness.ts";
 
@@ -25,42 +27,39 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
   });
   afterAll(() => h.close());
 
-  async function upload(id: string, contents = releaseArchive({ id, apps: [{ id: "lobby", sessions: ["default"] }] })) {
-    const deployments = h.client(DeploymentService);
-    const started = await deployments.uploadRelease({
+  type Archive = ReturnType<typeof releaseArchive>;
+
+  async function declare(id: string, archive: Archive) {
+    const started = await h.client(DeploymentService).uploadRelease({
       projectId,
       releaseId: id,
-      archiveSha256: contents.sha256,
-      archiveSizeBytes: contents.sizeBytes,
+      archiveSha256: archive.sha256,
+      archiveSizeBytes: archive.sizeBytes,
     });
-    const target = started.upload;
-    if (!target) throw new Error("expected an upload target");
-    const response = await fetch(target.url, { method: target.method, headers: target.headers, body: contents.bytes });
-    expect(response.status).toBe(204);
-    return deployments.completeReleaseUpload({ projectId, releaseId: id });
+    return started.upload?.url ?? "";
+  }
+
+  async function put(url: string, archive: Archive) {
+    return (await fetch(url, { method: "PUT", body: archive.bytes })).status;
+  }
+
+  async function upload(id: string, archive = releaseArchive(id)) {
+    expect(await put(await declare(id, archive), archive)).toBe(204);
+    return h.client(DeploymentService).completeReleaseUpload({ projectId, releaseId: id });
   }
 
   test("uploads verify the archive before a release becomes READY", async () => {
     const deployments = h.client(DeploymentService);
-    const archive = releaseArchive({ id: "r0", apps: [] });
-    const started = await deployments.uploadRelease({
-      projectId,
-      releaseId: "r0",
-      archiveSha256: archive.sha256,
-      archiveSizeBytes: archive.sizeBytes,
-    });
-    expect(started.release?.state).toBe(ReleaseState.UPLOADING);
-    const url = started.upload?.url ?? "";
+    const archive = releaseArchive("r0");
+    const url = await declare("r0", archive);
     const tampered = new Uint8Array(archive.bytes);
     tampered[100] = (tampered[100] ?? 0) ^ 0xff;
     expect((await fetch(url, { method: "PUT", body: tampered })).status).toBe(400);
-    expect((await fetch(url.replace("r0", "r9"), { method: "PUT", body: archive.bytes })).status).toBe(403);
+    expect(await put(url.replace("r0", "r9"), archive)).toBe(403);
     expect(await codeOf(deployments.completeReleaseUpload({ projectId, releaseId: "r0" }))).toBe(
       Code.FailedPrecondition,
     );
-
-    const mislabeled = releaseArchive({ id: "other", apps: [] });
-    expect(await codeOf(upload("r0", mislabeled))).toBe(Code.FailedPrecondition);
+    expect(await codeOf(upload("r0", releaseArchive("other")))).toBe(Code.FailedPrecondition);
 
     const ready = await upload("r1");
     expect(ready.release?.state).toBe(ReleaseState.READY);
@@ -71,6 +70,33 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
       archiveSizeBytes: ready.release?.archiveSizeBytes ?? 0n,
     });
     expect(again.upload).toBeUndefined();
+  });
+
+  test("an upload URL from an earlier declaration never replaces the READY archive", async () => {
+    const first = releaseArchive("r5");
+    const second = releaseArchive("r5");
+    const stale = await declare("r5", first);
+    expect((await upload("r5", second)).release?.archiveSha256).toBe(second.sha256);
+    expect(await put(stale, first)).toBe(204);
+
+    const stored = await h.releases.read(releaseKey(projectId, "r5", second.sha256));
+    const bytes = new Uint8Array(await new Response(stored).arrayBuffer());
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(second.sha256);
+  });
+
+  test("completion finalizes only the declaration it verified", async () => {
+    const deployments = h.client(DeploymentService);
+    const archive = releaseArchive("r6");
+    expect(await put(await declare("r6", archive), archive)).toBe(204);
+    h.beforeRead = async () => {
+      h.beforeRead = undefined;
+      await declare("r6", { ...archive, sizeBytes: archive.sizeBytes + 1n });
+    };
+    const complete = () => deployments.completeReleaseUpload({ projectId, releaseId: "r6" });
+    expect(await codeOf(complete())).toBe(Code.Aborted);
+    expect(await codeOf(complete())).toBe(Code.FailedPrecondition);
+    await declare("r6", archive);
+    expect((await complete()).release?.archiveSizeBytes).toBe(archive.sizeBytes);
   });
 
   test("deploy, promote and rollback move releases between environments", async () => {

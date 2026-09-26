@@ -5,7 +5,7 @@ import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 import type { Deps } from "../deps.ts";
 import { type DeploymentService, ReleaseState, UploadTargetSchema } from "../gen/chunk/management/v1/deployments_pb.ts";
 import { loadEnvironment, loadProject } from "../projects/store.ts";
-import { digest, readManifest } from "../releases/manifest.ts";
+import { verifyRelease } from "../releases/manifest.ts";
 import { maxArchiveBytes, releaseKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
@@ -17,6 +17,7 @@ const releaseIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
 export function releaseHandlers({
   sql,
   releases,
+  archiveLimits,
 }: Deps): Pick<ServiceImpl<typeof DeploymentService>, "uploadRelease" | "completeReleaseUpload" | "listApps"> {
   return {
     async uploadRelease(request, context) {
@@ -50,7 +51,7 @@ export function releaseHandlers({
       }
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const target = await releases.uploadTarget(
-        releaseKey(project.id, release.id),
+        releaseKey(project.id, release.id, release.archive_sha256),
         { sha256: release.archive_sha256, sizeBytes: release.archive_size_bytes },
         expireTime,
       );
@@ -66,28 +67,31 @@ export function releaseHandlers({
       if (!release) throw notFound("release");
       if (release.state === ReleaseState.READY) return { release: toRelease(release) };
 
-      const archive = async () => {
-        const stored = await releases.read(releaseKey(project.id, release.id));
-        if (!stored) throw failedPrecondition("the archive has not been uploaded");
-        return stored;
-      };
-      const actual = await digest(await archive());
-      if (actual.sha256 !== release.archive_sha256 || actual.sizeBytes !== release.archive_size_bytes) {
-        throw failedPrecondition("the uploaded archive does not match the declared size and digest");
-      }
-      const stored = await archive();
+      // Verify the declaration read above, and finalize only if it is still the declaration.
+      const { archive_sha256: sha256, archive_size_bytes: sizeBytes } = release;
+      const stored = await releases.read(releaseKey(project.id, release.id, sha256));
+      if (!stored) throw failedPrecondition("the archive has not been uploaded");
       let manifest: string;
       try {
-        manifest = await readManifest(stored, release.id);
+        manifest = await verifyRelease(stored, { releaseId: release.id, sha256, sizeBytes }, archiveLimits);
       } catch (error) {
         throw failedPrecondition(`the archive is not a valid release: ${(error as Error).message}`);
       }
       const [ready] = await sql<ReleaseRow[]>`
         update releases set state = ${ReleaseState.READY}, manifest = ${manifest}::text::jsonb
-        where project_id = ${project.id} and id = ${release.id} and archive_sha256 = ${release.archive_sha256}
+        where project_id = ${project.id} and id = ${release.id} and state = ${ReleaseState.UPLOADING}
+          and archive_sha256 = ${sha256} and archive_size_bytes = ${sizeBytes}
         returning *`;
-      if (!ready) throw new ConnectError("the release changed while it was verified; retry", Code.Aborted);
-      return { release: toRelease(ready) };
+      if (ready) return { release: toRelease(ready) };
+      const current = await findRelease(sql, project.id, release.id);
+      if (
+        current?.state === ReleaseState.READY &&
+        current.archive_sha256 === sha256 &&
+        current.archive_size_bytes === sizeBytes
+      ) {
+        return { release: toRelease(current) };
+      }
+      throw new ConnectError("the release was redeclared while it was verified; retry", Code.Aborted);
     },
 
     async listApps(request, context) {

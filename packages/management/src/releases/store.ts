@@ -12,7 +12,7 @@ export interface UploadTarget {
   headers: Record<string, string>;
 }
 
-/** Holds release archives, keyed by `releaseKey`. */
+/** Holds release archives, keyed by `releaseKey`. Objects are immutable once stored. */
 export interface ReleaseStore {
   /** Where a client sends an archive's bytes, such as a presigned URL. */
   uploadTarget(key: string, expected: ExpectedArchive, expireTime: Date): Promise<UploadTarget>;
@@ -25,6 +25,7 @@ export interface ReleaseStore {
   fetch?(request: Request): Promise<Response | undefined>;
 }
 
-export function releaseKey(projectId: string, releaseId: string): string {
-  return `${projectId}/${releaseId}.tar.gz`;
+/** Keyed by digest, so an upload of other bytes, for example through an old URL, never replaces a verified archive. */
+export function releaseKey(projectId: string, releaseId: string, sha256: string): string {
+  return `${projectId}/${releaseId}/${sha256}.tar.gz`;
 }

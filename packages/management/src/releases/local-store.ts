@@ -1,16 +1,17 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { link, mkdir, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { type Keys, randomToken } from "../crypto.ts";
 import type { ReleaseStore } from "./store.ts";
 
 const uploadPath = "/releases/upload/";
-const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.tar\.gz$/;
+const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/([0-9a-f]{64})\.tar\.gz$/;
 
 /**
- * Stores archives in a local directory. Uploads go to this service through URLs signed for one archive's digest and
- * size, so they need no bearer token, and bytes that do not match are never stored.
+ * Stores archives in a local directory. Uploads go to this service through URLs signed for one archive's key, digest
+ * and size, so they need no bearer token. Bytes that do not match are never stored, and a stored object is never
+ * replaced.
  */
 export function localReleaseStore({
   directory,
@@ -54,7 +55,7 @@ export function localReleaseStore({
         (name) => url.searchParams.get(name) ?? "",
       );
       if (
-        !keyPattern.test(key) ||
+        keyPattern.exec(key)?.[1] !== sha256 ||
         !sha256 ||
         !size ||
         !expires ||
@@ -73,7 +74,6 @@ export function localReleaseStore({
       const hash = createHash("sha256");
       const expected = BigInt(size);
       let received = 0n;
-      let stored = false;
       try {
         for await (const chunk of request.body) {
           received += BigInt(chunk.byteLength);
@@ -86,14 +86,14 @@ export function localReleaseStore({
         }
         await file.sync();
         await file.close();
-        await rename(partial, path);
-        stored = true;
+        // The key names the digest, so an object already stored under it holds these same bytes.
+        await link(partial, path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST") throw error;
+        });
         return new Response(null, { status: 204 });
       } finally {
-        if (!stored) {
-          await file.close().catch(() => {});
-          await rm(partial, { force: true });
-        }
+        await file.close().catch(() => {});
+        await rm(partial, { force: true });
       }
     },
   };

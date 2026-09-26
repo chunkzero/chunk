@@ -1,47 +1,94 @@
+import { createHash } from "node:crypto";
+
 const blockSize = 512;
 const maxLongNameBytes = 4096;
 
+export interface ArchiveLimits {
+  /** Decompressed bytes, tar headers and padding included. */
+  maxExpandedBytes: number;
+  maxEntries: number;
+}
+
+export interface ArchiveEntry {
+  size: number;
+  /** Lowercase hex SHA-256 of the entry's contents. */
+  sha256: string;
+  /** The contents, for entries `keep` asked for. */
+  data: Uint8Array | undefined;
+}
+
 /**
- * Reads one regular file from a gzip-compressed tar archive, stopping once it is found. Returns undefined when the
- * archive does not hold the file; throws when the archive is malformed or the file exceeds `maxBytes`.
+ * Reads a gzip-compressed tar archive to its end within `limits`, checking header checksums, entry types, paths and
+ * the end-of-archive marker. Hashes every file and keeps the contents of those `keep` returns a byte limit for.
+ * Throws with a reason when the archive is malformed or too large.
  */
-export async function readTarFile(
+export async function scanArchive(
   archive: ReadableStream<ArrayBufferView | ArrayBuffer>,
-  name: string,
-  maxBytes: number,
-): Promise<Uint8Array | undefined> {
+  limits: ArchiveLimits,
+  keep: (path: string) => number | undefined,
+): Promise<Map<string, ArchiveEntry>> {
   const reader = archive.pipeThrough(new DecompressionStream("gzip")).getReader();
-  const bytes = new ByteReader(reader);
+  const bytes = new ByteReader(reader, limits.maxExpandedBytes);
+  const entries = new Map<string, ArchiveEntry>();
   try {
     let longName: string | undefined;
+    let count = 0;
     for (;;) {
       const header = await bytes.take(blockSize);
-      if (!header || header.every((byte) => byte === 0)) return undefined;
+      if (header.every((byte) => byte === 0)) {
+        await bytes.drain((chunk) => {
+          if (chunk.some((byte) => byte !== 0)) throw new Error("data follows the end of the tar archive");
+        });
+        if (longName !== undefined) throw new Error("tar long name has no entry");
+        return entries;
+      }
+      if (++count > limits.maxEntries) throw new Error(`the archive has more than ${limits.maxEntries} entries`);
+      if (!checksumMatches(header)) throw new Error("tar header checksum mismatch");
       const size = entrySize(header.subarray(124, 136));
-      const padded = Math.ceil(size / blockSize) * blockSize;
+      const padding = Math.ceil(size / blockSize) * blockSize - size;
       const type = header[156];
       if (type === 0x4c) {
         // GNU long name: the entry's data is the next entry's path.
         if (size > maxLongNameBytes) throw new Error("tar long name is too long");
-        const data = await bytes.take(padded);
-        if (!data) throw new Error("truncated tar archive");
-        longName = text(data.subarray(0, size));
+        longName = text(await bytes.take(size));
+        await bytes.skip(padding);
         continue;
       }
+      if (type !== 0x30 && type !== 0) throw new Error("the archive holds something other than regular files");
       const prefix = text(header.subarray(257, 263)) === "ustar" ? text(header.subarray(345, 500)) : "";
-      const path = (longName ?? (prefix ? `${prefix}/` : "") + text(header.subarray(0, 100))).replace(/^\.\//, "");
+      const path = longName ?? (prefix ? `${prefix}/` : "") + text(header.subarray(0, 100));
       longName = undefined;
-      if (path === name && (type === 0x30 || type === 0)) {
-        if (size > maxBytes) throw new Error(`${name} is larger than ${maxBytes} bytes`);
-        const data = await bytes.take(padded);
-        if (!data) throw new Error("truncated tar archive");
-        return data.subarray(0, size);
-      }
-      if (!(await bytes.skip(padded))) throw new Error("truncated tar archive");
+      if (!portablePath(path)) throw new Error(`the archive holds an invalid path: ${JSON.stringify(path)}`);
+      if (entries.has(path)) throw new Error(`the archive holds ${path} twice`);
+      const limit = keep(path);
+      if (limit !== undefined && size > limit) throw new Error(`${path} is larger than ${limit} bytes`);
+      const hash = createHash("sha256");
+      const kept: Uint8Array[] = [];
+      await bytes.read(size, (chunk) => {
+        hash.update(chunk);
+        if (limit !== undefined) kept.push(chunk);
+      });
+      await bytes.skip(padding);
+      entries.set(path, {
+        size,
+        sha256: hash.digest("hex"),
+        data: limit === undefined ? undefined : Buffer.concat(kept),
+      });
     }
   } finally {
     await reader.cancel().catch(() => {});
   }
+}
+
+function portablePath(path: string): boolean {
+  return path.length > 0 && path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+function checksumMatches(header: Uint8Array): boolean {
+  let sum = 0;
+  for (let i = 0; i < blockSize; i++) sum += i >= 148 && i < 156 ? 0x20 : (header[i] ?? 0);
+  const stored = text(header.subarray(148, 156)).trim();
+  return /^[0-7]+$/.test(stored) && Number.parseInt(stored, 8) === sum;
 }
 
 function text(bytes: Uint8Array): string {
@@ -56,54 +103,70 @@ function entrySize(field: Uint8Array): number {
     return field.subarray(1).reduce((size, byte) => size * 256 + byte, first & 0x7f);
   }
   const octal = text(field).trim();
+  if (!/^[0-7]*$/.test(octal)) throw new Error("tar entry size is not octal");
   return octal ? Number.parseInt(octal, 8) : 0;
 }
 
 class ByteReader {
   private chunks: Uint8Array[] = [];
   private buffered = 0;
+  private total = 0;
 
-  constructor(private readonly reader: { read(): Promise<{ done: boolean; value?: Uint8Array | undefined }> }) {}
+  constructor(
+    private readonly reader: { read(): Promise<{ done: boolean; value?: Uint8Array | undefined }> },
+    private readonly maxBytes: number,
+  ) {}
 
-  /** The next `count` bytes, or undefined if the stream ends first. */
-  async take(count: number): Promise<Uint8Array | undefined> {
-    if (!(await this.fill(count))) return undefined;
+  /** The next `count` bytes; throws if the stream ends first. */
+  async take(count: number): Promise<Uint8Array> {
     const out = new Uint8Array(count);
     let offset = 0;
-    while (offset < count) {
-      offset += this.consume(count - offset, (chunk) => out.set(chunk, offset));
-    }
+    await this.read(count, (chunk) => {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    });
     return out;
   }
 
-  /** Discards the next `count` bytes; false if the stream ends first. */
-  async skip(count: number): Promise<boolean> {
+  /** Passes the next `count` bytes to `use` in pieces; throws if the stream ends first. */
+  async read(count: number, use: (chunk: Uint8Array) => void): Promise<void> {
     let remaining = count;
     while (remaining > 0) {
-      if (!(await this.fill(1))) return false;
-      remaining -= this.consume(remaining, () => {});
+      if (this.buffered === 0 && !(await this.pull())) throw new Error("truncated tar archive");
+      const chunk = this.chunks[0];
+      if (!chunk) continue;
+      const taken = Math.min(chunk.byteLength, remaining);
+      use(chunk.subarray(0, taken));
+      if (taken === chunk.byteLength) this.chunks.shift();
+      else this.chunks[0] = chunk.subarray(taken);
+      this.buffered -= taken;
+      remaining -= taken;
     }
-    return true;
   }
 
-  private consume(limit: number, use: (chunk: Uint8Array) => void): number {
-    const chunk = this.chunks[0];
-    if (!chunk) return 0;
-    const count = Math.min(chunk.byteLength, limit);
-    use(chunk.subarray(0, count));
-    if (count === chunk.byteLength) this.chunks.shift();
-    else this.chunks[0] = chunk.subarray(count);
-    this.buffered -= count;
-    return count;
+  skip(count: number): Promise<void> {
+    return this.read(count, () => {});
   }
 
-  private async fill(count: number): Promise<boolean> {
-    while (this.buffered < count) {
-      const { done, value } = await this.reader.read();
-      if (done || !value) return false;
-      this.chunks.push(value);
-      this.buffered += value.byteLength;
+  /** Passes everything left in the stream to `use`. */
+  async drain(use: (chunk: Uint8Array) => void): Promise<void> {
+    for (const chunk of this.chunks) use(chunk);
+    this.chunks = [];
+    this.buffered = 0;
+    while (await this.pull()) {
+      const chunk = this.chunks.pop();
+      this.buffered = 0;
+      if (chunk) use(chunk);
     }
+  }
+
+  private async pull(): Promise<boolean> {
+    const { done, value } = await this.reader.read();
+    if (done || !value) return false;
+    this.total += value.byteLength;
+    if (this.total > this.maxBytes) throw new Error(`the archive expands past ${this.maxBytes} bytes`);
+    this.chunks.push(value);
+    this.buffered += value.byteLength;
     return true;
   }
 }

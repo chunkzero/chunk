@@ -1,3 +1,5 @@
+import type { ArchiveLimits } from "./releases/archive.ts";
+
 export interface Config {
   databaseUrl: string;
   /** 32 bytes; encrypts secrets and signs upload URLs. */
@@ -10,6 +12,7 @@ export interface Config {
   port: number;
   /** Local release archives live under here. */
   dataDir: string;
+  archiveLimits: ArchiveLimits;
   /** Where players reach environments; unset leaves environments without hostnames. */
   edge: Edge | undefined;
 }
@@ -44,6 +47,10 @@ export function loadConfig(env: Env = process.env): Config {
     host: env.HOST ?? "0.0.0.0",
     port,
     dataDir: env.CHUNK_DATA_DIR ?? "data",
+    archiveLimits: {
+      maxExpandedBytes: positive(env, "CHUNK_MAX_RELEASE_EXPANDED_BYTES", 8 * 1024 ** 3),
+      maxEntries: positive(env, "CHUNK_MAX_RELEASE_ENTRIES", 100_000),
+    },
     edge: edgeOf(env),
   };
 }
@@ -54,6 +61,12 @@ function edgeOf(env: Env): Edge | undefined {
   const port = Number(env.CHUNK_EDGE_PORT ?? "25565");
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("CHUNK_EDGE_PORT must be a port number");
   return { domain, port };
+}
+
+function positive(env: Env, name: string, fallback: number): number {
+  const value = Number(env[name] ?? fallback);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
 }
 
 function required(env: Env, name: string): string {

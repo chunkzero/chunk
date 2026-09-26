@@ -39,7 +39,9 @@ describe.skipIf(!databaseUrl)("SecretService and DomainService", () => {
     expect(Buffer.from(ciphertext).includes(Buffer.from(value))).toBe(false);
     const opened = await h.keys.cipher.open(ciphertext, secretContext(environmentId, "DATABASE_PASSWORD"));
     expect(Buffer.from(opened).equals(Buffer.from(value))).toBe(true);
-    expect(h.keys.cipher.open(ciphertext, secretContext(environments[1] ?? "", "DATABASE_PASSWORD"))).rejects.toThrow();
+    await expect(
+      h.keys.cipher.open(ciphertext, secretContext(environments[1] ?? "", "DATABASE_PASSWORD")),
+    ).rejects.toThrow();
 
     await secrets.deleteSecret({ environmentId, name: "DATABASE_PASSWORD" });
     expect((await secrets.listSecrets({ environmentId })).secrets).toEqual([]);

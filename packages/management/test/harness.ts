@@ -11,6 +11,7 @@ import { ensureOperatorToken } from "../src/auth/tokens.ts";
 import { deriveKeys, type Keys, randomToken } from "../src/crypto.ts";
 import { connect, migrate, type Sql } from "../src/db.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
+import type { ReleaseStore } from "../src/releases/store.ts";
 import { createHandler } from "../src/server.ts";
 
 /** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
@@ -23,6 +24,9 @@ export interface Harness {
   operatorToken: string;
   /** TXT records the fake resolver answers with, by name. */
   txt: Map<string, string[]>;
+  releases: ReleaseStore;
+  /** Runs before the service reads a stored archive, to interleave other calls with verification. */
+  beforeRead: (() => Promise<void>) | undefined;
   /** A client sending `token` as its bearer, or none when null. */
   client<T extends DescService>(service: T, token?: string | null): Client<T>;
   close(): Promise<void>;
@@ -45,10 +49,29 @@ export async function startHarness(): Promise<Harness> {
   let handler: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => handler(request) });
   const url = server.url.origin;
+  const releases = localReleaseStore({ directory, keys, publicUrl: url });
+  const harness: Harness = {
+    sql,
+    keys,
+    url,
+    operatorToken,
+    txt,
+    releases,
+    beforeRead: undefined,
+    client,
+    close,
+  };
   handler = createHandler({
     sql,
     keys,
-    releases: localReleaseStore({ directory, keys, publicUrl: url }),
+    releases: {
+      ...releases,
+      async read(key) {
+        await harness.beforeRead?.();
+        return releases.read(key);
+      },
+    },
+    archiveLimits: { maxExpandedBytes: 64 * 1024 * 1024, maxEntries: 1000 },
     async resolveTxt(name) {
       const records = txt.get(name);
       if (!records) throw Object.assign(new Error(`no records for ${name}`), { code: "ENOTFOUND" });
@@ -58,36 +81,32 @@ export async function startHarness(): Promise<Harness> {
     edge: { domain: "play.example.net", port: 25565 },
   });
 
-  return {
-    sql,
-    keys,
-    url,
-    operatorToken,
-    txt,
-    client(service, token = operatorToken) {
-      const transport = createConnectTransport({
-        baseUrl: url,
-        useBinaryFormat: true,
-        interceptors:
-          token === null
-            ? []
-            : [
-                (next) => (request) => {
-                  request.header.set("authorization", `Bearer ${token}`);
-                  return next(request);
-                },
-              ],
-      });
-      return createClient(service, transport);
-    },
-    async close() {
-      await server.stop(true);
-      await sql.end();
-      await admin.unsafe(`drop schema ${schema} cascade`);
-      await admin.end();
-      await rm(directory, { recursive: true, force: true });
-    },
-  };
+  function client<T extends DescService>(service: T, token: string | null = operatorToken): Client<T> {
+    const transport = createConnectTransport({
+      baseUrl: url,
+      useBinaryFormat: true,
+      interceptors:
+        token === null
+          ? []
+          : [
+              (next) => (request) => {
+                request.header.set("authorization", `Bearer ${token}`);
+                return next(request);
+              },
+            ],
+    });
+    return createClient(service, transport);
+  }
+
+  async function close() {
+    await server.stop(true);
+    await sql.end();
+    await admin.unsafe(`drop schema ${schema} cascade`);
+    await admin.end();
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  return harness;
 }
 
 /** Runs `call` and returns the Connect error code it failed with. */
