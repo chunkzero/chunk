@@ -161,6 +161,8 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     std::mem::forget(crashed);
 
     let host = ProcessHost::new(config());
+    let recorded = host.launch_record(&id).unwrap();
+    assert!(recorded.boot == liveness::current_boot() && recorded.launched.is_some());
     assert!(host.unresolved(&id));
     assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
     assert!(host.adopt("another-credential", registration.clone()).is_err());
@@ -177,10 +179,9 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert!(!host.stopped(&id));
 }
 
-#[tokio::test]
-async fn a_launch_marker_without_a_record_is_never_adopted() {
-    let directory = tempfile::tempdir().unwrap();
-    let host = ProcessHost::new(ProcessHostConfig {
+/// A host that launches nothing in `directory`.
+fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
+    ProcessHost::new(ProcessHostConfig {
         distribution: directory.path().into(),
         java: directory.path().join("java"),
         directory: directory.path().join("nodes"),
@@ -194,7 +195,70 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
             endpoint: "http://127.0.0.1:1".into(),
             token: "unused".into(),
         },
-    });
+    })
+}
+
+/// A host with a launch marker, left by a host that restarted, recording `boot` and `launched`.
+fn marked(
+    directory: &tempfile::TempDir,
+    boot: Option<String>,
+    launched: Option<liveness::Launched>,
+) -> (ProcessHost, String) {
+    let host = idle_host(directory);
+    let id = uuid::Uuid::new_v4().to_string();
+    let record =
+        LaunchRecord { process_id: "jvm".into(), generation: 1, token_sha256: digest("token"), boot, launched };
+    std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
+    std::fs::write(host.path(&id, "launch").unwrap(), serde_json::to_vec(&record).unwrap()).unwrap();
+    (host, id)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launch_from_another_boot_is_confirmed_exited() {
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) = marked(&directory, Some("another-boot".into()), None);
+    assert!(host.stopped(&id));
+    assert!(host.path(&id, "exit").unwrap().is_file());
+    assert!(host.unowned().unwrap().is_empty());
+}
+
+#[test]
+fn a_launch_whose_pid_is_gone_is_confirmed_exited() {
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let launched = liveness::Launched { pid: child.id(), started: liveness::started(child.id()).unwrap().unwrap() };
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) = marked(&directory, liveness::current_boot(), Some(launched));
+    assert!(!host.stopped(&id));
+    assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(host.stopped(&id));
+    assert!(host.unowned().unwrap().is_empty());
+}
+
+#[test]
+fn a_reused_pid_with_another_start_time_is_confirmed_exited() {
+    let pid = std::process::id();
+    let started = liveness::started(pid).unwrap().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) =
+        marked(&directory, liveness::current_boot(), Some(liveness::Launched { pid, started: started + 1 }));
+    assert!(host.stopped(&id));
+}
+
+#[test]
+fn a_marker_without_boot_or_spawn_waits_for_an_exit_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) = marked(&directory, None, None);
+    assert!(!host.stopped(&id));
+    assert!(host.unresolved(&id));
+}
+
+#[tokio::test]
+async fn a_launch_marker_without_a_record_is_never_adopted() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = idle_host(&directory);
     let id = uuid::Uuid::new_v4().to_string();
     let registration = ProcessRegistration {
         identity: Some(ProcessIdentity { runtime_id: id.clone(), app_id: "bridge".into(), ..Default::default() }),
