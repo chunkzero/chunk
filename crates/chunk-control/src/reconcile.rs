@@ -6,30 +6,13 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{Control, Result, state::Phase};
 
 impl Control {
-    /// Expires unactivated reservations, releases claims on stopped hosts and repairs what JVMs reported. Unreachable
-    /// owners remain fenced.
+    /// Expires unactivated reservations, withdraws claims whose capacity is retired or released, and repairs what JVMs
+    /// reported. Unreachable owners remain fenced.
     /// # Errors
     /// Reports durable-state errors. Individual unavailable runtimes are retained for a later pass.
     pub async fn reconcile_all(self: &Arc<Self>) -> Result<()> {
         self.resolve_recovery().await?;
         let state = self.state()?;
-        let stopped: Vec<_> = state.hosts.keys().filter(|id| self.host.stopped(id)).cloned().collect();
-        for id in &stopped {
-            self.update(|state| {
-                state.retire_stopped_host(id);
-                let open: Vec<_> = state
-                    .claims
-                    .iter()
-                    .filter(|(_, claim)| claim.phase != Phase::Released && claim.assignment.is_some())
-                    .filter(|(_, claim)| state.sessions.get(&claim.session).is_some_and(|session| session.host == *id))
-                    .map(|(operation, _)| operation.clone())
-                    .collect();
-                for operation in open {
-                    crate::delivery::release(state, &operation)?;
-                }
-                Ok(())
-            })?;
-        }
         let mut tasks = JoinSet::new();
         let permits = Arc::new(Semaphore::new(8));
         for claim in state.claims.values().filter(|claim| claim.phase != Phase::Released) {
@@ -39,7 +22,7 @@ impl Control {
                 || state.moves.get(&request.operation_id).is_some_and(|intent| intent.failure.is_some())
                 || (claim.phase == Phase::Reserved && state.sessions[&claim.session].retired)
                 || claim.phase == Phase::Withdrawing
-                || (claim.assignment.is_none() && stopped.contains(&state.sessions[&claim.session].host));
+                || (claim.assignment.is_none() && state.released(&state.sessions[&claim.session].host));
             if !cancel {
                 continue;
             }
@@ -57,7 +40,7 @@ impl Control {
         self.join_progressing_drains(tasks).await?;
         self.reconcile_sessions().await?;
         self.retire_idle_hosts()?;
-        self.progress_drains().await?;
+        self.progress_drains()?;
         Ok(())
     }
 }

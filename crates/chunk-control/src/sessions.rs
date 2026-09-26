@@ -56,7 +56,7 @@ impl Control {
     /// sessions that emptied past their timeout or retired.
     pub(crate) async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
         let state = self.state()?;
-        if self.host.stopped(host) {
+        if state.released(host) {
             return Ok(());
         }
         let Some(runtime) = self.host.connection(host) else {

@@ -30,3 +30,66 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
     executor.stop().await;
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_restart_resumes_requested_and_releasing_capacity() {
+    let fixture = Fixture::new().await;
+    let path = fixture.directory.path().join("control.sqlite");
+    let control = open(&path, fixture.config.clone(), fixture.host.clone()).unwrap();
+    let claim = tokio::spawn({
+        let control = control.clone();
+        async move { control.claim(request("waiting", &uuid::Uuid::new_v4().to_string())).await }
+    });
+    eventually(|| control.state().unwrap().claims.contains_key("waiting")).await;
+    claim.abort();
+    let _ = claim.await;
+    let state = control.state().unwrap();
+    let requested = state.sessions[&state.claims["waiting"].session].host.clone();
+    let releasing = uuid::Uuid::new_v4().to_string();
+    control
+        .update(|state| {
+            let host = crate::state::HostState {
+                capacity: Capacity::Releasing,
+                retired: true,
+                ..crate::state::HostState::requested("bridge", "local")
+            };
+            state.hosts.insert(releasing.clone(), host);
+            Ok(())
+        })
+        .unwrap();
+    drop(control);
+
+    let control = fixture.control().await;
+    let state = control.state().unwrap();
+    assert_eq!(state.hosts[&requested].capacity, Capacity::Ready);
+    assert!(state.released(&releasing));
+    assert_eq!(*fixture.host.ids.lock().unwrap(), BTreeSet::from([requested]));
+    assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([releasing]));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control().await;
+    let assignment = control.claim(request("active", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    fixture.arrive(&control, "active").await;
+    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["active"].session].host.clone();
+    fixture.host.unconfirmed.store(true, Ordering::Release);
+    let command =
+        chunk_proto::v1::ShutdownNodeRequest { operation_id: "stop".into(), host_id: host.clone(), timeout_seconds: 0 };
+    control.shutdown_node(&command).unwrap();
+    control.progress_drains().unwrap();
+    // The executor keeps asking the host, but an unconfirmed exit changes nothing.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let state = control.state().unwrap();
+    assert_eq!(state.hosts[&host].capacity, Capacity::Releasing);
+    assert!(state.claims["active"].phase == Phase::Arrived);
+
+    fixture.host.unconfirmed.store(false, Ordering::Release);
+    eventually(|| control.state().unwrap().released(&host)).await;
+    assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
+    fixture.close().await;
+}

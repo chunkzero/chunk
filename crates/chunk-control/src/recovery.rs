@@ -117,14 +117,16 @@ impl Control {
     }
 
     async fn recover_host(&self, id: &str) -> Result<bool> {
-        if self.host.stopped(id) {
+        let state = self.state()?;
+        // The log has no capacity record for a host a restore lost, so only the host can confirm its JVM exited.
+        if state.hosts.get(id).map_or_else(|| self.host.stopped(id), |host| host.capacity == Capacity::Released) {
             return Ok(true);
         }
         let Some(runtime) = self.host.connection(id) else {
             // Without an unowned launch, no JVM from before the restart can run on this host.
             return Ok(!self.host.unresolved(id));
         };
-        if let Some(host) = self.state()?.hosts.get(id)
+        if let Some(host) = state.hosts.get(id)
             && !self.runs_host(&runtime, host)
         {
             return Err(Error::Invalid("recovered runtime mismatch"));
@@ -178,8 +180,8 @@ impl Control {
         })
     }
 
-    /// Records a fenced JVM whose host row a restore lost as a retiring host, so the host lifecycle stops it: its
-    /// drain terminates it at once, and control shutdown stops it like any logged host.
+    /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity, so the host lifecycle stops it:
+    /// its drain releases it at once, and control shutdown stops it like any logged host.
     fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
             if state.hosts.contains_key(id) {

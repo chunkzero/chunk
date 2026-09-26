@@ -2,6 +2,7 @@ use crate::{
     Control, Error, Result,
     client::{auth, channel},
     drain::retire_host,
+    state::Capacity,
 };
 use chunk_proto::v1::{
     NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest, node_control_client::NodeControlClient,
@@ -28,7 +29,7 @@ impl Control {
                 .iter()
                 .map(|(id, host)| {
                     let observation = observations.get(id);
-                    let phase = if self.host.stopped(id) {
+                    let phase = if host.capacity == Capacity::Released {
                         NodePhase::Stopped
                     } else if self.host.unresolved(id) {
                         NodePhase::Unreachable
@@ -95,7 +96,8 @@ impl Control {
     }
     pub(crate) async fn poll_health(self: &Arc<Self>) -> Result<()> {
         let mut tasks = tokio::task::JoinSet::new();
-        for id in self.state()?.hosts.keys().filter(|id| !self.host.stopped(id)) {
+        let state = self.state()?;
+        for id in state.hosts.keys().filter(|id| !state.released(id)) {
             let Some(connection) = self.host.connection(id) else {
                 continue;
             };

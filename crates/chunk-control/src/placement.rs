@@ -53,6 +53,10 @@ impl Control {
         self.session_ready(&session.host, &runtime, &claim.session).await?;
         let assignment = self.prepare_assignment(&runtime, channel, config, claim, &request).await?;
         self.update(|state| {
+            // A host released while preparing never gets a new prepared claim, which only its release would end.
+            if state.released(&session.host) {
+                return Err(Error::Stopped);
+            }
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
                 return Err(Error::Invalid("claim no longer reserved"));
@@ -132,7 +136,7 @@ impl Control {
             loop {
                 let state = self.state()?;
                 let host = state.hosts.get(id).ok_or(Error::Invalid("unknown host"))?;
-                if host.capacity == Capacity::Released || self.host.stopped(id) {
+                if host.capacity == Capacity::Released {
                     return Err(Error::Stopped);
                 }
                 if host.capacity == Capacity::Ready

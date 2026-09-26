@@ -261,8 +261,10 @@ impl ProcessHost {
             self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?.running.keys().cloned().collect();
         let mut result = Ok(());
         for id in ids {
-            if let Err(error) = self.terminate(&id).await {
-                result = Err(error);
+            match self.release(&id).await {
+                Ok(true) => {}
+                Ok(false) => result = Err(Error::Unresolved("JVM shutdown not confirmed")),
+                Err(error) => result = Err(error),
             }
         }
         result
@@ -347,9 +349,9 @@ impl Host for ProcessHost {
     fn connection(&self, id: &str) -> Option<RuntimeConnection> {
         self.process(id).ok()??.connection()
     }
-    async fn terminate(&self, id: &str) -> Result<()> {
+    async fn release(&self, id: &str) -> Result<bool> {
         if self.stopped(id) {
-            return Ok(());
+            return Ok(true);
         }
         let process = {
             let processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
@@ -357,14 +359,15 @@ impl Host for ProcessHost {
                 process.clone()
             } else {
                 if self.path(id, "exit")?.is_file() {
-                    return Ok(());
+                    return Ok(true);
                 }
+                // An unowned launch's JVM still holds its marker's lock.
                 if self.path(id, "launch")?.try_exists()? {
-                    return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+                    return Ok(false);
                 }
                 // Launch holds this same lock and checks the exit record before spawning.
                 self.record_exit(id, b"never launched")?;
-                return Ok(());
+                return Ok(true);
             }
         };
         process.stop.cancel();
@@ -375,11 +378,11 @@ impl Host for ProcessHost {
         let deadline = Instant::now() + Duration::from_secs(12);
         while !self.stopped(id) {
             if Instant::now() >= deadline {
-                return Err(Error::Unresolved("JVM shutdown not confirmed"));
+                return Ok(false);
             }
             sleep(Duration::from_millis(25)).await;
         }
-        Ok(())
+        Ok(true)
     }
     fn unresolved(&self, id: &str) -> bool {
         // A marker that cannot be looked up may exist.

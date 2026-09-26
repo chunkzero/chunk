@@ -217,6 +217,7 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     assert!(state.hosts[&host].retired && state.drains.values().any(|drain| drain.host == host));
     control.shutdown().await.unwrap();
     assert!(fixture.host.terminated.lock().unwrap().contains(&host));
+    eventually(|| control.state().unwrap().released(&host)).await;
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
     assert!(!state.hosts.contains_key(&host) && state.drains.is_empty());

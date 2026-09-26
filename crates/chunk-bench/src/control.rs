@@ -42,9 +42,9 @@ impl Host for SyntheticHost {
         })
     }
 
-    async fn terminate(&self, id: &str) -> chunk_control::Result<()> {
+    async fn release(&self, id: &str) -> chunk_control::Result<bool> {
         self.stopped.lock().expect("synthetic host lock").insert(id.into());
-        Ok(())
+        Ok(true)
     }
 
     fn stopped(&self, id: &str) -> bool {

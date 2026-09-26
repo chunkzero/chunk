@@ -9,7 +9,7 @@ fn manifest_jar(manifest: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated() {
+async fn launch_registration_is_frozen_and_only_owned_children_can_be_released() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
     std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
@@ -75,22 +75,22 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     );
     assert!(matches!(host.ensure(&id, "changed", "local").await, Ok(Progress::Failed(_))));
     assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Ready(_))));
-    host.terminate(&id).await.unwrap();
+    assert!(host.release(&id).await.unwrap());
     assert!(host.stopped(&id));
     assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Failed(_))));
-    host.terminate(&id).await.unwrap();
+    assert!(host.release(&id).await.unwrap());
     let stale = uuid::Uuid::new_v4().to_string();
     std::fs::write(host.path(&stale, "launch").unwrap(), b"").unwrap();
     let held = File::open(host.path(&stale, "launch").unwrap()).unwrap();
     held.lock().unwrap();
-    assert!(host.terminate(&stale).await.is_err());
+    assert!(!host.release(&stale).await.unwrap());
     assert!(!host.stopped(&stale));
     let invalid = uuid::Uuid::new_v4().to_string();
     let jar = directory.path().join("app.jar");
     std::fs::write(&jar, b"changed artifact").unwrap();
     assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(!host.path(&invalid, "launch").unwrap().exists());
-    host.terminate(&invalid).await.unwrap();
+    assert!(host.release(&invalid).await.unwrap());
     assert!(host.stopped(&invalid));
     std::fs::write(&jar, &launcher).unwrap();
     assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
@@ -107,7 +107,7 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     std::fs::create_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
     assert!(matches!(host.ensure(&failed_log, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(host.stopped(&failed_log));
-    host.terminate(&failed_log).await.unwrap();
+    assert!(host.release(&failed_log).await.unwrap());
     std::fs::remove_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
     assert_stopped_hosts_are_pruned(&host, &invalid, &stale).await;
     drop(held);
@@ -187,7 +187,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
         sleep(Duration::from_millis(10)).await;
     };
     assert!(std::process::Command::new("kill").arg(pid.to_string()).status().unwrap().success());
-    host.terminate(&id).await.unwrap();
+    assert!(host.release(&id).await.unwrap());
     assert!(host.stopped(&id));
 }
 

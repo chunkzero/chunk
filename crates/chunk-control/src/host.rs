@@ -35,8 +35,10 @@ pub trait Host: Send + Sync {
     /// Starts providing `id`'s runtime if it has not started yet, and reports its progress without waiting. Repeated
     /// calls with the same ID never start a second runtime.
     async fn ensure(&self, id: &str, app: &str, profile: &str) -> Result<Progress>;
-    /// Success requires affirmative evidence of complete process shutdown.
-    async fn terminate(&self, id: &str) -> Result<()>;
+    /// Stops `id`'s runtime, or confirms it never started. `true` only with affirmative evidence that no process for
+    /// `id` runs; `false` asks the caller to try again.
+    async fn release(&self, id: &str) -> Result<bool>;
+    /// Whether `id`'s runtime is confirmed to have exited.
     fn stopped(&self, id: &str) -> bool;
     /// Removes stopped host resources absent from durable state. The caller must exclude concurrent placement.
     /// # Errors

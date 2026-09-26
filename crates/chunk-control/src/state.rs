@@ -46,14 +46,9 @@ impl State {
         Generation { epoch: self.epoch, revision: self.revision }
     }
 
-    pub fn retire_stopped_host(&mut self, id: &str) {
-        if let Some(host) = self.hosts.get_mut(id) {
-            host.retired = true;
-        }
-        for session in self.sessions.values_mut().filter(|session| session.host == id) {
-            session.retired = true;
-            session.finished = true;
-        }
+    /// Whether `host`'s runtime is confirmed to have exited.
+    pub fn released(&self, host: &str) -> bool {
+        self.hosts.get(host).is_some_and(|host| host.capacity == Capacity::Released)
     }
 
     /// The arrived claim `identity` names, if it is still current and owns its player.

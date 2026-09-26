@@ -1,6 +1,6 @@
-//! Host capacity intents. Placement commits the capacity it needs before any host call, and this executor makes each
-//! host's calls, keyed by the host ID, committing their outcomes back to the log. After a restart it resumes every
-//! unfinished intent from the log.
+//! Host capacity intents. Placement commits the capacity it needs and drains commit the capacity they release before
+//! any host call, and this executor makes each host's calls, keyed by the host ID, committing their outcomes back to
+//! the log. After a restart it resumes every unfinished intent from the log.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Control, Result,
     host::Progress,
-    state::{Capacity, HostState, State},
+    state::{Capacity, HostState, Phase, State},
 };
 
 impl Control {
@@ -64,6 +64,20 @@ impl Control {
         let Some(host) = state.hosts.get(id).filter(|host| called(host)) else {
             return Ok(());
         };
+        match host.capacity {
+            // An exit nothing asked for; only the host's affirmative evidence releases ready capacity.
+            Capacity::Ready if self.host.stopped(id) => self.update(|state| released(state, id, Capacity::Ready)),
+            Capacity::Releasing => {
+                if !self.host.release(id).await? {
+                    return Ok(());
+                }
+                self.update(|state| released(state, id, Capacity::Releasing))
+            }
+            _ => self.ensure(id, host).await,
+        }
+    }
+
+    async fn ensure(&self, id: &str, host: &HostState) -> Result<()> {
         let failure = match self.host.ensure(id, &host.app, &host.profile).await? {
             Progress::Pending => return Ok(()),
             Progress::Ready(runtime) if self.runs_host(&runtime, host) => None,
@@ -92,9 +106,34 @@ impl Control {
 fn called(host: &HostState) -> bool {
     match host.capacity {
         Capacity::Requested => !host.retired,
-        Capacity::Ready => true,
-        Capacity::Releasing | Capacity::Released => false,
+        Capacity::Ready | Capacity::Releasing => true,
+        Capacity::Released => false,
     }
+}
+
+/// Records that `id`'s runtime exited while its capacity was `from`: retires the host, finishes its sessions and
+/// releases the claims prepared on them.
+fn released(state: &mut State, id: &str, from: Capacity) -> Result<()> {
+    let Some(host) = state.hosts.get_mut(id).filter(|host| host.capacity == from) else {
+        return Ok(());
+    };
+    host.capacity = Capacity::Released;
+    host.retired = true;
+    for session in state.sessions.values_mut().filter(|session| session.host == id) {
+        session.retired = true;
+        session.finished = true;
+    }
+    let prepared: Vec<_> = state
+        .claims
+        .iter()
+        .filter(|(_, claim)| claim.phase != Phase::Released && claim.assignment.is_some())
+        .filter(|(_, claim)| state.sessions.get(&claim.session).is_some_and(|session| session.host == id))
+        .map(|(operation, _)| operation.clone())
+        .collect();
+    for operation in prepared {
+        crate::delivery::release(state, &operation)?;
+    }
+    Ok(())
 }
 
 /// Releases `id`'s capacity after its host failed to provide it, retiring the host and its sessions.
