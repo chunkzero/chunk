@@ -19,7 +19,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Result, SessionType, state::Phase};
+use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Progress, Result, SessionType, state::Phase};
 
 struct Binding {
     delivery: PlayerDelivery,
@@ -297,20 +297,20 @@ impl Host for FakeHost {
         })
     }
 
-    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<RuntimeConnection> {
+    async fn ensure(&self, id: &str, _: &str, _: &str) -> Result<Progress> {
         self.ids.lock().unwrap().insert(id.into());
         if self.stopped(id) {
-            return Err(Error::Stopped);
+            return Ok(Progress::Failed("JVM exited".into()));
         }
         if self.forgotten.load(Ordering::Acquire) {
-            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
+            return Ok(Progress::Pending);
         }
-        Ok(RuntimeConnection {
+        Ok(Progress::Ready(Box::new(RuntimeConnection {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
             token: "test-runtime-credential".into(),
             identity: self.runtime.identity.clone(),
-        })
+        })))
     }
     async fn terminate(&self, id: &str) -> Result<()> {
         assert!(self.ids.lock().unwrap().contains(id));
@@ -338,6 +338,22 @@ impl Host for FakeHost {
             adopted();
         }
         Ok(())
+    }
+}
+
+/// Control's capacity executor, running until stopped.
+struct Executor(CancellationToken, JoinHandle<()>);
+
+impl Executor {
+    fn start(control: &Arc<Control>) -> Self {
+        let (control, stop) = (control.clone(), CancellationToken::new());
+        let task = stop.clone();
+        Self(stop, tokio::spawn(async move { control.run_capacity(&task).await }))
+    }
+
+    async fn stop(self) {
+        self.0.cancel();
+        self.1.await.unwrap();
     }
 }
 
@@ -426,21 +442,26 @@ impl Fixture {
         let follower = Mutex::default();
         Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server, follower }
     }
-    /// Opens control with the fake JVM following it, once the previous control's JVM stream has closed. A reachable
-    /// JVM re-attaches before this returns.
+    /// Opens control with its capacity executor and the fake JVM following it, once the previous control's JVM stream
+    /// has closed. A reachable JVM re-attaches before this returns.
     async fn control(&self) -> Arc<Control> {
         self.detach().await;
         let control =
             open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap();
         let stop = CancellationToken::new();
-        let task = tokio::spawn(follow(control.clone(), self.host.clone(), stop.clone()));
+        let task = tokio::spawn({
+            let (control, host, stop) = (control.clone(), self.host.clone(), stop.clone());
+            async move {
+                tokio::join!(follow(control.clone(), host, stop.clone()), control.run_capacity(&stop));
+            }
+        });
         *self.follower.lock().unwrap() = Some((stop, task));
         if self.runtime.available.load(Ordering::Acquire) && !self.host.forgotten.load(Ordering::Acquire) {
             self.recovered(&control).await;
         }
         control
     }
-    /// Closes the fake JVM's stream, so it no longer holds its control.
+    /// Stops the capacity executor and closes the fake JVM's stream, so neither holds its control.
     async fn detach(&self) {
         let follower = self.follower.lock().unwrap().take();
         if let Some((stop, task)) = follower {
@@ -1032,6 +1053,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     fixture.close().await;
 }
 
+mod capacity;
 mod creation;
 mod destinations;
 mod launch;

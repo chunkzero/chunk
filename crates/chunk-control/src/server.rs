@@ -38,6 +38,11 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     .map_err(io::Error::other)??;
     let service = Service::new(control.clone(), token.clone()).map_err(io::Error::other)?;
     let operations = service.operations();
+    let executor = CancellationToken::new();
+    let capacity = tokio::spawn({
+        let (control, executor) = (control.clone(), executor.clone());
+        async move { control.run_capacity(&executor).await }
+    });
     let result = async {
         let connection = ControlConnection { endpoint: format!("http://{address}"), token };
         if path.exists() {
@@ -106,8 +111,11 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     service.close_methods();
     operations.close();
     operations.wait().await;
+    // Accepted operations may wait on capacity, so the executor stops after them and before hosts stop.
+    executor.cancel();
+    let executed = capacity.await.map_err(io::Error::other);
     let stopped = control.shutdown().await.and(control.close()).map_err(io::Error::other);
-    result.and(stopped)
+    result.and(executed).and(stopped)
 }
 
 pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationToken) {

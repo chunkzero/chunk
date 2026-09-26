@@ -21,7 +21,7 @@ use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     drain::retire_host,
-    state::{Claim, Generation, HostState, Phase, SessionState},
+    state::{Capacity, Claim, Generation, HostState, Phase, SessionState},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -186,10 +186,8 @@ impl Control {
                 return Ok(());
             }
             let host = HostState {
-                app: identity.app_id.clone(),
-                profile: identity.machine_profile.clone(),
-                retired: false,
-                idle_since_ms: None,
+                capacity: Capacity::Ready,
+                ..HostState::requested(&identity.app_id, &identity.machine_profile)
             };
             state.hosts.insert(id.into(), host);
             let operation = format!("orphan/{id}");
@@ -205,7 +203,10 @@ impl Control {
     /// recovery withdraws them all.
     pub(crate) fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
         let error = match self.host.register(token, registration.clone()) {
-            Ok(identity) => return Ok(identity),
+            Ok(identity) => {
+                self.wake_capacity();
+                return Ok(identity);
+            }
             Err(error) => error,
         };
         let (Some(identity), Some(secret)) = (registration.identity.clone(), token.strip_prefix("Bearer ")) else {
@@ -223,6 +224,7 @@ impl Control {
             }
         }
         self.recovery.reattach(&identity.runtime_id, || self.host.adopt(secret, registration))?;
+        self.wake_capacity();
         tracing::info!(host = identity.runtime_id, "re-attached a JVM that outlived control");
         Ok(identity)
     }

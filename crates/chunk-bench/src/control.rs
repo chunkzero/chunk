@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Mutex};
 
 use anyhow::{Result, ensure};
-use chunk_control::{ControlConnection, Host, RuntimeConnection};
+use chunk_control::{ControlConnection, Host, Progress, RuntimeConnection};
 use chunk_proto::v1::{
     ActivateClaim, ClaimPhase, ClaimRequest, Identity, SessionDemand, WatchRequest,
     local_control_client::LocalControlClient,
@@ -26,11 +26,11 @@ impl SyntheticHost {
 
 #[tonic::async_trait]
 impl Host for SyntheticHost {
-    async fn ensure(&self, id: &str, _: &str, _: &str) -> chunk_control::Result<RuntimeConnection> {
+    async fn ensure(&self, id: &str, _: &str, _: &str) -> chunk_control::Result<Progress> {
         if self.stopped(id) {
-            return Err(chunk_control::Error::Stopped);
+            return Ok(Progress::Failed("synthetic runtime stopped".into()));
         }
-        Ok(self.connection(id).expect("synthetic connection"))
+        Ok(Progress::Ready(Box::new(self.connection(id).expect("synthetic connection"))))
     }
 
     fn connection(&self, id: &str) -> Option<RuntimeConnection> {

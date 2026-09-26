@@ -45,7 +45,7 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     });
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let process = host.launch(&id, "bridge", "local").unwrap();
+    let process = host.launch(&id, "bridge", "local").unwrap().unwrap();
     // Destinations may host an app's session on a profile other than the session's default.
     host.launch(&uuid::Uuid::new_v4().to_string(), "bridge", "large").unwrap();
     host.prune(&BTreeSet::new()).unwrap();
@@ -73,11 +73,11 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     assert!(
         host.register(&token, ProcessRegistration { player_endpoint: "127.0.0.1:3".into(), ..registration }).is_err()
     );
-    assert!(host.ensure(&id, "changed", "local").await.is_err());
-    assert!(host.ensure(&id, "bridge", "local").await.is_ok());
+    assert!(matches!(host.ensure(&id, "changed", "local").await, Ok(Progress::Failed(_))));
+    assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Ready(_))));
     host.terminate(&id).await.unwrap();
     assert!(host.stopped(&id));
-    assert!(host.ensure(&id, "bridge", "local").await.is_err());
+    assert!(matches!(host.ensure(&id, "bridge", "local").await, Ok(Progress::Failed(_))));
     host.terminate(&id).await.unwrap();
     let stale = uuid::Uuid::new_v4().to_string();
     std::fs::write(host.path(&stale, "launch").unwrap(), b"").unwrap();
@@ -88,24 +88,24 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_terminated
     let invalid = uuid::Uuid::new_v4().to_string();
     let jar = directory.path().join("app.jar");
     std::fs::write(&jar, b"changed artifact").unwrap();
-    assert!(host.ensure(&invalid, "bridge", "local").await.is_err());
+    assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(!host.path(&invalid, "launch").unwrap().exists());
     host.terminate(&invalid).await.unwrap();
     assert!(host.stopped(&invalid));
     std::fs::write(&jar, &launcher).unwrap();
-    assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Err(Error::Stopped)));
+    assert!(matches!(host.ensure(&invalid, "bridge", "local").await, Ok(Progress::Failed(_))));
     // A classpath JAR replaced under its digest name no longer matches the app identity.
     let replaced = uuid::Uuid::new_v4().to_string();
     std::fs::write(&library_path, manifest_jar("Manifest-Version: 1.0\r\nCreated-By: replacement\r\n\r\n")).unwrap();
     assert!(matches!(
         host.ensure(&replaced, "bridge", "local").await,
-        Err(Error::Invalid("app classpath digest mismatch"))
+        Ok(Progress::Failed(reason)) if reason.ends_with("app classpath digest mismatch")
     ));
     assert!(!host.path(&replaced, "launch").unwrap().exists());
     std::fs::write(&library_path, &library).unwrap();
     let failed_log = uuid::Uuid::new_v4().to_string();
     std::fs::create_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
-    assert!(host.ensure(&failed_log, "bridge", "local").await.is_err());
+    assert!(matches!(host.ensure(&failed_log, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(host.stopped(&failed_log));
     host.terminate(&failed_log).await.unwrap();
     std::fs::remove_dir(host.path(&failed_log, "jvm.log").unwrap()).unwrap();
@@ -154,7 +154,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     let crashed = ProcessHost::new(config());
     crashed.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let process = crashed.launch(&id, "bridge", "local").unwrap();
+    let process = crashed.launch(&id, "bridge", "local").unwrap().unwrap();
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
         control_endpoint: "http://127.0.0.1:1".into(),

@@ -72,7 +72,7 @@ impl Control {
             return Err(Error::Busy);
         }
         let unavailable = self.unavailable()?;
-        self.update(|state| {
+        let reserved = self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Invalid("control draining"));
             }
@@ -100,7 +100,9 @@ impl Control {
             let roster = Roster { version: request.version, members, ready: Vec::new(), admitted: false };
             state.rosters.insert(request.operation_id.clone(), roster);
             Ok(destinations)
-        })
+        })?;
+        self.wake_capacity();
+        Ok(reserved)
     }
 
     /// Fails a roster that has not been admitted, so members stay where they are.

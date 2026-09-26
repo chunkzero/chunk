@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{Config, Error, Result};
 pub use entities::Generation;
 pub(crate) use entities::{
-    Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
+    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
 };
 pub use store::clear;
 

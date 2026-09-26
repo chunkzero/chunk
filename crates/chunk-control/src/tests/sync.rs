@@ -13,8 +13,7 @@ async fn a_reported_arrival_reaches_the_watching_proxy_without_polling() {
     let fixture = Fixture::new().await;
     let control = fixture.control().await;
     // The stream finds its host by the JVM's runtime ID, which the fake JVM shares across hosts.
-    let host =
-        crate::state::HostState { app: "bridge".into(), profile: "local".into(), retired: false, idle_since_ms: None };
+    let host = crate::state::HostState::requested("bridge", "local");
     control
         .update(|state| {
             state.hosts.insert(fixture.runtime.identity.runtime_id.clone(), host);

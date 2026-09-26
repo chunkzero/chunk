@@ -82,6 +82,41 @@ pub(crate) struct HostState {
     pub retired: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_ms: Option<u64>,
+    /// The capacity intent for this host, whose ID keys every host call made for it.
+    #[serde(default)]
+    pub capacity: Capacity,
+    /// Why the host could not provide its capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+impl HostState {
+    pub fn requested(app: &str, profile: &str) -> Self {
+        Self {
+            app: app.into(),
+            profile: profile.into(),
+            retired: false,
+            idle_since_ms: None,
+            capacity: Capacity::Requested,
+            failure: None,
+        }
+    }
+}
+
+/// A host's capacity in lifecycle order. Control commits `Requested` and `Releasing`; the capacity executor commits
+/// the rest once the host confirms them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Capacity {
+    #[default]
+    Requested,
+    Ready,
+    Releasing,
+    Released,
+}
+
+impl Capacity {
+    pub const NAMES: [&str; 4] = ["requested", "ready", "releasing", "released"];
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

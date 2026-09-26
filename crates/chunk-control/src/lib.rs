@@ -1,5 +1,6 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
+mod capacity;
 mod client;
 mod delivery;
 mod drain;
@@ -30,7 +31,7 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
+pub use host::{Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
@@ -159,6 +160,8 @@ pub struct Control {
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     recovery: recovery::Recovery,
     links: sync::Links,
+    /// Wakes the capacity executor.
+    capacity: tokio::sync::Notify,
 }
 
 impl Control {
@@ -182,6 +185,7 @@ impl Control {
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
+            capacity: tokio::sync::Notify::new(),
         }))
     }
 

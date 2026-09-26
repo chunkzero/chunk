@@ -94,7 +94,7 @@ impl Control {
             return Ok(identity);
         }
         if !self.host.stopped(&host) {
-            let runtime = self.runtime(&state, &host).await?;
+            let runtime = self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
             let withdrawn = GameplayClient::new(channel(&runtime).await?)
                 .withdraw_player(auth(
                     &runtime,
