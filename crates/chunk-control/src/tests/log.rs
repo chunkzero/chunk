@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Generation, Table};
+use crate::Generation;
 use chunk_store::{Listed, ObjectStorage, Replication, SqliteStore, Storage};
 use prost::Message;
 
@@ -126,7 +126,7 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     let state = control.state().unwrap();
     assert_eq!(state.epoch, 2);
     assert!(state.claims.contains_key("kept") && !state.claims.contains_key("lost"));
-    assert!(control.changes_after(Generation { epoch: 1, revision: state.revision }).is_none());
+    assert!(control.authority.feed().after(Generation { epoch: 1, revision: state.revision }).is_none());
     let (position, restored) = (state.position(), state.revision);
     let lost_player = lost.identity.as_ref().unwrap().uuid.clone();
     let relogin = request("relogin", &lost_player);
@@ -157,12 +157,12 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     control.activate(ActivateClaim { claim: Some(fresh) }).await.unwrap();
     assert_eq!(control.inspect(&kept).unwrap().claim, kept_assignment.claim);
 
-    let changes = control.changes_after(position).unwrap();
-    assert!(changes.iter().any(|change| change.table == Table::Claims && change.id == "lost" && !change.removed));
+    let (changes, _) = control.authority.feed().after(position).unwrap();
+    assert!(changes.iter().any(|change| change.claim == "lost"));
     assert!(changes.iter().all(|change| change.position > position));
     let latest = *control.subscribe().borrow();
     assert_eq!(latest, control.state().unwrap().position());
-    assert_eq!(control.changes_after(latest), Some(Vec::new()));
+    assert_eq!(control.authority.feed().after(latest).map(|(changes, _)| changes), Some(Vec::new()));
     fixture.close().await;
 }
 

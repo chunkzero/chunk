@@ -1,0 +1,52 @@
+// Payloads of the `gateway/<id>` topic: the claims gateway `<id>` holds, from the players it admitted or is moving
+// until each is released. Only that gateway's credential may subscribe, with no arguments, deployment or caller, and
+// the topic is fenced. Each entry's key is a claim's operation ID and its value a GatewayClaim; a released claim's key
+// is removed. A pending move stays on its source claim until the gateway claims or abandons it, or control cancels it.
+syntax = "proto3";
+
+package chunk.sync.v1;
+
+import "chunk/sync/v1/core.proto";
+
+// An open claim of this gateway.
+message GatewayClaim {
+  // The commit that created the claim. A view at or past it that lacks the claim's key means it was released.
+  Position generation = 1;
+  // How far the player's admission has progressed.
+  ClaimPhase phase = 2;
+  // The move queued from this arrived claim, if any.
+  GatewayMove pending_move = 3;
+}
+
+// Where an open claim is in its lifecycle.
+enum ClaimPhase {
+  CLAIM_PHASE_UNSPECIFIED = 0;
+  // A session slot is reserved and the player's delivery is being prepared.
+  CLAIM_PHASE_RESERVED = 1;
+  // The gateway asked to activate the claim, and its JVM is admitting the player.
+  CLAIM_PHASE_ACTIVATING = 2;
+  // The JVM holds the player's connection.
+  CLAIM_PHASE_ATTACHED = 3;
+  // The player is in the session.
+  CLAIM_PHASE_ARRIVED = 4;
+  // The delivery is being withdrawn before the claim is released.
+  CLAIM_PHASE_WITHDRAWING = 5;
+}
+
+// A move control queued for a player, which the gateway carries out by claiming its destination.
+message GatewayMove {
+  // The destination claim's operation ID.
+  string operation_id = 1;
+  // The session the player moves to.
+  SessionDemand destination = 2;
+}
+
+// A session a player is placed in.
+message SessionDemand {
+  // The routing key that picks the session.
+  string key = 1;
+  // The session type, as `<app>/<session>`.
+  string session_type = 2;
+  // The machine profile the session runs on.
+  string machine_profile = 3;
+}

@@ -1,15 +1,15 @@
 //! The `queries` topic: app queries the client names by key, kept current through one shared backend group.
 
 use super::{
-    super::{NAME_BYTES, caller::Grant, errors, position, streams::Sender},
-    Context,
+    super::{NAME_BYTES, errors, position, streams::Sender},
+    Context, changed, send,
 };
 use chunk_backend::{Backend, Call, GroupSubscription, GroupUpdate};
 use chunk_proto::sync::v1::{Entry, Error, Update, entry::State, error::Code};
 use chunk_store::Revision;
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
-use tokio::{sync::watch, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// The most queries one subscription names, as one backend group.
@@ -162,23 +162,5 @@ impl Queries {
                 pending = None;
             }
         }
-    }
-}
-
-/// Sends `update` if the grant still holds, and otherwise ends the stream with why it lapsed. Returns whether the
-/// stream continues.
-fn send(grant: &Grant, sender: &Sender, update: Update) -> bool {
-    if let Err(error) = grant.check() {
-        sender.fail(error);
-        return false;
-    }
-    sender.send(update);
-    true
-}
-
-/// Waits for `receiver` to change, or forever once its sender is gone.
-async fn changed<T>(receiver: &mut watch::Receiver<T>) {
-    if receiver.changed().await.is_err() {
-        std::future::pending::<()>().await;
     }
 }

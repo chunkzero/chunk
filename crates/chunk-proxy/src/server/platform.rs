@@ -46,12 +46,15 @@ impl Platform {
                 .max_decoding_message_size(1024 * 1024),
             backend: BackendClient::new(channel(&target.backend.endpoint)?),
             native: native::Native::new(&target.backend.endpoint)?,
-            target,
             cleanup: tokio_util::task::TaskTracker::new(),
-            proxy_id: uuid::Uuid::new_v4().to_string(),
+            proxy_id: target
+                .gateway
+                .as_ref()
+                .map_or_else(|| uuid::Uuid::new_v4().to_string(), |gateway| gateway.id.clone()),
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),
             claims: Arc::default(),
+            target,
         })
     }
 

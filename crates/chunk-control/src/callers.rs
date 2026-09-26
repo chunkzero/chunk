@@ -38,10 +38,13 @@ impl Control {
         Ok(SessionScope { app: owner.app.clone(), deployment: owner.release.clone() })
     }
 
-    /// Whether `player` owns a current or pending claim.
+    /// Whether `player`'s current or pending claim is held through `gateway`.
     /// # Errors
     /// Reports unreadable state.
-    pub fn holds_claim(&self, player: &str) -> Result<bool> {
-        Ok(self.state()?.players.contains_key(player))
+    pub fn holds_claim(&self, gateway: &str, player: &str) -> Result<bool> {
+        let state = self.state()?;
+        let Some(owner) = state.players.get(player) else { return Ok(false) };
+        let held = [&owner.current, &owner.pending].into_iter().flatten();
+        Ok(held.filter_map(|operation| state.claims.get(operation)).any(|claim| claim.proxy == gateway))
     }
 }

@@ -5,6 +5,7 @@ mod capacity;
 mod client;
 mod delivery;
 mod drain;
+pub mod gateway;
 mod host;
 mod idle;
 mod moves;
@@ -39,7 +40,6 @@ pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
 pub use state::Generation;
-pub use state::feed::{Change, Table};
 use state::{Authority, State};
 
 pub use chunk_contract::ControlConnection;
@@ -239,13 +239,6 @@ impl Control {
             }
         }
         Ok(operations.entry(id.into()).or_default().clone())
-    }
-
-    /// Claim and move changes committed after `position`. `None` means the position is outside retained history
-    /// (another epoch, too old, or ahead); reload current state instead.
-    #[must_use]
-    pub fn changes_after(&self, position: Generation) -> Option<Vec<Change>> {
-        self.authority.feed().after(position)
     }
 
     /// Whether the environment store stopped or failed, so control can no longer commit.

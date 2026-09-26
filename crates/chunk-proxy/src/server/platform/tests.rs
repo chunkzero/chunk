@@ -68,6 +68,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hooks = Hooks::default();
     let platform = Platform::new(PlatformTarget {
+        gateway: None,
         backend: chunk_contract::BackendConnection {
             platform_token: None,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),

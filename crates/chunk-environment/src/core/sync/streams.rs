@@ -56,6 +56,22 @@ impl StreamKey {
     }
 }
 
+/// The newest stream of each fenced topic.
+#[derive(Default)]
+pub(super) struct Fences(Mutex<HashMap<String, CancellationToken>>);
+
+impl Fences {
+    /// Supersedes `topic`'s earlier stream, returning the token cancelled once a newer one supersedes this one.
+    pub fn fence(&self, topic: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        let mut fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = fences.insert(topic.to_owned(), token.clone()) {
+            previous.cancel();
+        }
+        token
+    }
+}
+
 /// The latest revision each credential's mutations committed, which the streams it opened catch up to promptly.
 #[derive(Default)]
 pub(super) struct Nudges(Mutex<HashMap<String, watch::Sender<Revision>>>);

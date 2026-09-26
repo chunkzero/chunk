@@ -2,12 +2,13 @@ mod runtime;
 
 use super::*;
 use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
-use chunk_proto::sync::v1::{Entry, call_response::Outcome, core_client::CoreClient, entry::State, error::Code};
+use chunk_proto::sync::v1::{
+    Cursor, Entry, call_response::Outcome, core_client::CoreClient, entry::State, error::Code,
+};
 use std::{io, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tonic::{Streaming, transport::Channel};
 
-const PLATFORM: &str = "platform-credential-with-at-least-32-bytes";
 const JVM: &str = "jvm-credential-with-at-least-32-bytes-long";
 const SOURCE: &str = r"
 export function get(ctx) { return ctx.db.get('counters', 'count')?.value ?? 0; }
@@ -85,6 +86,8 @@ struct Fixture {
     control: Arc<Control>,
     client: CoreClient<Channel>,
     cli: String,
+    /// The credential of gateway `proxy`, which holds the fake JVM's claims.
+    gateway: String,
 }
 
 impl Fixture {
@@ -99,6 +102,8 @@ impl Fixture {
         backend.deploy(deployment()).await.unwrap();
         let (ready, started) = oneshot::channel();
         let stop = CancellationToken::new();
+        let gateways = Arc::new(Gateways::default());
+        let gateway = gateways.mint("proxy");
         let config = chunk_control::server::Config {
             state: directory.path().join("control"),
             system: backend.system(),
@@ -107,7 +112,7 @@ impl Fixture {
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
-            services: Some(services(backend.clone(), Some(PLATFORM.into()))),
+            services: Some(services(backend.clone(), gateways)),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
@@ -120,6 +125,7 @@ impl Fixture {
             control: started.control,
             client,
             cli: started.connection.token,
+            gateway,
         }
     }
 
@@ -245,7 +251,8 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
     advance(&mut updates, &touched, prompt).await;
 
     // Another credential's write waits for the next idle advance.
-    let written = fixture.call(PLATFORM, "gateway-touch", "touch", "null").await;
+    let gateway = fixture.gateway.clone();
+    let written = fixture.call(&gateway, "gateway-touch", "touch", "null").await;
     let quiet = tokio::time::timeout(Duration::from_millis(500), updates.message()).await;
     assert!(quiet.is_err(), "the idle stream advanced promptly");
     advance(&mut updates, &written, tokio::time::Instant::now() + Duration::from_secs(1)).await;
@@ -367,4 +374,32 @@ async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     drop(updates);
     fixture.stop().await;
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
+    let mut fixture = Fixture::start().await;
+    let gateway = fixture.gateway.clone();
+    let subscription = SubscribeRequest { topic: "gateway/proxy".into(), ..SubscribeRequest::default() };
+    let foreign = SubscribeRequest { topic: "gateway/other".into(), ..SubscribeRequest::default() };
+    let mut denied = fixture.client.subscribe(authorized(foreign, &gateway)).await.unwrap().into_inner();
+    assert_eq!(next(&mut denied).await.error.map(|error| error.code()), Some(Code::Denied));
+
+    let mut first = fixture.client.subscribe(authorized(subscription.clone(), &gateway)).await.unwrap().into_inner();
+    let snapshot = next(&mut first).await;
+    assert!(snapshot.snapshot && !snapshot.stream.is_empty());
+    let after = Cursor { stream: snapshot.stream.clone(), position: snapshot.position };
+    let resumed = SubscribeRequest { after: Some(after), ..subscription };
+    let mut second = fixture.client.subscribe(authorized(resumed, &gateway)).await.unwrap().into_inner();
+    let update = next(&mut second).await;
+    assert!(!update.snapshot && update.stream == snapshot.stream && update.error.is_none());
+
+    let mut last = next(&mut first).await;
+    while last.error.is_none() {
+        last = next(&mut first).await;
+    }
+    assert_eq!(last.error.map(|error| error.code()), Some(Code::Stopped));
+    assert!(first.message().await.unwrap().is_none());
+    drop((first, second));
+    fixture.stop().await;
 }

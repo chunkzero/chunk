@@ -1,16 +1,13 @@
-//! Each proxy's open claims and pending moves, streamed from control's change feed.
+//! Each proxy's open claims and pending moves, streamed as the `gateway/<id>` topic sees them.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use chunk_proto::v1::{ClaimPhase, ClaimRequest, ClaimUpdate, WatchedClaim};
-use prost::Message;
+use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimUpdate, WatchedClaim};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 use crate::{
-    Change, Control, Generation, Result, Table,
-    state::{Phase, State},
+    Control,
+    gateway::{Delta, View},
 };
 
 impl Control {
@@ -24,11 +21,14 @@ impl Control {
         closed: CancellationToken,
     ) {
         let mut positions = self.subscribe();
-        let mut view = View { proxy, sent: BTreeMap::new(), position: Generation::default() };
-        let mut update = self.state().and_then(|state| view.snapshot(&state)).map(Some);
+        let (mut view, mut delta) = match View::open(self, &proxy, None) {
+            Ok((view, delta)) => (view, Ok(Some(delta))),
+            Err(error) => return drop(sender.send(Err(super::status(error))).await),
+        };
         loop {
-            if let Some(update) = update.transpose() {
-                let update = update.map_err(super::status);
+            // The proxy tracks positions only through claim changes.
+            if let Some(update) = delta.map(|delta| delta.filter(|delta| !delta.is_empty())).transpose() {
+                let update = update.map(|delta| claim_update(&proxy, delta)).map_err(super::status);
                 let failed = update.is_err();
                 let sent = tokio::select! { () = closed.cancelled() => return, sent = sender.send(update) => sent };
                 if sent.is_err() || failed {
@@ -40,117 +40,26 @@ impl Control {
                 () = sender.closed() => return,
                 changed = positions.changed() => if changed.is_err() { return },
             }
-            update = match self.changes_after(view.position) {
-                Some(changes) => self.state().and_then(|state| view.apply(&state, &changes)),
-                None => self.state().and_then(|state| view.snapshot(&state)).map(Some),
-            };
+            delta = view.next(self);
         }
     }
 }
 
-/// The claims one watcher was last sent.
-struct View {
-    proxy: String,
-    sent: BTreeMap<String, WatchedClaim>,
-    /// Every change up to this position is reflected in `sent`.
-    position: Generation,
-}
-
-impl View {
-    fn snapshot(&mut self, state: &State) -> Result<ClaimUpdate> {
-        let moves = pending_moves(state)?;
-        self.sent = state
-            .claims
-            .keys()
-            .filter_map(|operation| Some((operation.clone(), watched(state, &moves, operation, &self.proxy)?)))
-            .collect();
-        self.position = state.position();
-        Ok(ClaimUpdate {
-            position: self.position.wire(),
-            snapshot: true,
-            claims: self.sent.values().cloned().collect(),
-            released: Vec::new(),
-        })
-    }
-
-    /// This proxy's claims that `changes` affected, read from `state`, which includes them. `None` when no change
-    /// concerns this proxy.
-    fn apply(&mut self, state: &State, changes: &[Change]) -> Result<Option<ClaimUpdate>> {
-        let mut affected = BTreeSet::new();
-        for change in changes {
-            self.position = self.position.max(change.position);
-            affected.insert(change.id.clone());
-            // A move and its destination claim decide whether their source has a pending move.
-            let request = match change.table {
-                Table::Claims => state.claims.get(&change.id).map(|claim| &claim.request),
-                Table::Moves => state.moves.get(&change.id).map(|intent| &intent.request),
-            };
-            if let Some(request) = request
-                && let Some(source) = ClaimRequest::decode(request.as_slice())?.source
-            {
-                affected.insert(source.operation_id);
-            }
-        }
-        affected.retain(|operation| {
-            self.sent.contains_key(operation)
-                || state.claims.get(operation).is_some_and(|claim| claim.proxy == self.proxy)
-        });
-        if affected.is_empty() {
-            return Ok(None);
-        }
-        let moves = pending_moves(state)?;
-        let mut update = ClaimUpdate { position: self.position.wire(), ..ClaimUpdate::default() };
-        for operation in affected {
-            match watched(state, &moves, &operation, &self.proxy) {
-                Some(claim) if self.sent.get(&operation) != Some(&claim) => {
-                    update.claims.push(claim.clone());
-                    self.sent.insert(operation, claim);
-                }
-                Some(_) => {}
-                None => {
-                    if self.sent.remove(&operation).is_some() {
-                        update.released.push(operation);
-                    }
-                }
-            }
-        }
-        Ok(Some(update))
-    }
-}
-
-fn watched(
-    state: &State,
-    moves: &BTreeMap<String, ClaimRequest>,
-    operation: &str,
-    proxy: &str,
-) -> Option<WatchedClaim> {
-    let claim = state.claims.get(operation).filter(|claim| claim.proxy == proxy && claim.phase != Phase::Released)?;
-    Some(WatchedClaim {
-        claim: Some(claim.identity(operation)),
+fn claim_update(proxy: &str, delta: Delta) -> ClaimUpdate {
+    let claims = delta.upserts.into_iter().map(|(operation, claim)| WatchedClaim {
+        claim: Some(ClaimIdentity {
+            operation_id: operation,
+            proxy_id: proxy.to_owned(),
+            membership_generation: claim.membership.wire(),
+            delivery_generation: claim.generation.wire(),
+        }),
         phase: ClaimPhase::from(claim.phase).into(),
-        pending_move: moves.get(operation).cloned(),
-    })
-}
-
-/// The destination of each arrived claim's pending move, by source operation.
-pub(crate) fn pending_moves(state: &State) -> Result<BTreeMap<String, ClaimRequest>> {
-    let mut pending = BTreeMap::new();
-    for intent in state.moves.values().filter(|intent| !intent.canceled && intent.failure.is_none()) {
-        let destination = ClaimRequest::decode(intent.request.as_slice())?;
-        let Some(source) = &destination.source else {
-            continue;
-        };
-        let current = state
-            .claims
-            .get(&source.operation_id)
-            .is_some_and(|claim| claim.phase == Phase::Arrived && claim.identity(&source.operation_id) == *source);
-        let open = state
-            .claims
-            .get(&destination.operation_id)
-            .is_none_or(|claim| !matches!(claim.phase, Phase::Withdrawing | Phase::Released));
-        if current && open {
-            pending.entry(source.operation_id.clone()).or_insert(destination);
-        }
+        pending_move: claim.pending_move,
+    });
+    ClaimUpdate {
+        position: delta.position.wire(),
+        snapshot: delta.snapshot,
+        claims: claims.collect(),
+        released: delta.removed,
     }
-    Ok(pending)
 }

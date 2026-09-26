@@ -47,16 +47,16 @@ pub(super) fn derive(
 ) -> Result<chunk_js::Json, Error> {
     let (session, player) = caller.map_or(("", ""), |caller| (caller.session.as_str(), caller.player.as_str()));
     let value = match class {
-        Class::Gateway => {
+        Class::Gateway { id } => {
             if !session.is_empty() {
                 return Err(errors::denied("a gateway names no session"));
             }
             if player.is_empty() {
                 json!({"kind": "gateway"})
-            } else if control.holds_claim(player).map_err(|failure| errors::control(&failure))? {
+            } else if control.holds_claim(id, player).map_err(|failure| errors::control(&failure))? {
                 json!({"kind": "gateway", "player": player})
             } else {
-                return Err(errors::denied("no claim is held for this player"));
+                return Err(errors::denied("the gateway holds no claim for this player"));
             }
         }
         Class::Jvm { host } => {
