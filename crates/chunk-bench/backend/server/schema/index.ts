@@ -18,4 +18,6 @@ export default defineSchema({
   })
     .index("by_player", ["player"])
     .index("by_rank", ["rank"]),
+  // Written by `activity/record`; no query reads it.
+  activity: defineTable({ at: v.integer() }),
 });

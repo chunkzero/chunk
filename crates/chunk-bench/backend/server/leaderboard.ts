@@ -1,5 +1,5 @@
 import { mutation, query, v } from "#chunk";
-import type { QueryContext } from "#chunk";
+import type { Doc, MutationContext, QueryContext } from "#chunk";
 
 import { own } from "./players.ts";
 
@@ -28,15 +28,26 @@ export const standing = query({
 });
 
 // Sets a new overall record, so every write changes every leaderboard result regardless of arrival order.
-export const submit = mutation({
-  args: {},
+function lead({ db }: MutationContext, found: Doc<"profiles"> | null) {
+  if (!found) throw new Error("Profile missing");
+  const [leader] = db.query("profiles").withIndex("by_rank").collect(1);
+  const best = (leader?.best ?? 0) + 1;
+  db.patch(found._id, { best, rank: -best, lastSeen: Date.now() });
+  return best;
+}
+
+export const submit = mutation({ args: {}, returns: v.integer(), handler: (ctx) => lead(ctx, own(ctx)) });
+
+// As `submit`, for a named player, so callers without a player can raise the leaderboard.
+export const raise = mutation({
+  args: { player: v.player() },
   returns: v.integer(),
-  handler: (ctx) => {
-    const found = own(ctx);
-    if (!found) throw new Error("Profile missing");
-    const [leader] = ctx.db.query("profiles").withIndex("by_rank").collect(1);
-    const best = (leader?.best ?? 0) + 1;
-    ctx.db.patch(found._id, { best, rank: -best, lastSeen: Date.now() });
-    return best;
-  },
+  handler: (ctx, { player }) =>
+    lead(
+      ctx,
+      ctx.db
+        .query("profiles")
+        .withIndex("by_player", (q) => q.eq("player", player))
+        .unique(),
+    ),
 });

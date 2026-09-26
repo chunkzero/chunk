@@ -31,11 +31,12 @@ use crate::{
 };
 
 pub const ENVIRONMENT: &str = "bench";
-const SEED_BATCH: u32 = 200;
-const SOURCES: [(&str, &str); 3] = [
+pub const SEED_BATCH: u32 = 200;
+const SOURCES: [(&str, &str); 4] = [
     ("server/schema/index.ts", include_str!("../backend/server/schema/index.ts")),
     ("server/players.ts", include_str!("../backend/server/players.ts")),
     ("server/leaderboard.ts", include_str!("../backend/server/leaderboard.ts")),
+    ("server/activity.ts", include_str!("../backend/server/activity.ts")),
 ];
 
 /// Compiles the bundle into `output/bundle` (including `source.mjs`) and returns the deployment path.
@@ -215,22 +216,23 @@ impl Fanout {
         self.errors.store(0, Ordering::Relaxed);
     }
 
-    pub fn summary(&self, output: &Path) -> Result<Value> {
+    /// The measurement at this instant and its delivery histogram.
+    pub fn freeze(&self) -> (Value, Histogram<u64>) {
         let histogram = self.after_reply.lock().expect("fan-out histogram");
-        V2Serializer::new().serialize(&*histogram, &mut fs::File::create(output.join("measured-delivery.hdr"))?)?;
-        Ok(json!({
+        let summary = json!({
             "streams": self.deliveries.lock().expect("fan-out state").seen.len(),
             "updates_received": self.updates.load(Ordering::Relaxed),
             "updates_with_query_errors": self.errors.load(Ordering::Relaxed),
             "reply_to_all_delivered_us": metrics::distribution(&histogram),
-        }))
+        });
+        (summary, histogram.clone())
     }
 }
 
 /// Opens `subscribers` query subscriptions in watch groups of `group_size`, one connection per group, and waits for
 /// every initial result. The backend's own admission limits decide how many are accepted.
 pub async fn subscribe(connection: &BackendConnection, config: &Config) -> Result<Arc<Fanout>> {
-    let streams = config.subscribers.div_ceil(config.group_size);
+    let streams = config.subscribers().div_ceil(config.group_size);
     let fanout = Arc::new(Fanout {
         deliveries: Mutex::new(Deliveries { seen: vec![0; streams as usize], waiting: BTreeMap::new() }),
         after_reply: Mutex::new(metrics::histogram()?),
@@ -244,7 +246,7 @@ pub async fn subscribe(connection: &BackendConnection, config: &Config) -> Resul
     for stream in 0..streams {
         let client = Client::connect(connection, None).await?;
         let first = stream * config.group_size;
-        let queries = (first..config.subscribers.min(first + config.group_size))
+        let queries = (first..config.subscribers().min(first + config.group_size))
             .map(|subscriber| BackendQuery {
                 function: function.into(),
                 arguments_json: b"{}".to_vec(),

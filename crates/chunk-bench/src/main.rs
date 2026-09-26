@@ -6,6 +6,7 @@ mod load;
 mod metrics;
 mod proxy;
 mod resources;
+mod sync;
 mod target;
 
 use std::{
@@ -19,7 +20,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use serde_json::json;
+use hdrhistogram::Histogram;
+use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -116,17 +118,60 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
     shutdown
 }
 
-async fn clients(
-    config: &Config,
-    target: &target::Target,
-) -> Result<(VecDeque<load::Client>, Option<Arc<backend::Fanout>>)> {
+/// Subscriptions a workload holds open and reports on beside its operations.
+enum Subscriptions {
+    Backend(Arc<backend::Fanout>),
+    Sync(Arc<sync::Streams>),
+}
+
+impl Subscriptions {
+    fn reset(&self) -> Result<()> {
+        match self {
+            Self::Backend(fanout) => fanout.reset(),
+            Self::Sync(streams) => streams.reset()?,
+        }
+        Ok(())
+    }
+
+    /// Waits for outstanding deliveries, then returns the measurement at that instant, its delivery histogram and
+    /// the file name for it.
+    async fn freeze(&self) -> (Value, Histogram<u64>, &'static str) {
+        match self {
+            Self::Backend(fanout) => {
+                let (summary, histogram) = fanout.freeze();
+                (summary, histogram, "measured-delivery.hdr")
+            }
+            Self::Sync(streams) => {
+                streams.drain().await;
+                let (summary, histogram) = streams.freeze();
+                (summary, histogram, "measured-observed.hdr")
+            }
+        }
+    }
+}
+
+async fn clients(config: &Config, target: &target::Target) -> Result<(VecDeque<load::Client>, Option<Subscriptions>)> {
     let mut clients = VecDeque::new();
+    if let Some(connection) = &target.ready.sync {
+        eprintln!("Seeding {} player profiles…", config.population);
+        sync::seed(connection, config.population).await?;
+        eprintln!(
+            "Opening {} sync query streams, {} per connection…",
+            config.subscribers(),
+            config.streams_per_connection
+        );
+        let streams = sync::subscribe(connection, config).await?;
+        for _ in 0..config.concurrency {
+            clients.push_back(load::Client::Sync(sync::Writer::connect(connection, config, streams.clone()).await?));
+        }
+        return Ok((clients, Some(Subscriptions::Sync(streams))));
+    }
     let mut fanout = None;
     if let Some(connection) = &target.ready.backend {
         eprintln!("Seeding {} player profiles…", config.population);
         backend::seed(connection, config.population).await?;
         if config.scenario == Scenario::BackendFanout {
-            eprintln!("Opening {} subscriptions in groups of {}…", config.subscribers, config.group_size);
+            eprintln!("Opening {} subscriptions in groups of {}…", config.subscribers(), config.group_size);
             fanout = Some(backend::subscribe(connection, config).await?);
         }
         for _ in 0..config.concurrency {
@@ -151,11 +196,11 @@ async fn clients(
             clients.push_back(load::Client::Proxy(client));
         }
     }
-    Ok((clients, fanout))
+    Ok((clients, fanout.map(Subscriptions::Backend)))
 }
 
 async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Target) -> Result<()> {
-    let (mut clients, fanout) = clients(&config, target).await?;
+    let (mut clients, subscriptions) = clients(&config, target).await?;
     eprintln!(
         "Warmup {}s, then {}s at {}/s with {} lanes…",
         config.warmup,
@@ -177,8 +222,8 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     warmup.write(&output, "warmup")?;
     ensure!(warmup.errors.is_empty(), "warmup operations failed: {:?}", warmup.errors);
     target.reset().await?;
-    if let Some(fanout) = &fanout {
-        fanout.reset();
+    if let Some(subscriptions) = &subscriptions {
+        subscriptions.reset()?;
     }
     let monitor_stop = CancellationToken::new();
     let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone());
@@ -190,20 +235,28 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
             u64::from(config.warmup) * u64::from(config.rate()),
         )
         .await;
+        let fanout = match &subscriptions {
+            Some(subscriptions) => Some(subscriptions.freeze().await),
+            None => None,
+        };
         monitor_stop.cancel();
-        result
+        (result, fanout)
     };
-    let (stats, samples) = tokio::join!(workload, monitor);
+    let ((stats, fanout), samples) = tokio::join!(workload, monitor);
     let stats = stats?;
+    let fanout = fanout
+        .map(|(summary, histogram, file)| metrics::save(&histogram, &output.join(file)).map(|()| summary))
+        .transpose()?;
     stats.write(&output, "measured")?;
     let samples = samples?;
     let target_cpu_ms = samples.last().and_then(|sample| sample["target"]["cpu_ms"].as_u64()).unwrap_or_default();
     let result = json!({
         "measurement": stats.summary(config.seconds, bytes),
         "response": wire,
+        "target_cpu_cores": samples.last().map(|sample| sample["target"]["average_cpu_cores"].clone()),
         "target_cpu_us_per_completed": metrics::count(target_cpu_ms * 1000) / metrics::count(stats.completed.max(1)),
         "phases_us": target.report().await?,
-        "fanout": fanout.map(|fanout| fanout.summary(&output)).transpose()?,
+        "fanout": fanout,
     });
     let mut report = json!({"schema_version":1, "warmup":warmup.summary(config.warmup, bytes), "resources":samples});
     report.as_object_mut().context("report object")?.extend(result.as_object().context("result object")?.clone());
