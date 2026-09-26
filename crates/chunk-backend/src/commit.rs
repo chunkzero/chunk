@@ -9,6 +9,7 @@ use tokio::sync::mpsc::Sender;
 use crate::{
     Error, Result,
     service::{Event, Update},
+    timing::{Phase, Timer},
 };
 
 pub(crate) enum Job {
@@ -60,7 +61,10 @@ impl Committer {
                         let result = if failed {
                             Err(Error::CommitFailed)
                         } else {
-                            store.prepare_operation(&operation, context).map_err(Error::from)
+                            let timer = Timer::start();
+                            let result = store.prepare_operation(&operation, context).map_err(Error::from);
+                            timer.stop(Phase::Prepare);
+                            result
                         };
                         failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
                         Event::Prepared { operation: operation.id, result }
@@ -103,7 +107,10 @@ impl Committer {
                         let result = if failed {
                             Err(Error::CommitFailed)
                         } else {
-                            commit(store.as_mut(), expected, operation, writes, result, intents)
+                            let timer = Timer::start();
+                            let result = commit(store.as_mut(), expected, operation, writes, result, intents);
+                            timer.stop(Phase::Commit);
+                            result
                         };
                         // A later batch may depend on the failed batch's speculative
                         // writes. Never persist that suffix after an ambiguous failure.

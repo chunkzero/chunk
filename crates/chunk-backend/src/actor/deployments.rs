@@ -56,6 +56,7 @@ impl Actor {
                     view: self.view.clone(),
                     changes: None,
                     ids: self.subscriptions.iter().map(|s| s.id).collect(),
+                    published: crate::timing::Timer::start(),
                 });
                 reply.finish(Ok(()));
             }

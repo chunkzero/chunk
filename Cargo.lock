@@ -475,6 +475,9 @@ name = "chunk-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chunk-backend",
+ "chunk-build",
+ "chunk-contract",
  "chunk-control",
  "chunk-proto",
  "chunk-proxy",
@@ -600,6 +603,7 @@ dependencies = [
  "deno_error",
  "deno_web",
  "deno_webidl",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha1",

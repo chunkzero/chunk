@@ -19,6 +19,7 @@ use crate::{
     commit::{Committer, Job},
     reads::{Change, Dependencies, Host, View},
     service::{Call, Command, Event, GroupUpdate, Request, Update},
+    timing::{Phase, Timer},
 };
 
 mod actions;
@@ -46,6 +47,7 @@ struct Pending {
     writes: Vec<Write>,
     changes: Vec<Change>,
     bytes: usize,
+    staged: Timer,
 }
 
 struct Subscribed {
@@ -60,6 +62,7 @@ struct Reevaluation {
     view: Rc<View>,
     changes: Option<Vec<Change>>,
     ids: VecDeque<u64>,
+    published: Timer,
 }
 
 pub(crate) struct Actor {
@@ -272,16 +275,20 @@ impl Actor {
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
             Command::Query { mut call, reply } => {
+                reply.queued.stop(Phase::Queue);
                 if let Err(error) = self.normalize_call(&mut call) {
                     reply.finish(Err(error));
                     return;
                 }
                 self.query(&call, reply);
             }
-            Command::Mutate { operation, mut call, reply } => match self.normalize_call(&mut call) {
-                Ok(()) => self.mutate(operation, call, reply),
-                Err(error) => reply.finish(Err(error)),
-            },
+            Command::Mutate { operation, mut call, reply } => {
+                reply.queued.stop(Phase::Queue);
+                match self.normalize_call(&mut call) {
+                    Ok(()) => self.mutate(operation, call, reply),
+                    Err(error) => reply.finish(Err(error)),
+                }
+            }
             Command::Subscribe { mut calls, reply } => {
                 match calls.iter_mut().try_for_each(|call| self.normalize_call(call)) {
                     Ok(()) => self.subscribe(calls, reply),
@@ -292,7 +299,9 @@ impl Actor {
     }
 
     fn query(&mut self, call: &Call, reply: Request<Update>) {
+        let timer = Timer::start();
         let result = self.evaluate(call, Mode::Query, self.view.clone(), &reply.cancellation);
+        timer.stop(Phase::Query);
         match result {
             Ok((execution, dependencies)) => {
                 let independent = self.pending.iter().all(|pending| !dependencies.affected(&pending.changes));

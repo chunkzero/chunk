@@ -77,22 +77,35 @@ impl Stats {
     }
 }
 
-fn histogram() -> Result<Histogram<u64>> {
+pub fn histogram() -> Result<Histogram<u64>> {
     // Fixed storage, microseconds, 3 significant digits, up to two hours.
     Ok(Histogram::new_with_bounds(1, 7_200_000_000, 3)?)
 }
 
-fn micros(duration: Duration) -> u64 {
+/// Target phase timings: nanoseconds, 3 significant digits, up to one hour.
+pub fn nanosecond_histogram() -> Result<Histogram<u64>> {
+    Ok(Histogram::new_with_bounds(1, 3_600_000_000_000, 3)?)
+}
+
+pub fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX).max(1)
 }
 
-fn distribution(histogram: &Histogram<u64>) -> Value {
+pub fn distribution(histogram: &Histogram<u64>) -> Value {
     if histogram.is_empty() {
         return Value::Null;
     }
     json!({"samples": histogram.len(), "p50": histogram.value_at_quantile(0.5),
         "p95": histogram.value_at_quantile(0.95), "p99": histogram.value_at_quantile(0.99),
         "max": histogram.max(), "mean": histogram.mean()})
+}
+
+/// Summarizes a nanosecond histogram in fractional microseconds.
+pub fn nanosecond_distribution(histogram: &Histogram<u64>) -> Value {
+    let us = |nanos: u64| count(nanos) / 1000.0;
+    json!({"samples": histogram.len(), "p50": us(histogram.value_at_quantile(0.5)),
+        "p95": us(histogram.value_at_quantile(0.95)), "p99": us(histogram.value_at_quantile(0.99)),
+        "max": us(histogram.max()), "mean": histogram.mean() / 1000.0})
 }
 
 #[allow(clippy::cast_precision_loss)]
