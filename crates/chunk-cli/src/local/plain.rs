@@ -20,6 +20,18 @@ pub(super) fn read_commands(commands: mpsc::UnboundedSender<Command>) {
     });
 }
 
+/// Exits at once on a second Ctrl-C; the first stops the session.
+pub(super) fn exit_on_second_interrupt() {
+    tokio::spawn(async {
+        for _ in 0..2 {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+        }
+        super::force_exit();
+    });
+}
+
 /// Prints each step as one line until `finished`, then flushes the remaining events.
 pub(super) async fn render(mut events: mpsc::UnboundedReceiver<Event>, finished: CancellationToken) {
     loop {

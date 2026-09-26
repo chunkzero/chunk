@@ -1,7 +1,7 @@
 use crate::{PlatformTarget, Running};
 use chunk_contract::{BackendConnection, ControlConnection};
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::oneshot;
+use std::{collections::BTreeSet, fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub struct CoreConfig {
@@ -14,7 +14,8 @@ pub struct CoreConfig {
     pub control_record: PathBuf,
     pub backend_bind: SocketAddr,
     pub control_bind: SocketAddr,
-    /// Drops every control row before serving, as when a local session starts over.
+    /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
+    /// that outlived the previous control are stopped first.
     pub fresh: bool,
 }
 
@@ -39,7 +40,7 @@ impl Core {
         let mut started = core.start_backend(&config).await;
         if started.is_ok() {
             on_backend(core.backend_connection()?);
-            started = core.start_control(config).await;
+            started = core.start_control(&config).await;
         }
         if let Err(error) = started {
             if let Err(error) = core.stop(|| {}).await {
@@ -68,21 +69,79 @@ impl Core {
         Ok(())
     }
 
-    async fn start_control(&mut self, config: CoreConfig) -> io::Result<()> {
-        let state = config.state.join("control");
-        let host = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
-            directory: state.join("nodes"),
-            backend: self.backend_connection()?.clone(),
-        }));
+    /// Starts control. When `fresh`, the previous control's files and discovery record are deleted once every JVM it
+    /// launched has confirmed its exit.
+    async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
+        if config.fresh {
+            self.stop_survivors(config).await?;
+            // The record names the previous control's credential, which is deleted with its files.
+            if_present(fs::remove_file(&config.control_record))?;
+            if_present(fs::remove_dir_all(config.state.join("control")))?;
+        }
+        let listener = TcpListener::bind(config.control_bind).await?;
+        self.serve_control(config, listener, config.control_record.clone()).await
+    }
+
+    /// Stops the JVMs of the previous control that may still hold their launch locks, since only a control on its
+    /// files can confirm they exited. Each re-attaches only at the endpoint its launch record names, or at the previous
+    /// discovery record's endpoint when the record names none, so control serves there, waiting while another process
+    /// holds that address. That record stays as it is until they have exited, as control publishes its own elsewhere.
+    async fn stop_survivors(&mut self, config: &CoreConfig) -> io::Result<()> {
+        let launches = chunk_control::ProcessHost::new(self.host_config(config)?);
+        let previous =
+            chunk_service::read::<ControlConnection>(&config.control_record).ok().map(|record| record.endpoint);
+        let backend = address(&self.backend_connection()?.endpoint);
+        let mut waiting = false;
+        loop {
+            let endpoints = launches.unowned_endpoints().map_err(io::Error::other)?;
+            if endpoints.is_empty() {
+                return Ok(());
+            }
+            let known = survivor_bind(&endpoints, previous.as_deref())?;
+            let bind = known.unwrap_or(config.control_bind);
+            if backend.is_some_and(|backend| overlaps(backend, bind)) {
+                return Err(io::Error::other(format!(
+                    "JVMs that outlived the previous control re-attach only at {bind}, where the backend now serves; \
+                     choose another backend address"
+                )));
+            }
+            match TcpListener::bind(bind).await {
+                Ok(listener) => {
+                    if known.is_some() {
+                        tracing::warn!(%bind, "stopping JVMs that outlived the previous control");
+                    } else {
+                        tracing::warn!(%bind, "stopping JVMs that outlived the previous control at an address they may not know");
+                    }
+                    let record = config.state.join("control").join("recovery.json");
+                    self.serve_control(config, listener, record).await?;
+                    return self.stop_control(|| {}).await;
+                }
+                Err(error) => {
+                    if !std::mem::replace(&mut waiting, true) {
+                        tracing::warn!(%error, %bind, "JVMs that outlived the previous control re-attach only here; waiting for the address");
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn host_config(&self, config: &CoreConfig) -> io::Result<chunk_control::ProcessHostConfig> {
+        let directory = config.state.join("control").join("nodes");
+        Ok(chunk_control::ProcessHostConfig { directory, backend: self.backend_connection()?.clone() })
+    }
+
+    async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener, record: PathBuf) -> io::Result<()> {
+        let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
         self.host = Some(host.clone());
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
-            connection: config.control_record,
-            state,
+            connection: record,
+            state: config.state.join("control"),
             system: self.system()?,
-            bind: config.control_bind,
-            control: chunk_control::Config { environment: config.environment },
+            listener,
+            control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
         };
@@ -221,6 +280,37 @@ impl Core {
             result = Err(error);
         }
         result
+    }
+}
+
+/// Where control recovers JVMs launched with `endpoints`: the endpoint they share, taking `previous` for launch records
+/// that name none, or `None` when no endpoint is known. A control launches JVMs only after every earlier one has
+/// exited, so they share at most one.
+fn survivor_bind(endpoints: &BTreeSet<Option<String>>, previous: Option<&str>) -> io::Result<Option<SocketAddr>> {
+    let known: BTreeSet<_> = endpoints.iter().filter_map(|endpoint| endpoint.as_deref().or(previous)).collect();
+    let mut known = known.into_iter();
+    match (known.next(), known.next()) {
+        (None, _) => Ok(None),
+        (Some(endpoint), None) => address(endpoint)
+            .map(Some)
+            .ok_or_else(|| io::Error::other(format!("surviving JVM has invalid control endpoint {endpoint}"))),
+        (Some(_), Some(_)) => Err(io::Error::other("surviving JVMs were given different control endpoints")),
+    }
+}
+
+fn address(endpoint: &str) -> Option<SocketAddr> {
+    endpoint.strip_prefix("http://")?.parse().ok()
+}
+
+/// Whether a listener on `served` keeps `bind` from binding.
+fn overlaps(served: SocketAddr, bind: SocketAddr) -> bool {
+    served.port() == bind.port() && (served.ip() == bind.ip() || served.ip().is_unspecified())
+}
+
+fn if_present(removed: io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 

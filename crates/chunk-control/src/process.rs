@@ -176,7 +176,7 @@ impl ProcessHost {
         // The launch marker records the process's identity and credential digest before the JVM exists, so the JVM can
         // re-attach after a restart. The JVM inherits the marker's lock, and control's handle closes once the spawn
         // returns, so only the JVM holds the lock.
-        let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token))?;
+        let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token, endpoint))?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
             let mut command = Command::new(&distribution.java);
@@ -256,6 +256,14 @@ impl ProcessHost {
     }
     fn launch_record(&self, id: &str) -> Option<LaunchRecord> {
         serde_json::from_slice(&std::fs::read(self.path(id, "launch").ok()?).ok()?).ok()
+    }
+    /// The control endpoints the JVMs of unowned launches that may still run were given, with `None` for a launch
+    /// whose record names none. Each such JVM re-attaches only at its endpoint.
+    /// # Errors
+    /// Reports unreadable launch markers.
+    pub fn unowned_endpoints(&self) -> Result<BTreeSet<Option<String>>> {
+        let records = self.unowned()?.into_iter().map(|id| self.launch_record(&id));
+        Ok(records.map(|record| record.map(|record| record.control_endpoint).filter(|e| !e.is_empty())).collect())
     }
     /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does. A JVM holds its marker's
     /// lock until it exits, and control releases its own once the spawn returns or control stops, so a free lock
@@ -489,17 +497,25 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
     Ok(())
 }
 
-/// What a launch marker records: the JVM's process identity and the SHA-256 digest of its credential.
+/// What a launch marker records: the JVM's process identity, the SHA-256 digest of its credential, and the control
+/// endpoint it registers at.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LaunchRecord {
     process_id: String,
     generation: u64,
     token_sha256: String,
+    #[serde(default)]
+    control_endpoint: String,
 }
 
 impl LaunchRecord {
-    fn of(identity: &ProcessIdentity, token: &str) -> Self {
-        Self { process_id: identity.process_id.clone(), generation: identity.generation, token_sha256: digest(token) }
+    fn of(identity: &ProcessIdentity, token: &str, control_endpoint: &str) -> Self {
+        Self {
+            process_id: identity.process_id.clone(),
+            generation: identity.generation,
+            token_sha256: digest(token),
+            control_endpoint: control_endpoint.into(),
+        }
     }
 
     fn authenticates(&self, identity: &ProcessIdentity, token: &str) -> bool {

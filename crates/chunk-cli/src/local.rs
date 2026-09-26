@@ -81,6 +81,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
     } else {
         logs::plain();
         plain::read_commands(commands.clone());
+        plain::exit_on_second_interrupt();
     }
     chunk_service::run(|stop| async move {
         let finished = CancellationToken::new();
@@ -124,9 +125,6 @@ async fn serve(
     let project = building::inspect(root, state.join("releases"))?;
     reporter.done("Project", project_summary(&project));
     let _lock = runner_lock(&state.join("runner.lock"))?;
-    // Control's local files and JVM logs of an earlier session; control drops its rows once it starts, and its
-    // releases are pruned once this one is serving.
-    crate::cleaning::remove(&state.join("control"))?;
     if interactive {
         tokio::spawn(logs::follow_jvms(state.join("control").join("nodes"), reporter.clone(), stop.clone()));
     }
@@ -151,6 +149,12 @@ async fn serve(
     let (shared, version) = services::start(&settings, staged, &reporter).await?;
     let session = session::Session::new(&settings, &options, &reporter, environment, shared, version);
     session.run(watched, commands, stop).await
+}
+
+/// Exits without waiting for every JVM to confirm it stopped. The next `chunk dev` stops the JVMs left running.
+fn force_exit() -> ! {
+    eprintln!("chunk dev exited; JVMs may still be stopping");
+    std::process::exit(130);
 }
 
 /// Checks the release's Java requirement and projects it into a control release.

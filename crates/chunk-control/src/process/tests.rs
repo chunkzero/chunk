@@ -197,7 +197,12 @@ fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
 /// Publishes a launch marker for a new host ID, returning the lock control holds until it spawns the JVM.
 fn marked(host: &ProcessHost, directory: &tempfile::TempDir) -> (String, File) {
     let id = uuid::Uuid::new_v4().to_string();
-    let record = LaunchRecord { process_id: "jvm".into(), generation: 1, token_sha256: digest("token") };
+    let record = LaunchRecord {
+        process_id: "jvm".into(),
+        generation: 1,
+        token_sha256: digest("token"),
+        control_endpoint: String::new(),
+    };
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
     let lock = host.record_launch(&id, &record).unwrap();
     (id, lock)
