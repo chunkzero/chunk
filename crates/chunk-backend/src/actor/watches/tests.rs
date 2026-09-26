@@ -49,12 +49,19 @@ fn reads() -> Dependencies {
 }
 
 fn subscribe(watches: &mut Watches) -> oneshot::Receiver<crate::Result<GroupSubscription>> {
+    subscribe_arguments(watches, json!({}))
+}
+
+fn subscribe_arguments(
+    watches: &mut Watches,
+    arguments: serde_json::Value,
+) -> oneshot::Receiver<crate::Result<GroupSubscription>> {
     let (sender, receiver) = oneshot::channel();
     let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
     let call = Call {
         deployment: DeploymentId::new("build").unwrap(),
         function: "get".into(),
-        arguments: json!({}).into(),
+        arguments: arguments.into(),
         caller: json!({}).into(),
     };
     watches.subscribe(vec![call], Request::new(Cancellation::default(), sender, permit));
@@ -63,6 +70,89 @@ fn subscribe(watches: &mut Watches) -> oneshot::Receiver<crate::Result<GroupSubs
 
 fn change() -> Arc<[Change]> {
     vec![Change { key: key(), before: None, after: Some(json!({"coins": 1})) }].into()
+}
+
+#[tokio::test]
+async fn removing_a_queued_batch_tail_does_not_strand_the_next_rerun() {
+    let mut watches = Watches::new(Revision(0));
+    let first = subscribe(&mut watches);
+    let initial = watches.next_job(|| view(0)).unwrap();
+    watches.complete(&initial, Ok("0".into()), reads());
+    let mut group = first.await.unwrap().unwrap();
+    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+    let second = subscribe_arguments(&mut watches, json!({"other": true}));
+    let tail = watches.next_job(|| view(0)).unwrap();
+    watches.complete(&tail, Ok("0".into()), reads());
+    let cancelled = second.await.unwrap().unwrap();
+
+    watches.changed(Revision(1), change(), 64);
+    // One reader: A runs while B remains queued behind it.
+    let running = watches.next_job(|| view(1)).unwrap();
+    assert_eq!(running.id, initial.id);
+    assert_eq!(running.view.revision, Revision(1));
+    watches.changed(Revision(2), change(), 64);
+    drop(cancelled);
+    // Admission sweeps cancelled groups; attaching to A adds no new evaluation.
+    watches.sweep();
+    let _attached = subscribe(&mut watches);
+    watches.complete(&running, Ok("1".into()), reads());
+    let update = group.next().await.unwrap();
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), "1"));
+    let mut next = Box::pin(group.next());
+    crate::tests::pending(next.as_mut()).await;
+
+    // Dispatch stops on None, so this must advance without a second call or another event.
+    let rerun =
+        watches.next_job(|| view(2)).expect("revision 2 rerun was stranded after the cancelled batch tail was removed");
+    assert_eq!(rerun.id, initial.id);
+    assert_eq!(rerun.view.revision, Revision(2));
+    watches.complete(&rerun, Ok("2".into()), reads());
+    let update = std::future::poll_fn(|cx| match next.as_mut().poll(cx) {
+        std::task::Poll::Ready(result) => std::task::Poll::Ready(result.unwrap()),
+        std::task::Poll::Pending => panic!("revision 2 rerun completed without publishing its update"),
+    })
+    .await;
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), "2"));
+}
+
+#[tokio::test]
+async fn committed_reruns_get_a_turn_under_continuous_subscription_churn() {
+    let mut watches = Watches::with_budget(Revision(0), 4096);
+    let receiver = subscribe(&mut watches);
+    let initial = watches.next_job(|| view(0)).unwrap();
+    watches.complete(&initial, Ok("0".into()), reads());
+    let mut group = receiver.await.unwrap().unwrap();
+    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+    let mut next = Box::pin(group.next());
+    crate::tests::pending(next.as_mut()).await;
+
+    let mut newcomer = subscribe_arguments(&mut watches, json!({"newcomer": 0}));
+    let mut running = watches.next_job(|| view(0)).unwrap();
+    watches.changed(Revision(1), change(), 64);
+    // Keep a replacement queued before each completion, with only one evaluation in flight.
+    for index in 1..=100 {
+        watches.sweep();
+        let replacement = subscribe_arguments(&mut watches, json!({"newcomer": index}));
+        assert!(watches.bytes < 4096, "churn must stay below the subscription memory budget");
+        watches.complete(&running, Ok("0".into()), Dependencies::default());
+        drop(newcomer.await.unwrap().unwrap());
+        newcomer = replacement;
+        watches.sweep();
+        running = watches.next_job(|| view(1)).expect("subscription work remains queued");
+        if running.id == initial.id {
+            assert_eq!(running.view.revision, Revision(1));
+            watches.complete(&running, Ok("1".into()), reads());
+            let update = std::future::poll_fn(|cx| match next.as_mut().poll(cx) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(result.unwrap()),
+                std::task::Poll::Pending => panic!("committed rerun completed without publishing its update"),
+            })
+            .await;
+            assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), "1"));
+            return;
+        }
+        crate::tests::pending(next.as_mut()).await;
+    }
+    panic!("committed rerun received no turn across 100 newcomer completions below the subscription memory budget");
 }
 
 #[tokio::test]
