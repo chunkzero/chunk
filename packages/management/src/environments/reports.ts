@@ -10,6 +10,8 @@ import { blockKey } from "./blocklist.ts";
 
 const maxBatch = 1000;
 const maxMessageBytes = 64 * 1024;
+/** The text a log batch may hold in total, well under the RPC body cap so the rest of its encoding fits too. */
+const maxLogTextBytes = 2 * 1024 * 1024;
 /** How long a client address that failed authentication cannot wake the environment. */
 export const blockDurationMs = 10 * 60 * 1000;
 
@@ -41,11 +43,16 @@ export function reportServices({ sql }: Deps): Reports {
 
     async reportLogs(request, context) {
       const environmentId = environmentOf(context);
+      let textBytes = 0;
       const entries = batch(request.entries, "entries").map((entry) => {
         if (!entry.instanceId) throw invalid("entries[].instance_id is required");
         if (Buffer.byteLength(entry.message) > maxMessageBytes) {
           throw invalid(`entries[].message must be at most ${maxMessageBytes} bytes`);
         }
+        for (const text of [entry.message, entry.instanceId, entry.appId, entry.deploymentId]) {
+          textBytes += Buffer.byteLength(text);
+        }
+        if (textBytes > maxLogTextBytes) throw invalid(`entries must hold at most ${maxLogTextBytes} bytes of text`);
         return {
           instance_id: entry.instanceId,
           sequence: entry.sequence.toString(),

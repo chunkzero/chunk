@@ -23,6 +23,8 @@ const keepaliveMs = 30_000;
 const maxGateways = 64;
 const maxPings = 64;
 const maxStatusJsonBytes = 64 * 1024;
+/** What the pings may total, well under the RPC body cap so the rest of the report fits too. */
+const maxPingBytes = 2 * 1024 * 1024;
 const gatewayPattern = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})$/;
 
 export function environmentService(deps: Deps): Partial<ServiceImpl<typeof EnvironmentService>> {
@@ -170,11 +172,14 @@ function gatewayAddress(address: string): string {
 function pingsOf(request: ReportStatusRequest): Record<string, string> {
   if (request.pings.length > maxPings) throw invalid(`at most ${maxPings} pings are allowed`);
   const pings: Record<string, string> = {};
+  let bytes = 0;
   for (const { hostname, statusJson } of request.pings) {
     if (!hostname) throw invalid("pings[].hostname is required");
     if (Buffer.byteLength(statusJson) > maxStatusJsonBytes) {
       throw invalid(`pings[].status_json must be at most ${maxStatusJsonBytes} bytes`);
     }
+    bytes += Buffer.byteLength(hostname) + Buffer.byteLength(statusJson);
+    if (bytes > maxPingBytes) throw invalid(`pings must total at most ${maxPingBytes} bytes`);
     pings[normalizeHostname(hostname)] = statusJson;
   }
   return pings;
