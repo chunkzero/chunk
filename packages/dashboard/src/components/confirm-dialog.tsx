@@ -26,14 +26,15 @@ export function ConfirmDialog({
   onClose: () => void;
   children?: ReactNode;
 }) {
-  const mutation = useMutation({ mutationFn: action, onSuccess: onClose });
+  const mutation = useMutation({ mutationFn: action });
   return (
     <Dialog title={title} description={description} onClose={onClose}>
       <form
         className="space-y-6"
         onSubmit={(event) => {
           event.preventDefault();
-          mutation.mutate();
+          // Passed to mutate, onClose only runs while this dialog is mounted, never for a dialog opened after it.
+          mutation.mutate(undefined, { onSuccess: onClose });
         }}
       >
         {children}

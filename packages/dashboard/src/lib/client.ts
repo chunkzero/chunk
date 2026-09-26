@@ -12,7 +12,7 @@ import { SecretService } from "../gen/chunk/management/v1/secrets_pb.ts";
 import { getGeneration, getToken, setToken } from "./session.ts";
 
 /** Sends the session's token, and signs out when the service rejects it, unless a newer session has started since. */
-const bearer: Interceptor = (next) => async (request) => {
+export const bearer: Interceptor = (next) => async (request) => {
   const token = request.header.has("authorization") ? null : getToken();
   if (token === null) return next(request);
   request.header.set("authorization", `Bearer ${token}`);
