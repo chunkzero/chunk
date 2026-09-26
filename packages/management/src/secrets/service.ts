@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import type { ServiceImpl } from "@connectrpc/connect";
 
 import type { Deps } from "../deps.ts";
+import { advanceRevision } from "../environments/store.ts";
 import { SecretSchema, SecretService, SetSecretResponseSchema } from "../gen/chunk/management/v1/secrets_pb.ts";
 import { loadEnvironment } from "../projects/store.ts";
 import { callerOf } from "../rpc/caller.ts";
@@ -46,6 +47,7 @@ export function secretService({ sql, keys }: Deps): Partial<ServiceImpl<typeof S
           on conflict (environment_id, name) do update
             set version = secrets.version + 1, ciphertext = excluded.ciphertext, update_time = now()
           returning environment_id, name, version, update_time`;
+        await advanceRevision(tx, environment.id);
         return create(SetSecretResponseSchema, { secret: row && toSecret(row) });
       });
     },
@@ -66,9 +68,10 @@ export function secretService({ sql, keys }: Deps): Partial<ServiceImpl<typeof S
 
     async deleteSecret(request, context) {
       const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
-      await sql`
+      const deleted = await sql`
         update secrets set ciphertext = null, update_time = now()
         where environment_id = ${environment.id} and name = ${secretName(request.name)} and ciphertext is not null`;
+      if (deleted.count > 0) await advanceRevision(sql, environment.id);
       return {};
     },
   };

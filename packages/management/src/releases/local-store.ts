@@ -6,6 +6,7 @@ import { type Keys, randomToken } from "../crypto.ts";
 import type { ReleaseStore } from "./store.ts";
 
 const uploadPath = "/releases/upload/";
+const downloadPath = "/releases/download/";
 const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/([0-9a-f]{64})\.tar\.gz$/;
 
 /** Flushes the entries of `from` and each directory above it, up to and including `to`. */
@@ -42,6 +43,22 @@ export async function localReleaseStore({
   const signed = (key: string, sha256: string, size: string, expires: string) =>
     ["upload", key, sha256, size, expires].join("\n");
 
+  async function download(request: Request, url: URL): Promise<Response> {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("method not allowed\n", { status: 405 });
+    }
+    const key = url.pathname.slice(downloadPath.length);
+    const expires = url.searchParams.get("expires") ?? "";
+    const signature = url.searchParams.get("signature") ?? "";
+    if (!keyPattern.test(key) || !keys.verify(["download", key, expires].join("\n"), signature)) {
+      return new Response("invalid download signature\n", { status: 403 });
+    }
+    if (Number(expires) * 1000 < Date.now()) return new Response("download URL expired\n", { status: 403 });
+    const file = Bun.file(join(directory, key));
+    if (!(await file.exists())) return new Response("not found\n", { status: 404 });
+    return new Response(file, { headers: { "content-type": "application/gzip" } });
+  }
+
   return {
     async uploadTarget(key, { sha256, sizeBytes }, expireTime) {
       const expires = Math.floor(expireTime.getTime() / 1000).toString();
@@ -58,6 +75,12 @@ export async function localReleaseStore({
       };
     },
 
+    async downloadUrl(key, expireTime) {
+      const expires = Math.floor(expireTime.getTime() / 1000).toString();
+      const signature = keys.sign(["download", key, expires].join("\n"));
+      return `${publicUrl}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
+    },
+
     async read(key) {
       const path = join(root, key);
       const file = Bun.file(path);
@@ -69,6 +92,7 @@ export async function localReleaseStore({
 
     async fetch(request) {
       const url = new URL(request.url);
+      if (url.pathname.startsWith(downloadPath)) return download(request, url);
       if (!url.pathname.startsWith(uploadPath)) return undefined;
       if (request.method !== "PUT") return new Response("method not allowed\n", { status: 405 });
       const key = url.pathname.slice(uploadPath.length);

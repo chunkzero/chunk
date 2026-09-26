@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 
 import { newId } from "../crypto.ts";
 import type { Db } from "../db.ts";
+import { advanceRevision } from "../environments/store.ts";
 import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
 import {
   type Deployment,
@@ -90,6 +91,7 @@ export async function createDeployment(
     values (${newId("dep")}, ${environment.id}, ${release.id}, ${DeploymentState.PENDING}, ${trigger})
     returning *`;
   if (!row) throw new Error("deployment insert returned no row");
+  await advanceRevision(db, environment.id);
   return toDeployment(row);
 }
 
@@ -104,4 +106,20 @@ export async function activateDeployment(db: Db, id: string): Promise<void> {
     update deployments set state = ${DeploymentState.SUPERSEDED}, update_time = now()
     where environment_id = ${row.environment_id} and state = ${DeploymentState.ACTIVE} and id <> ${id}`;
   await db`update environments set active_deployment_id = ${id} where id = ${row.environment_id}`;
+}
+
+/** Records that the environment could not start a deployment; the previous one keeps serving. */
+export async function failDeployment(db: Db, id: string, message: string): Promise<void> {
+  const [row] = await db<{ environment_id: string }[]>`
+    update deployments set state = ${DeploymentState.FAILED}, message = ${message}, update_time = now()
+    where id = ${id} and state in ${db(unfinished)}
+    returning environment_id`;
+  if (row) await advanceRevision(db, row.environment_id);
+}
+
+/** Records that the environment started a deployment. */
+export async function progressDeployment(db: Db, id: string): Promise<void> {
+  await db`
+    update deployments set state = ${DeploymentState.IN_PROGRESS}, update_time = now()
+    where id = ${id} and state = ${DeploymentState.PENDING}`;
 }

@@ -10,6 +10,8 @@ import {
 } from "@connectrpc/connect";
 
 import { AuthService } from "../gen/chunk/management/v1/auth_pb.ts";
+import { EdgeService } from "../gen/chunk/management/v1/edge_pb.ts";
+import { EnvironmentService } from "../gen/chunk/management/v1/environment_pb.ts";
 
 export interface Principal {
   id: string;
@@ -24,12 +26,26 @@ export interface Caller {
   projectId: string | undefined;
 }
 
-/** Resolves a bearer token to a caller; undefined rejects the request. */
+/** What a bearer token authenticates: a person or CI job, one environment's processes, or an edge. */
+export type Identity =
+  | { kind: "person"; caller: Caller }
+  | { kind: "environment"; environmentId: string; tokenId: string }
+  | { kind: "edge"; tokenId: string };
+
+/** Resolves a bearer token to an identity; undefined rejects the request. */
 export interface Authenticator {
-  authenticate(bearer: string): Promise<Caller | undefined>;
+  authenticate(bearer: string): Promise<Identity | undefined>;
 }
 
+const identityKey = createContextKey<Identity | undefined>(undefined, { description: "identity" });
 const callerKey = createContextKey<Caller | undefined>(undefined, { description: "caller" });
+const environmentKey = createContextKey<string | undefined>(undefined, { description: "environment" });
+
+/** Services that only one kind of token may call; every other service is for people. */
+const serviceKinds = new Map<string, Identity["kind"]>([
+  [EnvironmentService.typeName, "environment"],
+  [EdgeService.typeName, "edge"],
+]);
 
 const publicMethods = new Set<string>(
   [AuthService.method.startLogin.name, AuthService.method.pollLogin.name].map(
@@ -51,16 +67,22 @@ export async function authenticate(
   const values = createContextValues();
   if (isPublic(method)) return values;
   const bearer = /^Bearer (\S+)$/i.exec(header.get("authorization") ?? "")?.[1];
-  const caller = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
-  if (!caller) return undefined;
-  values.set(callerKey, caller);
+  const identity = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
+  if (!identity) return undefined;
+  values.set(identityKey, identity);
   return values;
 }
 
-/** Rejects protected calls that `authenticate` did not admit. */
+/** Rejects protected calls that `authenticate` did not admit, and tokens of the wrong kind for the service. */
 export const authInterceptor: Interceptor = (next) => async (request) => {
-  if (!isPublic(request.method) && request.contextValues.get(callerKey) === undefined) {
-    throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
+  if (!isPublic(request.method)) {
+    const identity = request.contextValues.get(identityKey);
+    if (!identity) throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
+    if (identity.kind !== (serviceKinds.get(request.service.typeName) ?? "person")) {
+      throw new ConnectError(`an ${identity.kind} token cannot call ${request.service.name}`, Code.PermissionDenied);
+    }
+    if (identity.kind === "person") request.contextValues.set(callerKey, identity.caller);
+    if (identity.kind === "environment") request.contextValues.set(environmentKey, identity.environmentId);
   }
   return next(request);
 };
@@ -69,6 +91,13 @@ export function callerOf(context: HandlerContext): Caller {
   const caller = context.values.get(callerKey);
   if (!caller) throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
   return caller;
+}
+
+/** The environment whose token made the request. */
+export function environmentOf(context: HandlerContext): string {
+  const environmentId = context.values.get(environmentKey);
+  if (!environmentId) throw new ConnectError("an environment token is required", Code.Unauthenticated);
+  return environmentId;
 }
 
 export function checkProjectAccess(caller: Caller, projectId: string): void {

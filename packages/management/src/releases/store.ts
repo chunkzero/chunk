@@ -16,6 +16,8 @@ export interface UploadTarget {
 export interface ReleaseStore {
   /** Where a client sends an archive's bytes, such as a presigned URL. */
   uploadTarget(key: string, expected: ExpectedArchive, expireTime: Date): Promise<UploadTarget>;
+  /** A URL environments GET the stored archive from without other credentials. */
+  downloadUrl(key: string, expireTime: Date): Promise<string>;
   /** The stored archive, or undefined when nothing was uploaded under the key. */
   read(key: string): Promise<ReadableStream<Uint8Array> | undefined>;
   /**

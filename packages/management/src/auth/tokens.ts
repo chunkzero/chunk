@@ -58,14 +58,44 @@ export async function ensureOperatorToken(db: Db, secret: string): Promise<void>
     on conflict (secret_hash) do nothing`;
 }
 
+/** Issues the token an environment's core uses, revoking the environment's earlier ones. */
+export async function issueEnvironmentToken(db: Db, environmentId: string): Promise<string> {
+  await db`
+    update api_tokens set revoke_time = now()
+    where environment_id = ${environmentId} and kind = 'environment' and revoke_time is null`;
+  const secret = `${secretPrefix}${randomToken()}`;
+  await db`
+    insert into api_tokens (id, principal_id, name, kind, environment_id, secret_hash)
+    values (${newId("tok")}, '', 'environment', 'environment', ${environmentId}, ${sha256(secret)})`;
+  return secret;
+}
+
+/** Records the configured edge token once, like `ensureOperatorToken`. */
+export async function ensureEdgeToken(db: Db, secret: string): Promise<void> {
+  await db`
+    insert into api_tokens (id, principal_id, name, kind, secret_hash)
+    values (${newId("tok")}, '', 'CHUNK_EDGE_TOKEN', 'edge', ${sha256(secret)})
+    on conflict (secret_hash) do nothing`;
+}
+
 export function tokenAuthenticator(db: Db): Authenticator {
   return {
     async authenticate(bearer) {
-      const [row] = await db<{ id: string; principal_id: string; project_id: string | null }[]>`
-        select id, principal_id, project_id from api_tokens
+      const [row] = await db<
+        { id: string; kind: string; principal_id: string; project_id: string | null; environment_id: string | null }[]
+      >`
+        select id, kind, principal_id, project_id, environment_id from api_tokens
         where secret_hash = ${sha256(bearer)} and revoke_time is null and (expire_time is null or expire_time > now())`;
-      if (!row || row.principal_id !== operator.id) return undefined;
-      return { principal: operator, tokenId: row.id, projectId: row.project_id ?? undefined };
+      if (!row) return undefined;
+      if (row.kind === "environment" && row.environment_id) {
+        return { kind: "environment", environmentId: row.environment_id, tokenId: row.id };
+      }
+      if (row.kind === "edge") return { kind: "edge", tokenId: row.id };
+      if (row.kind !== "person" || row.principal_id !== operator.id) return undefined;
+      return {
+        kind: "person",
+        caller: { principal: operator, tokenId: row.id, projectId: row.project_id ?? undefined },
+      };
     },
   };
 }

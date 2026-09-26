@@ -16,21 +16,29 @@ import {
 
 import { authService } from "./auth/service.ts";
 import { tokenAuthenticator } from "./auth/tokens.ts";
+import { dashboardHandler } from "./dashboard.ts";
 import { deploymentService } from "./deployments/service.ts";
 import type { Deps } from "./deps.ts";
 import { domainService } from "./domains/service.ts";
+import { edgeService } from "./edge/service.ts";
+import { environmentService } from "./environments/service.ts";
 import { AuthService } from "./gen/chunk/management/v1/auth_pb.ts";
 import { DeploymentService } from "./gen/chunk/management/v1/deployments_pb.ts";
 import { DomainService } from "./gen/chunk/management/v1/domains_pb.ts";
+import { EdgeService } from "./gen/chunk/management/v1/edge_pb.ts";
+import { EnvironmentService } from "./gen/chunk/management/v1/environment_pb.ts";
 import { LogService } from "./gen/chunk/management/v1/logs_pb.ts";
 import { ProjectService } from "./gen/chunk/management/v1/projects_pb.ts";
 import { SecretService } from "./gen/chunk/management/v1/secrets_pb.ts";
+import { logService } from "./logs/service.ts";
 import { projectService } from "./projects/service.ts";
 import { authenticate, type Authenticator, authInterceptor } from "./rpc/caller.ts";
 import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
   authenticator?: Authenticator;
+  /** Serves the dashboard's static build from here; unset serves no dashboard. */
+  dashboardDir?: string | undefined;
   /** Registers more services; a service registered again here replaces the default one. */
   extend?: (router: ConnectRouter) => void;
 }
@@ -38,8 +46,16 @@ export interface HandlerOptions {
 /** The largest RPC message a client may send; release archives go to the release store instead. */
 export const maxRpcBytes = 4 * 1024 * 1024;
 
+/** The part of Bun's server a handler needs. */
+export interface Server {
+  timeout(request: Request, seconds: number): void;
+}
+
 /** Serves chunk.management.v1 over Connect, gRPC-Web and gRPC, plus the release store's own URLs. */
-export function createHandler(deps: Deps, options: HandlerOptions = {}): (request: Request) => Promise<Response> {
+export function createHandler(
+  deps: Deps,
+  options: HandlerOptions = {},
+): (request: Request, server?: Server) => Promise<Response> {
   const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
   const router = createConnectRouter({
     interceptors: [logUnexpectedErrors, authInterceptor],
@@ -51,8 +67,11 @@ export function createHandler(deps: Deps, options: HandlerOptions = {}): (reques
     .service(DeploymentService, deploymentService(deps))
     .service(SecretService, secretService(deps))
     .service(DomainService, domainService(deps))
-    .service(LogService, {});
+    .service(EnvironmentService, environmentService(deps))
+    .service(EdgeService, edgeService(deps))
+    .service(LogService, logService(deps));
   options.extend?.(router);
+  const dashboard = options.dashboardDir === undefined ? undefined : dashboardHandler(options.dashboardDir);
   const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
 
   /** Connect reads a unary request's whole body before interceptors run, so authentication comes first. */
@@ -65,12 +84,20 @@ export function createHandler(deps: Deps, options: HandlerOptions = {}): (reques
     return universalServerResponseToFetch(await handler(call));
   }
 
-  return async (request) => {
+  return async (request, server) => {
     const { pathname } = new URL(request.url);
     const rpc = rpcs.get(pathname);
-    if (rpc) return serveRpc(rpc, request);
+    if (rpc) {
+      // Bun closes connections idle for 10 seconds, which would cut quiet streams between keepalives.
+      if (rpc.method.methodKind === "server_streaming") server?.timeout(request, 0);
+      return serveRpc(rpc, request);
+    }
     if (pathname === "/healthz") return new Response("ok\n");
-    return (await deps.releases.fetch?.(request)) ?? new Response("not found\n", { status: 404 });
+    return (
+      (await deps.releases.fetch?.(request)) ??
+      (await dashboard?.(request)) ??
+      new Response("not found\n", { status: 404 })
+    );
   };
 }
 

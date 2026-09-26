@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type HandlerContext, type ServiceImpl } from "@connectrpc/connect";
 
+import { notify } from "../changes.ts";
 import { newId, randomToken } from "../crypto.ts";
 import type { Deps } from "../deps.ts";
 import {
@@ -96,6 +97,7 @@ export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceI
         "another environment already verified this hostname",
         () => sql`update domains set state = ${DomainState.VERIFIED} where id = ${domain.id}`,
       );
+      await notify(sql, { kind: "environment", environmentId: domain.environment_id });
       return { domain: toDomain({ ...domain, state: DomainState.VERIFIED }) };
     },
 
@@ -114,7 +116,10 @@ export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceI
 
     async removeDomain(request, context) {
       const domain = await loadDomain(request.domainId, context);
-      if (domain) await sql`delete from domains where id = ${domain.id}`;
+      if (domain) {
+        await sql`delete from domains where id = ${domain.id}`;
+        await notify(sql, { kind: "environment", environmentId: domain.environment_id });
+      }
       return {};
     },
   };
