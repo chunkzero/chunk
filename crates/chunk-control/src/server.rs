@@ -1,7 +1,7 @@
 //! Embeddable control server with explicit host ownership.
 use crate::{Control, ControlConnection, Host, Service};
 use chunk_proto::v1::local_control_server::LocalControlServer;
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,8 @@ pub struct Config {
     pub state: PathBuf,
     pub system: chunk_backend::System,
     pub connection: PathBuf,
-    pub bind: SocketAddr,
+    /// Loopback listener control serves on.
+    pub listener: TcpListener,
     pub control: crate::Config,
     pub host: Arc<dyn Host>,
     /// Drops every control row before serving, as when a local session starts over.
@@ -29,11 +30,11 @@ pub struct Ready {
 /// # Errors
 /// Reports configuration, durable-state, transport and shutdown errors, and a stopped environment store.
 pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: CancellationToken) -> io::Result<()> {
-    if !config.bind.ip().is_loopback() {
+    let listener = config.listener;
+    let address = listener.local_addr()?;
+    if !address.ip().is_loopback() {
         return Err(io::Error::other("control must bind loopback"));
     }
-    let listener = TcpListener::bind(config.bind).await?;
-    let address = listener.local_addr()?;
     config.host.configure(format!("http://{address}")).map_err(io::Error::other)?;
     let path = config.connection;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {

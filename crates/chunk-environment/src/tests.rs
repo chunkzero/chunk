@@ -159,14 +159,16 @@ impl NodeControl for Survivor {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_the_previous_control_address() {
+async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_its_control_address_once_that_is_free() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
     config.fresh = true;
-    // The previous control served elsewhere, under a credential this start no longer has.
-    let previous = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    // The survivor's control served elsewhere; another process holds that address for now.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let previous = occupied.local_addr().unwrap();
     let endpoint = format!("http://{previous}");
-    let record = ControlConnection { endpoint: endpoint.clone(), token: "previous".into() };
+    // A stale discovery record names neither that address nor a credential this start has.
+    let record = ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "previous".into() };
     std::fs::create_dir_all(&config.state).unwrap();
     std::fs::write(&config.control_record, serde_json::to_vec(&record).unwrap()).unwrap();
     let id = "5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f";
@@ -175,7 +177,8 @@ async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_the_previous_control
     let marker = nodes.join(format!("{id}.launch"));
     // The launch record of process `survivor`, whose credential is `survivor-credential`.
     let digest = "f81f7f42445b7b8d50607fb2be1213427da19382f3aa9bbd41d0c56c050fcc74";
-    let launch = serde_json::json!({"process_id": "survivor", "generation": 1, "token_sha256": digest});
+    let launch = serde_json::json!({"process_id": "survivor", "generation": 1, "token_sha256": digest,
+        "control_endpoint": endpoint});
     std::fs::write(&marker, launch.to_string()).unwrap();
     let lock = std::fs::File::open(&marker).unwrap();
     lock.try_lock().unwrap();
@@ -206,16 +209,22 @@ async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_the_previous_control
     // Like a JVM, it retries registering at the endpoint it was launched with.
     tokio::spawn(async move {
         loop {
-            if let Ok(mut client) = SupervisorClient::connect(endpoint.clone()).await
-                && client.register_process(authorized(registration.clone(), "survivor-credential")).await.is_ok()
-            {
+            let attempt = async {
+                let mut client = SupervisorClient::connect(endpoint.clone()).await.ok()?;
+                client.register_process(authorized(registration.clone(), "survivor-credential")).await.ok()
+            };
+            if let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(500), attempt).await {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
-    let core = tokio::time::timeout(Duration::from_secs(30), Core::start(config, |_| {})).await.unwrap().unwrap();
+    let starting = tokio::spawn(Core::start(config, |_| {}));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(stopped.lock().unwrap().is_none());
+    drop(occupied);
+    let core = tokio::time::timeout(Duration::from_secs(30), starting).await.unwrap().unwrap().unwrap();
     assert_eq!(*stopped.lock().unwrap(), Some(true));
     assert!(!marker.exists());
     assert_ne!(core.control_connection().unwrap().endpoint, format!("http://{previous}"));

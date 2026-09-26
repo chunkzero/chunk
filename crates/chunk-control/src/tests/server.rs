@@ -23,7 +23,7 @@ async fn run_releases_authority_before_returning_with_an_open_watch() {
                 state: fixture.directory.path().join("state"),
                 system: system.clone(),
                 connection: fixture.directory.path().join("control.json"),
-                bind: "127.0.0.1:0".parse().unwrap(),
+                listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
                 control: environment.clone(),
                 host: fixture.host.clone(),
                 fresh: false,

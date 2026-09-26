@@ -145,7 +145,7 @@ pub async fn serve(init: Init) -> Result<()> {
             connection: init.state.join("connection.json"),
             state: init.state.clone(),
             system,
-            bind: "127.0.0.1:0".parse()?,
+            listener: tokio::net::TcpListener::bind("127.0.0.1:0").await?,
             control: chunk_control::Config { environment: release.deployment.environment.clone() },
             host: Arc::new(control::SyntheticHost::new(init.backend)),
             fresh: false,

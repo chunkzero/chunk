@@ -17,7 +17,7 @@ chunk-contract = { path = "../chunk-contract" }
 chunk-control = { path = "../chunk-control" }
 chunk-proxy = { path = "../chunk-proxy", default-features = false }
 chunk-service = { path = "../chunk-service" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 
