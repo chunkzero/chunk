@@ -56,6 +56,10 @@ unary! {
     ensure_capacity: "EnvironmentService" / "EnsureCapacity" (EnsureCapacityRequest) -> EnsureCapacityResponse;
     release_capacity: "EnvironmentService" / "ReleaseCapacity" (ReleaseCapacityRequest) -> ReleaseCapacityResponse;
 
+    /// Reports client addresses that failed Minecraft authentication at a gateway.
+    report_failed_auth:
+        "EnvironmentService" / "ReportFailedAuth" (ReportFailedAuthRequest) -> ReportFailedAuthResponse;
+
     /// Asks for a sleeping environment to wake for a login or ping.
     wake: "EdgeService" / "Wake" (WakeRequest) -> WakeResponse;
 }
@@ -65,4 +69,6 @@ server_stream! {
     attach: "EnvironmentService" / "Attach" (AttachRequest) -> AttachResponse;
     /// Streams the routing table: every route first, then changes.
     watch_routes: "EdgeService" / "WatchRoutes" (WatchRoutesRequest) -> WatchRoutesResponse;
+    /// Streams an environment's stored log entries, then new ones when following.
+    read_logs: "LogService" / "ReadLogs" (ReadLogsRequest) -> ReadLogsResponse;
 }

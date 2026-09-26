@@ -39,7 +39,10 @@ impl<T: Message + Default> Stream<T> {
                 if flags & COMPRESSED != 0 {
                     return self.fail("a compressed message, which the client did not ask for".into());
                 }
-                return T::decode(payload).map(Some).map_err(|error| Error::Protocol(error.to_string()));
+                return match T::decode(payload) {
+                    Ok(message) => Ok(Some(message)),
+                    Err(error) => self.fail(error.to_string()),
+                };
             }
             match self.response.chunk().await {
                 Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),

@@ -5,8 +5,9 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use chunk_management::v1::{
-    AttachRequest, AttachResponse, DeployRequest, DeployResponse, Deployment, GetDeploymentRequest, ObjectStore,
-    WakeReason, WakeRequest, WatchRoutesRequest, WatchRoutesResponse,
+    AttachRequest, AttachResponse, DeployRequest, DeployResponse, Deployment, FailedAuth, GetDeploymentRequest,
+    LogEntry, ObjectStore, ReadLogsRequest, ReadLogsResponse, ReportFailedAuthRequest, ReportStatusRequest,
+    SetWakeAlarmRequest, UploadTarget, WakeReason, WakeRequest, WatchRoutesRequest, WatchRoutesResponse,
 };
 use chunk_management::{Client, Code, Error};
 use http_body_util::combinators::BoxBody;
@@ -55,7 +56,12 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
     let path = request.uri().path().to_owned();
     let authorized = request.headers().get("authorization").is_some_and(|value| value == "Bearer secret");
     let content_type = request.headers().get("content-type").cloned();
+    let credentialed = request.headers().contains_key("authorization");
     let body = request.into_body().collect().await.expect("request body").to_bytes();
+    if path == "/upload" {
+        let status = if credentialed || body.as_ref() != b"archive" { 403 } else { 200 };
+        return Ok(full(status, "text/plain", ""));
+    }
     if !authorized {
         return Ok(full(
             401,
@@ -74,6 +80,22 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
             full(404, "application/json", r#"{"code":"not_found","message":"deployment not found"}"#)
         }
         "/chunk.management.v1.EdgeService/Wake" => full(503, "text/plain", "upstream is down"),
+        "/chunk.management.v1.EnvironmentService/ReportStatus" => {
+            Response::builder().status(204).body(Full::new(Bytes::new()).boxed()).expect("response")
+        }
+        "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => full(200, "text/html", "<p>sign in</p>"),
+        "/chunk.management.v1.EnvironmentService/ReportFailedAuth" => {
+            let request = ReportFailedAuthRequest::decode(body).expect("report failed auth request");
+            assert_eq!(request.failures[0].client_address, "192.0.2.1");
+            full(200, "application/proto; charset=binary", Vec::new())
+        }
+        "/chunk.management.v1.LogService/ReadLogs" => {
+            let entry = ReadLogsResponse { entries: vec![LogEntry::default()] };
+            let mut stream = envelope(0, &[0xff, 0xff]);
+            stream.extend(envelope(0, &entry.encode_to_vec()));
+            stream.extend(envelope(2, b"{}"));
+            chunked(stream, 1024)
+        }
         "/chunk.management.v1.EnvironmentService/Attach" => {
             assert_eq!(content_type.expect("content type"), "application/connect+proto");
             let request = AttachRequest::decode(&body[5..]).expect("attach request");
@@ -185,4 +207,46 @@ async fn a_clean_end_of_stream_ends_the_stream() {
     let mut stream = client.watch_routes(&WatchRoutesRequest {}).await.expect("watch");
     assert!(stream.message().await.expect("first").expect("a message").reset);
     assert!(stream.message().await.expect("end").is_none());
+}
+
+#[tokio::test]
+async fn debug_output_never_shows_the_token() {
+    let client = Client::new("http://127.0.0.1:9").with_token("sentinel-token-7f3a");
+    let debug = format!("{client:?} {client:#?}");
+    assert!(!debug.contains("sentinel-token-7f3a"), "{debug}");
+    assert!(debug.contains("<redacted>"));
+}
+
+#[tokio::test]
+async fn archive_uploads_carry_no_credentials_of_the_service_client() {
+    let address = serve().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("authorization", "Bearer secret".parse().expect("header"));
+    let http = reqwest::Client::builder().default_headers(headers).build().expect("http client");
+    let client = Client::with_http(http, format!("http://{address}")).with_token("secret");
+
+    client.deploy(&DeployRequest::default()).await.expect("service calls keep the default header");
+    let target = UploadTarget { url: format!("http://{address}/upload"), ..UploadTarget::default() };
+    client.upload_archive(&target, "archive").await.expect("an upload without credentials");
+}
+
+#[tokio::test]
+async fn only_http_200_with_the_connect_content_type_succeeds() {
+    let client = client().await;
+    let error = client.report_status(&ReportStatusRequest::default()).await.unwrap_err();
+    assert_eq!(error.code(), Code::Unknown);
+
+    let error = client.set_wake_alarm(&SetWakeAlarmRequest::default()).await.unwrap_err();
+    assert!(matches!(error, Error::Protocol(_)), "{error}");
+
+    let failures = vec![FailedAuth { client_address: "192.0.2.1".into(), ..FailedAuth::default() }];
+    client.report_failed_auth(&ReportFailedAuthRequest { failures }).await.expect("a parameterized content type");
+}
+
+#[tokio::test]
+async fn a_malformed_message_ends_the_stream() {
+    let client = client().await;
+    let mut stream = client.read_logs(&ReadLogsRequest::default()).await.expect("read logs");
+    assert!(matches!(stream.message().await, Err(Error::Protocol(_))));
+    assert!(stream.message().await.expect("after the error").is_none());
 }

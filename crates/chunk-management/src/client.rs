@@ -1,15 +1,32 @@
+use std::fmt;
+
 use prost::Message;
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::{Response, StatusCode};
 
 use crate::error::{self, Error};
 use crate::stream::{Stream, envelope};
 
+const UNARY_CONTENT_TYPE: &str = "application/proto";
+const STREAM_CONTENT_TYPE: &str = "application/connect+proto";
+
 /// A client for one management service. Cloning is cheap and shares connections.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
+    /// Archive uploads go to presigned object-store URLs, so they never share the service client's credentials.
+    uploads: reqwest::Client,
     base_url: String,
     token: Option<String>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -18,13 +35,13 @@ impl Client {
         Self::with_http(reqwest::Client::new(), base_url)
     }
 
-    /// Like `new`, over an existing HTTP client.
+    /// Like `new`, calling the service over an existing HTTP client. Archive uploads still use a client of their own.
     pub fn with_http(http: reqwest::Client, base_url: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        Self { http, base_url, token: None }
+        Self { http, uploads: reqwest::Client::new(), base_url, token: None }
     }
 
-    /// Sends `token` as the bearer token of every call.
+    /// Sends `token` as the bearer token of every call to the service.
     #[must_use]
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
@@ -32,13 +49,9 @@ impl Client {
     }
 
     pub(crate) async fn unary<I: Message, O: Message + Default>(&self, path: &str, request: &I) -> Result<O, Error> {
-        let response = self.post(path, "application/proto", request.encode_to_vec()).send().await?;
-        let status = response.status();
-        let body = response.bytes().await?;
-        if !status.is_success() {
-            return Err(error::from_response(status, &body));
-        }
-        O::decode(body).map_err(|error| Error::Protocol(error.to_string()))
+        let response = self.post(path, UNARY_CONTENT_TYPE, request.encode_to_vec()).send().await?;
+        let response = accept(response, UNARY_CONTENT_TYPE).await?;
+        O::decode(response.bytes().await?).map_err(|error| Error::Protocol(error.to_string()))
     }
 
     pub(crate) async fn server_stream<I: Message, O: Message + Default>(
@@ -47,15 +60,12 @@ impl Client {
         request: &I,
     ) -> Result<Stream<O>, Error> {
         let body = envelope(0, &request.encode_to_vec());
-        let response = self.post(path, "application/connect+proto", body).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(error::from_response(status, &response.bytes().await?));
-        }
-        Ok(Stream::new(response))
+        let response = self.post(path, STREAM_CONTENT_TYPE, body).send().await?;
+        Ok(Stream::new(accept(response, STREAM_CONTENT_TYPE).await?))
     }
 
-    /// Sends a release archive where `UploadRelease` said to. The target is presigned, so no bearer token is sent.
+    /// Sends a release archive where `UploadRelease` said to, with only the headers it named: the URL is presigned,
+    /// so neither the bearer token nor any default header of the service's HTTP client goes along.
     ///
     /// # Errors
     /// The store's refusal, with a code from its HTTP status, or a transport failure.
@@ -67,7 +77,7 @@ impl Client {
         let method = if target.method.is_empty() { "PUT" } else { &target.method };
         let method =
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| Error::Protocol(error.to_string()))?;
-        let mut request = self.http.request(method, &target.url).body(archive);
+        let mut request = self.uploads.request(method, &target.url).body(archive);
         for (name, value) in &target.headers {
             let name = HeaderName::try_from(name).map_err(|error| Error::Protocol(error.to_string()))?;
             let value = HeaderValue::try_from(value).map_err(|error| Error::Protocol(error.to_string()))?;
@@ -93,4 +103,19 @@ impl Client {
             None => request,
         }
     }
+}
+
+/// A Connect success is HTTP 200 with the expected content type. Anything else is an error: the Connect error it
+/// carries, a code from its HTTP status, or, for a 200 of another type such as a proxy's page, a protocol error.
+async fn accept(response: Response, content_type: &str) -> Result<Response, Error> {
+    let status = response.status();
+    if status != StatusCode::OK {
+        return Err(error::from_response(status, &response.bytes().await?));
+    }
+    let actual = response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let media_type = actual.split(';').next().unwrap_or_default().trim();
+    if !media_type.eq_ignore_ascii_case(content_type) {
+        return Err(Error::Protocol(format!("expected {content_type}, got {actual:?}")));
+    }
+    Ok(response)
 }
