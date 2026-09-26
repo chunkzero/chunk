@@ -109,15 +109,15 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
     environment.ready_to_suspend &&
     environment.report_desired_revision === environment.revision;
   if (idle) {
-    if (environment.state !== EnvironmentState.SUSPENDED) {
-      // Marked only while the idle report still holds; a wake accepted afterwards resumes it on the next pass.
-      const marked = await sql`
-        update environments set state = ${EnvironmentState.SUSPENDED}
-        where id = ${id} and revision = ${environment.revision} and ready_to_suspend
-          and report_desired_revision = revision and state <> ${EnvironmentState.DELETING}`;
-      if (marked.count === 0) return;
-      await notify(sql, { kind: "environment", environmentId: id });
-    }
+    // Checked against the latest accepted report on every pass, retries included, since core may have reported
+    // activity or accepted a wake after this pass read the environment. A later change resumes it next pass.
+    const [marked] = await sql<{ changed: boolean }[]>`
+      update environments set state = ${EnvironmentState.SUSPENDED}
+      where id = ${id} and revision = ${environment.revision} and lease > 0 and ready_to_suspend
+        and report_desired_revision = revision and state <> ${EnvironmentState.DELETING}
+      returning ${environment.state !== EnvironmentState.SUSPENDED} as changed`;
+    if (!marked) return;
+    if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
     for (const request of active) {
       if (!request.machine_id) continue;
       const machine = await provider.status(request.machine_id);
@@ -143,15 +143,21 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
 async function createCore(deps: Deps, options: ReconcilerOptions, environment: EnvironmentRow) {
   const { sql, keys } = deps;
   const context = `machine-token/${environment.id}`;
-  // The token is saved before the machine exists, so a retry after a crash builds the same machine.
-  let token =
-    environment.machine_token && new TextDecoder().decode(await keys.cipher.open(environment.machine_token, context));
-  if (!token) {
-    token = await issueEnvironmentToken(sql, environment.id);
-    await sql`
-      update environments set machine_token = ${await keys.cipher.seal(new TextEncoder().encode(token), context)}
-      where id = ${environment.id}`;
-  }
+  // The token is saved before the machine exists, so a retry after a crash builds the same machine, and in the same
+  // transaction as the row lock deletion takes, so a deleted or deleting environment never gets a machine.
+  const { sealed } = await sql.begin(async (tx) => {
+    const [row] = await tx<{ machine_token: Uint8Array | null }[]>`
+      select machine_token from environments
+      where id = ${environment.id} and state <> ${EnvironmentState.DELETING}
+      for update`;
+    if (!row || row.machine_token) return { sealed: row?.machine_token ?? undefined };
+    const issued = await issueEnvironmentToken(tx, environment.id);
+    const token = await keys.cipher.seal(new TextEncoder().encode(issued), context);
+    await tx`update environments set machine_token = ${token} where id = ${environment.id}`;
+    return { sealed: token };
+  });
+  if (!sealed) return undefined;
+  const token = new TextDecoder().decode(await keys.cipher.open(sealed, context));
   const machine = await options.provider.create(coreMachineSpec(options, environment.id, token));
   const saved = await sql`
     update environments set machine_id = ${machine.id}

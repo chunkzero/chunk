@@ -204,6 +204,73 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(await codeOf(h.client(ProjectService).getEnvironment({ environmentId }))).toBe(Code.NotFound);
   });
 
+  test("a delete while core's token is being saved leaves no machine", async () => {
+    const { projectId, environmentId } = await createEnvironment(h);
+    await deployRelease(h, projectId, environmentId, "r1");
+    const name = coreMachineName(environmentId);
+    // A create whose reply is lost leaves a machine only cleanup by name would find.
+    hooks.create = (id) => {
+      if (id === name) throw new Error("connection reset");
+    };
+    let passing: Promise<void> | undefined;
+    await h.sql.begin(async (tx) => {
+      // This lock lets a token be issued for the environment but holds back saving it on the row.
+      await tx`select 1 from environments where id = ${environmentId} for no key update`;
+      passing = pass();
+      // Wait until the pass is blocked on this row.
+      for (let tries = 0; tries < 100; tries++) {
+        const [waiting] = await h.sql<{ count: bigint }[]>`
+          select count(*) from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`;
+        if ((waiting?.count ?? 0n) > 0n) break;
+        await Bun.sleep(20);
+      }
+      await tx`delete from environments where id = ${environmentId}`;
+    });
+    await passing;
+    hooks.create = undefined;
+    await pass();
+    expect(machines.has(name)).toBe(false);
+    const [tokens] = await h.sql<{ count: bigint }[]>`
+      select count(*) from api_tokens where environment_id = ${environmentId}`;
+    expect(tokens?.count).toBe(0n);
+  });
+
+  test("a retried suspension is dropped when a newer report shows activity", async () => {
+    const env = await running();
+    const gateways = [`${env.coreName}:25565`];
+    await env.client.reportStatus({
+      lease: env.lease,
+      sequence: 1n,
+      desiredRevision: env.revision,
+      gatewayAddresses: gateways,
+      readyToSuspend: true,
+    });
+    hooks.suspend = () => {
+      throw new Error("engine unavailable");
+    };
+    await pass();
+    hooks.suspend = undefined;
+    expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
+
+    // A player joins after the retry pass read the environment, before it suspends.
+    hooks.status = async (id) => {
+      if (id !== env.coreName) return;
+      hooks.status = undefined;
+      await env.client.reportStatus({
+        lease: env.lease,
+        sequence: 2n,
+        desiredRevision: env.revision,
+        gatewayAddresses: gateways,
+        onlinePlayers: 1,
+      });
+    };
+    await pass();
+    expect(env.core()?.state).toBe("running");
+    await pass();
+    expect(await env.state()).toBe(EnvironmentState.STARTING);
+    env.close();
+  });
+
   test("deleting an environment revokes its token and removes its machines", async () => {
     const env = await running();
     env.close();
