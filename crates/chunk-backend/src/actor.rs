@@ -147,7 +147,8 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let event = if let Some(wait) = self.scheduled.next_due() {
+            let due = [self.scheduled.next_due(), self.watches.advance_due()].into_iter().flatten().min();
+            let event = if let Some(wait) = due {
                 self.timer
                     .block_on(async { tokio::time::timeout(wait, incoming.recv()).await })
                     .unwrap_or(Some(Event::Wake))
@@ -217,6 +218,7 @@ impl Actor {
                 self.dispatch_jobs();
             }
             self.dispatch();
+            self.watches.advance();
         }
         incoming.close();
         while let Ok(event) = incoming.try_recv() {
@@ -250,6 +252,15 @@ impl Actor {
                     .and_then(Option::as_ref)
                     .map(|deployment| deployment.contracts.domains.clone())
                     .ok_or(Error::Contract)
+            })),
+            Command::Functions { id, reply } => reply.finish(self.check_deployment(&id).map(|()| {
+                let deployment = self.versions.get(&id).and_then(Option::as_ref);
+                deployment
+                    .iter()
+                    .flat_map(|deployment| &deployment.functions)
+                    .filter(|(_, function)| function.visibility == Visibility::Public)
+                    .map(|(name, function)| (name.clone(), function.kind))
+                    .collect()
             })),
             Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),

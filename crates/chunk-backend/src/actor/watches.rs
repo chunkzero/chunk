@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use chunk_js::DeploymentId;
@@ -25,6 +26,8 @@ const ENTRY_BYTES: usize = 256;
 const KEY_BYTES: usize = 64;
 /// Commits logged in full during a batch; beyond this they are kept only by table.
 const RECENT_BYTES: usize = 16 * 1024 * 1024;
+/// Least time between sweeps that raise the revision of groups whose results still hold.
+const ADVANCE: Duration = Duration::from_millis(100);
 
 /// Memory a group of `calls` holds while subscribed, not counting shared query results.
 fn cost(calls: &[Call]) -> usize {
@@ -132,6 +135,9 @@ pub(super) struct Watches {
     durable: Revision,
     /// Groups holding results evaluated past the durable revision, published once it catches up.
     withheld: BTreeSet<GroupId>,
+    /// The durable revision at the last advance sweep, and when it ran.
+    advanced: Revision,
+    swept: Instant,
     ids: u64,
     /// Estimated memory held by groups and queries, limited to `budget`.
     bytes: usize,
@@ -152,6 +158,8 @@ impl Watches {
             recent_bytes: 0,
             durable,
             withheld: BTreeSet::new(),
+            advanced: durable,
+            swept: Instant::now(),
             ids: 0,
             bytes: 0,
             budget: SUBSCRIPTION_BYTES,
@@ -508,7 +516,8 @@ impl Watches {
                 })
             })
             .collect();
-        let update = GroupUpdate { revision: last, results };
+        let version = self.id();
+        let update = GroupUpdate { revision: last, results, version };
         let group = self.groups.get_mut(&id).expect("published group");
         group.versions = versions;
         group.revision = last;
@@ -518,6 +527,46 @@ impl Watches {
             let (sender, receiver) = watch::channel(Ok(update));
             group.sender = Some(sender);
             reply.finish(Ok(GroupSubscription::new(receiver)));
+        }
+    }
+
+    /// How long until [`Self::advance`] sweeps, once a commit arrived since its last sweep.
+    pub fn advance_due(&self) -> Option<Duration> {
+        (self.durable > self.advanced).then(|| ADVANCE.saturating_sub(self.swept.elapsed()))
+    }
+
+    /// Republishes each group whose published results still hold at a later durable revision at that revision, at
+    /// most once per [`ADVANCE`], so its subscribers learn their view is current without a message per commit.
+    pub fn advance(&mut self) {
+        if self.advance_due().is_none_or(|wait| !wait.is_zero()) {
+            return;
+        }
+        self.advanced = self.durable;
+        self.swept = Instant::now();
+        for group in self.groups.values_mut() {
+            let Some(sender) = &group.sender else {
+                continue;
+            };
+            let mut last = self.durable;
+            for (query, version) in group.queries.iter().zip(&group.versions) {
+                let query = &self.queries[query];
+                if query.version != *version {
+                    // A changed result publishes on its own.
+                    last = Revision(0);
+                    break;
+                }
+                if let Some(stale) = query.stale {
+                    last = last.min(Revision(stale.0.saturating_sub(1)));
+                }
+            }
+            if last > group.revision {
+                group.revision = last;
+                sender.send_modify(|update| {
+                    if let Ok(update) = update {
+                        update.revision = last;
+                    }
+                });
+            }
         }
     }
 

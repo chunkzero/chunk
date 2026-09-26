@@ -6,6 +6,10 @@ use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 
+/// Builds services served beside control's own on its listener, from control, its credential, and a token cancelled
+/// when the transport begins shutting down, which must end their open streams.
+pub type Services = Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken) -> tonic::service::Routes + Send>;
+
 pub struct Config {
     /// Holds the credential and the host's local files; durable state lives in the environment's store.
     pub state: PathBuf,
@@ -17,6 +21,7 @@ pub struct Config {
     pub host: Arc<dyn Host>,
     /// Drops every control row before serving, as when a local session starts over.
     pub fresh: bool,
+    pub services: Option<Services>,
 }
 
 /// A serving control, which activates and retires releases.
@@ -37,6 +42,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     }
     config.host.configure(format!("http://{address}")).map_err(io::Error::other)?;
     let path = config.connection;
+    let services = config.services;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let token = chunk_service::secret(&config.state.join("token"))?;
@@ -62,6 +68,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             }
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
+        let routes = services.map_or_else(tonic::service::Routes::default, |services| {
+            services(&control, &connection.token, stop.clone())
+        });
         let _ = ready.send(Ready { connection, control: control.clone() });
         let shutdown = {
             let (stop, service) = (stop.clone(), service.clone());
@@ -71,6 +80,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             }
         };
         let server = tonic::transport::Server::builder()
+            .add_routes(routes)
             .add_service(
                 LocalControlServer::new(service.clone())
                     .max_decoding_message_size(65_536)

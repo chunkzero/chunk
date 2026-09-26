@@ -1,3 +1,5 @@
+mod sync;
+
 use crate::{PlatformTarget, Running};
 use chunk_contract::{BackendConnection, ControlConnection};
 use std::{collections::BTreeSet, fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -13,6 +15,7 @@ pub struct CoreConfig {
     pub backend_record: PathBuf,
     pub control_record: PathBuf,
     pub backend_bind: SocketAddr,
+    /// The core port, serving control and the sync protocol's `Core` service.
     pub control_bind: SocketAddr,
     /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
     /// that outlived the previous control are stopped first.
@@ -134,6 +137,8 @@ impl Core {
     async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener, record: PathBuf) -> io::Result<()> {
         let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
         self.host = Some(host.clone());
+        let backend = self.handle.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
+        let platform_token = self.backend_connection()?.platform_token.clone();
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
@@ -144,6 +149,7 @@ impl Core {
             control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
+            services: Some(sync::services(backend, platform_token)),
         };
         self.control =
             Some(Running { task: tokio::spawn(chunk_control::server::run(control, ready, stop.clone())), stop });

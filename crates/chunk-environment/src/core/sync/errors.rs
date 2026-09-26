@@ -1,0 +1,53 @@
+//! Protocol errors, and how backend and control failures map onto their codes.
+
+use chunk_proto::sync::v1::{Error, error::Code};
+
+pub(super) fn error(code: Code, message: impl Into<String>) -> Error {
+    Error { code: code.into(), message: message.into() }
+}
+
+pub(super) fn invalid(message: impl Into<String>) -> Error {
+    error(Code::Invalid, message)
+}
+
+pub(super) fn denied(message: impl Into<String>) -> Error {
+    error(Code::Denied, message)
+}
+
+pub(super) fn backend(failure: &chunk_backend::Error) -> Error {
+    use chunk_backend::Error as Backend;
+    let code = match failure {
+        Backend::Overloaded(_) => Code::Overloaded,
+        Backend::Storage(inner) if matches!(inner.as_ref(), chunk_store::Error::Capacity) => Code::Overloaded,
+        Backend::Storage(inner) if matches!(inner.as_ref(), chunk_store::Error::OperationMismatch) => {
+            Code::OperationMismatch
+        }
+        Backend::OperationMismatch => Code::OperationMismatch,
+        Backend::Invalid(_) | Backend::Json(_) => Code::Invalid,
+        Backend::Contract | Backend::Unknown => Code::Contract,
+        Backend::ActionOutcomeUnknown => Code::OutcomeUnknown,
+        Backend::JavaScript(inner) => match inner.as_ref() {
+            chunk_js::Error::JavaScript(thrown) => return error(Code::Application, thrown.clone()),
+            chunk_js::Error::Deadline | chunk_js::Error::Heap => Code::Application,
+            chunk_js::Error::Invalid(_) | chunk_js::Error::UnknownDeployment => Code::Contract,
+            chunk_js::Error::Cancelled | chunk_js::Error::Io(_) => Code::Unavailable,
+        },
+        Backend::Busy
+        | Backend::Retry
+        | Backend::Closed
+        | Backend::Cancelled
+        | Backend::CommitFailed
+        | Backend::Storage(_)
+        | Backend::Io(_) => Code::Unavailable,
+    };
+    error(code, failure.to_string())
+}
+
+/// Maps a failed caller check: requests control rejects are denied.
+pub(super) fn control(failure: &chunk_control::Error) -> Error {
+    match failure {
+        chunk_control::Error::Invalid(message) => denied(*message),
+        chunk_control::Error::Stopped => error(Code::Stopped, failure.to_string()),
+        _ => error(Code::Unavailable, failure.to_string()),
+    }
+}

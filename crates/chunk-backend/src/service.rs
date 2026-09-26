@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -7,7 +8,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_contract::{Deployment, DomainManifest, validate_wire_value};
+use chunk_contract::{Deployment, DomainManifest, FunctionKind, validate_wire_value};
 #[cfg(test)]
 use chunk_js::Limits;
 use chunk_js::{Cancellation, DeploymentId, Json};
@@ -75,6 +76,8 @@ pub struct Update {
 pub struct GroupUpdate {
     pub revision: Revision,
     pub results: Vec<Result<Arc<str>>>,
+    /// Changes whenever `results` do.
+    pub(crate) version: u64,
 }
 
 pub(crate) struct Request<T> {
@@ -125,6 +128,10 @@ pub(crate) enum Command {
     DomainManifest {
         id: DeploymentId,
         reply: Request<Option<DomainManifest>>,
+    },
+    Functions {
+        id: DeploymentId,
+        reply: Request<BTreeMap<String, FunctionKind>>,
     },
     JobStatus {
         id: String,
@@ -190,6 +197,7 @@ impl Command {
             Self::Suggest { reply, .. } => reply.finish(Err(error)),
             Self::Prepare { reply, .. } => reply.finish(Err(error)),
             Self::DomainManifest { reply, .. } => reply.finish(Err(error)),
+            Self::Functions { reply, .. } => reply.finish(Err(error)),
 
             Self::JobStatus { reply, .. } => reply.finish(Err(error)),
             Self::WakeHandoff { reply } => reply.finish(Err(error)),
@@ -507,6 +515,13 @@ impl Backend {
         self.submit(|reply| Command::DomainManifest { id, reply }).await
     }
 
+    /// The kind of each public function in the exact retained deployment.
+    /// # Errors
+    /// Rejects unknown or releasing deployments.
+    pub async fn functions(&self, id: DeploymentId) -> Result<BTreeMap<String, FunctionKind>> {
+        self.submit(|reply| Command::Functions { id, reply }).await
+    }
+
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
         call.validate_limit(512)?;
         let id = self.allocate_action_id()?;
@@ -629,17 +644,32 @@ impl Drop for CancelOnDrop {
 pub struct GroupSubscription {
     receiver: watch::Receiver<Result<GroupUpdate>>,
     initial: bool,
+    /// The version of the results `next` last returned.
+    returned: Option<u64>,
 }
 
 impl GroupSubscription {
     pub(crate) fn new(receiver: watch::Receiver<Result<GroupUpdate>>) -> Self {
-        Self { receiver, initial: true }
+        Self { receiver, initial: true, returned: None }
     }
 
     /// Returns the initial result, then waits for changed results or an error.
     /// # Errors
     /// Reports execution, commit failure or backend shutdown.
     pub async fn next(&mut self) -> Result<GroupUpdate> {
+        loop {
+            let update = self.next_revision().await?;
+            if self.returned.replace(update.version) != Some(update.version) {
+                return Ok(update);
+            }
+        }
+    }
+
+    /// Returns the initial result, then waits for changed results, a later revision at which the results still hold,
+    /// or an error. Later revisions are published at most every 100 ms, not for every commit.
+    /// # Errors
+    /// Reports execution, commit failure or backend shutdown.
+    pub async fn next_revision(&mut self) -> Result<GroupUpdate> {
         if !std::mem::take(&mut self.initial) {
             self.receiver.changed().await.map_err(|_| Error::Closed)?;
         }
