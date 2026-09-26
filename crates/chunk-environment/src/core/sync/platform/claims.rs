@@ -67,15 +67,14 @@ async fn claim(
     operation: &str,
     arguments: ClaimArguments,
 ) -> Result<ClaimResult, Error> {
-    let request = if let Some(login) = arguments.login {
-        login_request(gateway, operation, login)
-    } else {
-        let stored = held(service, gateway, operation)?;
-        let stored = stored.ok_or_else(|| errors::invalid("no move is queued under this operation ID"))?;
-        if stored.request.source.is_none() {
-            return Err(errors::error(Code::OperationMismatch, "the operation ID names a login"));
+    let request = match (arguments.login, held(service, gateway, operation)?) {
+        (Some(_), Some(stored)) if stored.request.source.is_some() => {
+            return Err(errors::error(Code::OperationMismatch, "the operation ID names a move"));
         }
-        stored.request
+        (Some(login), _) => login_request(gateway, operation, login),
+        (None, Some(stored)) if stored.request.source.is_some() => stored.request,
+        (None, Some(_)) => return Err(errors::error(Code::OperationMismatch, "the operation ID names a login")),
+        (None, None) => return Err(errors::invalid("no move is queued under this operation ID")),
     };
     let control = service.control.clone();
     let outcome = match run(service, async move { control.claim(request).await }).await {
