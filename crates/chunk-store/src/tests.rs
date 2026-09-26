@@ -23,6 +23,19 @@ pub(crate) fn write_to(table: &str, id: &str, value: Option<serde_json::Value>) 
     Write { key: DocumentKey::new(table, id).unwrap(), value }
 }
 
+/// A commit request for [`Storage::batch`].
+pub(crate) fn request(commit: Commit, intents: Vec<crate::JobIntent>) -> crate::Request {
+    crate::Request::Commit { commit, intents }
+}
+
+/// The revision of a committed batch reply.
+pub(crate) fn committed(result: &crate::Result<crate::Reply>) -> Revision {
+    match result {
+        Ok(crate::Reply::Committed(outcome)) => outcome.revision,
+        other => panic!("expected a commit, found {other:?}"),
+    }
+}
+
 pub(crate) fn commit(id: &str, revision: u64, writes: Vec<Write>) -> Commit {
     Commit { expected: Revision(revision), operation: operation(id), writes, result: json!({"committed": id}) }
 }

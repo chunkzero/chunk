@@ -85,8 +85,7 @@ pub struct Document {
 }
 
 /// Primary-key index interval: inclusive start, exclusive end; None is unbounded.
-/// Returns every matching document, bounded by the adapter environment capacity
-/// (100,000 documents / 32 MiB for SQLite).
+/// Returns every matching document, bounded by the caller's read budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyRange {
     pub table: String,

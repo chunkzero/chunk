@@ -61,7 +61,7 @@ pub use model::{
 };
 pub use replication::{ObjectStorage, Replication, Replicator};
 pub use snapshot::{Snapshot, SnapshotReader};
-pub use sqlite::SqliteStore;
+pub use sqlite::{SqliteStore, retention::Retention};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
@@ -140,6 +140,43 @@ pub trait Storage: Send {
     /// # Errors
     /// Returns conflicts, invalid batches, mismatched operations or storage failures.
     fn commit(&mut self, commit: Commit) -> Result<Outcome>;
+
+    /// Applies requests in order as if one at a time, each commit with its own
+    /// revision and outcome, returning one result per request until the first
+    /// failure that is not a [rejection](Error::rejected). Requests after it have
+    /// no result and were not applied. Adapters may share one durable write.
+    fn batch(&mut self, requests: Vec<Request>) -> Vec<Result<Reply>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let result = match request {
+                Request::Prepare { operation, context } => {
+                    self.prepare_operation(&operation, context).map(Reply::Prepared)
+                }
+                Request::Commit { commit, intents } => self.commit_with_jobs(commit, intents).map(Reply::Committed),
+            };
+            let stop = result.as_ref().is_err_and(|error| !error.rejected());
+            results.push(result);
+            if stop {
+                break;
+            }
+        }
+        results
+    }
+
+    /// Advances on every restore, so `(epoch, revision)` identifies a commit across restores.
+    fn epoch(&self) -> Epoch;
+}
+
+/// A durable write that may share a transaction and fsync with others.
+pub enum Request {
+    Prepare { operation: Operation, context: RetryContext },
+    Commit { commit: Commit, intents: Vec<JobIntent> },
+}
+
+#[derive(Debug)]
+pub enum Reply {
+    Prepared(RetryContext),
+    Committed(Outcome),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -178,6 +215,14 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl Error {
+    /// A rejected request changed nothing and leaves storage usable.
+    #[must_use]
+    pub fn rejected(&self) -> bool {
+        matches!(self, Self::Conflict { .. } | Self::Invalid(_) | Self::Capacity | Self::OperationMismatch)
+    }
 }
 
 #[cfg(test)]

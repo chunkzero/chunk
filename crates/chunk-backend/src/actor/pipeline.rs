@@ -239,14 +239,16 @@ impl Actor {
             self.fail(&Error::CommitFailed);
             return;
         };
-        if pending.operation != id || pending.revision != update.revision || snapshot.revision != update.revision {
+        // A shared durable write acknowledges each of its commits with the same, later snapshot.
+        if pending.operation != id || pending.revision != update.revision || snapshot.revision < update.revision {
             self.fail(&Error::CommitFailed);
             return;
         }
         pending.staged.stop(Phase::Durable);
         self.pending_bytes -= pending.bytes;
+        let durable = snapshot.revision;
         let mut view = View::new(snapshot);
-        for next in &self.pending {
+        for next in self.pending.iter().filter(|next| next.revision > durable) {
             view.apply(next.revision, &next.writes);
         }
         self.view = std::rc::Rc::new(view);

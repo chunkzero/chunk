@@ -182,3 +182,21 @@ fn exhausted_result_retention_still_records_terminal_state() {
     assert_eq!(full.state, JobState::Failed);
     assert!(full.result.is_none());
 }
+
+#[test]
+fn finished_jobs_expire_on_later_job_commands() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let intents = vec![JobIntent::Schedule(job("done")), JobIntent::Schedule(job("waiting"))];
+    store.commit_with_jobs(commit("schedule", 1, vec![]), intents).unwrap();
+    store.job_command(JobCommand::Claim { id: "done".into(), attempt: 1, now: 10 }).unwrap();
+    let finish = JobCommand::Finish { id: "done".into(), attempt: 1, state: JobState::Succeeded, result: None };
+    assert_eq!(store.job_command(finish).unwrap().records.len(), 2);
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store.set_retention(crate::Retention { jobs: std::time::Duration::ZERO, ..crate::Retention::default() });
+    let generation = store.jobs().unwrap().wake.generation;
+    let jobs = store.job_command(JobCommand::Recover).unwrap();
+    assert_eq!(jobs.records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
+    assert!(jobs.wake.generation > generation);
+}

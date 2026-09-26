@@ -124,6 +124,9 @@ impl Storage for ControlledStore {
     fn outcome(&self, operation: &Operation) -> chunk_store::Result<Option<Outcome>> {
         self.inner.outcome(operation)
     }
+    fn epoch(&self) -> chunk_store::Epoch {
+        self.inner.epoch()
+    }
     fn commit(&mut self, commit: Commit) -> chunk_store::Result<Outcome> {
         if let Some(attempts) = &self.attempts {
             attempts.lock().unwrap().push(commit.result.clone());
@@ -502,3 +505,28 @@ mod documents;
 mod effects;
 mod integration;
 mod jobs;
+
+#[tokio::test]
+async fn concurrent_mutations_share_durable_writes_and_keep_their_own_revisions() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let base = backend.query(call("get", json!({"id": "p"}))).await.unwrap().revision;
+    let tasks: Vec<_> = (0..16)
+        .map(|index| {
+            let backend = backend.clone();
+            tokio::spawn(async move { backend.mutate(format!("bump-{index}"), call("bump", json!({"id": "p"}))).await })
+        })
+        .collect();
+    let mut committed = Vec::new();
+    for task in tasks {
+        let update = task.await.unwrap().unwrap();
+        committed.push((update.revision, value(&update)));
+    }
+    committed.sort_by_key(|(revision, _)| *revision);
+    let expected: Vec<_> = (1..=16).map(|count| (Revision(base.0 + count), json!(count))).collect();
+    assert_eq!(committed, expected);
+    let read = backend.query(call("get", json!({"id": "p"}))).await.unwrap();
+    assert_eq!((read.revision, value(&read)), (Revision(base.0 + 16), json!(16)));
+    tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
+}

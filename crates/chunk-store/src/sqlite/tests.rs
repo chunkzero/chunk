@@ -7,6 +7,7 @@ use serde_json::json;
 
 mod jobs;
 mod queries;
+mod retention;
 mod schemas;
 mod transactions;
 
@@ -145,13 +146,13 @@ fn capacity_totals_follow_replacements_and_deletes() {
         ))
         .unwrap();
     assert_eq!(totals(&store), (1, 13));
-    let schema =
-        serde_json::from_value(json!({"large": {"fields": {"text": {"schema": {"type": "string"}}}}})).unwrap();
-    store.apply_schema(&schema).unwrap();
-    let value = json!({"text": "x".repeat(1024 * 1024 - 32)});
-    let writes = (0..33).map(|id| crate::tests::write_to("large", &id.to_string(), Some(value.clone()))).collect();
-    assert!(matches!(store.commit(commit("too-large", 4, writes)), Err(Error::Capacity)));
-    assert_eq!(totals(&store), (1, 13));
-    assert_eq!(store.snapshot().unwrap().revision, Revision(4));
+    let full = write::MAX_DOCUMENT_TOTAL_BYTES - 13;
+    store.connection.execute("UPDATE _chunk_metadata SET document_bytes = document_bytes + ?1", [full]).unwrap();
+    assert!(matches!(
+        store.commit(commit("too-large", 3, vec![write("b", Some(json!({"coins": 1})))])),
+        Err(Error::Capacity)
+    ));
+    assert_eq!(totals(&store), (1, 13 + full));
+    assert_eq!(store.snapshot().unwrap().revision, Revision(3));
     assert!(store.outcome(&operation("too-large")).unwrap().is_none());
 }

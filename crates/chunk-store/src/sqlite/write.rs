@@ -7,15 +7,16 @@ use chunk_contract::TableSchema;
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 
-use crate::{Commit, DatabaseSchema, DocumentKey, Error, Operation, Outcome, Result, Revision};
+use crate::{Commit, DatabaseSchema, DocumentKey, Error, JobIntent, Operation, Outcome, Result, Revision};
 
 use super::codec;
 use super::codec::quote;
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_WRITES: usize = 256;
-const MAX_DOCUMENT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
-const MAX_DOCUMENTS: usize = 100_000;
+/// Each write charges its key and document JSON, so deletes count too.
+const MAX_COMMIT_BYTES: usize = 64 * 1024 * 1024;
+/// Keeps the database, and so its snapshots and restores, to a bounded size.
+pub(super) const MAX_DOCUMENT_TOTAL_BYTES: usize = 16 * 1024 * 1024 * 1024;
 
 struct PreparedWrite<'a> {
     key: &'a DocumentKey,
@@ -31,9 +32,7 @@ pub(super) struct Prepared<'a> {
 
 impl<'a> Prepared<'a> {
     pub fn new(commit: &'a Commit, schema: &DatabaseSchema) -> Result<Self> {
-        if commit.writes.len() > MAX_WRITES {
-            return Err(Error::Invalid("too many writes"));
-        }
+        let mut commit_bytes = 0;
         let mut keys = BTreeSet::new();
         let mut statements = BTreeMap::new();
         let mut writes = Vec::with_capacity(commit.writes.len());
@@ -52,6 +51,7 @@ impl<'a> Prepared<'a> {
                 if bytes > MAX_DOCUMENT_BYTES {
                     return Err(Error::Capacity);
                 }
+                commit_bytes += bytes;
                 Some(
                     table
                         .fields
@@ -62,6 +62,10 @@ impl<'a> Prepared<'a> {
             } else {
                 None
             };
+            commit_bytes += write.key.table.len() + write.key.id.len();
+            if commit_bytes > MAX_COMMIT_BYTES {
+                return Err(Error::Capacity);
+            }
             writes.push(PreparedWrite {
                 key: &write.key,
                 upsert: statements
@@ -108,7 +112,7 @@ impl<'a> Prepared<'a> {
                 connection.prepare_cached(&format!("DELETE FROM {table} WHERE _id = ?"))?.execute([&write.key.id])?;
             }
         }
-        if count > MAX_DOCUMENTS || bytes > MAX_DOCUMENT_TOTAL_BYTES {
+        if bytes > MAX_DOCUMENT_TOTAL_BYTES {
             return Err(Error::Capacity);
         }
         connection.execute(
@@ -117,6 +121,35 @@ impl<'a> Prepared<'a> {
         )?;
         Ok(())
     }
+}
+
+/// Applies one commit inside the caller's transaction, stamping its outcome with `now`.
+pub(super) fn commit(
+    connection: &Connection,
+    schema: &DatabaseSchema,
+    commit: Commit,
+    intents: &[JobIntent],
+    now: i64,
+) -> Result<Outcome> {
+    if let Some(outcome) = outcome(connection, &commit.operation)? {
+        return Ok(outcome);
+    }
+    let prepared = Prepared::new(&commit, schema)?;
+    let current = super::revision::current(connection)?;
+    if current != commit.expected {
+        return Err(Error::Conflict { expected: commit.expected, actual: current });
+    }
+    let next = super::revision::next(current)?;
+    prepared.apply(connection, next)?;
+    super::jobs::apply(connection, intents)?;
+    connection.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
+    connection.execute(
+        "INSERT INTO _chunk_operations (operation_id, fingerprint, revision, result, committed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![commit.operation.id, commit.operation.fingerprint.as_slice(), next, prepared.result, now],
+    )?;
+    connection.execute("DELETE FROM _chunk_retry_contexts WHERE operation_id = ?1", [&commit.operation.id])?;
+    Ok(Outcome { revision: next, result: commit.result })
 }
 
 pub(super) fn outcome(connection: &Connection, operation: &Operation) -> Result<Option<Outcome>> {

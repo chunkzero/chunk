@@ -34,7 +34,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 }
 
 /// The current store format, recorded as SQLite's `user_version`.
-pub(super) const FORMAT: i64 = 7;
+pub(super) const FORMAT: i64 = 8;
 
 /// Reports whether an existing database was migrated from an older format.
 pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
@@ -118,6 +118,19 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
              PRAGMA user_version = 7;
              COMMIT;",
         )?;
+    }
+    if version < 8 {
+        // Existing records get a full retention window from the upgrade.
+        let now = super::retention::now();
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE _chunk_operations ADD COLUMN committed_at INTEGER NOT NULL DEFAULT {now};
+             CREATE INDEX _chunk_operations_committed ON _chunk_operations(committed_at);
+             ALTER TABLE _chunk_retry_contexts ADD COLUMN prepared_at INTEGER NOT NULL DEFAULT {now};
+             ALTER TABLE _chunk_jobs ADD COLUMN updated_at INTEGER NOT NULL DEFAULT {now};
+             PRAGMA user_version = 8;
+             COMMIT;"
+        ))?;
     }
     Ok((connection, version != 0 && version < FORMAT))
 }

@@ -1,13 +1,14 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 
 use crate::{
-    Commit, DatabaseSchema, Epoch, Error, Operation, Outcome, Replication, Replicator, Result, RetryContext, Revision,
-    Snapshot, Storage, replication,
+    Commit, DatabaseSchema, Epoch, Error, JobIntent, Operation, Outcome, Replication, Replicator, Reply, Request,
+    Result, RetryContext, Revision, Snapshot, Storage, replication,
 };
 
 pub(crate) mod bootstrap;
@@ -17,9 +18,13 @@ mod jobs;
 pub(crate) mod log;
 mod operations;
 mod read;
+pub(crate) mod retention;
 mod revision;
 mod schema;
 mod write;
+
+/// Expired outcomes and retry contexts are removed at most this often.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Local single-writer adapter. The advisory lock lives beside the canonical
 /// database path and is held for this object's lifetime. Every writer must use
@@ -30,6 +35,8 @@ pub struct SqliteStore {
     schema: Arc<DatabaseSchema>,
     epoch: Epoch,
     log: Option<log::Log>,
+    retention: retention::Retention,
+    pruned_at: Option<Instant>,
     _writer_lock: bootstrap::WriterLock,
 }
 
@@ -96,14 +103,21 @@ impl SqliteStore {
     ) -> Result<Self> {
         let schema = Arc::new(schema::load(&connection)?);
         let epoch = Epoch(log::epoch(&connection)?);
-        Ok(Self { connection, path, schema, epoch, log, _writer_lock: writer_lock })
+        Ok(Self {
+            connection,
+            path,
+            schema,
+            epoch,
+            log,
+            retention: retention::Retention::default(),
+            pruned_at: None,
+            _writer_lock: writer_lock,
+        })
     }
 
-    /// The environment epoch, fixed for this store's lifetime. Pair it with a
-    /// revision to identify a commit across restores.
-    #[must_use]
-    pub fn epoch(&self) -> Epoch {
-        self.epoch
+    /// Replaces the default one-day retention windows.
+    pub fn set_retention(&mut self, retention: retention::Retention) {
+        self.retention = retention;
     }
 }
 
@@ -116,9 +130,11 @@ fn validate_environment(environment: &str) -> Result<()> {
 
 impl Storage for SqliteStore {
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext> {
-        log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
-            operations::prepare(transaction, operation, context)
-        })
+        match self.batch(vec![Request::Prepare { operation: operation.clone(), context }]).pop() {
+            Some(Ok(Reply::Prepared(context))) => Ok(context),
+            Some(Err(error)) => Err(error),
+            _ => Err(Error::Corrupt("batch reply")),
+        }
     }
 
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
@@ -168,35 +184,76 @@ impl Storage for SqliteStore {
     }
 
     fn job_command(&mut self, command: crate::JobCommand) -> Result<crate::Jobs> {
-        log::write(&self.connection, self.log.as_mut(), &[], |transaction| jobs::command(transaction, command))
+        let retention = &self.retention;
+        log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
+            // Pruning changes the wake generation, which would make an acknowledgement stale.
+            let prune = !matches!(command, crate::JobCommand::AcknowledgeWake { .. });
+            let jobs = jobs::command(transaction, command)?;
+            if prune && retention::prune_jobs(transaction, retention, retention::now())? {
+                jobs::changed(transaction)?;
+                return jobs::load(transaction);
+            }
+            Ok(jobs)
+        })
     }
 
     fn commit(&mut self, commit: Commit) -> Result<Outcome> {
         self.commit_with_jobs(commit, Vec::new())
     }
 
-    fn commit_with_jobs(&mut self, commit: Commit, intents: Vec<crate::JobIntent>) -> Result<Outcome> {
-        if let Some(outcome) = write::outcome(&self.connection, &commit.operation)? {
-            return Ok(outcome);
+    fn commit_with_jobs(&mut self, commit: Commit, intents: Vec<JobIntent>) -> Result<Outcome> {
+        match self.batch(vec![Request::Commit { commit, intents }]).pop() {
+            Some(Ok(Reply::Committed(outcome))) => Ok(outcome),
+            Some(Err(error)) => Err(error),
+            _ => Err(Error::Corrupt("batch reply")),
         }
-        let prepared = write::Prepared::new(&commit, &self.schema)?;
-        let next = log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
-            let current = revision::current(transaction)?;
-            if current != commit.expected {
-                return Err(Error::Conflict { expected: commit.expected, actual: current });
+    }
+
+    /// Shares one transaction and fsync. Each request runs in a savepoint, so a
+    /// rejection undoes only that request; any other failure undoes the batch.
+    fn batch(&mut self, requests: Vec<Request>) -> Vec<Result<Reply>> {
+        let now = retention::now();
+        let prune = self.pruned_at.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL);
+        let (schema, retention) = (&self.schema, &self.retention);
+        let committed = log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
+            if prune {
+                retention::prune_operations(transaction, retention, now)?;
             }
-            let next = revision::next(current)?;
-            prepared.apply(transaction, next)?;
-            jobs::apply(transaction, &intents)?;
-            transaction.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
-            transaction.execute(
-                "INSERT INTO _chunk_operations VALUES (?1, ?2, ?3, ?4)",
-                params![commit.operation.id, commit.operation.fingerprint.as_slice(), next, prepared.result],
-            )?;
-            transaction.execute("DELETE FROM _chunk_retry_contexts WHERE operation_id = ?1", [&commit.operation.id])?;
-            Ok(next)
-        })?;
-        Ok(Outcome { revision: next, result: commit.result })
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                transaction.execute_batch("SAVEPOINT chunk_commit")?;
+                let result = match request {
+                    Request::Prepare { operation, context } => {
+                        operations::prepare(transaction, &operation, context).map(Reply::Prepared)
+                    }
+                    Request::Commit { commit, intents } => {
+                        write::commit(transaction, schema, commit, &intents, now).map(Reply::Committed)
+                    }
+                };
+                match &result {
+                    Ok(_) => transaction.execute_batch("RELEASE chunk_commit")?,
+                    Err(error) if error.rejected() => {
+                        transaction.execute_batch("ROLLBACK TO chunk_commit; RELEASE chunk_commit")?;
+                    }
+                    Err(_) => return result.map(|_| Vec::new()),
+                }
+                results.push(result);
+            }
+            Ok(results)
+        });
+        match committed {
+            Ok(results) => {
+                if prune {
+                    self.pruned_at = Some(Instant::now());
+                }
+                results
+            }
+            Err(error) => vec![Err(error)],
+        }
+    }
+
+    fn epoch(&self) -> Epoch {
+        self.epoch
     }
 }
 

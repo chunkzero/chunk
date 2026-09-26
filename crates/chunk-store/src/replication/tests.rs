@@ -12,7 +12,7 @@ use serde_json::json;
 use super::*;
 use crate::{
     Epoch, Error, Operation, RetryContext, Revision, SqliteStore, Storage,
-    tests::{commit, operation, schema, write},
+    tests::{commit, operation, request, schema, write},
 };
 
 #[derive(Default)]
@@ -134,19 +134,31 @@ fn restore_replays_the_latest_snapshot_and_later_segments_exactly() {
     store.prepare_operation(&operation("pending"), context).unwrap();
     store.commit(commit("two", 4, vec![write("a", None)])).unwrap();
     replicator.flush().unwrap();
+    // A batch shares one entry; its rejected commit's savepoint rollback must not replicate.
+    let rejected = crate::JobIntent::Cancel { id: "missing".into(), caller: json!(null) };
+    let results = store.batch(vec![
+        request(commit("batch-a", 5, vec![write("f", Some(json!({"coins": 7})))]), vec![]),
+        request(commit("batch-rejected", 6, vec![write("g", Some(json!({"coins": 8})))]), vec![rejected]),
+        request(commit("batch-b", 6, vec![write("f", None), write("h", Some(json!({"coins": 9})))]), vec![]),
+    ]);
+    assert!(results[1].is_err() && results[2].is_ok());
+    replicator.flush().unwrap();
+    let batch_replayed = directory.path().join("batch.db");
+    drop(open(&batch_replayed, manual(&storage.copy())));
+    assert_eq!(dump(&batch_replayed), dump(&path));
     drop((store, replicator));
 
     // Writes made without replication reach storage through the next snapshot.
     let mut store = SqliteStore::open(&path, "local").unwrap();
-    store.commit(commit("unlogged", 5, vec![write("d", Some(json!({"coins": 4})))])).unwrap();
+    store.commit(commit("unlogged", 7, vec![write("d", Some(json!({"coins": 4})))])).unwrap();
     drop(store);
     let (mut store, replicator) = open(&path, manual(&storage));
-    store.commit(commit("five", 6, vec![write("b", Some(json!({"coins": 5})))])).unwrap();
+    store.commit(commit("five", 8, vec![write("b", Some(json!({"coins": 5})))])).unwrap();
     replicator.flush().unwrap();
-    store.commit(commit("six", 7, vec![write("e", Some(json!({"coins": 6})))])).unwrap();
+    store.commit(commit("six", 9, vec![write("e", Some(json!({"coins": 6})))])).unwrap();
     replicator.flush().unwrap();
     drop((store, replicator));
-    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (3, 3));
+    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (3, 4));
 
     let restored = directory.path().join("restored.db");
     let (store, _replicator) = open(&restored, manual(&storage));

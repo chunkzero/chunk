@@ -51,7 +51,7 @@ fn save(connection: &Connection, job: &Job) -> Result<()> {
     if payload.len() > 256 * 1024 {
         return Err(Error::Capacity);
     }
-    connection.execute("INSERT INTO _chunk_jobs VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET state=excluded.state,due_at=excluded.due_at,payload=excluded.payload",params![job.id,job.deployment,state(job.state),job.due_at,payload])?;
+    connection.execute("INSERT INTO _chunk_jobs (id,deployment,state,due_at,payload,updated_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,due_at=excluded.due_at,payload=excluded.payload,updated_at=excluded.updated_at",params![job.id,job.deployment,state(job.state),job.due_at,payload,super::retention::now()])?;
     Ok(())
 }
 
@@ -90,7 +90,7 @@ fn charge(job: &Job) -> Result<usize> {
     Ok(serde_json::to_vec(job)?.len() + 9 - state(job.state).len())
 }
 
-fn changed(connection: &Connection) -> Result<()> {
+pub(super) fn changed(connection: &Connection) -> Result<()> {
     let (count, bytes) = totals(connection)?;
     if count > MAX_JOBS || bytes > MAX_BYTES {
         return Err(Error::Capacity);
