@@ -23,7 +23,8 @@
 // and an unset position means none. A restore starts a new epoch, whose revisions may repeat numbers from a lost tail
 // of the previous one, so a pair is never reused. A claim generation is the position of the commit that created it.
 //
-// Subscriptions. A topic's state is a map from key to value. Each stream's first update names the stream. The stream
+// Subscriptions. A topic's state is a map from key to value. Each stream's first update names the stream, unless the
+// subscription is rejected, in which case its only update is the terminal error. The stream
 // starts with a snapshot unless `after` names a stream of the same topic, arguments, deployment, caller and credential
 // and a position of the current epoch within retained history, not ahead of the current position; then it starts
 // with the changes after that position, possibly none. Either way the first update reflects the current position.
