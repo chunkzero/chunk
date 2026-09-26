@@ -169,10 +169,27 @@ impl Replica {
         Ok(self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?)
     }
 
-    /// Drops the source's retry contexts and, unless `keep_jobs`, its pending and
-    /// running jobs, so a fork never resumes work the source scheduled.
+    /// Drops the source's retry contexts, its system table rows and, unless `keep_jobs`,
+    /// its pending and running jobs, so a fork never resumes work or state the source owned.
     pub fn discard_inherited(&self, keep_jobs: bool) -> Result<()> {
         self.connection.execute("DELETE FROM _chunk_retry_contexts", [])?;
+        let tables = self
+            .connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter(|name| name.as_ref().is_ok_and(|name| crate::is_system_table(name)))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for table in tables {
+            let table = super::codec::quote(&table);
+            self.connection.execute(
+                &format!(
+                    "UPDATE _chunk_metadata SET document_count = document_count - (SELECT count(*) FROM {table}), \
+                     document_bytes = document_bytes - (SELECT coalesce(sum(_bytes), 0) FROM {table}) WHERE singleton = 1"
+                ),
+                [],
+            )?;
+            self.connection.execute(&format!("DELETE FROM {table}"), [])?;
+        }
         if !keep_jobs
             && self.connection.execute("DELETE FROM _chunk_jobs WHERE state IN ('pending', 'running')", [])? > 0
         {

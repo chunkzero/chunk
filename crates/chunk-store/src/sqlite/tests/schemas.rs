@@ -147,6 +147,15 @@ fn deployments_cannot_declare_system_tables() {
     assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
     assert!(matches!(store.retain_deployment(&deployment), Err(Error::Invalid(_))));
     assert!(store.deployments().unwrap().is_empty());
+    // A deployment stored before the prefix was reserved is refused when it reloads.
+    store
+        .connection
+        .execute(
+            "INSERT INTO _chunk_deployments VALUES (?1, ?2)",
+            [&deployment.id, &serde_json::to_string(&deployment).unwrap()],
+        )
+        .unwrap();
+    assert!(matches!(store.deployments(), Err(Error::Corrupt(_))));
 }
 
 #[test]
