@@ -9,7 +9,7 @@ import { Panel, PanelNote } from "../../components/panel.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { fieldClass, Input } from "../../components/ui/input.tsx";
 import { Label } from "../../components/ui/label.tsx";
-import { api, errorMessage, newRequestId, refresh } from "../../lib/client.ts";
+import { api, errorMessage, refresh, useRequestId } from "../../lib/client.ts";
 import { timeAgo } from "../../lib/format.ts";
 import { useSecrets } from "../../lib/queries.ts";
 
@@ -98,9 +98,9 @@ function SetSecretDialog({
   name: string | undefined;
   onClose: () => void;
 }) {
-  const [requestId] = useState(newRequestId);
   const [name, setName] = useState(existing ?? "");
   const [value, setValue] = useState("");
+  const requestId = useRequestId(environment, name, value);
 
   return (
     <ConfirmDialog

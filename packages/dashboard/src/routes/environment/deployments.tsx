@@ -12,7 +12,7 @@ import { Label } from "../../components/ui/label.tsx";
 import { DeploymentState } from "../../gen/chunk/management/v1/common_pb.ts";
 import type { Deployment } from "../../gen/chunk/management/v1/deployments_pb.ts";
 import type { Environment } from "../../gen/chunk/management/v1/projects_pb.ts";
-import { api, errorMessage, newRequestId, refresh } from "../../lib/client.ts";
+import { api, errorMessage, refresh, useRequestId } from "../../lib/client.ts";
 import { deploymentStatus, timeAgo, triggerLabels } from "../../lib/format.ts";
 import { recentDeployments, useDeployments, useEnvironment, useEnvironments } from "../../lib/queries.ts";
 
@@ -85,10 +85,10 @@ export function Deployments() {
 }
 
 function PromoteDialog({ project, source, onClose }: { project: string; source: Environment; onClose: () => void }) {
-  const [requestId] = useState(newRequestId);
   const targets = useEnvironments(project).data?.filter((environment) => environment.id !== source.id) ?? [];
   const [target, setTarget] = useState("");
   const targetId = target || targets[0]?.id || "";
+  const requestId = useRequestId(source.id, targetId);
 
   return (
     <ConfirmDialog
@@ -134,7 +134,7 @@ function RollbackDialog({
   deployment: Deployment;
   onClose: () => void;
 }) {
-  const [requestId] = useState(newRequestId);
+  const requestId = useRequestId(environment.id, deployment.id);
   return (
     <ConfirmDialog
       title="Roll back"
