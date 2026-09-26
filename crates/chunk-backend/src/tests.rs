@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     pin::Pin,
     sync::mpsc,
@@ -84,7 +85,7 @@ enum Notice {
 
 struct ControlledStore {
     inner: SqliteStore,
-    prepare: Option<mpsc::Receiver<()>>,
+    prepares: VecDeque<mpsc::Receiver<()>>,
     commits: Vec<mpsc::Receiver<()>>,
     committed: usize,
     notices: signals::UnboundedSender<Notice>,
@@ -106,7 +107,7 @@ impl ControlledStore {
     fn new(inner: SqliteStore, notices: signals::UnboundedSender<Notice>) -> Self {
         Self {
             inner,
-            prepare: None,
+            prepares: VecDeque::new(),
             commits: Vec::new(),
             committed: 0,
             notices,
@@ -200,7 +201,7 @@ impl Storage for ControlledStore {
         operation: &Operation,
         context: chunk_store::RetryContext,
     ) -> chunk_store::Result<chunk_store::RetryContext> {
-        if let Some(gate) = self.prepare.take() {
+        if let Some(gate) = self.prepares.pop_front() {
             let _ = self.notices.send(Notice::Preparing);
             let _ = gate.recv();
         }
@@ -248,7 +249,7 @@ impl Storage for ControlledStore {
 }
 
 struct Controls {
-    prepare: Option<mpsc::Sender<()>>,
+    prepares: Vec<mpsc::Sender<()>>,
     commits: Vec<mpsc::Sender<()>>,
     notices: signals::UnboundedReceiver<Notice>,
 }
@@ -267,23 +268,18 @@ impl Harness {
     }
 
     async fn with_failure(ambiguous: bool, rejected: bool) -> Self {
-        Self::with_options(ambiguous, rejected, rejected).await
+        Self::with_options(ambiguous, rejected, if rejected { 2 } else { 0 }).await
     }
 
-    async fn with_options(ambiguous: bool, rejected: bool, gate_prepare: bool) -> Self {
+    async fn with_options(ambiguous: bool, rejected: bool, prepare_gates: usize) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut store = open(&directory);
         let base = store.snapshot().unwrap().revision;
         let (commits, receivers): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
         let (notices, receiver) = signals::unbounded_channel();
-        let (prepare, prepare_receiver) = if gate_prepare {
-            let (sender, receiver) = mpsc::channel();
-            (Some(sender), Some(receiver))
-        } else {
-            (None, None)
-        };
+        let (prepares, prepare_receivers): (Vec<_>, VecDeque<_>) = (0..prepare_gates).map(|_| mpsc::channel()).unzip();
         let store = ControlledStore {
-            prepare: prepare_receiver,
+            prepares: prepare_receivers,
             commits: receivers,
             ambiguous,
             rejected,
@@ -291,7 +287,7 @@ impl Harness {
         };
         let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
-        Self { controls: Controls { prepare, commits, notices: receiver }, backend, directory, base }
+        Self { controls: Controls { prepares, commits, notices: receiver }, backend, directory, base }
     }
 }
 
@@ -471,13 +467,24 @@ async fn rejected_commit_drains_suffix_before_reusing_revisions() {
     let mut second = Box::pin(backend.mutate("b".into(), call("bump", json!({"id":"p"}))));
     pending(second.as_mut()).await;
     backend.query(call("get", json!({"id":"other"}))).await.unwrap();
-    harness.controls.prepare.take().unwrap().send(()).unwrap();
+    harness.controls.prepares[0].send(()).unwrap();
+    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Preparing);
+    // With b's preparation held, a's commit queues before this scheduling command.
+    // Scheduling ends its batch, so b's commit must belong to a later batch.
+    backend.query(call("get", json!({"id":"other"}))).await.unwrap();
+    let mut boundary = Box::pin(backend.acknowledge_wake(0, None));
+    pending(boundary.as_mut()).await;
+    backend.query(call("get", json!({"id":"other"}))).await.unwrap();
+    harness.controls.prepares[1].send(()).unwrap();
     assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    // b's prepare reply precedes a's rejection, so the actor stages the suffix first.
     backend.query(call("get", json!({"id":"other"}))).await.unwrap();
     harness.controls.commits[0].send(()).unwrap();
     assert!(matches!(first.await, Err(Error::Retry)));
     assert!(matches!(second.await, Err(Error::Retry)));
     assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    // Only the held suffix commit may keep recovery active during the Busy check.
+    assert!(boundary.await.is_err());
     assert_eq!(value(&backend.query(call("get", json!({"id":"p"}))).await.unwrap()), json!(0));
     assert!(matches!(backend.mutate("c".into(), call("bump", json!({"id":"p"}))).await, Err(Error::Busy)));
     harness.controls.commits[1].send(()).unwrap();
