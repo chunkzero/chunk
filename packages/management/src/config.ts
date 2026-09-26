@@ -21,6 +21,8 @@ export interface Config {
   logStore: LogStore | undefined;
   /** How environments get machines; unset leaves every environment unprovisioned. */
   machines: Machines | undefined;
+  /** The dashboard's static build; unset serves no dashboard. */
+  dashboardDir: string | undefined;
 }
 
 export interface Machines {
@@ -86,6 +88,7 @@ export function loadConfig(env: Env = process.env): Config {
     edgeToken: token(env, "CHUNK_EDGE_TOKEN"),
     logStore: logStoreOf(env),
     machines: machinesOf(env, publicUrl),
+    dashboardDir: env.CHUNK_DASHBOARD_DIR || undefined,
   };
 }
 

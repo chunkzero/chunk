@@ -20,6 +20,7 @@ bun src/main.ts
 | `CHUNK_PUBLIC_URL`                   | `http://localhost:$PORT`    | How clients reach this service; used in upload and login URLs.                                     |
 | `HOST` / `PORT`                      | `0.0.0.0` / `8080`          | Listen address.                                                                                    |
 | `CHUNK_DATA_DIR`                     | `data`                      | Release archives are stored under `releases/` here.                                                |
+| `CHUNK_DASHBOARD_DIR`                | unset                       | The dashboard's build (`pnpm build:dashboard` writes `packages/dashboard/dist`), served at `/`.    |
 | `CHUNK_MAX_RELEASE_EXPANDED_BYTES`   | `8589934592`                | How far a release archive may expand while it is verified.                                         |
 | `CHUNK_MAX_RELEASE_ENTRIES`          | `100000`                    | How many tar entries a release archive may hold.                                                   |
 | `CHUNK_EDGE_DOMAIN`                  | unset                       | Environments get `env-<id>.<domain>` hostnames; point `*.<domain>` at the edge.                    |

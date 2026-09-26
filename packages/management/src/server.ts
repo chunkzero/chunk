@@ -16,6 +16,7 @@ import {
 
 import { authService } from "./auth/service.ts";
 import { tokenAuthenticator } from "./auth/tokens.ts";
+import { dashboardHandler } from "./dashboard.ts";
 import { deploymentService } from "./deployments/service.ts";
 import type { Deps } from "./deps.ts";
 import { domainService } from "./domains/service.ts";
@@ -36,6 +37,8 @@ import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
   authenticator?: Authenticator;
+  /** Serves the dashboard's static build from here; unset serves no dashboard. */
+  dashboardDir?: string | undefined;
   /** Registers more services; a service registered again here replaces the default one. */
   extend?: (router: ConnectRouter) => void;
 }
@@ -68,6 +71,7 @@ export function createHandler(
     .service(EdgeService, edgeService(deps))
     .service(LogService, logService(deps));
   options.extend?.(router);
+  const dashboard = options.dashboardDir === undefined ? undefined : dashboardHandler(options.dashboardDir);
   const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
 
   /** Connect reads a unary request's whole body before interceptors run, so authentication comes first. */
@@ -89,7 +93,11 @@ export function createHandler(
       return serveRpc(rpc, request);
     }
     if (pathname === "/healthz") return new Response("ok\n");
-    return (await deps.releases.fetch?.(request)) ?? new Response("not found\n", { status: 404 });
+    return (
+      (await deps.releases.fetch?.(request)) ??
+      (await dashboard?.(request)) ??
+      new Response("not found\n", { status: 404 })
+    );
   };
 }
 

@@ -52,7 +52,7 @@ export async function start(config: Config) {
     hostname: config.host,
     port: config.port,
     maxRequestBodySize: Number(maxArchiveBytes) + 1024 * 1024,
-    fetch: createHandler(deps),
+    fetch: createHandler(deps, { dashboardDir: config.dashboardDir }),
   });
   return {
     url: server.url,
