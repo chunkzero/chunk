@@ -92,7 +92,7 @@ impl From<serde_json::Error> for Error {
 impl Error {
     pub(crate) fn is_rejected_commit(&self) -> bool {
         matches!(self, Self::Overloaded(Limit::Jobs))
-            || matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch))
+            || matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch | chunk_store::Error::RolledBack(_)))
     }
 }
 

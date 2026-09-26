@@ -36,23 +36,68 @@ pub(super) fn write<T>(
     statements: &[String],
     change: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
+    stage(connection, log, statements, change)?.commit()
+}
+
+/// Like [`write`], but a failure that is not a rejection and left no
+/// transaction open returns [`Error::RolledBack`]. Fencing and a failed commit
+/// keep their errors.
+pub(super) fn write_or_roll_back<T>(
+    connection: &Connection,
+    log: Option<&mut Log>,
+    statements: &[String],
+    change: impl FnOnce(&Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    stage(connection, log, statements, change)
+        .map_err(|error| {
+            if error.rejected() || matches!(error, Error::Fenced) || !connection.is_autocommit() {
+                error
+            } else {
+                Error::RolledBack(Box::new(error))
+            }
+        })?
+        .commit()
+}
+
+/// A write transaction holding its changes and log entry, not yet committed.
+struct Staged<'a, T> {
+    transaction: Transaction<'a>,
+    value: T,
+    /// The log, the entry's sequence and size, and the upload position pruned up to.
+    entry: Option<(&'a mut Log, u64, usize, u64)>,
+}
+
+impl<T> Staged<'_, T> {
+    fn commit(self) -> Result<T> {
+        self.transaction.commit()?;
+        if let Some((log, sequence, bytes, uploaded)) = self.entry {
+            log.pruned = log.pruned.max(uploaded);
+            log.shared.committed(sequence, bytes);
+        }
+        Ok(self.value)
+    }
+}
+
+fn stage<'a, T>(
+    connection: &'a Connection,
+    log: Option<&'a mut Log>,
+    statements: &[String],
+    change: impl FnOnce(&Transaction<'_>) -> Result<T>,
+) -> Result<Staged<'a, T>> {
     if log.as_ref().is_some_and(|log| log.shared.fenced()) {
         return Err(Error::Fenced);
     }
     let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let Some(log) = log else {
         let value = change(&transaction)?;
-        transaction.commit()?;
-        return Ok(value);
+        return Ok(Staged { transaction, value, entry: None });
     };
     let mut session = Session::new(connection)?;
     session.table_filter(Some(|table: &str| table != "_chunk_log"));
     session.attach(None::<&str>)?;
     let value = change(&transaction)?;
     if session.is_empty() && statements.is_empty() {
-        drop(session);
-        transaction.commit()?;
-        return Ok(value);
+        return Ok(Staged { transaction, value, entry: None });
     }
     transaction.execute("UPDATE _chunk_metadata SET log_sequence = log_sequence + 1 WHERE singleton = 1", [])?;
     let (sequence, revision) = position(&transaction)?;
@@ -65,10 +110,7 @@ pub(super) fn write<T>(
     if uploaded > log.pruned {
         transaction.execute("DELETE FROM _chunk_log WHERE sequence <= ?1", [uploaded])?;
     }
-    transaction.commit()?;
-    log.pruned = log.pruned.max(uploaded);
-    log.shared.committed(sequence, entry.len());
-    Ok(value)
+    Ok(Staged { transaction, value, entry: Some((log, sequence, entry.len(), uploaded)) })
 }
 
 /// The last assigned log sequence and the environment revision.
