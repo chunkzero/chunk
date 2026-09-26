@@ -187,10 +187,11 @@ impl Storage for SqliteStore {
 
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
         let migration = schema::merge(&self.schema, &deployment.tables)?;
-        let revision = log::write(&self.connection, self.log.as_mut(), &migration.statements, |transaction| {
-            deployments::insert(transaction, deployment)?;
-            schema::install(transaction, &migration)
-        })?;
+        let revision =
+            log::write_or_roll_back(&self.connection, self.log.as_mut(), &migration.statements, |transaction| {
+                deployments::insert(transaction, deployment)?;
+                schema::install(transaction, &migration)
+            })?;
         self.schema = Arc::new(migration.schema);
         Ok(revision)
     }

@@ -84,7 +84,8 @@ pub trait Storage: Send {
     /// Installs an additive schema and retains its deployment in one transaction.
     /// # Errors
     /// Rejects incompatible schemas, [system tables](is_system_table), retired
-    /// identities and storage failures.
+    /// identities and storage failures. A storage failure that changed nothing
+    /// is [`Error::RolledBack`].
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
 
     /// Removes an inactive deployment, permanently retiring its identity.
@@ -225,6 +226,8 @@ pub enum Error {
     Replication(String),
     #[error("another store claimed a newer epoch of this environment; stop serving it")]
     Fenced,
+    #[error("write rolled back: {0}")]
+    RolledBack(Box<Error>),
     #[error("storage I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("SQLite: {0}")]
@@ -239,7 +242,12 @@ impl Error {
     pub fn rejected(&self) -> bool {
         matches!(
             self,
-            Self::Conflict { .. } | Self::Invalid(_) | Self::Capacity | Self::JobBudget | Self::OperationMismatch
+            Self::Conflict { .. }
+                | Self::Invalid(_)
+                | Self::Capacity
+                | Self::JobBudget
+                | Self::OperationMismatch
+                | Self::RolledBack(_)
         )
     }
 }

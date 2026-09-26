@@ -264,6 +264,35 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
 }
 
+#[tokio::test]
+async fn activation_failing_before_commit_keeps_the_previous_deployment_serving() {
+    use crate::Call;
+    use chunk_js::DeploymentId;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rollback.db");
+    let store = SqliteStore::open(&path, "local").unwrap();
+    // A table the store does not track makes the next deployment's DDL fail inside its transaction.
+    rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TABLE extras (x)").unwrap();
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.deploy(deployment("old")).await.unwrap();
+    let call = |function: &str| Call {
+        deployment: DeploymentId::new("old").unwrap(),
+        function: function.into(),
+        arguments: serde_json::Value::Null.into(),
+        caller: serde_json::Value::Null.into(),
+    };
+    backend.mutate("first".into(), call("increment")).await.unwrap();
+    let mut next = deployment("new");
+    next.tables.insert(
+        "extras".into(),
+        serde_json::from_value(json!({"fields": {"x": {"schema": {"type": "integer"}}}})).unwrap(),
+    );
+    assert!(matches!(backend.deploy(next).await,
+            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::RolledBack(_))));
+    assert_eq!(&*backend.query(call("get")).await.unwrap().json, "1");
+    assert_eq!(&*backend.mutate("second".into(), call("increment")).await.unwrap().json, "2");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_shutdown_closes_watchers_and_releases_durable_state() {
     use std::time::Duration;
