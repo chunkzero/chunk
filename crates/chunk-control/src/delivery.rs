@@ -171,6 +171,10 @@ impl Control {
             Ok(unowned) => hosts.extend(unowned),
             Err(error) => result = Err(error),
         }
+        match self.recovery.pending() {
+            Ok(pending) => hosts.extend(pending),
+            Err(error) => result = Err(error),
+        }
         for id in &hosts {
             match self.host.release(id).await {
                 Ok(true) => {}

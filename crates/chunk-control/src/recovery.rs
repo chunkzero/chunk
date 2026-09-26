@@ -63,6 +63,11 @@ impl Recovery {
         Ok(self.lock()?.hosts.is_empty())
     }
 
+    /// Hosts still pending, including a re-attached orphan whose host row its first report has yet to recreate.
+    pub fn pending(&self) -> Result<Vec<String>> {
+        Ok(self.lock()?.hosts.keys().cloned().collect())
+    }
+
     /// Runs `adopt`, then makes `host` pending again, under the lock resolution completes hosts under. A resolution
     /// that observed the adopted process therefore sees the new stamp and leaves the host pending.
     fn reattach(&self, host: &str, adopt: impl FnOnce() -> Result<()>) -> Result<()> {
