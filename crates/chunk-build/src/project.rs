@@ -62,7 +62,7 @@ pub struct LocalConfig {
     pub profiles: BTreeMap<String, MachineProfile>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineProfile {
     pub memory_mib: u32,
