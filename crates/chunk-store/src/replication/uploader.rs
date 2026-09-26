@@ -27,6 +27,8 @@ pub(super) struct Uploader {
     bytes: u64,
     /// Set by a snapshot, whose upload may supersede older objects.
     prune_due: bool,
+    /// Superseded objects left to delete, last first, one per idle turn.
+    expired: Vec<String>,
     /// When ownership was last checked in object storage.
     checked: Cell<Instant>,
 }
@@ -34,6 +36,7 @@ pub(super) struct Uploader {
 enum Work {
     Upload { through: u64 },
     CheckOwnership,
+    Delete,
 }
 
 impl Uploader {
@@ -58,6 +61,7 @@ impl Uploader {
             segments,
             bytes,
             prune_due: false,
+            expired: Vec::new(),
             checked: Cell::new(Instant::now()),
         })
     }
@@ -65,11 +69,15 @@ impl Uploader {
     pub fn run(mut self) {
         let shared = self.shared.clone();
         let _exit = Exit(&shared);
-        self.prune();
+        self.queue_expired();
         let mut backoff = Duration::from_secs(1);
         while let Some(work) = self.wait() {
             let target = match work {
                 Work::Upload { through } => through,
+                Work::Delete => {
+                    self.delete_expired();
+                    continue;
+                }
                 Work::CheckOwnership => {
                     // Transient failures are retried after another interval.
                     if matches!(self.fence(), Err(Error::Fenced)) {
@@ -89,7 +97,7 @@ impl Uploader {
                 Ok(reached) => {
                     self.advance(reached);
                     if std::mem::take(&mut self.prune_due) {
-                        self.prune();
+                        self.queue_expired();
                     }
                     backoff = Duration::from_secs(1);
                     continue;
@@ -113,7 +121,8 @@ impl Uploader {
         }
     }
 
-    /// Waits until a batch or an ownership check is due.
+    /// Waits until an ownership check or a batch is due, or else an expired
+    /// object remains, so deletions never hold up the other two.
     fn wait(&self) -> Option<Work> {
         let mut state = self.shared.lock();
         loop {
@@ -124,23 +133,21 @@ impl Uploader {
             if check.is_zero() {
                 return Some(Work::CheckOwnership);
             }
-            if state.committed <= state.uploaded {
-                state = self.shared.changed.wait_timeout(state, check).unwrap_or_else(PoisonError::into_inner).0;
-                continue;
+            let mut timeout = check;
+            if state.committed > state.uploaded {
+                let waited = state.pending_since.map_or(self.replication.batch_delay, |since| since.elapsed());
+                if state.flush
+                    || state.pending_bytes >= self.replication.batch_bytes
+                    || waited >= self.replication.batch_delay
+                {
+                    return Some(Work::Upload { through: state.committed });
+                }
+                timeout = timeout.min(self.replication.batch_delay.saturating_sub(waited));
             }
-            let waited = state.pending_since.map_or(self.replication.batch_delay, |since| since.elapsed());
-            if state.flush
-                || state.pending_bytes >= self.replication.batch_bytes
-                || waited >= self.replication.batch_delay
-            {
-                return Some(Work::Upload { through: state.committed });
+            if !self.expired.is_empty() {
+                return Some(Work::Delete);
             }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, self.replication.batch_delay.saturating_sub(waited).min(check))
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            state = self.shared.changed.wait_timeout(state, timeout).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 
@@ -207,15 +214,19 @@ impl Uploader {
         Ok(sequence)
     }
 
-    /// Deletes superseded objects on a best-effort basis; a later snapshot or
-    /// open retries whatever fails.
-    fn prune(&self) {
-        let storage = self.replication.storage.as_ref();
-        let Ok(objects) = storage.list("epochs") else { return };
-        for key in super::prune::expired(&objects, self.replication.retention, SystemTime::now()) {
-            if storage.delete(key).is_err() {
-                return;
-            }
+    /// Queues superseded objects for deletion on a best-effort basis; a later
+    /// snapshot or open retries whatever is left.
+    fn queue_expired(&mut self) {
+        let Ok(objects) = self.replication.storage.list("epochs") else { return };
+        let expired = super::prune::expired(&objects, self.replication.retention, SystemTime::now());
+        self.expired = expired.into_iter().rev().map(str::to_owned).collect();
+    }
+
+    fn delete_expired(&mut self) {
+        if let Some(key) = self.expired.pop()
+            && self.replication.storage.delete(&key).is_err()
+        {
+            self.expired.clear();
         }
     }
 

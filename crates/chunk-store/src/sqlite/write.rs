@@ -129,6 +129,7 @@ pub(super) fn commit(
     schema: &DatabaseSchema,
     commit: Commit,
     intents: &[JobIntent],
+    limits: &super::jobs::JobLimits,
     now: i64,
 ) -> Result<Outcome> {
     if let Some(outcome) = outcome(connection, &commit.operation)? {
@@ -141,7 +142,7 @@ pub(super) fn commit(
     }
     let next = super::revision::next(current)?;
     prepared.apply(connection, next)?;
-    super::jobs::apply(connection, intents)?;
+    super::jobs::apply(connection, intents, limits)?;
     connection.execute("UPDATE _chunk_metadata SET revision = ?1 WHERE singleton = 1", [next])?;
     connection.execute(
         "INSERT INTO _chunk_operations (operation_id, fingerprint, revision, result, committed_at)

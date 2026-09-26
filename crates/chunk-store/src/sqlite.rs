@@ -14,7 +14,7 @@ use crate::{
 pub(crate) mod bootstrap;
 mod codec;
 mod deployments;
-mod jobs;
+pub(crate) mod jobs;
 pub(crate) mod log;
 mod operations;
 mod read;
@@ -36,6 +36,7 @@ pub struct SqliteStore {
     epoch: Epoch,
     log: Option<log::Log>,
     retention: retention::Retention,
+    job_limits: jobs::JobLimits,
     pruned_at: Option<Instant>,
     _writer_lock: bootstrap::WriterLock,
 }
@@ -151,6 +152,7 @@ impl SqliteStore {
             epoch,
             log,
             retention: retention::Retention::default(),
+            job_limits: jobs::JobLimits::default(),
             pruned_at: None,
             _writer_lock: writer_lock,
         })
@@ -159,6 +161,11 @@ impl SqliteStore {
     /// Replaces the default one-day retention windows.
     pub fn set_retention(&mut self, retention: retention::Retention) {
         self.retention = retention;
+    }
+
+    /// Replaces the default job budget. Existing jobs beyond a lower budget stay.
+    pub fn set_job_limits(&mut self, limits: jobs::JobLimits) {
+        self.job_limits = limits;
     }
 }
 
@@ -225,11 +232,11 @@ impl Storage for SqliteStore {
     }
 
     fn job_command(&mut self, command: crate::JobCommand) -> Result<crate::Jobs> {
-        let retention = &self.retention;
+        let (retention, limits) = (&self.retention, &self.job_limits);
         log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
             // Pruning changes the wake generation, which would make an acknowledgement stale.
             let prune = !matches!(command, crate::JobCommand::AcknowledgeWake { .. });
-            let jobs = jobs::command(transaction, command)?;
+            let jobs = jobs::command(transaction, command, limits)?;
             if prune && retention::prune_jobs(transaction, retention, retention::now())? {
                 jobs::changed(transaction)?;
                 return jobs::load(transaction);
@@ -255,7 +262,7 @@ impl Storage for SqliteStore {
     fn batch(&mut self, requests: Vec<Request>) -> Vec<Result<Reply>> {
         let now = retention::now();
         let prune = self.pruned_at.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL);
-        let (schema, retention) = (&self.schema, &self.retention);
+        let (schema, retention, limits) = (&self.schema, &self.retention, &self.job_limits);
         let mut backlog = false;
         let committed = log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
             if prune {
@@ -272,7 +279,7 @@ impl Storage for SqliteStore {
                         // Expired finished jobs must not hold capacity a new job needs.
                         let scheduling = intents.iter().any(|intent| matches!(intent, JobIntent::Schedule(_)));
                         (if scheduling { retention::prune_jobs(transaction, retention, now) } else { Ok(false) })
-                            .and_then(|_| write::commit(transaction, schema, commit, &intents, now))
+                            .and_then(|_| write::commit(transaction, schema, commit, &intents, limits, now))
                             .map(Reply::Committed)
                     }
                 };

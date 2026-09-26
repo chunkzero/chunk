@@ -195,13 +195,14 @@ for reconciliation; the job record retains only the latest attempt's state and r
 
 Pending/running jobs retain their originating bundle across restart. Terminal records remain until their owner calls
 `forget_job` or expire 24 hours after their last change; forgetting live work is rejected. Terminal records do not pin
-code: releasing their deployment makes later retries fail. The queue retains at most 256 jobs / 8 MiB, with 16 intents
-per mutation, 64 KiB per encoded intent and 64 KiB for captured caller data. `runAt` accepts a nonnegative safe integer
-no more than 366 days beyond the mutation's captured time; times already due become immediately eligible. Expired
-terminal records are removed before a new job is admitted, and queue overflow rejects the whole mutation. There is no
-recurring schedule or automatic action retry. Host HTTP/secret grants must be supplied again after restart; grants and
-secret values are never part of a job record unless application code explicitly puts such values in its
-arguments/result.
+code: releasing their deployment makes later retries fail. The queue retains at most 20,000 jobs / 64 MiB by default
+(`JobLimits` in `chunk-store`), with 16 intents per mutation, 64 KiB per encoded intent and 64 KiB for captured caller
+data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's captured time; times
+already due become immediately eligible. Expired terminal records are removed before a new job is admitted, and a full
+queue rejects the whole mutation: the store reports a distinct `JobBudget` error, which the backend currently surfaces
+as a retryable rejection (`ABORTED`). There is no recurring schedule or automatic action retry. Host HTTP/secret grants
+must be supplied again after restart; grants and secret values are never part of a job record unless application code
+explicitly puts such values in its arguments/result.
 
 ### Host alarm handoff
 

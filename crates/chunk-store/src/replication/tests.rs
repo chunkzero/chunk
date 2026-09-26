@@ -75,6 +75,18 @@ fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
 }
 
+fn epoch_objects(storage: &Memory, epoch: u64) -> Vec<String> {
+    storage.keys().into_iter().filter(|key| key.starts_with(&format!("epochs/{epoch:020}/"))).collect()
+}
+
+fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn count(storage: &Memory, kind: &str) -> usize {
     storage.keys().iter().filter(|key| key.contains(kind)).count()
 }
@@ -331,11 +343,7 @@ fn idle_writers_detect_a_takeover_and_never_upload_afterwards() {
     // The idle writer notices the takeover without any commit or flush.
     let (mut taken, taken_replicator) = open(&directory.path().join("taken.db"), manual(&storage));
     assert_eq!(taken.epoch(), Epoch(2));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !idle_replicator.fenced() {
-        assert!(Instant::now() < deadline, "idle writer was never fenced");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    eventually("idle writer was never fenced", || idle_replicator.fenced());
     assert!(matches!(idle.commit(commit("idle", 1, vec![])), Err(Error::Fenced)));
 
     // A commit accepted before the next check is never uploaded.
@@ -662,18 +670,18 @@ fn superseded_objects_are_deleted_once_a_newer_snapshot_is_old_enough() {
         store.commit(commit(id, index as u64 + 1, vec![write(id, Some(json!({"coins": 1})))])).unwrap();
         replicator.flush().unwrap();
     }
-    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (1, 1));
+    eventually("superseded objects were never pruned", || {
+        (count(&storage, "/snapshots/"), count(&storage, "/segments/")) == (1, 1)
+    });
     drop((store, replicator));
 
     let restored = directory.path().join("restored.db");
     let (mut store, replicator) = open(&restored, replication());
     store.commit(commit("four", 4, vec![])).unwrap();
     replicator.flush().unwrap();
-    drop((store, replicator));
     // The new epoch's first snapshot supersedes every object of epoch 1 except its claim.
-    let epoch_one: Vec<_> =
-        storage.keys().into_iter().filter(|key| key.starts_with(&format!("epochs/{:020}/", 1))).collect();
-    assert_eq!(epoch_one, [segment::claim_key(1)]);
+    eventually("epoch 1 was never pruned", || epoch_objects(&storage, 1) == [segment::claim_key(1)]);
+    drop((store, replicator));
     let (store, _replicator) = open(&directory.path().join("again.db"), manual(&storage));
     assert!(store.outcome(&operation("four")).unwrap().is_some());
     drop(store);
@@ -690,6 +698,64 @@ fn superseded_objects_are_deleted_once_a_newer_snapshot_is_old_enough() {
     store.commit(commit("two", 2, vec![])).unwrap();
     replicator.flush().unwrap();
     assert_eq!(count(&kept, "/snapshots/"), 2);
+}
+
+/// Takes `delay` for every delete, like a slow bucket.
+struct SlowDeletes(Arc<Memory>, Duration);
+
+impl ObjectStorage for SlowDeletes {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.0.put(key, bytes)
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        self.0.create(key, bytes)
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.0.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
+        self.0.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        std::thread::sleep(self.1);
+        self.0.delete(key)
+    }
+}
+
+#[test]
+fn a_deletion_backlog_never_holds_up_uploads_or_fencing() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) =
+        open(&directory.path().join("data.db"), Replication { snapshot_segments: 1, ..manual(&storage) });
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    for revision in 1..=20 {
+        store.commit(commit(&format!("old-{revision}"), revision, vec![])).unwrap();
+        replicator.flush().unwrap();
+    }
+    drop((store, replicator));
+    let backlog = epoch_objects(&storage, 1).len();
+    assert!(backlog > 20);
+
+    // Deleting the backlog takes seconds; uploads and fence checks go between deletes.
+    let slow = Arc::new(SlowDeletes(storage.clone(), Duration::from_millis(200)));
+    let replication =
+        Replication { fence_interval: Duration::from_millis(10), ..manual_on(slow) }.with_retention(Duration::ZERO);
+    let (mut store, replicator) = open(&directory.path().join("restored.db"), replication);
+    assert_eq!(store.epoch(), Epoch(2));
+    store.commit(commit("new", 21, vec![])).unwrap();
+    replicator.flush().unwrap();
+    assert!(epoch_objects(&storage, 1).len() > backlog / 2, "the upload waited for the backlog");
+    eventually("deletions stopped after the upload", || epoch_objects(&storage, 1).len() < backlog);
+
+    assert!(storage.create(&segment::claim_key(3), Vec::new()).unwrap());
+    eventually("the writer was never fenced", || replicator.fenced());
+    assert!(epoch_objects(&storage, 1).len() > backlog / 2, "fencing waited for the backlog");
 }
 
 #[test]

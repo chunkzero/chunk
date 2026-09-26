@@ -1,6 +1,6 @@
 use super::*;
 use crate::tests::{job, target};
-use crate::{JobCommand, JobIntent, JobState};
+use crate::{JobCommand, JobIntent, JobLimits, JobState};
 use chunk_contract::Schema;
 
 #[test]
@@ -95,23 +95,32 @@ fn claims_recover_unknown_with_stable_attempts_and_checked_owner_retry_retention
 }
 
 #[test]
-fn full_job_queue_rejects_new_intent_and_its_document_writes() {
+fn full_job_budget_rejects_new_intent_and_its_document_writes() {
     let (_directory, mut store) = open();
     store.retain_deployment(&target()).unwrap();
-    for batch in 0..16 {
+    store.set_job_limits(JobLimits { jobs: 32, ..JobLimits::default() });
+    for batch in 0..2 {
         let intents = (0..16).map(|index| JobIntent::Schedule(job(&format!("{batch}-{index}")))).collect();
         store.commit_with_jobs(commit(&format!("batch-{batch}"), batch + 1, vec![]), intents).unwrap();
     }
-    assert!(matches!(
-        store.commit_with_jobs(
-            commit("overflow", 17, vec![write("alice", Some(json!({"coins":7})))]),
-            vec![JobIntent::Schedule(job("overflow"))]
-        ),
-        Err(Error::Capacity)
-    ));
-    assert_eq!(store.jobs().unwrap().records.len(), 256);
+    let overflow = || {
+        (
+            commit("overflow", 3, vec![write("alice", Some(json!({"coins":7})))]),
+            vec![JobIntent::Schedule(job("overflow"))],
+        )
+    };
+    let (first, intents) = overflow();
+    assert!(matches!(store.commit_with_jobs(first, intents), Err(Error::JobBudget)));
+    assert_eq!(store.jobs().unwrap().records.len(), 32);
     assert_eq!(totals(&store), (0, 0));
     assert!(store.outcome(&operation("overflow")).unwrap().is_none());
+
+    // A lower budget keeps existing jobs readable; a higher one admits more.
+    store.set_job_limits(JobLimits { jobs: 1, ..JobLimits::default() });
+    assert_eq!(store.jobs().unwrap().records.len(), 32);
+    store.set_job_limits(JobLimits::default());
+    let (second, intents) = overflow();
+    store.commit_with_jobs(second, intents).unwrap();
 }
 
 #[test]
@@ -120,6 +129,7 @@ fn exhausted_result_retention_still_records_terminal_state() {
     let mut deployment = target();
     deployment.functions.get_mut("work").unwrap().arguments = Schema::String;
     store.retain_deployment(&deployment).unwrap();
+    store.set_job_limits(JobLimits { bytes: 8 * 1024 * 1024, ..JobLimits::default() });
     for batch in 0..4 {
         let intents = (0..if batch == 3 { 15 } else { 16 })
             .map(|index| {
@@ -171,9 +181,10 @@ fn finished_jobs_expire_on_later_job_commands() {
 fn expired_finished_jobs_free_scheduling_capacity() {
     let (_directory, mut store) = open();
     store.retain_deployment(&target()).unwrap();
+    store.set_job_limits(JobLimits { jobs: 32, ..JobLimits::default() });
     let caller = json!({"player":"alice"});
     let mut expected = 1;
-    for batch in 0..16 {
+    for batch in 0..2 {
         let ids: Vec<_> = (0..16).map(|index| format!("job-{batch}-{index}")).collect();
         let scheduled = ids.iter().map(|id| JobIntent::Schedule(job(id))).collect();
         store.commit_with_jobs(commit(&format!("schedule-{batch}"), expected, vec![]), scheduled).unwrap();
@@ -182,7 +193,7 @@ fn expired_finished_jobs_free_scheduling_capacity() {
         expected += 2;
     }
     let late = || vec![JobIntent::Schedule(job("late"))];
-    assert!(matches!(store.commit_with_jobs(commit("late", expected, vec![]), late()), Err(Error::Capacity)));
+    assert!(matches!(store.commit_with_jobs(commit("late", expected, vec![]), late()), Err(Error::JobBudget)));
 
     std::thread::sleep(std::time::Duration::from_millis(5));
     store.set_retention(crate::Retention { jobs: std::time::Duration::ZERO, ..crate::Retention::default() });

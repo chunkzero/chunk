@@ -61,7 +61,7 @@ pub use model::{
 };
 pub use replication::{Listed, ObjectStorage, Replication, Replicator};
 pub use snapshot::{Snapshot, SnapshotReader};
-pub use sqlite::{SqliteStore, retention::Retention};
+pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
@@ -200,6 +200,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("local database size limit reached")]
     Capacity,
+    #[error("scheduled job budget reached; retry once jobs finish or expire")]
+    JobBudget,
     #[error("snapshot read budget exceeded")]
     ReadLimit,
     #[error("corrupt storage: {0}")]
@@ -224,7 +226,10 @@ impl Error {
     /// A rejected request changed nothing and leaves storage usable.
     #[must_use]
     pub fn rejected(&self) -> bool {
-        matches!(self, Self::Conflict { .. } | Self::Invalid(_) | Self::Capacity | Self::OperationMismatch)
+        matches!(
+            self,
+            Self::Conflict { .. } | Self::Invalid(_) | Self::Capacity | Self::JobBudget | Self::OperationMismatch
+        )
     }
 }
 

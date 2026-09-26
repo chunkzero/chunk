@@ -24,7 +24,8 @@
 //! another prefix and starts epoch 1 in its own, empty prefix.
 //!
 //! Once a snapshot is `retention` old, the uploader deletes the snapshots and
-//! segments it supersedes. Claims stay, so epochs are never reused.
+//! segments it supersedes, one at a time between uploads and ownership checks.
+//! Claims stay, so epochs are never reused.
 
 use std::{
     io,
