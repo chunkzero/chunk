@@ -434,6 +434,7 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
     let target = &fixture.commands.tasks.platform.target;
     let unauthorized = crate::server::managed::ClaimGuard {
         platform: crate::server::platform::Platform::new(crate::PlatformTarget {
+            gateway: None,
             backend: target.backend.clone(),
             control: chunk_contract::ControlConnection {
                 endpoint: target.control.endpoint.clone(),

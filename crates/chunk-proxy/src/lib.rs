@@ -74,6 +74,15 @@ impl std::fmt::Debug for GameplayTarget {
 pub struct PlatformTarget {
     pub backend: chunk_contract::BackendConnection,
     pub control: chunk_contract::ControlConnection,
+    /// This gateway's identity in core; without one the proxy picks its own ID.
+    pub gateway: Option<GatewayCredential>,
+}
+
+/// The ID core knows a gateway by, which names the claims it holds, and the credential core minted for it.
+#[derive(Clone)]
+pub struct GatewayCredential {
+    pub id: String,
+    pub credential: String,
 }
 
 impl std::fmt::Debug for PlatformTarget {
@@ -81,6 +90,7 @@ impl std::fmt::Debug for PlatformTarget {
         f.debug_struct("PlatformTarget")
             .field("backend", &self.backend.endpoint)
             .field("control", &self.control.endpoint)
+            .field("gateway", &self.gateway.as_ref().map(|gateway| &gateway.id))
             .finish_non_exhaustive()
     }
 }

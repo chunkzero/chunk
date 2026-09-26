@@ -4,7 +4,7 @@ mod store;
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, MutexGuard, RwLock},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
@@ -121,7 +121,7 @@ impl State {
 pub(crate) struct Authority {
     system: chunk_backend::System,
     store: Mutex<Writable>,
-    current: RwLock<Arc<State>>,
+    /// The last committed state, with the claim changes that led to it.
     feed: feed::Feed,
     /// Runs once inside the next commit, before it is written, while other writers are excluded.
     #[cfg(test)]
@@ -142,12 +142,11 @@ impl Authority {
             store.drop_all()?;
         }
         let state = store.load()?;
-        let feed = feed::Feed::new(state.position());
+        let feed = feed::Feed::new(state);
         let store = Mutex::new(Writable { store, stale: false });
         let authority = Self {
             system,
             store,
-            current: RwLock::new(Arc::new(state)),
             feed,
             #[cfg(test)]
             committing: Mutex::default(),
@@ -166,7 +165,7 @@ impl Authority {
     }
 
     pub fn read(&self) -> Result<Arc<State>> {
-        Ok(self.current.read().map_err(|_| Error::Unresolved("control state poisoned"))?.clone())
+        self.feed.state()
     }
 
     pub fn update<T>(&self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -193,11 +192,6 @@ impl Authority {
     pub fn stopped(&self) -> bool {
         self.system.stopped()
     }
-
-    fn publish(&self, state: State) -> Result<()> {
-        *self.current.write().map_err(|_| Error::Unresolved("control state poisoned"))? = Arc::new(state);
-        Ok(())
-    }
 }
 
 pub(crate) struct Writer<'a> {
@@ -217,7 +211,7 @@ impl Writer<'_> {
         if writes.is_empty() {
             return Ok(result);
         }
-        let rows = feed::rows(writes.keys());
+        let touched = feed::touched(&previous, &next, writes.keys().map(|(key, _)| key));
         #[cfg(test)]
         if let Some(committing) = self.authority.committing.lock().ok().and_then(|mut hook| hook.take()) {
             committing();
@@ -227,8 +221,7 @@ impl Writer<'_> {
                 next.revision = revision;
                 let position = next.position();
                 next.stamp(position);
-                self.authority.publish(next)?;
-                self.authority.feed.record(position, rows);
+                self.authority.feed.record(next, touched)?;
                 Ok(result)
             }
             outcome => {
@@ -242,9 +235,7 @@ impl Writer<'_> {
     fn recover(&mut self) -> Result<()> {
         if self.store.stale {
             let state = self.store.store.load()?;
-            let position = state.position();
-            self.authority.publish(state)?;
-            self.authority.feed.reset(position);
+            self.authority.feed.reset(state)?;
             self.store.stale = false;
         }
         Ok(())

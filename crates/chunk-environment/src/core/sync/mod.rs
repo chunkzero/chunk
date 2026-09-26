@@ -29,13 +29,15 @@ const OPERATION_BYTES: usize = 256;
 const NAME_BYTES: usize = 512;
 const ARGUMENT_BYTES: usize = 1024 * 1024;
 
-/// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. Gateways present
-/// `platform_token`, the CLI presents control's credential, and each JVM its process credential.
-pub(crate) fn services(backend: Backend, platform_token: Option<String>) -> chunk_control::server::Services {
+pub(crate) use auth::Gateways;
+
+/// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. Each gateway presents the
+/// credential `gateways` minted for it, the CLI presents control's credential, and each JVM its process credential.
+pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_control::server::Services {
     Box::new(move |control, token, stop| {
         let service = SyncService {
             credentials: Arc::new(auth::Credentials {
-                gateway: platform_token,
+                gateways: gateways.clone(),
                 cli: token.to_owned(),
                 control: control.clone(),
             }),
@@ -43,6 +45,7 @@ pub(crate) fn services(backend: Backend, platform_token: Option<String>) -> chun
             epoch: backend.system().epoch().0,
             app: app::App::new(backend),
             streams: streams::StreamKey::new(),
+            fences: streams::Fences::default(),
             stop,
         };
         let server =
@@ -56,6 +59,7 @@ pub(crate) struct SyncService {
     control: Arc<Control>,
     app: app::App,
     streams: streams::StreamKey,
+    fences: streams::Fences,
     /// The store's epoch, fixed while the backend runs.
     epoch: u64,
     /// Ends open streams when control's transport shuts down.
@@ -84,6 +88,9 @@ impl SyncService {
         }
         if request.method.is_empty() || request.method.contains(':') {
             return Err(errors::invalid("unknown method"));
+        }
+        if !request.stream.is_empty() {
+            self.fences.check(&request.stream, &principal.credential)?;
         }
         let (deployment, caller) = self.scope(principal, &request.deployment, request.caller.as_ref())?;
         let arguments = std::str::from_utf8(&request.arguments).ok().and_then(|text| Json::parse(text).ok());

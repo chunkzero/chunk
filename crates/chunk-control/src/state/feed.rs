@@ -1,100 +1,134 @@
-//! Recent claim and move changes, so a subscriber can resume from the last log position it saw.
+//! Control's published state and the recent claim changes that led to it, so a subscriber can resume from the last
+//! log position it saw.
 
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::{Arc, RwLock},
+};
 
+use chunk_proto::v1::ClaimRequest;
 use chunk_store::DocumentKey;
+use prost::Message;
 use tokio::sync::watch;
 
 use super::{
-    Generation,
+    Generation, State,
     store::{CLAIMS, MOVES},
 };
+use crate::{Error, Result};
 
 /// Changes retained for resuming subscribers; older positions must reload current state.
 const RETAINED: usize = 4096;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Table {
-    Claims,
-    Moves,
-}
-
-/// One claim or move row that a commit wrote. Read current state for its value.
+/// A claim whose state as its gateway watches it a commit may have changed. Read the state for its value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Change {
+pub(crate) struct Change {
     pub position: Generation,
-    pub table: Table,
-    /// The claim or move operation ID.
-    pub id: String,
-    pub removed: bool,
+    /// The proxy that holds the claim.
+    pub gateway: String,
+    /// The claim's operation ID.
+    pub claim: String,
 }
 
-pub(super) type Row = (Table, String, bool);
-
-/// The claim and move rows among written `keys`.
-pub(super) fn rows<'a>(keys: impl Iterator<Item = (&'a DocumentKey, bool)>) -> Vec<Row> {
-    keys.filter_map(|(key, removed)| {
-        let table = match key.table.as_str() {
-            CLAIMS => Table::Claims,
-            MOVES => Table::Moves,
-            _ => return None,
+/// The claims that written `keys` may change, with their gateways: each written claim, and the source of each written
+/// move and move destination, since those decide whether the source has a pending move.
+pub(super) fn touched<'a>(
+    previous: &State,
+    next: &State,
+    keys: impl Iterator<Item = &'a DocumentKey>,
+) -> BTreeSet<(String, String)> {
+    let claim = |id: &str| next.claims.get(id).or_else(|| previous.claims.get(id));
+    let mut touched = BTreeSet::new();
+    for key in keys {
+        let request = match key.table.as_str() {
+            CLAIMS => {
+                let Some(written) = claim(&key.id) else { continue };
+                touched.insert((written.proxy.clone(), key.id.clone()));
+                &written.request
+            }
+            MOVES => match next.moves.get(&key.id).or_else(|| previous.moves.get(&key.id)) {
+                Some(intent) => &intent.request,
+                None => continue,
+            },
+            _ => continue,
         };
-        Some((table, key.id.clone(), removed))
-    })
-    .collect()
+        let source = ClaimRequest::decode(request.as_slice()).ok().and_then(|request| request.source);
+        if let Some(source) = source
+            && let Some(held) = claim(&source.operation_id)
+        {
+            touched.insert((held.proxy.clone(), source.operation_id));
+        }
+    }
+    touched
 }
 
 pub(crate) struct Feed {
-    history: Mutex<History>,
+    published: RwLock<Published>,
     position: watch::Sender<Generation>,
 }
 
-struct History {
+struct Published {
+    /// The last committed state; its position is the latest change's, or later.
+    state: Arc<State>,
     changes: VecDeque<Change>,
     /// Every change up to and including this position has been evicted.
     floor: Generation,
 }
 
 impl Feed {
-    pub(super) fn new(position: Generation) -> Self {
-        let history = History { changes: VecDeque::new(), floor: position };
-        Self { history: Mutex::new(history), position: watch::Sender::new(position) }
+    pub(super) fn new(state: State) -> Self {
+        let position = state.position();
+        let published = Published { state: Arc::new(state), changes: VecDeque::new(), floor: position };
+        Self { published: RwLock::new(published), position: watch::Sender::new(position) }
     }
 
-    /// Records the claim and move rows a commit wrote, then announces its position.
-    pub(super) fn record(&self, position: Generation, rows: Vec<Row>) {
-        let changes = rows.into_iter().map(|(table, id, removed)| Change { position, table, id, removed });
-        if let Ok(mut history) = self.history.lock() {
-            history.changes.extend(changes);
-            while history.changes.len() > RETAINED {
-                if let Some(evicted) = history.changes.pop_front() {
-                    history.floor = evicted.position;
+    /// Publishes a committed state with the claims its commit touched, then announces its position.
+    pub(super) fn record(&self, state: State, touched: BTreeSet<(String, String)>) -> Result<()> {
+        let position = state.position();
+        {
+            let mut published = self.write()?;
+            published.state = Arc::new(state);
+            let changes = touched.into_iter().map(|(gateway, claim)| Change { position, gateway, claim });
+            published.changes.extend(changes);
+            while published.changes.len() > RETAINED {
+                if let Some(evicted) = published.changes.pop_front() {
+                    published.floor = evicted.position;
                 }
             }
         }
         self.position.send_replace(position);
+        Ok(())
     }
 
-    /// Forgets history after state was reloaded, so earlier positions resynchronize.
-    pub(super) fn reset(&self, position: Generation) {
-        if let Ok(mut history) = self.history.lock() {
-            *history = History { changes: VecDeque::new(), floor: position };
-        }
+    /// Publishes state reloaded from storage and forgets history, so earlier positions resynchronize.
+    pub(super) fn reset(&self, state: State) -> Result<()> {
+        let position = state.position();
+        *self.write()? = Published { state: Arc::new(state), changes: VecDeque::new(), floor: position };
         self.position.send_replace(position);
+        Ok(())
     }
 
-    /// Changes after `position`, or `None` when that position is outside retained history: from another epoch, too
-    /// old, or not yet committed.
-    pub fn after(&self, position: Generation) -> Option<Vec<Change>> {
-        let history = self.history.lock().ok()?;
-        let current = *self.position.borrow();
-        if position.epoch != current.epoch || position < history.floor || position > current {
+    pub(super) fn state(&self) -> Result<Arc<State>> {
+        Ok(self.published.read().map_err(|_| Error::Unresolved("control state poisoned"))?.state.clone())
+    }
+
+    /// The changes after `position` and the state they lead to, read together. `None` when that position is outside
+    /// retained history: from another epoch, too old, or not yet committed.
+    pub fn after(&self, position: Generation) -> Option<(Vec<Change>, Arc<State>)> {
+        let published = self.published.read().ok()?;
+        let current = published.state.position();
+        if position.epoch != current.epoch || position < published.floor || position > current {
             return None;
         }
-        Some(history.changes.iter().filter(|change| change.position > position).cloned().collect())
+        let changes = published.changes.iter().filter(|change| change.position > position).cloned().collect();
+        Some((changes, published.state.clone()))
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Generation> {
         self.position.subscribe()
+    }
+
+    fn write(&self) -> Result<std::sync::RwLockWriteGuard<'_, Published>> {
+        self.published.write().map_err(|_| Error::Unresolved("control state poisoned"))
     }
 }

@@ -1098,6 +1098,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
 mod capacity;
 mod creation;
 mod destinations;
+mod gateway;
 mod launch;
 mod log;
 mod recovery;

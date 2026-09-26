@@ -2,6 +2,7 @@ mod sync;
 
 use crate::{PlatformTarget, Running};
 use chunk_contract::{BackendConnection, ControlConnection};
+use chunk_proxy::GatewayCredential;
 use std::{collections::BTreeSet, fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
@@ -31,15 +32,21 @@ pub struct Core {
     control: Option<Running>,
     host: Option<Arc<chunk_control::ProcessHost>>,
     authority: Option<chunk_control::server::Ready>,
+    /// Every gateway's credential, which the sync protocol authenticates.
+    gateways: Arc<sync::Gateways>,
+    /// The credential of the gateway serving in this process.
+    gateway: Option<GatewayCredential>,
 }
 
 impl Core {
-    /// Starts the backend, calls `on_backend` once it serves, then starts control. On error, everything started is
-    /// stopped.
+    /// Mints the in-process gateway's credential, starts the backend, calls `on_backend` once it serves, then starts
+    /// control. On error, everything started is stopped.
     /// # Errors
     /// Reports backend and control startup errors.
     pub async fn start(config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
         let mut core = Self::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
         if started.is_ok() {
             on_backend(core.backend_connection()?);
@@ -138,7 +145,6 @@ impl Core {
         let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
         self.host = Some(host.clone());
         let backend = self.handle.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
-        let platform_token = self.backend_connection()?.platform_token.clone();
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
@@ -149,7 +155,7 @@ impl Core {
             control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
-            services: Some(sync::services(backend, platform_token)),
+            services: Some(sync::services(backend, self.gateways.clone())),
         };
         self.control =
             Some(Running { task: tokio::spawn(chunk_control::server::run(control, ready, stop.clone())), stop });
@@ -192,12 +198,12 @@ impl Core {
         Ok(self.authority()?.control.clone())
     }
 
-    /// The backend deployment and control a gateway routes players through.
+    /// The backend deployment and control the in-process gateway routes players through, with its credential.
     /// # Errors
     /// Reports a stopped backend or control.
     pub fn target(&self) -> io::Result<PlatformTarget> {
         let control = self.control_connection()?.clone();
-        Ok(PlatformTarget { backend: self.backend_connection()?.clone(), control })
+        Ok(PlatformTarget { backend: self.backend_connection()?.clone(), control, gateway: self.gateway.clone() })
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.

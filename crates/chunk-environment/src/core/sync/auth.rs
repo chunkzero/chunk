@@ -1,12 +1,17 @@
 //! Which class of client a request's credential belongs to.
 
 use chunk_service::same_secret;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fmt::Write,
+    sync::{Arc, PoisonError, RwLock},
+};
 use tonic::{Request, Status};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Class {
-    Gateway,
+    Gateway { id: String },
     Jvm { host: String },
     Cli,
 }
@@ -18,8 +23,7 @@ pub(super) struct Principal {
 }
 
 pub(super) struct Credentials {
-    /// The backend's platform credential, which gateways present.
-    pub gateway: Option<String>,
+    pub gateways: Arc<Gateways>,
     /// Control's credential, which the CLI presents.
     pub cli: String,
     pub control: Arc<chunk_control::Control>,
@@ -42,14 +46,44 @@ impl Credentials {
 
     /// The class `credential` currently grants; a JVM's lapses once its process stops.
     pub fn class(&self, credential: &str) -> Option<Class> {
-        let gateway = self.gateway.as_deref().is_some_and(|gateway| same_secret(credential, gateway));
+        let gateway = self.gateways.gateway(credential);
         let cli = same_secret(credential, &self.cli);
-        if gateway {
-            Some(Class::Gateway)
+        if let Some(id) = gateway {
+            Some(Class::Gateway { id })
         } else if cli {
             Some(Class::Cli)
         } else {
             self.control.authenticate(credential).map(|host| Class::Jvm { host })
         }
     }
+}
+
+/// The credential core minted for each gateway, by gateway ID. Only digests are kept.
+#[derive(Default)]
+pub(crate) struct Gateways(RwLock<BTreeMap<String, String>>);
+
+impl Gateways {
+    /// Mints `id`'s credential, which replaces any earlier one and is the gateway's authority for its topic and
+    /// callers.
+    pub fn mint(&self, id: &str) -> String {
+        let credential = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut gateways = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        gateways.insert(id.to_owned(), digest(&credential));
+        credential
+    }
+
+    /// The gateway `credential` was minted for, comparing it against every gateway's in constant time.
+    fn gateway(&self, credential: &str) -> Option<String> {
+        let presented = digest(credential);
+        let gateways = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let matches = gateways.iter().filter(|(_, expected)| same_secret(&presented, expected));
+        matches.fold(None, |_, (id, _)| Some(id.clone()))
+    }
+}
+
+fn digest(credential: &str) -> String {
+    Sha256::digest(credential).iter().fold(String::with_capacity(64), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
 }

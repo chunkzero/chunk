@@ -386,17 +386,15 @@ impl Fixture {
                 .await
                 .unwrap();
         });
-        let platform = Platform::new(crate::PlatformTarget {
-            backend: BackendConnection {
-                endpoint: endpoint.clone(),
-                token: "application".into(),
-                platform_token: Some("platform".into()),
-                environment: "environment".into(),
-                deployment: "deployment".into(),
-            },
-            control: ControlConnection { endpoint, token: "control".into() },
-        })
-        .unwrap();
+        let backend = BackendConnection {
+            endpoint: endpoint.clone(),
+            token: "application".into(),
+            platform_token: Some("platform".into()),
+            environment: "environment".into(),
+            deployment: "deployment".into(),
+        };
+        let control = ControlConnection { endpoint, token: "control".into() };
+        let platform = Platform::new(crate::PlatformTarget { backend, control, gateway: None }).unwrap();
         let manifest = Arc::new(serde_json::from_value::<DomainManifest>(serde_json::json!({"version":1,"apps":{"lobby":""},"scopes":{"":{"parent":null}},"hooks":{},"commands":service.commands})).unwrap());
         let (output, receiver) = mpsc::channel(32);
         let (state, current) = watch::channel(None);

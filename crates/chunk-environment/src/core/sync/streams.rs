@@ -2,7 +2,8 @@
 //! nudges after a credential's own writes.
 
 use super::{MESSAGE_BYTES, errors};
-use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State};
+use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State, error::Code};
+use chunk_service::same_secret;
 use chunk_store::Revision;
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -18,6 +19,9 @@ use tonic::Status;
 /// Room left in each message for its position, flags and stream ID.
 const HEADER_BYTES: usize = 2048;
 
+/// The hex nonce that starts every stream ID.
+const NONCE_BYTES: usize = 32;
+
 /// Keys stream IDs for this process only, so a stream from before a restart never resumes.
 pub(super) struct StreamKey([u8; 32]);
 
@@ -29,10 +33,24 @@ impl StreamKey {
         Self(key)
     }
 
-    /// An HMAC-SHA256 over the subscription's topic, arguments, deployment, caller and credential.
+    /// A new stream's ID: a fresh nonce, then an HMAC binding it to the subscription's scope and credential.
     pub fn id(&self, request: &SubscribeRequest, credential: &str) -> String {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mac = self.mac(&nonce, request, credential);
+        nonce + &mac
+    }
+
+    /// Whether this process issued `id` for a stream of `request`'s scope and `credential`.
+    pub fn verify(&self, id: &str, request: &SubscribeRequest, credential: &str) -> bool {
+        id.split_at_checked(NONCE_BYTES)
+            .is_some_and(|(nonce, mac)| same_secret(mac, &self.mac(nonce, request, credential)))
+    }
+
+    /// An HMAC-SHA256 over `nonce` and the subscription's topic, arguments, deployment, caller and credential.
+    fn mac(&self, nonce: &str, request: &SubscribeRequest, credential: &str) -> String {
         let caller = request.caller.as_ref();
         let fields = [
+            nonce.as_bytes(),
             request.topic.as_bytes(),
             &request.arguments,
             request.deployment.as_bytes(),
@@ -53,6 +71,38 @@ impl StreamKey {
             let _ = write!(id, "{byte:02x}");
             id
         })
+    }
+}
+
+/// The newest stream of each fenced topic, by topic.
+#[derive(Default)]
+pub(super) struct Fences(Mutex<HashMap<String, Fence>>);
+
+struct Fence {
+    stream: String,
+    credential: String,
+    superseded: CancellationToken,
+}
+
+impl Fences {
+    /// Makes `stream` `topic`'s current stream, superseding the earlier one, and returns the token cancelled once a
+    /// newer stream supersedes this one.
+    pub fn fence(&self, topic: &str, stream: &str, credential: &str) -> CancellationToken {
+        let superseded = CancellationToken::new();
+        let fence =
+            Fence { stream: stream.to_owned(), credential: credential.to_owned(), superseded: superseded.clone() };
+        let mut fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = fences.insert(topic.to_owned(), fence) {
+            previous.superseded.cancel();
+        }
+        superseded
+    }
+
+    /// Checks that `stream` is the current stream of a fenced topic `credential` opened.
+    pub fn check(&self, stream: &str, credential: &str) -> Result<(), Error> {
+        let fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = fences.values().any(|fence| fence.stream == stream && fence.credential == credential);
+        current.then_some(()).ok_or_else(|| errors::error(Code::Stopped, "the stream was superseded or is unknown"))
     }
 }
 

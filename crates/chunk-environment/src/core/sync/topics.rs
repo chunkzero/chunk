@@ -1,15 +1,17 @@
 //! Subscription topics, by name.
 
+mod gateway;
 mod queries;
 
 use super::{SyncService, auth::Principal, caller::Grant, errors, streams::Sender};
-use chunk_proto::sync::v1::{Error, SubscribeRequest};
+use chunk_proto::sync::v1::{Error, SubscribeRequest, Update};
 use chunk_store::Revision;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(super) enum Topic {
     Queries(queries::Queries),
+    Gateway(gateway::Gateway),
 }
 
 /// What every stream carries besides its topic's state.
@@ -44,6 +46,7 @@ impl Topic {
                 };
                 Ok(Self::Queries(queries::Queries::new(keys, group, context)))
             }
+            topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
             _ => Err(errors::invalid("unknown topic")),
         }
     }
@@ -51,6 +54,25 @@ impl Topic {
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         match self {
             Self::Queries(queries) => queries.run(sender, stop).await,
+            Self::Gateway(gateway) => gateway.run(sender, stop).await,
         }
+    }
+}
+
+/// Sends `update` if the grant still holds, and otherwise ends the stream with why it lapsed. Returns whether the
+/// stream continues.
+fn send(grant: &Grant, sender: &Sender, update: Update) -> bool {
+    if let Err(error) = grant.check() {
+        sender.fail(error);
+        return false;
+    }
+    sender.send(update);
+    true
+}
+
+/// Waits for `receiver` to change, or forever once its sender is gone.
+async fn changed<T>(receiver: &mut watch::Receiver<T>) {
+    if receiver.changed().await.is_err() {
+        std::future::pending::<()>().await;
     }
 }

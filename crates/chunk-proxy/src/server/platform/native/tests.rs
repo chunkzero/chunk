@@ -28,6 +28,7 @@ impl Fixture {
         backend.deploy(deployment()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let platform = Platform::new(PlatformTarget {
+            gateway: None,
             backend: chunk_contract::BackendConnection {
                 endpoint: format!("http://{}", listener.local_addr().unwrap()),
                 environment: "test".into(),
