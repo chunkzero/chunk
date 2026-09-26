@@ -553,7 +553,7 @@ dependencies = [
  "chunk-build",
  "chunk-contract",
  "chunk-control",
- "chunk-edge",
+ "chunk-environment",
  "chunk-proto",
  "chunk-service",
  "clap",
@@ -611,13 +611,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "chunk-edge"
+name = "chunk-environment"
 version = "0.1.0"
 dependencies = [
+ "chunk-backend",
+ "chunk-contract",
+ "chunk-control",
+ "chunk-proto",
  "chunk-proxy",
  "chunk-service",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

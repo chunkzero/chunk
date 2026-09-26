@@ -1,8 +1,8 @@
 # Local control
 
 `chunk_control::server::run` serves control in the same process as the environment backend, writing through the
-backend's `System` handle; `chunk dev` embeds it. There is no standalone binary, because control shares the backend's
-store. `server::Config.state` holds the credential and the host's local files.
+backend's `System` handle; `chunk dev` and the `chunk-environment` binary embed it. It has no binary of its own, because
+control shares the backend's store. `server::Config.state` holds the credential and the host's local files.
 
 `chunk dev` uses `ProcessHost` to launch each app with `java -jar`. It owns the child handle and waits for exit; there
 is no per-server sidecar. External app manifests supply session type IDs, placement and capacity requirements, and JAR

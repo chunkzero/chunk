@@ -16,8 +16,8 @@ dependencies {
 
 val generate = rootProject.tasks.named<GenerateChunkBackend>("generateChunkBackend")
 val platformDirectory = rootProject.file("../..")
-val buildBackendExecutable =
-    tasks.register<Exec>("buildBackendExecutable") {
+val buildEnvironmentExecutable =
+    tasks.register<Exec>("buildEnvironmentExecutable") {
         workingDir(platformDirectory)
         inputs.files(
             fileTree(platformDirectory.resolve("crates")) { include("**/src/**", "**/Cargo.toml", "**/build.rs") },
@@ -26,14 +26,14 @@ val buildBackendExecutable =
             listOf("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "mise.toml").map(platformDirectory::resolve),
         )
         inputs.dir(platformDirectory.resolve("proto"))
-        outputs.file(platformDirectory.resolve("target/debug/chunk-backend"))
-        commandLine("cargo", "build", "-q", "-p", "chunk-backend")
+        outputs.file(platformDirectory.resolve("target/debug/chunk-environment"))
+        commandLine("cargo", "build", "-q", "-p", "chunk-environment")
     }
 tasks.test {
     useJUnitPlatform()
-    dependsOn(buildBackendExecutable, generate)
-    inputs.files(buildBackendExecutable)
+    dependsOn(buildEnvironmentExecutable, generate)
+    inputs.files(buildEnvironmentExecutable)
     inputs.dir(generate.flatMap { it.backendDirectory })
-    systemProperty("chunk.executable", platformDirectory.resolve("target/debug/chunk-backend").absolutePath)
+    systemProperty("chunk.executable", platformDirectory.resolve("target/debug/chunk-environment").absolutePath)
     systemProperty("chunk.backend", rootProject.file(".chunk/build/backend").absolutePath)
 }

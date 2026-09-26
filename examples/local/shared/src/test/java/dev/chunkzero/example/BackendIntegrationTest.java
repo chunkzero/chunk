@@ -135,30 +135,33 @@ class BackendIntegrationTest {
             bundle.addProperty("source", Files.readString(generated.resolve("source.mjs")));
             var bundlePath = directory.resolve("bundle.json");
             Files.writeString(bundlePath, bundle.toString());
-            var connection = directory.resolve("connection.json");
+            var state = directory.resolve("state");
+            var connection = state.resolve("backend.json");
             Files.deleteIfExists(connection);
             var builder = new ProcessBuilder(System.getProperty("chunk.executable"));
             builder.environment()
                     .putAll(
                             java.util.Map.of(
+                                    "CHUNK_SERVICES",
+                                    "core,exec",
                                     "CHUNK_BUNDLE",
                                     bundlePath.toString(),
                                     "CHUNK_ENVIRONMENT",
                                     "test",
                                     "CHUNK_STATE",
-                                    directory.resolve("state").toString(),
-                                    "CHUNK_CONNECTION",
-                                    connection.toString(),
-                                    "CHUNK_BIND",
-                                    address));
+                                    state.toString(),
+                                    "CHUNK_BACKEND_BIND",
+                                    address,
+                                    "CHUNK_CONTROL_BIND",
+                                    "127.0.0.1:0"));
             process =
                     builder.redirectErrorStream(true)
-                            .redirectOutput(directory.resolve("backend.log").toFile())
+                            .redirectOutput(directory.resolve("environment.log").toFile())
                             .start();
             var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (!Files.exists(connection)) {
-                assertTrue(process.isAlive(), "Backend process exited before readiness");
-                assertTrue(System.nanoTime() < deadline, "Backend readiness timed out");
+                assertTrue(process.isAlive(), "Environment process exited before readiness");
+                assertTrue(System.nanoTime() < deadline, "Environment readiness timed out");
                 Thread.sleep(10);
             }
             JsonObject record =
@@ -172,7 +175,7 @@ class BackendIntegrationTest {
             process.destroy();
             if (!process.waitFor(5, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                assertTrue(process.waitFor(3, TimeUnit.SECONDS), "Backend did not stop");
+                assertTrue(process.waitFor(3, TimeUnit.SECONDS), "Environment did not stop");
             }
             process = null;
         }

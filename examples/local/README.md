@@ -61,12 +61,12 @@ commands print an operation ID; supply `--operation <id>` when retrying an uncer
 
 ## Lifecycle
 
-Backend, control and edge run as tasks in one development process. The backend retains its dedicated JavaScript and
+Backend, control and proxy run as tasks in one development process. The backend retains its dedicated JavaScript and
 storage threads. Control owns each gameplay JVM directly as a child process.
 
 Ctrl-C closes player connections, drains control operations, stops owned JVMs, and joins backend workers. An unexpected
-service exit stops the local stack; there is no independent process restart in this mode. Use the standalone service
-binaries when testing process failure and recovery. An abrupt dev-process crash can leave an unresolved JVM launch; the
+service exit stops the local stack; there is no independent process restart in this mode. Run the `chunk-environment`
+binary when testing process failure and recovery. An abrupt dev-process crash can leave an unresolved JVM launch; the
 next run refuses to claim ownership from a stale PID. Resolve the leftover JVM before reusing that state.
 
 Service logs go to the console and JVM logs stay in the runtime state directory. An unresolved shutdown is reported as

@@ -66,7 +66,7 @@ impl Source {
     /// Classifies a tracing target by the crate that emitted it.
     pub fn of(target: &str) -> Self {
         match target.split("::").next().unwrap_or(target) {
-            "chunk_proxy" | "chunk_edge" | "chunk_protocol" => Self::Proxy,
+            "chunk_proxy" | "chunk_protocol" => Self::Proxy,
             "chunk_control" => Self::Control,
             "chunk_backend" | "chunk_js" | "chunk_store" => Self::Backend,
             _ => Self::Dev,

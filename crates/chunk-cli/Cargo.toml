@@ -9,7 +9,7 @@ publish = false
 
 [features]
 default = ["mc-26-2"]
-mc-26-2 = ["chunk-edge/mc-26-2"]
+mc-26-2 = ["chunk-environment/mc-26-2"]
 
 [[bin]]
 name = "chunk"
@@ -21,7 +21,7 @@ chunk-backend = { path = "../chunk-backend" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-build = { path = "../chunk-build" }
 chunk-control = { path = "../chunk-control" }
-chunk-edge = { path = "../chunk-edge", default-features = false }
+chunk-environment = { path = "../chunk-environment", default-features = false }
 chunk-proto = { path = "../chunk-proto" }
 clap = { version = "4", features = ["derive", "env"] }
 url = { version = "2", features = ["serde"] }
