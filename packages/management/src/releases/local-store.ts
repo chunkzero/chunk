@@ -79,7 +79,11 @@ export function localReleaseStore({
           received += BigInt(chunk.byteLength);
           if (received > expected) return new Response("archive is larger than declared\n", { status: 413 });
           hash.update(chunk);
-          await file.write(chunk);
+          for (let offset = 0; offset < chunk.byteLength;) {
+            const { bytesWritten } = await file.write(chunk, offset, chunk.byteLength - offset);
+            if (bytesWritten <= 0) throw new Error(`short write to ${partial}`);
+            offset += bytesWritten;
+          }
         }
         if (received !== expected || hash.digest("hex") !== sha256) {
           return new Response("archive does not match its declared size and digest\n", { status: 400 });
