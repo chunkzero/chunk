@@ -235,6 +235,41 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(tokens?.count).toBe(0n);
   });
 
+  test("a late activity report during an extra machine status lookup prevents both suspensions", async () => {
+    const env = await running();
+    try {
+      await env.client.ensureCapacity(capacityRequest(env, "late-activity"));
+      await pass();
+      const extraName = nameOf(env.environmentId, "late-activity");
+      const report = {
+        lease: env.lease,
+        desiredRevision: env.revision,
+        gatewayAddresses: [`${env.coreName}:25565`],
+      };
+      await env.client.reportStatus({ ...report, sequence: 1n, readyToSuspend: true });
+
+      // The extra machine's lookup happens after the conditional idle update has committed.
+      hooks.status = async (id) => {
+        if (id !== extraName) return;
+        hooks.status = undefined;
+        await env.client.reportStatus({ ...report, sequence: 2n, readyToSuspend: false, onlinePlayers: 1 });
+      };
+      await pass();
+
+      const [activity] = await h.sql`
+        select report_sequence, ready_to_suspend, online_players
+        from environments where id = ${env.environmentId}`;
+      expect(activity).toEqual({ report_sequence: 2n, ready_to_suspend: false, online_players: 1 });
+      expect({ core: env.core()?.state, extra: machines.get(extraName)?.machine.state }).toEqual({
+        core: "running",
+        extra: "running",
+      });
+    } finally {
+      hooks.status = undefined;
+      env.close();
+    }
+  });
+
   test("a retried suspension is dropped when a newer report shows activity", async () => {
     const env = await running();
     const gateways = [`${env.coreName}:25565`];
