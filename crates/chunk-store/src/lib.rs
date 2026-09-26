@@ -66,6 +66,7 @@ pub use sqlite::{SqliteStore, retention::Retention};
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
     /// Durably fixes invocation time, seed and deployment before evaluation.
+    /// A retry within the retry-context retention window gets the stored context.
     /// # Errors
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
@@ -102,7 +103,8 @@ pub trait Storage: Send {
     /// Returns I/O or corruption errors.
     fn snapshot(&mut self) -> Result<Snapshot>;
 
-    /// Recovers an operation's durable result, including after backend restart.
+    /// Recovers an operation's durable result, including after backend restart,
+    /// until its outcome retention expires.
     /// # Errors
     /// Rejects reuse of an ID for a different request and reports storage failures.
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>>;
@@ -136,7 +138,8 @@ pub trait Storage: Send {
 
     /// Atomically applies changes and records their outcome, or changes nothing.
     /// An already committed operation returns its original outcome before checking
-    /// the expected revision. Other stale revisions return `Conflict`.
+    /// the expected revision, while that outcome is retained; afterwards it commits
+    /// again as a new operation. Other stale revisions return `Conflict`.
     /// # Errors
     /// Returns conflicts, invalid batches, mismatched operations or storage failures.
     fn commit(&mut self, commit: Commit) -> Result<Outcome>;

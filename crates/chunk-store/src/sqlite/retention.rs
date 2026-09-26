@@ -14,7 +14,8 @@ pub struct Retention {
     /// Committed operation outcomes. Retrying an operation with an unknown
     /// outcome inside this window returns its outcome; later it runs again.
     pub outcomes: Duration,
-    /// Fixed invocation inputs of operations that never committed.
+    /// Fixed invocation inputs of operations that never committed. A retry after
+    /// they expire evaluates with a fresh time, seed and deployment binding.
     pub retry_contexts: Duration,
     /// Succeeded, failed, unknown and cancelled job records.
     pub jobs: Duration,

@@ -28,12 +28,13 @@ retained results stale until a fresh full group arrives on reconnect.
 
 Give every mutation a stable operation ID. Its fingerprint includes the function, canonical arguments and caller,
 independent of bundle and deployment identity. Duplicate requests recover the stored outcome without executing again,
-including after redeployment; reuse with a different request fails. Outcome lookups use the engine's pinned base
-snapshot and pending operations. New operations prepare their retry context on the commit thread before execution.
-Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`) to encode and canonicalize once before crossing the
-engine boundary. Argument/result contracts and wire numbers are validated before publication. Deployment-specific reads
-project declared fields; writes must satisfy the physical schema and all resident contracts. Storage's signed 64-bit
-support does not make arbitrary integers safe JavaScript values.
+including after redeployment; reuse with a different request fails. Outcomes are kept for 24 hours after their commit
+(the default `chunk_store::Retention`); a retry after that executes again as a new operation. Outcome lookups use the
+engine's pinned base snapshot and pending operations. New operations prepare their retry context on the commit thread
+before execution. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`) to encode and canonicalize once before
+crossing the engine boundary. Argument/result contracts and wire numbers are validated before publication.
+Deployment-specific reads project declared fields; writes must satisfy the physical schema and all resident contracts.
+Storage's signed 64-bit support does not make arbitrary integers safe JavaScript values.
 
 Dropping a request cancels queued work and executing queries. Once a mutation starts, an independent execution token
 prevents one caller from interrupting a shared business operation. If every waiter has gone before staging, the mutation
@@ -76,9 +77,10 @@ Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
 
 Mutation admission durably fixes the original snapshot timestamp, seed and uncommitted deployment binding before
 evaluation. Definite rejection and restart preserve these inputs; committed retries still recover the original outcome
-before execution and can cross deployment versions. New operations add a metadata durability step on the commit thread,
-which can queue behind a pending commit. Concurrent prepared operations still use the ordered speculative pipeline.
-Retry contexts are retained with operation history; automatic expiry is not implemented.
+before execution and can cross deployment versions. New operations write their retry context in the commit thread's next
+shared durable write, together with queued commits. Concurrent prepared operations still use the ordered speculative
+pipeline. Retry contexts of operations that never committed are kept for 24 hours after preparation; an unresolved retry
+after that executes with a fresh timestamp, seed and deployment binding.
 
 ## Bounded actions
 
@@ -192,13 +194,14 @@ effects. Its captured caller, arguments and originating deployment remain fixed.
 for reconciliation; the job record retains only the latest attempt's state and result.
 
 Pending/running jobs retain their originating bundle across restart. Terminal records remain until their owner calls
-`forget_job`; forgetting live work is rejected. Terminal records do not pin code: releasing their deployment makes later
-retries fail. The queue retains at most 256 jobs / 8 MiB, with 16 intents per mutation, 64 KiB per encoded intent and 64
-KiB for captured caller data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's
-captured time; times already due become immediately eligible. Queue overflow rejects the whole mutation. There is no
-automatic pruning, recurring schedule, or automatic action retry. Host HTTP/secret grants must be supplied again after
-restart; grants and secret values are never part of a job record unless application code explicitly puts such values in
-its arguments/result.
+`forget_job` or expire 24 hours after their last change; forgetting live work is rejected. Terminal records do not pin
+code: releasing their deployment makes later retries fail. The queue retains at most 256 jobs / 8 MiB, with 16 intents
+per mutation, 64 KiB per encoded intent and 64 KiB for captured caller data. `runAt` accepts a nonnegative safe integer
+no more than 366 days beyond the mutation's captured time; times already due become immediately eligible. Expired
+terminal records are removed before a new job is admitted, and queue overflow rejects the whole mutation. There is no
+recurring schedule or automatic action retry. Host HTTP/secret grants must be supplied again after restart; grants and
+secret values are never part of a job record unless application code explicitly puts such values in its
+arguments/result.
 
 ### Host alarm handoff
 
