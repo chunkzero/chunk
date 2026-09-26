@@ -104,3 +104,57 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
     control.activate(activation).await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn players_are_forgotten_on_release_and_pruning_spans_as_many_commits_as_it_needs() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let player = uuid::Uuid::new_v4().to_string();
+    let claim = request("only", &player);
+    control.claim(claim.clone()).await.unwrap();
+    assert!(control.state().unwrap().players.contains_key(&player));
+    control.cancel(claim).await.unwrap();
+    assert!(!control.state().unwrap().players.contains_key(&player));
+    // More expired claims than one store commit can remove.
+    for batch in 0..3 {
+        control
+            .update(|state| {
+                let expired = crate::state::Claim { released_at_ms: Some(0), ..state.claims["only"].clone() };
+                for index in 0..100 {
+                    state.claims.insert(format!("expired-{batch}-{index}"), expired.clone());
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    control.retire_idle_hosts().unwrap();
+    drop(control);
+    let state = fixture.control().state().unwrap();
+    assert_eq!(state.claims.keys().collect::<Vec<_>>(), ["only"]);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn open_claims_are_unbounded_and_only_in_flight_work_is_refused_as_busy() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    control.claim(request("template", &uuid::Uuid::new_v4().to_string())).await.unwrap();
+    for batch in 0..11 {
+        control
+            .update(|state| {
+                let open = crate::state::Claim { session: "elsewhere".into(), ..state.claims["template"].clone() };
+                for index in 0..100 {
+                    state.claims.insert(format!("open-{batch}-{index}"), open.clone());
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    let held: Vec<_> = (0..1024).map(|index| control.operation(&format!("held-{index}")).unwrap()).collect();
+    let next = request("next", &uuid::Uuid::new_v4().to_string());
+    assert!(matches!(control.claim(next.clone()).await, Err(Error::Busy)));
+    drop(held);
+    control.claim(next).await.unwrap();
+    assert!(control.state().unwrap().claims.values().filter(|claim| claim.phase != Phase::Released).count() > 1100);
+    fixture.close().await;
+}

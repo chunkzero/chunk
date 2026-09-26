@@ -47,6 +47,7 @@ fn status(error: Error) -> Status {
     match error {
         Error::Invalid(message) => Status::failed_precondition(message),
         Error::Capacity => Status::resource_exhausted("control capacity reached"),
+        Error::Busy => Status::unavailable("control busy"),
         Error::Unresolved(message) => Status::unavailable(message),
         Error::Stopped => Status::failed_precondition("runtime stopped"),
         Error::Rpc(error) => error,

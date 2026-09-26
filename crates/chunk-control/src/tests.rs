@@ -199,7 +199,11 @@ impl Gameplay for RuntimeService {
         self.check(&request)?;
         let delivery = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
-        if let Some(previous) = bindings.get(&delivery.operation_id) {
+        // Like the JVM's delivery fence, a closed delivery yields only to a newer owner generation.
+        if let Some(previous) = bindings.get(&delivery.operation_id)
+            && !(previous.phase == DeliveryPhase::Closed
+                && delivery.owner_generation > previous.delivery.owner_generation)
+        {
             if previous.delivery != delivery {
                 return Err(Status::failed_precondition("changed preparation"));
             }
@@ -437,8 +441,9 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
     recovered.cancel(first.clone()).await.unwrap();
     let second = request("second", &uuid);
     let next = recovered.claim(second.clone()).await.unwrap();
-    assert_eq!(next.claim.as_ref().unwrap().membership_generation, 2);
-    assert_eq!(next.claim.as_ref().unwrap().delivery_generation, 2);
+    let (previous, next_claim) = (assignment.claim.as_ref().unwrap(), next.claim.as_ref().unwrap());
+    assert!(next_claim.membership_generation > previous.membership_generation);
+    assert!(next_claim.delivery_generation > previous.delivery_generation);
     recovered.cancel(first).await.unwrap();
     assert_eq!(recovered.state().unwrap().players[&uuid].current.as_deref(), Some("second"));
     assert!(recovered.activate(ActivateClaim { claim: assignment.claim }).await.is_err());
@@ -509,7 +514,7 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
         second.claim.as_ref().unwrap().membership_generation,
         first.claim.as_ref().unwrap().membership_generation
     );
-    assert_eq!(second.claim.as_ref().unwrap().delivery_generation, 2);
+    assert!(second.claim.as_ref().unwrap().delivery_generation > first.claim.as_ref().unwrap().delivery_generation);
     assert_ne!(second.delivery.as_ref().unwrap().session, first.delivery.as_ref().unwrap().session);
     assert_eq!(fixture.host.ids.lock().unwrap().len(), 1);
     let owner = control.state().unwrap().players[&uuid].clone();
@@ -665,7 +670,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
         let status = control.drain(command).unwrap();
         assert!(status.stopped);
         assert_eq!(status.remaining_claims, 0);
-        assert!(control.state().unwrap().players[&uuid].current.is_none());
+        assert!(!control.state().unwrap().players.contains_key(&uuid));
         if !available {
             assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([drained.host_id.clone()]));
             let other_host = &state.sessions[&state.claims["new-login"].session].host;
@@ -853,6 +858,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
+    let membership = first.claim.as_ref().unwrap().membership_generation;
     fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
     let destination = control
@@ -872,7 +878,7 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     assert!(control.reconcile_departure(destination).await.unwrap().departed);
     let replacement = request("replacement", &uuid);
     let next = control.claim(replacement.clone()).await.unwrap();
-    assert_eq!(next.claim.as_ref().unwrap().membership_generation, 2);
+    assert!(next.claim.as_ref().unwrap().membership_generation > membership);
     assert!(!control.reconcile_departure(source).await.unwrap().departed);
     assert_eq!(control.state().unwrap().players[&uuid].current.as_deref(), Some("replacement"));
     assert!(control.reconcile_departure(replacement).await.unwrap().departed);
@@ -882,4 +888,5 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
 mod creation;
 mod destinations;
 mod launch;
+mod log;
 mod retention;

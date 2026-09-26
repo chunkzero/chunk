@@ -98,7 +98,7 @@ impl Control {
                     &runtime,
                     PlayerWithdrawal {
                         operation_id: request.operation_id.clone(),
-                        owner_generation: claim.delivery_generation,
+                        owner_generation: claim.generation.wire(),
                     },
                     10,
                 )?)
@@ -120,13 +120,8 @@ impl Control {
     pub async fn reconcile_departure(&self, request: ClaimRequest) -> Result<chunk_proto::v1::DepartureStatus> {
         let player = request.identity.as_ref().ok_or(Error::Invalid("missing player identity"))?.uuid.clone();
         let identity = self.cancel(request).await?;
-        let state = self.state()?;
-        let departed = identity.membership_generation != 0
-            && state.players.get(&player).is_some_and(|player| {
-                player.membership_generation == identity.membership_generation
-                    && player.current.is_none()
-                    && player.pending.is_none()
-            });
+        // A player row exists only while it owns a claim, whether in this membership or a newer one.
+        let departed = identity.membership_generation != 0 && !self.state()?.players.contains_key(&player);
         Ok(chunk_proto::v1::DepartureStatus { claim: Some(identity), departed })
     }
 
@@ -156,8 +151,8 @@ impl Control {
                 .find(|d| d.delivery.as_ref().is_some_and(|d| d.operation_id == operation))
                 .ok_or(Error::Unresolved("delivery absent from runtime inventory"))?;
             let delivery = binding.delivery.as_ref().ok_or(Error::Invalid("inventory delivery"))?;
-            if delivery.owner_generation != claim.delivery_generation
-                || delivery.membership_generation != claim.membership_generation
+            if delivery.owner_generation != claim.generation.wire()
+                || delivery.membership_generation != claim.membership.wire()
                 || delivery.proxy_id != claim.proxy
                 || delivery.session.as_ref().map(|s| &s.id) != Some(&claim.session)
                 || delivery.session_generation != 1
@@ -219,14 +214,8 @@ fn release(state: &mut State, operation: &str) -> Result<()> {
     set_phase(claim, Phase::Released)?;
     claim.released_at_ms.get_or_insert(crate::now_ms());
     let session_id = claim.session.clone();
-    if let Some(player) = state.players.get_mut(&claim.player) {
-        if player.current.as_deref() == Some(operation) {
-            player.current = None;
-        }
-        if player.pending.as_deref() == Some(operation) {
-            player.pending = None;
-        }
-    }
+    let player = claim.player.clone();
+    state.disown(&player, operation);
     if !state.claims.values().any(|claim| claim.session == session_id && claim.phase != Phase::Released)
         && let Some(session) = state.sessions.get_mut(&session_id)
     {

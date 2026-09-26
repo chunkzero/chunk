@@ -19,68 +19,7 @@ impl Control {
         {
             return Err(Error::Invalid("invalid move request"));
         }
-        self.update(|state| {
-            if let Some(expected) = &request.expected_source {
-                let claim = state.arrived_claim(expected).ok_or(Error::Invalid("stale captured move source"))?;
-                if claim.player != request.player_id
-                    || ClaimRequest::decode(claim.request.as_slice())?.connection_id != request.expected_connection_id
-                {
-                    return Err(Error::Invalid("stale captured move source"));
-                }
-            }
-            // Trusted unbound retries can recover the source after arrival in the destination.
-            if let Some(intent) = state.moves.get(&request.operation_id) {
-                let previous = ClaimRequest::decode(intent.request.as_slice())?;
-                if previous.identity.as_ref().map(|i| &i.uuid) != Some(&request.player_id)
-                    || previous.demand != request.demand
-                    || request.expected_source.as_ref().is_some_and(|expected| {
-                        previous.source.as_ref() != Some(expected)
-                            || previous.connection_id != request.expected_connection_id
-                    })
-                {
-                    return Err(Error::Invalid("move operation changed"));
-                }
-                return Ok(previous);
-            }
-            if state.moves.len() >= 1024 || state.claims.contains_key(&request.operation_id) {
-                return Err(Error::Capacity);
-            }
-            let owner = state.players.get(&request.player_id).ok_or(Error::Invalid("unknown player"))?;
-            let source = owner.current.as_ref().ok_or(Error::Invalid("player has no current delivery"))?;
-            let claim = &state.claims[source];
-            if claim.phase != Phase::Arrived || owner.pending.is_some() {
-                return Err(Error::Invalid("player already transitioning"));
-            }
-            for intent in state.moves.values().filter(|intent| !intent.canceled) {
-                let queued = ClaimRequest::decode(intent.request.as_slice())?;
-                if queued.source.as_ref().map(|s| &s.operation_id) == Some(source)
-                    && state.claims.get(&queued.operation_id).is_none_or(|c| c.phase != Phase::Released)
-                {
-                    return Err(Error::Invalid("move already queued"));
-                }
-            }
-            let mut destination = ClaimRequest::decode(claim.request.as_slice())?;
-            destination.operation_id = request.operation_id;
-            destination.demand = request.demand;
-            destination.source = Some(claim.identity(source));
-            crate::placement::validate_demand(
-                &self.config,
-                destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
-            )?;
-            let sequence = state
-                .moves
-                .values()
-                .map(|intent| intent.sequence)
-                .max()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or(Error::Capacity)?;
-            state.moves.insert(
-                destination.operation_id.clone(),
-                MoveIntent { request: destination.encode_to_vec(), canceled: false, sequence, failure: None },
-            );
-            Ok(destination)
-        })
+        self.update(|state| queue(state, &self.config, request))
     }
 
     /// Returns the pending move only to the exact current claim.
@@ -142,6 +81,62 @@ impl Control {
             Ok(true)
         })
     }
+}
+
+/// Queues `request`'s move in the current update, returning the destination claim request.
+pub(crate) fn queue(state: &mut State, config: &crate::Config, request: MovePlayerRequest) -> Result<ClaimRequest> {
+    if let Some(expected) = &request.expected_source {
+        let claim = state.arrived_claim(expected).ok_or(Error::Invalid("stale captured move source"))?;
+        if claim.player != request.player_id
+            || ClaimRequest::decode(claim.request.as_slice())?.connection_id != request.expected_connection_id
+        {
+            return Err(Error::Invalid("stale captured move source"));
+        }
+    }
+    // Trusted unbound retries can recover the source after arrival in the destination.
+    if let Some(intent) = state.moves.get(&request.operation_id) {
+        let previous = ClaimRequest::decode(intent.request.as_slice())?;
+        if previous.identity.as_ref().map(|i| &i.uuid) != Some(&request.player_id)
+            || previous.demand != request.demand
+            || request.expected_source.as_ref().is_some_and(|expected| {
+                previous.source.as_ref() != Some(expected) || previous.connection_id != request.expected_connection_id
+            })
+        {
+            return Err(Error::Invalid("move operation changed"));
+        }
+        return Ok(previous);
+    }
+    if state.claims.contains_key(&request.operation_id) {
+        return Err(Error::Invalid("move operation already names a claim"));
+    }
+    let owner = state.players.get(&request.player_id).ok_or(Error::Invalid("unknown player"))?;
+    let source = owner.current.as_ref().ok_or(Error::Invalid("player has no current delivery"))?;
+    let claim = &state.claims[source];
+    if claim.phase != Phase::Arrived || owner.pending.is_some() {
+        return Err(Error::Invalid("player already transitioning"));
+    }
+    for intent in state.moves.values().filter(|intent| !intent.canceled) {
+        let queued = ClaimRequest::decode(intent.request.as_slice())?;
+        if queued.source.as_ref().map(|s| &s.operation_id) == Some(source)
+            && state.claims.get(&queued.operation_id).is_none_or(|c| c.phase != Phase::Released)
+        {
+            return Err(Error::Invalid("move already queued"));
+        }
+    }
+    let mut destination = ClaimRequest::decode(claim.request.as_slice())?;
+    destination.operation_id = request.operation_id;
+    destination.demand = request.demand;
+    destination.source = Some(claim.identity(source));
+    crate::placement::validate_demand(
+        config,
+        destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
+    )?;
+    let sequence = state.next_generation()?.wire();
+    state.moves.insert(
+        destination.operation_id.clone(),
+        MoveIntent { request: destination.encode_to_vec(), canceled: false, sequence, failure: None },
+    );
+    Ok(destination)
 }
 
 pub(crate) fn authorize_destination(state: &mut State, identity: &ClaimIdentity) -> Result<()> {

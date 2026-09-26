@@ -70,6 +70,7 @@ impl Control {
         if inventory.identity.as_ref() != Some(&runtime.identity) {
             return Err(Error::Invalid("session inventory process mismatch"));
         }
+        self.fence_deliveries(&runtime, &inventory).await?;
         let now = crate::now_ms();
         let finish = self.update(|state| {
             let mut finish = Vec::new();

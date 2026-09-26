@@ -586,9 +586,11 @@ dependencies = [
 name = "chunk-control"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chunk-contract",
  "chunk-proto",
  "chunk-service",
+ "chunk-store",
  "prost",
  "rusqlite",
  "serde",

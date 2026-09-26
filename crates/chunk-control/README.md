@@ -23,16 +23,23 @@ native Minecraft connection using the capability. `Inspect` reconciles the same 
 releasing the reservation. Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
-profile. A prepared slot is a reservation, not a second attached player. Each membership and delivery has a separate
-monotonic generation; the session and process have their own incarnations. Duplicate login is rejected while an earlier
-owner remains unresolved. An old cancellation cannot release a newer connection. Unactivated reservations expire after
-60 seconds; active membership never expires solely because a control channel becomes unavailable.
+profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
+of the commit that created it; its membership generation is that of the login it continues. Generations compare as
+pairs, because a restore starts a new epoch and may reuse revisions. The current wire contract carries a pair as one
+`uint64`, the epoch above 40 revision bits. The session and process have their own incarnations. Duplicate login is
+rejected while an earlier owner remains unresolved. An old cancellation cannot release a newer connection. Unactivated
+reservations expire after 60 seconds; active membership never expires solely because a control channel becomes
+unavailable.
 
-Control uses a separate SQLite database and exclusive writer lock under `.chunk/control/`. Gameplay data still belongs
-to the environment backend. The control database retains requests, generation counters, reservations and activation
-intent before external effects. A lost activation reply is reconciled against the runtime's inventory. Configuration
-packets travel over the native Minecraft connection; control carries destination metadata. Released claims, and moves
-that only reference them, are forgotten five minutes after release.
+Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chunk_players`, `chunk_claims`,
+`chunk_moves`, `chunk_drains` and the `chunk_control` row) in a `chunk-store` database under `.chunk/control/`, with
+its exclusive writer lock. Each update is one commit with its own operation ID and revision; an
+in-memory copy serves reads and is rebuilt from the tables on open. Gameplay data still belongs to the environment
+backend. The tables retain requests, reservations and activation intent before external effects. A lost activation reply
+is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft connection;
+control carries destination metadata. A player row exists only while it owns a claim. Released claims, and moves that
+only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move changes
+after a log position, and `Control::subscribe` announces new positions.
 
 `Nodes` reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped states, including the
 last observed JVM health metrics and observation timestamp. Health is polled every five seconds; missing or stalled
@@ -50,10 +57,11 @@ will need durable provider identities to confirm termination across control rest
 worlds; no packets or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this
 release.
 
-Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process, 256 retained
-sessions and 1024 retained claims. The state document also inherits the storage byte limit. These conservative limits
-are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted providers, deployment
-rollout and directory replication remain outside this local implementation.
+Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
+sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
+operations are in flight; beyond that, new work fails as busy (`UNAVAILABLE`, "control busy") and should be retried.
+These conservative limits are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted
+providers, deployment rollout and directory replication remain outside this local implementation.
 
 Focused tests: `cargo test -p chunk-control`.
 
