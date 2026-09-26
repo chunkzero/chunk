@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use chunk_contract::{Deployment, Function, FunctionKind, Visibility};
@@ -15,6 +16,7 @@ use crate::{
     Error, Result,
     commit::{Committer, Job},
     evaluate::{Target, evaluate},
+    limits::EngineQueue,
     reads::{Change, Dependencies, View},
     service::{Call, Command, Event, Request, Update},
     timing::{Phase, Timer},
@@ -34,15 +36,13 @@ mod watches;
 pub(crate) use readers::Evaluated;
 
 const MAX_DEPLOYMENTS: usize = 16;
-const MAX_SUBSCRIPTIONS: usize = 64;
-const MAX_PENDING: usize = 16;
-const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 struct Mutation {
     operation: Operation,
     context: Option<chunk_store::RetryContext>,
     call: Call,
     waiters: Vec<Request<Update>>,
+    admitted: Instant,
 }
 
 struct Pending {
@@ -78,6 +78,7 @@ pub(crate) struct Actor {
     pending: VecDeque<Pending>,
     pending_bytes: usize,
     deferred: VecDeque<(Update, Request<Update>)>,
+    queue: Arc<EngineQueue>,
     failure: Option<Error>,
 }
 
@@ -88,6 +89,7 @@ impl Actor {
         incarnation: String,
         effects: crate::ActionEffects,
         readers: usize,
+        queue: Arc<EngineQueue>,
     ) -> Result<Self> {
         let (committer, snapshot, deployments, scheduled) = Committer::new(store, events.clone())?;
         let mut js = Engine::new()?;
@@ -125,6 +127,7 @@ impl Actor {
             pending: VecDeque::new(),
             pending_bytes: 0,
             deferred: VecDeque::new(),
+            queue,
             failure: None,
         })
     }
@@ -165,7 +168,8 @@ impl Actor {
                         self.action_transaction(&id, sequence, mode, function, arguments, reply);
                     }
                 }
-                Event::Request(command) => {
+                Event::Request { command, admitted } => {
+                    self.queue.dequeued(admitted);
                     if stopped.load(Ordering::Acquire) {
                         command.reject(Error::Closed);
                     } else if let Some(error) = &self.failure {
@@ -200,7 +204,8 @@ impl Actor {
         }
         incoming.close();
         while let Ok(event) = incoming.try_recv() {
-            if let Event::Request(command) = event {
+            if let Event::Request { command, admitted } = event {
+                self.queue.dequeued(admitted);
                 command.reject(Error::Closed);
             }
         }

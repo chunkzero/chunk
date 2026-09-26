@@ -68,10 +68,9 @@ a stored outcome.
 and waits for every initial result. `--subscription shared` subscribes everyone to the identical leaderboard (`top`);
 `per-player` subscribes everyone to their own standing (leaderboard plus their profile). Every write reads the current
 leader and sets a higher score, so it changes every subscriber's result in any arrival order. An operation completes
-only when every stream has delivered that write's revision or a later one; slow streams coalesce. The backend admits 64
-subscriptions in total, each a group of at most 16 queries, so at most 1,024 subscribers fit. Larger requests fail
-during setup with the backend's own rejection. Admission also allows 16 outstanding mutations and 64 outstanding
-requests; all capacity rejections report the same `ResourceExhausted` status.
+only when every stream has delivered that write's revision or a later one; slow streams coalesce. Subscriptions are
+limited by the backend's memory budget and read-queue wait rather than a count; a rejection during setup reports its
+limit in the `ResourceExhausted` message.
 
 Backend targets build `chunk-backend` with its `bench-support` feature, which exposes phase timings from the engine and
 commit threads without changing behavior. Phases are recorded after warmup: `queue` (admission until the engine thread

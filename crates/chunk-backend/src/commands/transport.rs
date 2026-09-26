@@ -232,7 +232,7 @@ async fn owner_run(
     let call = prepared.call();
     let purpose = Purpose::Command(Arc::new(CommandBinding { scope: prepared.scope, input: prepared.input, effects }));
     let invocation = id.to_string();
-    let acceptance = backend.submit(|reply| Command::StartAction { id, call, purpose, reply });
+    let acceptance = backend.submit_sized(call.bytes(), |reply| Command::StartAction { id, call, purpose, reply });
     let accepted = tokio::select! {
         ()=output.closed()=>Err(Error::Cancelled),
         ()=shutdown.cancelled()=>Err(Error::Cancelled),

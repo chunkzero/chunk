@@ -18,6 +18,13 @@ use crate::{
 type GroupId = u64;
 
 const GROUP_RESULT_BYTES: usize = 1024 * 1024;
+/// Bookkeeping charged per subscribed call and per query, beyond their inputs and results.
+const ENTRY_BYTES: usize = 256;
+
+/// Memory a group of `calls` holds while subscribed, not counting shared query results.
+pub(super) fn cost(calls: &[Call]) -> usize {
+    calls.iter().map(|call| call.bytes() + ENTRY_BYTES).sum()
+}
 
 /// Subscriptions with the same identity share one evaluation. The caller is part of
 /// the identity only after an evaluation read it.
@@ -111,6 +118,8 @@ pub(super) struct Watches {
     recent: Vec<(Revision, Option<Arc<[Change]>>)>,
     durable: Revision,
     ids: u64,
+    /// Estimated memory held by groups and queries.
+    bytes: usize,
 }
 
 impl Watches {
@@ -126,6 +135,7 @@ impl Watches {
             recent: Vec::new(),
             durable,
             ids: 0,
+            bytes: 0,
         }
     }
 
@@ -134,8 +144,8 @@ impl Watches {
         self.ids
     }
 
-    pub fn len(&self) -> usize {
-        self.groups.len()
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn references(&self, deployment: &DeploymentId) -> bool {
@@ -145,6 +155,7 @@ impl Watches {
     /// Registers a group. The reply completes once every query has a result.
     pub fn subscribe(&mut self, calls: Vec<Call>, reply: Request<GroupSubscription>) {
         let group = self.id();
+        self.bytes += cost(&calls);
         let queries = calls.iter().map(|call| self.attach(call, group)).collect();
         self.groups.insert(
             group,
@@ -164,6 +175,7 @@ impl Watches {
 
     fn create(&mut self, call: &Call, caller: bool) -> QueryId {
         let id = self.id();
+        self.bytes += call.bytes() + ENTRY_BYTES;
         let identity = Identity::new(call, caller);
         self.identities.insert(identity.clone(), id);
         self.queries.insert(
@@ -330,6 +342,7 @@ impl Watches {
         query.reads = reads;
         query.evaluated = evaluated;
         if query.result.as_ref().is_none_or(|previous| !same(previous, &result)) {
+            self.bytes = self.bytes + result_bytes(Some(&result)) - result_bytes(query.result.as_ref());
             query.result = Some(result);
             query.version = version;
         }
@@ -428,6 +441,7 @@ impl Watches {
         let closed: Vec<_> = self.groups.iter().filter(|(_, group)| group.closed()).map(|(id, _)| *id).collect();
         for id in closed {
             let group = self.groups.remove(&id).expect("closed group");
+            self.bytes -= cost(&group.calls);
             for query in group.queries {
                 self.detach(query, id);
             }
@@ -443,6 +457,7 @@ impl Watches {
         }
         if query.groups.is_empty() {
             let query = self.queries.remove(&id).expect("unsubscribed query");
+            self.bytes -= query.call.bytes() + ENTRY_BYTES + result_bytes(query.result.as_ref());
             if self.identities.get(&query.identity) == Some(&id) {
                 self.identities.remove(&query.identity);
             }
@@ -459,6 +474,13 @@ impl Watches {
             }
         }
         *self = Self::new(self.durable);
+    }
+}
+
+fn result_bytes(result: Option<&Result<Arc<str>>>) -> usize {
+    match result {
+        Some(Ok(json)) => json.len(),
+        _ => 0,
     }
 }
 

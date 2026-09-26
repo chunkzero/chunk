@@ -342,19 +342,18 @@ async fn durability_gates_pipeline_queries_and_subscriptions_in_commit_order() {
 }
 
 #[tokio::test]
-async fn admission_bounds_duplicate_waiters_and_cancelled_waiter_does_not_stage_twice() {
+async fn duplicate_waiters_share_one_mutation_and_cancelled_waiter_does_not_stage_twice() {
     let mut harness = Harness::new(false).await;
     let mut requests = Vec::new();
     for index in 0..64 {
         let mut request = Box::pin(harness.backend.mutate("same".into(), call("bump", json!({"id": "p"}))));
         pending(request.as_mut()).await;
         if index == 0 {
-            // Let preparation finish before filling the shared event queue.
+            // Let preparation finish before the duplicates arrive.
             assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
         }
         requests.push(request);
     }
-    assert!(matches!(harness.backend.query(call("get", json!({"id": "p"}))).await, Err(Error::Busy)));
     drop(requests.remove(0));
     harness.controls.commits[0].send(()).unwrap();
     for request in requests {
@@ -616,4 +615,5 @@ mod documents;
 mod effects;
 mod integration;
 mod jobs;
+mod limits;
 mod subscriptions;

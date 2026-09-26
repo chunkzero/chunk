@@ -53,16 +53,20 @@ dependent batch. Ambiguous commit or acknowledgment failures stop the pipeline a
 same store and recover outcomes by operation ID; a failed acknowledgment may follow a durable commit. The backend never
 automatically retries a speculative suffix.
 
-Admission allows 64 outstanding requests, including replies waiting for durability. Limits are 16 resident deployments,
-64 subscriptions, 16 outstanding mutations and 32 MiB of serialized pending writes/results. Excess work returns
-`Error::Busy`. These are logical bounds, not an RSS limit. JS retains its own source, heap, capability and payload
-budgets. Release a deployment after its mutations and subscriptions drain. Release durably removes the bundle and
-permanently retires its identity before unloading the runtime. It cannot be reactivated under the same ID. Data and
-schema remain shared; release never drops application tables or operation outcomes. Uncommitted operation IDs remain
-bound to the retired deployment and return `OperationMismatch` if retried against another deployment. Clients must use
-new operation IDs for those requests. Committed outcomes remain recoverable through a retained deployment exposing the
-same mutation. If a retained bundle prevents startup, open the store with exclusive writer authority and call
-`Storage::release_deployment` with its ID before constructing the backend again.
+Admission is bounded by queue time and memory rather than counts. New requests are refused once queued work of the same
+kind has waited over 500 ms: requests for the engine thread, queries for a read engine, or mutations to commit. Memory
+budgets cover admitted requests including replies waiting for durability (64 MiB, each charged its input plus 1 KiB),
+pending mutations with their staged writes and results (32 MiB), subscriptions with their latest results (256 MiB), and
+live actions at their 32 MiB engine heap limit (256 MiB). Each refusal is `Error::Overloaded` naming its `Limit`;
+`Error::Busy` remains for state conflicts such as a deployment change in progress. At most 16 deployments are resident.
+These are logical bounds, not an RSS limit. JS retains its own source, heap, capability and payload budgets. Release a
+deployment after its mutations and subscriptions drain. Release durably removes the bundle and permanently retires its
+identity before unloading the runtime. It cannot be reactivated under the same ID. Data and schema remain shared;
+release never drops application tables or operation outcomes. Uncommitted operation IDs remain bound to the retired
+deployment and return `OperationMismatch` if retried against another deployment. Clients must use new operation IDs for
+those requests. Committed outcomes remain recoverable through a retained deployment exposing the same mutation. If a
+retained bundle prevents startup, open the store with exclusive writer authority and call `Storage::release_deployment`
+with its ID before constructing the backend again.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
@@ -176,7 +180,7 @@ full originating caller; job arguments cannot select a caller, environment or de
 call a mutation to record intent.
 
 `Backend` starts a local timer and dispatches due jobs automatically, checking at most every 100 milliseconds when the
-actor is available. At most two scheduled jobs run within the existing eight-action limit. Busy action capacity leaves
+actor is available. At most two scheduled jobs run within the live-action memory budget. Busy action capacity leaves
 jobs pending, or retains an already-durable claim until a worker is available. The commit thread durably changes
 `pending` to `running` before any action starts. SQLite keeps job metadata and wake state in private tables, separate
 from application schema. Other storage adapters must implement atomic scheduling; nonempty intents fail closed by

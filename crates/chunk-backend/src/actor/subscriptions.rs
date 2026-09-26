@@ -1,6 +1,6 @@
-use super::{Actor, MAX_SUBSCRIPTIONS};
+use super::Actor;
 use crate::{
-    Error,
+    limits::{Limit, SUBSCRIPTION_BYTES},
     service::{Call, GroupSubscription, Request},
 };
 use chunk_js::Mode;
@@ -8,8 +8,12 @@ use chunk_js::Mode;
 impl Actor {
     pub(super) fn subscribe(&mut self, calls: Vec<Call>, reply: Request<GroupSubscription>) {
         self.watches.sweep();
-        if self.watches.len() >= MAX_SUBSCRIPTIONS {
-            reply.finish(Err(Error::Busy));
+        if self.watches.bytes() + super::watches::cost(&calls) > SUBSCRIPTION_BYTES {
+            reply.finish(Err(Limit::SubscriptionMemory.exceeded()));
+            return;
+        }
+        if let Err(error) = self.admit_read() {
+            reply.finish(Err(error));
             return;
         }
         for call in &calls {

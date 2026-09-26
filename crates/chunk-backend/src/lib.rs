@@ -9,6 +9,7 @@ mod commit;
 mod effects;
 mod evaluate;
 mod hooks;
+mod limits;
 mod reads;
 pub mod server;
 mod service;
@@ -20,6 +21,7 @@ pub use chunk_js::{DeploymentId, HttpMethod};
 pub use commands::CommandService;
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
 pub use hooks::HookService;
+pub use limits::Limit;
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Subscription, Update};
 #[cfg(feature = "bench-support")]
 pub use timing::{Phase, observe};
@@ -31,6 +33,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("backend capacity reached")]
     Busy,
+    #[error("backend overloaded: {0}")]
+    Overloaded(Limit),
     #[error("commit rejected; retry the operation")]
     Retry,
     #[error("action outcome unknown; do not retry under a new invocation identity")]

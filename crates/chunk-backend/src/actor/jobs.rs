@@ -214,7 +214,7 @@ impl Actor {
                     self.scheduled.ready.pop_front();
                     self.scheduled.active.insert(job.id, (job.attempt, handle));
                 }
-                Err(Error::Busy) => {}
+                Err(Error::Busy | Error::Overloaded(_)) => {}
                 Err(_) => {
                     if self.send_scheduling(JobCommand::Finish {
                         id: job.id,

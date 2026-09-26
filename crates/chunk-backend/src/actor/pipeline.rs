@@ -2,10 +2,11 @@ use chunk_js::{Cancellation, Mode};
 use chunk_store::{DocumentKey, Operation, Revision, Snapshot, Write};
 use sha2::{Digest, Sha256};
 
-use super::{Actor, MAX_PENDING, MAX_PENDING_BYTES, Mutation, Pending};
+use super::{Actor, Mutation, Pending};
 use crate::{
     Error, Result,
     commit::Job,
+    limits::{Limit, MUTATION_BYTES, QUEUE_WAIT},
     reads::View,
     service::{Call, Request, Update},
     timing::{Phase, Timer},
@@ -33,8 +34,8 @@ impl Actor {
             }
             return;
         }
-        if self.mutations.len() >= MAX_PENDING {
-            reply.finish(Err(Error::Busy));
+        if let Err(error) = self.admit_mutation(&call) {
+            reply.finish(Err(error));
             return;
         }
         let outcome = self.view.base.outcome(&operation).map_err(Error::from);
@@ -52,7 +53,8 @@ impl Actor {
                     reply.finish(Err(Error::Busy));
                     return;
                 }
-                let mutation = Mutation { operation, context: None, call, waiters: vec![reply] };
+                let admitted = std::time::Instant::now();
+                let mutation = Mutation { operation, context: None, call, waiters: vec![reply], admitted };
                 let context = chunk_store::RetryContext {
                     deployment: mutation.call.deployment.as_str().into(),
                     timestamp: self.view.base.timestamp,
@@ -60,7 +62,7 @@ impl Actor {
                         Sha256::digest(mutation.operation.id.as_bytes())[..8].try_into().expect("digest prefix"),
                     ),
                 };
-                match self.send(Job::Prepare { operation: mutation.operation.clone(), context }) {
+                match self.send_commit(Job::Prepare { operation: mutation.operation.clone(), context }) {
                     Ok(()) => {
                         self.mutations.insert(mutation.operation.id.clone(), mutation);
                     }
@@ -72,6 +74,25 @@ impl Actor {
                 }
             }
         }
+    }
+
+    fn admit_mutation(&self, call: &Call) -> Result<()> {
+        if self.mutations.values().any(|mutation| mutation.admitted.elapsed() > QUEUE_WAIT) {
+            return Err(Limit::CommitQueue.exceeded());
+        }
+        let admitted: usize = self.mutations.values().map(|mutation| mutation.call.bytes()).sum();
+        if self.pending_bytes + admitted + call.bytes() > MUTATION_BYTES {
+            return Err(Limit::MutationMemory.exceeded());
+        }
+        Ok(())
+    }
+
+    /// The commit thread's queue is full only when commits fall behind.
+    fn send_commit(&mut self, job: Job) -> Result<()> {
+        self.send(job).map_err(|error| match error {
+            Error::Busy => Limit::CommitQueue.exceeded(),
+            error => error,
+        })
     }
 
     pub(super) fn prepared(&mut self, id: &str, result: Result<chunk_store::RetryContext>) {
@@ -181,8 +202,8 @@ impl Actor {
             .map(|before| serde_json::to_vec(before).map(|bytes| bytes.len()))
             .sum::<serde_json::Result<usize>>()?;
         let bytes = written + execution.value.len() + old_bytes;
-        if self.pending.len() >= MAX_PENDING || self.pending_bytes + bytes > MAX_PENDING_BYTES {
-            return Err(Error::Busy);
+        if self.pending_bytes + bytes > MUTATION_BYTES {
+            return Err(Limit::MutationMemory.exceeded());
         }
         if mutation.waiters.iter().all(|reply| reply.cancellation.is_cancelled()) {
             return Err(Error::Cancelled);
@@ -191,7 +212,7 @@ impl Actor {
         // can change the read revision before this batch is applied.
         let revision = Revision(snapshot.revision.0.checked_add(1).ok_or(Error::Invalid("revision exhausted"))?);
         timer.stop(Phase::Mutation);
-        self.send(Job::Commit {
+        self.send_commit(Job::Commit {
             expected: snapshot.revision,
             operation: mutation.operation.clone(),
             writes: writes.clone(),

@@ -96,7 +96,7 @@ pub(crate) fn status(error: &Error) -> Status {
     match error {
         Error::Invalid(_) | Error::Contract | Error::Json(_) => Status::invalid_argument(error.to_string()),
         Error::Unknown => Status::not_found(error.to_string()),
-        Error::Busy => Status::resource_exhausted(error.to_string()),
+        Error::Busy | Error::Overloaded(_) => Status::resource_exhausted(error.to_string()),
         Error::Retry => Status::aborted(error.to_string()),
         Error::Cancelled => Status::cancelled("invocation cancelled"),
         Error::JavaScript(error) => match error.as_ref() {

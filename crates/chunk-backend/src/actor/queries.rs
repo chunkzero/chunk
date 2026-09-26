@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use chunk_contract::Function;
 use chunk_js::Mode;
@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
     Error, Result,
+    limits::{Limit, QUEUE_WAIT},
     reads::{Dependencies, View},
     service::{Call, Request, Update},
     timing::Phase,
@@ -19,6 +20,7 @@ pub(super) struct Waiting {
     call: Call,
     function: Option<Function>,
     reply: Request<Update>,
+    since: Instant,
 }
 
 impl Waiting {
@@ -33,16 +35,24 @@ impl Waiting {
 
 impl Actor {
     pub(super) fn query(&mut self, call: Call, reply: Request<Update>) {
-        match self.resolve(&call, Mode::Query) {
-            Ok(function) => self.reads.push_back(Waiting { call, function, reply }),
+        match self.admit_read().and_then(|()| self.resolve(&call, Mode::Query)) {
+            Ok(function) => self.reads.push_back(Waiting { call, function, reply, since: Instant::now() }),
             Err(error) => reply.finish(Err(error)),
         }
+    }
+
+    /// Refuses new reads while queued queries wait too long for a read engine.
+    pub(super) fn admit_read(&self) -> Result<()> {
+        if self.reads.front().is_some_and(|waiting| waiting.since.elapsed() > QUEUE_WAIT) {
+            return Err(Limit::ReadQueue.exceeded());
+        }
+        Ok(())
     }
 
     /// Hands queued queries, then subscription reevaluations, to idle read engines.
     pub(super) fn dispatch(&mut self) {
         while self.readers.idle() {
-            let read = if let Some(Waiting { call, function, reply }) = self.reads.pop_front() {
+            let read = if let Some(Waiting { call, function, reply, .. }) = self.reads.pop_front() {
                 if reply.cancellation.is_cancelled() {
                     reply.finish(Err(Error::Cancelled));
                     continue;
@@ -108,7 +118,7 @@ impl Actor {
         }
         if epoch != self.epoch {
             // Staged writes in its view were rolled back.
-            self.reads.push_front(Waiting { call, function, reply });
+            self.reads.push_front(Waiting { call, function, reply, since: Instant::now() });
             return;
         }
         let json = match result {
