@@ -27,6 +27,9 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<Deployment>> {
 
 pub(super) fn insert(transaction: &Connection, deployment: &Deployment) -> Result<()> {
     deployment.validate().map_err(Error::Invalid)?;
+    if deployment.tables.keys().any(|table| crate::is_system_table(table)) {
+        return Err(Error::Invalid("deployment declares a reserved chunk_ table"));
+    }
     let encoded = serde_json::to_string(deployment)?;
     let retired: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM _chunk_retired_deployments WHERE id = ?1)",

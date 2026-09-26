@@ -63,6 +63,16 @@ pub use replication::{Listed, ObjectStorage, Replication, Replicator};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
 
+/// Tables whose names start with this prefix, in any letter case, belong to the
+/// environment itself. App deployments may not declare them.
+pub const SYSTEM_TABLE_PREFIX: &str = "chunk_";
+
+/// Whether `table` is reserved for the environment by [`SYSTEM_TABLE_PREFIX`].
+#[must_use]
+pub fn is_system_table(table: &str) -> bool {
+    table.get(..SYSTEM_TABLE_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(SYSTEM_TABLE_PREFIX))
+}
+
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
     /// Durably fixes invocation time, seed and deployment before evaluation.
@@ -73,7 +83,8 @@ pub trait Storage: Send {
 
     /// Installs an additive schema and retains its deployment in one transaction.
     /// # Errors
-    /// Rejects incompatible schemas, retired identities and storage failures.
+    /// Rejects incompatible schemas, [system tables](is_system_table), retired
+    /// identities and storage failures.
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
 
     /// Removes an inactive deployment, permanently retiring its identity.
