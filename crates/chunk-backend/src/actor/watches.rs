@@ -305,26 +305,34 @@ impl Watches {
         }
     }
 
-    /// Takes the next evaluation, starting a batch against `latest` when none is running.
+    /// Takes the next evaluation, starting a batch against `latest` when none is running,
+    /// including when the running batch finishes because its queued queries were removed.
     pub fn next_job(&mut self, latest: impl FnOnce() -> Arc<View>) -> Option<Job> {
-        if self.batch.is_none() && !self.next.is_empty() {
-            self.sweep();
-            self.start(latest());
-        }
-        let batch = self.batch.as_mut()?;
-        while let Some(id) = batch.queue.pop_front() {
-            if let Some(query) = self.queries.get(&id) {
-                batch.running += 1;
-                return Some(Job {
-                    id,
-                    call: query.call.clone(),
-                    view: batch.view.clone(),
-                    generation: batch.generation,
-                });
+        let mut latest = Some(latest);
+        loop {
+            if self.batch.is_none() && !self.next.is_empty() {
+                // A started batch always yields a job, so `latest` is needed at most once.
+                let latest = latest.take()?;
+                self.sweep();
+                self.start(latest());
+            }
+            let batch = self.batch.as_mut()?;
+            while let Some(id) = batch.queue.pop_front() {
+                if let Some(query) = self.queries.get(&id) {
+                    batch.running += 1;
+                    return Some(Job {
+                        id,
+                        call: query.call.clone(),
+                        view: batch.view.clone(),
+                        generation: batch.generation,
+                    });
+                }
+            }
+            self.finish();
+            if self.batch.is_some() {
+                return None;
             }
         }
-        self.finish();
-        None
     }
 
     fn start(&mut self, view: Arc<View>) {
