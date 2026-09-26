@@ -22,11 +22,11 @@ const manifestPath = "release.json";
 const maxManifestBytes = 16 * 1024 * 1024;
 const manifestVersion = 3;
 /** The backend files every release carries besides its apps and assets, with chunk_contract's size limits. */
-const backendFiles: Record<string, number> = {
-  "backend.json": 5 * 1024 * 1024,
-  "contract.json": 2 * 1024 * 1024,
-  "source.mjs": 4 * 1024 * 1024,
-};
+const backendFiles = new Map([
+  ["backend.json", 5 * 1024 * 1024],
+  ["contract.json", 2 * 1024 * 1024],
+  ["source.mjs", 4 * 1024 * 1024],
+]);
 /** chunk_contract::CONTRACT_VERSION and the runtime profiles it knows. */
 const contractVersion = 2;
 const runtimeProfiles = ["transactional_v1"];
@@ -55,9 +55,7 @@ export async function verifyRelease(
       },
     }),
   );
-  const entries = await scanArchive(counted, limits, (path) =>
-    path === manifestPath ? maxManifestBytes : backendFiles[path],
-  );
+  const entries = await scanArchive(counted, limits, keepLimit);
   if (sizeBytes !== expected.sizeBytes || hash.digest("hex") !== expected.sha256) {
     throw new Error("the archive does not match the declared size and digest");
   }
@@ -74,7 +72,7 @@ export async function verifyRelease(
   const payloads: [string, string | undefined][] = [
     ...apps.map((app): [string, string] => [app.jar, app.sha256]),
     ...Object.entries(assets),
-    ...Object.keys(backendFiles).map((path): [string, undefined] => [path, undefined]),
+    ...[...backendFiles.keys()].map((path): [string, undefined] => [path, undefined]),
   ];
   for (const [path, sha256] of payloads) {
     const entry = entries.get(path);
@@ -84,6 +82,11 @@ export async function verifyRelease(
   const backend = backendProblem(id, (path) => entries.get(path)?.data ?? new Uint8Array());
   if (backend !== undefined) throw new Error(backend);
   return text;
+}
+
+/** How many bytes of an entry verification keeps in memory: only release.json and the backend files, capped. */
+export function keepLimit(path: string): number | undefined {
+  return path === manifestPath ? maxManifestBytes : backendFiles.get(path);
 }
 
 /**
@@ -119,7 +122,7 @@ function contractProblem(contract: Record<string, unknown>): string | undefined 
   if (!isRecord(contract.tables)) return "has no tables";
   if (!isRecord(contract.functions) || Object.keys(contract.functions).length > 256) return "has invalid functions";
   for (const field of optionalContractFields) {
-    if (field in contract && !isRecord(contract[field])) return `has an invalid ${field}`;
+    if (Object.hasOwn(contract, field) && !isRecord(contract[field])) return `has an invalid ${field}`;
   }
   return undefined;
 }

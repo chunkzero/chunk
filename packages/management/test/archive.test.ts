@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { type ArchiveLimits, scanArchive } from "../src/releases/archive.ts";
-import { verifyRelease } from "../src/releases/manifest.ts";
+import { keepLimit, verifyRelease } from "../src/releases/manifest.ts";
 import { type ArchiveOptions, rawArchive, releaseArchive } from "./fixtures.ts";
 
 const limits: ArchiveLimits = { maxExpandedBytes: 64 * 1024 * 1024, maxEntries: 1000 };
@@ -58,6 +58,14 @@ test("rejects backend metadata chunk build would not write", async () => {
   await expect(broken({ replace: backend({ id: "r2" }) })).rejects.toThrow('names release "r2"');
   await expect(broken({ replace: backend({ source: "other" }) })).rejects.toThrow("does not carry source.mjs");
   await expect(broken({ replace: backend({ functions: { f: {} } }) })).rejects.toThrow("does not match contract.json");
+});
+
+test("keeps only the named metadata files, never entries named like Object properties", async () => {
+  expect(keepLimit("backend.json")).toBe(5 * 1024 * 1024);
+  for (const path of ["constructor", "__proto__", "toString", "hasOwnProperty"])
+    expect(keepLimit(path)).toBeUndefined();
+  const archive = releaseArchive("r1", undefined, { extra: [["constructor", "x".repeat(1024)]] });
+  expect(JSON.parse(await verify(archive)).id).toBe("r1");
 });
 
 test("rejects a path that is both a file and a directory, in either order", async () => {

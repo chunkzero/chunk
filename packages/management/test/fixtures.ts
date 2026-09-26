@@ -47,6 +47,8 @@ export interface ArchiveOptions {
   omit?: (path: string) => boolean;
   /** Replaces files' contents by path. */
   replace?: Record<string, string>;
+  /** Adds files after the release's own. */
+  extra?: [string, string][];
   badChecksum?: boolean;
 }
 
@@ -96,9 +98,10 @@ export function releaseArchive(
   const kept = files
     .filter(([name]) => !options.omit?.(name))
     .map(([name, bytes]): [string, Uint8Array] => {
-      const replacement = options.replace?.[name];
+      const replacement = options.replace && Object.hasOwn(options.replace, name) ? options.replace[name] : undefined;
       return [name, replacement === undefined ? bytes : encoder.encode(replacement)];
-    });
+    })
+    .concat((options.extra ?? []).map(([name, text]): [string, Uint8Array] => [name, encoder.encode(text)]));
   const bytes = Bun.gzipSync(tar(kept, options.badChecksum));
   return { bytes, sha256: sha256(bytes), sizeBytes: BigInt(bytes.byteLength) };
 }
