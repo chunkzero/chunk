@@ -77,14 +77,14 @@ writes participate in ordering and limiting. Dependencies include old/new index 
 are parsed on the commit thread because `chunk_store::Commit` currently takes `Value`; query/subscription responses
 remain JSON text. Durable retries preserve the JSON value but may normalize its formatting and object key order.
 
-`Backend::system` returns the native system module's `System` handle. `System::open` installs `chunk_`-prefixed
-system tables and `System::commit` writes them as one commit, blocking until it is durable. The commit thread drains
-system commits first into every durable write, ahead of queued prepares and app commits; app commits already staged
-move past them, and the engine shifts their staged revisions, so each commit's revision stays the previous one plus
-one. System commits record operation IDs starting with `chunk/`, which app operations may not use. Deployments may not
-declare `chunk_` tables in any letter case, so apps can neither read nor write them. JavaScript never runs for a system
-commit. Once the pipeline fails, `System::stopped` reports it and app calls fail too. `System::lock_scope` holds a
-scope of system rows exclusively on one backend until the returned lock drops.
+`Backend::system` returns the native system module's `System` handle. `System::open` installs `chunk_`-prefixed system
+tables and `System::commit` writes them as one commit, blocking until it is durable. The commit thread drains system
+commits first into every durable write, ahead of queued prepares and app commits; app commits already staged move past
+them, and the engine shifts their staged revisions, so each commit's revision stays the previous one plus one. System
+commits record operation IDs starting with `chunk/`, which app operations may not use. Deployments may not declare
+`chunk_` tables in any letter case, so apps can neither read nor write them. JavaScript never runs for a system commit.
+Once the pipeline fails, `System::stopped` reports it and app calls fail too. `System::lock_scope` holds a scope of
+system rows exclusively on one backend until the returned lock drops.
 
 Construction waits for initialization. Dropping the last backend handle drains accepted commits and joins its owned
 threads; use a blocking task for construction and final drop from async code. Persistent module state is disposable:
