@@ -36,8 +36,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 /// The current store format, recorded as SQLite's `user_version`.
 pub(super) const FORMAT: i64 = 8;
 
-/// Reports whether an existing database was migrated from an older format.
-pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)> {
+pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version = version(&connection)?;
@@ -75,6 +74,12 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
         connection.query_row("SELECT environment FROM _chunk_metadata WHERE singleton = 1", [], |row| row.get(0))?;
     if stored != environment {
         return Err(Error::EnvironmentMismatch);
+    }
+    if (7..FORMAT).contains(&version) {
+        // Segments written after a migration cannot apply to a snapshot taken
+        // before it. Require a new snapshot before migrating, so a crash at any
+        // point either repeats the migration or already left this marker.
+        super::log::mark_unlogged(&connection)?;
     }
     if version < 3 {
         connection.execute_batch(
@@ -132,7 +137,7 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<(Connection, bool)>
              COMMIT;"
         ))?;
     }
-    Ok((connection, version != 0 && version < FORMAT))
+    Ok(connection)
 }
 
 pub(super) fn version(connection: &Connection) -> Result<i64> {

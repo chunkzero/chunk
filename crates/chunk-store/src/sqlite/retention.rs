@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::Result;
 
 /// Rows removed per table and pass, so pruning never stalls a commit for long.
-const PRUNE_ROWS: i64 = 10_000;
+const PRUNE_ROWS: u16 = 10_000;
 
 /// How long records stay after they stop changing. Expired records are deleted
 /// in ordinary write transactions, so replicas and restores forget them too.
@@ -37,18 +37,19 @@ fn cutoff(now: i64, window: Duration) -> i64 {
     now.saturating_sub(i64::try_from(window.as_millis()).unwrap_or(i64::MAX))
 }
 
-pub(super) fn prune_operations(connection: &Connection, retention: &Retention, now: i64) -> Result<()> {
-    connection.execute(
+/// Reports whether expired rows may remain beyond this pass.
+pub(super) fn prune_operations(connection: &Connection, retention: &Retention, now: i64) -> Result<bool> {
+    let outcomes = connection.execute(
         "DELETE FROM _chunk_operations WHERE operation_id IN (
             SELECT operation_id FROM _chunk_operations WHERE committed_at < ?1 ORDER BY committed_at LIMIT ?2)",
-        [cutoff(now, retention.outcomes), PRUNE_ROWS],
+        [cutoff(now, retention.outcomes), i64::from(PRUNE_ROWS)],
     )?;
-    connection.execute(
+    let contexts = connection.execute(
         "DELETE FROM _chunk_retry_contexts WHERE operation_id IN (
             SELECT operation_id FROM _chunk_retry_contexts WHERE prepared_at < ?1 LIMIT ?2)",
-        [cutoff(now, retention.retry_contexts), PRUNE_ROWS],
+        [cutoff(now, retention.retry_contexts), i64::from(PRUNE_ROWS)],
     )?;
-    Ok(())
+    Ok([outcomes, contexts].into_iter().any(|removed| removed >= usize::from(PRUNE_ROWS)))
 }
 
 /// Reports whether any finished job record expired.

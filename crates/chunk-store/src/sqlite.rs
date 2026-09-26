@@ -51,7 +51,7 @@ impl SqliteStore {
     pub fn open(path: impl AsRef<Path>, environment: &str) -> Result<Self> {
         validate_environment(environment)?;
         let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
-        let (connection, _) = bootstrap::open(&path, environment)?;
+        let connection = bootstrap::open(&path, environment)?;
         log::mark_unlogged(&connection)?;
         Self::new(connection, path, writer_lock, None)
     }
@@ -104,18 +104,9 @@ impl SqliteStore {
             return Err(Error::Invalid("fork target database already exists"));
         }
         let target = replication.storage();
-        replication::fork(&path, source.storage(), source_environment, environment, target)?;
+        replication::fork(&path, source.storage(), source_environment, environment, target, keep_jobs)?;
         let remote = replication::Remote::load(target)?;
-        let (mut store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
-        log::write(&store.connection, store.log.as_mut(), &[], |transaction| {
-            transaction.execute("DELETE FROM _chunk_retry_contexts", [])?;
-            if !keep_jobs
-                && transaction.execute("DELETE FROM _chunk_jobs WHERE state IN ('pending', 'running')", [])? > 0
-            {
-                jobs::changed(transaction)?;
-            }
-            Ok(())
-        })?;
+        let (store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
         replicator.flush()?;
         Ok((store, replicator))
     }
@@ -127,10 +118,7 @@ impl SqliteStore {
         replication: Replication,
         remote: &replication::Remote,
     ) -> Result<(Self, Replicator)> {
-        let (connection, migrated) = bootstrap::open(&path, environment)?;
-        if migrated {
-            log::mark_unlogged(&connection)?;
-        }
+        let connection = bootstrap::open(&path, environment)?;
         let epoch = log::epoch(&connection)?;
         let uploaded = remote.uploaded(epoch);
         if remote.latest_epoch().is_some_and(|latest| latest > epoch) || uploaded > log::position(&connection)?.0 {
@@ -268,9 +256,10 @@ impl Storage for SqliteStore {
         let now = retention::now();
         let prune = self.pruned_at.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL);
         let (schema, retention) = (&self.schema, &self.retention);
+        let mut backlog = false;
         let committed = log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
             if prune {
-                retention::prune_operations(transaction, retention, now)?;
+                backlog = retention::prune_operations(transaction, retention, now)?;
             }
             let mut results = Vec::with_capacity(requests.len());
             for request in requests {
@@ -300,8 +289,9 @@ impl Storage for SqliteStore {
         });
         match committed {
             Ok(results) => {
+                // Each pass is bounded; a remaining backlog keeps the next write pruning.
                 if prune {
-                    self.pruned_at = Some(Instant::now());
+                    self.pruned_at = (!backlog).then(Instant::now);
                 }
                 results
             }

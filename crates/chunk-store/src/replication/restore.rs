@@ -106,6 +106,7 @@ pub(crate) fn fork(
     source_environment: &str,
     environment: &str,
     target: &dyn ObjectStorage,
+    keep_jobs: bool,
 ) -> Result<()> {
     if !target.list("epochs")?.is_empty() {
         return Err(Error::Invalid("fork target storage is not empty"));
@@ -116,6 +117,8 @@ pub(crate) fn fork(
     }
     install(path, |temporary| {
         let replica = rebuild(temporary, source_environment, source, &remote)?;
+        // Cleaned before the file is installed, so no interruption leaves source work behind.
+        replica.discard_inherited(keep_jobs)?;
         let token = replica.token()?;
         if !target.create(&segment::claim_key(1), token.clone().into_bytes())? {
             return Err(Error::Invalid("fork target storage is not empty"));

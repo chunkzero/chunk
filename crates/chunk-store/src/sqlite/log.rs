@@ -169,6 +169,18 @@ impl Replica {
         Ok(self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?)
     }
 
+    /// Drops the source's retry contexts and, unless `keep_jobs`, its pending and
+    /// running jobs, so a fork never resumes work the source scheduled.
+    pub fn discard_inherited(&self, keep_jobs: bool) -> Result<()> {
+        self.connection.execute("DELETE FROM _chunk_retry_contexts", [])?;
+        if !keep_jobs
+            && self.connection.execute("DELETE FROM _chunk_jobs WHERE state IN ('pending', 'running')", [])? > 0
+        {
+            super::jobs::changed(&self.connection)?;
+        }
+        Ok(())
+    }
+
     /// Commits the replayed entries as `environment` under a claimed `epoch`,
     /// leaving a single durable file.
     pub fn finish(self, epoch: u64, claim: &str, environment: &str) -> Result<()> {

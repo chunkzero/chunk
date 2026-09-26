@@ -510,7 +510,82 @@ fn a_fork_drops_retry_contexts_and_unfinished_jobs_unless_asked_to_keep_jobs() {
     let mut kept = fork("kept.db", true);
     assert_eq!(kept.jobs().unwrap().records.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(), ["later"]);
     assert_eq!(kept.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
+
+    // Failing after the database is installed still leaves no inherited work in it.
+    let interrupted = directory.path().join("interrupted.db");
+    let failing = Arc::new(FailingLists { storage: Arc::default(), remaining: Mutex::new(1) });
+    assert!(SqliteStore::fork(&manual(&source), "local", &interrupted, "preview", manual_on(failing), false).is_err());
+    let mut reopened = SqliteStore::open(&interrupted, "preview").unwrap();
+    assert!(reopened.jobs().unwrap().records.is_empty());
+    assert_eq!(reopened.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
     assert_eq!(store.prepare_operation(&operation("unfinished"), fresh).unwrap(), inherited);
+}
+
+/// Fails every listing after the first `remaining`.
+struct FailingLists {
+    storage: Arc<Memory>,
+    remaining: Mutex<usize>,
+}
+
+impl ObjectStorage for FailingLists {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.storage.put(key, bytes)
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
+        self.storage.create(key, bytes)
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.storage.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
+        let mut remaining = self.remaining.lock().unwrap();
+        if *remaining == 0 {
+            return Err(io::Error::other("listing failed"));
+        }
+        *remaining -= 1;
+        self.storage.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.storage.delete(key)
+    }
+}
+
+#[test]
+fn a_crash_right_after_a_format_migration_still_forces_a_new_snapshot() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let (mut store, replicator) = open(&path, manual(&storage));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // A format-7 database as an older binary left it, migrated by a process
+    // that stops before replication resumes.
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "DROP INDEX _chunk_operations_committed;
+             ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+             ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+             ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+    drop(crate::sqlite::bootstrap::open(&path, "local").unwrap());
+
+    let snapshots = count(&storage, "/snapshots/");
+    let (mut store, replicator) = open(&path, manual(&storage));
+    store.commit(commit("after", 1, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // The migrated state reaches storage as a snapshot, never as segments on the old one.
+    assert_eq!(count(&storage, "/snapshots/"), snapshots + 1);
+    let (store, _replicator) = open(&directory.path().join("restored.db"), manual(&storage));
+    assert!(store.outcome(&operation("after")).unwrap().is_some());
 }
 
 #[test]
