@@ -59,10 +59,14 @@ impl Service {
 
 #[derive(Default)]
 pub(super) struct Logins {
-    /// The deployment of each login claim, in order.
-    pub deployments: Vec<String>,
+    /// Each login claim, in order.
+    pub claims: Vec<ClaimRequest>,
+    /// Each claim canceled, in order.
+    pub cancels: Vec<ClaimRequest>,
     /// Logins routed with this deployment are rejected for routing again.
     pub retired: Option<String>,
+    /// The next routing waits for this, then fails.
+    pub unroutable: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 #[derive(Default)]
@@ -91,6 +95,11 @@ impl backend_hooks_server::BackendHooks for Service {
     }
     async fn invoke(&self, request: Request<InvokeHook>) -> Result<Response<HookResult>, Status> {
         auth(&request, "platform")?;
+        let unroutable = self.logins.lock().unwrap().unroutable.take();
+        if let Some(unroutable) = unroutable {
+            let _ = unroutable.await;
+            return Err(Status::unavailable("routing failed"));
+        }
         let route = serde_json::json!({"key":"lobby","session_type":"lobby/default","machine_profile":"local"});
         Ok(Response::new(HookResult { result_json: serde_json::to_vec(&route).unwrap() }))
     }
@@ -238,7 +247,7 @@ impl local_control_server::LocalControl for Service {
         if request.get_ref().source.is_none() {
             let login = request.into_inner();
             let mut logins = self.logins.lock().unwrap();
-            logins.deployments.push(login.deployment.clone());
+            logins.claims.push(login.clone());
             if logins.retired.as_ref() == Some(&login.deployment) {
                 return Err(Status::unavailable(super::super::ROUTE_AGAIN));
             }
@@ -263,8 +272,12 @@ impl local_control_server::LocalControl for Service {
         }
         Ok(Response::new(self.assignment.lock().unwrap().clone()))
     }
-    async fn cancel(&self, _: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
-        Err(Status::unimplemented("unused"))
+    async fn cancel(&self, request: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
+        auth(&request, "control")?;
+        let claim = request.into_inner();
+        let identity = ClaimIdentity { operation_id: claim.operation_id.clone(), ..Default::default() };
+        self.logins.lock().unwrap().cancels.push(claim);
+        Ok(Response::new(identity))
     }
     async fn reconcile_departure(&self, _: Request<ClaimRequest>) -> Result<Response<DepartureStatus>, Status> {
         Err(Status::unimplemented("unused"))

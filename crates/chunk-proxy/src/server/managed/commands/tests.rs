@@ -451,27 +451,59 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
 }
 
 #[tokio::test]
-async fn a_login_control_rejects_for_routing_again_is_claimed_once_through_the_current_release() {
+async fn a_login_routed_again_keeps_its_operation_until_the_connection_deadline_cancels_its_reservation() {
     let fixture = Fixture::new().await;
-    fixture.service.logins.lock().unwrap().retired = Some("deployment".into());
+    let logins = &fixture.service.logins;
+    logins.lock().unwrap().retired = Some("deployment".into());
     let current = crate::server::Retarget(Arc::new(std::sync::RwLock::new(fixture.commands.tasks.platform.clone())));
+    let (_client, public) = tokio::io::duplex(16384);
+    let authenticated = crate::server::authentication::Authenticated {
+        protocol_version: 776,
+        profile: chunk_protocol::versions::v26_2::LoginSuccess {
+            session_id: chunk_protocol::Uuid([2; 16]),
+            uuid: chunk_protocol::Uuid([1; 16]),
+            username: McString::new("Alex").unwrap(),
+            properties: chunk_protocol::BoundedArray::new(vec![]).unwrap(),
+        },
+        transport: Transport::new(public),
+    };
+    // After control rejects the login, its next routing fails once the release it used is no longer current.
     let reload = async {
-        while fixture.service.logins.lock().unwrap().deployments.is_empty() {
+        let (fail, unroutable) = tokio::sync::oneshot::channel();
+        while logins.lock().unwrap().claims.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        logins.lock().unwrap().unroutable = Some(unroutable);
+        while logins.lock().unwrap().unroutable.is_some() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let mut target = current.platform().target;
         target.backend.deployment = "next".into();
         current.replace(target).unwrap();
+        fail.send(()).unwrap();
     };
-    let claiming = async { tokio::join!(super::super::claim_destination(&fixture.claim, &current), reload).0 };
-    let claimed = tokio::time::timeout(Duration::from_secs(10), claiming).await.unwrap();
-    let (mut guard, assignment) = claimed.unwrap();
-    guard.armed = false;
-    assert_eq!(guard.claim.deployment, "next");
-    assert_eq!(assignment.configuration.unwrap().deployment.unwrap().deployment, "next");
-    let logins = fixture.service.logins.lock().unwrap().deployments.clone();
-    let (reserved, rejected) = logins.split_last().unwrap();
-    assert_eq!(reserved, "next");
-    assert!(!rejected.is_empty() && rejected.iter().all(|deployment| deployment == "deployment"));
+    // The client never finishes configuration, so the connection's own deadline ends the login.
+    let deadline = Duration::from_secs(1);
+    let started = tokio::time::Instant::now();
+    let (served, ()) = tokio::join!(super::super::serve(authenticated, &current, deadline), reload);
+    assert_eq!(served.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    assert!((deadline..deadline * 2).contains(&started.elapsed()));
+    while logins.lock().unwrap().cancels.is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (claims, cancels) = {
+        let logins = logins.lock().unwrap();
+        (logins.claims.clone(), logins.cancels.clone())
+    };
+    let (reserved, rejected) = claims.split_last().unwrap();
+    assert_eq!(reserved.deployment, "next");
+    assert!(!rejected.is_empty() && rejected.iter().all(|claim| claim.deployment == "deployment"));
+    assert!(
+        claims.iter().all(|claim| {
+            claim.operation_id == reserved.operation_id && claim.connection_id == reserved.connection_id
+        })
+    );
+    // Rejected attempts reserved nothing; only the reservation the deadline abandoned is canceled.
+    assert_eq!(cancels, std::slice::from_ref(reserved));
     fixture.close().await;
 }
