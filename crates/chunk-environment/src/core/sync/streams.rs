@@ -265,3 +265,35 @@ fn room<'a>(parts: &'a mut Vec<Update>, size: &mut usize, bytes: usize, position
     *size += bytes;
     parts.last_mut().expect("a part")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upsert(key: &str, value: &str, revision: u64) -> Update {
+        Update {
+            position: Some(Position { epoch: 1, revision }),
+            upserts: vec![Entry { key: key.into(), state: Some(State::Value(value.as_bytes().to_vec())) }],
+            ..Update::default()
+        }
+    }
+
+    #[test]
+    fn merged_changes_keep_every_key_at_its_latest_value() {
+        let mut changes = Changes::default();
+        changes.merge(upsert("a", "1", 2));
+        changes.merge(upsert("b", "1", 3));
+        changes.merge(upsert("a", "2", 4));
+        changes.merge(Update {
+            position: Some(Position { epoch: 1, revision: 5 }),
+            removed: vec!["b".into()],
+            ..Update::default()
+        });
+
+        let update = changes.into_update();
+        assert_eq!(update.position, Some(Position { epoch: 1, revision: 5 }));
+        let values: Vec<_> = update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
+        assert_eq!(values, [("a", Some(State::Value(b"2".to_vec())))]);
+        assert_eq!(update.removed, ["b"]);
+    }
+}

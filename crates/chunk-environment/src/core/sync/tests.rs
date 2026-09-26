@@ -103,7 +103,7 @@ impl Fixture {
             state: directory.path().join("control"),
             system: backend.system(),
             connection: directory.path().join("control.json"),
-            bind: "127.0.0.1:0".parse().unwrap(),
+            listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
