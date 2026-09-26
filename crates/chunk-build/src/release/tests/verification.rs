@@ -58,28 +58,64 @@ fn verification_rejects_consistently_signed_invalid_releases() {
 }
 
 #[test]
-fn unpack_rejects_escaping_deep_and_oversized_paths() {
+fn unpack_rejects_unsafe_archives_without_leaving_anything_behind() {
+    use tar::EntryType::{Regular, Symlink};
     let root = tempfile::tempdir().unwrap();
-    let unpack = |names: &[&str], limits: UnpackLimits| {
-        let archive = root.path().join("release.tar.gz");
+    let (archive, parent) = (root.path().join("release.tar.gz"), root.path().join("unpacked"));
+    let destination = parent.join("release");
+    let deep = format!("{}f", "d/".repeat(18));
+    let long = "a".repeat(5000);
+    let small = UnpackLimits { entries: 4, bytes: 1024 };
+    let default = UnpackLimits::default;
+    for (entries, limits, tamper, existing, expected) in [
+        (vec![("../escape", Regular, 1)], default(), false, false, "not portable"),
+        (vec![(deep.as_str(), Regular, 1)], default(), false, false, "nesting limits"),
+        (vec![("a/b/c/1", Regular, 1), ("a/b/c/2", Regular, 1)], small, false, false, "exceeds unpack limits"),
+        (vec![("big", Regular, 2048)], UnpackLimits { entries: 4, bytes: 1024 }, false, false, "exceeds unpack"),
+        (vec![("link", Symlink, 0)], default(), false, false, "other than regular files"),
+        (vec![("f", Regular, 1), ("f", Regular, 1)], default(), false, false, "twice"),
+        (vec![("f", Regular, 1), ("f/g", Regular, 1)], default(), false, false, "as a directory"),
+        (vec![(long.as_str(), Regular, 1)], default(), false, false, "name exceeds limit"),
+        (vec![("f", Regular, 1)], default(), true, false, "expected size and SHA-256"),
+        (vec![("f", Regular, 1)], default(), false, true, "exists"),
+    ] {
+        let _ = fs::remove_dir_all(&parent);
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
-        for name in names {
+        for (name, kind, size) in entries {
             let mut header = tar::Header::new_gnu();
-            header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
-            header.set_size(1);
+            header.set_size(size);
             header.set_mode(0o644);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            builder.append(&header, b"x".as_slice()).unwrap();
+            header.set_entry_type(kind);
+            header.set_link_name("../../outside").unwrap();
+            let data = vec![b'x'; usize::try_from(size).unwrap()];
+            if name.len() > 100 {
+                builder.append_data(&mut header, name, data.as_slice()).unwrap();
+            } else {
+                header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+                header.set_cksum();
+                builder.append(&header, data.as_slice()).unwrap();
+            }
         }
         fs::write(&archive, builder.into_inner().unwrap().finish().unwrap()).unwrap();
-        let directory = root.path().join("unpacked/release");
-        let error = unpack_release(&archive, &digest(&archive), &directory, &limits).unwrap_err().to_string();
-        assert!(!root.path().join("unpacked").read_dir().unwrap().any(|_| true), "{error}");
-        error
-    };
-    assert!(unpack(&["../escape.txt"], UnpackLimits::default()).contains("not portable"));
-    assert!(unpack(&[&format!("{}f", "d/".repeat(18))], UnpackLimits::default()).contains("nesting limit"));
-    let limits = UnpackLimits { entries: 4, bytes: 1024 };
-    assert!(unpack(&["a/b/c/1", "a/b/c/2"], limits).contains("exceeds unpack limits"));
+        let mut expected_digest = digest(&archive);
+        if tamper {
+            expected_digest.sha256 = content_digest(b"other");
+        }
+        if existing {
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(destination.join("marker"), b"kept").unwrap();
+        }
+        let error = unpack_release(&archive, &expected_digest, &destination, &limits).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+        let left: Vec<_> =
+            fs::read_dir(&parent).into_iter().flatten().map(|entry| entry.unwrap().file_name()).collect();
+        if existing {
+            assert_eq!(fs::read(destination.join("marker")).unwrap(), b"kept");
+            assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
+            assert_eq!(left, ["release"]);
+        } else {
+            assert!(left.is_empty(), "{error}: {left:?}");
+            assert!(!tamper || !parent.exists());
+        }
+    }
 }

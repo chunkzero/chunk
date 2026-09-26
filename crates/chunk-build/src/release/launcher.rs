@@ -5,6 +5,12 @@ use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileO
 use super::jars;
 use crate::publication::{Files, insert};
 
+/// The thin app JAR and at most the 1024 classpath JARs a JVM descriptor allows.
+const MAX_CLASSPATH: usize = 1025;
+/// Holds the largest manifest `write` produces: `MAX_CLASSPATH` entries of 80 bytes, a 1024-byte `Main-Class` and
+/// line wrapping come to under 90 KiB.
+const MANIFEST_LIMIT: u64 = 128 * 1024;
+
 /// Publishes a thin app JAR and its runtime classpath under `libs/` and returns a launcher JAR that runs `main` with
 /// them. The launcher manifest names every JAR by digest, so its own digest changes whenever any of them does.
 pub(super) fn assemble(main: &str, jars: impl IntoIterator<Item = Vec<u8>>, files: &mut Files) -> io::Result<Vec<u8>> {
@@ -22,6 +28,9 @@ pub(super) fn assemble(main: &str, jars: impl IntoIterator<Item = Vec<u8>>, file
 
 /// The launcher JAR that runs `main` over `classpath`, byte for byte as `assemble` publishes it.
 pub(super) fn write(main: &str, classpath: &[String]) -> io::Result<Vec<u8>> {
+    if classpath.len() > MAX_CLASSPATH {
+        return Err(io::Error::other(format!("launcher classpath exceeds {MAX_CLASSPATH} JARs")));
+    }
     let manifest: String = [
         "Manifest-Version: 1.0".to_owned(),
         format!("Main-Class: {main}"),
@@ -49,14 +58,21 @@ pub(super) fn classpath(jar: &[u8]) -> io::Result<Option<Vec<String>>> {
     }
     let mut manifest = Vec::new();
     match archive.by_name("META-INF/MANIFEST.MF") {
-        Ok(entry) => entry.take(65_537).read_to_end(&mut manifest)?,
+        Ok(entry) => entry.take(MANIFEST_LIMIT + 1).read_to_end(&mut manifest)?,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(error) => return Err(io::Error::other(error)),
     };
-    Ok(jars::attributes(&manifest)?.iter().find_map(|line| {
+    if manifest.len() as u64 > MANIFEST_LIMIT {
+        return Err(io::Error::other(format!("launcher manifest exceeds {MANIFEST_LIMIT} bytes")));
+    }
+    let classpath: Option<Vec<String>> = jars::attributes(&manifest)?.iter().find_map(|line| {
         let (key, value) = line.split_once(':')?;
         key.eq_ignore_ascii_case("Class-Path").then(|| value.split_whitespace().map(Into::into).collect())
-    }))
+    });
+    if classpath.as_ref().is_some_and(|entries| entries.len() > MAX_CLASSPATH) {
+        return Err(io::Error::other(format!("launcher classpath exceeds {MAX_CLASSPATH} JARs")));
+    }
+    Ok(classpath)
 }
 
 /// Splits a manifest attribute into 72-byte lines without breaking UTF-8 characters.

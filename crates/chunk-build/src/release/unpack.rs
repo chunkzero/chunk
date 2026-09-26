@@ -8,9 +8,10 @@ use sha2::{Digest, Sha256};
 
 use std::collections::BTreeSet;
 
-use crate::publication::{self, MAX_BYTES, MAX_COMPONENTS, MAX_FILES};
+use crate::publication::{self, MAX_BYTES, MAX_COMPONENTS, MAX_FILES, MAX_PATH_BYTES};
 
-const LONG_NAME_LIMIT: u64 = 4096;
+/// A GNU long name holds the path and a trailing NUL.
+const LONG_NAME_LIMIT: u64 = MAX_PATH_BYTES as u64 + 1;
 
 /// The size and lowercase hex SHA-256 a release archive must have.
 pub struct ArchiveDigest {
@@ -19,7 +20,8 @@ pub struct ArchiveDigest {
 }
 
 /// How many filesystem entries, files and directories together, and content bytes an archive may unpack to.
-/// The default admits releases of up to 4096 files in as many directories and every size `chunk build` publishes.
+/// The default admits every release `chunk build` can publish: each of its files may add a directory for every
+/// other component of its path.
 pub struct UnpackLimits {
     pub entries: usize,
     pub bytes: u64,
@@ -27,7 +29,7 @@ pub struct UnpackLimits {
 
 impl Default for UnpackLimits {
     fn default() -> Self {
-        Self { entries: 2 * MAX_FILES, bytes: MAX_BYTES as u64 }
+        Self { entries: MAX_FILES * MAX_COMPONENTS, bytes: MAX_BYTES as u64 }
     }
 }
 
@@ -59,7 +61,7 @@ pub fn unpack_release(
 fn extract(reader: impl Read, directory: &Path, limits: &UnpackLimits) -> io::Result<()> {
     let mut archive = tar::Archive::new(reader);
     let (mut entries, mut bytes, mut long_name) = (0, 0, None);
-    let mut directories = BTreeSet::new();
+    let (mut files, mut directories) = (BTreeSet::new(), BTreeSet::new());
     for entry in archive.entries()?.raw(true) {
         let mut entry = entry?;
         let kind = entry.header().entry_type();
@@ -81,15 +83,20 @@ fn extract(reader: impl Read, directory: &Path, limits: &UnpackLimits) -> io::Re
         let name = long_name.take().unwrap_or_else(|| entry.path_bytes().into_owned());
         let name = String::from_utf8(name).map_err(|_| io::Error::other("release archive paths must be UTF-8"))?;
         publication::relative_name(&name)?;
-        if name.split('/').count() > MAX_COMPONENTS {
-            return Err(io::Error::other("release archive path exceeds nesting limit"));
+        let duplicate = || io::Error::other(format!("release archive holds {name:?} twice or as a directory"));
+        if directories.contains(&name) || !files.insert(name.clone()) {
+            return Err(duplicate());
         }
         entries += 1;
         let mut ancestor = name.as_str();
         // Deepest first: once one ancestor is known, so are all of its own.
         while let Some((parent, _)) = ancestor.rsplit_once('/')
-            && directories.insert(parent.to_owned())
+            && !directories.contains(parent)
         {
+            if files.contains(parent) {
+                return Err(duplicate());
+            }
+            directories.insert(parent.to_owned());
             entries += 1;
             ancestor = parent;
         }

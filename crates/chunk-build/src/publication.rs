@@ -10,8 +10,9 @@ use sha2::{Digest, Sha256};
 pub(super) type Files = BTreeMap<String, Vec<u8>>;
 pub(super) const MAX_BYTES: usize = 256 * 1024 * 1024;
 pub(super) const MAX_FILES: usize = 4096;
-/// The most path components a collected file may have.
+/// The most components and bytes an artifact path may have.
 pub(super) const MAX_COMPONENTS: usize = 18;
+pub(super) const MAX_PATH_BYTES: usize = 4096;
 
 pub(super) fn insert(files: &mut Files, name: String, bytes: Vec<u8>) -> io::Result<()> {
     relative_name(&name)?;
@@ -33,6 +34,9 @@ pub(super) fn relative_name(name: &str) -> io::Result<()> {
         || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' ']))
     {
         return Err(io::Error::other(format!("artifact path is not portable: {name:?}")));
+    }
+    if name.len() > MAX_PATH_BYTES || name.split('/').count() > MAX_COMPONENTS {
+        return Err(io::Error::other("artifact path exceeds length or nesting limits"));
     }
     Ok(())
 }
