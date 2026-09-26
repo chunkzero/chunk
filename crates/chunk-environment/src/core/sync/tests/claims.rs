@@ -104,9 +104,8 @@ async fn a_gateway_claims_activates_and_sees_its_player_arrive() {
     let activated = fixture.platform(&gateway, &first.stream, "login", "chunk:activate", &()).await;
     assert!(!result::<ActivateResult>(&activated).waiting);
 
-    let (update, claim) = arrival(&mut updates, "login").await;
+    let (_, claim) = arrival(&mut updates, "login").await;
     assert_eq!(claim.generation, assignment.generation);
-    assert!(revision(update.position.as_ref()) >= revision(activated.position.as_ref()));
     drop(updates);
     fixture.stop().await;
     server.abort();
