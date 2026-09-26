@@ -2,10 +2,10 @@
 
 Implemented listener behavior and development commands. Run commands from the repository root.
 
-With `CHUNK_BACKEND_FILE=.chunk/local/backend.json` and `CHUNK_CONTROL_FILE=.chunk/local/control.json`, the proxy runs
-live backend status/admission/routing hooks and waits in configuration while control provisions gameplay. Each delivery
-uses a dedicated authenticated TCP path through the runtime to Minestom. Admission and preparation have a 45-second
-total limit; arrival has a 20-second limit while packets continue flowing.
+With a `PlatformTarget` naming the backend and control connections, the proxy runs live backend status/admission/routing
+hooks and waits in configuration while control provisions gameplay. Each delivery uses a dedicated authenticated TCP
+path through the runtime to Minestom. Admission and preparation have a 45-second total limit; arrival has a 20-second
+limit while packets continue flowing.
 
 Same-proxy moves preserve authentication, encryption, compression and the public socket, including across JVMs. The
 `proxy/move` hook approves the requested route after admission. The destination reserves capacity without creating a
@@ -24,21 +24,21 @@ retires the selected player's current runtime, queues replacement moves, and sto
 deadline. The CLI reports completion only after confirmed runtime/JVM shutdown. Retain the printed operation ID with
 `--operation` when retrying an uncertain command.
 
-## Standalone service
+## Environment gateway
 
-The reusable proxy library is hosted by the `chunk-edge` binary:
+The `chunk-environment` binary hosts the proxy as its gateway service, targeting the backend and control it runs in the
+same process (see the [root README](../../README.md) for its variables):
 
 ```sh
-CHUNK_BACKEND_FILE=.chunk/local/backend.json CHUNK_CONTROL_FILE=.chunk/local/control.json CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-edge
+CHUNK_BUNDLE=bundle.json CHUNK_ENVIRONMENT=local CHUNK_STATE=.chunk/environment CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-environment
 ```
 
-The edge requires backend/control discovery records. Library callers can omit `Config::platform` to use the
-waiting-world fixture, or replace the platform for later connections with `Proxy::retarget`; established connections
-keep the platform they started with. The listener supports Java Edition 26.2 (protocol 776), with online authentication
-through Mojang.
+Library callers can omit `Config::platform` to use the waiting-world fixture, or replace the platform for later
+connections with `Proxy::retarget`; established connections keep the platform they started with. The listener supports
+Java Edition 26.2 (protocol 776), with online authentication through Mojang.
 
-`mc-26-2` is enabled by default and forwarded from the edge to the proxy and protocol. Select it explicitly with
-`cargo run -p chunk-edge --no-default-features --features mc-26-2`.
+`mc-26-2` is enabled by default and forwarded from the environment to the proxy and protocol. Select it explicitly with
+`cargo run -p chunk-environment --no-default-features --features mc-26-2`.
 
 Without version features, protocol primitives remain available but the proxy refuses to start. Features select releases;
 they do not translate versions.

@@ -19,8 +19,8 @@ release.
 
 The local implementation includes online authentication, live JavaScript admission/routing, automatic session placement,
 supervised Minestom JVMs, SQLite transactions and reactive subscriptions. Players move between sessions and JVMs on the
-same public connection. Standalone backend and control services can restart independently. The development runner embeds
-services and stops the stack if one fails.
+same public connection. The `chunk-environment` binary runs the environment's services in one process. The development
+runner embeds the same services and stops the stack if one fails.
 
 Run the [local example](examples/local/README.md) with `just local`. It packages an immutable deployment, starts all
 services, and demonstrates persistent coins, subscriptions, session moves and drain. Ctrl-C stops its services and
@@ -179,12 +179,15 @@ automatic rebuilds. Reloads do not preserve gameplay state. Development releases
 is deleted once no running version uses it, and a new session first clears the previous one's control state and JVM
 logs.
 
-Standalone `chunk-backend` and `chunk-edge` binaries read environment variables and call the same libraries. They have
-no CLI argument parser. Control has no binary of its own: it shares the backend's store, so it runs embedded beside it.
-The proxy remains the reusable listener implementation hosted by edge. Backend requires `CHUNK_BUNDLE`,
-`CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_CONNECTION`, and optional `CHUNK_BIND` (default `127.0.0.1:25568`). See the
-[control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and [runtime](jvm/runtime/README.md)
-docs for the other service environments.
+The `chunk-environment` binary runs an environment's services in one process and calls the same libraries as
+`chunk dev`. `CHUNK_SERVICES` selects them: `core,gateway,exec` (the default) or `core,exec`. Core is the backend and
+the control that shares its store, exec runs backend code beside core, and gateway is the proxy's player listener. It
+reads environment variables and has no CLI argument parser. It requires `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT` and
+`CHUNK_STATE`, and accepts `CHUNK_BACKEND_BIND` (default `127.0.0.1:25568`), `CHUNK_CONTROL_BIND` (default
+`127.0.0.1:25567`), and the gateway's `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`.
+It writes the backend and control connection records to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`. See
+the [control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and
+[runtime](jvm/runtime/README.md) docs for the other service environments.
 
 ## License
 

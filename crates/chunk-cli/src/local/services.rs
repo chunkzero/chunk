@@ -1,205 +1,70 @@
 use super::{Reporter, Settings, Staged, report::Destination};
 use chunk_build::Release;
-use chunk_contract::{BackendConnection, ControlConnection};
+use chunk_contract::ControlConnection;
+use chunk_environment::{Core, CoreConfig, Gateway, GatewayConfig, PlatformTarget};
 use chunk_proto::v1::{
     MovePlayerRequest, NodePhase, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand,
 };
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{sync::oneshot, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
-
-type Task = JoinHandle<io::Result<()>>;
-
-const STARTUP: Duration = Duration::from_secs(30);
-
-struct Service {
-    stop: CancellationToken,
-    task: Task,
-}
-impl Service {
-    async fn ready<T>(slot: &mut Option<Self>, started: oneshot::Receiver<T>, name: &str) -> io::Result<T> {
-        match tokio::time::timeout(STARTUP, started).await {
-            Ok(Ok(connection)) => return Ok(connection),
-            Ok(Err(_)) => {}
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("{name} did not become ready within {}s", STARTUP.as_secs()),
-                ));
-            }
-        }
-        let result = (&mut slot.as_mut().expect("service started").task).await;
-        slot.take();
-        match result {
-            Ok(Err(error)) => Err(error),
-            Err(error) => Err(io::Error::other(error)),
-            Ok(Ok(())) => Err(io::Error::other(format!("{name} stopped before readiness"))),
-        }
-    }
-
-    async fn stop(self) -> io::Result<()> {
-        self.stop.cancel();
-        self.task.await.map_err(io::Error::other)?
-    }
-}
 
 /// The backend, control and proxy that outlive every release.
-#[derive(Default)]
 pub(super) struct Shared {
-    backend: Option<Service>,
-    handle: Option<chunk_backend::Backend>,
-    connection: Option<BackendConnection>,
-    control: Option<Service>,
-    host: Option<Arc<chunk_control::ProcessHost>>,
-    authority: Option<chunk_control::server::Ready>,
-    edge: Option<Service>,
-    retarget: Option<chunk_edge::Retarget>,
+    core: Core,
+    gateway: Option<Gateway>,
 }
 
 impl Shared {
-    async fn start_backend(&mut self, settings: &Settings, staged: &Staged, reporter: &Reporter) -> io::Result<()> {
-        let bundle = settings.state.join("deployment.json");
-        std::fs::write(&bundle, serde_json::to_vec(&staged.bundle).map_err(io::Error::other)?)?;
-        let token = CancellationToken::new();
-        let (ready, started) = oneshot::channel();
-        let config = chunk_backend::server::Config {
-            bundle,
-            environment: staged.control.deployment.environment.clone(),
-            state: settings.state.join("backend"),
-            connection: settings.state.join("backend.json"),
-            bind: settings.backend_bind,
-        };
-        self.backend =
-            Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
-        let ready = Service::ready(&mut self.backend, started, "backend").await?;
-        reporter.done("Backend", &ready.connection.endpoint);
-        self.handle = Some(ready.backend);
-        self.connection = Some(ready.connection);
-        Ok(())
-    }
-
-    /// Starts the environment's control, which drops the rows of an earlier session, whose JVMs are gone.
-    async fn start_control(&mut self, settings: &Settings, environment: String) -> io::Result<()> {
-        let state = settings.state.join("control");
-        let backend = self.connection.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
-        let host = Arc::new(chunk_control::ProcessHost::new(chunk_control::ProcessHostConfig {
-            directory: state.join("nodes"),
-            backend,
-        }));
-        self.host = Some(host.clone());
-        let token = CancellationToken::new();
-        let (ready, started) = oneshot::channel();
-        let config = chunk_control::server::Config {
-            connection: state.join("connection.json"),
-            state,
-            system: self.system()?,
-            bind: settings.control_bind,
-            control: chunk_control::Config { environment },
-            host,
-            fresh: true,
-        };
-        self.control =
-            Some(Service { task: tokio::spawn(chunk_control::server::run(config, ready, token.clone())), stop: token });
-        self.authority = Some(Service::ready(&mut self.control, started, "control").await?);
-        Ok(())
-    }
-
-    async fn start_proxy(&mut self, settings: &Settings, target: chunk_edge::PlatformTarget) -> io::Result<()> {
-        let proxy = chunk_edge::Proxy::bind(
-            settings.bind,
-            chunk_edge::ProxyConfig { platform: Some(target), ..Default::default() },
-        )
-        .await?;
-        self.retarget = proxy.retarget();
-        let token = CancellationToken::new();
-        let shutdown = token.clone();
-        self.edge = Some(Service {
-            task: tokio::spawn(proxy.run(async move {
-                shutdown.cancelled().await;
-                Ok(())
-            })),
-            stop: token,
-        });
-        Ok(())
-    }
-
-    fn backend_connection(&self, deployment: &str) -> io::Result<BackendConnection> {
-        let connection = self.connection.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
-        Ok(BackendConnection { deployment: deployment.into(), ..connection.clone() })
-    }
-
     pub fn backend(&self) -> Option<chunk_backend::Backend> {
-        self.handle.clone()
-    }
-
-    /// The environment store's system lane, which control writes through.
-    fn system(&self) -> io::Result<chunk_backend::System> {
-        self.handle
-            .as_ref()
-            .map(chunk_backend::Backend::system)
-            .ok_or_else(|| io::Error::other("backend is not running"))
-    }
-
-    fn authority(&self) -> io::Result<&chunk_control::server::Ready> {
-        self.authority.as_ref().ok_or_else(|| io::Error::other("control is not running"))
+        self.core.backend()
     }
 
     /// Control's endpoint, for the proxy and for `chunk players` and `chunk nodes`.
     pub fn control_connection(&self) -> io::Result<&ControlConnection> {
-        Ok(&self.authority()?.connection)
+        self.core.control_connection()
     }
 
     pub fn control(&self) -> io::Result<Arc<chunk_control::Control>> {
-        Ok(self.authority()?.control.clone())
+        self.core.control()
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
     pub async fn deploy(&self, bundle: chunk_contract::Deployment) -> io::Result<()> {
-        let backend = self.handle.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
-        for _ in 0..50 {
-            match backend.deploy(bundle.clone()).await {
-                Err(chunk_backend::Error::Busy) => tokio::time::sleep(Duration::from_millis(200)).await,
-                result => return result.map_err(io::Error::other),
-            }
-        }
-        Err(io::Error::other("backend stayed busy for 10s; deployment not activated"))
+        self.core.deploy(bundle).await
     }
 
     /// Makes `version` control's current release, whose JVMs launch from its release directory. Earlier releases keep
     /// their sessions.
     pub fn activate(&self, version: &Version) -> io::Result<()> {
-        let host = self.host.as_ref().ok_or_else(|| io::Error::other("control is not running"))?;
         let distribution =
             chunk_control::Distribution { directory: version.release.directory.clone(), java: version.java.clone() };
-        host.add_release(&version.deployment, distribution).map_err(io::Error::other)?;
-        self.control()?.activate_release(version.control.clone()).map_err(io::Error::other)
+        self.core.activate(&version.deployment, distribution, version.control.clone())
     }
 
     /// Sends later player connections to `version`'s backend.
     pub fn route(&self, version: &Version) -> io::Result<()> {
-        let retarget = self.retarget.as_ref().ok_or_else(|| io::Error::other("proxy is not running"))?;
-        retarget.replace(self.target(version)?)
+        let gateway = self.gateway.as_ref().ok_or_else(|| io::Error::other("proxy is not running"))?;
+        gateway.retarget(self.target(version)?)
     }
 
-    fn target(&self, version: &Version) -> io::Result<chunk_edge::PlatformTarget> {
-        let control = self.control_connection()?.clone();
-        Ok(chunk_edge::PlatformTarget { backend: self.backend_connection(&version.deployment)?, control })
+    fn target(&self, version: &Version) -> io::Result<PlatformTarget> {
+        let mut target = self.core.target()?;
+        target.backend.deployment.clone_from(&version.deployment);
+        Ok(target)
     }
 
     /// Whether the backend or proxy stopped.
     pub fn failed(&self) -> bool {
-        [&self.backend, &self.edge].into_iter().flatten().any(|service| service.task.is_finished())
+        self.core.failed() || self.gateway.as_ref().is_some_and(Gateway::failed)
     }
 
     pub fn control_failed(&self) -> bool {
-        self.control.as_ref().is_some_and(|service| service.task.is_finished())
+        self.core.control_failed()
     }
 
     /// Closes player connections first so releases can stop without new arrivals.
     pub async fn stop_proxy(&mut self) -> io::Result<()> {
-        self.retarget = None;
-        match self.edge.take() {
-            Some(edge) => edge.stop().await.inspect_err(|error| tracing::error!(%error, "proxy shutdown failed")),
+        match self.gateway.take() {
+            Some(gateway) => gateway.stop().await.inspect_err(|error| tracing::error!(%error, "proxy shutdown failed")),
             None => Ok(()),
         }
     }
@@ -207,57 +72,21 @@ impl Shared {
     /// Stops every JVM, then control, retrying until each JVM has confirmed its exit, however long that takes. The
     /// host and backend stay until then.
     pub async fn stop_control(&mut self, reporter: &Reporter) -> io::Result<()> {
-        let mut waiting = false;
-        if let Ok(control) = self.control() {
-            // While control serves, a JVM that outlived an earlier control can still re-attach and be stopped.
-            while let Err(error) = control.shutdown().await
-                && !self.control_failed()
-            {
-                wait_for_jvms(reporter, &mut waiting, &error).await;
-            }
-        }
-        self.authority = None;
-        let mut result = Ok(());
-        if let Some(control) = self.control.take()
-            && let Err(error) = control.stop().await
-        {
-            tracing::error!(%error, "control shutdown failed");
-            result = Err(error);
-        }
-        if let Some(host) = &self.host {
-            while let Err(error) = host.shutdown().await {
-                wait_for_jvms(reporter, &mut waiting, &error).await;
-            }
-        }
-        self.host = None;
-        result
+        self.core.stop_control(waiting(reporter)).await
     }
 
     pub async fn stop(mut self, reporter: &Reporter) -> io::Result<()> {
         let mut result = self.stop_proxy().await;
-        if let Err(error) = self.stop_control(reporter).await {
-            result = Err(error);
-        }
-        // The service joins the backend engine only once this last outside handle is gone.
-        if let Some(handle) = self.handle.take() {
-            tokio::task::spawn_blocking(move || drop(handle)).await.map_err(io::Error::other)?;
-        }
-        if let Some(backend) = self.backend.take()
-            && let Err(error) = backend.stop().await
-        {
+        if let Err(error) = self.core.stop(waiting(reporter)).await {
             result = Err(error);
         }
         result
     }
 }
 
-/// Waits before the next attempt to stop the JVMs, telling the user once that it waits for them.
-async fn wait_for_jvms(reporter: &Reporter, waiting: &mut bool, error: &chunk_control::Error) {
-    if !std::mem::replace(waiting, true) {
-        tracing::warn!(%error, "JVM exit unconfirmed; retrying until every JVM stops");
-        reporter.running("Stop", "waiting for JVMs to stop");
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
+/// Tells the user that stopping waits for the JVMs.
+fn waiting(reporter: &Reporter) -> impl Fn() {
+    move || reporter.running("Stop", "waiting for JVMs to stop")
 }
 
 /// One deployment version: its release, its backend version, and its release in control.
@@ -283,31 +112,41 @@ impl Version {
 
 /// Starts the backend, control with its first release, and the proxy; on error, everything started is stopped.
 pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Reporter) -> io::Result<(Shared, Version)> {
-    let mut shared = Shared::default();
     reporter.running("Backend", settings.backend_bind);
-    if let Err(error) = shared.start_backend(settings, &staged, reporter).await {
-        return Err(abandon(error, shared, reporter).await);
-    }
-    reporter.running("Control", settings.control_bind);
-    let environment = staged.control.deployment.environment.clone();
-    let version = Version::new(staged);
-    let started = match shared.start_control(settings, environment).await {
-        Ok(()) => shared.activate(&version),
-        Err(error) => Err(error),
+    let bundle = settings.state.join("deployment.json");
+    std::fs::write(&bundle, serde_json::to_vec(&staged.bundle).map_err(io::Error::other)?)?;
+    let config = CoreConfig {
+        bundle,
+        environment: staged.control.deployment.environment.clone(),
+        state: settings.state.clone(),
+        backend_record: settings.state.join("backend.json"),
+        control_record: settings.state.join("control").join("connection.json"),
+        backend_bind: settings.backend_bind,
+        control_bind: settings.control_bind,
+        // Drops the control rows of an earlier session, whose JVMs are gone.
+        fresh: true,
     };
-    if let Err(error) = started {
+    let core = Core::start(config, |connection| {
+        reporter.done("Backend", &connection.endpoint);
+        reporter.running("Control", settings.control_bind);
+    })
+    .await?;
+    let mut shared = Shared { core, gateway: None };
+    let version = Version::new(staged);
+    if let Err(error) = shared.activate(&version) {
         return Err(abandon(error, shared, reporter).await);
     }
     if let Ok(connection) = shared.control_connection() {
         reporter.done("Control", &connection.endpoint);
     }
     reporter.running("Proxy", settings.bind);
-    let proxy = match shared.target(&version) {
-        Ok(target) => shared.start_proxy(settings, target).await,
+    let gateway = match shared.target(&version) {
+        Ok(target) => Gateway::start(GatewayConfig::new(settings.bind), target).await,
         Err(error) => Err(error),
     };
-    if let Err(error) = proxy {
-        return Err(abandon(error, shared, reporter).await);
+    match gateway {
+        Ok(gateway) => shared.gateway = Some(gateway),
+        Err(error) => return Err(abandon(error, shared, reporter).await),
     }
     reporter.done("Proxy", settings.bind);
     Ok((shared, version))
@@ -370,6 +209,3 @@ pub(super) async fn move_player(
         .map_err(|status| io::Error::other(status.message().to_owned()))?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

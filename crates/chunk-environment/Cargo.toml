@@ -1,0 +1,31 @@
+[package]
+name = "chunk-environment"
+description = "Environment process running the core, gateway and exec services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["mc-26-2"]
+mc-26-2 = ["chunk-proxy/mc-26-2"]
+
+[dependencies]
+chunk-backend = { path = "../chunk-backend" }
+chunk-contract = { path = "../chunk-contract" }
+chunk-control = { path = "../chunk-control" }
+chunk-proxy = { path = "../chunk-proxy", default-features = false }
+chunk-service = { path = "../chunk-service" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+chunk-proto = { path = "../chunk-proto" }
+serde_json = "1"
+tempfile = "3"
+tonic = "0.14.6"
+
+[lints]
+workspace = true

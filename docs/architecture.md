@@ -25,8 +25,8 @@ retained until cleanup is confirmed. Hosted capacity, suspension, promotion and 
 work.
 
 The proxy owns public Minecraft connections, online authentication, encryption, compression and routing. Players can
-move between sessions and JVMs on the same public connection. The development runner embeds backend, control and edge
-services, while standalone binaries host the same libraries independently. An unexpected service exit stops the
+move between sessions and JVMs on the same public connection. The development runner embeds the backend, control and
+proxy, and the `chunk-environment` binary runs the same services as one process. An unexpected service exit stops the
 development stack. A lost gameplay JVM loses its live simulation; packet replay does not restore its worlds.
 
 ## Crates
@@ -37,7 +37,7 @@ This is a responsibility map, not a dependency policy.
 | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `chunk-protocol-derive`, `chunk-protocol-codegen`, `chunk-protocol` | Minecraft codecs and packet generation without sockets                                                    |
 | `chunk-proxy`                                                       | Login, authentication, configuration, routing, player moves and waiting world                             |
-| `chunk-edge`                                                        | Hosting the proxy with backend admission/routing and local control                                        |
+| `chunk-environment`                                                 | The environment process: core (backend and control) and the gateway proxy, selected by `CHUNK_SERVICES`   |
 | `chunk-js`                                                          | Bounded `deno_core`/V8 execution with explicit transactional capabilities                                 |
 | `chunk-store`                                                       | SQLite snapshots, indexes, durable commits and operation-outcome recovery                                 |
 | `chunk-backend`                                                     | Environment sync engine, retained deployments, transactions, subscriptions and authenticated backend RPCs |
