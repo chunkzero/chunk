@@ -62,8 +62,11 @@ impl Recovery {
         Ok(self.lock()?.hosts.is_empty())
     }
 
-    fn reopen(&self, host: &str) -> Result<()> {
+    /// Runs `adopt`, then makes `host` pending again, under the lock resolution completes hosts under. A resolution
+    /// that observed the adopted process therefore sees the new stamp and leaves the host pending.
+    fn reattach(&self, host: &str, adopt: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut pending = self.lock()?;
+        adopt()?;
         pending.attachments += 1;
         let attachment = pending.attachments;
         pending.hosts.insert(host.into(), attachment);
@@ -227,8 +230,7 @@ impl Control {
                 return Err(error);
             }
         }
-        self.host.adopt(secret, registration)?;
-        self.recovery.reopen(&identity.runtime_id)?;
+        self.recovery.reattach(&identity.runtime_id, || self.host.adopt(secret, registration))?;
         tracing::info!(host = identity.runtime_id, "re-attached a JVM that outlived control");
         Ok(identity)
     }

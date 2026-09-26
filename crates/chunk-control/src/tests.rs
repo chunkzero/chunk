@@ -251,6 +251,8 @@ struct FakeHost {
     forgotten: AtomicBool,
     /// Runs once when a forgotten host is asked for its connection, after answering none.
     missed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once when an adoption has published its process, before the adoption returns.
+    adopted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
@@ -306,6 +308,10 @@ impl Host for FakeHost {
             return Err(Error::Invalid("process credential does not match its launch record"));
         }
         assert!(self.forgotten.swap(false, Ordering::AcqRel));
+        let adopted = self.adopted.lock().unwrap().take();
+        if let Some(adopted) = adopted {
+            adopted();
+        }
         Ok(())
     }
 }
@@ -371,6 +377,7 @@ impl Fixture {
             terminated: Mutex::default(),
             forgotten: AtomicBool::new(false),
             missed: Mutex::default(),
+            adopted: Mutex::default(),
         });
         let config = Config {
             contracts: Contracts::default(),
