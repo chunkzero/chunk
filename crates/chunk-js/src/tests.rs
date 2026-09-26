@@ -77,6 +77,33 @@ fn retained_capabilities_cannot_access_later_transactions_or_callers() {
 }
 
 #[test]
+fn hosts_learn_when_the_caller_is_read() {
+    struct Tracked(std::rc::Rc<std::cell::Cell<u32>>);
+    impl ReadHost for Tracked {
+        fn read_caller(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+        fn get(&mut self, key: &Key) -> Result<Option<Value>, String> {
+            Snapshot.get(key)
+        }
+        fn scan(&mut self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<Vec<(String, Value)>, String> {
+            Ok(vec![])
+        }
+    }
+    let mut engine = deployment(
+        "if (args.id === 'caller') throw new Error(ctx.caller.player + ctx.caller.player); return ctx.db.get('profiles','p');",
+        Limits::default(),
+    );
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    engine.execute(invocation(), Box::new(Tracked(reads.clone())), &Cancellation::default()).unwrap();
+    assert_eq!(reads.get(), 0);
+    let mut read = invocation();
+    read.arguments = json!({"id":"caller"}).into();
+    assert!(engine.execute(read, Box::new(Tracked(reads.clone())), &Cancellation::default()).is_err());
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
 fn failed_call_discards_writes_and_retains_module_state() {
     let mut engine = deployment(
         "globalThis.count = (globalThis.count || 0) + 1; if (args.fail) { ctx.db.put('profiles','p',{}); throw Error('rollback'); } return count;",

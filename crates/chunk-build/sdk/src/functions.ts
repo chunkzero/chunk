@@ -154,12 +154,29 @@ function extendContext<C extends object, E extends object>(ctx: C, extra: E): Re
   for (const key of Reflect.ownKeys(extra)) {
     if (Object.hasOwn(ctx, key)) throw new Error(`Context field already exists: ${String(key)}`);
   }
-  return Object.freeze({ ...ctx, ...extra });
+  // Copying descriptors keeps `caller` lazy.
+  const extended = Object.defineProperties({}, Object.getOwnPropertyDescriptors(ctx)) as C;
+  return Object.freeze(Object.assign(extended, extra));
 }
 
-function protect<C extends { readonly caller: JsonValue }>(ctx: C): C {
-  freeze(ctx.caller);
-  return Object.freeze(ctx);
+/** Reads the caller only when the handler does; the backend treats that read as a dependency. */
+function protect<C extends object>(
+  source: { readonly caller: JsonValue },
+  fields: C,
+): C & { readonly caller: JsonValue } {
+  let caller: JsonValue;
+  let read = false;
+  const ctx = Object.defineProperty({}, "caller", {
+    enumerable: true,
+    get: () => {
+      if (!read) {
+        read = true;
+        caller = freeze(source.caller);
+      }
+      return caller;
+    },
+  });
+  return Object.freeze(Object.assign(ctx, fields)) as C & { readonly caller: JsonValue };
 }
 
 function raw<K extends "query" | "mutation">(kind: K, visibility: Visibility) {
@@ -172,7 +189,10 @@ function raw<K extends "query" | "mutation">(kind: K, visibility: Visibility) {
     (handler) => (ctx, args) =>
       handler(
         protect(
-          kind === "mutation" ? { ...ctx, scheduler: scheduler((ctx as RawMutationContext).scheduler) } : ctx,
+          ctx,
+          kind === "mutation"
+            ? { db: ctx.db, scheduler: scheduler((ctx as RawMutationContext).scheduler) }
+            : { db: ctx.db },
         ) as unknown as Context,
         args,
       ),
@@ -199,15 +219,14 @@ export function actionContext(ctx: RawActionContext): ActionContext {
     const result = await (kind === "query" ? ctx.runQuery(ref.path, input) : ctx.runMutation(ref.path, input));
     return ref.result.parse(result);
   };
-  return protect({
-    caller: ctx.caller,
+  return protect(ctx, {
     invocationId: ctx.invocationId,
     http: (binding, request) => ctx.http(binding, request),
     secret: (name) => ctx.secret(name),
     runQuery: (ref, values) => invoke("query", ref, values),
     runMutation: (ref, values) => invoke("mutation", ref, values),
     sleep: (milliseconds) => ctx.sleep(milliseconds),
-  } satisfies ActionContext);
+  } satisfies Omit<ActionContext, "caller">);
 }
 
 export const action = actionBuilder("public");
@@ -229,8 +248,7 @@ export function defineFunctions<T extends Tables>(schema: SchemaDefinition<T>) {
       visibility,
       (handler) => (ctx, args) =>
         handler(
-          protect({
-            caller: ctx.caller,
+          protect(ctx, {
             db: documents(schema, ctx.db, kind === "mutation"),
             ...(kind === "mutation" ? { scheduler: scheduler((ctx as RawMutationContext).scheduler) } : {}),
           }) as Context,

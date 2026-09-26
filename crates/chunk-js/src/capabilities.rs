@@ -152,4 +152,13 @@ fn op_chunk_write(state: &mut OpState, generation: u32, #[string] request: &str)
     Ok(())
 }
 
-deno_core::extension!(chunk_capabilities, ops = [op_chunk_read, op_chunk_write]);
+#[op2(fast)]
+fn op_chunk_caller(state: &mut OpState, generation: u32) {
+    if let Some(capabilities) =
+        state.borrow_mut::<Option<Capabilities>>().as_mut().filter(|capabilities| capabilities.generation == generation)
+    {
+        capabilities.host.read_caller();
+    }
+}
+
+deno_core::extension!(chunk_capabilities, ops = [op_chunk_read, op_chunk_write, op_chunk_caller]);
