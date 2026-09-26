@@ -40,9 +40,10 @@ struct Scans {
 }
 
 impl Scan {
-    /// An upper estimate of the memory a cached scan retains, including its record.
+    /// An upper estimate of the memory a cached scan retains: its cache record and a partly filled tree node, then
+    /// each class's name, digest and share of the tree.
     fn retained(&self) -> usize {
-        256 + self.classes.keys().map(|name| name.len() + 96).sum::<usize>()
+        1024 + self.classes.keys().map(|name| name.len() + 128).sum::<usize>()
     }
 }
 
