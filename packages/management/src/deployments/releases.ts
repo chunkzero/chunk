@@ -5,7 +5,7 @@ import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 import type { Deps } from "../deps.ts";
 import { type DeploymentService, ReleaseState, UploadTargetSchema } from "../gen/chunk/management/v1/deployments_pb.ts";
 import { loadEnvironment, loadProject } from "../projects/store.ts";
-import { verifyRelease } from "../releases/manifest.ts";
+import { type ReleaseManifest, verifyRelease } from "../releases/manifest.ts";
 import { maxArchiveBytes, releaseKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
@@ -71,14 +71,14 @@ export function releaseHandlers({
       const { archive_sha256: sha256, archive_size_bytes: sizeBytes } = release;
       const stored = await releases.read(releaseKey(project.id, release.id, sha256));
       if (!stored) throw failedPrecondition("the archive has not been uploaded");
-      let manifest: string;
+      let manifest: ReleaseManifest;
       try {
         manifest = await verifyRelease(stored, { releaseId: release.id, sha256, sizeBytes }, archiveLimits);
       } catch (error) {
         throw failedPrecondition(`the archive is not a valid release: ${(error as Error).message}`);
       }
       const [ready] = await sql<ReleaseRow[]>`
-        update releases set state = ${ReleaseState.READY}, manifest = ${manifest}::text::jsonb
+        update releases set state = ${ReleaseState.READY}, manifest = ${JSON.stringify(manifest)}::text::jsonb
         where project_id = ${project.id} and id = ${release.id} and state = ${ReleaseState.UPLOADING}
           and archive_sha256 = ${sha256} and archive_size_bytes = ${sizeBytes}
         returning *`;

@@ -29,6 +29,13 @@ Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` wit
 the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,
 so plain gRPC clients do not work.
 
+## Releases
+
+Management is a registry for release archives. A READY release means the archive is stored and intact: it matches the
+declared size and SHA-256, it is a well-formed tar within the expansion and entry limits, and `release.json` names the
+release and declares the apps, sessions and machine profiles management reads. Management does not validate the backend
+contract or the rest of the release. The environment decides whether a release is deployable when it loads it.
+
 ## Development
 
 ```sh
