@@ -1,7 +1,7 @@
 # Service benchmarks
 
-Opt-in local workloads for the production proxy relay, control server and environment backend. Use a release build;
-these workloads never run as part of tests or CI.
+Opt-in local workloads for the production proxy relay, control server, environment backend and core's sync protocol. Use
+a release build; these workloads never run as part of tests or CI.
 
 ```sh
 just bench proxy-relay
@@ -14,6 +14,8 @@ just bench control-churn --population 128 --rate 20 --seconds 20
 just bench backend-query --population 5000 --rate 2000
 just bench backend-mutation --population 5000 --rate 100 --concurrency 16
 just bench backend-fanout --population 5000 --rate 2 --subscribers 1024 --group-size 16 --subscription shared
+just bench sync-queries --subscribers 200 --rate 100 --writes unrelated
+just bench sync-queries --subscribers 5000 --rate 100 --writes related --own-writes
 ```
 
 `just bench --help` lists the parameters. Defaults are 2 seconds of warmup, 10 seconds of measurement, 64
@@ -32,6 +34,7 @@ repeat each point. Use the same build, payload, duration and hardware when compa
 | `backend-query`      | Load one player's profile through a `by_player` index                | Real authenticated backend gRPC, engine queue, JS evaluation, SQLite snapshot reads, contract validation         |
 | `backend-mutation`   | Save one player's profile (load, patch, return save count)           | As above, plus retry-context preparation and durable SQLite commit before the reply                              |
 | `backend-fanout`     | Raise one player's best score, then wait until every stream has it   | As above, plus reevaluation of every subscription and delivery over each watch stream                            |
+| `sync-queries`       | One app mutation through sync `Call` while `queries` streams follow  | Core's backend and control, sync authentication, position-only advances or reevaluation, and stream delivery     |
 
 The proxy uses pre-established connections. It excludes Mojang login, configuration, command handling, admission,
 movement between servers and control streams. A feature-gated adapter calls the existing packet pump; normal proxy
@@ -75,6 +78,19 @@ only when every stream has delivered that write's revision or a later one; slow 
 limited by the backend's memory budget and read-queue wait rather than a count; a rejection during setup reports its
 limit in the `ResourceExhausted` message.
 
+`sync-queries` runs core (`chunk_environment::Core`: backend, control and the `chunk.sync.v1.Core` service) in the
+target and opens `--subscribers` (default 5,000) `Subscribe(queries)` streams on the shared leaderboard (`top`) with the
+gateway (platform) credential, `--streams-per-connection` to a connection, then waits for each snapshot. Writes are sync
+`Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams only
+advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
+writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
+record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read. The
+`fanout` summary reports stream updates, position-only updates, changed entries and encoded update bytes per second
+(excluding gRPC and HTTP/2 framing), streams that ended, and `reply_to_observed_us`: from a write's reply reaching the
+generator until each prompt stream observes its position, once per write and stream (slow readers excluded; a stream
+that got there before the reply counts as zero). `measured-observed.hdr` holds that histogram. `target_cpu_cores` is
+core's CPU time over wall time. No control state changes during the run, so streams never recheck their grant.
+
 Backend targets build `chunk-backend` with its `bench-support` feature, which exposes phase timings from the engine and
 commit threads without changing behavior. Phases are recorded after warmup: `queue` (admission until the engine thread
 takes a query or mutation), `query` and `mutation` (evaluation and validation), `prepare` and `commit` (SQLite work on
@@ -110,8 +126,8 @@ Each run writes to `target/bench/<timestamp>-<pid>/` (gitignored):
 - `warmup-*.hdr` / `measured-*.hdr`: mergeable HdrHistogram V2 data in microseconds, with three significant digits.
   `latency` includes completed successes and failures; `success` contains only successful completions; `scheduler`
   covers offers examined during the window. Unsent offers have no completion latency.
-- `measured-phase-<name>-ns.hdr` (backend target phases, nanoseconds) and `measured-delivery.hdr` (fan-out reply to last
-  delivery, microseconds).
+- `measured-phase-<name>-ns.hdr` (backend target phases, nanoseconds), `measured-delivery.hdr` (fan-out reply to last
+  delivery, microseconds) and `measured-observed.hdr` (sync reply to observed position, microseconds).
 - `bundle/` for backend workloads: the compiled `source.mjs`, `contract.json` and `deployment.json`.
 - `failure.json` if setup, infrastructure, warmup or shutdown fails. A measured overload can still finish successfully:
   inspect failure/drop counts, not just the command's exit status.

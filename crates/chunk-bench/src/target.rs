@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     backend,
     config::{Config, Scenario},
-    control, proxy,
+    control, proxy, sync,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -38,6 +38,7 @@ pub struct Ready {
     pub endpoint: String,
     pub control: Option<ControlConnection>,
     pub backend: Option<BackendConnection>,
+    pub sync: Option<sync::Connection>,
 }
 
 pub struct Target {
@@ -113,11 +114,34 @@ pub async fn serve(init: Init) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     let ready = if init.config.scenario == Scenario::ProxyRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let ready = Ready { endpoint: listener.local_addr()?.to_string(), control: None, backend: None };
+        let ready = Ready { endpoint: listener.local_addr()?.to_string(), control: None, backend: None, sync: None };
         let token = stop.clone();
         let (address, config) = (init.backend.clone(), init.config.clone());
         tasks.spawn(async move { proxy::target(listener, &address, &config, token).await });
         ready
+    } else if init.config.scenario == Scenario::SyncQueries {
+        chunk_backend::observe(backend::observe);
+        let state = init.state.join("core");
+        let config = chunk_environment::CoreConfig {
+            bundle: init.backend.clone().into(),
+            environment: backend::ENVIRONMENT.into(),
+            backend_record: state.join("backend.json"),
+            control_record: state.join("control.json"),
+            state,
+            backend_bind: "127.0.0.1:0".parse()?,
+            control_bind: "127.0.0.1:0".parse()?,
+            fresh: false,
+        };
+        let core = chunk_environment::Core::start(config, |_| {}).await?;
+        let control = core.control_connection()?;
+        let platform = core.backend_connection()?.platform_token.clone().context("backend platform credential")?;
+        let connection = sync::Connection { endpoint: control.endpoint.clone(), cli: control.token.clone(), platform };
+        let token = stop.clone();
+        tasks.spawn(async move {
+            token.cancelled().await;
+            Ok(core.stop(|| {}).await?)
+        });
+        Ready { endpoint: connection.endpoint.clone(), control: None, backend: None, sync: Some(connection) }
     } else if init.config.scenario.is_backend() {
         chunk_backend::observe(backend::observe);
         let (ready, receiver) = oneshot::channel();
@@ -131,7 +155,7 @@ pub async fn serve(init: Init) -> Result<()> {
         let token = stop.clone();
         tasks.spawn(async move { Ok(chunk_backend::server::run(config, ready, token).await?) });
         let connection = receiver.await.context("backend startup failed")?.connection;
-        Ready { endpoint: connection.endpoint.clone(), control: None, backend: Some(connection) }
+        Ready { endpoint: connection.endpoint.clone(), control: None, backend: Some(connection), sync: None }
     } else {
         let (ready, receiver) = oneshot::channel();
         let release = control::release()?;
@@ -156,7 +180,7 @@ pub async fn serve(init: Init) -> Result<()> {
         let started = receiver.await.context("control startup failed")?;
         started.control.activate_release(release)?;
         let connection = started.connection;
-        Ready { endpoint: connection.endpoint.clone(), control: Some(connection), backend: None }
+        Ready { endpoint: connection.endpoint.clone(), control: Some(connection), backend: None, sync: None }
     };
     println!("{}", serde_json::to_string(&ready)?);
     let mut input = BufReader::new(tokio::io::stdin()).lines();

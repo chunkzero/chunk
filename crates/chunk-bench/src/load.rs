@@ -6,12 +6,13 @@ use tokio::{
     time::{Instant, sleep_until, timeout_at},
 };
 
-use crate::{backend, config::Config, control, metrics::Stats, proxy};
+use crate::{backend, config::Config, control, metrics::Stats, proxy, sync};
 
 pub enum Client {
     Proxy(proxy::Client),
     Control(control::Client),
     Backend(backend::Client),
+    Sync(sync::Writer),
 }
 
 impl Client {
@@ -20,6 +21,7 @@ impl Client {
             Self::Proxy(client) => client.exchange(sequence).await,
             Self::Control(client) => client.execute(sequence, config).await,
             Self::Backend(client) => client.execute(sequence, config).await,
+            Self::Sync(client) => client.execute(sequence, config).await,
         }
     }
 }

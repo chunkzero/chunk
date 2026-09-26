@@ -11,11 +11,13 @@ pub enum Scenario {
     BackendQuery,
     BackendMutation,
     BackendFanout,
+    SyncQueries,
 }
 
 impl Scenario {
+    /// Workloads served from the compiled backend bundle.
     pub fn is_backend(self) -> bool {
-        matches!(self, Self::BackendQuery | Self::BackendMutation | Self::BackendFanout)
+        matches!(self, Self::BackendQuery | Self::BackendMutation | Self::BackendFanout | Self::SyncQueries)
     }
 }
 
@@ -26,6 +28,15 @@ pub enum Subscription {
     Shared,
     /// Everyone watches their own standing: the leaderboard plus their profile.
     PerPlayer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Writes {
+    /// Commits to a table no subscribed query reads, so streams only advance their position.
+    Unrelated,
+    /// Sets a new leaderboard record, changing every subscribed result.
+    Related,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ValueEnum)]
@@ -48,7 +59,7 @@ pub struct Config {
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
     /// Total operations/second. Defaults: relay 2000, population 100, churn 10, backend query 1000,
-    /// mutation 100, fan-out 10.
+    /// mutation 100, fan-out 10, sync queries 100.
     #[arg(long)]
     pub rate: Option<u32>,
     /// Established proxy connections or independent control/backend RPC lanes.
@@ -57,14 +68,28 @@ pub struct Config {
     /// Arrived players (control) or player profiles (backend) seeded before the workload.
     #[arg(long, default_value_t = 128)]
     pub population: u32,
-    /// Backend fan-out: query subscriptions held open while writes change the leaderboard.
-    #[arg(long, default_value_t = 64)]
-    pub subscribers: u32,
+    /// Query subscriptions held open while writes run. Defaults: backend fan-out 64, sync queries 5000.
+    #[arg(long)]
+    pub subscribers: Option<u32>,
     /// Backend fan-out: subscriptions per watch-group stream; each stream has its own connection.
     #[arg(long, default_value_t = 1)]
     pub group_size: u32,
     #[arg(long, value_enum, default_value_t = Subscription::Shared)]
     pub subscription: Subscription,
+    /// Sync queries: what each write changes.
+    #[arg(long, value_enum, default_value_t = Writes::Unrelated)]
+    pub writes: Writes,
+    /// Sync queries: write with the subscribers' credential, so every stream catches up to each write promptly.
+    #[arg(long)]
+    pub own_writes: bool,
+    /// Sync queries: subscription streams multiplexed on each connection.
+    #[arg(long, default_value_t = 100)]
+    pub streams_per_connection: u32,
+    /// Sync queries: streams that wait `--slow-read-ms` before each read; excluded from lag.
+    #[arg(long, default_value_t = 0)]
+    pub slow_readers: u32,
+    #[arg(long, default_value_t = 5000)]
+    pub slow_read_ms: u32,
     /// Pin the target process with `taskset -c`, e.g. `12-13`. Pin the generator by running under taskset.
     #[arg(long)]
     pub target_cpus: Option<String>,
@@ -103,8 +128,12 @@ impl Config {
             Scenario::ProxyRelay => 2000,
             Scenario::ControlChurn | Scenario::BackendFanout => 10,
             Scenario::BackendQuery => 1000,
-            Scenario::ControlPopulation | Scenario::BackendMutation => 100,
+            Scenario::ControlPopulation | Scenario::BackendMutation | Scenario::SyncQueries => 100,
         })
+    }
+
+    pub fn subscribers(&self) -> u32 {
+        self.subscribers.unwrap_or(if self.scenario == Scenario::SyncQueries { 5000 } else { 64 })
     }
 
     pub fn compression(&self) -> Option<usize> {
@@ -117,8 +146,13 @@ impl Config {
         let population = if self.scenario.is_backend() { 100_000 } else { 1024 };
         ensure!((1..=population).contains(&self.population), "population must be 1..={population}");
         ensure!(
-            (1..=100_000).contains(&self.subscribers) && (1..=1024).contains(&self.group_size),
+            (1..=100_000).contains(&self.subscribers()) && (1..=1024).contains(&self.group_size),
             "subscribers must be 1..=100000 and group size 1..=1024"
+        );
+        ensure!((1..=10_000).contains(&self.streams_per_connection), "streams per connection must be 1..=10000");
+        ensure!(
+            self.slow_readers <= self.subscribers() && (1..=600_000).contains(&self.slow_read_ms),
+            "slow readers must be at most the subscribers, and their read delay 1..=600000 ms"
         );
         ensure!(
             self.target_cpus.as_ref().is_none_or(|cpus| {
