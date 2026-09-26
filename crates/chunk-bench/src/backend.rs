@@ -340,7 +340,7 @@ mod tests {
         let stop = tokio_util::sync::CancellationToken::new();
         let server = tokio::spawn(chunk_backend::server::run(
             chunk_backend::server::Config {
-                bundle,
+                bundle: Some(bundle),
                 environment: ENVIRONMENT.into(),
                 state: root.path().join("state"),
                 connection: root.path().join("connection.json"),

@@ -2,14 +2,16 @@
 
 mod core;
 mod gateway;
+mod managed;
 mod services;
 
 pub use self::core::{Core, CoreConfig};
 pub use gateway::{Gateway, GatewayConfig, PlatformTarget};
+pub use managed::ManagementConfig;
 pub use services::{Service, Services};
 
 use chunk_service::{optional, required};
-use std::{io, time::Duration};
+use std::{io, sync::OnceLock, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -19,20 +21,33 @@ pub struct Config {
     pub services: Services,
     pub core: CoreConfig,
     pub gateway: GatewayConfig,
+    /// Set when the management service deploys the environment; otherwise core serves its bundle.
+    pub management: Option<ManagementConfig>,
 }
 
 impl Config {
-    /// Reads `CHUNK_SERVICES`, `CHUNK_BUNDLE`, `CHUNK_ENVIRONMENT`, `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
-    /// `CHUNK_CONTROL_BIND`, and the gateway's `CHUNK_BIND`, `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. Connection
-    /// records go to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`.
+    /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
+    /// `CHUNK_CONTROL_BIND`, and the gateway's `CHUNK_BIND`, `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With
+    /// `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it
+    /// serves `CHUNK_BUNDLE`. Connection records go to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`.
     /// # Errors
     /// Reports missing or invalid variables.
     pub fn from_env() -> io::Result<Self> {
         let services = optional::<String>("CHUNK_SERVICES")?.map_or_else(|| Ok(Services::default()), |s| s.parse())?;
         let state: std::path::PathBuf = required("CHUNK_STATE")?;
+        let management = match optional("CHUNK_MANAGEMENT_URL")? {
+            Some(url) => Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")? }),
+            None => None,
+        };
+        let environment = match optional("CHUNK_ENVIRONMENT_ID")? {
+            Some(environment) => environment,
+            None => {
+                optional("CHUNK_ENVIRONMENT")?.ok_or_else(|| io::Error::other("CHUNK_ENVIRONMENT_ID is required"))?
+            }
+        };
         let core = CoreConfig {
-            bundle: required("CHUNK_BUNDLE")?,
-            environment: required("CHUNK_ENVIRONMENT")?,
+            bundle: if management.is_some() { None } else { Some(required("CHUNK_BUNDLE")?) },
+            environment,
             backend_record: state.join("backend.json"),
             control_record: state.join("control.json"),
             state,
@@ -45,30 +60,38 @@ impl Config {
         if let Some(max_connections) = optional("CHUNK_MAX_CONNECTIONS")? {
             gateway.max_connections = max_connections;
         }
-        Ok(Self { services, core, gateway })
+        Ok(Self { services, core, gateway, management })
     }
 }
 
-/// Runs the selected services until `stop` or until one of them stops, then stops the gateway before core.
+/// Runs the selected services until `stop` or until one of them stops, then stops the gateway before core. Under
+/// management, the gateway starts with the first deployment, and a core that management fences stops.
 /// # Errors
-/// Reports startup errors, a service that stopped on its own, and shutdown errors.
+/// Reports startup errors, a service that stopped on its own, a fenced core, and shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
+    let environment = config.core.environment.clone();
+    let releases = config.core.state.join("releases");
     let core = Core::start(config.core, |_| {}).await?;
-    let gateway = if config.services.contains(Service::Gateway) {
-        let started = match core.target() {
-            Ok(target) => Gateway::start(config.gateway, target).await,
-            Err(error) => Err(error),
-        };
-        match started {
-            Ok(gateway) => Some(gateway),
-            Err(error) => {
-                if let Err(error) = core.stop(|| {}).await {
-                    tracing::error!(%error, "service shutdown failed");
+    let gateway = OnceLock::new();
+    let gateway_config = config.services.contains(Service::Gateway).then_some(config.gateway);
+    let managed = if let Some(management) = config.management {
+        Some(managed::Managed::new(management, environment, releases, &core, &gateway, gateway_config))
+    } else {
+        if let Some(gateway_config) = gateway_config {
+            let started = match core.target() {
+                Ok(target) => Gateway::start(gateway_config, target).await,
+                Err(error) => Err(error),
+            };
+            match started {
+                Ok(started) => _ = gateway.set(started),
+                Err(error) => {
+                    if let Err(error) = core.stop(|| {}).await {
+                        tracing::error!(%error, "service shutdown failed");
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
-    } else {
         None
     };
     tracing::info!("environment ready");
@@ -76,7 +99,7 @@ pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
-            if core.failed() || gateway.as_ref().is_some_and(Gateway::failed) {
+            if core.failed() || gateway.get().is_some_and(Gateway::failed) {
                 break "backend or gateway stopped";
             }
             if core.control_failed() {
@@ -84,11 +107,18 @@ pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
             }
         }
     };
+    let managed = async {
+        match managed {
+            Some(managed) => managed.run().await,
+            None => std::future::pending().await,
+        }
+    };
     let failure = tokio::select! {
         () = stop.cancelled() => Ok(()),
         failure = failed => Err(io::Error::other(failure)),
+        error = managed => Err(error),
     };
-    let mut result = match gateway {
+    let mut result = match gateway.into_inner() {
         Some(gateway) => gateway.stop().await.inspect_err(|error| tracing::error!(%error, "gateway shutdown failed")),
         None => Ok(()),
     };

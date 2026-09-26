@@ -14,8 +14,9 @@ const STREAM_CONTENT_TYPE: &str = "application/connect+proto";
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    /// Archive uploads go to presigned object-store URLs, so they never share the service client's credentials.
-    uploads: reqwest::Client,
+    /// Archive uploads and downloads use presigned object-store URLs, so they never share the service client's
+    /// credentials.
+    presigned: reqwest::Client,
     base_url: String,
     token: Option<String>,
 }
@@ -35,10 +36,10 @@ impl Client {
         Self::with_http(reqwest::Client::new(), base_url)
     }
 
-    /// Like `new`, calling the service over an existing HTTP client. Archive uploads still use a client of their own.
+    /// Like `new`, calling the service over an existing HTTP client. Archive transfers still use a client of their own.
     pub fn with_http(http: reqwest::Client, base_url: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        Self { http, uploads: reqwest::Client::new(), base_url, token: None }
+        Self { http, presigned: reqwest::Client::new(), base_url, token: None }
     }
 
     /// Sends `token` as the bearer token of every call to the service.
@@ -78,7 +79,7 @@ impl Client {
         let method = if target.method.is_empty() { "PUT" } else { &target.method };
         let method =
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| Error::Protocol(error.to_string()))?;
-        let mut request = self.uploads.request(method, &target.url).body(archive);
+        let mut request = self.presigned.request(method, &target.url).body(archive);
         for (name, value) in &target.headers {
             let name = HeaderName::try_from(name).map_err(|error| Error::Protocol(error.to_string()))?;
             let value = HeaderValue::try_from(value).map_err(|error| Error::Protocol(error.to_string()))?;
@@ -92,6 +93,25 @@ impl Client {
         Err(upload_refusal(status, &response.bytes().await.map_err(without_url)?))
     }
 
+    /// Starts fetching a release archive from the URL an `AttachResponse` names. The bearer token goes along only to
+    /// this service's own origin; other URLs are presigned.
+    ///
+    /// # Errors
+    /// The server's refusal, with a code from its HTTP status, or a transport failure. Errors never include the URL,
+    /// which may carry a signature.
+    pub async fn download_archive(&self, url: &str) -> Result<Download, Error> {
+        let url = reqwest::Url::parse(url).map_err(|_| Error::Protocol("invalid archive URL".into()))?;
+        let own = reqwest::Url::parse(&self.base_url).is_ok_and(|base| base.origin() == url.origin());
+        let request = if own { self.authorized(self.http.get(url)) } else { self.presigned.get(url) };
+        let response = request.send().await.map_err(without_url)?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = format!("archive download refused with HTTP {status}");
+            return Err(Status { code: Code::from_http(status), message }.into());
+        }
+        Ok(Download(response))
+    }
+
     fn post(&self, path: &str, content_type: &'static str, body: Vec<u8>) -> reqwest::RequestBuilder {
         let request = self
             .http
@@ -99,10 +119,27 @@ impl Client {
             .header(CONTENT_TYPE, content_type)
             .header("connect-protocol-version", "1")
             .body(body);
+        self.authorized(request)
+    }
+
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.token {
             Some(token) => request.bearer_auth(token),
             None => request,
         }
+    }
+}
+
+/// A release archive's bytes as they arrive. Dropping it ends the download.
+pub struct Download(Response);
+
+impl Download {
+    /// The next piece of the archive, or None once all of it arrived.
+    ///
+    /// # Errors
+    /// A transport failure, without the URL.
+    pub async fn chunk(&mut self) -> Result<Option<bytes::Bytes>, Error> {
+        self.0.chunk().await.map_err(without_url)
     }
 }
 

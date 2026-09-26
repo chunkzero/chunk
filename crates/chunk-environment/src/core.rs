@@ -8,8 +8,8 @@ use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub struct CoreConfig {
-    /// The backend deployment served first.
-    pub bundle: PathBuf,
+    /// The backend deployment served first. Without one, the backend serves only the deployments it retained.
+    pub bundle: Option<PathBuf>,
     pub environment: String,
     /// Holds the backend's store under `backend/` and control's credential and JVM files under `control/`.
     pub state: PathBuf,
@@ -180,6 +180,13 @@ impl Core {
             .as_ref()
             .map(chunk_backend::Backend::system)
             .ok_or_else(|| io::Error::other("backend is not running"))
+    }
+
+    /// The log epoch the backend serves.
+    /// # Errors
+    /// Reports a stopped backend.
+    pub fn epoch(&self) -> io::Result<u64> {
+        Ok(self.system()?.epoch().0)
     }
 
     fn authority(&self) -> io::Result<&chunk_control::server::Ready> {

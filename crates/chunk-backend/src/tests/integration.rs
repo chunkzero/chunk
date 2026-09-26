@@ -307,7 +307,7 @@ async fn service_shutdown_closes_watchers_and_releases_durable_state() {
         let (ready, started) = oneshot::channel();
         let task = tokio::spawn(crate::server::run(
             crate::server::Config {
-                bundle: bundle.clone(),
+                bundle: Some(bundle.clone()),
                 environment: "local".into(),
                 state: directory.path().join("state"),
                 connection: path.clone(),
