@@ -4,8 +4,8 @@ modules:
 lint:
   use:
     - STANDARD
-  # Services are named for what they are (Runtime, Players, EdgeCall,
-  # Directory), and the streaming RPCs reuse message types by design.
+  # Services are named for what they are (Backend, Gameplay, Supervisor),
+  # and the streaming RPCs reuse message types by design.
   except:
     - SERVICE_SUFFIX
     - RPC_REQUEST_RESPONSE_UNIQUE
