@@ -1,9 +1,14 @@
 import type { FunctionReference } from "./functions.ts";
 import { freeze, v } from "./validators.ts";
-import type { AdmissionResult, Destination, JsonValue, PlayerIdentity, ServerStatus } from "./validators.ts";
+import type { AdmissionResult, Destination, PlayerId, PlayerIdentity, ServerStatus } from "./validators.ts";
 
+/** The gateway running a hook. It names `player` only while it holds that player's claim. */
+export interface HookCaller {
+  readonly kind: "gateway";
+  readonly player?: PlayerId;
+}
 interface ReadHookContext {
-  readonly caller: JsonValue;
+  readonly caller: HookCaller;
   readonly eventId: string;
   readonly domain: string;
   runQuery<A, R>(reference: FunctionReference<"query", A, R>, args: A): Promise<R>;
@@ -99,7 +104,7 @@ export function isHook(value: unknown): value is HookDefinition {
 }
 
 interface RawHookContext {
-  readonly caller: JsonValue;
+  readonly caller: HookCaller;
   runQuery(path: string, args: unknown): Promise<unknown>;
   runMutation(path: string, args: unknown): Promise<unknown>;
 }

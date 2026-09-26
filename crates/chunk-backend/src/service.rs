@@ -515,9 +515,7 @@ impl Backend {
     /// exhausted capacity. Dropping an acceptance future cancels its scope.
     pub async fn start_action(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
         call.validate()?;
-        if id.incarnation != self.0.incarnation {
-            return Err(Error::ActionOutcomeUnknown);
-        }
+        self.check_allocated(&id)?;
         let bytes = id.incarnation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::StartAction {
             purpose: crate::commands::Purpose::Function,
@@ -543,18 +541,33 @@ impl Backend {
     }
 
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
+        self.start_hook(self.allocate_action_id()?, call).await?.outcome().await
+    }
+
+    /// Starts the hook `call` names under an identity from [`Self::allocate_action_id`], as
+    /// [`Self::start_action`] starts an action.
+    /// # Errors
+    /// Rejects identities this backend didn't allocate, mismatched requests, unknown hooks, untrusted hook context or
+    /// exhausted capacity. Dropping an acceptance future cancels its scope.
+    pub async fn start_hook(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
         call.validate_limit(512)?;
-        let id = self.allocate_action_id()?;
+        self.check_allocated(&id)?;
         let bytes = id.incarnation.len() + call.bytes();
-        let mut handle = self
-            .submit_sized(bytes, |reply| Command::StartAction {
-                purpose: crate::commands::Purpose::Hook,
-                id,
-                call,
-                reply,
-            })
-            .await?;
-        handle.outcome().await
+        self.submit_sized(bytes, |reply| Command::StartAction {
+            purpose: crate::commands::Purpose::Hook,
+            id,
+            call,
+            reply,
+        })
+        .await
+    }
+
+    /// An identity this backend didn't allocate, such as one from an earlier incarnation, has an unknown outcome.
+    fn check_allocated(&self, id: &ActionId) -> Result<()> {
+        if id.incarnation != self.0.incarnation || id.sequence >= self.0.action_sequence.load(Ordering::Acquire) {
+            return Err(Error::ActionOutcomeUnknown);
+        }
+        Ok(())
     }
 
     /// Look up retained status using the original caller authority.

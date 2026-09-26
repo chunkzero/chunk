@@ -22,6 +22,20 @@ impl std::fmt::Display for ActionId {
     }
 }
 
+/// Parses the `<incarnation>:<sequence>` form [`ActionId`] displays as.
+impl std::str::FromStr for ActionId {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let invalid = || Error::Invalid("action identity");
+        let (incarnation, sequence) = text.rsplit_once(':').ok_or_else(invalid)?;
+        if incarnation.is_empty() || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        Ok(Self { incarnation: incarnation.to_owned(), sequence: sequence.parse().map_err(|_| invalid())? })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ActionStatus {
     Running,

@@ -162,3 +162,12 @@ message Error {
   Code code = 1;
   string message = 2;
 }
+
+// The result of `chunk:prepare`, which issues the operation ID of one effectful call: an app action, or for a gateway,
+// a hook. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call issues one
+// ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued before it
+// restarted or restored, gets OUTCOME_UNKNOWN.
+message PrepareResult {
+  // The issued operation ID.
+  string operation_id = 1;
+}

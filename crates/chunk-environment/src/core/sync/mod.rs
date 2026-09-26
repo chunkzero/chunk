@@ -114,7 +114,7 @@ impl SyncService {
         let arguments = std::str::from_utf8(&request.arguments).ok().and_then(|text| Json::parse(text).ok());
         let arguments = arguments.ok_or_else(|| errors::invalid("arguments are not JSON"))?;
         let call = Call { deployment, function: request.method, arguments, caller };
-        self.app.call(&principal.credential, request.operation_id, call).await
+        self.app.call(principal, request.operation_id, call).await
     }
 
     async fn open(&self, principal: auth::Principal, request: &SubscribeRequest) -> Result<topics::Topic, Error> {
