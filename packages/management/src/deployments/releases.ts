@@ -19,6 +19,12 @@ export function releaseHandlers({
   releases,
   archiveLimits,
 }: Deps): Pick<ServiceImpl<typeof DeploymentService>, "uploadRelease" | "completeReleaseUpload" | "listApps"> {
+  const isStored = async (key: string) => {
+    const stored = await releases.read(key);
+    await stored?.cancel();
+    return stored !== undefined;
+  };
+
   return {
     async uploadRelease(request, context) {
       const project = await loadProject(sql, callerOf(context), request.projectId);
@@ -40,6 +46,7 @@ export function releaseHandlers({
         returning *`;
       const release = declared ?? (await findRelease(sql, project.id, request.releaseId));
       if (!release) throw notFound("release");
+      const key = releaseKey(project.id, release.id, release.archive_sha256);
       if (release.state === ReleaseState.READY) {
         if (
           release.archive_sha256 !== request.archiveSha256 ||
@@ -47,11 +54,12 @@ export function releaseHandlers({
         ) {
           throw new ConnectError("the project already holds this release with different contents", Code.AlreadyExists);
         }
-        return { release: toRelease(release) };
+        // A READY release whose archive was lost takes the same bytes again.
+        if (await isStored(key)) return { release: toRelease(release) };
       }
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const target = await releases.uploadTarget(
-        releaseKey(project.id, release.id, release.archive_sha256),
+        key,
         { sha256: release.archive_sha256, sizeBytes: release.archive_size_bytes },
         expireTime,
       );
@@ -65,7 +73,12 @@ export function releaseHandlers({
       const project = await loadProject(sql, callerOf(context), request.projectId);
       const release = await findRelease(sql, project.id, request.releaseId);
       if (!release) throw notFound("release");
-      if (release.state === ReleaseState.READY) return { release: toRelease(release) };
+      if (release.state === ReleaseState.READY) {
+        if (!(await isStored(releaseKey(project.id, release.id, release.archive_sha256)))) {
+          throw failedPrecondition("the archive is missing; upload it again");
+        }
+        return { release: toRelease(release) };
+      }
 
       // Verify the declaration read above, and finalize only if it is still the declaration.
       const { archive_sha256: sha256, archive_size_bytes: sizeBytes } = release;

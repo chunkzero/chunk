@@ -1,12 +1,25 @@
 import { createHash } from "node:crypto";
 import { link, mkdir, open, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { type Keys, randomToken } from "../crypto.ts";
 import type { ReleaseStore } from "./store.ts";
 
 const uploadPath = "/releases/upload/";
 const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/([0-9a-f]{64})\.tar\.gz$/;
+
+/** Flushes the entries of `from` and each directory above it, up to and including `to`. */
+async function syncDirectories(from: string, to: string) {
+  for (let dir = from; ; dir = dirname(dir)) {
+    const handle = await open(dir, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (dir === to || dir === dirname(dir)) return;
+  }
+}
 
 /**
  * Stores archives in a local directory. Uploads go to this service through URLs signed for one archive's key, digest
@@ -22,6 +35,8 @@ export function localReleaseStore({
   keys: Keys;
   publicUrl: string;
 }): ReleaseStore {
+  // Also syncs the entry for the store's own directory, which the first upload may create.
+  const top = dirname(resolve(directory));
   const signed = (key: string, sha256: string, size: string, expires: string) =>
     ["upload", key, sha256, size, expires].join("\n");
 
@@ -42,8 +57,12 @@ export function localReleaseStore({
     },
 
     async read(key) {
-      const file = Bun.file(join(directory, key));
-      return (await file.exists()) ? file.stream() : undefined;
+      const path = join(directory, key);
+      const file = Bun.file(path);
+      if (!(await file.exists())) return undefined;
+      // A concurrent upload may have linked the archive without syncing its directories yet.
+      await syncDirectories(dirname(resolve(path)), top);
+      return file.stream();
     },
 
     async fetch(request) {
@@ -94,6 +113,7 @@ export function localReleaseStore({
         await link(partial, path).catch((error: NodeJS.ErrnoException) => {
           if (error.code !== "EEXIST") throw error;
         });
+        await syncDirectories(dirname(resolve(path)), top);
         return new Response(null, { status: 204 });
       } finally {
         await file.close().catch(() => {});
