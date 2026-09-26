@@ -21,7 +21,7 @@ mod state;
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -167,7 +167,10 @@ impl Control {
     pub fn open(path: &Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
         let authority = Authority::open(path, &config)?;
-        let surviving = authority.read()?.hosts.keys().filter(|id| !host.stopped(id)).cloned().collect();
+        // A restore can lose a host's row while the JVM launched for it still runs.
+        let mut surviving: BTreeSet<_> = authority.read()?.hosts.keys().cloned().collect();
+        surviving.extend(host.unowned()?);
+        surviving.retain(|id| !host.stopped(id));
         Ok(Arc::new(Self {
             recovery: recovery::Recovery::new(surviving),
             config,

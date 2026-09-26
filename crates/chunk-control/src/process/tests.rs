@@ -162,6 +162,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
 
     let host = ProcessHost::new(config());
     assert!(host.unresolved(&id));
+    assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
     assert!(host.adopt("another-credential", registration.clone()).is_err());
     let mut changed = registration.clone();
     changed.identity.as_mut().unwrap().process_id = "another-process".into();
@@ -169,6 +170,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert!(host.unresolved(&id));
     host.adopt(&process.token, registration.clone()).unwrap();
     assert!(!host.unresolved(&id));
+    assert!(host.unowned().unwrap().is_empty());
     assert_eq!(host.connection(&id).unwrap().token, process.token);
     assert!(host.adopt(&process.token, registration).is_err());
     assert!(matches!(host.terminate(&id).await, Err(Error::Unresolved(_))));

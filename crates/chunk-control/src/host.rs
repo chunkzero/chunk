@@ -36,6 +36,12 @@ pub trait Host: Send + Sync {
     fn unresolved(&self, _id: &str) -> bool {
         false
     }
+    /// Hosts whose launch may still run a JVM this host does not own, such as one launched before control restarted.
+    /// # Errors
+    /// Reports launch records that cannot be listed.
+    fn unowned(&self) -> Result<BTreeSet<String>> {
+        Ok(BTreeSet::new())
+    }
     /// # Errors
     /// Rejects an incompatible control endpoint.
     fn configure(&self, _endpoint: String) -> Result<()> {

@@ -104,3 +104,50 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     assert_eq!(control.changes_after(latest), Some(Vec::new()));
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission() {
+    use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
+
+    let fixture = Fixture::new().await;
+    let path = fixture.directory.path().join("control.sqlite");
+    let storage = Arc::new(Memory::default());
+    drop(fixture.control());
+    let (store, replicator) = SqliteStore::open_replicated(&path, "test", Replication::new(storage.clone())).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+
+    // The host's creation and its player's admission never reach object storage.
+    let control = fixture.control();
+    let player = uuid::Uuid::new_v4().to_string();
+    control.claim(request("lost", &player)).await.unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["lost"].session].host.clone();
+    drop(control);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    drop(SqliteStore::open_replicated(&path, "test", Replication::new(storage)).unwrap());
+    fixture.host.forgotten.store(true, Ordering::Release);
+
+    let control = fixture.control();
+    assert!(control.state().unwrap().hosts.is_empty());
+    let relogin = request("relogin", &player);
+    assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
+    control.reconcile_all().await.unwrap();
+    assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
+
+    let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
+    let mut registration = Request::new(ProcessRegistration {
+        identity: Some(ProcessIdentity { runtime_id: host, ..fixture.runtime.identity.clone() }),
+        control_endpoint: fixture.host.endpoint.clone(),
+        player_endpoint: "127.0.0.1:1".into(),
+    });
+    registration.metadata_mut().insert("authorization", "Bearer test-runtime-credential".parse().unwrap());
+    service.register_process(registration).await.unwrap();
+    control.reconcile_all().await.unwrap();
+    assert_eq!(fixture.runtime.bindings.lock().unwrap()["lost"].phase, DeliveryPhase::Closed);
+    assert!(control.state().unwrap().claims["lost"].phase == Phase::Released);
+    control.claim(relogin).await.unwrap();
+    fixture.close().await;
+}

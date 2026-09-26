@@ -112,8 +112,9 @@ impl Control {
             // Without an unowned launch, no JVM from before the restart can run on this host.
             return Ok(!self.host.unresolved(id));
         };
-        let host = self.state()?.hosts.get(id).cloned().ok_or(Error::Invalid("missing host"))?;
-        if !self.runs_host(&runtime, &host) {
+        if let Some(host) = self.state()?.hosts.get(id)
+            && !self.runs_host(&runtime, host)
+        {
             return Err(Error::Invalid("recovered runtime mismatch"));
         }
         let inventory = ProcessControlClient::new(channel(&runtime).await?)
@@ -129,7 +130,9 @@ impl Control {
     }
 
     /// Accepts a JVM registration. A JVM launched before control restarted re-attaches only if its host adopts it,
-    /// which requires the credential recorded before launch, and it still runs this host's app.
+    /// which requires the credential recorded before launch, and it still runs its logged host's app. A JVM whose
+    /// host row a restore lost re-attaches by its launch record alone; the log owns none of its deliveries, so
+    /// recovery withdraws them all.
     pub(crate) fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
         let error = match self.host.register(token, registration.clone()) {
             Ok(identity) => return Ok(identity),
@@ -138,18 +141,16 @@ impl Control {
         let (Some(identity), Some(secret)) = (registration.identity.clone(), token.strip_prefix("Bearer ")) else {
             return Err(error);
         };
-        let state = self.state()?;
-        let Some(host) = state.hosts.get(&identity.runtime_id) else {
-            return Err(error);
-        };
-        let connection = RuntimeConnection {
-            endpoint: registration.control_endpoint.clone(),
-            token: secret.into(),
-            identity: identity.clone(),
-            player_endpoint: registration.player_endpoint.clone(),
-        };
-        if !self.runs_host(&connection, host) {
-            return Err(error);
+        if let Some(host) = self.state()?.hosts.get(&identity.runtime_id) {
+            let connection = RuntimeConnection {
+                endpoint: registration.control_endpoint.clone(),
+                token: secret.into(),
+                identity: identity.clone(),
+                player_endpoint: registration.player_endpoint.clone(),
+            };
+            if !self.runs_host(&connection, host) {
+                return Err(error);
+            }
         }
         self.host.adopt(secret, registration)?;
         self.recovery.reopen(&identity.runtime_id)?;

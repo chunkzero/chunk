@@ -289,6 +289,10 @@ impl Host for FakeHost {
     fn unresolved(&self, _: &str) -> bool {
         self.forgotten.load(Ordering::Acquire)
     }
+    fn unowned(&self) -> Result<BTreeSet<String>> {
+        let forgotten = self.forgotten.load(Ordering::Acquire);
+        Ok(if forgotten { self.ids.lock().unwrap().clone() } else { BTreeSet::new() })
+    }
     fn adopt(&self, token: &str, registration: chunk_proto::v1::ProcessRegistration) -> Result<()> {
         let process = registration.identity.map(|identity| identity.process_id);
         if token != "test-runtime-credential" || process.as_ref() != Some(&self.runtime.identity.process_id) {

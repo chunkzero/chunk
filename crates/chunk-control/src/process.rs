@@ -186,6 +186,25 @@ impl ProcessHost {
         });
         Ok(process)
     }
+    /// Host IDs with a record of `extension`.
+    fn recorded(&self, extension: &str) -> Result<BTreeSet<String>> {
+        let entries = match std::fs::read_dir(&self.config.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = BTreeSet::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_some_and(|found| found == extension)
+                && let Some(id) = path.file_stem().and_then(|stem| stem.to_str())
+                && uuid::Uuid::parse_str(id).is_ok()
+            {
+                ids.insert(id.into());
+            }
+        }
+        Ok(ids)
+    }
     fn record_launch(&self, id: &str, process: &Process) -> Result<()> {
         let record = LaunchRecord::of(&process.identity, &process.token);
         let mut marker = chunk_service::private_file(&self.path(id, "launch")?)?;
@@ -323,6 +342,9 @@ impl Host for ProcessHost {
             && self.path(id, "launch").is_ok_and(|p| p.exists())
             && !self.stopped(id)
     }
+    fn unowned(&self) -> Result<BTreeSet<String>> {
+        Ok(self.recorded("launch")?.into_iter().filter(|id| self.unresolved(id)).collect())
+    }
     fn stopped(&self, id: &str) -> bool {
         self.processes.lock().is_ok_and(|processes| {
             processes.failed.contains(id)
@@ -341,20 +363,7 @@ impl Host for ProcessHost {
                 .map(|(id, _)| id.clone()),
         );
         // Exit records also recover cleanup interrupted after the durable host was removed.
-        let entries = match std::fs::read_dir(&self.config.directory) {
-            Ok(entries) => Some(entries),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        for entry in entries.into_iter().flatten() {
-            let path = entry?.path();
-            if path.extension().is_some_and(|extension| extension == "exit")
-                && let Some(id) = path.file_stem().and_then(|stem| stem.to_str())
-                && uuid::Uuid::parse_str(id).is_ok()
-            {
-                stopped.insert(id.into());
-            }
-        }
+        stopped.extend(self.recorded("exit")?);
         let mut result = Ok(());
         'hosts: for id in stopped.difference(retained) {
             for extension in ["launch", "jvm.log", "exit"] {
