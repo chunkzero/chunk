@@ -49,11 +49,15 @@ service EnvironmentService {
   // and arguments to observe progress or recover a lost reply; the same
   // request_id with a different workload, machine_profile, release_id or
   // app_id fails with ALREADY_EXISTS; the lease is not part of that match. A
-  // failed request stays failed; retry with a new request_id. Fenced by lease.
+  // failed request stays failed; retry with a new request_id. A JVM request is
+  // one machine lifetime: a JVM machine that exits fails its request and is
+  // never replaced under it. GATEWAY and EXEC machines are stateless and are
+  // replaced under the same request. Fenced by lease.
   rpc EnsureCapacity(EnsureCapacityRequest) returns (EnsureCapacityResponse);
-  // Returns the capacity granted under an EnsureCapacity request_id.
-  // Idempotent: releasing unknown or already released capacity succeeds.
-  // Fenced by lease.
+  // Returns the capacity granted under an EnsureCapacity request_id. The
+  // response is RELEASING until the machine is gone, then RELEASED; repeat the
+  // call to observe that. Idempotent: releasing unknown capacity returns
+  // RELEASED. Fenced by lease.
   rpc ReleaseCapacity(ReleaseCapacityRequest) returns (ReleaseCapacityResponse);
   // Records usage for accounting. At least once: the server deduplicates by
   // record ID, so retry a batch until it succeeds.
@@ -242,7 +246,10 @@ enum CapacityState {
   CAPACITY_STATE_PROVISIONING = 1;
   CAPACITY_STATE_READY = 2;
   CAPACITY_STATE_FAILED = 3;
+  // The machine is gone.
   CAPACITY_STATE_RELEASED = 4;
+  // Released, and the machine is still being removed.
+  CAPACITY_STATE_RELEASING = 5;
 }
 
 message ReleaseCapacityRequest {
