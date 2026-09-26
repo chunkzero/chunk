@@ -11,7 +11,13 @@ const progress = {
   best: v.integer(),
   inventory: v.array(item),
 };
-const profile = v.object({ player: v.player(), name: v.string(), ...progress, lastSeen: v.integer(), saves: v.integer() });
+const profile = v.object({
+  player: v.player(),
+  name: v.string(),
+  ...progress,
+  lastSeen: v.integer(),
+  saves: v.integer(),
+});
 
 export const player = (caller: JsonValue) => identity.parse(caller).player;
 

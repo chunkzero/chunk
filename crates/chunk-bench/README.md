@@ -57,12 +57,12 @@ failure; target warnings and errors go to stderr. Treat storage/capacity rejecti
 saturation. The claim-count budget does not guarantee that a workload fits in the state document.
 
 Backend workloads compile the TypeScript app in `backend/` with `chunk_build::compile`, exactly as an app is built, and
-serve it with `chunk_backend::server::run` on on-disk SQLite. Compilation needs the pinned native TypeScript:
-run `node scripts/install-typescript.mjs target/release` or set `CHUNK_TYPESCRIPT`. The bundle has one `profiles` table
-(ten fields including an eight- to sixteen-item inventory) with `by_player` and `by_rank` indexes; `rank` is the negated
-best score because indexes are ascending. Setup seeds `--population` profiles through the bundle's own `seed` mutation,
-200 per commit. Each lane is its own connection with a fixed player caller. Operation IDs are unique, so no request
-recovers a stored outcome.
+serve it with `chunk_backend::server::run` on on-disk SQLite. Compilation needs the pinned native TypeScript: run
+`node scripts/install-typescript.mjs target/release` or set `CHUNK_TYPESCRIPT`. The bundle has one `profiles` table (ten
+fields including an eight- to sixteen-item inventory) with `by_player` and `by_rank` indexes; `rank` is the negated best
+score because indexes are ascending. Setup seeds `--population` profiles through the bundle's own `seed` mutation, 200
+per commit. Each lane is its own connection with a fixed player caller. Operation IDs are unique, so no request recovers
+a stored outcome.
 
 `backend-fanout` opens `--subscribers` query subscriptions in watch groups of `--group-size`, one connection per group,
 and waits for every initial result. `--subscription shared` subscribes everyone to the identical leaderboard (`top`);
@@ -82,10 +82,10 @@ published; a coalesced batch reports only its latest commit). Phases overlap; do
 `fanout.reply_to_all_delivered_us` is measured by the generator from the durable mutation reply to the last stream's
 delivery. `target_cpu_us_per_completed` divides target CPU, including drain, by completed operations.
 
-`cargo bench -p chunk-js --bench engines -- target/bench/<run>/bundle` compares chunk-js's persistent `deno_core`
-engine with a persistent direct V8 context on the compiled bundle. Both get the same in-memory snapshot of 1,000
-profiles, a 32 MiB heap and a one-second watchdog. Each cell runs 1,000 warmup and 8,000 measured calls (below
-chunk-js's 10,000-call runtime recycling) in its own process and checks that both engines return identical results.
+`cargo bench -p chunk-js --bench engines -- target/bench/<run>/bundle` compares chunk-js's persistent `deno_core` engine
+with a persistent direct V8 context on the compiled bundle. Both get the same in-memory snapshot of 1,000 profiles, a 32
+MiB heap and a one-second watchdog. Each cell runs 1,000 warmup and 8,000 measured calls (below chunk-js's 10,000-call
+runtime recycling) in its own process and checks that both engines return identical results.
 
 ## Measurement and output
 
