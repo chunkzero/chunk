@@ -1,10 +1,12 @@
-import type { Machine, MachineSpec, MachineState, Provider } from "./provider.ts";
+import { type Machine, type MachineSpec, type MachineState, OwnershipError, type Provider } from "./provider.ts";
 
 export interface DockerProviderOptions {
   /** Path of the Docker-compatible API's unix socket. */
   socketPath: string;
-  /** A user-defined network every machine joins; created when missing. */
+  /** A user-defined network every machine joins; created when missing and never removed. */
   network: string;
+  /** Identifies this chunk install; the provider only touches containers and volumes labelled with it. */
+  installId: string;
 }
 
 /** An unexpected response from the engine. */
@@ -20,15 +22,23 @@ export class ProviderError extends Error {
 
 // The oldest version current Docker accepts, and the one Podman 5 reports.
 const apiPrefix = "/v1.44";
-const managed = { "chunk.managed": "true" };
+const installLabel = "chunk.install";
+const machineLabel = "chunk.machine";
 const stopTimeoutSeconds = 10;
+
+type Labels = Record<string, string> | null | undefined;
 
 interface Inspection {
   Id: string;
   Name: string;
+  Config: { Labels?: Labels };
   State: { Status: string };
-  Mounts?: { Type: string; Name?: string }[];
   NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+}
+
+interface Volume {
+  Name: string;
+  Labels?: Labels;
 }
 
 /** The socket path from a DOCKER_HOST value such as unix:///run/user/1000/podman/podman.sock; throws for non-unix hosts. */
@@ -40,7 +50,7 @@ export function socketPathFrom(dockerHost: string): string {
 }
 
 /** Runs machines as containers through the Docker Engine API, which Podman also serves. */
-export function dockerProvider({ socketPath, network }: DockerProviderOptions): Provider {
+export function dockerProvider({ socketPath, network, installId }: DockerProviderOptions): Provider {
   const call = async (
     method: string,
     path: string,
@@ -60,32 +70,51 @@ export function dockerProvider({ socketPath, network }: DockerProviderOptions): 
     throw new ProviderError(response.status, `${method} ${path}: ${message}`);
   };
 
+  const ownership = (name: string) => ({ [installLabel]: installId, [machineLabel]: name });
+  const owned = (labels: Labels) => labels?.[installLabel] === installId;
+  const ownedFor = (labels: Labels, machine: string) => owned(labels) && labels?.[machineLabel] === machine;
+
   const inspect = async (id: string) => {
     const response = await call("GET", `/containers/${encodeURIComponent(id)}/json`, { allow: [404] });
     return response.status === 404 ? undefined : ((await response.json()) as Inspection);
   };
 
+  const nameOf = (inspection: Inspection) => inspection.Name.replace(/^\//, "");
+
   const machineFrom = (inspection: Inspection): Machine => {
-    const name = inspection.Name.replace(/^\//, "");
+    const name = nameOf(inspection);
     const ip = inspection.NetworkSettings?.Networks?.[network]?.IPAddress;
-    return { id: inspection.Id, name, state: stateOf(inspection.State.Status), addresses: ip ? [ip, name] : [name] };
+    return { id: inspection.Id, name, state: stateOf(inspection.State.Status), addresses: ip ? [name, ip] : [name] };
+  };
+
+  const refuseForeign = (inspection: Inspection | undefined, what: string) => {
+    if (inspection && !owned(inspection.Config.Labels)) throw new OwnershipError(`container ${what}`);
+    return inspection;
   };
 
   const status = async (id: string): Promise<Machine> => {
-    const inspection = await inspect(id);
+    const inspection = refuseForeign(await inspect(id), id);
     return inspection ? machineFrom(inspection) : { id, name: "", state: "missing", addresses: [] };
   };
 
   // Inspecting also matches ID prefixes, so a name only counts when it is the container's exact name.
   const named = async (name: string) => {
     const inspection = await inspect(name);
-    return inspection?.Name.replace(/^\//, "") === name ? machineFrom(inspection) : undefined;
+    return inspection && nameOf(inspection) === name ? inspection : undefined;
   };
 
   const existing = async (id: string) => {
-    const machine = await status(id);
-    if (machine.state === "missing") throw new ProviderError(404, `no such machine ${id}`);
-    return machine;
+    const inspection = refuseForeign(await inspect(id), id);
+    if (!inspection) throw new ProviderError(404, `no such machine ${id}`);
+    return machineFrom(inspection);
+  };
+
+  // An existing container is adopted only when it carries this install's labels and every label the spec asks for.
+  const adopt = (spec: MachineSpec, inspection: Inspection) => {
+    const labels = inspection.Config.Labels;
+    const wanted = Object.entries({ ...spec.labels, ...ownership(spec.name) });
+    if (!wanted.every(([key, value]) => labels?.[key] === value)) throw new OwnershipError(`container ${spec.name}`);
+    return machineFrom(inspection);
   };
 
   const containerAction = (id: string, action: string, query = "") =>
@@ -100,16 +129,27 @@ export function dockerProvider({ socketPath, network }: DockerProviderOptions): 
     }
   };
 
+  // Docker returns an existing volume from create while Podman answers 409, so both paths check the labels.
+  const createVolume = async (spec: MachineSpec, name: string) => {
+    let response = await call("POST", "/volumes/create", {
+      body: { Name: name, Labels: { ...spec.labels, ...ownership(spec.name) } },
+      allow: [409],
+    });
+    if (response.status === 409) response = await call("GET", `/volumes/${encodeURIComponent(name)}`);
+    const volume = (await response.json()) as Volume;
+    if (!ownedFor(volume.Labels, spec.name)) throw new OwnershipError(`volume ${name}`);
+  };
+
   const createContainer = async (spec: MachineSpec) => {
     const body = {
       Image: spec.image,
       ...(spec.command ? { Cmd: spec.command } : {}),
       Env: Object.entries(spec.env).map(([key, value]) => `${key}=${value}`),
-      Labels: { ...spec.labels, ...managed },
+      Labels: { ...spec.labels, ...ownership(spec.name) },
       HostConfig: {
         Memory: spec.memoryMib * 1024 * 1024,
         NanoCpus: Math.round(spec.cpus * 1e9),
-        RestartPolicy: { Name: "unless-stopped" },
+        RestartPolicy: { Name: spec.restart ? "unless-stopped" : "no" },
         Binds: spec.volumes.map(({ name, path }) => `${name}:${path}`),
       },
       NetworkingConfig: { EndpointsConfig: { [network]: {} } },
@@ -119,12 +159,10 @@ export function dockerProvider({ socketPath, network }: DockerProviderOptions): 
 
   return {
     async create(spec) {
-      await call("POST", "/networks/create", { body: { Name: network, Labels: managed }, allow: [409] });
-      for (const volume of spec.volumes) {
-        await call("POST", "/volumes/create", { body: { Name: volume.name, Labels: managed }, allow: [409] });
-      }
       const found = await named(spec.name);
-      if (found) return found;
+      if (found) return adopt(spec, found);
+      await call("POST", "/networks/create", { body: { Name: network }, allow: [409] });
+      for (const volume of spec.volumes) await createVolume(spec, volume.name);
       try {
         let response = await createContainer(spec);
         if (response.status === 404) {
@@ -136,7 +174,7 @@ export function dockerProvider({ socketPath, network }: DockerProviderOptions): 
       } catch (error) {
         // Another caller created the same name concurrently; Podman reports that as a 500 rather than a 409.
         const raced = await named(spec.name);
-        if (raced) return raced;
+        if (raced) return adopt(spec, raced);
         throw error;
       }
     },
@@ -163,21 +201,27 @@ export function dockerProvider({ socketPath, network }: DockerProviderOptions): 
       return status(id);
     },
 
-    async destroy(id) {
-      const inspection = await inspect(id);
-      if (!inspection) return;
-      await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true`, { allow: [404] });
-      for (const mount of inspection.Mounts ?? []) {
-        if (mount.Type !== "volume" || !mount.Name) continue;
-        const path = `/volumes/${encodeURIComponent(mount.Name)}`;
-        const response = await call("GET", path, { allow: [404] });
-        if (response.status === 404) continue;
-        const { Labels } = (await response.json()) as { Labels?: Record<string, string> | null };
-        if (Labels?.["chunk.managed"] === "true") await call("DELETE", path, { allow: [404] });
-      }
+    status,
+
+    async find(name) {
+      const inspection = refuseForeign(await named(name), name);
+      return inspection && machineFrom(inspection);
     },
 
-    status,
+    async destroy(name) {
+      const inspection = refuseForeign(await named(name), name);
+      if (inspection) {
+        await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true`, { allow: [404] });
+      }
+      const filters = JSON.stringify({ label: [`${installLabel}=${installId}`, `${machineLabel}=${name}`] });
+      const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
+      const { Volumes } = (await response.json()) as { Volumes?: Volume[] | null };
+      for (const volume of Volumes ?? []) {
+        if (ownedFor(volume.Labels, name)) {
+          await call("DELETE", `/volumes/${encodeURIComponent(volume.Name)}`, { allow: [404] });
+        }
+      }
+    },
   };
 }
 

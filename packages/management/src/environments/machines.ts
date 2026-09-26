@@ -24,10 +24,25 @@ const workloadNames: Record<number, string> = {
   [Workload.EXEC]: "exec",
 };
 
-/** Machine names are unique per provider, so they carry the environment ID. */
+/** Machine names are unique per provider and valid hostnames, so they carry the environment ID with `_` as `-`. */
+function namePrefix(environmentId: string): string {
+  return `chunk-${environmentId.replaceAll("_", "-")}`;
+}
+
+export function coreMachineName(environmentId: string): string {
+  return `${namePrefix(environmentId)}-core`;
+}
+
+/** Stable per request, so a replacement machine takes the name of the one it replaces. */
+export function capacityMachineName(request: CapacityRow): string {
+  const workload = workloadNames[request.workload] ?? "unknown";
+  return `${namePrefix(request.environment_id)}-${workload}-${sha256(request.request_id).toString("hex").slice(0, 12)}`;
+}
+
+/** Core keeps its data volume and is restarted by the host. */
 export function coreMachineSpec(options: MachineOptions, environmentId: string, token: string): MachineSpec {
   return {
-    name: `chunk-${environmentId}-core`,
+    name: coreMachineName(environmentId),
     image: options.image,
     env: {
       CHUNK_WORKLOAD: "core",
@@ -37,21 +52,24 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
     },
     memoryMib: options.coreMemoryMib,
     cpus: cpusFor(options.coreMemoryMib),
-    labels: { "chunk.environment": environmentId, "chunk.workload": "core" },
-    volumes: [{ name: `chunk-${environmentId}-data`, path: "/data" }],
+    labels: { "chunk.environment": environmentId, "chunk.request": "core", "chunk.workload": "core" },
+    volumes: [{ name: `${namePrefix(environmentId)}-data`, path: "/data" }],
+    restart: true,
   };
 }
 
-/** An extra machine joins core directly with a join token; it never calls this service. */
+/**
+ * An extra machine joins core directly with a join token; it never calls this service. It is stateless and never
+ * restarted by the host: the reconciler replaces one that exits, with a fresh join token.
+ */
 export function capacityMachineSpec(
   options: MachineOptions,
   request: CapacityRow,
   { coreAddress, environmentToken }: { coreAddress: string; environmentToken: string },
 ): MachineSpec {
   const workload = workloadNames[request.workload] ?? "unknown";
-  const suffix = sha256(request.request_id).toString("hex").slice(0, 12);
   return {
-    name: `chunk-${request.environment_id}-${workload}-${suffix}`,
+    name: capacityMachineName(request),
     image: options.image,
     env: {
       CHUNK_WORKLOAD: workload,
@@ -70,8 +88,13 @@ export function capacityMachineSpec(
     },
     memoryMib: request.memory_mib,
     cpus: cpusFor(request.memory_mib),
-    labels: { "chunk.environment": request.environment_id, "chunk.workload": workload },
+    labels: {
+      "chunk.environment": request.environment_id,
+      "chunk.request": request.request_id,
+      "chunk.workload": workload,
+    },
     volumes: [],
+    restart: false,
   };
 }
 

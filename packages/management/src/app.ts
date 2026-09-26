@@ -36,11 +36,16 @@ export async function start(config: Config) {
     changes: await listenForChanges(sql),
   };
   const { machines } = config;
+  const [installation] = await sql<{ id: string }[]>`select id from installation`;
   const reconciler =
     machines &&
     startReconciler(deps, {
       ...machines,
-      provider: dockerProvider({ socketPath: socketPathFrom(machines.dockerHost), network: machines.network }),
+      provider: dockerProvider({
+        socketPath: socketPathFrom(machines.dockerHost),
+        network: machines.network,
+        installId: installation?.id ?? "",
+      }),
     });
   const server = Bun.serve({
     hostname: config.host,

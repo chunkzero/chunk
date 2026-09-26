@@ -5,6 +5,7 @@ import { Code } from "@connectrpc/connect";
 import { ensureEdgeToken } from "../src/auth/tokens.ts";
 import { randomToken } from "../src/crypto.ts";
 import { wakesPerMinute } from "../src/edge/service.ts";
+import { coreMachineName } from "../src/environments/machines.ts";
 import { reconcile, type ReconcilerOptions } from "../src/environments/reconciler.ts";
 import { LogSeverity, LogSource, SleepingPingMode } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { EdgeService, WakeOutcome, WakeReason } from "../src/gen/chunk/management/v1/edge_pb.ts";
@@ -33,7 +34,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     const { projectId, environmentId } = await createEnvironment(h);
     await deployRelease(h, projectId, environmentId, "r1");
     await reconcile(h.deps, options);
-    const core = await provider.status(`chunk-${environmentId}-core`);
+    const core = await provider.status(coreMachineName(environmentId));
     const [row] = await h.sql<{ hostname: string }[]>`select hostname from environments where id = ${environmentId}`;
     const token = (
       await h.keys.cipher.open(await machineToken(environmentId), `machine-token/${environmentId}`)
