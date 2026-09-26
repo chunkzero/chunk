@@ -133,6 +133,9 @@ fn schema() -> DatabaseSchema {
         META: {"config": string, "method_sequence": integer},
         HOSTS: {
             "app": string, "profile": string, "retired": boolean, "idle_since_ms?": integer,
+            "process?": {"type": "object", "fields": {
+                "id": {"schema": string}, "generation": {"schema": integer}, "token_sha256": {"schema": string},
+            }},
         },
         SESSIONS: {
             "empty_since_ms?": integer, "finish_requested": boolean, "finished": boolean, "host": string,

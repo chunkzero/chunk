@@ -76,6 +76,17 @@ pub(crate) struct HostState {
     pub retired: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_ms: Option<u64>,
+    /// The JVM last launched for this host, so it can re-register after control restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessRecord>,
+}
+
+/// Identifies a launched JVM without retaining its credential.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProcessRecord {
+    pub id: String,
+    pub generation: u64,
+    pub token_sha256: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

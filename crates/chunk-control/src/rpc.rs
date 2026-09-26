@@ -220,6 +220,6 @@ impl chunk_proto::v1::supervisor_server::Supervisor for Service {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| Status::unauthenticated("missing process credential"))?
             .to_owned();
-        self.control.host.register(&token, request.into_inner()).map(Response::new).map_err(status)
+        self.control.register(&token, request.into_inner()).map(Response::new).map_err(status)
     }
 }

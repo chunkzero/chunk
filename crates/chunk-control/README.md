@@ -55,10 +55,12 @@ deadline. Zero seconds requests immediate termination. `chunk nodes --control-fi
 acknowledgment.
 
 Graceful control shutdown stops owned JVMs. After an abrupt control-process failure, local child handles cannot be
-recovered safely: durable launch markers retain unresolved ownership and prevent duplicate launches. Such nodes report
-unreachable. Persisted numeric PIDs never authorize a kill. This local host does not yet recover or automatically clean
-up orphaned JVMs after a hard control crash; stop those processes before discarding their local state. Hosted providers
-will need durable provider identities to confirm termination across control restarts. JVM failure loses transient
+recovered: durable launch markers retain unresolved ownership and prevent duplicate launches, and such nodes report
+unreachable until their JVM re-attaches. A JVM keeps repeating its registration; control accepts it only with the
+credential whose SHA-256 digest and process identity the log recorded for that host. Reconciliation then keeps deliveries
+whose generations match an open claim and withdraws the rest. Nothing adopts a process by PID. A re-attached JVM has no
+child handle, so stopping it sends `StopProcess` but its exit stays unconfirmed; stop such processes before discarding
+local state. Hosted providers will need durable provider identities to confirm termination across control restarts. JVM failure loses transient
 worlds; no packets or worlds are replayed. State from the previous shared-classpath runtime is incompatible with this
 release.
 

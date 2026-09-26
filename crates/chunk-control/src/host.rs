@@ -46,6 +46,13 @@ pub trait Host: Send + Sync {
     fn register(&self, _token: &str, _registration: ProcessRegistration) -> Result<ProcessIdentity> {
         Err(Error::Invalid("host does not accept process registrations"))
     }
+    /// Takes over a process launched for `registration`'s host before control restarted. Control has already
+    /// matched `token` and the identity against its log.
+    /// # Errors
+    /// Rejects hosts that cannot adopt processes, or a host already running or stopped.
+    fn adopt(&self, _token: &str, _registration: ProcessRegistration) -> Result<()> {
+        Err(Error::Invalid("host cannot adopt processes"))
+    }
     fn connection(&self, _id: &str) -> Option<RuntimeConnection> {
         None
     }

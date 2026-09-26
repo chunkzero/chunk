@@ -121,3 +121,39 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
     assert!(!host.path(retained, "exit").unwrap().exists());
     assert!(host.path(unconfirmed, "launch").unwrap().exists());
 }
+
+#[tokio::test]
+async fn only_an_unowned_launch_can_be_adopted_and_its_exit_stays_unconfirmed() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = ProcessHost::new(ProcessHostConfig {
+        distribution: directory.path().into(),
+        java: directory.path().join("java"),
+        directory: directory.path().join("nodes"),
+        deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
+        apps: BTreeMap::from([("bridge".into(), crate::tests::test_app())]),
+        profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
+        backend: chunk_contract::BackendConnection {
+            platform_token: None,
+            environment: "test".into(),
+            deployment: "build".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            token: "unused".into(),
+        },
+    });
+    let id = uuid::Uuid::new_v4().to_string();
+    let registration = ProcessRegistration {
+        identity: Some(ProcessIdentity { runtime_id: id.clone(), app_id: "bridge".into(), ..Default::default() }),
+        control_endpoint: "http://127.0.0.1:1".into(),
+        player_endpoint: "127.0.0.1:2".into(),
+    };
+    assert!(host.adopt("credential", registration.clone()).is_err());
+    std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
+    std::fs::write(host.path(&id, "launch").unwrap(), b"").unwrap();
+    assert!(host.unresolved(&id));
+    host.adopt("credential", registration.clone()).unwrap();
+    assert!(!host.unresolved(&id));
+    assert_eq!(host.connection(&id).unwrap().token, "credential");
+    assert!(host.adopt("credential", registration).is_err());
+    assert!(matches!(host.terminate(&id).await, Err(Error::Unresolved(_))));
+    assert!(!host.stopped(&id));
+}

@@ -36,6 +36,8 @@ struct Process {
     registration: Mutex<Option<ProcessRegistration>>,
     stop: CancellationToken,
     stopped: AtomicBool,
+    /// Re-attached after control restarted, so no child handle can confirm its exit.
+    adopted: bool,
 }
 impl Process {
     fn connection(&self) -> Option<RuntimeConnection> {
@@ -142,6 +144,7 @@ impl ProcessHost {
             registration: Mutex::default(),
             stop: CancellationToken::new(),
             stopped: AtomicBool::new(false),
+            adopted: false,
         });
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
@@ -234,25 +237,36 @@ impl Host for ProcessHost {
         if process.stop.is_cancelled() || process.stopped.load(Ordering::Acquire) {
             return Err(Error::Stopped);
         }
-        for endpoint in [&registration.control_endpoint, &registration.player_endpoint] {
-            let address: std::net::SocketAddr = endpoint
-                .strip_prefix("http://")
-                .unwrap_or(endpoint)
-                .parse()
-                .map_err(|_| Error::Invalid("process endpoint"))?;
-            if !address.ip().is_loopback() || address.port() == 0 {
-                return Err(Error::Invalid("process requires loopback"));
-            }
-        }
-        if !registration.control_endpoint.starts_with("http://") {
-            return Err(Error::Invalid("control endpoint scheme"));
-        }
+        validate_endpoints(&registration)?;
         let mut frozen = process.registration.lock().map_err(|_| Error::Unresolved("registration poisoned"))?;
         if frozen.as_ref().is_some_and(|previous| previous != &registration) {
             return Err(Error::Invalid("registration changed"));
         }
         *frozen = Some(registration);
         Ok(process.identity.clone())
+    }
+    fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
+        validate_endpoints(&registration)?;
+        let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
+        let id = identity.runtime_id.clone();
+        let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
+        if processes.running.contains_key(&id)
+            || processes.failed.contains(&id)
+            || !self.path(&id, "launch")?.try_exists()?
+            || self.path(&id, "exit")?.try_exists()?
+        {
+            return Err(Error::Invalid("process is not awaiting re-attachment"));
+        }
+        let process = Process {
+            identity,
+            token: token.into(),
+            registration: Mutex::new(Some(registration)),
+            stop: CancellationToken::new(),
+            stopped: AtomicBool::new(false),
+            adopted: true,
+        };
+        processes.running.insert(id, Arc::new(process));
+        Ok(())
     }
     fn connection(&self, id: &str) -> Option<RuntimeConnection> {
         self.process(id).ok()??.connection()
@@ -278,6 +292,10 @@ impl Host for ProcessHost {
             }
         };
         process.stop.cancel();
+        if process.adopted {
+            stop_gracefully(&process).await;
+            return Err(Error::Unresolved("re-attached JVM exit unconfirmed"));
+        }
         let deadline = Instant::now() + Duration::from_secs(12);
         while !process.stopped.load(Ordering::Acquire) {
             if Instant::now() >= deadline {
@@ -347,6 +365,17 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         exit = child.wait() => { exit?; return Ok(()); }
         () = process.stop.cancelled() => {}
     }
+    stop_gracefully(process).await;
+    if let Ok(result) = tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        result?;
+    } else {
+        child.kill().await?;
+        child.wait().await?;
+    }
+    Ok(())
+}
+
+async fn stop_gracefully(process: &Process) {
     if let Some(connection) = process.connection() {
         let graceful = async {
             NodeControlClient::new(channel(&connection).await?)
@@ -356,11 +385,21 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         };
         let _ = tokio::time::timeout(Duration::from_secs(3), graceful).await;
     }
-    if let Ok(result) = tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-        result?;
-    } else {
-        child.kill().await?;
-        child.wait().await?;
+}
+
+fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
+    for endpoint in [&registration.control_endpoint, &registration.player_endpoint] {
+        let address: std::net::SocketAddr = endpoint
+            .strip_prefix("http://")
+            .unwrap_or(endpoint)
+            .parse()
+            .map_err(|_| Error::Invalid("process endpoint"))?;
+        if !address.ip().is_loopback() || address.port() == 0 {
+            return Err(Error::Invalid("process requires loopback"));
+        }
+    }
+    if !registration.control_endpoint.starts_with("http://") {
+        return Err(Error::Invalid("control endpoint scheme"));
     }
     Ok(())
 }

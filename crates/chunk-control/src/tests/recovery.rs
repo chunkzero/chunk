@@ -1,0 +1,55 @@
+use super::*;
+use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
+
+#[tokio::test]
+async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_claims() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control();
+    let arrived = request("arrived", &uuid::Uuid::new_v4().to_string());
+    let assignment = control.claim(arrived.clone()).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("arrived").unwrap().phase = DeliveryPhase::Arrived;
+    control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
+    let state = control.state().unwrap();
+    let host = state.sessions[&state.claims["arrived"].session].host.clone();
+    drop(control);
+    fixture.host.forgotten.store(true, Ordering::Release);
+
+    let control = fixture.control();
+    assert!(control.inspect(arrived.clone()).await.is_err());
+    let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
+    let register = |token: &str, process: &str| {
+        let identity = ProcessIdentity {
+            runtime_id: host.clone(),
+            process_id: process.into(),
+            ..fixture.runtime.identity.clone()
+        };
+        let mut request = Request::new(ProcessRegistration {
+            identity: Some(identity),
+            control_endpoint: fixture.host.endpoint.clone(),
+            player_endpoint: "127.0.0.1:1".into(),
+        });
+        request.metadata_mut().insert("authorization", token.parse().unwrap());
+        request
+    };
+    for (token, process) in [("Bearer another-credential", "jvm"), ("Bearer test-runtime-credential", "other-jvm")] {
+        assert!(service.register_process(register(token, process)).await.is_err());
+        assert!(fixture.host.forgotten.load(Ordering::Acquire));
+    }
+    service.register_process(register("Bearer test-runtime-credential", "jvm")).await.unwrap();
+    assert!(!fixture.host.forgotten.load(Ordering::Acquire));
+
+    // The log owns the arrived delivery; a delivery it does not know is withdrawn.
+    let stray = PlayerDelivery {
+        operation_id: "stray".into(),
+        owner_generation: assignment.claim.as_ref().unwrap().delivery_generation,
+        ..assignment.delivery.clone().unwrap()
+    };
+    let binding = Binding { delivery: stray, phase: DeliveryPhase::Arrived };
+    fixture.runtime.bindings.lock().unwrap().insert("stray".into(), binding);
+    control.reconcile_all().await.unwrap();
+    assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
+    let current = control.inspect(arrived).await.unwrap();
+    assert_eq!(current.phase, ClaimPhase::Arrived as i32);
+    assert_eq!(current.claim, assignment.claim);
+    fixture.close().await;
+}

@@ -168,6 +168,7 @@ impl Control {
         if !self.runs_host(&runtime, host) {
             return Err(Error::Invalid("host returned incompatible runtime"));
         }
+        self.record_process(id, &runtime)?;
         Ok(runtime)
     }
 

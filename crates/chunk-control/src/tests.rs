@@ -249,10 +249,15 @@ struct FakeHost {
     endpoint: String,
     ids: Mutex<BTreeSet<String>>,
     terminated: Mutex<BTreeSet<String>>,
+    /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
+    forgotten: AtomicBool,
 }
 #[tonic::async_trait]
 impl Host for FakeHost {
     fn connection(&self, _: &str) -> Option<RuntimeConnection> {
+        if self.forgotten.load(Ordering::Acquire) {
+            return None;
+        }
         Some(RuntimeConnection {
             endpoint: self.endpoint.clone(),
             player_endpoint: "127.0.0.1:1".into(),
@@ -265,6 +270,9 @@ impl Host for FakeHost {
         self.ids.lock().unwrap().insert(id.into());
         if self.stopped(id) {
             return Err(Error::Stopped);
+        }
+        if self.forgotten.load(Ordering::Acquire) {
+            return Err(Error::Unresolved("no owned process; exit unconfirmed"));
         }
         Ok(RuntimeConnection {
             endpoint: self.endpoint.clone(),
@@ -280,6 +288,14 @@ impl Host for FakeHost {
     }
     fn stopped(&self, id: &str) -> bool {
         self.runtime.stopped.load(Ordering::Acquire) || self.terminated.lock().unwrap().contains(id)
+    }
+    fn unresolved(&self, _: &str) -> bool {
+        self.forgotten.load(Ordering::Acquire)
+    }
+    fn adopt(&self, token: &str, _: chunk_proto::v1::ProcessRegistration) -> Result<()> {
+        assert_eq!(token, "test-runtime-credential");
+        assert!(self.forgotten.swap(false, Ordering::AcqRel));
+        Ok(())
     }
 }
 
@@ -342,6 +358,7 @@ impl Fixture {
             endpoint,
             ids: Mutex::default(),
             terminated: Mutex::default(),
+            forgotten: AtomicBool::new(false),
         });
         let config = Config {
             contracts: Contracts::default(),
@@ -889,5 +906,6 @@ mod creation;
 mod destinations;
 mod launch;
 mod log;
+mod recovery;
 mod retention;
 mod roster;
