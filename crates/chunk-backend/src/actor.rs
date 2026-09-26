@@ -65,6 +65,8 @@ pub(crate) struct Actor {
     readers: readers::Readers,
     sources: BTreeMap<DeploymentId, Arc<readers::Source>>,
     reads: VecDeque<queries::Waiting>,
+    /// Whether a subscription reevaluation goes before the next queued query.
+    rerun_turn: bool,
     /// Increments when staged writes roll back, so queries that read them run again.
     epoch: u64,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
@@ -118,6 +120,7 @@ impl Actor {
             readers,
             sources,
             reads: VecDeque::new(),
+            rerun_turn: false,
             epoch: 0,
             versions,
             deploying: None,

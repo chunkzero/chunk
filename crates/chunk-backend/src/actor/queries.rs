@@ -49,38 +49,53 @@ impl Actor {
         Ok(())
     }
 
-    /// Hands queued queries, then subscription reevaluations, to idle read engines.
+    /// Hands queued queries and subscription reevaluations to idle read engines, alternating
+    /// while both wait so continuous queries cannot starve subscriptions.
     pub(super) fn dispatch(&mut self) {
         while self.readers.idle() {
-            let read = if let Some(Waiting { call, function, reply, .. }) = self.reads.pop_front() {
-                if reply.cancellation.is_cancelled() {
-                    reply.finish(Err(Error::Cancelled));
-                    continue;
-                }
-                reply.queued.stop(Phase::Queue);
-                let cancellation = reply.cancellation.clone();
-                let overlay = self.pending.iter().map(|pending| pending.changes.clone()).collect();
-                let ticket = Ticket::Query { reply, epoch: self.epoch, overlay };
-                self.read(ticket, call, function, self.view.clone(), cancellation)
+            let read = if self.rerun_turn {
+                self.next_rerun().or_else(|| self.next_query())
             } else {
-                let base = &self.view.base;
-                let Some(job) = self.watches.next_job(|| Arc::new(View::new(base.clone()))) else {
-                    break;
-                };
-                let (call, view) = (job.call.clone(), job.view.clone());
-                match self.resolve(&call, Mode::Query) {
-                    Ok(function) => self.read(Ticket::Watch(job), call, function, view, self.readers.stopping()),
-                    Err(error) => {
-                        self.watches.complete(&job, Err(error), Dependencies::default());
-                        continue;
-                    }
-                }
+                self.next_query().or_else(|| self.next_rerun())
             };
+            let Some(read) = read else {
+                break;
+            };
+            self.rerun_turn = matches!(read.ticket, Ticket::Query { .. });
             if let Err(read) = self.readers.send(read) {
                 self.answer(*read, Err(Error::Closed), Dependencies::default());
                 if !self.readers.alive() {
                     self.fail(&Error::Closed);
                 }
+            }
+        }
+    }
+
+    fn next_query(&mut self) -> Option<Read> {
+        while let Some(Waiting { call, function, reply, .. }) = self.reads.pop_front() {
+            if reply.cancellation.is_cancelled() {
+                reply.finish(Err(Error::Cancelled));
+                continue;
+            }
+            reply.queued.stop(Phase::Queue);
+            let cancellation = reply.cancellation.clone();
+            let overlay = self.pending.iter().map(|pending| pending.changes.clone()).collect();
+            let ticket = Ticket::Query { reply, epoch: self.epoch, overlay };
+            return Some(self.read(ticket, call, function, self.view.clone(), cancellation));
+        }
+        None
+    }
+
+    fn next_rerun(&mut self) -> Option<Read> {
+        loop {
+            let base = &self.view.base;
+            let job = self.watches.next_job(|| Arc::new(View::new(base.clone())))?;
+            let (call, view) = (job.call.clone(), job.view.clone());
+            match self.resolve(&call, Mode::Query) {
+                Ok(function) => {
+                    return Some(self.read(Ticket::Watch(job), call, function, view, self.readers.stopping()));
+                }
+                Err(error) => self.watches.complete(&job, Err(error), Dependencies::default()),
             }
         }
     }
