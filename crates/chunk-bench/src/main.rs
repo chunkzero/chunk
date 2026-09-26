@@ -31,10 +31,12 @@ fn main() -> Result<()> {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line)?;
         let init: target::Init = serde_json::from_str(&line)?;
+        compression_level(&init.config)?;
         return runtime(init.config.target_threads)?.block_on(target::serve(init));
     }
     let config = Config::parse();
     config.validate()?;
+    compression_level(&config)?;
     ensure!(!cfg!(debug_assertions), "benchmarks require --release (use just bench)");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).context("workspace root")?;
     let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
@@ -60,6 +62,14 @@ fn main() -> Result<()> {
     }
     eprintln!("Results: {}", output.display());
     result
+}
+
+/// Must run before any runtime thread compresses a packet.
+fn compression_level(config: &Config) -> Result<()> {
+    if let Some(level) = config.compression_level {
+        chunk_proxy::benchmark::set_compression_level(level)?;
+    }
+    Ok(())
 }
 
 fn runtime(threads: usize) -> Result<tokio::runtime::Runtime> {
@@ -149,10 +159,15 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
         config.rate(),
         config.concurrency
     );
-    let bytes = if config.scenario == Scenario::ProxyRelay {
-        config.request_bytes + config.response_bytes * config.burst
+    let (bytes, wire) = if config.scenario == Scenario::ProxyRelay {
+        let response = proxy::response(&config);
+        let wire = chunk_proxy::benchmark::frame_len(&response, config.compression())?;
+        (
+            config.request_bytes + response.len() * config.burst,
+            Some(json!({"body_bytes": response.len(), "frame_bytes": wire})),
+        )
     } else {
-        0
+        (0, None)
     };
     let warmup = load::run(config.clone(), &mut clients, config.warmup, 0).await?;
     warmup.write(&output, "warmup")?;
@@ -181,6 +196,7 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     let target_cpu_ms = samples.last().and_then(|sample| sample["target"]["cpu_ms"].as_u64()).unwrap_or_default();
     let result = json!({
         "measurement": stats.summary(config.seconds, bytes),
+        "response": wire,
         "target_cpu_us_per_completed": metrics::count(target_cpu_ms * 1000) / metrics::count(stats.completed.max(1)),
         "phases_us": target.report().await?,
         "fanout": fanout.map(|fanout| fanout.summary(&output)).transpose()?,

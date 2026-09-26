@@ -1,3 +1,5 @@
+mod terrain;
+
 use std::{io, sync::Arc};
 
 use anyhow::{Result, ensure};
@@ -10,7 +12,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, Payload};
 
-pub fn payload(length: usize, pattern: Payload, seed: u64) -> Vec<u8> {
+/// Downstream packet body; chunk columns only replace responses.
+pub fn response(config: &Config) -> Vec<u8> {
+    match config.payload {
+        Payload::Chunk => terrain::column(config.seed),
+        pattern => payload(config.response_bytes, pattern, config.seed),
+    }
+}
+
+fn payload(length: usize, pattern: Payload, seed: u64) -> Vec<u8> {
     let mut body = vec![0; length];
     let mut state = seed.max(1);
     for (index, byte) in body.iter_mut().enumerate().skip(9) {
@@ -20,7 +30,7 @@ pub fn payload(length: usize, pattern: Payload, seed: u64) -> Vec<u8> {
         *byte = match pattern {
             Payload::Repeated => 42,
             Payload::Mixed if index % 2 == 0 => 42,
-            Payload::Mixed | Payload::Random => state.to_le_bytes()[0],
+            Payload::Mixed | Payload::Random | Payload::Chunk => state.to_le_bytes()[0],
         };
     }
     // Opaque PLAY packet; avoids settings and command-tree packet IDs.
@@ -42,7 +52,7 @@ impl Client {
         Ok(Self {
             peer: Peer::new(stream, !config.no_encryption, config.compression())?,
             request: payload(config.request_bytes, config.payload, config.seed),
-            response: payload(config.response_bytes, config.payload, config.seed),
+            response: response(config),
             burst: config.burst,
         })
     }
@@ -60,7 +70,7 @@ impl Client {
 
 pub async fn gameplay(listener: TcpListener, config: &Config, stop: CancellationToken) -> Result<()> {
     let request = Arc::new(payload(config.request_bytes, config.payload, config.seed));
-    let response = Arc::new(payload(config.response_bytes, config.payload, config.seed));
+    let response = Arc::new(response(config));
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {

@@ -34,6 +34,8 @@ pub enum Payload {
     Repeated,
     Mixed,
     Random,
+    /// A synthetic overworld chunk column (about 50 KiB); replaces `--response-bytes` downstream.
+    Chunk,
 }
 
 #[derive(Clone, Debug, Parser, Serialize, Deserialize)]
@@ -90,6 +92,9 @@ pub struct Config {
     pub no_compression: bool,
     #[arg(long, default_value_t = 256)]
     pub compression_threshold: usize,
+    /// libdeflate level (1..=12) for the target and generator; defaults to the production level.
+    #[arg(long)]
+    pub compression_level: Option<i32>,
 }
 
 impl Config {
@@ -131,6 +136,10 @@ impl Config {
         ensure!((9..=2_000_000).contains(&self.response_bytes), "response bytes must be 9..=2000000");
         ensure!((1..=64).contains(&self.burst), "burst must be 1..=64");
         ensure!(self.compression_threshold <= 2_000_000, "invalid compression threshold");
+        ensure!(
+            self.compression_level.is_none_or(|level| (1..=12).contains(&level)),
+            "compression level must be 1..=12"
+        );
         let offers = u64::from(self.rate()) * u64::from(self.seconds + self.warmup);
         ensure!(self.rate() > 0 && offers <= 10_000_000, "rate must be positive; at most 10 million offers/run");
         if self.scenario == Scenario::ControlChurn {

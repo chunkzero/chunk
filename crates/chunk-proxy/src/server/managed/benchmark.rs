@@ -8,7 +8,7 @@ use chunk_protocol::{
 };
 use tokio::net::TcpStream;
 
-use super::super::transport::Transport;
+use super::super::transport::{self, Transport};
 
 /// A benchmark peer using the production frame, compression and encryption implementation.
 pub struct Peer(Transport<TcpStream>);
@@ -48,6 +48,20 @@ impl Peer {
     pub async fn read(&mut self) -> io::Result<bytes::Bytes> {
         self.0.read_frame(chunk_protocol::MAX_FRAME_SIZE).await
     }
+}
+
+/// Sets the zlib level for compressors created afterwards. Call before starting any runtime.
+/// # Errors
+/// Returns an error for levels outside libdeflate's 1..=12.
+pub fn set_compression_level(level: i32) -> io::Result<()> {
+    transport::set_compression_level(level)
+}
+
+/// Wire length of one packet body framed with the production encoder, before encryption.
+/// # Errors
+/// Returns frame size or compression errors.
+pub fn frame_len(body: &[u8], compression: Option<usize>) -> io::Result<usize> {
+    transport::frame_len(body, compression)
 }
 
 /// Runs the managed PLAY packet pump after synthetic negotiation.
