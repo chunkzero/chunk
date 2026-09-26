@@ -23,7 +23,7 @@ const REVISION_BITS: u32 = 40;
 #[derive(Default)]
 pub(in crate::server) struct View {
     live: bool,
-    /// The stream the last update came from, cleared when it ends superseded.
+    /// The stream the last update came from, cleared whenever it ends, before the follower subscribes again.
     stream: String,
     position: Option<Position>,
     claims: BTreeMap<String, GatewayClaim>,
@@ -52,7 +52,8 @@ impl View {
         Some(self.stream.as_str()).filter(|stream| self.live && !stream.is_empty())
     }
 
-    /// Whether `stream` was superseded: the view has moved on from it, or saw it end stopped.
+    /// Whether `stream` may have been superseded: the view no longer names it. Only this gateway's one follower
+    /// supersedes its streams, and it leaves each one before subscribing again.
     pub fn superseded(&self, stream: &str) -> bool {
         self.stream != stream
     }
@@ -98,7 +99,10 @@ pub(super) fn follow(client: CoreClient<Channel>, gateway: GatewayCredential) ->
             let mut after = None;
             loop {
                 after = stream(client.clone(), &gateway, after, &view).await;
-                view.send_modify(|view| view.live = false);
+                view.send_modify(|view| {
+                    view.live = false;
+                    view.stream.clear();
+                });
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         };
@@ -140,11 +144,7 @@ async fn stream(
         };
         if let Some(error) = update.error {
             tracing::debug!(message = %error.message, "gateway topic ended");
-            if error.code() != Code::Stopped {
-                return cursor;
-            }
-            view.send_modify(|view| view.stream.clear());
-            return None;
+            return if error.code() == Code::Stopped { None } else { cursor };
         }
         let continued = update.continued;
         pending.push(update);

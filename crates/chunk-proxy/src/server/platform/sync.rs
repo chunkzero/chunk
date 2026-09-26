@@ -50,7 +50,8 @@ impl Connection {
 
     /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's
     /// position after it. A call core stops because the stream it named was superseded runs again on the topic's next
-    /// stream; any other stop fails the call.
+    /// stream; any other stop fails the call. A runtime stop racing a stream change runs once more, under the same
+    /// operation, and is stopped again.
     pub async fn call<R: Message + Default>(
         &self,
         method: &str,

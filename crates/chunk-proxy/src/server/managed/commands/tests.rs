@@ -311,6 +311,7 @@ async fn a_call_on_a_superseded_stream_runs_again_on_its_replacement_under_the_s
     let fixture = Fixture::new().await;
     let platform = fixture.commands.tasks.platform.clone();
     fixture.sync().await;
+    // Core drops the stream, then stops the call once the gateway resubscribes, before the new stream's first update.
     fixture.service.supersede.store(true, Ordering::SeqCst);
     let withdrawal = platform.call::<WithdrawResult>("withdraw", "claim", &(), crate::server::platform::RPC_TIMEOUT);
     tokio::time::timeout(Duration::from_secs(3), withdrawal).await.unwrap().unwrap();

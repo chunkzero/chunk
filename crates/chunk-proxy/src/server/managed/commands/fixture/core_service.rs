@@ -7,7 +7,7 @@ use chunk_proto::sync::v1::{
     error::Code,
 };
 use prost::Message;
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering, time::Duration};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -108,11 +108,13 @@ impl core_server::Core for Service {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         super::auth(&request, "gateway")?;
         let call = request.into_inner();
-        if call.stream == *self.stream.lock().unwrap() && self.supersede.swap(false, Ordering::SeqCst) {
+        if call.stream == *self.stream.lock().unwrap() && self.supersede.load(Ordering::SeqCst) {
             self.superseded.notify_one();
             while call.stream == *self.stream.lock().unwrap() {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            self.supersede.store(false, Ordering::SeqCst);
+            self.superseded.notify_one();
         }
         let outcome = if call.stream == *self.stream.lock().unwrap() {
             self.platform(&call).await?
@@ -139,7 +141,13 @@ impl core_server::Core for Service {
         let (sender, receiver) = mpsc::channel(1);
         let service = self.clone();
         let mut published = self.published.subscribe();
+        let held = self.supersede.load(Ordering::SeqCst);
         tokio::spawn(async move {
+            if held {
+                service.superseded.notified().await;
+                // Lets the stopped call's response reach the gateway first.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             loop {
                 published.borrow_and_update();
                 if service.watch_down.load(Ordering::SeqCst)
@@ -149,11 +157,7 @@ impl core_server::Core for Service {
                 }
                 tokio::select! {
                     () = service.watches.cancelled() => return,
-                    () = service.superseded.notified() => {
-                        let stopped = sync::Error { code: Code::Stopped.into(), message: "superseded".into() };
-                        let _ = sender.send(Ok(Update { error: Some(stopped), ..Update::default() })).await;
-                        return;
-                    }
+                    () = service.superseded.notified() => return,
                     () = sender.closed() => return,
                     _ = published.changed() => {}
                 }
