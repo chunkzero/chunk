@@ -11,6 +11,7 @@ import { ensureOperatorToken } from "../src/auth/tokens.ts";
 import { listenForChanges } from "../src/changes.ts";
 import { deriveKeys, type Keys, randomToken } from "../src/crypto.ts";
 import { connect, migrate, type Sql } from "../src/db.ts";
+import type { Deps } from "../src/deps.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
@@ -24,6 +25,8 @@ export const databaseUrl = process.env.TEST_DATABASE_URL;
 export interface Harness {
   sql: Sql;
   keys: Keys;
+  /** What the handler was built with, for driving background work such as the reconciler directly. */
+  deps: Deps;
   url: string;
   operatorToken: string;
   /** TXT records the fake resolver answers with, by name. */
@@ -58,19 +61,7 @@ export async function startHarness(): Promise<Harness> {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request, bun) => handler(request, bun) });
   const url = server.url.origin;
   const releases = await localReleaseStore({ directory, keys, publicUrl: url });
-  const harness: Harness = {
-    sql,
-    keys,
-    url,
-    operatorToken,
-    txt,
-    releases,
-    beforeRead: undefined,
-    client,
-    fetch: (request) => handler(request),
-    close,
-  };
-  handler = createHandler({
+  const deps: Deps = {
     sql,
     keys,
     releases: {
@@ -90,7 +81,21 @@ export async function startHarness(): Promise<Harness> {
     edge: { domain: "play.example.net", port: 25565 },
     logStore: undefined,
     changes,
-  });
+  };
+  const harness: Harness = {
+    sql,
+    keys,
+    deps,
+    url,
+    operatorToken,
+    txt,
+    releases,
+    beforeRead: undefined,
+    client,
+    fetch: (request) => handler(request),
+    close,
+  };
+  handler = createHandler(deps);
 
   function client<T extends DescService>(service: T, token: string | null = operatorToken): Client<T> {
     const transport = createConnectTransport({

@@ -1,5 +1,6 @@
 import { notify } from "../changes.ts";
 import type { Db, Sql } from "../db.ts";
+import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { failedPrecondition, notFound } from "../rpc/validate.ts";
 
 /** Advances the environment's desired-state revision, so attached processes receive a new message. */
@@ -49,4 +50,26 @@ export function fenceLease(current: bigint, lease: bigint): void {
       lease < current ? `lease ${lease} was superseded by lease ${current}` : `lease ${lease} was never granted`,
     );
   }
+}
+
+/**
+ * Deletes an environment at once when it has no machines; otherwise marks it DELETING, revokes its tokens and leaves
+ * the machines and the row to the reconciler.
+ */
+export async function deleteEnvironment(sql: Sql, environmentId: string): Promise<void> {
+  await sql.begin(async (tx) => {
+    const [environment] = await tx<{ machine_id: string; machines: bigint }[]>`
+      select machine_id,
+        (select count(*) from capacity_requests c
+          where c.environment_id = e.id and c.machine_id <> '' and not c.torn_down) as machines
+      from environments e where id = ${environmentId} for update`;
+    if (!environment) return;
+    if (!environment.machine_id && environment.machines === 0n) {
+      await tx`delete from environments where id = ${environmentId}`;
+    } else {
+      await tx`update environments set state = ${EnvironmentState.DELETING} where id = ${environmentId}`;
+      await tx`update api_tokens set revoke_time = now() where environment_id = ${environmentId} and revoke_time is null`;
+    }
+    await notify(tx, { kind: "environment", environmentId });
+  });
 }

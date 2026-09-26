@@ -6,6 +6,9 @@ import { listenForChanges } from "./changes.ts";
 import type { Config } from "./config.ts";
 import { deriveKeys } from "./crypto.ts";
 import { connect, migrate } from "./db.ts";
+import type { Deps } from "./deps.ts";
+import { startReconciler } from "./environments/reconciler.ts";
+import { dockerProvider, socketPathFrom } from "./providers/docker.ts";
 import { localReleaseStore } from "./releases/local-store.ts";
 import { maxArchiveBytes } from "./releases/store.ts";
 import { createHandler } from "./server.ts";
@@ -17,32 +20,39 @@ export async function start(config: Config) {
   if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
   if (config.edgeToken) await ensureEdgeToken(sql, config.edgeToken);
   const keys = deriveKeys(config.secretKey);
-  const releases = await localReleaseStore({
-    directory: join(config.dataDir, "releases"),
+  const deps: Deps = {
+    sql,
     keys,
+    releases: await localReleaseStore({
+      directory: join(config.dataDir, "releases"),
+      keys,
+      publicUrl: config.publicUrl,
+    }),
+    archiveLimits: config.archiveLimits,
+    resolveTxt,
     publicUrl: config.publicUrl,
-  });
-  const changes = await listenForChanges(sql);
+    edge: config.edge,
+    logStore: config.logStore,
+    changes: await listenForChanges(sql),
+  };
+  const { machines } = config;
+  const reconciler =
+    machines &&
+    startReconciler(deps, {
+      ...machines,
+      provider: dockerProvider({ socketPath: socketPathFrom(machines.dockerHost), network: machines.network }),
+    });
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
     maxRequestBodySize: Number(maxArchiveBytes) + 1024 * 1024,
-    fetch: createHandler({
-      sql,
-      keys,
-      releases,
-      archiveLimits: config.archiveLimits,
-      resolveTxt,
-      publicUrl: config.publicUrl,
-      edge: config.edge,
-      logStore: config.logStore,
-      changes,
-    }),
+    fetch: createHandler(deps),
   });
   return {
     url: server.url,
     async stop() {
       await server.stop();
+      await reconciler?.stop();
       await sql.end({ timeout: 5 });
     },
   };

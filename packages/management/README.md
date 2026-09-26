@@ -24,6 +24,12 @@ bun src/main.ts
 | `CHUNK_MAX_RELEASE_ENTRIES`        | `100000`                 | How many tar entries a release archive may hold.                                |
 | `CHUNK_EDGE_DOMAIN`                | unset                    | Environments get `env-<id>.<domain>` hostnames; point `*.<domain>` at the edge. |
 | `CHUNK_EDGE_PORT`                  | `25565`                  | The edge's player port, used in custom domains' SRV records.                    |
+| `CHUNK_ENVIRONMENT_IMAGE`          | unset                    | The environment image. Unset, no machines are provisioned.                      |
+| `DOCKER_HOST`                      | `/var/run/docker.sock`   | The Docker or Podman API socket machines run on, as `unix://<path>`.            |
+| `CHUNK_MACHINE_NETWORK`            | `chunk`                  | The container network machines join; created when missing.                      |
+| `CHUNK_MACHINE_MANAGEMENT_URL`     | `$CHUNK_PUBLIC_URL`      | How machines reach this service.                                                |
+| `CHUNK_CORE_MEMORY_MIB`            | `1024`                   | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.   |
+| `CHUNK_CORE_PORT`                  | `7070`                   | The port extra machines reach core on.                                          |
 
 Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, using
 the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,
@@ -46,4 +52,19 @@ podman run -d --rm --name chunk-test-postgres -e POSTGRES_PASSWORD=test -p 127.0
 TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres pnpm --filter @chunkzero/management test
 ```
 
-Tests that need Postgres skip when `TEST_DATABASE_URL` is unset. Each test file uses its own schema.
+Tests that need Postgres skip when `TEST_DATABASE_URL` is unset. Each test file uses its own schema. The provider tests
+use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists.
+
+## Machines
+
+With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
+machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
+for accepted wakes and due wake alarms. Every machine runs the environment image; `CHUNK_WORKLOAD` (`core`, `jvm`,
+`gateway` or `exec`) selects the role.
+
+Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID` and its `CHUNK_ENVIRONMENT_TOKEN`. Extra machines never call
+this service. They get `CHUNK_CORE_ADDRESS` and a `CHUNK_JOIN_TOKEN` valid for 15 minutes, plus the request's
+`CHUNK_CAPACITY_REQUEST_ID`, `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and `CHUNK_MACHINE_PROFILE`. A join token is
+`chunkjoin.v1.<claims>.<mac>`: base64url JSON claims (`environment_id`, `request_id`, `workload`, `expire_time` in Unix
+seconds) and the base64url HMAC-SHA256 of everything before the last dot, keyed by the SHA-256 of core's environment
+token. See `verifyJoinToken` in `src/environments/machines.ts`.

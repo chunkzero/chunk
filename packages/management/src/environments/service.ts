@@ -14,6 +14,7 @@ import {
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { environmentOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
+import { capacityServices } from "./capacity.ts";
 import { desiredState } from "./desired.ts";
 import { reportServices } from "./reports.ts";
 import { claimLease, fenceLease } from "./store.ts";
@@ -135,6 +136,7 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
       });
     },
 
+    ...capacityServices(deps),
     ...reportServices(deps),
   };
 }

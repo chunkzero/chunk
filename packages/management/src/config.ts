@@ -19,6 +19,19 @@ export interface Config {
   edgeToken: string | undefined;
   /** Where environments replicate their logs; unset turns replication off. */
   logStore: LogStore | undefined;
+  /** How environments get machines; unset leaves every environment unprovisioned. */
+  machines: Machines | undefined;
+}
+
+export interface Machines {
+  /** A Docker-compatible engine socket, as unix://<path>. */
+  dockerHost: string;
+  /** The container network machines share. */
+  network: string;
+  image: string;
+  managementUrl: string;
+  coreMemoryMib: number;
+  corePort: number;
 }
 
 /** An S3-compatible bucket; each environment replicates below `<prefix><environment ID>/`. */
@@ -49,11 +62,12 @@ export function loadConfig(env: Env = process.env): Config {
   if (secretKey.length !== 32) {
     throw new Error("CHUNK_SECRET_KEY must be 32 bytes, base64-encoded (for example `openssl rand -base64 32`)");
   }
+  const publicUrl = (env.CHUNK_PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, "");
   return {
     databaseUrl: required(env, "DATABASE_URL"),
     secretKey,
     operatorToken: token(env, "CHUNK_OPERATOR_TOKEN"),
-    publicUrl: (env.CHUNK_PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, ""),
+    publicUrl,
     host: env.HOST ?? "0.0.0.0",
     port,
     dataDir: env.CHUNK_DATA_DIR ?? "data",
@@ -64,6 +78,20 @@ export function loadConfig(env: Env = process.env): Config {
     edge: edgeOf(env),
     edgeToken: token(env, "CHUNK_EDGE_TOKEN"),
     logStore: logStoreOf(env),
+    machines: machinesOf(env, publicUrl),
+  };
+}
+
+function machinesOf(env: Env, publicUrl: string): Machines | undefined {
+  const image = env.CHUNK_ENVIRONMENT_IMAGE;
+  if (!image) return undefined;
+  return {
+    dockerHost: env.DOCKER_HOST ?? "unix:///var/run/docker.sock",
+    network: env.CHUNK_MACHINE_NETWORK ?? "chunk",
+    image,
+    managementUrl: env.CHUNK_MACHINE_MANAGEMENT_URL ?? publicUrl,
+    coreMemoryMib: positive(env, "CHUNK_CORE_MEMORY_MIB", 1024),
+    corePort: positive(env, "CHUNK_CORE_PORT", 7070),
   };
 }
 
