@@ -16,6 +16,7 @@ const HOSTS: &str = "chunk_hosts";
 const SESSIONS: &str = "chunk_sessions";
 const PLAYERS: &str = "chunk_players";
 const DRAINS: &str = "chunk_drains";
+const ROSTERS: &str = "chunk_rosters";
 const META_ID: &str = "control";
 
 /// The application ID of the entity-row format that preceded system tables.
@@ -59,6 +60,7 @@ impl Store {
             claims: scan(&snapshot, CLAIMS)?,
             moves: scan(&snapshot, MOVES)?,
             drains: scan(&snapshot, DRAINS)?,
+            rosters: scan(&snapshot, ROSTERS)?,
             epoch: self.store.epoch().0,
             revision: snapshot.revision.0,
         })
@@ -99,6 +101,7 @@ pub(super) fn writes(previous: &State, next: &State) -> Result<Vec<Write>> {
     diff(CLAIMS, &previous.claims, &next.claims, &mut writes)?;
     diff(MOVES, &previous.moves, &next.moves, &mut writes)?;
     diff(DRAINS, &previous.drains, &next.drains, &mut writes)?;
+    diff(ROSTERS, &previous.rosters, &next.rosters, &mut writes)?;
     Ok(writes)
 }
 
@@ -125,6 +128,7 @@ fn schema() -> DatabaseSchema {
     let generation = json!({"type": "object", "fields": {
         "epoch": {"schema": integer}, "revision": {"schema": integer},
     }});
+    let strings = json!({"type": "array", "items": string});
     let tables = json!({
         META: {"config": string, "method_sequence": integer},
         HOSTS: {
@@ -140,12 +144,14 @@ fn schema() -> DatabaseSchema {
             "request": string, "player": string, "proxy": string, "membership": generation,
             "generation": generation, "session": string, "phase": {"type": "enum", "values": Phase::NAMES},
             "assignment?": string, "activated": boolean, "created_at_ms": integer, "released_at_ms?": integer,
+            "roster?": string,
         },
         MOVES: {
             "request": string, "canceled": boolean, "sequence": integer,
             "failure?": {"type": "object", "fields": {"reason": {"schema": string}, "at_ms": {"schema": integer}}},
         },
         DRAINS: {"request": string, "host": string, "deadline_ms": integer, "automatic": boolean},
+        ROSTERS: {"version": integer, "members": strings, "ready": strings, "admitted": boolean},
     });
     let tables = tables.as_object().into_iter().flatten().map(|(table, fields)| {
         let fields: serde_json::Map<_, _> = fields

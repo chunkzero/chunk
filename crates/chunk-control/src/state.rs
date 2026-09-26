@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Result};
 pub use entities::Generation;
-pub(crate) use entities::{Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, SessionState};
+pub(crate) use entities::{
+    Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
@@ -25,6 +27,7 @@ pub(crate) struct State {
     pub method_sequence: u64,
     pub moves: BTreeMap<String, MoveIntent>,
     pub drains: BTreeMap<String, Drain>,
+    pub rosters: BTreeMap<String, Roster>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
     /// The revision of the last commit this state includes.

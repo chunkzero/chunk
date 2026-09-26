@@ -65,6 +65,10 @@ impl Control {
                 && source(&intent.request).is_none_or(|source| !state.claims.contains_key(&source.operation_id))
         });
         remove(&mut state.moves, moves);
+        let rosters = select(&state.rosters, &mut budget, |_, roster| {
+            roster.members.iter().all(|member| !state.claims.contains_key(member))
+        });
+        remove(&mut state.rosters, rosters);
         let open: BTreeSet<_> =
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
         let sessions = select(&state.sessions, &mut budget, |id, session| session.finished && !open.contains(id));

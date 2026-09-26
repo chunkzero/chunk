@@ -13,7 +13,7 @@ use crate::{
     state::{Claim, Generation, HostState, Phase, State},
 };
 use select::select_session;
-pub(crate) use select::validate_demand;
+pub(crate) use select::{select_room, validate_demand};
 
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.
@@ -214,11 +214,11 @@ fn reserve(
     }
     let owner = owner(state, request)?;
     let session = select_session(state, config, request.demand.as_ref().ok_or(Error::Invalid("demand"))?, unavailable)?;
-    insert_claim(state, request, owner, session)
+    insert_claim(state, request, owner, session, None)
 }
 
 /// Whether `request` already has its claim. Rejects changed claims and canceled or changed moves.
-fn reserved(state: &State, request: &ClaimRequest) -> Result<bool> {
+pub(crate) fn reserved(state: &State, request: &ClaimRequest) -> Result<bool> {
     if let Some(intent) = state.moves.get(&request.operation_id)
         && (intent.canceled || intent.failure.is_some() || intent.request != request.encode_to_vec())
     {
@@ -232,14 +232,14 @@ fn reserved(state: &State, request: &ClaimRequest) -> Result<bool> {
 }
 
 /// The player a new claim may own, and the membership a move continues.
-struct Owner {
+pub(crate) struct Owner {
     player: String,
     membership: Option<Generation>,
 }
 
 /// Checks that `request` may take ownership of its player: a login needs an unowned player, a move needs its exact
 /// arrived source with no other move pending.
-fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
+pub(crate) fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
     let player = &request.identity.as_ref().ok_or(Error::Invalid("identity"))?.uuid;
     let Some(source) = &request.source else {
         if state.players.get(player).is_some_and(|p| p.current.is_some() || p.pending.is_some()) {
@@ -264,7 +264,13 @@ fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
 }
 
 /// Reserves a slot in `session` for `request`, created by the commit applying this update.
-fn insert_claim(state: &mut State, request: &ClaimRequest, owner: Owner, session: String) -> Result<()> {
+pub(crate) fn insert_claim(
+    state: &mut State,
+    request: &ClaimRequest,
+    owner: Owner,
+    session: String,
+    roster: Option<String>,
+) -> Result<()> {
     let generation = state.next_generation()?;
     state.sessions.get_mut(&session).ok_or(Error::Invalid("missing selected session"))?.empty_since_ms = None;
     let player = state.players.entry(owner.player.clone()).or_default();
@@ -287,6 +293,7 @@ fn insert_claim(state: &mut State, request: &ClaimRequest, owner: Owner, session
             activated: false,
             created_at_ms: crate::now_ms(),
             released_at_ms: None,
+            roster,
         },
     );
     Ok(())

@@ -32,14 +32,19 @@ reservations expire after 60 seconds; active membership never expires solely bec
 unavailable.
 
 Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chunk_players`, `chunk_claims`,
-`chunk_moves`, `chunk_drains` and the `chunk_control` row) in a `chunk-store` database under `.chunk/control/`, with
-its exclusive writer lock. Each update is one commit with its own operation ID and revision; an
+`chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` row) in a `chunk-store` database under
+`.chunk/control/`, with its exclusive writer lock. Each update is one commit with its own operation ID and revision; an
 in-memory copy serves reads and is rebuilt from the tables on open. Gameplay data still belongs to the environment
 backend. The tables retain requests, reservations and activation intent before external effects. A lost activation reply
 is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft connection;
 control carries destination metadata. A player row exists only while it owns a claim. Released claims, and moves that
 only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move changes
 after a log position, and `Control::subscribe` announces new positions.
+
+`Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
+in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
+any member's claim ending, or `Control::cancel_roster`, fails every member's move. Session capacity is the only hard
+limit.
 
 `Nodes` reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped states, including the
 last observed JVM health metrics and observation timestamp. Health is polled every five seconds; missing or stalled

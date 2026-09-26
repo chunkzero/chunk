@@ -29,9 +29,9 @@ impl Control {
         let identity = request.claim.as_ref().ok_or(Error::Invalid("missing claim identity"))?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
-        self.update(|state| {
+        let admitted = self.update(|state| {
             crate::moves::authorize_destination(state, identity)?;
-            let claim = state.claims.get_mut(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
                 return Err(Error::Invalid("destination draining"));
             }
@@ -42,12 +42,22 @@ impl Control {
             {
                 return Err(Error::Invalid("stale activation"));
             }
-            claim.activated = true;
-            if claim.phase == Phase::Reserved {
-                set_phase(claim, Phase::Activating)?;
+            let members = match claim.roster.clone() {
+                Some(roster) => crate::roster::ready(state, &roster, &identity.operation_id)?,
+                None => vec![identity.operation_id.clone()],
+            };
+            for member in &members {
+                let claim = state.claims.get_mut(member).ok_or(Error::Invalid("unknown claim"))?;
+                claim.activated = true;
+                if claim.phase == Phase::Reserved {
+                    set_phase(claim, Phase::Activating)?;
+                }
             }
-            Ok(())
+            Ok(!members.is_empty())
         })?;
+        if !admitted {
+            return Err(Error::Unresolved("roster awaiting members"));
+        }
         self.reconcile(&identity.operation_id).await
     }
 
@@ -214,8 +224,11 @@ fn release(state: &mut State, operation: &str) -> Result<()> {
     set_phase(claim, Phase::Released)?;
     claim.released_at_ms.get_or_insert(crate::now_ms());
     let session_id = claim.session.clone();
-    let player = claim.player.clone();
+    let (player, roster) = (claim.player.clone(), claim.roster.clone());
     state.disown(&player, operation);
+    if let Some(roster) = roster {
+        crate::roster::fail(state, &roster, "roster member left");
+    }
     if !state.claims.values().any(|claim| claim.session == session_id && claim.phase != Phase::Released)
         && let Some(session) = state.sessions.get_mut(&session_id)
     {

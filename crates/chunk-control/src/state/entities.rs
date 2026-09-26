@@ -148,6 +148,8 @@ pub(crate) struct Claim {
     pub created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster: Option<String>,
 }
 
 impl Claim {
@@ -166,6 +168,18 @@ impl Claim {
         }
         Ok(())
     }
+}
+
+/// Destination claims reserved together for a group move. Members are admitted together or not at all.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Roster {
+    /// The caller's membership version.
+    pub version: u64,
+    /// Member claim operations, in request order.
+    pub members: Vec<String>,
+    /// Members whose activation is waiting for the rest.
+    pub ready: Vec<String>,
+    pub admitted: bool,
 }
 
 mod bytes {

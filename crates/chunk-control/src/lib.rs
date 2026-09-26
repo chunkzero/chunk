@@ -12,6 +12,7 @@ mod players;
 mod process;
 mod reconcile;
 mod recovery;
+mod roster;
 mod rpc;
 pub mod server;
 mod session_methods;
@@ -31,6 +32,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
 pub use process::ProcessHost;
+pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
 pub use state::Generation;
 pub use state::feed::{Change, Table};

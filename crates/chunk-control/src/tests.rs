@@ -890,3 +890,4 @@ mod destinations;
 mod launch;
 mod log;
 mod retention;
+mod roster;
