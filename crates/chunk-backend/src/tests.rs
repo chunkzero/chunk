@@ -89,6 +89,7 @@ struct ControlledStore {
     committed: usize,
     notices: signals::UnboundedSender<Notice>,
     ambiguous: bool,
+    snapshot_failure_after_commit: Option<std::io::Error>,
     rejected: bool,
     attempts: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
     /// Holds the first scheduling command, keeping the commit thread busy.
@@ -111,6 +112,7 @@ impl ControlledStore {
             committed: 0,
             notices,
             ambiguous: false,
+            snapshot_failure_after_commit: None,
             rejected: false,
             attempts: None,
             scheduling: None,
@@ -218,6 +220,11 @@ impl Storage for ControlledStore {
         self.inner.apply_schema(schema)
     }
     fn snapshot(&mut self) -> chunk_store::Result<Snapshot> {
+        if self.committed > 0
+            && let Some(error) = self.snapshot_failure_after_commit.take()
+        {
+            return Err(chunk_store::Error::Io(error));
+        }
         self.inner.snapshot()
     }
     fn outcome(&self, operation: &Operation) -> chunk_store::Result<Option<Outcome>> {
@@ -430,6 +437,42 @@ async fn ambiguous_commit_stops_the_suffix_and_restart_recovers_once() {
         matches!(backend.mutate("first".into(), changed).await, Err(Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch))
     );
     assert_eq!(value(&backend.mutate("second".into(), call("bump", json!({"id": "p"}))).await.unwrap()), json!(2));
+}
+
+#[tokio::test]
+async fn system_post_commit_snapshot_failure_stops_lane_and_app_calls() {
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, _) = signals::unbounded_channel();
+    let store = ControlledStore {
+        snapshot_failure_after_commit: Some(std::io::Error::other("post-commit snapshot failed")),
+        ..ControlledStore::new(open(&directory), notices)
+    };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let system = backend.system();
+    let schema = serde_json::from_value(json!({
+        "chunk_claims": {"fields": {"player": {"schema": {"type": "string"}}}}
+    }))
+    .unwrap();
+    system.open(schema).unwrap();
+    let key = DocumentKey::new("chunk_claims", "claim").unwrap();
+    let document = json!({"player": "alex"});
+    let _ = system.commit(vec![chunk_store::Write { key: key.clone(), value: Some(document.clone()) }]);
+
+    // A second lane request also waits until the first request's engine event has been sent.
+    let next = system.commit(Vec::new());
+    let stopped = system.stopped();
+    let query = backend.query(call("get", json!({"id": "p"}))).await;
+    drop(system);
+    drop(backend);
+
+    let snapshot = open(&directory).snapshot().unwrap();
+    assert_eq!(snapshot.get(&key).unwrap().unwrap().value, document);
+    assert!(matches!(query, Err(Error::CommitFailed | Error::Closed)), "app query survived snapshot failure");
+    assert!(
+        stopped || matches!(next, Err(Error::CommitFailed | Error::Closed)),
+        "system lane stayed open after a durable commit's snapshot failed"
+    );
 }
 
 #[tokio::test]

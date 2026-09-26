@@ -503,6 +503,25 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
 }
 
 #[tokio::test]
+async fn duplicate_control_open_on_same_backend_is_rejected() {
+    let fixture = Fixture::new().await;
+    let store = chunk_store::SqliteStore::open(
+        fixture.directory.path().join("control.sqlite"),
+        &fixture.config.deployment.environment,
+    )
+    .unwrap();
+    let backend = chunk_backend::Backend::new(fixture.config.deployment.environment.clone(), Box::new(store)).unwrap();
+    let first = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone()).unwrap();
+    let second = Control::open(backend.system(), fixture.config.clone(), fixture.host.clone());
+    let rejected = second.is_err();
+    drop(second);
+    drop(first);
+    drop(backend);
+    fixture.close().await;
+    assert!(rejected, "second Control::open on the same backend and deployment must be rejected");
+}
+
+#[tokio::test]
 async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fences_active_players() {
     let fixture = Fixture::new().await;
     let control = fixture.control();
