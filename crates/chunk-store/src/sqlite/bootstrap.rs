@@ -8,7 +8,18 @@ use rusqlite::Connection;
 
 use crate::{Error, Result};
 
-pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, File)> {
+/// Exclusive writer lock beside the database. Dropping it unlocks explicitly:
+/// a child forked by another thread shares the open file description until it
+/// execs, so closing our descriptor alone would leave the lock held.
+pub(super) struct WriterLock(File);
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> {
     // Create a fresh database file before canonicalizing its lock identity.
     File::options().create(true).truncate(false).write(true).open(path)?;
     let canonical = path.canonicalize()?;
@@ -19,7 +30,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, File)> {
         std::fs::TryLockError::WouldBlock => Error::WriterLocked,
         std::fs::TryLockError::Error(error) => Error::Io(error),
     })?;
-    Ok((canonical, writer_lock))
+    Ok((canonical, WriterLock(writer_lock)))
 }
 
 pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
@@ -93,4 +104,22 @@ pub(super) fn open(path: &Path, environment: &str) -> Result<Connection> {
             PRAGMA user_version = 6; COMMIT;")?;
     }
     Ok(connection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_shared_descriptor_survives() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
+        let (_, lock) = acquire_writer_lock(&path).unwrap();
+        // A forked child that has not exec'd yet shares the description like this clone.
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(matches!(acquire_writer_lock(&path), Err(Error::WriterLocked)));
+        drop(lock);
+        assert!(acquire_writer_lock(&path).is_ok());
+        drop(inherited);
+    }
 }

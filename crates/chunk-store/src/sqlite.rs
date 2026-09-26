@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -25,7 +24,7 @@ pub struct SqliteStore {
     connection: Connection,
     path: PathBuf,
     schema: Arc<DatabaseSchema>,
-    _writer_lock: File,
+    _writer_lock: bootstrap::WriterLock,
 }
 
 impl SqliteStore {
