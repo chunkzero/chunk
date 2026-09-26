@@ -41,10 +41,10 @@ sequence number. Default packet bodies are 32 bytes upstream and 1 KiB downstrea
 `--payload chunk` sends a synthetic 25 KiB overworld chunk column (paletted sections, heightmaps and surface sky light,
 laid out like the real packet) downstream instead. `--compression-level` overrides the production zlib level in both
 processes, and the summary's `response` reports the body and framed (compressed, unencrypted) sizes. These opaque
-packets model transport work, not an actual Minecraft play session or representative traffic capture. Each
-connection has at most one outstanding round trip. `--burst N` makes the gameplay server answer each request with N
-response packets in one write, which exercises write batching; there is still no independent server broadcast, sustained
-one-way stream, slow reader or backpressure workload.
+packets model transport work, not an actual Minecraft play session or representative traffic capture. Each connection
+has at most one outstanding round trip. `--burst N` makes the gameplay server answer each request with N response
+packets in one write, which exercises write batching; there is still no independent server broadcast, sustained one-way
+stream, slow reader or backpressure workload.
 
 Control populations are seeded through real claim and activation RPCs. Synthetic runtimes provide independent process
 identities, session inventories and instant player arrival; they do not launch JVMs or simulate game ticks, startup or
