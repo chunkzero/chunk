@@ -134,7 +134,7 @@ pub async fn serve(init: Init) -> Result<()> {
         };
         let core = chunk_environment::Core::start(config, |_| {}).await?;
         let control = core.control_connection()?;
-        let gateway = core.target()?.gateway.context("in-process gateway credential")?.credential;
+        let gateway = core.target()?.gateway.credential;
         let connection = sync::Connection { endpoint: control.endpoint.clone(), cli: control.token.clone(), gateway };
         let token = stop.clone();
         tasks.spawn(async move {

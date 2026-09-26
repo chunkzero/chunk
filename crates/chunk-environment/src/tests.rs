@@ -109,6 +109,20 @@ async fn all_in_one_serves_backend_and_control_until_stopped() {
     assert!(!control_record.exists());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_core_keeps_its_gateway_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut gateways = Vec::new();
+    for _ in 0..2 {
+        let config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        let core = Core::start(config, |_| {}).await.unwrap();
+        gateways.push(core.target().unwrap().gateway);
+        core.stop(|| {}).await.unwrap();
+    }
+    assert_eq!(gateways[0].id, gateways[1].id);
+    assert_ne!(gateways[0].credential, gateways[1].credential);
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopped() {

@@ -85,6 +85,8 @@ struct Fixture {
     stop: CancellationToken,
     task: JoinHandle<io::Result<()>>,
     control: Arc<Control>,
+    /// Core's endpoint.
+    endpoint: String,
     client: CoreClient<Channel>,
     cli: String,
     /// The credential of gateway `proxy`, which holds the fake JVM's claims.
@@ -118,13 +120,15 @@ impl Fixture {
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
-        let client = CoreClient::connect(started.connection.endpoint).await.unwrap();
+        let endpoint = started.connection.endpoint;
+        let client = CoreClient::connect(endpoint.clone()).await.unwrap();
         Self {
             _directory: directory,
             backend,
             stop,
             task,
             control: started.control,
+            endpoint,
             client,
             cli: started.connection.token,
             gateway,

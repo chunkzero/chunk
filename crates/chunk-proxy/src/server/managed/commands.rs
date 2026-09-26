@@ -11,7 +11,7 @@ use super::super::{
 };
 use crate::command_tree::CommandTreeCatalog;
 use chunk_contract::{Command, DomainManifest};
-use chunk_proto::v1::{Assignment, ClaimRequest};
+use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
 use chunk_protocol::{commands::CommandTree, encode_packet};
 use scope::Origin;
 use std::{
@@ -100,7 +100,7 @@ impl Commands {
             refreshing: false,
         })
     }
-    pub fn bind(&mut self, claim: &ClaimRequest, assignment: &Assignment) -> io::Result<()> {
+    pub fn bind(&mut self, claim: &ClaimRequest, identity: &ClaimIdentity, session: &str) -> io::Result<()> {
         self.configuration();
         let Some(manifest) = &self.manifest else {
             self.origin = None;
@@ -125,7 +125,7 @@ impl Commands {
             .collect();
         self.catalog =
             Some(CommandTreeCatalog::new(CommandTree::empty(), &self.descriptors, &domain).map_err(invalid_data)?);
-        self.origin = Some(Origin::new(claim, assignment, domain)?);
+        self.origin = Some(Origin::new(claim, identity, session, domain)?);
         self.tree_received = false;
         self.allowed.clear();
         self.refreshing = false;

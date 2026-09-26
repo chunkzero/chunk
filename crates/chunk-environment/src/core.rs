@@ -3,7 +3,14 @@ mod sync;
 use crate::{PlatformTarget, Running};
 use chunk_contract::{BackendConnection, ControlConnection};
 use chunk_proxy::GatewayCredential;
-use std::{collections::BTreeSet, fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fs, io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -11,7 +18,8 @@ pub struct CoreConfig {
     /// The backend deployment served first. Without one, the backend serves only the deployments it retained.
     pub bundle: Option<PathBuf>,
     pub environment: String,
-    /// Holds the backend's store under `backend/` and control's credential and JVM files under `control/`.
+    /// Holds the backend's store under `backend/`, control's credential and JVM files under `control/`, and the
+    /// in-process gateway's ID.
     pub state: PathBuf,
     pub backend_record: PathBuf,
     pub control_record: PathBuf,
@@ -39,13 +47,13 @@ pub struct Core {
 }
 
 impl Core {
-    /// Mints the in-process gateway's credential, starts the backend, calls `on_backend` once it serves, then starts
-    /// control. On error, everything started is stopped.
+    /// Mints the in-process gateway's credential for the gateway ID recorded in the state directory, starts the
+    /// backend, calls `on_backend` once it serves, then starts control. On error, everything started is stopped.
     /// # Errors
-    /// Reports backend and control startup errors.
+    /// Reports an unreadable gateway ID, and backend and control startup errors.
     pub async fn start(config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
         let mut core = Self::default();
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
         if started.is_ok() {
@@ -205,12 +213,19 @@ impl Core {
         Ok(self.authority()?.control.clone())
     }
 
-    /// The backend deployment and control the in-process gateway routes players through, with its credential.
+    /// Core's endpoint and the in-process gateway's credential, with the backend deployment it routes players
+    /// through.
     /// # Errors
     /// Reports a stopped backend or control.
     pub fn target(&self) -> io::Result<PlatformTarget> {
-        let control = self.control_connection()?.clone();
-        Ok(PlatformTarget { backend: self.backend_connection()?.clone(), control, gateway: self.gateway.clone() })
+        let control = self.control_connection()?;
+        let gateway = self.gateway.clone().ok_or_else(|| io::Error::other("core has no gateway"))?;
+        Ok(PlatformTarget {
+            core: control.endpoint.clone(),
+            gateway,
+            backend: self.backend_connection()?.clone(),
+            control_token: control.token.clone(),
+        })
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
@@ -324,6 +339,23 @@ fn address(endpoint: &str) -> Option<SocketAddr> {
 /// Whether a listener on `served` keeps `bind` from binding.
 fn overlaps(served: SocketAddr, bind: SocketAddr) -> bool {
     served.port() == bind.port() && (served.ip() == bind.ip() || served.ip().is_unspecified())
+}
+
+/// The in-process gateway's ID, recorded in `state` on first start so that the claims it holds outlive a restart.
+fn gateway_id(state: &Path) -> io::Result<String> {
+    let path = state.join("gateway-id");
+    match fs::read_to_string(&path) {
+        Ok(id) => Ok(id),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let id = uuid::Uuid::new_v4().to_string();
+            fs::create_dir_all(state)?;
+            let written = path.with_extension("tmp");
+            fs::write(&written, &id)?;
+            fs::rename(written, path)?;
+            Ok(id)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn if_present(removed: io::Result<()>) -> io::Result<()> {

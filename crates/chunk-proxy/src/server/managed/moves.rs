@@ -1,5 +1,9 @@
-use super::{Assignment, ClaimGuard, ClaimIdentity, ClaimRequest, Platform, WAIT_TIMEOUT, invalid_data, validate};
-use crate::server::platform::RPC_TIMEOUT;
+use super::{Assignment, ClaimGuard, ClaimIdentity, ClaimRequest, Platform, WAIT_TIMEOUT, claim, invalid_data};
+use crate::server::platform::{RPC_TIMEOUT, failure};
+use chunk_proto::{
+    sync::v1::{Position, error::Code},
+    v1::SessionDemand,
+};
 use std::{io, time::Duration};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 
@@ -12,11 +16,15 @@ pub(super) async fn next_move(
     protocol: i32,
 ) -> io::Result<(ClaimGuard, Assignment)> {
     let mut abandoned: Option<ClaimGuard> = None;
-    let mut failed: Option<String> = None;
+    // A view past an abandonment no longer shows its move, and failures are final.
+    let mut settled: Option<Position> = None;
     loop {
         if let Some(mut guard) = abandoned.take() {
             match guard.cancel().await {
-                Ok(()) => guard.armed = false,
+                Ok((_, position)) => {
+                    guard.armed = false;
+                    settled = position;
+                }
                 Err(error) => {
                     tracing::debug!(%error, operation = %guard.claim.operation_id, "move abandonment unresolved");
                     abandoned = Some(guard);
@@ -25,20 +33,24 @@ pub(super) async fn next_move(
                 }
             }
         }
-        // The view may still show a move this connection abandoned; failures are final, so skip it.
-        let claim = source
-            .platform
-            .claims(|view| {
-                view.claim(identity)?.pending_move.clone().filter(|claim| Some(&claim.operation_id) != failed.as_ref())
-            })
-            .await?;
-        if claim.source.as_ref() != Some(identity)
-            || claim.proxy_id != source.claim.proxy_id
-            || claim.connection_id != source.claim.connection_id
-            || claim.identity != source.claim.identity
-        {
-            return Err(invalid_data("move identity mismatch"));
-        }
+        let pending = source.platform.claims(|view| {
+            if !view.passed(settled.as_ref()) {
+                return None;
+            }
+            view.claim(identity)?.pending_move.clone()
+        });
+        let pending = pending.await?;
+        let demand = pending.destination.ok_or_else(|| invalid_data("move without destination"))?;
+        let claim = ClaimRequest {
+            operation_id: pending.operation_id,
+            demand: Some(SessionDemand {
+                key: demand.key,
+                session_type: demand.session_type,
+                machine_profile: demand.machine_profile,
+            }),
+            source: Some(identity.clone()),
+            ..source.claim.clone()
+        };
         let mut guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true, failure: None };
         match prepare(source, &guard, protocol).await {
             Ok(assignment) => return Ok((guard, assignment)),
@@ -47,7 +59,6 @@ pub(super) async fn next_move(
                 let reason = if reason.is_empty() { "move preparation failed".into() } else { reason };
                 tracing::warn!(%reason, operation = %guard.claim.operation_id, "move abandoned; source remains active");
                 guard.failure = Some(reason.chars().take(1024).collect());
-                failed = Some(guard.claim.operation_id.clone());
                 abandoned = Some(guard);
             }
         }
@@ -97,20 +108,19 @@ async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -
     check_move(platform, &destination.claim).await?;
     platform.approve_move(&source.claim, &destination.claim).await?;
     check_move(platform, &destination.claim).await?;
-    let mut message = destination.platform.control_request(destination.claim.clone())?;
-    message.set_timeout(WAIT_TIMEOUT);
-    let assignment = destination.platform.control.clone().claim(message).await.map_err(io::Error::other)?.into_inner();
-    validate(&assignment, destination)?;
-    if assignment.configuration.as_ref().is_none_or(|c| c.protocol != protocol) {
+    let assignment = claim(destination).await?.ok_or_else(|| invalid_data("core refused the move"))?;
+    if assignment.protocol != protocol {
         return Err(invalid_data("destination protocol differs from client"));
     }
     check_move(platform, &destination.claim).await?;
     Ok(assignment)
 }
 
-fn transient(error: &io::Error) -> bool {
+/// Whether `error` may pass on a retry under the same operation ID.
+pub(super) fn transient(error: &io::Error) -> bool {
     rpc_error(error)
         .is_some_and(|status| matches!(status.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded))
+        || failure(error).is_some_and(|failure| matches!(failure.code(), Code::Unavailable | Code::Overloaded))
         || error.kind() == io::ErrorKind::TimedOut
         || matches!(error.get_ref(), Some(cause) if cause.is::<tokio::time::error::Elapsed>())
 }
@@ -122,7 +132,10 @@ pub(super) fn rpc_error(error: &io::Error) -> Option<&tonic::Status> {
 /// Confirms from the claim view that `destination` is still the move pending from its source.
 pub(super) async fn check_move(platform: &Platform, destination: &ClaimRequest) -> io::Result<()> {
     let source = destination.source.as_ref().ok_or_else(|| invalid_data("move without source"))?;
-    let pending = platform.claims(|view| Some(view.claim(source)?.pending_move.as_ref() == Some(destination)));
+    let pending = platform.claims(|view| {
+        let pending = view.claim(source)?.pending_move.as_ref();
+        Some(pending.is_some_and(|pending| pending.operation_id == destination.operation_id))
+    });
     match timeout(RPC_TIMEOUT, pending).await {
         Ok(Ok(true)) => Ok(()),
         Ok(Ok(false)) => Err(invalid_data("move canceled or source ownership changed")),

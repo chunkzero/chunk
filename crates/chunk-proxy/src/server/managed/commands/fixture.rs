@@ -1,8 +1,15 @@
+mod core_service;
 mod script;
 
+pub(super) use core_service::Held;
+
 use super::*;
-use chunk_contract::{BackendConnection, CommandRoute, ControlConnection};
-use chunk_proto::v1::*;
+use crate::server::platform::generation;
+use chunk_contract::{BackendConnection, CommandRoute};
+use chunk_proto::{
+    sync::v1::{self as sync, ClaimPhase, GatewayLogin, GatewayMove, core_server},
+    v1::*,
+};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -13,7 +20,8 @@ use tonic::{Request, Response, Status};
 #[derive(Clone)]
 pub(super) struct Service {
     pub movement: Arc<Mutex<Movement>>,
-    pub assignment: Arc<Mutex<Assignment>>,
+    /// The one claim the gateway's topic holds.
+    pub claim: Arc<Mutex<Held>>,
     pub commands: BTreeMap<String, Command>,
     pub allowed: Arc<AtomicBool>,
     pub catalog_unavailable: Arc<AtomicBool>,
@@ -30,39 +38,24 @@ pub(super) struct Service {
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
-    /// Counts claim-state changes; open watches send a new snapshot for each.
+    /// Counts claim-state changes; open streams send a new snapshot for each.
     pub published: Arc<watch::Sender<u64>>,
-    /// Ends open watches at their next publication and refuses new ones.
+    /// Ends open streams at their next publication and refuses new ones.
     pub watch_down: Arc<AtomicBool>,
     pub refused_watches: Arc<AtomicUsize>,
     pub logins: Arc<Mutex<Logins>>,
+    /// The newest stream; calls naming another are stopped.
+    stream: Arc<Mutex<String>>,
+    streams: Arc<AtomicUsize>,
     watches: CancellationToken,
-}
-
-impl Service {
-    /// Announces changed claim state to open watches, returning its position.
-    pub fn publish(&self) -> u64 {
-        self.published.send_modify(|position| *position += 1);
-        *self.published.borrow()
-    }
-
-    fn snapshot(&self, position: u64) -> ClaimUpdate {
-        let assignment = self.assignment.lock().unwrap().clone();
-        let claim = WatchedClaim {
-            claim: assignment.claim,
-            phase: assignment.phase,
-            pending_move: self.movement.lock().unwrap().pending.clone(),
-        };
-        ClaimUpdate { position, snapshot: true, claims: vec![claim], released: vec![] }
-    }
 }
 
 #[derive(Default)]
 pub(super) struct Logins {
-    /// Each login claim, in order.
-    pub claims: Vec<ClaimRequest>,
-    /// Each claim canceled, in order.
-    pub cancels: Vec<ClaimRequest>,
+    /// Each login claimed, with its operation ID, in order.
+    pub claims: Vec<(String, GatewayLogin)>,
+    /// The operation ID of each claim withdrawn, in order.
+    pub cancels: Vec<String>,
     /// Logins routed with this deployment are rejected for routing again.
     pub retired: Option<String>,
     /// The next routing waits for this, then fails.
@@ -71,13 +64,14 @@ pub(super) struct Logins {
 
 #[derive(Default)]
 pub(super) struct Movement {
-    pub pending: Option<ClaimRequest>,
-    pub error: Option<Status>,
+    pub pending: Option<GatewayMove>,
+    pub error: Option<sync::Error>,
     pub attempts: usize,
     pub reports: usize,
     pub lose_report: bool,
     pub stall_retries: bool,
-    pub failure: Option<AbandonMoveRequest>,
+    /// The operation ID and reason of the move abandoned.
+    pub failure: Option<(String, String)>,
 }
 
 #[tonic::async_trait]
@@ -163,31 +157,8 @@ impl backend_commands_server::BackendCommands for Service {
 #[tonic::async_trait]
 impl local_control_server::LocalControl for Service {
     type WatchStream = ReceiverStream<Result<ClaimUpdate, Status>>;
-    async fn watch(&self, request: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
-        auth(&request, "control")?;
-        if self.watch_down.load(Ordering::SeqCst) {
-            self.refused_watches.fetch_add(1, Ordering::SeqCst);
-            return Err(Status::unavailable("watch unavailable"));
-        }
-        let (sender, receiver) = mpsc::channel(1);
-        let service = self.clone();
-        let mut published = self.published.subscribe();
-        tokio::spawn(async move {
-            loop {
-                let position = *published.borrow_and_update();
-                if service.watch_down.load(Ordering::SeqCst)
-                    || sender.send(Ok(service.snapshot(position))).await.is_err()
-                {
-                    return;
-                }
-                tokio::select! {
-                    () = service.watches.cancelled() => return,
-                    () = sender.closed() => return,
-                    _ = published.changed() => {}
-                }
-            }
-        });
-        Ok(Response::new(ReceiverStream::new(receiver)))
+    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
+        Err(Status::unimplemented("unused"))
     }
     async fn prepare_session_method(
         &self,
@@ -242,42 +213,14 @@ impl local_control_server::LocalControl for Service {
         self.cancels.fetch_add(1, Ordering::SeqCst);
         Err(Status::unimplemented("unused"))
     }
-    async fn claim(&self, request: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
-        auth(&request, "control")?;
-        if request.get_ref().source.is_none() {
-            let login = request.into_inner();
-            let mut logins = self.logins.lock().unwrap();
-            logins.claims.push(login.clone());
-            if logins.retired.as_ref() == Some(&login.deployment) {
-                return Err(Status::unavailable(super::super::ROUTE_AGAIN));
-            }
-            return Ok(Response::new(reservation(&login)));
-        }
-        let (error, stall) = {
-            let mut movement = self.movement.lock().unwrap();
-            assert_eq!(movement.pending.as_ref(), Some(request.get_ref()));
-            movement.attempts += 1;
-            (movement.error.clone(), movement.stall_retries && movement.attempts > 1)
-        };
-        if stall {
-            tokio::time::sleep(super::super::WAIT_TIMEOUT).await;
-        }
-        Err(error.unwrap_or_else(|| Status::unimplemented("unused")))
+    async fn claim(&self, _: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
+        Err(Status::unimplemented("unused"))
     }
-    async fn activate(&self, request: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
-        auth(&request, "control")?;
-        self.activations.fetch_add(1, Ordering::SeqCst);
-        if self.roster_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waits| waits.checked_sub(1)).is_ok() {
-            return Err(Status::unavailable("roster awaiting members"));
-        }
-        Ok(Response::new(self.assignment.lock().unwrap().clone()))
+    async fn activate(&self, _: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
+        Err(Status::unimplemented("unused"))
     }
-    async fn cancel(&self, request: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
-        auth(&request, "control")?;
-        let claim = request.into_inner();
-        let identity = ClaimIdentity { operation_id: claim.operation_id.clone(), ..Default::default() };
-        self.logins.lock().unwrap().cancels.push(claim);
-        Ok(Response::new(identity))
+    async fn cancel(&self, _: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
+        Err(Status::unimplemented("unused"))
     }
     async fn reconcile_departure(&self, _: Request<ClaimRequest>) -> Result<Response<DepartureStatus>, Status> {
         Err(Status::unimplemented("unused"))
@@ -285,21 +228,8 @@ impl local_control_server::LocalControl for Service {
     async fn move_player(&self, _: Request<MovePlayerRequest>) -> Result<Response<ClaimRequest>, Status> {
         Err(Status::unimplemented("unused"))
     }
-    async fn abandon_move(&self, request: Request<AbandonMoveRequest>) -> Result<Response<ClaimIdentity>, Status> {
-        auth(&request, "control")?;
-        let mut movement = self.movement.lock().unwrap();
-        movement.reports += 1;
-        if std::mem::take(&mut movement.lose_report) {
-            return Err(Status::unavailable("lost failure report"));
-        }
-        let expected =
-            movement.pending.as_ref().or_else(|| movement.failure.as_ref().and_then(|failure| failure.claim.as_ref()));
-        assert_eq!(request.get_ref().claim.as_ref(), expected);
-        movement.pending = None;
-        movement.failure = Some(request.into_inner());
-        drop(movement);
-        self.publish();
-        Ok(Response::new(ClaimIdentity::default()))
+    async fn abandon_move(&self, _: Request<AbandonMoveRequest>) -> Result<Response<ClaimIdentity>, Status> {
+        Err(Status::unimplemented("unused"))
     }
     async fn drain(&self, _: Request<DrainRequest>) -> Result<Response<DrainStatus>, Status> {
         Err(Status::unimplemented("unused"))
@@ -319,7 +249,8 @@ pub(super) struct Fixture {
     pub commands: Commands,
     pub service: Service,
     pub claim: ClaimRequest,
-    pub assignment: Assignment,
+    pub identity: ClaimIdentity,
+    pub session: String,
     stop: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
@@ -327,30 +258,20 @@ impl Fixture {
     pub async fn new() -> Self {
         let commands = declarations();
         let claim = claim();
-        let assignment = Assignment {
-            claim: Some(ClaimIdentity {
-                operation_id: "claim".into(),
-                proxy_id: "proxy".into(),
-                membership_generation: 1,
-                delivery_generation: 1,
-            }),
-            phase: i32::from(ClaimPhase::Arrived),
-            delivery: Some(PlayerDelivery {
-                operation_id: "claim".into(),
-                proxy_id: "proxy".into(),
-                connection_id: "connection".into(),
-                membership_generation: 1,
-                owner_generation: 1,
-                player: Some(PlayerRef { id: "player".into() }),
-                session: Some(SessionRef { id: "session".into() }),
-                deployment: Some(DeploymentRef { environment: "environment".into(), deployment: "deployment".into() }),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let held = Held {
+            operation: "claim".into(),
+            generation: sync::Position { epoch: 1, revision: 1 },
+            phase: ClaimPhase::Arrived,
+        };
+        let identity = ClaimIdentity {
+            operation_id: "claim".into(),
+            proxy_id: "proxy".into(),
+            membership_generation: generation(&held.generation),
+            delivery_generation: generation(&held.generation),
         };
         let service = Service {
             movement: Arc::default(),
-            assignment: Arc::new(Mutex::new(assignment.clone())),
+            claim: Arc::new(Mutex::new(held)),
             commands,
             allowed: Arc::new(AtomicBool::new(true)),
             catalog_unavailable: Arc::default(),
@@ -370,6 +291,8 @@ impl Fixture {
             watch_down: Arc::default(),
             refused_watches: Arc::default(),
             logins: Arc::default(),
+            stream: Arc::default(),
+            streams: Arc::default(),
             watches: CancellationToken::new(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -381,6 +304,7 @@ impl Fixture {
             tonic::transport::Server::builder()
                 .add_service(backend_hooks_server::BackendHooksServer::new(server_service.clone()))
                 .add_service(backend_commands_server::BackendCommandsServer::new(server_service.clone()))
+                .add_service(core_server::CoreServer::new(server_service.clone()))
                 .add_service(local_control_server::LocalControlServer::new(server_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stopped.cancelled())
                 .await
@@ -393,8 +317,9 @@ impl Fixture {
             environment: "environment".into(),
             deployment: "deployment".into(),
         };
-        let control = ControlConnection { endpoint, token: "control".into() };
-        let platform = Platform::new(crate::PlatformTarget { backend, control, gateway: None }).unwrap();
+        let gateway = crate::GatewayCredential { id: "proxy".into(), credential: "gateway".into() };
+        let target = crate::PlatformTarget { core: endpoint, gateway, backend, control_token: "control".into() };
+        let platform = Platform::new(target).unwrap();
         let manifest = Arc::new(serde_json::from_value::<DomainManifest>(serde_json::json!({"version":1,"apps":{"lobby":""},"scopes":{"":{"parent":null}},"hooks":{},"commands":service.commands})).unwrap());
         let (output, receiver) = mpsc::channel(32);
         let (state, current) = watch::channel(None);
@@ -419,13 +344,14 @@ impl Fixture {
             tree_received: false,
             refreshing: false,
         };
-        commands.bind(&claim, &assignment).unwrap();
-        Self { commands, service, claim, assignment, stop, server }
+        let session = String::from("session");
+        commands.bind(&claim, &identity, &session).unwrap();
+        Self { commands, service, claim, identity, session, stop, server }
     }
     /// Publishes the current claim state and waits until the platform's view reflects it.
     pub async fn sync(&self) {
         let position = self.service.publish();
-        let synced = self.commands.tasks.platform.claims(|view| (view.position() >= position).then_some(()));
+        let synced = self.commands.tasks.platform.claims(|view| view.passed(Some(&position)).then_some(()));
         tokio::time::timeout(std::time::Duration::from_secs(3), synced).await.unwrap().unwrap();
     }
     pub async fn close(self) {
@@ -496,41 +422,5 @@ fn claim() -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
-    }
-}
-
-/// A reservation of `login` on a runtime of the deployment it was routed with.
-fn reservation(login: &ClaimRequest) -> Assignment {
-    let deployment = Some(DeploymentRef { environment: "environment".into(), deployment: login.deployment.clone() });
-    let (operation_id, proxy_id) = (login.operation_id.clone(), login.proxy_id.clone());
-    Assignment {
-        claim: Some(ClaimIdentity {
-            operation_id: operation_id.clone(),
-            proxy_id: proxy_id.clone(),
-            membership_generation: 1,
-            delivery_generation: 1,
-        }),
-        phase: i32::from(ClaimPhase::Reserved),
-        delivery: Some(PlayerDelivery {
-            operation_id: operation_id.clone(),
-            proxy_id,
-            connection_id: login.connection_id.clone(),
-            membership_generation: 1,
-            owner_generation: 1,
-            session_generation: 1,
-            player: login.identity.as_ref().map(|identity| PlayerRef { id: identity.uuid.clone() }),
-            session: Some(SessionRef { id: "session".into() }),
-            deployment: deployment.clone(),
-            runtime_id: "runtime".into(),
-            process_generation: 1,
-            ..Default::default()
-        }),
-        configuration: Some(ConfigurationResponse {
-            deployment,
-            runtime_id: "runtime".into(),
-            process_generation: 1,
-            ..Default::default()
-        }),
-        preparation: Some(PlayerPreparation { operation_id, capability: vec![0; 32], endpoint: "127.0.0.1:1".into() }),
     }
 }

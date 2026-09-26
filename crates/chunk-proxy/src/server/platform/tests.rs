@@ -68,7 +68,9 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hooks = Hooks::default();
     let platform = Platform::new(PlatformTarget {
-        gateway: None,
+        core: "http://127.0.0.1:1".into(),
+        gateway: crate::GatewayCredential { id: "proxy".into(), credential: "unused".into() },
+        control_token: "unused".into(),
         backend: chunk_contract::BackendConnection {
             platform_token: None,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
@@ -76,7 +78,6 @@ async fn status_is_live_and_failed_admission_never_routes() {
             environment: "local".into(),
             deployment: "example".into(),
         },
-        control: chunk_contract::ControlConnection { endpoint: "http://127.0.0.1:1".into(), token: "unused".into() },
     })
     .unwrap();
     let server = tokio::spawn(

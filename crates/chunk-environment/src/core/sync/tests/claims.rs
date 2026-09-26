@@ -113,6 +113,30 @@ async fn a_gateway_claims_activates_and_sees_its_player_arrive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive() {
+    let (jvm, server) = runtime::Runtime::start();
+    let fixture = Fixture::with_host(Arc::new(jvm)).await;
+    fixture.control.activate_release(runtime::release()).unwrap();
+    let target = chunk_proxy::PlatformTarget {
+        core: fixture.endpoint.clone(),
+        gateway: chunk_proxy::GatewayCredential { id: "proxy".into(), credential: fixture.gateway.clone() },
+        backend: chunk_contract::BackendConnection {
+            endpoint: "http://127.0.0.1:1".into(),
+            token: "unused".into(),
+            platform_token: None,
+            environment: "test".into(),
+            deployment: "test".into(),
+        },
+        control_token: fixture.cli.clone(),
+    };
+    let login = chunk_proxy::testing::login(target, runtime::PLAYER, "player", runtime::demand("lobby"));
+    let session = tokio::time::timeout(Duration::from_secs(30), login).await.unwrap().unwrap();
+    assert!(!session.is_empty());
+    fixture.stop().await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claim_calls_naming_a_superseded_or_foreign_stream_are_stopped() {
     let mut fixture = Fixture::start().await;
     let gateway = fixture.gateway.clone();

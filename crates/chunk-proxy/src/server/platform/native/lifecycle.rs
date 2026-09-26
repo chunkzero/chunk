@@ -1,10 +1,13 @@
 use std::{io, sync::Arc};
 
 use chunk_contract::{DomainManifest, HookEvent};
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
+use chunk_proto::{
+    sync::v1::DepartResult,
+    v1::{ClaimIdentity, ClaimRequest},
+};
 use tokio_util::sync::CancellationToken;
 
-use super::{Platform, ancestors, caller, domain, invalid_data, payload};
+use super::{Platform, RPC_TIMEOUT, ancestors, caller, domain, invalid_data, payload};
 
 /// One socket's captured domain and membership; each invocation receives fresh capabilities.
 pub(in crate::server) struct Lifecycle {
@@ -77,19 +80,9 @@ impl Drop for Lifecycle {
         let platform = self.platform.clone();
         self.platform.cleanup.spawn(async move {
             let result = async {
-                let response = platform
-                    .control
-                    .clone()
-                    .reconcile_departure(platform.control_request(claim.clone())?)
-                    .await
-                    .map_err(io::Error::other)?
-                    .into_inner();
-                let same_membership = response.claim.as_ref().is_some_and(|identity| {
-                    identity.membership_generation == arrival.identity.membership_generation
-                        && identity.operation_id == claim.operation_id
-                        && identity.proxy_id == claim.proxy_id
-                });
-                if response.departed && same_membership {
+                let operation = &claim.operation_id;
+                let (result, _): (DepartResult, _) = platform.call("depart", operation, &(), RPC_TIMEOUT).await?;
+                if result.departed {
                     let scopes = ancestors(&arrival.domain);
                     let events = scopes
                         .iter()
@@ -186,7 +179,7 @@ impl Platform {
                     }
                 }
             };
-            if tokio::time::timeout(super::RPC_TIMEOUT, batch).await.is_err() {
+            if tokio::time::timeout(RPC_TIMEOUT, batch).await.is_err() {
                 tracing::warn!("lifecycle notification batch deadline exceeded");
             }
         });

@@ -1,25 +1,30 @@
-use std::{
-    io,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{io, sync::Arc, time::Duration};
 
-use chunk_proto::v1::{
-    BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
-    local_control_client::LocalControlClient,
+use chunk_proto::{
+    sync::v1::Position,
+    v1::{
+        BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
+        local_control_client::LocalControlClient,
+    },
 };
+use prost::Message;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
-use tonic::{Request, transport::Channel};
+use tonic::{
+    Request,
+    transport::{Channel, Endpoint},
+};
 
 use super::transport::invalid_data;
 use crate::PlatformTarget;
 
 mod claims;
 mod native;
-pub(in crate::server) use claims::View;
+mod sync;
+pub(in crate::server) use claims::{View, generation};
 pub(in crate::server) use native::Lifecycle;
+pub(in crate::server) use sync::failure;
 
 pub(super) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -28,52 +33,67 @@ pub(super) struct Platform {
     pub target: PlatformTarget,
     pub cleanup: tokio_util::task::TaskTracker,
     pub proxy_id: String,
+    /// Control's local service, which command effects still move players and call session methods through.
     pub control: LocalControlClient<Channel>,
     pub commands: BackendCommandsClient<Channel>,
     backend: BackendClient<Channel>,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
     native: native::Native,
-    claims: Arc<OnceLock<(tokio::sync::watch::Receiver<View>, tokio_util::sync::DropGuard)>>,
+    sync: Arc<sync::Connection>,
 }
 
 impl Platform {
     pub fn new(target: PlatformTarget) -> io::Result<Self> {
+        let sync = sync::Connection::new(&target.core, target.gateway.clone())?;
+        Self::with(target, Arc::new(sync), tokio_util::task::TaskTracker::new())
+    }
+
+    /// A platform for `target` that keeps this one's core client, claims follower and cleanup tracking, and with them
+    /// its core endpoint and gateway identity.
+    pub fn retarget(&self, target: PlatformTarget) -> io::Result<Self> {
+        Self::with(target, self.sync.clone(), self.cleanup.clone())
+    }
+
+    fn with(
+        target: PlatformTarget,
+        sync: Arc<sync::Connection>,
+        cleanup: tokio_util::task::TaskTracker,
+    ) -> io::Result<Self> {
         Ok(Self {
-            control: LocalControlClient::new(channel(&target.control.endpoint)?)
-                .max_decoding_message_size(8 * 1024 * 1024),
+            control: LocalControlClient::new(channel(&target.core)?).max_decoding_message_size(8 * 1024 * 1024),
             commands: BackendCommandsClient::new(channel(&target.backend.endpoint)?)
                 .max_decoding_message_size(1024 * 1024),
             backend: BackendClient::new(channel(&target.backend.endpoint)?),
             native: native::Native::new(&target.backend.endpoint)?,
-            cleanup: tokio_util::task::TaskTracker::new(),
-            proxy_id: target
-                .gateway
-                .as_ref()
-                .map_or_else(|| uuid::Uuid::new_v4().to_string(), |gateway| gateway.id.clone()),
+            cleanup,
+            proxy_id: sync.gateway().to_owned(),
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),
-            claims: Arc::default(),
+            sync,
             target,
         })
     }
 
-    /// A platform for `target` sharing this proxy's identity and cleanup tracking.
-    pub fn retarget(&self, target: PlatformTarget) -> io::Result<Self> {
-        Ok(Self { cleanup: self.cleanup.clone(), proxy_id: self.proxy_id.clone(), ..Self::new(target)? })
-    }
-
     pub fn control_request<T>(&self, body: T) -> io::Result<Request<T>> {
-        request(body, &self.target.control.token)
+        request(body, &self.target.control_token)
     }
 
-    /// Waits for a live view of this proxy's claims in which `ready` returns a value. The first call opens the stream,
-    /// which stays open while any clone of this platform remains.
+    /// Waits for a live view of this gateway's claims in which `ready` returns a value.
     pub async fn claims<T>(&self, ready: impl FnMut(&View) -> Option<T>) -> io::Result<T> {
-        let (view, _) = self.claims.get_or_init(|| {
-            claims::follow(self.control.clone(), self.proxy_id.clone(), self.target.control.token.clone())
-        });
-        claims::wait(view.clone(), ready).await
+        self.sync.claims(ready).await
+    }
+
+    /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's
+    /// position after it.
+    pub async fn call<R: Message + Default>(
+        &self,
+        method: &str,
+        operation: &str,
+        arguments: &impl Message,
+        timeout: Duration,
+    ) -> io::Result<(R, Option<Position>)> {
+        self.sync.call(method, operation, arguments, timeout).await
     }
 
     /// Authenticates `body` with `token` for this platform's backend environment and deployment.
@@ -189,6 +209,10 @@ fn authorized<T>(body: T, token: &str) -> io::Result<Request<T>> {
 }
 
 fn channel(endpoint: &str) -> io::Result<Channel> {
+    Ok(self::endpoint(endpoint)?.connect_lazy())
+}
+
+fn endpoint(endpoint: &str) -> io::Result<Endpoint> {
     let address = endpoint
         .strip_prefix("http://")
         .ok_or_else(|| invalid_data("local service requires http loopback endpoint"))?;
@@ -199,8 +223,7 @@ fn channel(endpoint: &str) -> io::Result<Channel> {
     Ok(Channel::from_shared(endpoint.to_owned())
         .map_err(invalid_data)?
         .connect_timeout(RPC_TIMEOUT)
-        .timeout(Duration::from_secs(45))
-        .connect_lazy())
+        .timeout(Duration::from_secs(45)))
 }
 
 #[cfg(test)]
