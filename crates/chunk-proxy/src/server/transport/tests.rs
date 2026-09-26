@@ -101,30 +101,41 @@ async fn encryption_switch_decrypts_buffered_bytes_and_keeps_cipher_state_betwee
     tokio::join!(sender, receiver);
 }
 
-#[tokio::test]
-async fn sent_output_is_released_while_a_peer_keeps_reading_and_writing() {
-    use tokio::io::AsyncReadExt;
+/// A distinct, poorly compressible packet body.
+fn numbered(index: u32) -> Vec<u8> {
+    let mut state = index;
+    let mut body = vec![0x7f];
+    for _ in 0..4096 {
+        state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        body.extend(state.to_le_bytes());
+    }
+    body
+}
 
+#[tokio::test]
+async fn sent_output_is_released_and_stays_decodable_while_a_peer_keeps_reading_and_writing() {
+    const PACKETS: u32 = 256;
     let (peer, server) = tokio::io::duplex(4096);
-    let (mut peer_read, mut peer_write) = tokio::io::split(peer);
+    let (mut peer, mut server) = (Transport::new(peer), Transport::new(server));
+    for transport in [&mut peer, &mut server] {
+        transport.enable_encryption(&[7; 16]).unwrap();
+        transport.enable_compression(256);
+    }
     let peer = tokio::spawn(async move {
-        let mut bytes = vec![0; 1024];
-        loop {
-            peer_write.write_all(&[1, 0x7f]).await?;
-            if peer_read.read(&mut bytes).await? == 0 {
-                return io::Result::Ok(());
-            }
+        for index in 0..PACKETS {
+            peer.write_body(&[0x01]).await.unwrap();
+            assert_eq!(peer.read_frame(32 * 1024).await.unwrap(), numbered(index));
         }
     });
-    let mut server = Transport::new(server);
-    let mut sent = 0;
-    while sent < 16 * 1024 * 1024 {
+    let mut queued = 0;
+    while queued < PACKETS {
         if server.queued() < RETAINED_CAPACITY {
-            server.queue(&[0x7f; 16_384]).unwrap();
-            sent += 16_384;
+            server.queue(&numbered(queued)).unwrap();
+            queued += 1;
         }
         server.pump(Some(64)).await.unwrap();
         assert!(server.output.len() <= 3 * RETAINED_CAPACITY, "output grew to {} bytes", server.output.len());
     }
-    peer.abort();
+    server.flush().await.unwrap();
+    peer.await.unwrap();
 }
