@@ -10,8 +10,11 @@ import { blockKey } from "./blocklist.ts";
 
 const maxBatch = 1000;
 const maxMessageBytes = 64 * 1024;
-/** The text a log batch may hold in total, well under the RPC body cap so the rest of its encoding fits too. */
-const maxLogTextBytes = 2 * 1024 * 1024;
+/**
+ * The text a log batch may hold in total. JSON can escape each byte as six (`\u0000`), so even then it takes at most
+ * 3 MiB of the 4 MiB RPC body cap, leaving room for the rest of the encoding.
+ */
+const maxLogTextBytes = 512 * 1024;
 /** How long a client address that failed authentication cannot wake the environment. */
 export const blockDurationMs = 10 * 60 * 1000;
 

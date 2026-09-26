@@ -23,8 +23,11 @@ const keepaliveMs = 30_000;
 const maxGateways = 64;
 const maxPings = 64;
 const maxStatusJsonBytes = 64 * 1024;
-/** What the pings may total, well under the RPC body cap so the rest of the report fits too. */
-const maxPingBytes = 2 * 1024 * 1024;
+/**
+ * What the pings may total. JSON can escape each byte as six (`\u0000`), so even then they take at most 3 MiB of the
+ * 4 MiB RPC body cap, leaving room for the rest of the report.
+ */
+const maxPingBytes = 512 * 1024;
 const gatewayPattern = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})$/;
 
 export function environmentService(deps: Deps): Partial<ServiceImpl<typeof EnvironmentService>> {
