@@ -36,8 +36,8 @@ pub struct Connection {
     pub endpoint: String,
     /// Control's credential, which the CLI presents.
     pub cli: String,
-    /// The backend's platform credential, which gateways present.
-    pub platform: String,
+    /// The in-process gateway's credential.
+    pub gateway: String,
 }
 
 async fn connect(endpoint: &str) -> Result<CoreClient<Channel>> {
@@ -95,7 +95,7 @@ pub struct Writer {
 impl Writer {
     /// Writes as the CLI, or with the subscribers' gateway credential under `--own-writes`.
     pub async fn connect(connection: &Connection, config: &Config, streams: Arc<Streams>) -> Result<Self> {
-        let credential = if config.own_writes { &connection.platform } else { &connection.cli };
+        let credential = if config.own_writes { &connection.gateway } else { &connection.cli };
         Ok(Self { rpc: connect(&connection.endpoint).await?, credential: credential.clone(), streams })
     }
 
@@ -292,7 +292,7 @@ pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<S
             ..SubscribeRequest::default()
         };
         let mut updates = rpc
-            .subscribe(request(subscription, &connection.platform)?)
+            .subscribe(request(subscription, &connection.gateway)?)
             .await
             .with_context(|| format!("opening stream {} of {total}", index + 1))?
             .into_inner();
