@@ -105,6 +105,10 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
     let mut outdated = roster("stale", 1, &[first.clone(), second.clone()]);
     outdated.members[1].expected_source.delivery_generation += 1;
     assert!(control.move_roster(&outdated).is_err());
+    // A member operation `claim()` would reject must not reserve capacity.
+    let mut oversized = roster("oversized", 1, &[first.clone(), second.clone()]);
+    oversized.members[1].operation_id = "x".repeat(129);
+    assert!(control.move_roster(&oversized).is_err());
     let state = control.state().unwrap();
     assert!(state.rosters.is_empty() && state.moves.is_empty() && state.players.values().all(|p| p.pending.is_none()));
 

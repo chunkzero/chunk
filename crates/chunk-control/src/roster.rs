@@ -52,6 +52,21 @@ impl Control {
         {
             return Err(Error::Invalid("invalid roster"));
         }
+        let commands = request
+            .members
+            .iter()
+            .map(|member| {
+                let command = MovePlayerRequest {
+                    operation_id: member.operation_id.clone(),
+                    player_id: member.player_id.clone(),
+                    demand: Some(request.demand.clone()),
+                    expected_source: Some(member.expected_source.clone()),
+                    expected_connection_id: member.expected_connection_id.clone(),
+                };
+                crate::moves::validate(&command)?;
+                Ok(command)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let _operation = self.operation(&request.operation_id)?;
         if !self.state()?.rosters.contains_key(&request.operation_id) && !self.recovery.open()? {
             return Err(Error::Busy);
@@ -64,17 +79,10 @@ impl Control {
             if let Some(roster) = state.rosters.get(&request.operation_id) {
                 return retried(state, roster, request);
             }
-            let mut destinations = Vec::with_capacity(request.members.len());
-            for member in &request.members {
-                let command = MovePlayerRequest {
-                    operation_id: member.operation_id.clone(),
-                    player_id: member.player_id.clone(),
-                    demand: Some(request.demand.clone()),
-                    expected_source: Some(member.expected_source.clone()),
-                    expected_connection_id: member.expected_connection_id.clone(),
-                };
-                destinations.push(crate::moves::queue(state, &self.config, command)?);
-            }
+            let destinations = commands
+                .into_iter()
+                .map(|command| crate::moves::queue(state, &self.config, command))
+                .collect::<Result<Vec<_>>>()?;
             let session = select_room(state, &self.config, &request.demand, &unavailable, destinations.len())?;
             for destination in &destinations {
                 let owner = owner(state, destination)?;

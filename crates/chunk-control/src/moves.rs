@@ -11,14 +11,7 @@ impl Control {
     /// # Errors
     /// Rejects changed operations, concurrent moves and players without an arrived delivery.
     pub fn move_player(&self, request: MovePlayerRequest) -> Result<ClaimRequest> {
-        if request.operation_id.is_empty()
-            || request.operation_id.len() > 128
-            || request.demand.is_none()
-            || request.expected_source.is_some() == request.expected_connection_id.is_empty()
-            || request.expected_connection_id.len() > 128
-        {
-            return Err(Error::Invalid("invalid move request"));
-        }
+        validate(&request)?;
         self.update(|state| queue(state, &self.config, request))
     }
 
@@ -81,6 +74,18 @@ impl Control {
             Ok(true)
         })
     }
+}
+
+pub(crate) fn validate(request: &MovePlayerRequest) -> Result<()> {
+    if request.operation_id.is_empty()
+        || request.operation_id.len() > 128
+        || request.demand.is_none()
+        || request.expected_source.is_some() == request.expected_connection_id.is_empty()
+        || request.expected_connection_id.len() > 128
+    {
+        return Err(Error::Invalid("invalid move request"));
+    }
+    Ok(())
 }
 
 /// Queues `request`'s move in the current update, returning the destination claim request.
