@@ -77,7 +77,8 @@ impl Queries {
 
     /// Sends a snapshot, then each key whose result changed since it was last sent, and position-only updates when
     /// the results still hold at a later commit: promptly up to the credential's own mutations, otherwise at most
-    /// once per [`IDLE`]. A slow client gets the latest state, never an intermediate one. Ends once the grant lapses.
+    /// once per [`IDLE`]. Never waits for the client, so the grant is rechecked on each control change and before
+    /// each update however slowly it reads. Ends once the grant lapses.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         let Self { keys, mut group, context: Context { id, grant, mut nudges, epoch } } = self;
         let mut progress = group.progress();
@@ -90,7 +91,6 @@ impl Queries {
         let mut pending = None;
         let mut checked = Instant::now();
         loop {
-            let next = async { if sender.ready().await { Some(group.next().await) } else { None } };
             let advance = async {
                 if pending.is_some() {
                     progress.changed().await;
@@ -102,10 +102,9 @@ impl Queries {
             let event = tokio::select! {
                 () = stop.cancelled() => return sender.fail(errors::error(Code::Unavailable, "core is stopping")),
                 () = sender.closed() => return,
-                update = next => match update {
-                    None => return,
-                    Some(Err(failure)) => return sender.fail(errors::backend(&failure)),
-                    Some(Ok(update)) => Event::Results(update),
+                update = group.next() => match update {
+                    Err(failure) => return sender.fail(errors::backend(&failure)),
+                    Ok(update) => Event::Results(update),
                 },
                 () = changed(&mut changes) => Event::Control,
                 () = changed(&mut nudges), if version.is_some() => Event::Nudge,
@@ -141,7 +140,7 @@ impl Queries {
                             stream: if first { id.clone() } else { String::new() },
                             ..Update::default()
                         };
-                        if !send(&grant, &sender, update).await {
+                        if !send(&grant, &sender, update) {
                             return;
                         }
                     }
@@ -155,7 +154,7 @@ impl Queries {
             let last = version.and_then(|version| progress.holds(version)).filter(|last| *last > revision);
             if let Some(last) = last {
                 revision = last;
-                if !send(&grant, &sender, Update { position: position(epoch, revision), ..Update::default() }).await {
+                if !send(&grant, &sender, Update { position: position(epoch, revision), ..Update::default() }) {
                     return;
                 }
             }
@@ -168,12 +167,13 @@ impl Queries {
 
 /// Sends `update` if the grant still holds, and otherwise ends the stream with why it lapsed. Returns whether the
 /// stream continues.
-async fn send(grant: &Grant, sender: &Sender, update: Update) -> bool {
+fn send(grant: &Grant, sender: &Sender, update: Update) -> bool {
     if let Err(error) = grant.check() {
         sender.fail(error);
         return false;
     }
-    sender.send(update).await
+    sender.send(update);
+    true
 }
 
 /// Waits for `receiver` to change, or forever once its sender is gone.

@@ -1,13 +1,18 @@
-//! Subscription streams: their IDs, message splitting, a sender that only ever sends the latest state, and nudges
-//! after a credential's own writes.
+//! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
+//! nudges after a credential's own writes.
 
 use super::{MESSAGE_BYTES, errors};
-use chunk_proto::sync::v1::{Error, Position, SubscribeRequest, Update, entry::State};
+use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State};
 use chunk_store::Revision;
 use prost::Message;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fmt::Write, sync::Mutex};
-use tokio::sync::{mpsc, watch};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    fmt::Write,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::{Notify, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 /// Room left in each message for its position, flags and stream ID.
@@ -77,39 +82,149 @@ impl Nudges {
 
 pub(super) type Stream = mpsc::Receiver<Result<Update, Status>>;
 
-/// Holds at most one update in flight, so a subscriber waits for room before reading the state it sends.
-pub(super) struct Sender(mpsc::Sender<Result<Update, Status>>);
+/// A stream's producing side, which never waits for the client: each update merges into the one the client has yet
+/// to take, and a writer task hands that over as the client reads.
+pub(super) struct Sender {
+    slot: Arc<Slot>,
+    closed: CancellationToken,
+}
 
 pub(super) fn channel() -> (Sender, Stream) {
     let (sender, receiver) = mpsc::channel(1);
-    (Sender(sender), receiver)
+    let slot = Arc::<Slot>::default();
+    let closed = CancellationToken::new();
+    drop(tokio::spawn(write(slot.clone(), sender, closed.clone())));
+    (Sender { slot, closed }, receiver)
 }
 
 impl Sender {
-    /// Waits until the client can take another update. Returns `false` once it went away.
-    pub async fn ready(&self) -> bool {
-        self.0.reserve().await.is_ok()
-    }
-
+    /// Resolves once the client went away or took the stream's final update.
     pub async fn closed(&self) {
-        self.0.closed().await;
+        self.closed.cancelled().await;
     }
 
-    /// Sends `update`, split into continued updates that each fit in a message. Returns `false` once the client
-    /// went away.
-    pub async fn send(&self, update: Update) -> bool {
-        for part in split(update) {
-            if self.0.send(Ok(part)).await.is_err() {
-                return false;
+    /// Merges `update` into what the client has yet to take.
+    pub fn send(&self, update: Update) {
+        self.slot.update(|pending| {
+            if pending.error.is_none() {
+                pending.changes.get_or_insert_default().merge(update);
+            }
+        });
+    }
+
+    /// Ends the stream with `error`, which replaces anything the client has yet to take and is sent as soon as it
+    /// has room.
+    pub fn fail(&self, error: Error) {
+        self.slot.update(|pending| {
+            pending.changes = None;
+            pending.error.get_or_insert(error);
+        });
+    }
+}
+
+impl Drop for Sender {
+    fn drop(&mut self) {
+        self.slot.update(|pending| pending.ended = true);
+    }
+}
+
+#[derive(Default)]
+struct Slot {
+    pending: Mutex<Pending>,
+    wake: Notify,
+}
+
+#[derive(Default)]
+struct Pending {
+    changes: Option<Changes>,
+    /// The stream's final update, sent in place of any changes.
+    error: Option<Error>,
+    /// The sender dropped; the writer ends once it sent the rest.
+    ended: bool,
+}
+
+impl Slot {
+    fn update(&self, change: impl FnOnce(&mut Pending)) {
+        change(&mut self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        self.wake.notify_one();
+    }
+}
+
+/// Updates the client has yet to take, merged into one: the latest value of each key at the latest position.
+#[derive(Default)]
+struct Changes {
+    position: Option<Position>,
+    snapshot: bool,
+    stream: String,
+    upserts: BTreeMap<String, Entry>,
+    removed: BTreeSet<String>,
+}
+
+impl Changes {
+    fn merge(&mut self, update: Update) {
+        if update.snapshot {
+            *self = Self { snapshot: true, stream: std::mem::take(&mut self.stream), ..Self::default() };
+        }
+        if !update.stream.is_empty() {
+            self.stream = update.stream;
+        }
+        self.position = update.position.or(self.position);
+        for entry in update.upserts {
+            self.removed.remove(&entry.key);
+            self.upserts.insert(entry.key.clone(), entry);
+        }
+        for key in update.removed {
+            self.upserts.remove(&key);
+            if !self.snapshot {
+                self.removed.insert(key);
             }
         }
-        true
     }
 
-    /// Sends `error` as the stream's final update, unless the client is too far behind to take it; either way the
-    /// stream ends once this sender drops.
-    pub fn fail(&self, error: Error) {
-        let _ = self.0.try_send(Ok(Update { error: Some(error), ..Update::default() }));
+    fn into_update(self) -> Update {
+        Update {
+            position: self.position,
+            snapshot: self.snapshot,
+            upserts: self.upserts.into_values().collect(),
+            removed: self.removed.into_iter().collect(),
+            stream: self.stream,
+            ..Update::default()
+        }
+    }
+}
+
+/// Hands the slot's changes to `client` as it takes them, split to fit in messages, and ends after the slot's error.
+async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, closed: CancellationToken) {
+    let _closed = closed.drop_guard();
+    let mut parts = VecDeque::new();
+    while let Ok(permit) = client.reserve().await {
+        let (part, last) = loop {
+            {
+                let mut pending = slot.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(error) = pending.error.take() {
+                    break (Update { error: Some(error), ..Update::default() }, true);
+                }
+                if parts.is_empty()
+                    && let Some(changes) = pending.changes.take()
+                {
+                    parts = split(changes.into_update()).into();
+                }
+                if let Some(part) = parts.pop_front() {
+                    break (part, false);
+                }
+                if pending.ended {
+                    return;
+                }
+            }
+            tokio::select! {
+                () = slot.wake.notified() => {}
+                () = client.closed() => return,
+            }
+        };
+        permit.send(Ok(part));
+        if last {
+            return;
+        }
     }
 }
 

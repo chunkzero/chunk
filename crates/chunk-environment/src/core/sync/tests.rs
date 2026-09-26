@@ -14,6 +14,7 @@ export function get(ctx) { return ctx.db.get('counters', 'count')?.value ?? 0; }
 export function add(ctx, by) { const value = get(ctx) + by; ctx.db.put('counters', 'count', {value}); return value; }
 export function touch(ctx) { ctx.db.put('counters', 'other', {value: 1}); return 1; }
 export function boom(ctx) { throw 'x'.repeat(17 * 1024 * 1024); }
+export function big(ctx) { return 'x'.repeat(900 * 1024) + get(ctx); }
 ";
 
 fn deployment() -> Deployment {
@@ -29,6 +30,7 @@ fn deployment() -> Deployment {
         ("add", function(FunctionKind::Mutation, Schema::Integer)),
         ("touch", function(FunctionKind::Mutation, Schema::Null)),
         ("boom", function(FunctionKind::Query, Schema::Null)),
+        ("big", Function { result: Schema::String, ..function(FunctionKind::Query, Schema::Null) }),
     ];
     Deployment {
         contracts: Contracts::default(),
@@ -176,6 +178,18 @@ async fn next(updates: &mut Streaming<Update>) -> Update {
     update.expect("an update")
 }
 
+/// Reads position-only updates until one reaches `target`'s position, failing at `deadline`.
+async fn advance(updates: &mut Streaming<Update>, target: &CallResponse, deadline: tokio::time::Instant) {
+    loop {
+        let update = tokio::time::timeout_at(deadline, updates.message()).await.expect("an advance in time");
+        let update = update.unwrap().expect("an update");
+        assert!(update.upserts.is_empty() && update.removed.is_empty() && !update.snapshot);
+        if revision(update.position.as_ref()) >= revision(target.position.as_ref()) {
+            return;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retried_mutations_return_their_committed_outcome() {
     let mut fixture = Fixture::start().await;
@@ -228,14 +242,13 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
     assert!(revision(update.position.as_ref()) >= revision(added.position.as_ref()));
 
     let touched = fixture.call(&cli, "touch", "touch", "null").await;
-    loop {
-        let update = tokio::time::timeout_at(prompt, updates.message()).await.expect("a prompt advance");
-        let update = update.unwrap().expect("an update");
-        assert!(update.upserts.is_empty() && update.removed.is_empty() && !update.snapshot);
-        if revision(update.position.as_ref()) >= revision(touched.position.as_ref()) {
-            break;
-        }
-    }
+    advance(&mut updates, &touched, prompt).await;
+
+    // Another credential's write waits for the next idle advance.
+    let written = fixture.call(PLATFORM, "gateway-touch", "touch", "null").await;
+    let quiet = tokio::time::timeout(Duration::from_millis(500), updates.message()).await;
+    assert!(quiet.is_err(), "the idle stream advanced promptly");
+    advance(&mut updates, &written, tokio::time::Instant::now() + Duration::from_secs(1)).await;
     drop(updates);
     fixture.stop().await;
 }
@@ -271,6 +284,42 @@ async fn oversized_errors_stay_in_band() {
         update = next(&mut updates).await;
     }
     assert_eq!(update.upserts, [Entry { key: "count".into(), state: Some(State::Value("5".into())) }]);
+    drop(updates);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_whose_client_stopped_reading_releases_its_subscription_and_ends_with_its_error() {
+    let mut fixture = Fixture::start().await;
+    let cli = fixture.cli.clone();
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"big": {"function": "big"}}"#.to_vec(),
+        deployment: "test".into(),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = fixture.client.subscribe(authorized(subscription, &cli)).await.unwrap().into_inner();
+    // Each value is most of a mebibyte, and each has time to be sent, so these fill every buffer up to the client.
+    for count in 0..16 {
+        fixture.call(&cli, &format!("add-{count}"), "add", "1").await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A position-only advance while the client is full.
+    fixture.call(&cli, "touch", "touch", "null").await;
+
+    fixture.stop.cancel();
+    let deployment = chunk_js::DeploymentId::new("test").unwrap();
+    let released = async {
+        while fixture.backend.release(deployment.clone()).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), released).await.expect("the subscription released promptly");
+    let mut last = next(&mut updates).await;
+    while let Some(update) = tokio::time::timeout(Duration::from_secs(10), updates.message()).await.unwrap().unwrap() {
+        last = update;
+    }
+    assert_eq!(last.error.map(|error| error.code()), Some(Code::Unavailable));
     drop(updates);
     fixture.stop().await;
 }
