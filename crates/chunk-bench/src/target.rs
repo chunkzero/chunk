@@ -149,6 +149,7 @@ pub async fn serve(init: Init) -> Result<()> {
             control: chunk_control::Config { environment: release.deployment.environment.clone() },
             host: Arc::new(control::SyntheticHost::new(init.backend)),
             fresh: false,
+            services: None,
         };
         let token = stop.clone();
         tasks.spawn(async move { Ok(chunk_control::server::run(config, ready, token).await?) });

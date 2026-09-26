@@ -75,6 +75,10 @@ pub trait Host: Send + Sync {
     fn connection(&self, _id: &str) -> Option<RuntimeConnection> {
         None
     }
+    /// The host whose running JVM holds `credential`, compared in constant time.
+    fn authenticate(&self, _credential: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct ProcessHostConfig {

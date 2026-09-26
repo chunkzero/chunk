@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -7,7 +8,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_contract::{Deployment, DomainManifest, validate_wire_value};
+use chunk_contract::{Deployment, DomainManifest, FunctionKind, validate_wire_value};
 #[cfg(test)]
 use chunk_js::Limits;
 use chunk_js::{Cancellation, DeploymentId, Json};
@@ -75,6 +76,17 @@ pub struct Update {
 pub struct GroupUpdate {
     pub revision: Revision,
     pub results: Vec<Result<Arc<str>>>,
+    /// Changes whenever `results` do.
+    pub version: u64,
+}
+
+/// The revisions at which a group's published update holds: from the latest evaluation of any of its results until
+/// the revision before a commit invalidates one, or the durable revision while none did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hold {
+    pub version: u64,
+    pub from: Revision,
+    pub until: Option<Revision>,
 }
 
 pub(crate) struct Request<T> {
@@ -125,6 +137,10 @@ pub(crate) enum Command {
     DomainManifest {
         id: DeploymentId,
         reply: Request<Option<DomainManifest>>,
+    },
+    Functions {
+        id: DeploymentId,
+        reply: Request<BTreeMap<String, FunctionKind>>,
     },
     JobStatus {
         id: String,
@@ -190,6 +206,7 @@ impl Command {
             Self::Suggest { reply, .. } => reply.finish(Err(error)),
             Self::Prepare { reply, .. } => reply.finish(Err(error)),
             Self::DomainManifest { reply, .. } => reply.finish(Err(error)),
+            Self::Functions { reply, .. } => reply.finish(Err(error)),
 
             Self::JobStatus { reply, .. } => reply.finish(Err(error)),
             Self::WakeHandoff { reply } => reply.finish(Err(error)),
@@ -507,6 +524,13 @@ impl Backend {
         self.submit(|reply| Command::DomainManifest { id, reply }).await
     }
 
+    /// The kind of each public function in the exact retained deployment.
+    /// # Errors
+    /// Rejects unknown or releasing deployments.
+    pub async fn functions(&self, id: DeploymentId) -> Result<BTreeMap<String, FunctionKind>> {
+        self.submit(|reply| Command::Functions { id, reply }).await
+    }
+
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
         call.validate_limit(512)?;
         let id = self.allocate_action_id()?;
@@ -629,11 +653,22 @@ impl Drop for CancelOnDrop {
 pub struct GroupSubscription {
     receiver: watch::Receiver<Result<GroupUpdate>>,
     initial: bool,
+    progress: Progress,
 }
 
 impl GroupSubscription {
-    pub(crate) fn new(receiver: watch::Receiver<Result<GroupUpdate>>) -> Self {
-        Self { receiver, initial: true }
+    pub(crate) fn new(
+        receiver: watch::Receiver<Result<GroupUpdate>>,
+        hold: watch::Receiver<Option<Hold>>,
+        durable: watch::Receiver<Revision>,
+    ) -> Self {
+        Self { receiver, initial: true, progress: Progress { hold, durable } }
+    }
+
+    /// Follows the later durable revisions at which this group's results hold.
+    #[must_use]
+    pub fn progress(&self) -> Progress {
+        self.progress.clone()
     }
 
     /// Returns the initial result, then waits for changed results or an error.
@@ -644,6 +679,44 @@ impl GroupSubscription {
             self.receiver.changed().await.map_err(|_| Error::Closed)?;
         }
         self.receiver.borrow_and_update().clone()
+    }
+}
+
+/// Tells a group's subscriber how far its results hold at later durable revisions, without waking it for each commit
+/// unless it waits.
+#[derive(Clone)]
+pub struct Progress {
+    hold: watch::Receiver<Option<Hold>>,
+    durable: watch::Receiver<Revision>,
+}
+
+impl Progress {
+    /// The latest durable revision at which the update with `version` holds, if it still holds at any.
+    pub fn holds(&mut self, version: u64) -> Option<Revision> {
+        // The durable revision is announced after the holds it affects, so it is read first.
+        let durable = *self.durable.borrow_and_update();
+        let hold = (*self.hold.borrow_and_update()).filter(|hold| hold.version == version)?;
+        let last = hold.until.map_or(durable, |until| until.min(durable));
+        (last >= hold.from).then_some(last)
+    }
+
+    /// Waits until the durable revision passes `revision`.
+    pub async fn durable_after(&mut self, revision: Revision) {
+        if self.durable.wait_for(|durable| *durable > revision).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Waits for a commit, or a change in how far the results hold, since [`Self::holds`] last looked.
+    pub async fn changed(&mut self) {
+        let changed = tokio::select! {
+            changed = self.durable.changed() => changed,
+            changed = self.hold.changed() => changed,
+        };
+        if changed.is_err() {
+            // The group or backend is gone, which its results report.
+            std::future::pending::<()>().await;
+        }
     }
 }
 

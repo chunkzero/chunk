@@ -617,15 +617,22 @@ dependencies = [
  "chunk-backend",
  "chunk-contract",
  "chunk-control",
+ "chunk-js",
  "chunk-proto",
  "chunk-proxy",
  "chunk-service",
+ "chunk-store",
+ "prost",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

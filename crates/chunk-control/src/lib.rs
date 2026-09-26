@@ -1,5 +1,6 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
+mod callers;
 mod capacity;
 mod client;
 mod delivery;
@@ -21,6 +22,7 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
+pub use callers::SessionScope;
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{

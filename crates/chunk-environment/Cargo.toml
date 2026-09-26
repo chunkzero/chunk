@@ -15,17 +15,24 @@ mc-26-2 = ["chunk-proxy/mc-26-2"]
 chunk-backend = { path = "../chunk-backend" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-control = { path = "../chunk-control" }
+chunk-js = { path = "../chunk-js" }
+chunk-proto = { path = "../chunk-proto" }
 chunk-proxy = { path = "../chunk-proxy", default-features = false }
 chunk-service = { path = "../chunk-service" }
+chunk-store = { path = "../chunk-store" }
+prost = "0.14.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-stream = "0.1"
 tokio-util = "0.7"
+tonic = "0.14.6"
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-chunk-proto = { path = "../chunk-proto" }
-serde_json = "1"
 tempfile = "3"
-tonic = "0.14.6"
 
 [lints]
 workspace = true

@@ -251,6 +251,15 @@ impl Actor {
                     .map(|deployment| deployment.contracts.domains.clone())
                     .ok_or(Error::Contract)
             })),
+            Command::Functions { id, reply } => reply.finish(self.check_deployment(&id).map(|()| {
+                let deployment = self.versions.get(&id).and_then(Option::as_ref);
+                deployment
+                    .iter()
+                    .flat_map(|deployment| &deployment.functions)
+                    .filter(|(_, function)| function.visibility == Visibility::Public)
+                    .map(|(name, function)| (name.clone(), function.kind))
+                    .collect()
+            })),
             Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),

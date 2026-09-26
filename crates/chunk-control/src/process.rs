@@ -359,6 +359,20 @@ impl Host for ProcessHost {
         *frozen = Some(registration);
         Ok(process.identity.clone())
     }
+    fn authenticate(&self, credential: &str) -> Option<String> {
+        let processes = self.processes.lock().ok()?;
+        let mut found = None;
+        // Every running process is compared, so timing reveals no match position.
+        for (id, process) in &processes.running {
+            if chunk_service::same_secret(credential, &process.token)
+                && !process.stop.is_cancelled()
+                && !process.stopped.load(Ordering::Acquire)
+            {
+                found = Some(id.clone());
+            }
+        }
+        found
+    }
     fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
         validate_endpoints(&registration)?;
         let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;

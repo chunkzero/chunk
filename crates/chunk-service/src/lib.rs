@@ -51,6 +51,17 @@ pub fn private_file(path: &Path) -> io::Result<fs::File> {
     options.open(path)
 }
 
+/// Whether `presented` equals `expected`, in time that depends only on their lengths.
+#[must_use]
+pub fn same_secret(presented: &str, expected: &str) -> bool {
+    presented.len() == expected.len()
+        && presented
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0, |difference, (a, b)| difference | std::hint::black_box(a ^ b))
+            == 0
+}
+
 /// Loads or creates a durable credential.
 /// # Errors
 /// Reports I/O errors.

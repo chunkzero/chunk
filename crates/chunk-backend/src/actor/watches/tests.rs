@@ -330,3 +330,26 @@ fn subscription_reruns_get_a_turn_under_continuous_foreground_queries() {
     }
     panic!("subscription rerun received no turn across 32 foreground completions, with no overload signalled");
 }
+
+#[tokio::test]
+async fn position_advances_follow_where_published_results_hold() {
+    let mut watches = Watches::new(Revision(0));
+    let receiver = subscribe(&mut watches);
+    let initial = watches.next_job(|| view(0)).unwrap();
+    watches.complete(&initial, Ok("0".into()), reads());
+    let mut group = receiver.await.unwrap().unwrap();
+    let version = group.next().await.unwrap().version;
+    let mut progress = group.progress();
+
+    // Revisions 1 and 2 share one durable write, which changes the value to 1 and back to 0; the rerun sees
+    // revision 2 before revision 1 is acknowledged.
+    watches.changed(Revision(1), change(), 64);
+    let rerun = watches.next_job(|| view(2)).unwrap();
+    watches.complete(&rerun, Ok("0".into()), reads());
+    assert_eq!(progress.holds(version), None, "the published value did not hold at revision 1");
+
+    // The unchanged rerun publishes nothing, yet the result reaches revision 2 once it is durable.
+    watches.changed(Revision(2), Arc::from([]), 0);
+    assert_eq!(progress.holds(version), Some(Revision(2)));
+    crate::tests::pending(Box::pin(group.next()).as_mut()).await;
+}

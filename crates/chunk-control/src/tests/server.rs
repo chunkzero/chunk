@@ -27,6 +27,7 @@ async fn run_releases_authority_before_returning_with_an_open_watch() {
                 control: environment.clone(),
                 host: fixture.host.clone(),
                 fresh: false,
+                services: None,
             };
             let server = async {
                 crate::server::run(config, ready, stop.clone()).await.unwrap();
