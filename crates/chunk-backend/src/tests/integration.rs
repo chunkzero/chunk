@@ -287,7 +287,9 @@ async fn service_shutdown_closes_watchers_and_releases_durable_state() {
             ready,
             stop.clone(),
         ));
-        let connection = tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap().connection;
+        // The embedder keeps its readiness handle past shutdown.
+        let crate::server::Ready { connection, backend } =
+            tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap();
         let mut client = BackendClient::connect(connection.endpoint).await.unwrap();
         let mut request = authorized(BackendWatchGroup { queries: vec![query("get")] });
         request.metadata_mut().insert("authorization", format!("Bearer {}", connection.token).parse().unwrap());
@@ -297,6 +299,7 @@ async fn service_shutdown_closes_watchers_and_releases_durable_state() {
         tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap().unwrap();
         assert!(!path.exists());
         assert!(stream.message().await.unwrap().is_none());
+        assert!(matches!(backend.wake_handoff().await, Err(crate::Error::Closed)));
     }
 }
 

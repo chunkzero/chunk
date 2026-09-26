@@ -114,7 +114,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     }
     .await;
     let flushed = tokio::task::spawn_blocking(move || {
-        drop(backend);
+        // Embedders may still hold handles from `Ready`; nothing commits after this.
+        backend.stop();
         replicator.as_ref().map_or(Ok(()), chunk_store::Replicator::flush)
     })
     .await

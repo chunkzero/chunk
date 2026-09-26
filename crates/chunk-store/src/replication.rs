@@ -18,8 +18,9 @@
 //! format migration) or after `snapshot_segments` segments or `snapshot_bytes`
 //! bytes of segments. Restore takes the newest epoch's latest snapshot, replays
 //! its later segments and continues under the next unused epoch. A writer
-//! checks for the next epoch's claim before and after each upload; once it
-//! exists, the writer is fenced and its commits and flushes fail.
+//! checks for the next epoch's claim before and after each upload, on every
+//! flush and every `fence_interval` while idle; once it exists, the writer is
+//! fenced and its commits and flushes fail.
 
 use std::{
     io,
@@ -66,11 +67,12 @@ pub struct Replication {
     batch_bytes: usize,
     snapshot_segments: usize,
     snapshot_bytes: u64,
+    fence_interval: Duration,
 }
 
 impl Replication {
-    /// Uploads within about five seconds of a commit and snapshots after 720
-    /// segments or 64 MiB of segments.
+    /// Uploads within about five seconds of a commit, snapshots after 720
+    /// segments or 64 MiB of segments and checks ownership every 10 seconds.
     #[must_use]
     pub fn new(storage: Arc<dyn ObjectStorage>) -> Self {
         Self {
@@ -79,6 +81,7 @@ impl Replication {
             batch_bytes: 8 * 1024 * 1024,
             snapshot_segments: 720,
             snapshot_bytes: 64 * 1024 * 1024,
+            fence_interval: Duration::from_secs(10),
         }
     }
 
@@ -101,6 +104,8 @@ impl Replication {
 /// Owns the uploader thread. Dropping it stops uploading without flushing.
 pub struct Replicator {
     shared: Arc<Shared>,
+    storage: Arc<dyn ObjectStorage>,
+    epoch: u64,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -122,9 +127,10 @@ impl Replicator {
             }),
             changed: Condvar::new(),
         });
+        let storage = replication.storage.clone();
         let worker = uploader::Uploader::new(path, replication, epoch, remote, shared.clone())?;
         let thread = std::thread::Builder::new().name("chunk-replication".into()).spawn(move || worker.run())?;
-        Ok((Self { shared: shared.clone(), thread: Some(thread) }, shared))
+        Ok((Self { shared: shared.clone(), storage, epoch, thread: Some(thread) }, shared))
     }
 
     /// Blocks until every transaction committed before the call is in object
@@ -132,8 +138,18 @@ impl Replicator {
     /// # Errors
     /// Reports the first failed upload attempt after the call; the uploader keeps
     /// retrying in the background, so callers may flush again.
-    /// Fails with [`Error::Fenced`] once another store claimed a newer epoch.
+    /// Fails with [`Error::Fenced`] once another store claimed a newer epoch,
+    /// which it checks in object storage before reporting success.
     pub fn flush(&self) -> Result<()> {
+        self.uploaded()?;
+        if fenced(self.storage.as_ref(), self.epoch)? {
+            self.shared.fence();
+            return Err(Error::Fenced);
+        }
+        Ok(())
+    }
+
+    fn uploaded(&self) -> Result<()> {
         let mut state = self.shared.lock();
         let target = state.committed;
         let failures = state.failures;
@@ -220,6 +236,12 @@ impl Shared {
         self.lock().ended == Some(Ended::Fenced)
     }
 
+    /// Stops the uploader and fails later commits and flushes.
+    fn fence(&self) {
+        self.lock().ended = Some(Ended::Fenced);
+        self.changed.notify_all();
+    }
+
     pub(crate) fn committed(&self, sequence: u64, bytes: usize) {
         let mut state = self.lock();
         state.committed = sequence;
@@ -227,6 +249,12 @@ impl Shared {
         state.pending_since.get_or_insert_with(Instant::now);
         self.changed.notify_all();
     }
+}
+
+/// Whether a newer epoch was claimed. Epochs are claimed in order, so any newer
+/// claim implies the next one.
+fn fenced(storage: &dyn ObjectStorage, epoch: u64) -> Result<bool> {
+    Ok(!storage.list(&segment::epoch_key(epoch + 1))?.is_empty())
 }
 
 /// Owns `epoch` through its claim object, creating it when absent.

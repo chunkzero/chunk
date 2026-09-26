@@ -231,16 +231,16 @@ impl ObjectStorage for Racing {
 
 type Host = Arc<Mutex<Option<(SqliteStore, Replicator)>>>;
 
-/// Asserts a superseded writer can neither upload nor commit.
+/// Asserts an idle superseded writer learns it was fenced and can no longer commit.
 fn assert_fenced(host: &Host, storage: &Memory, id: &str) {
     let (mut store, replicator) = host.lock().unwrap().take().unwrap();
     let keys = storage.keys();
-    let revision = store.snapshot().unwrap().revision.0;
-    store.commit(commit(id, revision, vec![])).unwrap();
+    assert!(!replicator.fenced());
     assert!(matches!(replicator.flush(), Err(Error::Fenced)));
     assert!(replicator.fenced());
+    let revision = store.snapshot().unwrap().revision.0;
+    assert!(matches!(store.commit(commit(id, revision, vec![])), Err(Error::Fenced)));
     assert_eq!(storage.keys(), keys);
-    assert!(matches!(store.commit(commit(&format!("{id}-again"), revision + 1, vec![])), Err(Error::Fenced)));
 }
 
 #[test]
@@ -296,6 +296,34 @@ fn a_restore_includes_uploads_that_race_its_claim_and_fences_their_writer() {
     assert!(store.outcome(&operation("raced")).unwrap().is_some());
     drop(store);
     assert_fenced(&writer, &storage, "after-takeover");
+}
+
+#[test]
+fn idle_writers_detect_a_takeover_and_never_upload_afterwards() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let checked = Replication { fence_interval: Duration::from_millis(10), ..manual(&storage) };
+    let (mut idle, idle_replicator) = open(&directory.path().join("idle.db"), checked);
+    idle.apply_schema(&schema()).unwrap();
+    idle_replicator.flush().unwrap();
+
+    // The idle writer notices the takeover without any commit or flush.
+    let (mut taken, taken_replicator) = open(&directory.path().join("taken.db"), manual(&storage));
+    assert_eq!(taken.epoch(), Epoch(2));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !idle_replicator.fenced() {
+        assert!(Instant::now() < deadline, "idle writer was never fenced");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(idle.commit(commit("idle", 1, vec![])), Err(Error::Fenced)));
+
+    // A commit accepted before the next check is never uploaded.
+    drop(open(&directory.path().join("later.db"), manual(&storage)));
+    taken.commit(commit("unsent", 1, vec![])).unwrap();
+    let keys = storage.keys();
+    assert!(matches!(taken_replicator.flush(), Err(Error::Fenced)));
+    assert_eq!(storage.keys(), keys);
+    assert!(matches!(taken.commit(commit("after", 2, vec![])), Err(Error::Fenced)));
 }
 
 #[test]

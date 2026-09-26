@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, PoisonError},
@@ -24,6 +25,13 @@ pub(super) struct Uploader {
     /// Segments and their bytes uploaded since this epoch's latest snapshot.
     segments: usize,
     bytes: u64,
+    /// When ownership was last checked in object storage.
+    checked: Cell<Instant>,
+}
+
+enum Work {
+    Upload { through: u64 },
+    CheckOwnership,
 }
 
 impl Uploader {
@@ -38,14 +46,35 @@ impl Uploader {
             Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         let (segments, bytes) = remote.since_snapshot(epoch);
-        Ok(Self { path, connection, replication, epoch, shared, based: remote.base(epoch).is_some(), segments, bytes })
+        Ok(Self {
+            path,
+            connection,
+            replication,
+            epoch,
+            shared,
+            based: remote.base(epoch).is_some(),
+            segments,
+            bytes,
+            checked: Cell::new(Instant::now()),
+        })
     }
 
     pub fn run(mut self) {
         let shared = self.shared.clone();
         let _exit = Exit(&shared);
         let mut backoff = Duration::from_secs(1);
-        while let Some(target) = self.wait() {
+        while let Some(work) = self.wait() {
+            let target = match work {
+                Work::Upload { through } => through,
+                Work::CheckOwnership => {
+                    // Transient failures are retried after another interval.
+                    if matches!(self.fence(), Err(Error::Fenced)) {
+                        shared.fence();
+                        return;
+                    }
+                    continue;
+                }
+            };
             // Progress counts only once no newer epoch claimed the environment by
             // the end of the upload, so a flush never reports superseded objects.
             let result = self.fence().and_then(|()| self.upload(target)).and_then(|reached| {
@@ -59,7 +88,7 @@ impl Uploader {
                     continue;
                 }
                 Err(Error::Fenced) => {
-                    shared.lock().ended = Some(Ended::Fenced);
+                    shared.fence();
                     return;
                 }
                 Err(error) => error,
@@ -77,15 +106,19 @@ impl Uploader {
         }
     }
 
-    /// Waits until a batch is due and returns the sequence to upload through.
-    fn wait(&self) -> Option<u64> {
+    /// Waits until a batch or an ownership check is due.
+    fn wait(&self) -> Option<Work> {
         let mut state = self.shared.lock();
         loop {
-            if state.stop {
+            if state.stop || state.ended.is_some() {
                 return None;
             }
+            let check = self.replication.fence_interval.saturating_sub(self.checked.get().elapsed());
+            if check.is_zero() {
+                return Some(Work::CheckOwnership);
+            }
             if state.committed <= state.uploaded {
-                state = self.shared.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+                state = self.shared.changed.wait_timeout(state, check).unwrap_or_else(PoisonError::into_inner).0;
                 continue;
             }
             let waited = state.pending_since.map_or(self.replication.batch_delay, |since| since.elapsed());
@@ -93,22 +126,21 @@ impl Uploader {
                 || state.pending_bytes >= self.replication.batch_bytes
                 || waited >= self.replication.batch_delay
             {
-                return Some(state.committed);
+                return Some(Work::Upload { through: state.committed });
             }
             state = self
                 .shared
                 .changed
-                .wait_timeout(state, self.replication.batch_delay.saturating_sub(waited))
+                .wait_timeout(state, self.replication.batch_delay.saturating_sub(waited).min(check))
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
     }
 
-    /// Fails with [`Error::Fenced`] once the next epoch is claimed. Epochs are
-    /// claimed in order, so any newer claim implies that one.
+    /// Fails with [`Error::Fenced`] once a newer epoch is claimed.
     fn fence(&self) -> Result<()> {
-        let next = segment::epoch_key(self.epoch + 1);
-        if self.replication.storage.list(&next)?.is_empty() { Ok(()) } else { Err(Error::Fenced) }
+        self.checked.set(Instant::now());
+        if super::fenced(self.replication.storage.as_ref(), self.epoch)? { Err(Error::Fenced) } else { Ok(()) }
     }
 
     /// Uploads entries through `target` and returns the last sequence stored.
