@@ -118,12 +118,23 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
       returning ${environment.state !== EnvironmentState.SUSPENDED} as changed`;
     if (!marked) return;
     if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
+    // Reports, wakes and attaches lock the row too, so none can land between this recheck and the suspension.
+    const suspendIfIdle = (machineId: string) =>
+      sql.begin(async (tx) => {
+        const [still] = await tx`
+          select 1 as idle from environments
+          where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
+            and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision
+          for update`;
+        if (still) await provider.suspend(machineId);
+        return Boolean(still);
+      });
     for (const request of active) {
       if (!request.machine_id) continue;
       const machine = await provider.status(request.machine_id);
-      if (machine.state === "running") await provider.suspend(machine.id);
+      if (machine.state === "running" && !(await suspendIfIdle(machine.id))) return;
     }
-    if (core.state === "running") await provider.suspend(core.id);
+    if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
     await fireDueAlarm(deps, environment);
     return;
   }
