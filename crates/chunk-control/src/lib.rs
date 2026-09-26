@@ -21,7 +21,7 @@ pub use session_methods::{CapturedSession, PreparedSessionMethod};
 use std::{
     collections::BTreeMap,
     path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use chunk_proto::v1::DeploymentRef;
@@ -148,7 +148,7 @@ impl Config {
 pub struct Control {
     config: Config,
     host: Arc<dyn Host>,
-    authority: Mutex<Authority>,
+    authority: Authority,
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
@@ -165,28 +165,28 @@ impl Control {
             config,
             host,
             observations: Mutex::default(),
-            authority: Mutex::new(authority),
+            authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
-    fn authority(&self) -> Result<MutexGuard<'_, Authority>> {
-        self.authority.lock().map_err(|_| Error::Unresolved("control authority poisoned"))
-    }
-
-    fn state(&self) -> Result<State> {
-        self.authority()?.read()
+    fn state(&self) -> Result<Arc<State>> {
+        self.authority.read()
     }
 
     fn update<T>(&self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-        self.authority()?.update(change)
+        self.authority.update(change)
     }
 
     fn operation(&self, id: &str) -> Result<Arc<AsyncMutex<()>>> {
         let mut operations = self.operations.lock().map_err(|_| Error::Unresolved("operation mutex poisoned"))?;
         if operations.len() >= 1024 && !operations.contains_key(id) {
-            return Err(Error::Capacity);
+            // Only the map holds an idle lock, so dropping it cannot split a caller from its waiters.
+            operations.retain(|_, lock| Arc::strong_count(lock) > 1);
+            if operations.len() >= 1024 {
+                return Err(Error::Capacity);
+            }
         }
         Ok(operations.entry(id.into()).or_default().clone())
     }
@@ -204,8 +204,10 @@ pub enum Error {
     Capacity,
     #[error("runtime and JVM have stopped")]
     Stopped,
+    #[error("control state is open in another process")]
+    Locked,
     #[error("control storage: {0}")]
-    Storage(#[from] chunk_store::Error),
+    Storage(#[from] rusqlite::Error),
     #[error("local host I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("control state: {0}")]

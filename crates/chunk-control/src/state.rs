@@ -1,90 +1,79 @@
-use std::{collections::BTreeMap, path::Path};
+mod store;
+
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex, MutexGuard, RwLock},
+};
 
 use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
-use chunk_store::{Commit, DocumentKey, Operation, SqliteStore, Storage, Write};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Result};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default)]
 pub(crate) struct State {
     pub config: Vec<u8>,
     pub hosts: BTreeMap<String, HostState>,
     pub sessions: BTreeMap<String, SessionState>,
     pub players: BTreeMap<String, PlayerState>,
     pub claims: BTreeMap<String, Claim>,
-    #[serde(default)]
     pub method_sequence: u64,
-    #[serde(default)]
     pub moves: BTreeMap<String, MoveIntent>,
-    #[serde(default)]
     pub drains: BTreeMap<String, Drain>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Drain {
     pub request: Vec<u8>,
     pub host: String,
     pub deadline_ms: u64,
     /// Started by control itself, so no caller retries it and it can be forgotten once the host stops.
-    #[serde(default)]
     pub automatic: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MoveIntent {
     pub request: Vec<u8>,
     pub canceled: bool,
-    #[serde(default)]
     pub sequence: u64,
-    #[serde(default)]
     pub failure: Option<MoveFailure>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MoveFailure {
     pub reason: String,
     pub at_ms: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HostState {
     pub app: String,
     pub profile: String,
     pub retired: bool,
-    #[serde(default)]
     pub idle_since_ms: Option<u64>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionState {
-    #[serde(default)]
     pub empty_since_ms: Option<u64>,
-    #[serde(default)]
     pub finish_requested: bool,
-    #[serde(default)]
     pub finished: bool,
     pub host: String,
     pub session_type: String,
     pub demand_key: String,
     pub capacity: u32,
-    #[serde(default = "empty_configuration")]
     pub configuration: serde_json::Value,
     pub retired: bool,
 }
 
-fn empty_configuration() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PlayerState {
     pub membership_generation: u64,
     pub delivery_generation: u64,
     pub current: Option<String>,
-    #[serde(default)]
     pub pending: Option<String>,
 }
 
@@ -111,7 +100,7 @@ impl From<Phase> for ClaimPhase {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Claim {
     pub request: Vec<u8>,
     pub player: String,
@@ -123,6 +112,7 @@ pub(crate) struct Claim {
     pub assignment: Option<Vec<u8>>,
     pub activated: bool,
     pub created_at_ms: u64,
+    pub released_at_ms: Option<u64>,
 }
 
 impl Claim {
@@ -165,20 +155,23 @@ impl State {
     }
 }
 
+/// The durable control state. Reads share the last committed state; writers serialize on the store.
 pub(crate) struct Authority {
-    store: SqliteStore,
+    store: Mutex<Writable>,
+    current: RwLock<Arc<State>>,
+}
+
+struct Writable {
+    store: store::Store,
+    /// Set after a failed commit, whose outcome is unknown, until state is reloaded from storage.
+    stale: bool,
 }
 
 impl Authority {
     pub fn open(path: &Path, config: &Config) -> Result<Self> {
-        if !path.exists() {
-            super::host::private_file(path)?;
-        }
-        let mut store = SqliteStore::open(path, &format!("control:{}", config.deployment.environment))?;
-        store.apply_schema(&serde_json::from_value(serde_json::json!({
-            "control": {"fields": {"state": {"schema": {"type": "string"}}}}
-        }))?)?;
-        let mut authority = Self { store };
+        let store = store::Store::open(path)?;
+        let current = RwLock::new(Arc::new(store.load()?));
+        let authority = Self { store: Mutex::new(Writable { store, stale: false }), current };
         let fingerprint = Sha256::digest(serde_json::to_vec(config)?).to_vec();
         authority.update(|state| {
             if state.config.is_empty() {
@@ -192,32 +185,56 @@ impl Authority {
         Ok(authority)
     }
 
-    pub fn read(&mut self) -> Result<State> {
-        let snapshot = self.store.snapshot()?;
-        snapshot
-            .get(&DocumentKey::new("control", "state")?)?
-            .map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))
+    pub fn read(&self) -> Result<Arc<State>> {
+        Ok(self.current.read().map_err(|_| Error::Unresolved("control state poisoned"))?.clone())
     }
 
-    pub fn update<T>(&mut self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-        // Reload after every boundary, including an ambiguous prior commit failure.
-        let snapshot = self.store.snapshot()?;
-        let key = DocumentKey::new("control", "state")?;
-        let mut state = snapshot.get(&key)?.map_or_else(|| Ok(State::default()), |doc| decode_state(&doc.value))?;
-        let result = change(&mut state)?;
-        let value = serde_json::json!({"state": serde_json::to_string(&state)?});
-        let fingerprint = Sha256::digest(serde_json::to_vec(&value)?).into();
-        self.store.commit(Commit {
-            expected: snapshot.revision,
-            operation: Operation { id: uuid::Uuid::new_v4().to_string(), fingerprint },
-            writes: vec![Write { key, value: Some(value) }],
-            result: serde_json::Value::Null,
-        })?;
-        Ok(result)
+    pub fn update<T>(&self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        self.writer()?.update(change)
+    }
+
+    /// Excludes other writers until the returned guard drops.
+    pub fn writer(&self) -> Result<Writer<'_>> {
+        let store = self.store.lock().map_err(|_| Error::Unresolved("control authority poisoned"))?;
+        Ok(Writer { authority: self, store })
+    }
+
+    fn publish(&self, state: State) -> Result<()> {
+        *self.current.write().map_err(|_| Error::Unresolved("control state poisoned"))? = Arc::new(state);
+        Ok(())
     }
 }
 
-fn decode_state(value: &serde_json::Value) -> Result<State> {
-    let json = value["state"].as_str().ok_or(Error::Invalid("corrupt control state"))?;
-    Ok(serde_json::from_str(json)?)
+pub(crate) struct Writer<'a> {
+    authority: &'a Authority,
+    store: MutexGuard<'a, Writable>,
+}
+
+impl Writer<'_> {
+    /// Applies `change` to the current state and commits only the entities it touched.
+    pub fn update<T>(&mut self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        self.recover()?;
+        let previous = self.authority.read()?;
+        let mut next = State::clone(&previous);
+        let result = change(&mut next)?;
+        let changes = store::changes(&previous, &next)?;
+        if changes.is_empty() {
+            return Ok(result);
+        }
+        if let Err(error) = self.store.store.write(&changes) {
+            self.store.stale = true;
+            let _ = self.recover();
+            return Err(error);
+        }
+        self.authority.publish(next)?;
+        Ok(result)
+    }
+
+    fn recover(&mut self) -> Result<()> {
+        if self.store.stale {
+            self.authority.publish(self.store.store.load()?)?;
+            self.store.stale = false;
+        }
+        Ok(())
+    }
 }

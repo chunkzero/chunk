@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use chunk_proto::v1::ShutdownNodeRequest;
+use chunk_proto::v1::{ClaimRequest, ShutdownNodeRequest};
 use prost::Message;
 
 use crate::{
@@ -9,17 +9,18 @@ use crate::{
     state::{Phase, State},
 };
 
+/// Long enough for callers to retry an operation after its release, short enough to bound history.
+const RELEASED_RETENTION_MS: u64 = 300_000;
+
 impl Control {
     /// Drains hosts that have had no unfinished session or open claim for the idle timeout,
-    /// and forgets finished sessions, stopped hosts and its own drains once nothing references them.
+    /// and forgets finished sessions, stopped hosts, its own drains and old released claims once
+    /// nothing references them.
     pub(crate) fn retire_idle_hosts(&self) -> Result<()> {
         let now = crate::now_ms();
-        let mut authority = self.authority()?;
-        // Most passes change nothing, so only commit when the current state would change.
-        if self.tidy(&mut authority.read()?, now)? {
-            authority.update(|state| self.tidy(state, now))?;
-        }
-        let retained = authority.read()?.hosts.into_keys().collect();
+        let mut writer = self.authority.writer()?;
+        writer.update(|state| self.tidy(state, now))?;
+        let retained = self.state()?.hosts.keys().cloned().collect();
         // Keep placement excluded until pruning finishes, so a newly allocated host cannot be removed.
         if let Err(error) = self.host.prune(&retained) {
             tracing::warn!(%error, "stopped host cleanup will be retried");
@@ -31,10 +32,37 @@ impl Control {
         Ok(())
     }
 
-    fn tidy(&self, state: &mut State, now: u64) -> Result<bool> {
+    fn tidy(&self, state: &mut State, now: u64) -> Result<()> {
+        // A released move claim stays while the other end is open: the source's move checks
+        // read its destination's outcome, and a destination's activation checks its fenced source.
+        let source = |request: &[u8]| ClaimRequest::decode(request).ok().and_then(|request| request.source);
+        let open = |operation: &str| state.claims.get(operation).is_some_and(|claim| claim.phase != Phase::Released);
+        let mut referenced: BTreeSet<_> = state
+            .claims
+            .values()
+            .filter(|claim| claim.phase != Phase::Released)
+            .filter_map(|claim| source(&claim.request).map(|source| source.operation_id))
+            .collect();
+        referenced.extend(
+            state
+                .moves
+                .iter()
+                .filter(|(_, intent)| source(&intent.request).is_some_and(|source| open(&source.operation_id)))
+                .map(|(destination, _)| destination.clone()),
+        );
+        state.claims.retain(|operation, claim| {
+            claim.released_at_ms.is_none_or(|at| now.saturating_sub(at) < RELEASED_RETENTION_MS)
+                || referenced.contains(operation)
+        });
+        state.moves.retain(|operation, intent| {
+            state.claims.contains_key(operation)
+                || ClaimRequest::decode(intent.request.as_slice())
+                    .ok()
+                    .and_then(|request| request.source)
+                    .is_some_and(|source| state.claims.contains_key(&source.operation_id))
+        });
         let open: BTreeSet<_> =
             state.claims.values().filter(|c| c.phase != Phase::Released).map(|c| c.session.clone()).collect();
-        let (sessions, drains, hosts) = (state.sessions.len(), state.drains.len(), state.hosts.len());
         state.sessions.retain(|id, session| !session.finished || open.contains(id));
         state.drains.retain(|_, drain| !drain.automatic || !self.host.stopped(&drain.host));
         state.hosts.retain(|id, host| {
@@ -43,11 +71,9 @@ impl Control {
                 || state.sessions.values().any(|session| session.host == *id)
                 || state.drains.values().any(|drain| drain.host == *id)
         });
-        let mut changed =
-            sessions != state.sessions.len() || drains != state.drains.len() || hosts != state.hosts.len();
         let timeout = u64::from(self.config.idle_node_timeout_seconds) * 1000;
         if timeout == 0 {
-            return Ok(changed);
+            return Ok(());
         }
         let busy: BTreeSet<_> = state
             .sessions
@@ -58,7 +84,6 @@ impl Control {
         let mut expired = Vec::new();
         for (id, host) in state.hosts.iter_mut().filter(|(_, host)| !host.retired) {
             let since = (!busy.contains(id)).then(|| host.idle_since_ms.unwrap_or(now));
-            changed |= since != host.idle_since_ms;
             host.idle_since_ms = since;
             if since.is_some_and(|since| now.saturating_sub(since) >= timeout) {
                 expired.push(id.clone());
@@ -69,8 +94,7 @@ impl Control {
             let request =
                 ShutdownNodeRequest { operation_id: operation.clone(), host_id: id.clone(), timeout_seconds: 0 };
             retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id))?;
-            changed = true;
         }
-        Ok(changed)
+        Ok(())
     }
 }

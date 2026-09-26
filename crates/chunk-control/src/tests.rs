@@ -449,7 +449,7 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
     );
     assert!(matches!(
         Control::open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
-        Err(Error::Storage(chunk_store::Error::WriterLocked))
+        Err(Error::Locked)
     ));
     fixture.close().await;
 }
@@ -882,3 +882,4 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
 mod creation;
 mod destinations;
 mod launch;
+mod retention;

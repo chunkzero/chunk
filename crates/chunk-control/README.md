@@ -31,7 +31,8 @@ owner remains unresolved. An old cancellation cannot release a newer connection.
 Control uses a separate SQLite database and exclusive writer lock under `.chunk/control/`. Gameplay data still belongs
 to the environment backend. The control database retains requests, generation counters, reservations and activation
 intent before external effects. A lost activation reply is reconciled against the runtime's inventory. Configuration
-packets travel over the native Minecraft connection; control carries destination metadata.
+packets travel over the native Minecraft connection; control carries destination metadata. Released claims, and moves
+that only reference them, are forgotten five minutes after release.
 
 `Nodes` reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped states, including the
 last observed JVM health metrics and observation timestamp. Health is polled every five seconds; missing or stalled
