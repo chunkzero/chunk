@@ -107,4 +107,7 @@ message ProcessReport {
 message DesiredSessions {
   repeated SessionCommand create = 1;
   repeated SessionCommand finish = 2;
+  // Sessions control no longer tracks. The process drops each one's record once
+  // it has ended or failed.
+  repeated SessionRef forget = 3;
 }

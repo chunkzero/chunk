@@ -15,6 +15,7 @@ import io.grpc.stub.StreamObserver;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 
 /**
@@ -67,14 +68,20 @@ final class ProcessSync {
     private ProcessReport.Builder changes() {
         var inventory = state.inventory();
         var report = ProcessReport.newBuilder().setIdentity(identity);
+        var sessionIds = new HashSet<String>();
         for (var session : inventory.getSessionsList()) {
+            sessionIds.add(session.getSession().getId());
             if (!session.equals(sessions.put(session.getSession().getId(), session)))
                 report.addSessions(session);
         }
+        var operationIds = new HashSet<String>();
         for (var delivery : inventory.getDeliveriesList()) {
+            operationIds.add(delivery.getDelivery().getOperationId());
             if (!delivery.equals(deliveries.put(delivery.getDelivery().getOperationId(), delivery)))
                 report.addDeliveries(delivery);
         }
+        sessions.keySet().retainAll(sessionIds);
+        deliveries.keySet().retainAll(operationIds);
         return report;
     }
 

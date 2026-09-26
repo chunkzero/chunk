@@ -45,5 +45,6 @@ public final class ProcessService implements ProcessState {
         for (var command : desired.getFinishList()) {
             if (command.getIdentity().equals(identity)) sessions.finish(command);
         }
+        for (var session : desired.getForgetList()) sessions.forget(session.getId());
     }
 }

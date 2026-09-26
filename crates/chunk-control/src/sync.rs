@@ -178,8 +178,8 @@ impl Control {
             .unwrap_or(Err(Error::Unresolved("session is not ready")))
     }
 
-    /// The sessions `host`'s JVM should run or end that differ from `sent`, or all of them when nothing was sent.
-    /// `None` when nothing changed.
+    /// The sessions `host`'s JVM should run or end that differ from `sent`, or all of them when nothing was sent, and
+    /// the sessions it may forget. `None` when nothing changed.
     pub(crate) fn desired(&self, host: &str, sent: &mut Option<Desired>) -> Result<Option<DesiredSessions>> {
         let state = self.state()?;
         let Some(runtime) = self.host.connection(host) else {
@@ -193,9 +193,22 @@ impl Control {
             }
             if *finish { &mut update.finish } else { &mut update.create }.push(command.clone());
         }
+        // A new stream learns which reported sessions control dropped while it was away.
+        let known: Vec<String> = match sent.as_ref() {
+            Some(sent) => sent.keys().cloned().collect(),
+            None => self
+                .links
+                .report(host, &runtime.identity)
+                .map(|report| report.sessions.into_iter().filter_map(|s| s.session).map(|s| s.id).collect())
+                .unwrap_or_default(),
+        };
+        let forget: Vec<String> = known.into_iter().filter(|id| !desired.contains_key(id)).collect();
+        self.links.forget(host, &forget);
+        update.forget = forget.into_iter().map(|id| SessionRef { id }).collect();
         let first = sent.is_none();
         *sent = Some(desired);
-        Ok((first || !update.create.is_empty() || !update.finish.is_empty()).then_some(update))
+        let changed = !(update.create.is_empty() && update.finish.is_empty() && update.forget.is_empty());
+        Ok((first || changed).then_some(update))
     }
 }
 

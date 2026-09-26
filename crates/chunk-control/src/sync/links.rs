@@ -70,6 +70,17 @@ impl Links {
         }
     }
 
+    /// Drops `host`'s reported sessions that control no longer tracks.
+    pub fn forget(&self, host: &str, sessions: &[String]) {
+        if let Ok(mut links) = self.lock()
+            && let Some(link) = links.get_mut(host)
+        {
+            for id in sessions {
+                link.sessions.remove(id);
+            }
+        }
+    }
+
     /// Wakes waiters after a report was applied.
     pub fn applied(&self) {
         self.reports.send_modify(|count| *count += 1);
