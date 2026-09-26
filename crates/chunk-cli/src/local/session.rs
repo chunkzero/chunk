@@ -256,9 +256,11 @@ impl<'a> Session<'a> {
         Ok(format!("{}{resumed} · {summary}", short(&id)))
     }
 
-    /// Stops every running release, disconnecting its players, then starts `staged`.
+    /// Stops every running release, disconnecting its players, then starts `staged`. The backend
+    /// activates `staged` first, so a release it rejects leaves the running ones untouched.
     async fn restart(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
+        self.shared.deploy(staged.bundle.clone()).await?;
         let id = staged.release.id.clone();
         let mut stopped = Vec::new();
         for live in self.live.drain(..) {
