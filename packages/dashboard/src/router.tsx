@@ -23,25 +23,25 @@ function section(path: string, component: () => React.ReactNode) {
   return createRoute({ getParentRoute: () => environmentRoute, path, component });
 }
 
-export const router = createRouter({
-  routeTree: rootRoute.addChildren([
-    createRoute({ getParentRoute: () => rootRoute, path: "/", component: Projects }),
-    createRoute({
-      getParentRoute: () => rootRoute,
-      path: "/login",
-      validateSearch: (search: Record<string, unknown>): { code?: string } =>
-        typeof search.code === "string" ? { code: search.code } : {},
-      component: Login,
-    }),
-    createRoute({ getParentRoute: () => rootRoute, path: "/p/$project", component: Project }),
-    environmentRoute.addChildren([
-      section("/", Deployments),
-      section("logs", Logs),
-      section("secrets", Secrets),
-      section("domains", Domains),
-    ]),
+export const routeTree = rootRoute.addChildren([
+  createRoute({ getParentRoute: () => rootRoute, path: "/", component: Projects }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/login",
+    validateSearch: (search: Record<string, unknown>): { code?: string } =>
+      typeof search.code === "string" ? { code: search.code } : {},
+    component: Login,
+  }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/p/$project", component: Project }),
+  environmentRoute.addChildren([
+    section("/", Deployments),
+    section("logs", Logs),
+    section("secrets", Secrets),
+    section("domains", Domains),
   ]),
-});
+]);
+
+export const router = createRouter({ routeTree });
 
 declare module "@tanstack/react-router" {
   interface Register {

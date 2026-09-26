@@ -7,7 +7,7 @@
     "fmt:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
     "typecheck": "tsc --project crates/chunk-build/sdk/tsconfig.json && pnpm --filter @chunkzero/management typecheck && pnpm --filter @chunkzero/dashboard typecheck",
-    "test": "node --test crates/chunk-build/sdk/test/*.test.mjs",
+    "test": "node --test crates/chunk-build/sdk/test/*.test.mjs && pnpm --filter @chunkzero/dashboard test",
     "test:management": "pnpm --filter @chunkzero/management test",
     "build:dashboard": "pnpm --filter @chunkzero/dashboard build"
   },
