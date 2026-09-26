@@ -22,7 +22,6 @@ pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -34,9 +33,9 @@ pub use host::{Host, MachineProfile, ProcessHostConfig, RuntimeConnection};
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
-pub use state::Generation;
 pub use state::feed::{Change, Table};
 use state::{Authority, State};
+pub use state::{Generation, clear};
 
 pub use chunk_contract::ControlConnection;
 
@@ -161,12 +160,13 @@ pub struct Control {
 }
 
 impl Control {
-    /// Opens one durable authority. Runtime processes and their sockets are owned separately.
+    /// Opens one durable authority over its deployment's rows in the environment's system tables. Runtime processes
+    /// and their sockets are owned separately.
     /// # Errors
-    /// Rejects a second writer, changed configuration, invalid limits, or corrupt state.
-    pub fn open(path: &Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
+    /// Rejects changed configuration, invalid limits, corrupt state, or a stopped environment store.
+    pub fn open(system: chunk_backend::System, config: Config, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         config.validate()?;
-        let authority = Authority::open(path, &config)?;
+        let authority = Authority::open(system, &config)?;
         // A restore can lose a host's row while the JVM launched for it still runs.
         let mut surviving: BTreeSet<_> = authority.read()?.hosts.keys().cloned().collect();
         surviving.extend(host.unowned()?);
@@ -211,6 +211,12 @@ impl Control {
         self.authority.feed().after(position)
     }
 
+    /// Whether the environment store stopped or failed, so control can no longer commit.
+    #[must_use]
+    pub fn store_stopped(&self) -> bool {
+        self.authority.stopped()
+    }
+
     /// The position of the latest commit, updated after each one is readable.
     #[must_use]
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Generation> {
@@ -233,12 +239,10 @@ pub enum Error {
     Busy,
     #[error("runtime and JVM have stopped")]
     Stopped,
-    #[error("control state is open in another process")]
-    Locked,
-    #[error("control storage: {0}")]
-    Storage(#[from] rusqlite::Error),
     #[error("control store: {0}")]
     Store(chunk_store::Error),
+    #[error("environment store: {0}")]
+    Backend(chunk_backend::Error),
     #[error("local host I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("control state: {0}")]
@@ -252,9 +256,17 @@ pub enum Error {
 impl From<chunk_store::Error> for Error {
     fn from(error: chunk_store::Error) -> Self {
         match error {
-            chunk_store::Error::WriterLocked => Self::Locked,
             chunk_store::Error::Capacity => Self::Capacity,
             error => Self::Store(error),
+        }
+    }
+}
+
+impl From<chunk_backend::Error> for Error {
+    fn from(error: chunk_backend::Error) -> Self {
+        match error {
+            chunk_backend::Error::Storage(inner) if matches!(*inner, chunk_store::Error::Capacity) => Self::Capacity,
+            error => Self::Backend(error),
         }
     }
 }

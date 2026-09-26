@@ -80,7 +80,7 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
         .as_mut()
         .unwrap()
         .configuration = json!({"map":"desert"});
-    assert!(Control::open(&fixture.directory.path().join("control.sqlite"), changed, fixture.host.clone()).is_err());
+    assert!(open(&fixture.directory.path().join("control.sqlite"), changed, fixture.host.clone()).is_err());
     fixture.close().await;
 }
 
@@ -103,7 +103,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
             .as_mut()
             .unwrap()
             .configuration = configuration;
-        assert!(Control::open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
+        assert!(open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
     }
     for field in ["schema", "profile", "capacity"] {
         let mut config = fixture.config.clone();
@@ -138,13 +138,12 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
                     .capacity = 0;
             }
         }
-        assert!(Control::open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
+        assert!(open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
     }
     let control = fixture.control();
     assert!(control.claim(demand("missing-configuration", "undeclared")).await.is_err());
     assert!(control.state().unwrap().claims.is_empty());
     assert!(fixture.host.ids.lock().unwrap().is_empty());
-    assert!(!fixture.directory.path().join("invalid.sqlite").exists());
     let source = demand("source", "small");
     let assignment = control.claim(source.clone()).await.unwrap();
     fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;

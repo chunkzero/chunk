@@ -31,8 +31,8 @@ pub struct Change {
 
 pub(super) type Row = (Table, String, bool);
 
-/// The claim and move rows among `writes`.
-pub(super) fn rows(writes: &[Write]) -> Vec<Row> {
+/// The claim and move rows among `writes`, whose IDs start with `scope`.
+pub(super) fn rows(writes: &[Write], scope: &str) -> Vec<Row> {
     writes
         .iter()
         .filter_map(|write| {
@@ -41,7 +41,8 @@ pub(super) fn rows(writes: &[Write]) -> Vec<Row> {
                 MOVES => Table::Moves,
                 _ => return None,
             };
-            Some((table, write.key.id.clone(), write.value.is_none()))
+            let id = write.key.id.strip_prefix(scope).unwrap_or(&write.key.id);
+            Some((table, id.to_owned(), write.value.is_none()))
         })
         .collect()
 }

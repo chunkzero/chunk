@@ -124,7 +124,8 @@ async fn serve(
     let project = building::inspect(root, state.join("releases"))?;
     reporter.done("Project", project_summary(&project));
     let _lock = runner_lock(&state.join("runner.lock"))?;
-    // Control state and JVM logs of an earlier session; its releases are pruned once this one is serving.
+    // Control's local files and JVM logs of an earlier session; the backend clears its rows once it starts, and its
+    // releases are pruned once this one is serving.
     crate::cleaning::remove(&state.join("control"))?;
     if interactive {
         tokio::spawn(logs::follow_jvms(state.join("control"), reporter.clone(), stop.clone()));

@@ -70,9 +70,13 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
                         .empty_timeout_seconds = 2;
                 }
             }
-            assert!(
-                Control::open(&fixture.directory.path().join("control.sqlite"), config, fixture.host.clone()).is_err()
-            );
+            let opened = open(&fixture.directory.path().join("control.sqlite"), config, fixture.host.clone());
+            if change == "version" {
+                // Another deployment version is another control authority, with rows of its own.
+                assert!(opened.unwrap().state().unwrap().claims.is_empty());
+            } else {
+                assert!(opened.is_err());
+            }
         }
         fixture.close().await;
     }

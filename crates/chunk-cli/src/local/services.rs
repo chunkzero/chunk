@@ -69,6 +69,12 @@ impl Shared {
         self.backend =
             Some(Service { task: tokio::spawn(chunk_backend::server::run(config, ready, token.clone())), stop: token });
         let ready = Service::ready(&mut self.backend, started, "backend").await?;
+        // Control state of an earlier session, whose JVMs are gone.
+        let system = ready.backend.system();
+        tokio::task::spawn_blocking(move || chunk_control::clear(&system))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
         reporter.done("Backend", &ready.connection.endpoint);
         self.handle = Some(ready.backend);
         self.connection = Some(ready.connection);
@@ -101,6 +107,14 @@ impl Shared {
 
     pub fn backend(&self) -> Option<chunk_backend::Backend> {
         self.handle.clone()
+    }
+
+    /// The environment store's system lane, which every control generation writes through.
+    fn system(&self) -> io::Result<chunk_backend::System> {
+        self.handle
+            .as_ref()
+            .map(chunk_backend::Backend::system)
+            .ok_or_else(|| io::Error::other("backend is not running"))
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
@@ -210,6 +224,7 @@ impl Generation {
         let config = chunk_control::server::Config {
             connection: state.join("connection.json"),
             state,
+            system: shared.system()?,
             bind,
             control: authority,
             host,

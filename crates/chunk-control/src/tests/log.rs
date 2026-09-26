@@ -47,9 +47,8 @@ async fn reopens_state_larger_than_the_default_scan_budget() {
     assert_eq!(expected.claims.len(), 512);
     drop(control);
 
-    let reopened =
-        Control::open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone())
-            .and_then(|control| control.state());
+    let reopened = open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone())
+        .and_then(|control| control.state());
     fixture.close().await;
     let actual = reopened.expect("control must reopen state exceeding the default scan byte budget");
     assert!(actual.claims == expected.claims);

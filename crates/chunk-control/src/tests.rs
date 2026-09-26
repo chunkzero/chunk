@@ -316,6 +316,13 @@ impl Host for FakeHost {
     }
 }
 
+/// Opens control on an environment store of its own at `path`, through that store's backend.
+fn open(path: &std::path::Path, config: Config, host: Arc<dyn Host>) -> Result<Arc<Control>> {
+    let store = chunk_store::SqliteStore::open(path, &config.deployment.environment)?;
+    let backend = chunk_backend::Backend::new(config.deployment.environment.clone(), Box::new(store))?;
+    Control::open(backend.system(), config, host)
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     config: Config,
@@ -395,7 +402,7 @@ impl Fixture {
         Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server }
     }
     fn control(&self) -> Arc<Control> {
-        Control::open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap()
+        open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap()
     }
     async fn close(self) {
         let _ = self.stop.send(());
@@ -489,8 +496,8 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
         ClaimPhase::Arrived as i32
     );
     assert!(matches!(
-        Control::open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
-        Err(Error::Locked)
+        open(&fixture.directory.path().join("control.sqlite"), fixture.config.clone(), fixture.host.clone()),
+        Err(Error::Store(chunk_store::Error::WriterLocked))
     ));
     fixture.close().await;
 }
