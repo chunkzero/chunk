@@ -18,6 +18,7 @@ pub mod server;
 mod session_methods;
 mod sessions;
 mod state;
+mod sync;
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{
@@ -157,6 +158,7 @@ pub struct Control {
     draining: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     recovery: recovery::Recovery,
+    links: sync::Links,
 }
 
 impl Control {
@@ -176,6 +178,7 @@ impl Control {
             config,
             host,
             observations: Mutex::default(),
+            links: sync::Links::default(),
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),

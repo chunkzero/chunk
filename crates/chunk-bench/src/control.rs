@@ -104,9 +104,15 @@ impl Client {
     pub async fn arrive(&mut self, request: ClaimRequest) -> Result<()> {
         let assignment = self.client.claim(self.request(request)).await?.into_inner();
         ensure!(assignment.claim.is_some() && assignment.preparation.is_some(), "incomplete assignment");
-        let arrived = self.client.activate(self.request(ActivateClaim { claim: assignment.claim })).await?.into_inner();
-        ensure!(arrived.phase == ClaimPhase::Arrived as i32, "synthetic player did not arrive");
-        Ok(())
+        // The runtime reports the arrival on its own stream, which may reach control after this activation.
+        for _ in 0..100 {
+            let activation = ActivateClaim { claim: assignment.claim.clone() };
+            if self.client.activate(self.request(activation)).await?.into_inner().phase == ClaimPhase::Arrived as i32 {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        anyhow::bail!("synthetic player did not arrive")
     }
 
     pub async fn execute(&mut self, sequence: u64, config: &Config) -> Result<()> {

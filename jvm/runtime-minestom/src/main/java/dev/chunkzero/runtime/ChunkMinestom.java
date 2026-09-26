@@ -71,7 +71,7 @@ public final class ChunkMinestom implements AutoCloseable {
                                 Thread.currentThread().getContextClassLoader()),
                         gameplay::authorizeMethodCaller,
                         System::currentTimeMillis);
-        service = new ProcessService(identity, gameplay, sessions, chunk::tickCount, chunk);
+        service = new ProcessService(identity, gameplay, sessions, chunk);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
@@ -97,6 +97,7 @@ public final class ChunkMinestom implements AutoCloseable {
                                         methods.flush();
                                         ticks.flush();
                                         gameplay.flush();
+                                        chunk.flush();
                                         var inventory = sessions.inventory();
                                         chunk.progress(
                                                 sessions.activeCount(),
@@ -108,7 +109,7 @@ public final class ChunkMinestom implements AutoCloseable {
                             .schedule();
             server.start(new InetSocketAddress("127.0.0.1", 0));
             gameplay.setEndpoint("127.0.0.1:" + server.server().getPort());
-            chunk.bind(List.of(gameplay, service, methods), gameplay.getEndpoint());
+            chunk.bind(List.of(gameplay, methods), gameplay.getEndpoint(), service);
             started = true;
         } catch (IOException | RuntimeException error) {
             close();

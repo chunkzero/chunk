@@ -10,13 +10,13 @@ use std::{
 use crate::RuntimeConnection;
 use chunk_proto::v1::{
     ActivateClaim, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeliveryInventory,
-    DeliveryPhase, DeploymentRef, Identity, PlayerDelivery, PlayerPreparation, PlayerWithdrawal, ProcessIdentity,
-    ProcessInventory, SessionCommand, SessionDemand, SessionInventory, SessionPhase,
+    DeliveryPhase, DeploymentRef, DesiredSessions, Identity, PlayerDelivery, PlayerPreparation, PlayerWithdrawal,
+    ProcessIdentity, ProcessReport, SessionCommand, SessionDemand, SessionInventory, SessionPhase,
     gameplay_server::{Gameplay, GameplayServer},
-    process_control_server::{ProcessControl, ProcessControlServer},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::{Config, Contracts, Control, Error, Host, MachineProfile, Result, SessionType, state::Phase};
@@ -34,10 +34,9 @@ struct FakeRuntime {
     method_requests: Mutex<BTreeMap<String, chunk_proto::v1::SessionMethodRequest>>,
     sessions: Mutex<BTreeMap<String, SessionCommand>>,
     ended_sessions: Mutex<BTreeSet<String>>,
+    failed_sessions: Mutex<BTreeSet<String>>,
     failed_creation: AtomicBool,
-    lost_creation: AtomicBool,
     lost_preparation: AtomicBool,
-    lost_finish: AtomicBool,
     finishes: AtomicUsize,
     bindings: Mutex<BTreeMap<String, Binding>>,
     available: AtomicBool,
@@ -72,110 +71,126 @@ impl FakeRuntime {
     }
 }
 
-#[tonic::async_trait]
-impl ProcessControl for RuntimeService {
-    async fn inventory(
-        &self,
-        request: Request<ProcessIdentity>,
-    ) -> std::result::Result<Response<ProcessInventory>, Status> {
-        self.check(&request)?;
-        if request.get_ref() != &self.identity {
-            return Err(Status::failed_precondition("identity"));
-        }
-        if self.lost_reply.swap(false, Ordering::AcqRel) {
-            return Err(Status::deadline_exceeded("lost inventory reply"));
-        }
-        let ended = self.ended_sessions.lock().unwrap().clone();
-        Ok(Response::new(ProcessInventory {
+impl FakeRuntime {
+    /// Everything this JVM holds, as it reports it to control.
+    fn report(&self) -> ProcessReport {
+        let (ended, failed) =
+            (self.ended_sessions.lock().unwrap().clone(), self.failed_sessions.lock().unwrap().clone());
+        let sessions = self.sessions.lock().unwrap().clone();
+        let sessions = sessions.values().map(|command| {
+            let id = &command.session.as_ref().unwrap().id;
+            let phase = if failed.contains(id) {
+                SessionPhase::Failed
+            } else if ended.contains(id) {
+                SessionPhase::Ended
+            } else {
+                SessionPhase::Ready
+            };
+            SessionInventory {
+                session: command.session.clone(),
+                generation: command.generation,
+                session_type: command.session_type.clone(),
+                phase: phase as i32,
+                capacity: command.capacity,
+                prepared: 0,
+                attached: 0,
+            }
+        });
+        let bindings = self.bindings.lock().unwrap();
+        ProcessReport {
             identity: Some(self.identity.clone()),
-            tick_count: 100,
-            sessions: self
-                .sessions
-                .lock()
-                .unwrap()
-                .values()
-                .map(|session| {
-                    let mut inventory = session_inventory(session);
-                    if ended.contains(&session.session.as_ref().unwrap().id) {
-                        inventory.phase = SessionPhase::Ended as i32;
-                    }
-                    inventory
-                })
-                .collect(),
-            deliveries: self
-                .bindings
-                .lock()
-                .unwrap()
+            sessions: sessions.collect(),
+            deliveries: bindings
                 .values()
                 .map(|b| DeliveryInventory { delivery: Some(b.delivery.clone()), phase: b.phase as i32 })
                 .collect(),
-            draining: false,
-        }))
+        }
     }
-    async fn create_session(
-        &self,
-        request: Request<SessionCommand>,
-    ) -> std::result::Result<Response<SessionInventory>, Status> {
-        self.check(&request)?;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let command = request.into_inner();
-        if self.failed_creation.load(Ordering::Acquire) {
-            return Err(Status::failed_precondition("failed creation"));
+
+    /// Runs and ends sessions as control desires. A failed session stays failed, even once asked to end.
+    fn apply(&self, desired: DesiredSessions) {
+        for command in desired.create {
+            let id = command.session.as_ref().unwrap().id.clone();
+            let mut sessions = self.sessions.lock().unwrap();
+            if sessions.contains_key(&id) {
+                continue;
+            }
+            if self.failed_creation.load(Ordering::Acquire) {
+                self.failed_sessions.lock().unwrap().insert(id.clone());
+            }
+            sessions.insert(id, command);
         }
-        let id = command.session.as_ref().unwrap().id.clone();
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(previous) = sessions.get(&id)
-            && previous != &command
-        {
-            return Err(Status::failed_precondition("changed creation"));
-        }
-        sessions.insert(id, command.clone());
-        if self.lost_creation.swap(false, Ordering::AcqRel) {
-            return Err(Status::deadline_exceeded("lost creation reply"));
-        }
-        Ok(Response::new(session_inventory(&command)))
-    }
-    async fn finish_session(
-        &self,
-        request: Request<SessionCommand>,
-    ) -> std::result::Result<Response<SessionInventory>, Status> {
-        self.check(&request)?;
-        let command = request.get_ref();
-        let id = &command.session.as_ref().unwrap().id;
-        if !self.sessions.lock().unwrap().contains_key(id) {
-            return Err(Status::not_found("unknown session"));
-        }
-        if self.ended_sessions.lock().unwrap().insert(id.clone()) {
+        for command in desired.finish {
+            let id = command.session.as_ref().unwrap().id.clone();
+            if !self.sessions.lock().unwrap().contains_key(&id)
+                || !self.ended_sessions.lock().unwrap().insert(id.clone())
+            {
+                continue;
+            }
             self.finishes.fetch_add(1, Ordering::AcqRel);
+            for binding in self
+                .bindings
+                .lock()
+                .unwrap()
+                .values_mut()
+                .filter(|binding| binding.delivery.session.as_ref().is_some_and(|session| session.id == id))
+            {
+                binding.phase = DeliveryPhase::Closed;
+            }
         }
-        for binding in self
-            .bindings
-            .lock()
-            .unwrap()
-            .values_mut()
-            .filter(|binding| binding.delivery.session.as_ref().is_some_and(|session| &session.id == id))
-        {
-            binding.phase = DeliveryPhase::Closed;
-        }
-        if self.lost_finish.swap(false, Ordering::AcqRel) {
-            return Err(Status::deadline_exceeded("lost finish reply"));
-        }
-        let mut result = session_inventory(command);
-        result.phase = SessionPhase::Ended as i32;
-        Ok(Response::new(result))
     }
 }
 
-fn session_inventory(command: &SessionCommand) -> SessionInventory {
-    SessionInventory {
-        session: command.session.clone(),
-        generation: command.generation,
-        session_type: command.session_type.clone(),
-        phase: SessionPhase::Ready as i32,
-        capacity: command.capacity,
-        prepared: 0,
-        attached: 0,
+/// Plays the JVM of every host `control` launched: attaches once its host has registered, then follows control's
+/// desired sessions and reports its whole state after each change, until `stop`.
+async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationToken) {
+    let mut positions = control.subscribe();
+    let mut streams = BTreeMap::new();
+    loop {
+        let runtime = &host.runtime;
+        let ids = host.ids.lock().unwrap().clone();
+        for id in ids {
+            // A forgotten host has not re-registered, and asking it for its connection has test side effects.
+            if !runtime.available.load(Ordering::Acquire) || host.forgotten.load(Ordering::Acquire) || host.stopped(&id)
+            {
+                continue;
+            }
+            let stream = match streams.get(&id) {
+                Some(stream) => *stream,
+                None => match control.attach(&id, "test-runtime-credential", runtime.report()).await {
+                    Ok(stream) => *streams.entry(id.clone()).or_insert(stream),
+                    Err(_) => continue,
+                },
+            };
+            match control.desired(&id, &mut None) {
+                Ok(Some(desired)) => runtime.apply(desired),
+                Ok(None) => {}
+                Err(_) => {
+                    streams.remove(&id);
+                    continue;
+                }
+            }
+            if control.report(&id, stream, &runtime.report()).await.is_err() {
+                streams.remove(&id);
+            }
+        }
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = positions.changed() => {}
+            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
     }
+}
+
+/// Waits up to five seconds for `condition`.
+async fn eventually(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
 }
 
 #[tonic::async_trait]
@@ -330,6 +345,7 @@ struct Fixture {
     host: Arc<FakeHost>,
     stop: oneshot::Sender<()>,
     server: JoinHandle<()>,
+    follower: Mutex<Option<(CancellationToken, JoinHandle<()>)>>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -347,10 +363,9 @@ impl Fixture {
             method_requests: Mutex::default(),
             sessions: Mutex::default(),
             ended_sessions: Mutex::default(),
+            failed_sessions: Mutex::default(),
             failed_creation: AtomicBool::new(false),
-            lost_creation: AtomicBool::new(false),
             lost_preparation: AtomicBool::new(false),
-            lost_finish: AtomicBool::new(false),
             finishes: AtomicUsize::new(0),
             bindings: Mutex::default(),
             available: AtomicBool::new(true),
@@ -369,8 +384,7 @@ impl Fixture {
             tonic::transport::Server::builder()
                 .add_service(GameplayServer::new(service.clone()))
                 .add_service(chunk_proto::v1::node_control_server::NodeControlServer::new(service.clone()))
-                .add_service(chunk_proto::v1::session_methods_server::SessionMethodsServer::new(service.clone()))
-                .add_service(ProcessControlServer::new(service))
+                .add_service(chunk_proto::v1::session_methods_server::SessionMethodsServer::new(service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = stopped.await;
                 })
@@ -399,14 +413,55 @@ impl Fixture {
             max_processes: 1,
             idle_node_timeout_seconds: 0,
         };
-        Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server }
+        let follower = Mutex::default();
+        Self { directory: tempfile::tempdir().unwrap(), config, runtime, host, stop, server, follower }
     }
-    fn control(&self) -> Arc<Control> {
-        open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap()
+    /// Opens control with the fake JVM following it, once the previous control's JVM stream has closed. A reachable
+    /// JVM re-attaches before this returns.
+    async fn control(&self) -> Arc<Control> {
+        self.detach().await;
+        let control =
+            open(&self.directory.path().join("control.sqlite"), self.config.clone(), self.host.clone()).unwrap();
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(follow(control.clone(), self.host.clone(), stop.clone()));
+        *self.follower.lock().unwrap() = Some((stop, task));
+        if self.runtime.available.load(Ordering::Acquire) && !self.host.forgotten.load(Ordering::Acquire) {
+            self.recovered(&control).await;
+        }
+        control
+    }
+    /// Closes the fake JVM's stream, so it no longer holds its control.
+    async fn detach(&self) {
+        let follower = self.follower.lock().unwrap().take();
+        if let Some((stop, task)) = follower {
+            stop.cancel();
+            task.await.unwrap();
+        }
+    }
+    /// Waits until control has reconciled every surviving JVM and admits new claims.
+    async fn recovered(&self, control: &Control) {
+        eventually(|| control.recovery.open().unwrap()).await;
+    }
+    /// Reports `operation`'s delivery arrived and waits until control records it.
+    async fn arrive(&self, control: &Control, operation: &str) {
+        self.runtime.bindings.lock().unwrap().get_mut(operation).unwrap().phase = DeliveryPhase::Arrived;
+        eventually(|| control.state().unwrap().claims[operation].phase == Phase::Arrived).await;
     }
     async fn close(self) {
+        self.detach().await;
         let _ = self.stop.send(());
         self.server.await.unwrap();
+    }
+}
+
+impl Control {
+    /// The claim's current assignment.
+    fn inspect(&self, request: &ClaimRequest) -> Result<chunk_proto::v1::Assignment> {
+        let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;
+        claim.matches(request)?;
+        Ok(prost::Message::decode(
+            claim.assignment.ok_or(Error::Unresolved("claim preparation incomplete"))?.as_slice(),
+        )?)
     }
 }
 
@@ -441,7 +496,7 @@ async fn pending_move(control: &Control, source: &ClaimRequest) -> Option<ClaimR
 #[tokio::test]
 async fn concurrent_demand_coalesces_and_reservations_release_once() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let requests: Vec<_> = (0..4).map(|i| request(&format!("claim-{i}"), &uuid::Uuid::new_v4().to_string())).collect();
     let mut tasks = tokio::task::JoinSet::new();
     for request in &requests {
@@ -473,16 +528,15 @@ async fn concurrent_demand_coalesces_and_reservations_release_once() {
 #[tokio::test]
 async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let first = request("first", &uuid);
     let assignment = control.claim(first.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("first").unwrap().phase = DeliveryPhase::Arrived;
-    fixture.runtime.lost_reply.store(true, Ordering::Release);
-    assert!(control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.is_err());
+    // The JVM reports the arrival, but the proxy never learns its activation succeeded.
+    fixture.arrive(&control, "first").await;
     drop(control);
-    let recovered = fixture.control();
-    let current = recovered.inspect(first.clone()).await.unwrap();
+    let recovered = fixture.control().await;
+    let current = recovered.inspect(&first).unwrap();
     assert_eq!(current.phase, ClaimPhase::Arrived as i32);
     assert_eq!(current.claim, assignment.claim);
     assert!(recovered.claim(request("competing", &uuid)).await.is_err());
@@ -491,10 +545,11 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
     assert!(recovered.cancel(first.clone()).await.is_err());
     assert!(recovered.claim(request("still-competing", &uuid)).await.is_err());
     drop(recovered);
-    let recovered = fixture.control();
+    let recovered = fixture.control().await;
     assert!(recovered.claim(request("after-restart", &uuid)).await.is_err());
     fixture.runtime.available.store(true, Ordering::Release);
     recovered.cancel(first.clone()).await.unwrap();
+    fixture.recovered(&recovered).await;
     let second = request("second", &uuid);
     let next = recovered.claim(second.clone()).await.unwrap();
     let (previous, next_claim) = (assignment.claim.as_ref().unwrap(), next.claim.as_ref().unwrap());
@@ -503,7 +558,7 @@ async fn recovery_reconciles_lost_activation_and_retains_unreachable_ownership()
     recovered.cancel(first).await.unwrap();
     assert_eq!(recovered.state().unwrap().players[&uuid].current.as_deref(), Some("second"));
     assert!(recovered.activate(ActivateClaim { claim: assignment.claim }).await.is_err());
-    fixture.runtime.bindings.lock().unwrap().get_mut("second").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&recovered, "second").await;
     assert_eq!(
         recovered.activate(ActivateClaim { claim: next.claim }).await.unwrap().phase,
         ClaimPhase::Arrived as i32
@@ -541,12 +596,12 @@ async fn duplicate_control_open_on_same_backend_is_rejected() {
 #[tokio::test]
 async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fences_active_players() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let waiting = request("waiting", &uuid::Uuid::new_v4().to_string());
     control.claim(waiting.clone()).await.unwrap();
     let active = request("active", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(active.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("active").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "active").await;
     control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     control
         .update(|state| {
@@ -571,11 +626,11 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
 #[tokio::test]
 async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activation() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
     let command = chunk_proto::v1::MovePlayerRequest {
         expected_source: None,
@@ -611,18 +666,19 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
     assert!(control.cancel(source.clone()).await.is_err());
     assert!(control.activate(activation.clone()).await.is_err());
     fixture.runtime.available.store(true, Ordering::Release);
-    assert_eq!(control.inspect(source.clone()).await.unwrap().phase, ClaimPhase::Withdrawing as i32);
+    assert_eq!(control.inspect(&source).unwrap().phase, ClaimPhase::Withdrawing as i32);
     fixture.runtime.lost_withdrawal.store(true, Ordering::Release);
     assert!(control.cancel(source.clone()).await.is_err());
     assert!(control.activate(activation.clone()).await.is_err());
     drop(control);
-    let control = fixture.control();
-    assert_eq!(control.inspect(source.clone()).await.unwrap().phase, ClaimPhase::Released as i32);
+    // The restarted control learns from the JVM's first report that the withdrawal completed.
+    let control = fixture.control().await;
+    fixture.recovered(&control).await;
+    assert_eq!(control.inspect(&source).unwrap().phase, ClaimPhase::Released as i32);
     assert!(control.claim(request("new-login", &uuid)).await.is_err());
-    fixture.runtime.lost_reply.store(true, Ordering::Release);
-    assert!(control.activate(activation).await.is_err());
-    fixture.runtime.bindings.lock().unwrap().get_mut("move").unwrap().phase = DeliveryPhase::Arrived;
-    assert_eq!(control.inspect(destination.clone()).await.unwrap().phase, ClaimPhase::Arrived as i32);
+    control.activate(activation).await.unwrap();
+    fixture.arrive(&control, "move").await;
+    assert_eq!(control.inspect(&destination).unwrap().phase, ClaimPhase::Arrived as i32);
     control.cancel(source).await.unwrap();
     let owner = control.state().unwrap().players[&uuid].clone();
     assert_eq!(owner.current.as_deref(), Some("move"));
@@ -635,11 +691,11 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
 #[tokio::test]
 async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
     let fixture = Fixture::new().await;
-    let mut control = fixture.control();
+    let mut control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
     let mut previous = None;
     for (operation, prepare) in [("queued", false), ("prepared", true)] {
@@ -684,12 +740,12 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
         assert_eq!(failure.reason, abandoned.reason);
         assert!(failure.failed_at_ms > 0);
         drop(control);
-        control = fixture.control();
+        control = fixture.control().await;
         assert_eq!(control.players().unwrap().players[0].last_move_failure.as_ref(), Some(&failure));
         previous = Some(abandoned);
         assert!(control.claim(destination).await.is_err());
         assert!(pending_move(&control, &source).await.is_none());
-        assert_eq!(control.inspect(source.clone()).await.unwrap().phase, ClaimPhase::Arrived as i32);
+        assert_eq!(control.inspect(&source).unwrap().phase, ClaimPhase::Arrived as i32);
         assert!(control.state().unwrap().players[&uuid].pending.is_none());
     }
     assert_eq!(fixture.runtime.bindings.lock().unwrap().len(), 2);
@@ -700,11 +756,11 @@ async fn canceling_moves_before_preparation_or_cutover_leaves_source_usable() {
 async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline() {
     for available in [true, false] {
         let fixture = Fixture::new().await;
-        let control = fixture.control();
+        let control = fixture.control().await;
         let uuid = uuid::Uuid::new_v4().to_string();
         let source = request("source", &uuid);
         let first = control.claim(source.clone()).await.unwrap();
-        fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+        fixture.arrive(&control, "source").await;
         control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
         let command = chunk_proto::v1::DrainRequest {
             operation_id: "drain".into(),
@@ -731,7 +787,7 @@ async fn drain_retires_capacity_before_moves_and_enforces_its_durable_deadline()
             })
             .unwrap();
         drop(control);
-        let control = fixture.control();
+        let control = fixture.control().await;
         let operation = control.operation("source").unwrap();
         let guard = operation.lock().await;
         let reconciler = control.clone();
@@ -772,6 +828,8 @@ async fn leave(control: &Arc<Control>, claim: ClaimRequest) -> String {
         .unwrap();
     let host = control.state().unwrap().sessions[&session].host.clone();
     control.reconcile_all().await.unwrap();
+    eventually(|| control.state().unwrap().sessions.get(&session).is_none_or(|session| session.finished)).await;
+    control.reconcile_all().await.unwrap();
     assert!(!control.state().unwrap().sessions.contains_key(&session));
     host
 }
@@ -780,7 +838,7 @@ async fn leave(control: &Arc<Control>, claim: ClaimRequest) -> String {
 async fn idle_hosts_stop_once_their_last_session_has_finished_for_the_timeout() {
     let mut fixture = Fixture::new().await;
     fixture.config.idle_node_timeout_seconds = 1;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let first = request("first", &uuid::Uuid::new_v4().to_string());
     control.claim(first.clone()).await.unwrap();
     let host = leave(&control, first).await;
@@ -839,10 +897,10 @@ impl chunk_proto::v1::node_control_server::NodeControl for RuntimeService {
 async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     use chunk_proto::v1::{NodePhase, ShutdownNodeRequest};
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let request = request("active", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(request.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("active").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "active").await;
     control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     control.poll_health().await.unwrap();
     let online = control.nodes().unwrap().nodes.remove(0);
@@ -862,7 +920,7 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     assert_eq!(control.shutdown_node(&command).unwrap().phase, NodePhase::Draining as i32);
     let deadline = control.state().unwrap().drains["node/operator-stop"].deadline_ms;
     drop(control);
-    let control = fixture.control();
+    let control = fixture.control().await;
     control.shutdown_node(&command).unwrap();
     assert_eq!(control.state().unwrap().drains["node/operator-stop"].deadline_ms, deadline);
     assert!(control.shutdown_node(&ShutdownNodeRequest { timeout_seconds: 0, ..command }).is_err());
@@ -888,10 +946,10 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
 #[tokio::test]
 async fn delayed_health_monitor_does_not_retire_a_surviving_runtime() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let request = request("active", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(request).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("active").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "active").await;
     control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     fixture.runtime.advance_ticks.store(false, Ordering::Release);
     fixture.runtime.ticks.store(1, Ordering::Release);
@@ -933,12 +991,12 @@ async fn delayed_health_monitor_does_not_retire_a_surviving_runtime() {
 #[tokio::test]
 async fn departure_fences_only_the_captured_membership_and_waits_for_pending_moves() {
     let fixture = Fixture::new().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
     let membership = first.claim.as_ref().unwrap().membership_generation;
-    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
     let destination = control
         .move_player(chunk_proto::v1::MovePlayerRequest {
@@ -972,4 +1030,5 @@ mod recovery;
 mod retention;
 mod roster;
 mod server;
+mod sync;
 mod watch;

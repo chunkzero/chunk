@@ -11,8 +11,8 @@ use std::{
 };
 
 use chunk_proto::v1::{
-    DeliveryPhase, PlayerDelivery, PlayerWithdrawal, ProcessIdentity, ProcessInventory, ProcessRegistration,
-    SessionPhase, ShutdownNodeRequest, gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
+    DeliveryPhase, PlayerDelivery, PlayerWithdrawal, ProcessIdentity, ProcessRegistration, ProcessReport, SessionPhase,
+    ShutdownNodeRequest, gameplay_client::GameplayClient,
 };
 use prost::Message;
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,7 +21,7 @@ use crate::{
     Control, Error, Result, RuntimeConnection,
     client::{auth, channel},
     drain::retire_host,
-    state::{Claim, Generation, HostState, Phase, SessionState, State},
+    state::{Claim, Generation, HostState, Phase, SessionState},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -129,33 +129,25 @@ impl Control {
         {
             return Err(Error::Invalid("recovered runtime mismatch"));
         }
-        let inventory = ProcessControlClient::new(channel(&runtime).await?)
-            .max_decoding_message_size(8 * 1024 * 1024)
-            .inventory(auth(&runtime, runtime.identity.clone(), 3)?)
-            .await?
-            .into_inner();
-        if inventory.identity.as_ref() != Some(&runtime.identity) {
-            return Err(Error::Invalid("recovered inventory mismatch"));
-        }
+        // The JVM's complete report, from a stream it opened after re-attaching.
+        let Some(inventory) = self.links.report(id, &runtime.identity) else {
+            return Ok(false);
+        };
         self.retire_unknown_operations(&inventory)?;
         self.retire_unknown_sessions(id, &inventory)?;
         if !self.fence_deliveries(&runtime, &inventory).await? {
             return Ok(false);
         }
         self.retire_orphan(id, &runtime.identity)?;
-        let unfinished = |state: &State| {
-            state.sessions.values().any(|session| session.host == id && session.recovered() && !session.finished)
-        };
-        if unfinished(&*self.state()?) {
-            self.reconcile_host_sessions(id).await?;
-        }
-        Ok(!unfinished(&*self.state()?))
+        // Control's desired state asks the JVM to end the sessions the log lost; its reports finish them.
+        let state = self.state()?;
+        Ok(!state.sessions.values().any(|session| session.host == id && session.recovered() && !session.finished))
     }
 
     /// Records each session a logged host's JVM runs without a log row, such as one whose creation a restore lost, as
     /// a retired session to finish. Until the JVM confirms it ended, its row counts toward the host's capacity. A lost
     /// orphan host's sessions end with its JVM instead.
-    fn retire_unknown_sessions(&self, id: &str, inventory: &ProcessInventory) -> Result<()> {
+    fn retire_unknown_sessions(&self, id: &str, inventory: &ProcessReport) -> Result<()> {
         self.update(|state| {
             if !state.hosts.contains_key(id) {
                 return Ok(());
@@ -238,7 +230,7 @@ impl Control {
     /// Records a released tombstone for each delivery whose operation the log does not know, such as deliveries
     /// prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
     /// player again under an operation ID the JVM already holds.
-    fn retire_unknown_operations(&self, inventory: &ProcessInventory) -> Result<()> {
+    fn retire_unknown_operations(&self, inventory: &ProcessReport) -> Result<()> {
         self.update(|state| {
             for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
                 state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
@@ -248,12 +240,12 @@ impl Control {
     }
 
     /// Withdraws open deliveries that no open claim in the log owns with the same generations, using the generation
-    /// the JVM holds. `inventory` must be read before state, so every delivery control prepared already has its
-    /// claim. Reports whether every such delivery is now withdrawn.
+    /// the JVM holds. `inventory` must be reported before state is read, so every delivery control prepared already
+    /// has its claim. Reports whether every such delivery is now withdrawn.
     pub(crate) async fn fence_deliveries(
         &self,
         runtime: &RuntimeConnection,
-        inventory: &ProcessInventory,
+        inventory: &ProcessReport,
     ) -> Result<bool> {
         let state = self.state()?;
         let mut gameplay = None;

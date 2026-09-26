@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chunk_proto::v1::{
-    ActivateClaim, Assignment, ClaimIdentity, ClaimRequest, ClaimUpdate, WatchRequest,
+    ActivateClaim, Assignment, ClaimIdentity, ClaimRequest, ClaimUpdate, DesiredSessions, ProcessReport, WatchRequest,
     local_control_server::LocalControl,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -42,7 +42,7 @@ impl Service {
         self.methods.close();
     }
 
-    /// Ends every claim watch, so the transport can finish shutting down.
+    /// Ends every claim watch and JVM stream, so the transport can finish shutting down.
     pub(crate) fn close_watches(&self) {
         self.watches.cancel();
     }
@@ -61,7 +61,7 @@ impl Service {
     }
 }
 
-fn status(error: Error) -> Status {
+pub(crate) fn status(error: Error) -> Status {
     match error {
         Error::Invalid(message) => Status::failed_precondition(message),
         Error::Capacity => Status::resource_exhausted("control capacity reached"),
@@ -227,18 +227,36 @@ impl LocalControl for Service {
     }
 }
 
+fn process_credential<T>(request: &Request<T>) -> Result<String, Status> {
+    Ok(request
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Status::unauthenticated("missing process credential"))?
+        .to_owned())
+}
+
 #[tonic::async_trait]
 impl chunk_proto::v1::supervisor_server::Supervisor for Service {
     async fn register_process(
         &self,
         request: Request<chunk_proto::v1::ProcessRegistration>,
     ) -> Result<Response<chunk_proto::v1::ProcessIdentity>, Status> {
-        let token = request
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::unauthenticated("missing process credential"))?
-            .to_owned();
+        let token = process_credential(&request)?;
         self.control.register(&token, request.into_inner()).map(Response::new).map_err(status)
+    }
+
+    type SyncStream = ReceiverStream<Result<DesiredSessions, Status>>;
+
+    async fn sync(
+        &self,
+        request: Request<tonic::Streaming<ProcessReport>>,
+    ) -> Result<Response<Self::SyncStream>, Status> {
+        let token = process_credential(&request)?;
+        let token = token.strip_prefix("Bearer ").ok_or_else(|| Status::unauthenticated("process credential"))?.into();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (control, closed) = (self.control.clone(), self.watches.clone());
+        tokio::spawn(async move { control.sync(token, request.into_inner(), sender, closed).await });
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
 }

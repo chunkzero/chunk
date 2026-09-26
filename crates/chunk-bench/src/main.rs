@@ -83,6 +83,7 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
     let address = listener.local_addr()?;
     let mut services = JoinSet::new();
     let token = stop.clone();
+    let runtimes = fixtures::Runtimes::default();
     let backend = if config.scenario == Scenario::ProxyRelay {
         let config = config.clone();
         services.spawn(async move { proxy::gameplay(listener, &config, token).await });
@@ -92,10 +93,13 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
         let bundle = output.to_path_buf();
         tokio::task::spawn_blocking(move || backend::compile(&bundle)).await??.display().to_string()
     } else {
-        services.spawn(fixtures::Runtimes::default().serve(listener, token));
+        services.spawn(runtimes.clone().serve(listener, token));
         format!("http://{address}")
     };
     let mut target = target::Target::start(&config, backend, state.path(), output).await?;
+    if let Some(control) = &target.ready.control {
+        runtimes.connect(control.endpoint.clone());
+    }
     let result = tokio::select! {
         result = measure(config, output.to_path_buf(), &mut target) => result,
         result = services.join_next(), if !services.is_empty() => {

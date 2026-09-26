@@ -1,6 +1,6 @@
 use chunk_proto::v1::{
-    ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, DeliveryPhase, PlayerWithdrawal,
-    gameplay_client::GameplayClient, process_control_client::ProcessControlClient,
+    ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, DeliveryInventory, DeliveryPhase,
+    PlayerDelivery, PlayerWithdrawal, ProcessIdentity, gameplay_client::GameplayClient,
 };
 use prost::Message;
 
@@ -11,17 +11,6 @@ use crate::{
 };
 
 impl Control {
-    /// Recovers the same delivery from runtime inventory; never replaces its TCP connection.
-    /// # Errors
-    /// An unavailable runtime leaves ownership unresolved and retained.
-    pub(crate) async fn inspect(&self, request: ClaimRequest) -> Result<Assignment> {
-        let operation = self.operation(&request.operation_id)?;
-        let _guard = operation.lock().await;
-        let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;
-        claim.matches(&request)?;
-        self.reconcile(&request.operation_id).await
-    }
-
     /// Records admission intent; native Minecraft login attaches the prepared delivery.
     /// # Errors
     /// Rejects stale identity and retains authority after ambiguous runtime replies. Reports `Busy` until recovery
@@ -60,7 +49,8 @@ impl Control {
         if !admitted {
             return Err(Error::Unresolved("roster awaiting members"));
         }
-        self.reconcile(&identity.operation_id).await
+        self.apply_reported(&identity.operation_id)?;
+        self.reconcile(&identity.operation_id)
     }
 
     /// Withdraws only this exact operation and releases capacity after affirmative fencing.
@@ -137,62 +127,14 @@ impl Control {
         Ok(chunk_proto::v1::DepartureStatus { claim: Some(identity), departed })
     }
 
-    async fn reconcile(&self, operation: &str) -> Result<Assignment> {
+    /// The claim's current assignment, after releasing it if its host stopped.
+    fn reconcile(&self, operation: &str) -> Result<Assignment> {
         let state = self.state()?;
         let claim = state.claims.get(operation).ok_or(Error::Invalid("unknown claim"))?;
-        let assignment = claim.assignment.as_ref().ok_or(Error::Unresolved("claim preparation incomplete"))?;
-        if claim.phase == Phase::Released {
-            return Ok(Assignment::decode(assignment.as_slice())?);
-        }
+        claim.assignment.as_ref().ok_or(Error::Unresolved("claim preparation incomplete"))?;
         let host = &state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host;
-        if self.host.stopped(host) {
+        if claim.phase != Phase::Released && self.host.stopped(host) {
             self.update(|state| release(state, operation))?;
-        } else {
-            let runtime = self.runtime(&state, host).await?;
-            let inventory = ProcessControlClient::new(channel(&runtime).await?)
-                .max_decoding_message_size(8 * 1024 * 1024)
-                .inventory(auth(&runtime, runtime.identity.clone(), 3)?)
-                .await?
-                .into_inner();
-            if inventory.identity.as_ref() != Some(&runtime.identity) {
-                return Err(Error::Invalid("inventory identity mismatch"));
-            }
-            let binding = inventory
-                .deliveries
-                .iter()
-                .find(|d| d.delivery.as_ref().is_some_and(|d| d.operation_id == operation))
-                .ok_or(Error::Unresolved("delivery absent from runtime inventory"))?;
-            let delivery = binding.delivery.as_ref().ok_or(Error::Invalid("inventory delivery"))?;
-            if delivery.owner_generation != claim.generation.wire()
-                || delivery.membership_generation != claim.membership.wire()
-                || delivery.proxy_id != claim.proxy
-                || delivery.session.as_ref().map(|s| &s.id) != Some(&claim.session)
-                || delivery.session_generation != 1
-                || delivery.runtime_id != runtime.identity.runtime_id
-                || delivery.process_generation != runtime.identity.generation
-                || delivery.deployment != runtime.identity.deployment
-            {
-                return Err(Error::Invalid("inventory binding mismatch"));
-            }
-            let phase = match DeliveryPhase::try_from(binding.phase).ok() {
-                Some(DeliveryPhase::Arrived) => Phase::Arrived,
-                Some(DeliveryPhase::Attached) => Phase::Attached,
-                Some(DeliveryPhase::Closed) => Phase::Released,
-                Some(DeliveryPhase::Withdrawing) => Phase::Withdrawing,
-                Some(DeliveryPhase::Prepared) => claim.phase,
-                _ => return Err(Error::Unresolved("unknown runtime delivery phase")),
-            };
-            let phase =
-                if claim.phase == Phase::Withdrawing && phase != Phase::Released { Phase::Withdrawing } else { phase };
-            if phase != claim.phase {
-                self.update(|state| {
-                    if phase == Phase::Released {
-                        release(state, operation)
-                    } else {
-                        set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
-                    }
-                })?;
-            }
         }
         let state = self.state()?;
         let bytes = state
@@ -227,7 +169,60 @@ impl Control {
     }
 }
 
-fn release(state: &mut State, operation: &str) -> Result<()> {
+/// Records the phase a JVM reported for one delivery. A report for a claim control has not prepared yet, or that does
+/// not match the claim's generations, session and process, is ignored.
+pub(crate) fn apply(
+    state: &mut State,
+    host: &str,
+    identity: &ProcessIdentity,
+    binding: &DeliveryInventory,
+) -> Result<()> {
+    let Some(delivery) = &binding.delivery else {
+        return Ok(());
+    };
+    let operation = &delivery.operation_id;
+    let Some(claim) = state.claims.get(operation) else {
+        return Ok(());
+    };
+    if claim.phase == Phase::Released || claim.assignment.is_none() {
+        return Ok(());
+    }
+    if !owns(state, claim, host, identity, delivery) {
+        tracing::debug!(operation, "ignoring a stale delivery report");
+        return Ok(());
+    }
+    let phase = match DeliveryPhase::try_from(binding.phase) {
+        Ok(DeliveryPhase::Arrived) => Phase::Arrived,
+        Ok(DeliveryPhase::Attached) => Phase::Attached,
+        Ok(DeliveryPhase::Closed) => Phase::Released,
+        Ok(DeliveryPhase::Withdrawing) => Phase::Withdrawing,
+        _ => return Ok(()),
+    };
+    let phase = if claim.phase == Phase::Withdrawing && phase != Phase::Released { Phase::Withdrawing } else { phase };
+    if phase == claim.phase {
+        return Ok(());
+    }
+    if phase == Phase::Released {
+        release(state, operation)
+    } else {
+        set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
+    }
+}
+
+/// Whether `delivery` is the one control prepared for `claim` on `host`'s current process.
+fn owns(state: &State, claim: &Claim, host: &str, identity: &ProcessIdentity, delivery: &PlayerDelivery) -> bool {
+    delivery.owner_generation == claim.generation.wire()
+        && delivery.membership_generation == claim.membership.wire()
+        && delivery.proxy_id == claim.proxy
+        && delivery.session.as_ref().map(|s| &s.id) == Some(&claim.session)
+        && delivery.session_generation == 1
+        && delivery.runtime_id == identity.runtime_id
+        && delivery.process_generation == identity.generation
+        && delivery.deployment == identity.deployment
+        && state.sessions.get(&claim.session).is_some_and(|session| session.host == host)
+}
+
+pub(crate) fn release(state: &mut State, operation: &str) -> Result<()> {
     let claim = state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?;
     set_phase(claim, Phase::Released)?;
     claim.released_at_ms.get_or_insert(crate::now_ms());

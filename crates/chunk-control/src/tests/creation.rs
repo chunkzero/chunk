@@ -34,13 +34,13 @@ fn demand(operation: &str, key: &str) -> ClaimRequest {
 async fn one_implementation_uses_frozen_destination_capacity_and_configuration_across_recovery() {
     let mut fixture = Fixture::new().await;
     configured_destinations(&mut fixture);
-    let control = fixture.control();
+    let control = fixture.control().await;
     let small = demand("small", "small");
-    fixture.runtime.lost_creation.store(true, Ordering::Release);
+    fixture.runtime.lost_preparation.store(true, Ordering::Release);
     assert!(control.claim(small.clone()).await.is_err());
     let reserved = control.state().unwrap().claims["small"].session.clone();
     drop(control);
-    let control = fixture.control();
+    let control = fixture.control().await;
     let recovered = control.claim(small).await.unwrap();
     assert_eq!(recovered.delivery.unwrap().session.unwrap().id, reserved);
     for index in 0..3 {
@@ -80,6 +80,7 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
         .as_mut()
         .unwrap()
         .configuration = json!({"map":"desert"});
+    fixture.detach().await;
     assert!(open(&fixture.directory.path().join("control.sqlite"), changed, fixture.host.clone()).is_err());
     fixture.close().await;
 }
@@ -140,13 +141,13 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
         }
         assert!(open(&fixture.directory.path().join("invalid.sqlite"), config, fixture.host.clone()).is_err());
     }
-    let control = fixture.control();
+    let control = fixture.control().await;
     assert!(control.claim(demand("missing-configuration", "undeclared")).await.is_err());
     assert!(control.state().unwrap().claims.is_empty());
     assert!(fixture.host.ids.lock().unwrap().is_empty());
     let source = demand("source", "small");
     let assignment = control.claim(source.clone()).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut("source").unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     assert!(matches!(
         control.move_player(chunk_proto::v1::MovePlayerRequest {

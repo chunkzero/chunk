@@ -47,6 +47,7 @@ final class PreparedDelivery {
     private final CompletableFuture<Void> removed = new CompletableFuture<>();
     private boolean arrived;
     private boolean joinStarted;
+    private @Nullable DeliveryInventory inventory;
 
     PreparedDelivery(
             PlayerDelivery delivery,
@@ -110,10 +111,14 @@ final class PreparedDelivery {
         else if (connection != null && connection.getClientState() == ConnectionState.PLAY) {
             phase = DeliveryPhase.DELIVERY_PHASE_ATTACHED;
         } else phase = DeliveryPhase.DELIVERY_PHASE_PREPARED;
-        return DeliveryInventory.newBuilder()
-                .setDelivery(delivery.toBuilder().clearIdentity())
-                .setPhase(phase)
-                .build();
+        if (inventory == null || inventory.getPhase() != phase) {
+            inventory =
+                    DeliveryInventory.newBuilder()
+                            .setDelivery(delivery.toBuilder().clearIdentity())
+                            .setPhase(phase)
+                            .build();
+        }
+        return inventory;
     }
 
     synchronized PlayerPreparation result(String endpoint) {

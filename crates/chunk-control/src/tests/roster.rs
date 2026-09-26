@@ -28,7 +28,7 @@ fn arena() -> SessionDemand {
 async fn arrive(fixture: &Fixture, control: &Arc<Control>, operation: &str) -> (String, ClaimIdentity) {
     let player = uuid::Uuid::new_v4().to_string();
     let assignment = control.claim(request(operation, &player)).await.unwrap();
-    fixture.runtime.bindings.lock().unwrap().get_mut(operation).unwrap().phase = DeliveryPhase::Arrived;
+    fixture.arrive(control, operation).await;
     control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
     (player, assignment.claim.unwrap())
 }
@@ -49,7 +49,7 @@ fn roster(operation: &str, version: u64, members: &[(String, ClaimIdentity)]) ->
 #[tokio::test]
 async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a_destination() {
     let fixture = fixture().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let mut players = Vec::new();
     for index in 0..6 {
         players.push(arrive(&fixture, &control, &format!("lobby-{index}")).await);
@@ -96,7 +96,7 @@ async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a
 #[tokio::test]
 async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
     let fixture = fixture().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let (first, second, third) = (
         arrive(&fixture, &control, "a").await,
         arrive(&fixture, &control, "b").await,
@@ -165,7 +165,7 @@ async fn new_rosters_reject_terminal_member_operations_without_changing_state() 
         [("prepared then canceled", true, false), ("canceled before preparation", false, false), ("failed", true, true)]
     {
         let fixture = fixture().await;
-        let control = fixture.control();
+        let control = fixture.control().await;
         let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
         // Reserve the fresh member first to exercise rollback of the whole roster.
         let group = roster("party", 1, &members);
@@ -224,7 +224,7 @@ async fn new_rosters_reject_terminal_member_operations_without_changing_state() 
 #[tokio::test]
 async fn canceling_a_roster_before_preparation_releases_its_reservations() {
     let fixture = fixture().await;
-    let control = fixture.control();
+    let control = fixture.control().await;
     let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
     let destinations = control.move_roster(&roster("party", 1, &members)).unwrap();
     control.cancel_roster("party").unwrap();

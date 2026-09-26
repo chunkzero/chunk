@@ -9,13 +9,10 @@ import "chunk/v1/gameplay.proto";
 // registration reconciles a channel outage without replacing any player socket.
 service Supervisor {
   rpc RegisterProcess(ProcessRegistration) returns (ProcessIdentity);
-}
-
-// Engine session operations exposed by the app JVM.
-service ProcessControl {
-  rpc Inventory(ProcessIdentity) returns (ProcessInventory);
-  rpc CreateSession(SessionCommand) returns (SessionInventory);
-  rpc FinishSession(SessionCommand) returns (SessionInventory);
+  // Opened by a registered JVM with its process credential. The first report lists everything the JVM holds, which
+  // control reconciles once; later reports carry only changes. Control streams the sessions the JVM should run or end:
+  // all of them first, then changes.
+  rpc Sync(stream ProcessReport) returns (stream DesiredSessions);
 }
 
 service NodeControl {
@@ -100,10 +97,14 @@ message SessionInventory {
   uint32 attached = 7;
 }
 
-message ProcessInventory {
+// A JVM's actual sessions and deliveries.
+message ProcessReport {
   ProcessIdentity identity = 1;
-  uint64 tick_count = 2;
-  repeated SessionInventory sessions = 3;
-  repeated DeliveryInventory deliveries = 4;
-  bool draining = 5;
+  repeated SessionInventory sessions = 2;
+  repeated DeliveryInventory deliveries = 3;
+}
+
+message DesiredSessions {
+  repeated SessionCommand create = 1;
+  repeated SessionCommand finish = 2;
 }
