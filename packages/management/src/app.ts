@@ -8,6 +8,7 @@ import { deriveKeys } from "./crypto.ts";
 import { connect, migrate } from "./db.ts";
 import type { Deps } from "./deps.ts";
 import { startReconciler } from "./environments/reconciler.ts";
+import { logStoreIssuer } from "./logstore/issuer.ts";
 import { dockerProvider, socketPathFrom } from "./providers/docker.ts";
 import { localReleaseStore } from "./releases/local-store.ts";
 import { maxArchiveBytes } from "./releases/store.ts";
@@ -32,7 +33,7 @@ export async function start(config: Config) {
     resolveTxt,
     publicUrl: config.publicUrl,
     edge: config.edge,
-    logStore: config.logStore,
+    logStore: config.logStore && logStoreIssuer(config.logStore),
     changes: await listenForChanges(sql),
   };
   const { machines } = config;

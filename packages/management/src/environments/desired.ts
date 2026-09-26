@@ -11,7 +11,7 @@ import {
 } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { releaseKey } from "../releases/store.ts";
-import { notFound } from "../rpc/validate.ts";
+import { notFound, timestamp } from "../rpc/validate.ts";
 import { secretContext } from "../secrets/service.ts";
 
 const artifactUrlLifetimeMs = 60 * 60 * 1000;
@@ -79,14 +79,8 @@ export async function desiredState(
     });
   }
   if (logStore) {
-    message.logStore = create(ObjectStoreSchema, {
-      endpoint: logStore.endpoint,
-      region: logStore.region,
-      bucket: logStore.bucket,
-      prefix: `${logStore.prefix}${environmentId}/`,
-      accessKeyId: logStore.accessKeyId,
-      secretAccessKey: logStore.secretAccessKey,
-    });
+    const { expireTime, ...grant } = await logStore.grant(environmentId);
+    message.logStore = create(ObjectStoreSchema, { ...grant, expireTime: timestamp(expireTime) });
   }
   return { message, lease: environment.lease };
 }

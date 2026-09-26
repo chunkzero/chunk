@@ -40,8 +40,15 @@ export interface LogStore {
   region: string;
   bucket: string;
   prefix: string;
+  /** The operator's credentials, which environments get only with `sharedCredentials`. */
   accessKeyId: string;
   secretAccessKey: string;
+  /** Hands every environment the operator's credentials, trusting each with every other environment's logs. */
+  sharedCredentials: boolean;
+  /** Where environments' prefix-limited credentials come from, unless `sharedCredentials`. */
+  stsEndpoint: string;
+  roleArn: string;
+  credentialSeconds: number;
 }
 
 export interface Edge {
@@ -104,13 +111,19 @@ function token(env: Env, name: string): string | undefined {
 function logStoreOf(env: Env): LogStore | undefined {
   const bucket = env.CHUNK_LOG_STORE_BUCKET;
   if (!bucket) return undefined;
+  const endpoint = required(env, "CHUNK_LOG_STORE_ENDPOINT");
+  const sharedCredentials = env.CHUNK_LOG_STORE_SHARED_CREDENTIALS === "1";
   return {
-    endpoint: required(env, "CHUNK_LOG_STORE_ENDPOINT"),
-    region: env.CHUNK_LOG_STORE_REGION ?? "auto",
+    endpoint,
+    region: env.CHUNK_LOG_STORE_REGION ?? "us-east-1",
     bucket,
     prefix: env.CHUNK_LOG_STORE_PREFIX ?? "environments/",
     accessKeyId: required(env, "CHUNK_LOG_STORE_ACCESS_KEY_ID"),
     secretAccessKey: required(env, "CHUNK_LOG_STORE_SECRET_ACCESS_KEY"),
+    sharedCredentials,
+    stsEndpoint: env.CHUNK_LOG_STORE_STS_ENDPOINT ?? endpoint,
+    roleArn: sharedCredentials ? "" : required(env, "CHUNK_LOG_STORE_ROLE_ARN"),
+    credentialSeconds: positive(env, "CHUNK_LOG_STORE_CREDENTIAL_SECONDS", 3600),
   };
 }
 
