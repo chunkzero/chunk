@@ -54,10 +54,15 @@ fn chunked(bytes: Vec<u8>, size: usize) -> Response<Body> {
 
 async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible> {
     let path = request.uri().path().to_owned();
+    let uri = request.uri().to_string();
     let authorized = request.headers().get("authorization").is_some_and(|value| value == "Bearer secret");
     let content_type = request.headers().get("content-type").cloned();
     let credentialed = request.headers().contains_key("authorization");
     let body = request.into_body().collect().await.expect("request body").to_bytes();
+    if path == "/upload" && uri.contains("refuse") {
+        let body = format!("<Error><Code>AccessDenied</Code><Resource>{uri}</Resource></Error>");
+        return Ok(full(403, "application/xml", body));
+    }
     if path == "/upload" {
         let status = if credentialed || body.as_ref() != b"archive" { 403 } else { 200 };
         return Ok(full(status, "text/plain", ""));
@@ -271,13 +276,19 @@ async fn a_truncated_stream_fails_then_ends() {
 
 #[tokio::test]
 async fn upload_errors_never_show_the_presigned_url() {
-    let client = Client::new("http://127.0.0.1:9");
-    let target = UploadTarget {
-        url: "http://127.0.0.1:9/upload?X-Amz-Signature=sentinel-signature-51c2".into(),
-        ..UploadTarget::default()
-    };
-    let error = client.upload_archive(&target, "archive").await.unwrap_err();
-    assert!(matches!(error, Error::Transport(_)));
-    let output = format!("{error} {error:?} {error:#?}");
-    assert!(!output.contains("sentinel-signature-51c2"), "{output}");
+    let refusing = format!("http://{}/upload?refuse=1&X-Amz-Signature=sentinel-signature-51c2", serve().await);
+    let unreachable = "http://127.0.0.1:9/upload?X-Amz-Signature=sentinel-signature-51c2".to_owned();
+    for url in [refusing, unreachable] {
+        let target = UploadTarget { url, ..UploadTarget::default() };
+        let error = Client::new("http://127.0.0.1:9").upload_archive(&target, "archive").await.unwrap_err();
+        let output = format!("{error} {error:?} {error:#?}");
+        assert!(!output.contains("sentinel-signature-51c2"), "{output}");
+        match error {
+            Error::Status(status) => {
+                assert_eq!(status.code, Code::PermissionDenied);
+                assert_eq!(status.message, "upload refused with HTTP 403 Forbidden (AccessDenied)");
+            }
+            error => assert!(matches!(error, Error::Transport(_)), "{error}"),
+        }
+    }
 }

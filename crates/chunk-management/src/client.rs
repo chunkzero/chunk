@@ -4,7 +4,7 @@ use prost::Message;
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use reqwest::{Response, StatusCode};
 
-use crate::error::{self, Error};
+use crate::error::{self, Code, Error, Status};
 use crate::stream::{Stream, envelope};
 
 const UNARY_CONTENT_TYPE: &str = "application/proto";
@@ -69,7 +69,7 @@ impl Client {
     ///
     /// # Errors
     /// The store's refusal, with a code from its HTTP status, or a transport failure. Errors never include the URL,
-    /// whose query carries the upload's signature.
+    /// whose query carries the upload's signature, nor the store's response body, which may echo it.
     pub async fn upload_archive(
         &self,
         target: &crate::v1::UploadTarget,
@@ -89,7 +89,7 @@ impl Client {
         if status.is_success() {
             return Ok(());
         }
-        Err(error::from_response(status, &response.bytes().await.map_err(without_url)?))
+        Err(upload_refusal(status, &response.bytes().await.map_err(without_url)?))
     }
 
     fn post(&self, path: &str, content_type: &'static str, body: Vec<u8>) -> reqwest::RequestBuilder {
@@ -108,6 +108,20 @@ impl Client {
 
 fn without_url(error: reqwest::Error) -> Error {
     Error::Transport(error.without_url())
+}
+
+fn upload_refusal(status: StatusCode, body: &[u8]) -> Error {
+    let detail = s3_code(body).map(|code| format!(" ({code})")).unwrap_or_default();
+    Status { code: Code::from_http(status), message: format!("upload refused with HTTP {status}{detail}") }.into()
+}
+
+/// The `<Code>` of an S3 error body, such as `AccessDenied`, when it is a plain identifier.
+fn s3_code(body: &[u8]) -> Option<&str> {
+    let body = std::str::from_utf8(body).ok()?;
+    let start = body.find("<Code>")? + "<Code>".len();
+    let code = &body[start..start + body[start..].find("</Code>")?];
+    let plain = !code.is_empty() && code.len() <= 64 && code.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    plain.then_some(code)
 }
 
 /// A Connect success is HTTP 200 with the expected content type. Anything else is an error: the Connect error it
