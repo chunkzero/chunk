@@ -171,6 +171,10 @@ impl Proxy {
                         drop(stream);
                         continue;
                     }
+                    // Relay writes are already batched; small packets should not wait for ACKs.
+                    if let Err(error) = stream.set_nodelay(true) {
+                        tracing::debug!(%peer, %error, "could not disable Nagle's algorithm");
+                    }
                     let responses = Arc::clone(&self.responses);
                     let authentication = Arc::clone(&self.authentication);
                     let limbo_packets = Arc::clone(&self.limbo_packets);

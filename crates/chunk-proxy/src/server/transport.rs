@@ -1,16 +1,50 @@
-use std::{future::Future, io, io::Write as _, time::Duration};
+use std::{
+    cell::RefCell,
+    future::{Future, poll_fn},
+    io,
+    pin::Pin,
+    task::{Context, Poll, ready},
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
 use chunk_protocol::{Decode, Encode, MAX_FRAME_SIZE, Packet, VarInt, decode_frame, encode_packet};
-use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
-use openssl::symm::{Cipher, Crypter, Mode};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use libdeflater::{CompressionLvl, Compressor, Decompressor};
+use openssl::{cipher::Cipher, cipher_ctx::CipherCtx};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    time::Instant,
+};
+use tokio_util::io::poll_read_buf;
 
+/// Space reserved for each socket read.
+const READ_SIZE: usize = 8 * 1024;
+/// Buffer capacity kept after an unusually large packet has been handled.
+const RETAINED_CAPACITY: usize = 64 * 1024;
+/// Bytes queued output must drain within each `WRITE_TIMEOUT`, so a peer that
+/// reads a trickle cannot keep a backlog alive indefinitely.
+const MIN_WRITE_PROGRESS: usize = 16 * 1024;
+
+thread_local! {
+    // Every Minecraft packet is an independent zlib stream, so each worker
+    // thread resets one shared state instead of allocating one per packet.
+    static DEFLATE: RefCell<Compressor> = RefCell::new(Compressor::new(CompressionLvl::default()));
+    static INFLATE: RefCell<Decompressor> = RefCell::new(Decompressor::new());
+}
+
+/// A framed connection. Outgoing frames are encoded and encrypted into one
+/// reusable buffer and sent by `flush` or `pump`, so several can share a write.
 pub(super) struct Transport<S> {
     stream: S,
-    buffer: BytesMut,
-    encrypt: Option<Crypter>,
-    decrypt: Option<Crypter>,
+    input: BytesMut,
+    output: Vec<u8>,
+    written: usize,
+    /// When queued output was last emptied or drained by `MIN_WRITE_PROGRESS`,
+    /// and the bytes written since.
+    progress: Instant,
+    progressed: usize,
+    encrypt: Option<CipherCtx>,
+    decrypt: Option<CipherCtx>,
     compression: Option<usize>,
 }
 
@@ -31,27 +65,30 @@ impl PreparedPackets {
     }
 
     pub(super) fn push_frame(&mut self, frame: &[u8]) -> io::Result<()> {
-        if let Some(threshold) = self.compression {
-            let mut body = frame;
-            VarInt::decode(&mut body).map_err(invalid_data)?;
-            self.wire.extend(deflate(body, threshold)?);
-        } else {
-            self.wire.extend_from_slice(frame);
-        }
-        Ok(())
+        encode_frame(&mut self.wire, unframe(frame)?, self.compression)
     }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     pub(super) fn new(stream: S) -> Self {
-        Self { stream, buffer: BytesMut::new(), encrypt: None, decrypt: None, compression: None }
+        Self {
+            stream,
+            input: BytesMut::new(),
+            output: Vec::new(),
+            written: 0,
+            progress: Instant::now(),
+            progressed: 0,
+            encrypt: None,
+            decrypt: None,
+            compression: None,
+        }
     }
 
     pub(super) fn enable_encryption(&mut self, secret: &[u8; 16]) -> io::Result<()> {
-        self.encrypt = Some(Crypter::new(Cipher::aes_128_cfb8(), Mode::Encrypt, secret, Some(secret))?);
-        let mut decrypt = Crypter::new(Cipher::aes_128_cfb8(), Mode::Decrypt, secret, Some(secret))?;
+        self.encrypt = Some(cfb8(secret, true)?);
+        let mut decrypt = cfb8(secret, false)?;
         // Bytes read beyond Encryption Response already belong to the encrypted stream.
-        self.buffer = transform(&mut decrypt, &self.buffer)?.as_slice().into();
+        apply(&mut decrypt, &mut self.input)?;
         self.decrypt = Some(decrypt);
         Ok(())
     }
@@ -61,37 +98,51 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     }
 
     pub(super) async fn read_frame(&mut self, limit: usize) -> io::Result<Bytes> {
-        loop {
-            // A compressed frame needs room for its uncompressed-length prefix and zlib overhead.
-            let wire_limit = if self.compression.is_some() { limit.saturating_add(1024) } else { limit };
-            if let Some(frame) = decode_frame(&mut self.buffer, wire_limit).map_err(invalid_data)? {
-                return self.compression.map_or(Ok(frame.clone()), |threshold| inflate(&frame, threshold, limit));
-            }
-            let mut bytes = [0; 4096];
-            let count = self.stream.read(&mut bytes).await?;
-            if count == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client closed the connection"));
-            }
-            if let Some(decrypt) = &mut self.decrypt {
-                self.buffer.extend_from_slice(&transform(decrypt, &bytes[..count])?);
-            } else {
-                self.buffer.extend_from_slice(&bytes[..count]);
-            }
+        poll_fn(|cx| self.poll_frame(cx, limit)).await
+    }
+
+    /// The next frame if it has already been received, without reading the socket.
+    pub(super) fn buffered_frame(&mut self, limit: usize) -> io::Result<Option<Bytes>> {
+        // A compressed frame needs room for its uncompressed-length prefix and zlib overhead.
+        let wire_limit = if self.compression.is_some() { limit.saturating_add(1024) } else { limit };
+        let Some(frame) = decode_frame(&mut self.input, wire_limit).map_err(invalid_data)? else {
+            return Ok(None);
+        };
+        match self.compression {
+            Some(threshold) => inflate(&frame, threshold, limit).map(Some),
+            None => Ok(Some(frame)),
         }
     }
 
     pub(super) fn has_buffered_data(&self) -> bool {
-        !self.buffer.is_empty()
+        !self.input.is_empty()
+    }
+
+    /// Encodes a frame body for the next flush or pump.
+    pub(super) fn queue(&mut self, body: &[u8]) -> io::Result<()> {
+        self.compact();
+        let start = self.output.len();
+        encode_frame(&mut self.output, body, self.compression)?;
+        self.seal(start)
+    }
+
+    pub(super) fn queue_encoded(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.queue(unframe(frame)?)
+    }
+
+    /// Queued bytes not yet accepted by the socket.
+    pub(super) fn queued(&self) -> usize {
+        self.output.len() - self.written
+    }
+
+    /// When queued output that stops draining should be abandoned.
+    pub(super) fn write_deadline(&self) -> Option<Instant> {
+        (!self.output.is_empty()).then(|| self.progress + WRITE_TIMEOUT)
     }
 
     pub(super) async fn write_body(&mut self, body: &[u8]) -> io::Result<()> {
-        if body.is_empty() || body.len() > MAX_FRAME_SIZE {
-            return Err(invalid_data("invalid player frame size"));
-        }
-        let mut framed = Vec::with_capacity(body.len() + 5);
-        VarInt(i32::try_from(body.len()).map_err(invalid_data)?).encode(&mut framed).map_err(invalid_data)?;
-        framed.extend_from_slice(body);
-        self.write_encoded(&framed).await
+        self.queue(body)?;
+        self.flush().await
     }
 
     pub(super) async fn write_packet<P: Packet + Encode>(&mut self, packet: &P) -> io::Result<()> {
@@ -99,84 +150,199 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport<S> {
     }
 
     pub(super) async fn write_encoded(&mut self, frame: &[u8]) -> io::Result<()> {
-        let output = if let Some(threshold) = self.compression {
-            let mut body = frame;
-            VarInt::decode(&mut body).map_err(invalid_data)?;
-            deflate(body, threshold)?
-        } else {
-            frame.to_vec()
-        };
-        self.write_wire(&output).await
+        self.queue_encoded(frame)?;
+        self.flush().await
     }
 
     pub(super) async fn write_prepared(&mut self, packets: &PreparedPackets) -> io::Result<()> {
         if packets.compression != self.compression {
             return Err(invalid_data("prepared packets have a different compression threshold"));
         }
-        self.write_wire(&packets.wire).await
+        self.compact();
+        let start = self.output.len();
+        self.output.extend_from_slice(&packets.wire);
+        self.seal(start)?;
+        self.flush().await
     }
 
-    async fn write_wire(&mut self, wire: &[u8]) -> io::Result<()> {
-        if let Some(encrypt) = &mut self.encrypt {
-            self.stream.write_all(&transform(encrypt, wire)?).await
-        } else {
-            self.stream.write_all(wire).await
-        }
+    /// Sends all queued output. Cancelling keeps unsent bytes queued in order.
+    pub(super) async fn flush(&mut self) -> io::Result<()> {
+        poll_fn(|cx| self.poll_output(cx)).await
+    }
+
+    /// Sends queued output while waiting for a frame when `limit` is set.
+    /// Returns `None` once output that was queued at the start is flushed.
+    pub(super) async fn pump(&mut self, limit: Option<usize>) -> io::Result<Option<Bytes>> {
+        let flushing = !self.output.is_empty();
+        poll_fn(|cx| {
+            if flushing && self.poll_output(cx)?.is_ready() {
+                return Poll::Ready(Ok(None));
+            }
+            match limit {
+                Some(limit) => self.poll_frame(cx, limit).map_ok(Some),
+                None => Poll::Pending,
+            }
+        })
+        .await
     }
 
     pub(super) async fn shutdown(&mut self) -> io::Result<()> {
+        self.flush().await?;
         self.stream.shutdown().await
     }
+
+    fn poll_frame(&mut self, cx: &mut Context<'_>, limit: usize) -> Poll<io::Result<Bytes>> {
+        loop {
+            if let Some(frame) = self.buffered_frame(limit)? {
+                return Poll::Ready(Ok(frame));
+            }
+            ready!(self.poll_fill(cx))?;
+        }
+    }
+
+    fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.input.reserve(READ_SIZE);
+        if self.input.is_empty() && self.input.capacity() > RETAINED_CAPACITY {
+            self.input = BytesMut::with_capacity(READ_SIZE);
+        }
+        let start = self.input.len();
+        if ready!(poll_read_buf(Pin::new(&mut self.stream), cx, &mut self.input))? == 0 {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client closed the connection")));
+        }
+        if let Some(decrypt) = &mut self.decrypt {
+            apply(decrypt, &mut self.input[start..])?;
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_output(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.written < self.output.len() {
+            let count = ready!(Pin::new(&mut self.stream).poll_write(cx, &self.output[self.written..]))?;
+            if count == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+            self.written += count;
+            self.progressed += count;
+            if self.progressed >= MIN_WRITE_PROGRESS {
+                self.progress = Instant::now();
+                self.progressed = 0;
+            }
+        }
+        ready!(Pin::new(&mut self.stream).poll_flush(cx))?;
+        self.output.clear();
+        self.output.shrink_to(RETAINED_CAPACITY);
+        self.written = 0;
+        self.progressed = 0;
+        Poll::Ready(Ok(()))
+    }
+
+    /// Drops output the socket already accepted once it outweighs what remains,
+    /// so a peer that never fully drains cannot grow the buffer past twice its backlog.
+    fn compact(&mut self) {
+        if self.written > 0 && self.written >= self.queued() {
+            self.output.drain(..self.written);
+            self.written = 0;
+        }
+    }
+
+    /// Encrypts output queued from `start`.
+    fn seal(&mut self, start: usize) -> io::Result<()> {
+        if start == 0 {
+            self.progress = Instant::now();
+            self.progressed = 0;
+        }
+        if let Some(encrypt) = &mut self.encrypt {
+            apply(encrypt, &mut self.output[start..])?;
+        }
+        Ok(())
+    }
 }
 
-fn transform(cipher: &mut Crypter, bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let mut output = vec![0; bytes.len() + Cipher::aes_128_cfb8().block_size()];
-    let count = cipher.update(bytes, &mut output)?;
-    if count != bytes.len() {
+fn cfb8(secret: &[u8; 16], encrypt: bool) -> io::Result<CipherCtx> {
+    let mut context = CipherCtx::new()?;
+    if encrypt {
+        context.encrypt_init(Some(Cipher::aes_128_cfb8()), Some(secret), Some(secret))?;
+    } else {
+        context.decrypt_init(Some(Cipher::aes_128_cfb8()), Some(secret), Some(secret))?;
+    }
+    Ok(context)
+}
+
+fn apply(cipher: &mut CipherCtx, bytes: &mut [u8]) -> io::Result<()> {
+    if cipher.cipher_update_inplace(bytes, bytes.len())? != bytes.len() {
         return Err(io::Error::other("unexpected CFB8 output length"));
     }
-    output.truncate(count);
-    Ok(output)
+    Ok(())
 }
 
-fn deflate(body: &[u8], threshold: usize) -> io::Result<Vec<u8>> {
-    let mut payload = Vec::new();
-    if body.len() >= threshold {
-        VarInt(i32::try_from(body.len()).map_err(invalid_data)?).encode(&mut payload).map_err(invalid_data)?;
-        let mut encoder = ZlibEncoder::new(payload, Compression::default());
-        encoder.write_all(body)?;
-        payload = encoder.finish()?;
-    } else {
-        payload.push(0);
-        payload.extend_from_slice(body);
-    }
-    if payload.len() > MAX_FRAME_SIZE {
-        return Err(invalid_data("compressed frame too large"));
-    }
-    let mut frame = Vec::new();
-    VarInt(i32::try_from(payload.len()).map_err(invalid_data)?).encode(&mut frame).map_err(invalid_data)?;
-    frame.extend_from_slice(&payload);
+/// The body of an encoded frame, without its length prefix.
+fn unframe(mut frame: &[u8]) -> io::Result<&[u8]> {
+    VarInt::decode(&mut frame).map_err(invalid_data)?;
     Ok(frame)
 }
 
-fn inflate(mut frame: &[u8], threshold: usize, limit: usize) -> io::Result<Bytes> {
-    let length = usize::try_from(VarInt::decode(&mut frame).map_err(invalid_data)?.0).map_err(invalid_data)?;
+/// Appends one wire frame containing `body` (a packet ID and payload).
+fn encode_frame(output: &mut Vec<u8>, body: &[u8], compression: Option<usize>) -> io::Result<()> {
+    if body.is_empty() || body.len() > MAX_FRAME_SIZE {
+        return Err(invalid_data("invalid frame size"));
+    }
+    match compression {
+        None => {
+            varint(output, body.len())?;
+            output.extend_from_slice(body);
+        }
+        Some(threshold) if body.len() < threshold => {
+            varint(output, body.len() + 1)?;
+            output.push(0);
+            output.extend_from_slice(body);
+        }
+        Some(_) => {
+            let start = output.len();
+            varint(output, body.len())?;
+            deflate(body, output)?;
+            let length = output.len() - start;
+            if length > MAX_FRAME_SIZE {
+                output.truncate(start);
+                return Err(invalid_data("compressed frame too large"));
+            }
+            let mut prefix = Vec::with_capacity(3);
+            varint(&mut prefix, length)?;
+            output.splice(start..start, prefix);
+        }
+    }
+    Ok(())
+}
+
+fn varint(output: &mut Vec<u8>, value: usize) -> io::Result<()> {
+    VarInt(i32::try_from(value).map_err(invalid_data)?).encode(output).map_err(invalid_data)
+}
+
+fn deflate(body: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+    DEFLATE.with_borrow_mut(|deflate| {
+        let start = output.len();
+        output.resize(start + deflate.zlib_compress_bound(body.len()), 0);
+        let count = deflate.zlib_compress(body, &mut output[start..]).map_err(invalid_data)?;
+        output.truncate(start + count);
+        Ok(())
+    })
+}
+
+fn inflate(frame: &Bytes, threshold: usize, limit: usize) -> io::Result<Bytes> {
+    let mut body = frame.as_ref();
+    let length = usize::try_from(VarInt::decode(&mut body).map_err(invalid_data)?.0).map_err(invalid_data)?;
     if length == 0 {
-        if frame.is_empty() || frame.len() >= threshold || frame.len() > limit {
+        if body.is_empty() || body.len() >= threshold || body.len() > limit {
             return Err(invalid_data("invalid uncompressed packet length"));
         }
-        return Ok(Bytes::copy_from_slice(frame));
+        return Ok(frame.slice(frame.len() - body.len()..));
     }
     if length < threshold || length > limit.min(MAX_FRAME_SIZE) {
         return Err(invalid_data("invalid decompressed packet length"));
     }
-    let mut output = vec![0; length + 1];
-    let mut decoder = Decompress::new(true);
-    let status = decoder.decompress(frame, &mut output, FlushDecompress::Finish).map_err(invalid_data)?;
-    if status != Status::StreamEnd || decoder.total_in() != frame.len() as u64 || decoder.total_out() != length as u64 {
+    let mut output = vec![0; length];
+    if INFLATE.with_borrow_mut(|inflate| inflate.zlib_decompress(body, &mut output)).map_err(invalid_data)? != length {
         return Err(invalid_data("invalid or mismatched zlib stream"));
     }
-    output.truncate(length);
     Ok(output.into())
 }
 

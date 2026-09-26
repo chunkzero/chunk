@@ -47,6 +47,9 @@ pub struct Config {
     pub request_bytes: usize,
     #[arg(long, default_value_t = 1024)]
     pub response_bytes: usize,
+    /// Relay response packets the synthetic gameplay server sends per request, in one write.
+    #[arg(long, default_value_t = 1)]
+    pub burst: usize,
     #[arg(long, value_enum, default_value_t = Payload::Mixed)]
     pub payload: Payload,
     #[arg(long, default_value_t = 1)]
@@ -83,6 +86,7 @@ impl Config {
         ensure!((1..=60_000).contains(&self.timeout_ms), "timeout must be 1..=60000 ms");
         ensure!((9..=65_536).contains(&self.request_bytes), "request bytes must be 9..=65536");
         ensure!((9..=2_000_000).contains(&self.response_bytes), "response bytes must be 9..=2000000");
+        ensure!((1..=64).contains(&self.burst), "burst must be 1..=64");
         ensure!(self.compression_threshold <= 2_000_000, "invalid compression threshold");
         let offers = u64::from(self.rate()) * u64::from(self.seconds + self.warmup);
         ensure!(self.rate() > 0 && offers <= 10_000_000, "rate must be positive; at most 10 million offers/run");

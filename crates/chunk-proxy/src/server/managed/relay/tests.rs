@@ -122,3 +122,101 @@ async fn active_destination_failure_sends_a_play_disconnect() {
     assert_eq!(packet[0], 0x20);
     assert_eq!(server.await.unwrap().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
+
+const PACKET: [u8; 16_384] = [0x7f; 16_384];
+const PACKETS: usize = 8 * BACKLOG_LIMIT / PACKET.len();
+
+#[tokio::test]
+async fn packets_sent_before_a_clean_close_are_delivered() {
+    for trial in 0..200 {
+        let (client, public) = tokio::io::duplex(8192);
+        let (jvm, internal) = tokio::io::duplex(8192);
+        let (mut client, mut jvm) = (Transport::new(client), Transport::new(jvm));
+        let (sender, receiver) = if trial % 2 == 0 { (&mut client, &mut jvm) } else { (&mut jvm, &mut client) };
+        sender.write_body(&[0x7f, 42]).await.unwrap();
+        sender.shutdown().await.unwrap();
+        let mut public = Transport::new(public);
+        let error = until(
+            &mut public,
+            &mut Transport::new(internal),
+            &mut information(),
+            std::future::pending::<()>(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(receiver.read_frame(4096).await.unwrap().as_ref(), [0x7f, 42]);
+    }
+}
+
+/// Relays `PACKETS` gameplay packets to a player reading `chunk` bytes per `period`, who
+/// leaves once all of them arrive. Returns the relay's error, the bytes the JVM sent,
+/// and the packets the player decoded.
+async fn relay_to_reader(period: std::time::Duration, chunk: usize) -> (io::Error, usize, Vec<bytes::Bytes>) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::AsyncReadExt;
+
+    let (mut client, public) = tokio::io::duplex(1024);
+    let (jvm, internal) = tokio::io::duplex(8192);
+    let relay = tokio::spawn(async move {
+        until(
+            &mut Transport::new(public),
+            &mut Transport::new(internal),
+            &mut information(),
+            std::future::pending::<()>(),
+            true,
+            None,
+        )
+        .await
+    });
+    let sent = Arc::new(AtomicUsize::new(0));
+    let writer = tokio::spawn({
+        let sent = sent.clone();
+        async move {
+            let mut jvm = Transport::new(jvm);
+            while sent.load(Ordering::Relaxed) < PACKETS * PACKET.len() && jvm.write_body(&PACKET).await.is_ok() {
+                sent.fetch_add(PACKET.len(), Ordering::Relaxed);
+            }
+            std::future::pending::<()>().await;
+        }
+    });
+    let reader = tokio::spawn(async move {
+        let mut received = bytes::BytesMut::new();
+        let mut packets = Vec::new();
+        let mut bytes = vec![0; chunk];
+        while packets.len() < PACKETS {
+            tokio::time::sleep(period).await;
+            match client.read(&mut bytes).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => received.extend_from_slice(&bytes[..count]),
+            }
+            while let Some(packet) = chunk_protocol::decode_frame(&mut received, INPUT_LIMIT).unwrap() {
+                packets.push(packet);
+            }
+        }
+        packets
+    });
+    let error = tokio::time::timeout(std::time::Duration::from_secs(120), relay).await.unwrap().unwrap().unwrap_err();
+    writer.abort();
+    (error, sent.load(Ordering::Relaxed), reader.await.unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_players_bound_gameplay_reads_and_only_trickling_ones_time_out() {
+    use std::time::Duration;
+
+    let (error, sent, _) = relay_to_reader(Duration::from_secs(1), 256).await;
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(sent < 2 * BACKLOG_LIMIT);
+    // About 10 KiB/s: slow, but drains faster than the minimum write progress.
+    let (error, sent, packets) = relay_to_reader(Duration::from_millis(100), 1024).await;
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "the player leaves only after receiving everything");
+    assert_eq!(sent, PACKETS * PACKET.len());
+    assert_eq!(packets.len(), PACKETS);
+    assert!(packets.iter().all(|packet| packet.as_ref() == PACKET));
+}

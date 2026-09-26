@@ -33,6 +33,16 @@ impl Peer {
         self.0.write_body(body).await
     }
 
+    /// Sends `count` copies of a packet with one flush.
+    /// # Errors
+    /// Returns packet encoding or socket errors.
+    pub async fn write_burst(&mut self, body: &[u8], count: usize) -> io::Result<()> {
+        for _ in 0..count {
+            self.0.queue(body)?;
+        }
+        self.0.flush().await
+    }
+
     /// # Errors
     /// Returns frame validation or socket errors.
     pub async fn read(&mut self) -> io::Result<bytes::Bytes> {

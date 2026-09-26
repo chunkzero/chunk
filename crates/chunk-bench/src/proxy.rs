@@ -32,6 +32,7 @@ pub struct Client {
     peer: Peer,
     request: Vec<u8>,
     response: Vec<u8>,
+    burst: usize,
 }
 
 impl Client {
@@ -42,6 +43,7 @@ impl Client {
             peer: Peer::new(stream, !config.no_encryption, config.compression())?,
             request: payload(config.request_bytes, config.payload, config.seed),
             response: payload(config.response_bytes, config.payload, config.seed),
+            burst: config.burst,
         })
     }
 
@@ -49,7 +51,9 @@ impl Client {
         self.request[1..9].copy_from_slice(&sequence.to_le_bytes());
         self.response[1..9].copy_from_slice(&sequence.to_le_bytes());
         self.peer.write(&self.request).await?;
-        ensure!(self.peer.read().await?.as_ref() == self.response, "relay response payload mismatch");
+        for _ in 0..self.burst {
+            ensure!(self.peer.read().await?.as_ref() == self.response, "relay response payload mismatch");
+        }
         Ok(())
     }
 }
@@ -66,6 +70,7 @@ pub async fn gameplay(listener: TcpListener, config: &Config, stop: Cancellation
                 stream.set_nodelay(true)?;
                 let request = request.clone();
                 let mut response = response.as_ref().clone();
+                let burst = config.burst;
                 tasks.spawn(async move {
                     let mut peer = Peer::new(stream, false, None)?;
                     loop {
@@ -74,7 +79,7 @@ pub async fn gameplay(listener: TcpListener, config: &Config, stop: Cancellation
                             return Err(io::Error::other("relay request payload mismatch"));
                         }
                         response[1..9].copy_from_slice(&received[1..9]);
-                        peer.write(&response).await?;
+                        peer.write_burst(&response, burst).await?;
                     }
                 });
             }
@@ -94,6 +99,8 @@ pub async fn target(listener: TcpListener, backend: &str, config: &Config, stop:
             () = stop.cancelled() => break,
             result = listener.accept() => {
                 let (stream, _) = result?;
+                // Matches the production player listener.
+                stream.set_nodelay(true)?;
                 let backend = backend.to_owned();
                 let encrypted = !config.no_encryption;
                 let compression = config.compression();
