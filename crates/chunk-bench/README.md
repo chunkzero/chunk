@@ -80,9 +80,9 @@ limit in the `ResourceExhausted` message.
 
 `sync-queries` runs core (`chunk_environment::Core`: backend, control and the `chunk.sync.v1.Core` service) in the
 target and opens `--subscribers` (default 5,000) `Subscribe(queries)` streams on the shared leaderboard (`top`) with the
-gateway (platform) credential, `--streams-per-connection` to a connection, then waits for each snapshot. Writes are sync
-`Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams only
-advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
+in-process gateway's credential, `--streams-per-connection` to a connection, then waits for each snapshot. Writes are
+sync `Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams
+only advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
 writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
 record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read. Setup
 fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an ended stream. The `fanout`
