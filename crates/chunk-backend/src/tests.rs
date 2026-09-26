@@ -6,7 +6,9 @@ use std::{
 };
 
 use chunk_js::{DeploymentId, Limits};
-use chunk_store::{Commit, DatabaseSchema, DocumentKey, Operation, Outcome, Revision, Snapshot, SqliteStore, Storage};
+use chunk_store::{
+    Commit, DatabaseSchema, DocumentKey, Operation, Outcome, Reply, Request, Revision, Snapshot, SqliteStore, Storage,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc as signals;
 
@@ -75,6 +77,9 @@ async fn pending<F: Future>(mut future: Pin<&mut F>) {
 enum Notice {
     Preparing,
     Commit(usize),
+    Scheduling,
+    /// The requests of one shared durable write, as `prepare {id}` or `commit {id}`.
+    Batch(Vec<String>),
 }
 
 struct ControlledStore {
@@ -86,9 +91,93 @@ struct ControlledStore {
     ambiguous: bool,
     rejected: bool,
     attempts: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
+    /// Holds the first scheduling command, keeping the commit thread busy.
+    scheduling: Option<mpsc::Receiver<()>>,
+    /// Sends shared writes to the inner store whole, reporting each one and
+    /// rejecting the commit of operation `rejected` with `Capacity`.
+    batched: bool,
+    /// Holds the first shared write that contains a commit.
+    batch: Option<mpsc::Receiver<()>>,
+}
+
+impl ControlledStore {
+    fn new(inner: SqliteStore, notices: signals::UnboundedSender<Notice>) -> Self {
+        Self {
+            inner,
+            prepare: None,
+            commits: Vec::new(),
+            committed: 0,
+            notices,
+            ambiguous: false,
+            rejected: false,
+            attempts: None,
+            scheduling: None,
+            batched: false,
+            batch: None,
+        }
+    }
+
+    fn shared(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        let names = requests
+            .iter()
+            .map(|request| match request {
+                Request::Prepare { operation, .. } => format!("prepare {}", operation.id),
+                Request::Commit { commit, .. } => format!("commit {}", commit.operation.id),
+            })
+            .collect();
+        let _ = self.notices.send(Notice::Batch(names));
+        if requests.iter().any(|request| matches!(request, Request::Commit { .. }))
+            && let Some(gate) = self.batch.take()
+        {
+            let _ = gate.recv();
+        }
+        let (mut results, mut run) = (Vec::new(), Vec::new());
+        for request in requests {
+            if matches!(&request, Request::Commit { commit, .. } if commit.operation.id == "rejected") {
+                results.extend(self.inner.batch(std::mem::take(&mut run)));
+                results.push(Err(chunk_store::Error::Capacity));
+            } else {
+                run.push(request);
+            }
+        }
+        results.extend(self.inner.batch(run));
+        results
+    }
 }
 
 impl Storage for ControlledStore {
+    fn batch(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        if self.batched {
+            return self.shared(requests);
+        }
+        let mut results = Vec::new();
+        for request in requests {
+            let result = match request {
+                Request::Prepare { operation, context } => {
+                    self.prepare_operation(&operation, context).map(Reply::Prepared)
+                }
+                Request::Commit { commit, intents } => self.commit_with_jobs(commit, intents).map(Reply::Committed),
+            };
+            let stop = result.as_ref().is_err_and(|error| !error.rejected());
+            results.push(result);
+            if stop {
+                break;
+            }
+        }
+        results
+    }
+
+    fn job_command(&mut self, command: chunk_store::JobCommand) -> chunk_store::Result<chunk_store::Jobs> {
+        if matches!(command, chunk_store::JobCommand::Recover) {
+            return self.jobs();
+        }
+        if let Some(gate) = self.scheduling.take() {
+            let _ = self.notices.send(Notice::Scheduling);
+            let _ = gate.recv();
+        }
+        Err(chunk_store::Error::Invalid("durable scheduling unsupported"))
+    }
+
     fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
         self.inner.activate_deployment(deployment)
     }
@@ -184,14 +273,11 @@ impl Harness {
             (None, None)
         };
         let store = ControlledStore {
-            inner: store,
             prepare: prepare_receiver,
             commits: receivers,
-            committed: 0,
-            notices,
             ambiguous,
             rejected,
-            attempts: None,
+            ..ControlledStore::new(store, notices)
         };
         let backend = Backend::new("local".into(), Box::new(store)).unwrap();
         backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
@@ -443,14 +529,9 @@ async fn rejected_operation_preserves_time_seed_and_deployment_across_restart() 
     let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (notices, _) = signals::unbounded_channel();
     let store = ControlledStore {
-        inner: open(&directory),
-        prepare: None,
-        commits: Vec::new(),
-        committed: 0,
-        notices,
-        ambiguous: false,
         rejected: true,
         attempts: Some(attempts.clone()),
+        ..ControlledStore::new(open(&directory), notices)
     };
     let source = "export function attempt(ctx) { ctx.db.put('profiles','p',{coins:1}); return {time:Date.now(), random:Math.random(), id:crypto.randomUUID()}; }";
     let backend = Backend::new("local".into(), Box::new(store)).unwrap();
@@ -500,33 +581,9 @@ async fn concurrent_stops_both_wait_for_a_pending_commit() {
 }
 
 mod actions;
+mod batching;
 mod context;
 mod documents;
 mod effects;
 mod integration;
 mod jobs;
-
-#[tokio::test]
-async fn concurrent_mutations_share_durable_writes_and_keep_their_own_revisions() {
-    let directory = tempfile::tempdir().unwrap();
-    let backend = Backend::new("local".into(), Box::new(open(&directory))).unwrap();
-    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
-    let base = backend.query(call("get", json!({"id": "p"}))).await.unwrap().revision;
-    let tasks: Vec<_> = (0..16)
-        .map(|index| {
-            let backend = backend.clone();
-            tokio::spawn(async move { backend.mutate(format!("bump-{index}"), call("bump", json!({"id": "p"}))).await })
-        })
-        .collect();
-    let mut committed = Vec::new();
-    for task in tasks {
-        let update = task.await.unwrap().unwrap();
-        committed.push((update.revision, value(&update)));
-    }
-    committed.sort_by_key(|(revision, _)| *revision);
-    let expected: Vec<_> = (1..=16).map(|count| (Revision(base.0 + count), json!(count))).collect();
-    assert_eq!(committed, expected);
-    let read = backend.query(call("get", json!({"id": "p"}))).await.unwrap();
-    assert_eq!((read.revision, value(&read)), (Revision(base.0 + 16), json!(16)));
-    tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
-}
