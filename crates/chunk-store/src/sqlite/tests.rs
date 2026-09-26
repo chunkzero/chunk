@@ -173,8 +173,8 @@ fn reused_read_connections_stay_pinned_while_held_and_see_later_commits() {
     assert_eq!((held.revision, coins(&held)), (Revision(2), Some(json!(1))));
     assert_eq!((latest.revision, coins(&latest)), (Revision(3), Some(json!(2))));
 
-    drop((held, latest));
-    assert_eq!(store.readers.idle(), 2);
+    drop(held);
+    assert_eq!(store.readers.idle(), 1);
     let reused = store.snapshot().unwrap();
     assert_eq!((reused.revision, coins(&reused)), (Revision(3), Some(json!(2))));
 }
