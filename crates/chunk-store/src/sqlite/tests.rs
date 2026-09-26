@@ -156,3 +156,25 @@ fn capacity_totals_follow_replacements_and_deletes() {
     assert_eq!(store.snapshot().unwrap().revision, Revision(3));
     assert!(store.outcome(&operation("too-large")).unwrap().is_none());
 }
+
+#[test]
+fn reused_read_connections_stay_pinned_while_held_and_see_later_commits() {
+    let (_directory, mut store) = open();
+    let key = DocumentKey::new("profiles", "alice").unwrap();
+    let coins = |snapshot: &Snapshot| snapshot.get(&key).unwrap().map(|document| document.value["coins"].clone());
+    drop(store.snapshot().unwrap());
+    assert_eq!(store.readers.idle(), 1);
+
+    store.commit(commit("one", 1, vec![write("alice", Some(json!({"coins": 1})))])).unwrap();
+    let held = store.snapshot().unwrap();
+    assert_eq!(store.readers.idle(), 0);
+    store.commit(commit("two", 2, vec![write("alice", Some(json!({"coins": 2})))])).unwrap();
+    let latest = store.snapshot().unwrap();
+    assert_eq!((held.revision, coins(&held)), (Revision(2), Some(json!(1))));
+    assert_eq!((latest.revision, coins(&latest)), (Revision(3), Some(json!(2))));
+
+    drop((held, latest));
+    assert_eq!(store.readers.idle(), 2);
+    let reused = store.snapshot().unwrap();
+    assert_eq!((reused.revision, coins(&reused)), (Revision(3), Some(json!(2))));
+}

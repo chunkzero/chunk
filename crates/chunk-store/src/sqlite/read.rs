@@ -1,6 +1,6 @@
 use chunk_contract::{Field, TableSchema};
 use std::{
-    path::Path,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,24 +10,90 @@ use serde_json::Value;
 
 use crate::{
     DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Result,
-    Snapshot, SnapshotReader,
+    Revision, Snapshot, SnapshotReader,
 };
 
 use super::{codec, revision, schema};
 
+/// Idle read connections beyond this are closed instead of kept.
+const IDLE: usize = 8;
+
+/// Read-only connections reused across snapshots, so their prepared statements
+/// stay compiled. A connection is idle only outside a transaction.
+pub(super) struct Pool {
+    path: PathBuf,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl Pool {
+    pub fn new(path: PathBuf) -> Arc<Self> {
+        Arc::new(Self { path, idle: Mutex::new(Vec::new()) })
+    }
+
+    #[cfg(test)]
+    pub fn idle(&self) -> usize {
+        self.idle.lock().unwrap().len()
+    }
+
+    fn lease(self: &Arc<Self>) -> Result<Lease> {
+        let idle = self.idle.lock().map_err(|_| Error::Poisoned)?.pop();
+        let connection = if let Some(connection) = idle {
+            connection
+        } else {
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let connection = Connection::open_with_flags(&self.path, flags)?;
+            connection.busy_timeout(Duration::from_secs(5))?;
+            connection.set_prepared_statement_cache_capacity(64);
+            connection
+        };
+        Ok(Lease { connection: Some(connection), pool: self.clone() })
+    }
+}
+
+/// A pooled connection that ends its read transaction and returns on drop.
+struct Lease {
+    connection: Option<Connection>,
+    pool: Arc<Pool>,
+}
+
+impl Lease {
+    fn connection(&self) -> &Connection {
+        self.connection.as_ref().expect("leased until dropped")
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else { return };
+        if !connection.is_autocommit() && connection.execute_batch("ROLLBACK").is_err() {
+            return;
+        }
+        if let Ok(mut idle) = self.pool.idle.lock()
+            && idle.len() < IDLE
+        {
+            idle.push(connection);
+        }
+    }
+}
+
 struct Reader {
-    connection: Mutex<Connection>,
+    connection: Mutex<Lease>,
     schema: Arc<DatabaseSchema>,
 }
 
-pub(super) fn snapshot(path: &Path, schema: Arc<DatabaseSchema>) -> Result<Snapshot> {
-    let connection =
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.execute_batch("BEGIN")?;
+pub(super) fn snapshot(pool: &Arc<Pool>, schema: Arc<DatabaseSchema>) -> Result<Snapshot> {
+    let lease = pool.lease()?;
+    lease.connection().execute_batch("BEGIN")?;
     // The first read establishes the WAL snapshot before any writer can advance it.
-    let revision = revision::current(&connection)?;
-    Ok(Snapshot::new(revision, Reader { connection: Mutex::new(connection), schema }))
+    let revision = revision::current(lease.connection())?;
+    Ok(Snapshot::new(revision, Reader { connection: Mutex::new(lease), schema }))
+}
+
+/// A row copied out of SQLite, decoded once the connection is released.
+struct Raw {
+    id: String,
+    revision: Revision,
+    fields: Vec<SqlValue>,
 }
 
 impl Reader {
@@ -42,10 +108,26 @@ impl Reader {
         params: Vec<SqlValue>,
         budget: &mut ReadBudget,
     ) -> Result<Vec<(String, Document)>> {
-        let connection = self.connection.lock().map_err(|_| Error::Poisoned)?;
-        let mut statement = connection.prepare_cached(sql)?;
+        let rows = self.rows(table, sql, params, budget)?;
+        rows.into_iter()
+            .map(|raw| {
+                let mut fields = serde_json::Map::new();
+                for ((name, field), value) in table.fields.iter().zip(raw.fields) {
+                    if let Some(value) = codec::decode(field, value)? {
+                        fields.insert(name.clone(), value);
+                    }
+                }
+                Ok((raw.id, Document { revision: raw.revision, value: Value::Object(fields) }))
+            })
+            .collect()
+    }
+
+    /// Steps and copies rows while holding the connection; decoding happens after.
+    fn rows(&self, table: &TableSchema, sql: &str, params: Vec<SqlValue>, budget: &mut ReadBudget) -> Result<Vec<Raw>> {
+        let lease = self.connection.lock().map_err(|_| Error::Poisoned)?;
+        let mut statement = lease.connection().prepare_cached(sql)?;
         let mut rows = statement.query(params_from_iter(params))?;
-        let mut documents = Vec::new();
+        let mut copied = Vec::new();
         while let Some(row) = rows.next()? {
             let mut bytes = row.get::<_, usize>(2)?;
             let raw_bytes = (3..table.fields.len() + 3).try_fold(0, |total, index| -> Result<usize> {
@@ -59,24 +141,17 @@ impl Reader {
             bytes = bytes.max(raw_bytes)
                 + row.get_ref(0)?.as_bytes().map_err(|_| Error::Corrupt("invalid document ID"))?.len();
             budget.charge(bytes)?;
-            let id = row.get(0)?;
-            let revision = row.get(1)?;
-            let mut fields = serde_json::Map::new();
-            for (index, (name, field)) in table.fields.iter().enumerate() {
-                if let Some(value) = codec::decode(field, row.get(index + 3)?)? {
-                    fields.insert(name.clone(), value);
-                }
-            }
-            documents.push((id, Document { revision, value: Value::Object(fields) }));
+            let fields = (3..table.fields.len() + 3).map(|index| row.get(index)).collect::<rusqlite::Result<_>>()?;
+            copied.push(Raw { id: row.get(0)?, revision: row.get(1)?, fields });
         }
-        Ok(documents)
+        Ok(copied)
     }
 }
 
 impl SnapshotReader for Reader {
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {
-        let connection = self.connection.lock().map_err(|_| Error::Poisoned)?;
-        super::write::outcome(&connection, operation)
+        let lease = self.connection.lock().map_err(|_| Error::Poisoned)?;
+        super::write::outcome(lease.connection(), operation)
     }
 
     fn schema(&self) -> &DatabaseSchema {
