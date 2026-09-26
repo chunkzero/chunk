@@ -159,6 +159,69 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
 }
 
 #[tokio::test]
+async fn new_rosters_reject_terminal_member_operations_without_changing_state() {
+    let mut outcomes = Vec::new();
+    for (case, prepare, fail) in
+        [("prepared then canceled", true, false), ("canceled before preparation", false, false), ("failed", true, true)]
+    {
+        let fixture = fixture().await;
+        let control = fixture.control();
+        let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
+        // Reserve the fresh member first to exercise rollback of the whole roster.
+        let group = roster("party", 1, &members);
+        let member = &group.members[1];
+        let destination = control
+            .move_player(MovePlayerRequest {
+                operation_id: member.operation_id.clone(),
+                player_id: member.player_id.clone(),
+                demand: Some(group.demand.clone()),
+                expected_source: Some(member.expected_source.clone()),
+                expected_connection_id: member.expected_connection_id.clone(),
+            })
+            .unwrap();
+        if prepare {
+            control.claim(destination.clone()).await.unwrap();
+        }
+        if fail {
+            control
+                .abandon_move(chunk_proto::v1::AbandonMoveRequest {
+                    claim: Some(destination),
+                    reason: "destination preparation failed".into(),
+                })
+                .await
+                .unwrap();
+            control.reconcile_all().await.unwrap();
+        } else {
+            control.cancel(destination).await.unwrap();
+        }
+        let before = control.state().unwrap();
+        if prepare {
+            let old_claim = &before.claims[&member.operation_id];
+            assert!(old_claim.phase == Phase::Released && old_claim.assignment.is_some(), "{case}");
+        } else {
+            assert!(!before.claims.contains_key(&member.operation_id));
+            assert!(before.moves[&member.operation_id].canceled);
+        }
+        assert_eq!(before.moves[&member.operation_id].failure.is_some(), fail);
+        let result = control.move_roster(&group);
+        outcomes.push((case, result, before, control.state().unwrap()));
+        fixture.close().await;
+    }
+    for (case, result, before, after) in outcomes {
+        assert!(result.is_err(), "{case}: new roster must reject a terminal member operation");
+        assert!(after.rosters.is_empty(), "{case}: roster was inserted");
+        assert!(!after.claims.contains_key("party/a"), "{case}: fresh member claim was inserted");
+        assert!(after.claims.get("party/b") == before.claims.get("party/b"), "{case}: old claim was overwritten");
+        assert!(after.claims == before.claims, "{case}: claims changed");
+        assert!(after.moves == before.moves, "{case}: move intents changed");
+        assert!(after.players == before.players, "{case}: player ownership changed");
+        assert!(after.sessions == before.sessions, "{case}: sessions changed");
+        assert!(after.hosts == before.hosts, "{case}: hosts changed");
+        assert_eq!(after.position(), before.position(), "{case}: state was committed");
+    }
+}
+
+#[tokio::test]
 async fn canceling_a_roster_before_preparation_releases_its_reservations() {
     let fixture = fixture().await;
     let control = fixture.control();
