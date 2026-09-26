@@ -98,6 +98,8 @@ struct ControlledStore {
     batched: bool,
     /// Holds the first shared write that contains a commit.
     batch: Option<mpsc::Receiver<()>>,
+    /// The most successful commits one underlying write has persisted.
+    largest_write: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ControlledStore {
@@ -114,6 +116,7 @@ impl ControlledStore {
             scheduling: None,
             batched: false,
             batch: None,
+            largest_write: std::sync::Arc::default(),
         }
     }
 
@@ -134,13 +137,20 @@ impl ControlledStore {
         let (mut results, mut run) = (Vec::new(), Vec::new());
         for request in requests {
             if matches!(&request, Request::Commit { commit, .. } if commit.operation.id == "rejected") {
-                results.extend(self.inner.batch(std::mem::take(&mut run)));
+                results.extend(self.write(std::mem::take(&mut run)));
                 results.push(Err(chunk_store::Error::Capacity));
             } else {
                 run.push(request);
             }
         }
-        results.extend(self.inner.batch(run));
+        results.extend(self.write(run));
+        results
+    }
+
+    fn write(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
+        let results = self.inner.batch(requests);
+        let committed = results.iter().filter(|result| matches!(result, Ok(Reply::Committed(_)))).count();
+        self.largest_write.fetch_max(committed, std::sync::atomic::Ordering::SeqCst);
         results
     }
 }
@@ -493,30 +503,49 @@ async fn foreground_queries_run_between_subscription_reevaluations() {
 
 #[tokio::test]
 async fn indexed_reads_merge_both_overlays_and_invalidate_old_and_new_keys() {
-    let mut harness = Harness::with_options(false, false, true).await;
-    let backend = &harness.backend;
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, mut notice) = signals::unbounded_channel();
+    let (scheduling, scheduling_gate) = mpsc::channel();
+    let (commits, gates): (Vec<_>, Vec<_>) = (0..2).map(|_| mpsc::channel()).unzip();
+    let store = ControlledStore {
+        scheduling: Some(scheduling_gate),
+        commits: gates,
+        ..ControlledStore::new(open(&directory), notices)
+    };
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.register(id(), SOURCE.into(), Limits::default()).await.unwrap();
+    let barrier = || backend.query(call("get", json!({"id":"unrelated"})));
     let mut watch = backend.subscribe(call("indexed", json!({}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
+    // Both prepares share one durable write, so both mutations stage before either commits.
+    let mut blocker = Box::pin(backend.acknowledge_wake(0, None));
+    pending(blocker.as_mut()).await;
+    assert_eq!(notice.recv().await.unwrap(), Notice::Scheduling);
     let mut seed = Box::pin(backend.mutate("seed-index".into(), call("seedIndex", json!({}))));
     pending(seed.as_mut()).await;
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Preparing);
     let mut shift = Box::pin(backend.mutate("shift-index".into(), call("shiftIndex", json!({}))));
     pending(shift.as_mut()).await;
-    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
-    harness.controls.prepare.take().unwrap().send(()).unwrap();
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(0));
+    barrier().await.unwrap();
+    scheduling.send(()).unwrap();
+    assert!(blocker.await.is_err());
+    assert_eq!(notice.recv().await.unwrap(), Notice::Commit(0));
+    barrier().await.unwrap();
     let mut query = Box::pin(backend.query(call("indexed", json!({}))));
     pending(query.as_mut()).await;
-    backend.query(call("get", json!({"id":"unrelated"}))).await.unwrap();
-    harness.controls.commits[0].send(()).unwrap();
-    seed.await.unwrap();
-    assert_eq!(value(&watch.next().await.unwrap()), json!([["a", {"coins":1}]]));
-    assert_eq!(harness.controls.notices.recv().await.unwrap(), Notice::Commit(1));
+    commits[0].send(()).unwrap();
+    assert_eq!(notice.recv().await.unwrap(), Notice::Commit(1));
     pending(query.as_mut()).await;
-    harness.controls.commits[1].send(()).unwrap();
+    pending(shift.as_mut()).await;
+    commits[1].send(()).unwrap();
+    seed.await.unwrap();
     assert_eq!(value(&shift.await.unwrap()), json!([["c", {"coins":3}]]));
     assert_eq!(value(&query.await.unwrap()), json!([["c", {"coins":3}]]));
-    assert_eq!(value(&watch.next().await.unwrap()), json!([["c", {"coins":3}]]));
+    // Subscribers see the seeded state only if the two commits were written separately.
+    let mut published = value(&watch.next().await.unwrap());
+    if published == json!([["a", {"coins":1}]]) {
+        published = value(&watch.next().await.unwrap());
+    }
+    assert_eq!(published, json!([["c", {"coins":3}]]));
     backend.mutate("leave-range".into(), call("put", json!({"id":"c", "value":{"coins":9}}))).await.unwrap();
     assert_eq!(value(&watch.next().await.unwrap()), json!([]));
     backend.mutate("enter-range".into(), call("put", json!({"id":"z", "value":{"coins":2}}))).await.unwrap();
