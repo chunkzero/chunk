@@ -11,8 +11,7 @@ use super::{
     Manifest, Metadata, content_digest, jars, jars::Classpath, launcher, session_configurations, session_methods,
 };
 use crate::{
-    BackendMetadata,
-    project::MachineProfile,
+    BackendMetadata, MachineProfile,
     publication::{self, Files},
 };
 

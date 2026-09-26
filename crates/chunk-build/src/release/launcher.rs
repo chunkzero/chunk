@@ -3,7 +3,6 @@ use std::io::{self, Cursor, Read, Write};
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::jars;
-use crate::publication::{Files, insert};
 
 /// The thin app JAR and at most the 1024 classpath JARs a JVM descriptor allows.
 const MAX_CLASSPATH: usize = 1025;
@@ -11,22 +10,7 @@ const MAX_CLASSPATH: usize = 1025;
 /// line wrapping come to under 90 KiB.
 const MANIFEST_LIMIT: u64 = 128 * 1024;
 
-/// Publishes a thin app JAR and its runtime classpath under `libs/` and returns a launcher JAR that runs `main` with
-/// them. The launcher manifest names every JAR by digest, so its own digest changes whenever any of them does.
-pub(super) fn assemble(main: &str, jars: impl IntoIterator<Item = Vec<u8>>, files: &mut Files) -> io::Result<Vec<u8>> {
-    let mut classpath = Vec::new();
-    for bytes in jars {
-        let name = format!("libs/{}.jar", super::content_digest(&bytes));
-        insert(files, name.clone(), bytes)?;
-        let entry = format!("../../{name}");
-        if !classpath.contains(&entry) {
-            classpath.push(entry);
-        }
-    }
-    write(main, &classpath)
-}
-
-/// The launcher JAR that runs `main` over `classpath`, byte for byte as `assemble` publishes it.
+/// The launcher JAR that runs `main` over `classpath`, byte for byte as release publication assembles it.
 pub(super) fn write(main: &str, classpath: &[String]) -> io::Result<Vec<u8>> {
     if classpath.len() > MAX_CLASSPATH {
         return Err(io::Error::other(format!("launcher classpath exceeds {MAX_CLASSPATH} JARs")));

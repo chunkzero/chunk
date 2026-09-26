@@ -9,6 +9,8 @@ use std::{
 use chunk_contract::DomainScope;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::{MachineProfile, valid_id};
+
 pub(crate) mod authoring;
 
 /// Apps, domain scopes and authored modules found in one pass over the project tree.
@@ -60,22 +62,6 @@ pub struct LocalConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_node_timeout_seconds: Option<u32>,
     pub profiles: BTreeMap<String, MachineProfile>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MachineProfile {
-    pub memory_mib: u32,
-    pub max_sessions: u16,
-}
-
-impl MachineProfile {
-    pub(crate) fn valid(name: &str, profile: &Self) -> bool {
-        !name.is_empty()
-            && name.len() <= 128
-            && (128..=8192).contains(&profile.memory_mib)
-            && (1..=16).contains(&profile.max_sessions)
-    }
 }
 
 #[derive(Deserialize)]
@@ -258,12 +244,6 @@ impl LocalConfig {
         }
         Ok(())
     }
-}
-
-pub(crate) fn valid_id(id: &str) -> bool {
-    id.len() <= 128
-        && id.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn require_file(path: &Path) -> io::Result<()> {

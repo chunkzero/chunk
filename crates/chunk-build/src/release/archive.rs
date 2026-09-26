@@ -6,7 +6,8 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::publication::{Files, exists};
+use super::directory::exists;
+use crate::publication::Files;
 
 pub(super) fn prepare(directory: &Path, files: &Files) -> io::Result<NamedTempFile> {
     fs::create_dir_all(directory)?;

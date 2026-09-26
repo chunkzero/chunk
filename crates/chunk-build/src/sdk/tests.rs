@@ -101,3 +101,38 @@ fn generated_implementation_refs_require_an_authored_catalog() {
     assert!(!source.contains("[\"large\"]"), "{source}");
     assert!(source.contains("[\"default\"]:{[\"app\"]:\"authored\",\n[\"session\"]:\"default\"}"), "{source}");
 }
+
+#[test]
+fn generated_typescript_references_validate_the_cross_language_fixtures() {
+    let output = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let fixtures = root.join("jvm/backend-api/src/test/resources");
+    crate::generate(&fixtures.join("contract.json"), output.path(), crate::GenerationTarget::TypeScript).unwrap();
+    let api = fs::read_to_string(output.path().join("api.ts")).unwrap();
+    crate::generate(&fixtures.join("contract.json"), output.path(), crate::GenerationTarget::TypeScript).unwrap();
+    assert_eq!(api, fs::read_to_string(output.path().join("api.ts")).unwrap());
+    fs::create_dir_all(output.path().join("server/schema")).unwrap();
+    fs::write(
+        output.path().join("server/schema/index.ts"),
+        "import {defineSchema} from '#chunk/schema'; export default defineSchema({});",
+    )
+    .unwrap();
+    generate_sdk(output.path()).unwrap();
+    let fixtures_json = fs::read_to_string(fixtures.join("values.json")).unwrap();
+    let script = format!(
+        "import assert from 'node:assert/strict'; import {{api,internal}} from './api.ts'; assert.equal(Object.hasOwn(api.shared.profile, 'hidden'), false); assert.equal(internal.shared.profile.hidden.path, 'shared/profile/hidden'); const fixtures={fixtures_json}; for(const value of fixtures) {{ const expected = {{...value}}; if(expected.note === null) delete expected.note; assert.deepEqual(api.shared.profile.record.arguments.parse(value),expected); }} assert.throws(()=>api.shared.profile.record.arguments.parse({{...fixtures[0],count:9007199254740992}})); assert(Object.hasOwn(api, '__proto__')); assert.equal(Object.getPrototypeOf(api), Object.prototype); assert.equal(api.__proto__.read.path, '__proto__/read');"
+    );
+    fs::write(output.path().join("check.mjs"), script).unwrap();
+    assert!(std::process::Command::new("node").arg(output.path().join("check.mjs")).status().unwrap().success());
+    fs::write(output.path().join("types.ts"), "import {api} from './api.ts'; const doc = api.__proto__.read.result.parse({}); doc.wins = 2;\n// @ts-expect-error Document IDs are immutable.\ndoc._id = doc._id;\n").unwrap();
+    fs::write(output.path().join("tsconfig.json"), serde_json::to_vec(&serde_json::json!({"compilerOptions":{"strict":true,"noEmit":true,"target":"ES2023","module":"ESNext","moduleResolution":"Bundler","allowImportingTsExtensions":true,"exactOptionalPropertyTypes":true,"lib":["ES2023"],"types":[]},"files":["api.ts","types.ts"]})).unwrap()).unwrap();
+    assert!(
+        std::process::Command::new("node")
+            .arg(root.join("node_modules/typescript/bin/tsc"))
+            .arg("--project")
+            .arg(output.path().join("tsconfig.json"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
