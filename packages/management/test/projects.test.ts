@@ -3,7 +3,6 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Code } from "@connectrpc/connect";
 
 import { SleepingPingMode } from "../src/gen/chunk/management/v1/common_pb.ts";
-import { LogService } from "../src/gen/chunk/management/v1/logs_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { codeOf, databaseUrl, type Harness, startHarness } from "./harness.ts";
 
@@ -58,11 +57,9 @@ describe.skipIf(!databaseUrl)("ProjectService", () => {
     expect(await codeOf(projects.getEnvironment({ environmentId: production?.id ?? "" }))).toBe(Code.NotFound);
   });
 
-  test("forks and logs are not implemented yet", async () => {
+  test("forks are not implemented yet", async () => {
     expect(
       await codeOf(h.client(ProjectService).forkEnvironment({ requestId: crypto.randomUUID(), name: "fork" })),
     ).toBe(Code.Unimplemented);
-    const logs = h.client(LogService).readLogs({ environmentId: "env" });
-    expect(await codeOf(Array.fromAsync(logs))).toBe(Code.Unimplemented);
   });
 });

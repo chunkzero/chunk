@@ -162,3 +162,10 @@ export async function deployRelease(h: Harness, projectId: string, environmentId
   const deployed = await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
   return deployed.deployment?.id ?? "";
 }
+
+/** The stream's next message; fails when the stream ended instead. */
+export async function next<T>(messages: AsyncIterator<T>): Promise<T> {
+  const result = await messages.next();
+  if (result.done) throw new Error("the stream ended");
+  return result.value;
+}

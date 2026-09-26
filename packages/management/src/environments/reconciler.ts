@@ -38,7 +38,7 @@ export function startReconciler(deps: Deps, options: ReconcilerOptions): { stop(
   const subscription = deps.changes.subscribe((change) => change.kind === "environment");
   const running = (async () => {
     while (!abort.signal.aborted) {
-      await reconcile(deps, options);
+      await reconcile(deps, options).catch((error: unknown) => console.error("reconciling failed:", error));
       await subscription.next(intervalMs, abort.signal);
     }
   })();

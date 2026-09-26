@@ -12,24 +12,31 @@ CHUNK_OPERATOR_TOKEN=chunk_$(head -c 32 /dev/urandom | base64 | tr -d '/+=') \
 bun src/main.ts
 ```
 
-| Variable                           | Default                  | Purpose                                                                         |
-| ---------------------------------- | ------------------------ | ------------------------------------------------------------------------------- |
-| `DATABASE_URL`                     | required                 | Postgres connection URL.                                                        |
-| `CHUNK_SECRET_KEY`                 | required                 | 32 bytes, base64. Encrypts secrets and signs upload URLs; keep it stable.       |
-| `CHUNK_OPERATOR_TOKEN`             | unset                    | An API token for the operator, recorded on start. At least 32 characters.       |
-| `CHUNK_PUBLIC_URL`                 | `http://localhost:$PORT` | How clients reach this service; used in upload and login URLs.                  |
-| `HOST` / `PORT`                    | `0.0.0.0` / `8080`       | Listen address.                                                                 |
-| `CHUNK_DATA_DIR`                   | `data`                   | Release archives are stored under `releases/` here.                             |
-| `CHUNK_MAX_RELEASE_EXPANDED_BYTES` | `8589934592`             | How far a release archive may expand while it is verified.                      |
-| `CHUNK_MAX_RELEASE_ENTRIES`        | `100000`                 | How many tar entries a release archive may hold.                                |
-| `CHUNK_EDGE_DOMAIN`                | unset                    | Environments get `env-<id>.<domain>` hostnames; point `*.<domain>` at the edge. |
-| `CHUNK_EDGE_PORT`                  | `25565`                  | The edge's player port, used in custom domains' SRV records.                    |
-| `CHUNK_ENVIRONMENT_IMAGE`          | unset                    | The environment image. Unset, no machines are provisioned.                      |
-| `DOCKER_HOST`                      | `/var/run/docker.sock`   | The Docker or Podman API socket machines run on, as `unix://<path>`.            |
-| `CHUNK_MACHINE_NETWORK`            | `chunk`                  | The container network machines join; created when missing.                      |
-| `CHUNK_MACHINE_MANAGEMENT_URL`     | `$CHUNK_PUBLIC_URL`      | How machines reach this service.                                                |
-| `CHUNK_CORE_MEMORY_MIB`            | `1024`                   | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.   |
-| `CHUNK_CORE_PORT`                  | `7070`                   | The port extra machines reach core on.                                          |
+| Variable                            | Default                  | Purpose                                                                                      |
+| ----------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                      | required                 | Postgres connection URL.                                                                     |
+| `CHUNK_SECRET_KEY`                  | required                 | 32 bytes, base64. Encrypts secrets and signs upload URLs; keep it stable.                    |
+| `CHUNK_OPERATOR_TOKEN`              | unset                    | An API token for the operator, recorded on start. At least 32 characters.                    |
+| `CHUNK_PUBLIC_URL`                  | `http://localhost:$PORT` | How clients reach this service; used in upload and login URLs.                               |
+| `HOST` / `PORT`                     | `0.0.0.0` / `8080`       | Listen address.                                                                              |
+| `CHUNK_DATA_DIR`                    | `data`                   | Release archives are stored under `releases/` here.                                          |
+| `CHUNK_MAX_RELEASE_EXPANDED_BYTES`  | `8589934592`             | How far a release archive may expand while it is verified.                                   |
+| `CHUNK_MAX_RELEASE_ENTRIES`         | `100000`                 | How many tar entries a release archive may hold.                                             |
+| `CHUNK_EDGE_DOMAIN`                 | unset                    | Environments get `env-<id>.<domain>` hostnames; point `*.<domain>` at the edge.              |
+| `CHUNK_EDGE_PORT`                   | `25565`                  | The edge's player port, used in custom domains' SRV records.                                 |
+| `CHUNK_EDGE_TOKEN`                  | unset                    | The token edges call `EdgeService` with, recorded on start. At least 32 characters.          |
+| `CHUNK_LOG_STORE_BUCKET`            | unset                    | An S3-compatible bucket environments replicate their logs to. Unset turns replication off.   |
+| `CHUNK_LOG_STORE_ENDPOINT`          | required with a bucket   | The bucket's endpoint URL.                                                                   |
+| `CHUNK_LOG_STORE_REGION`            | `auto`                   | The bucket's region.                                                                         |
+| `CHUNK_LOG_STORE_PREFIX`            | `environments/`          | Each environment replicates below `<prefix><environment ID>/`.                               |
+| `CHUNK_LOG_STORE_ACCESS_KEY_ID`     | required with a bucket   | Credentials handed to every environment; scope them to the prefix where the store allows it. |
+| `CHUNK_LOG_STORE_SECRET_ACCESS_KEY` | required with a bucket   | The secret for `CHUNK_LOG_STORE_ACCESS_KEY_ID`.                                              |
+| `CHUNK_ENVIRONMENT_IMAGE`           | unset                    | The environment image. Unset, no machines are provisioned.                                   |
+| `DOCKER_HOST`                       | `/var/run/docker.sock`   | The Docker or Podman API socket machines run on, as `unix://<path>`.                         |
+| `CHUNK_MACHINE_NETWORK`             | `chunk`                  | The container network machines join; created when missing.                                   |
+| `CHUNK_MACHINE_MANAGEMENT_URL`      | `$CHUNK_PUBLIC_URL`      | How machines reach this service.                                                             |
+| `CHUNK_CORE_MEMORY_MIB`             | `1024`                   | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.                |
+| `CHUNK_CORE_PORT`                   | `7070`                   | The port extra machines reach core on.                                                       |
 
 Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, using
 the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,

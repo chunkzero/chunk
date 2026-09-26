@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 
+import { notify } from "../changes.ts";
 import { newId } from "../crypto.ts";
 import type { Deps } from "../deps.ts";
 import { deleteEnvironment } from "../environments/store.ts";
@@ -79,6 +80,7 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
               ${hostname})
             returning *`,
         );
+        await notify(tx, { kind: "environment", environmentId: id });
         return create(CreateEnvironmentResponseSchema, { environment: row && toEnvironment(row) });
       });
     },
@@ -111,6 +113,7 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
         where id = ${environment.id}
         returning *`;
       if (!row) throw invalid("environment was deleted");
+      await notify(sql, { kind: "environment", environmentId: row.id });
       return { environment: toEnvironment(row) };
     },
 

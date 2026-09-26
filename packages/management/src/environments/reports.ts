@@ -57,7 +57,10 @@ export function reportServices({ sql }: Deps): Reports {
           deployment_id: entry.deploymentId,
         };
       });
-      const inserted = await sql`
+      // One writer per environment at a time, so entries commit in seq order and followers never skip one.
+      const inserted = await sql.begin(async (tx) => {
+        await tx`select pg_advisory_xact_lock(hashtext(${`logs/${environmentId}`}))`;
+        return tx`
         insert into log_entries
           (environment_id, instance_id, sequence, time, source, severity, message, app_id, deployment_id)
         select ${environmentId}, instance_id, sequence, time, source, severity, message, app_id, deployment_id
@@ -65,6 +68,7 @@ export function reportServices({ sql }: Deps): Reports {
           as e(instance_id text, sequence bigint, time timestamptz, source smallint, severity smallint, message text,
             app_id text, deployment_id text)
         on conflict do nothing`;
+      });
       if (inserted.count > 0) await notify(sql, { kind: "logs", environmentId });
       return {};
     },
