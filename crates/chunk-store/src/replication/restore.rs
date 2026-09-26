@@ -24,7 +24,7 @@ pub(crate) struct Remote {
 impl Remote {
     pub fn load(storage: &dyn ObjectStorage) -> Result<Self> {
         let listed = storage.list("epochs")?;
-        Ok(Self { objects: listed.iter().filter_map(|(key, size)| Object::parse(key, *size)).collect() })
+        Ok(Self { objects: listed.iter().filter_map(|listed| Object::parse(&listed.key, listed.size)).collect() })
     }
 
     pub fn latest_epoch(&self) -> Option<u64> {
@@ -91,10 +91,36 @@ pub(crate) fn restore(path: &Path, environment: &str, storage: &dyn ObjectStorag
             }
             let current = Remote::load(storage)?;
             if current.latest_epoch() == Some(claimed) && current.source() == remote.source() {
-                return replica.finish(claimed, &token);
+                return replica.finish(claimed, &token, environment);
             }
         }
         Err(Error::Replication("object storage kept changing during restore".into()))
+    })
+}
+
+/// Restores the newest state of `source` into `path` as `environment`, owning
+/// epoch 1 of the empty `target`. Only reads from `source`.
+pub(crate) fn fork(
+    path: &Path,
+    source: &dyn ObjectStorage,
+    source_environment: &str,
+    environment: &str,
+    target: &dyn ObjectStorage,
+) -> Result<()> {
+    if !target.list("epochs")?.is_empty() {
+        return Err(Error::Invalid("fork target storage is not empty"));
+    }
+    let remote = Remote::load(source)?;
+    if remote.source().is_none() {
+        return Err(Error::Invalid("fork source has no snapshot"));
+    }
+    install(path, |temporary| {
+        let replica = rebuild(temporary, source_environment, source, &remote)?;
+        let token = replica.token()?;
+        if !target.create(&segment::claim_key(1), token.clone().into_bytes())? {
+            return Err(Error::Invalid("fork target storage is not empty"));
+        }
+        replica.finish(1, &token, environment)
     })
 }
 

@@ -74,6 +74,46 @@ impl SqliteStore {
             replication::restore(&path, environment, replication.storage())?;
         }
         let remote = replication::Remote::load(replication.storage())?;
+        Self::replicated(path, writer_lock, environment, replication, &remote)
+    }
+
+    /// Creates the database at `path` as `environment` from the latest state
+    /// replicated to `source` as `source_environment`, and replicates it to the
+    /// empty storage of `replication` under a new lineage starting at epoch 1.
+    /// Returns once that storage holds the fork's first snapshot. Pending jobs,
+    /// operation outcomes and retry contexts are copied with the documents.
+    /// # Errors
+    /// Fails like [`Self::open_replicated`], and with [`Error::Invalid`] when
+    /// `path` already holds a database, the target storage is not empty or the
+    /// source has no snapshot.
+    pub fn fork(
+        source: &Replication,
+        source_environment: &str,
+        path: impl AsRef<Path>,
+        environment: &str,
+        replication: Replication,
+    ) -> Result<(Self, Replicator)> {
+        validate_environment(source_environment)?;
+        validate_environment(environment)?;
+        let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
+        if bootstrap::version(&Connection::open(&path)?)? != 0 {
+            return Err(Error::Invalid("fork target database already exists"));
+        }
+        let target = replication.storage();
+        replication::fork(&path, source.storage(), source_environment, environment, target)?;
+        let remote = replication::Remote::load(target)?;
+        let (store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
+        replicator.flush()?;
+        Ok((store, replicator))
+    }
+
+    fn replicated(
+        path: PathBuf,
+        writer_lock: bootstrap::WriterLock,
+        environment: &str,
+        replication: Replication,
+        remote: &replication::Remote,
+    ) -> Result<(Self, Replicator)> {
         let (connection, migrated) = bootstrap::open(&path, environment)?;
         if migrated {
             log::mark_unlogged(&connection)?;
@@ -90,7 +130,7 @@ impl SqliteStore {
         }
         let (sequence, _) = log::position(&connection)?;
         connection.execute("DELETE FROM _chunk_log WHERE sequence <= ?1", [uploaded])?;
-        let (replicator, shared) = Replicator::start(path.clone(), replication, epoch, &remote, sequence)?;
+        let (replicator, shared) = Replicator::start(path.clone(), replication, epoch, remote, sequence)?;
         let store = Self::new(connection, path, writer_lock, Some(log::Log::new(shared, uploaded)))?;
         Ok((store, replicator))
     }

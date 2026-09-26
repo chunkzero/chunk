@@ -5,7 +5,7 @@ use object_store::{
     ObjectStore, PutMode, PutOptions, PutPayload, aws::AmazonS3Builder, path::Path, prefix::PrefixStore,
 };
 
-use super::ObjectStorage;
+use super::{Listed, ObjectStorage};
 use crate::{Error, Result};
 
 /// S3-compatible storage with its own I/O runtime, callable from any thread.
@@ -15,7 +15,8 @@ pub(super) struct S3 {
 }
 
 impl S3 {
-    pub fn from_env() -> Result<Option<Self>> {
+    /// Uses `prefix`, or `CHUNK_REPLICATION_PREFIX` when it is `None`.
+    pub fn from_env(prefix: Option<&str>) -> Result<Option<Self>> {
         let variable = |name| std::env::var(name).ok().filter(|value: &String| !value.is_empty());
         let Some(bucket) = variable("CHUNK_REPLICATION_BUCKET") else {
             return Ok(None);
@@ -34,10 +35,11 @@ impl S3 {
             builder = builder.with_allow_http(endpoint.starts_with("http://")).with_endpoint(endpoint);
         }
         let bucket = builder.build().map_err(io::Error::other)?;
-        let store: Arc<dyn ObjectStore> = match variable("CHUNK_REPLICATION_PREFIX") {
-            Some(prefix) => Arc::new(PrefixStore::new(bucket, prefix.as_str())),
-            None => Arc::new(bucket),
-        };
+        let store: Arc<dyn ObjectStore> =
+            match prefix.map(str::to_owned).or_else(|| variable("CHUNK_REPLICATION_PREFIX")) {
+                Some(prefix) => Arc::new(PrefixStore::new(bucket, prefix.as_str())),
+                None => Arc::new(bucket),
+            };
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("chunk-replication-io")
@@ -83,10 +85,28 @@ impl ObjectStorage for S3 {
         self.run(async move { store.get(&key).await?.bytes().await }).map(Vec::from)
     }
 
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
         let (store, prefix) = (self.store.clone(), Path::from(prefix));
         self.run(async move {
-            store.list(Some(&prefix)).map_ok(|object| (object.location.to_string(), object.size)).try_collect().await
+            store
+                .list(Some(&prefix))
+                .map_ok(|object| Listed {
+                    key: object.location.to_string(),
+                    size: object.size,
+                    modified: object.last_modified.into(),
+                })
+                .try_collect()
+                .await
+        })
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        let (store, key) = (self.store.clone(), Path::from(key));
+        self.run(async move {
+            match store.delete(&key).await {
+                Err(object_store::Error::NotFound { .. }) => Ok(()),
+                result => result,
+            }
         })
     }
 }

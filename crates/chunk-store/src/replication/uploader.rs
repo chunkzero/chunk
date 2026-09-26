@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, PoisonError},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +25,8 @@ pub(super) struct Uploader {
     /// Segments and their bytes uploaded since this epoch's latest snapshot.
     segments: usize,
     bytes: u64,
+    /// Set by a snapshot, whose upload may supersede older objects.
+    prune_due: bool,
     /// When ownership was last checked in object storage.
     checked: Cell<Instant>,
 }
@@ -55,6 +57,7 @@ impl Uploader {
             based: remote.base(epoch).is_some(),
             segments,
             bytes,
+            prune_due: false,
             checked: Cell::new(Instant::now()),
         })
     }
@@ -62,6 +65,7 @@ impl Uploader {
     pub fn run(mut self) {
         let shared = self.shared.clone();
         let _exit = Exit(&shared);
+        self.prune();
         let mut backoff = Duration::from_secs(1);
         while let Some(work) = self.wait() {
             let target = match work {
@@ -84,6 +88,9 @@ impl Uploader {
             let error = match result {
                 Ok(reached) => {
                     self.advance(reached);
+                    if std::mem::take(&mut self.prune_due) {
+                        self.prune();
+                    }
                     backoff = Duration::from_secs(1);
                     continue;
                 }
@@ -196,7 +203,20 @@ impl Uploader {
         self.based = true;
         self.segments = 0;
         self.bytes = 0;
+        self.prune_due = true;
         Ok(sequence)
+    }
+
+    /// Deletes superseded objects on a best-effort basis; a later snapshot or
+    /// open retries whatever fails.
+    fn prune(&self) {
+        let storage = self.replication.storage.as_ref();
+        let Ok(objects) = storage.list("epochs") else { return };
+        for key in super::prune::expired(&objects, self.replication.retention, SystemTime::now()) {
+            if storage.delete(key).is_err() {
+                return;
+            }
+        }
     }
 
     fn upload_snapshot(&self, copy: &Path) -> Result<u64> {

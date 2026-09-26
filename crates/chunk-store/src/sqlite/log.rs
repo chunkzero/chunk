@@ -163,11 +163,12 @@ impl Replica {
         Ok(self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?)
     }
 
-    /// Commits the replayed entries under a claimed `epoch`, leaving a single durable file.
-    pub fn finish(self, epoch: u64, claim: &str) -> Result<()> {
+    /// Commits the replayed entries as `environment` under a claimed `epoch`,
+    /// leaving a single durable file.
+    pub fn finish(self, epoch: u64, claim: &str, environment: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE _chunk_metadata SET epoch = ?1, claim = ?2 WHERE singleton = 1",
-            rusqlite::params![epoch, claim],
+            "UPDATE _chunk_metadata SET epoch = ?1, claim = ?2, environment = ?3 WHERE singleton = 1",
+            rusqlite::params![epoch, claim, environment],
         )?;
         self.connection.execute_batch("DELETE FROM _chunk_log; COMMIT;")?;
         self.connection.close().map_err(|(_, error)| error)?;

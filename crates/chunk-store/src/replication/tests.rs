@@ -3,7 +3,7 @@ use std::{
     io,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use rusqlite::{Connection, types::Value};
@@ -16,7 +16,7 @@ use crate::{
 };
 
 #[derive(Default)]
-struct Memory(Mutex<BTreeMap<String, Vec<u8>>>);
+struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
 
 impl Memory {
     fn keys(&self) -> Vec<String> {
@@ -30,7 +30,7 @@ impl Memory {
 
 impl ObjectStorage for Memory {
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
-        self.0.lock().unwrap().insert(key.into(), bytes);
+        self.0.lock().unwrap().insert(key.into(), (bytes, SystemTime::now()));
         Ok(())
     }
 
@@ -39,21 +39,26 @@ impl ObjectStorage for Memory {
         if objects.contains_key(key) {
             return Ok(false);
         }
-        objects.insert(key.into(), bytes);
+        objects.insert(key.into(), (bytes, SystemTime::now()));
         Ok(true)
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
-        self.0.lock().unwrap().get(key).cloned().ok_or_else(|| io::ErrorKind::NotFound.into())
+        self.0.lock().unwrap().get(key).map(|(bytes, _)| bytes.clone()).ok_or_else(|| io::ErrorKind::NotFound.into())
     }
 
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
         let objects = self.0.lock().unwrap();
         Ok(objects
             .iter()
             .filter(|(key, _)| key.starts_with(&format!("{prefix}/")))
-            .map(|(key, bytes)| (key.clone(), bytes.len() as u64))
+            .map(|(key, (bytes, modified))| Listed { key: key.clone(), size: bytes.len() as u64, modified: *modified })
             .collect())
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
     }
 }
 
@@ -94,7 +99,7 @@ fn dump(path: &Path) -> Vec<String> {
         let mut cursor = rows.query([]).unwrap();
         while let Some(row) = cursor.next().unwrap() {
             let values: Vec<String> = (0..columns.len())
-                .filter(|index| !matches!(columns[*index].as_str(), "epoch" | "claim" | "log_sequence"))
+                .filter(|index| !matches!(columns[*index].as_str(), "epoch" | "claim" | "log_sequence" | "environment"))
                 .map(|index| format!("{:?}", row.get::<_, Value>(index).unwrap()))
                 .collect();
             lines.push(format!("  {}", values.join(", ")));
@@ -236,8 +241,12 @@ impl ObjectStorage for Racing {
         self.storage.get(key)
     }
 
-    fn list(&self, prefix: &str) -> io::Result<Vec<(String, u64)>> {
+    fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
         self.storage.list(prefix)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.storage.delete(key)
     }
 }
 
@@ -413,6 +422,97 @@ fn uploads_follow_commits_and_an_idle_store_uploads_nothing() {
 }
 
 #[test]
+fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_source() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.db");
+    let (mut store, replicator) = open(&path, manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    replicator.flush().unwrap();
+    let before = source.keys();
+
+    let target = Arc::new(Memory::default());
+    let forked = directory.path().join("fork.db");
+    let (mut fork, fork_replicator) =
+        SqliteStore::fork(&manual(&source), "local", &forked, "preview", manual(&target)).unwrap();
+    assert_eq!(fork.epoch(), Epoch(1));
+    assert_eq!(count(&target, "/snapshots/"), 1);
+    fork.commit(commit("fork-only", 2, vec![write("b", Some(json!({"coins": 2})))])).unwrap();
+    fork_replicator.flush().unwrap();
+    store.commit(commit("source-only", 2, vec![write("c", Some(json!({"coins": 3})))])).unwrap();
+    assert_eq!(source.keys(), before);
+    drop((fork, fork_replicator));
+
+    let restored = directory.path().join("restored.db");
+    let (store, _replicator) = SqliteStore::open_replicated(&restored, "preview", manual(&target)).unwrap();
+    assert_eq!(store.epoch(), Epoch(2));
+    assert!(store.outcome(&operation("fork-only")).unwrap().is_some());
+    assert!(store.outcome(&operation("source-only")).unwrap().is_none());
+    drop(store);
+    assert_eq!(dump(&restored), dump(&forked));
+
+    assert!(matches!(
+        SqliteStore::fork(&manual(&source), "local", directory.path().join("again.db"), "preview", manual(&target)),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        SqliteStore::fork(
+            &manual(&target),
+            "local",
+            directory.path().join("wrong.db"),
+            "other",
+            manual(&Arc::default())
+        ),
+        Err(Error::EnvironmentMismatch)
+    ));
+}
+
+#[test]
+fn superseded_objects_are_deleted_once_a_newer_snapshot_is_old_enough() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let replication = || Replication { snapshot_segments: 1, ..manual(&storage) }.with_retention(Duration::ZERO);
+    let (mut store, replicator) = open(&path, replication());
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    for (index, id) in ["one", "two", "three"].into_iter().enumerate() {
+        store.commit(commit(id, index as u64 + 1, vec![write(id, Some(json!({"coins": 1})))])).unwrap();
+        replicator.flush().unwrap();
+    }
+    assert_eq!((count(&storage, "/snapshots/"), count(&storage, "/segments/")), (1, 1));
+    drop((store, replicator));
+
+    let restored = directory.path().join("restored.db");
+    let (mut store, replicator) = open(&restored, replication());
+    store.commit(commit("four", 4, vec![])).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    // The new epoch's first snapshot supersedes every object of epoch 1 except its claim.
+    let epoch_one: Vec<_> =
+        storage.keys().into_iter().filter(|key| key.starts_with(&format!("epochs/{:020}/", 1))).collect();
+    assert_eq!(epoch_one, [segment::claim_key(1)]);
+    let (store, _replicator) = open(&directory.path().join("again.db"), manual(&storage));
+    assert!(store.outcome(&operation("four")).unwrap().is_some());
+    drop(store);
+    assert_eq!(dump(&directory.path().join("again.db")), dump(&restored));
+
+    // Within the window nothing is deleted.
+    let kept = Arc::new(Memory::default());
+    let (mut store, replicator) =
+        open(&directory.path().join("kept.db"), Replication { snapshot_segments: 1, ..manual(&kept) });
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("one", 1, vec![])).unwrap();
+    replicator.flush().unwrap();
+    store.commit(commit("two", 2, vec![])).unwrap();
+    replicator.flush().unwrap();
+    assert_eq!(count(&kept, "/snapshots/"), 2);
+}
+
+#[test]
 fn segments_round_trip_and_reject_corruption() {
     let entry = segment::Entry {
         sequence: 7,
@@ -438,6 +538,12 @@ fn s3_round_trip() {
     let claim = "probes/claim";
     assert!(replication.storage().create(claim, vec![1]).unwrap());
     assert!(!replication.storage().create(claim, vec![2]).unwrap());
+    let listed = replication.storage().list("probes").unwrap();
+    assert!(listed.iter().any(|object| object.key == claim
+        && SystemTime::now().duration_since(object.modified).unwrap_or_default() < Duration::from_secs(600)));
+    replication.storage().delete(claim).unwrap();
+    replication.storage().delete(claim).unwrap();
+    assert!(replication.storage().list("probes").unwrap().is_empty());
     let (mut store, replicator) = open(&path, Replication::from_env().unwrap().unwrap());
     let epoch = store.epoch();
     store.apply_schema(&schema()).unwrap();
