@@ -75,13 +75,13 @@ impl Committer {
             let initial = (|| -> Result<_> {
                 Ok((store.snapshot()?, store.deployments()?, store.job_command(chunk_store::JobCommand::Recover)?))
             })();
-            let mut sequence = match &initial {
-                Ok((snapshot, ..)) => Sequence { revision: snapshot.revision, system: 0, epoch: store.epoch() },
-                Err(_) => Sequence { revision: Revision(0), system: 0, epoch: store.epoch() },
+            let Ok((snapshot, ..)) = &initial else {
+                let _ = ready.send(initial);
+                return;
             };
-            if initial.is_ok() {
-                lane.0.start(wake, sequence.epoch);
-            }
+            let revision = snapshot.revision;
+            let mut sequence = Sequence { revision, system: 0, epoch: store.epoch() };
+            lane.0.start(wake, sequence.epoch);
             if ready.send(initial).is_err() {
                 return;
             }

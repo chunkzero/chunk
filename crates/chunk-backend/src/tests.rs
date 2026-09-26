@@ -90,6 +90,7 @@ struct ControlledStore {
     notices: signals::UnboundedSender<Notice>,
     ambiguous: bool,
     snapshot_failure_after_commit: Option<std::io::Error>,
+    snapshot_failure: Option<std::io::Error>,
     rejected: bool,
     attempts: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
     /// Holds the first scheduling command, keeping the commit thread busy.
@@ -113,6 +114,7 @@ impl ControlledStore {
             notices,
             ambiguous: false,
             snapshot_failure_after_commit: None,
+            snapshot_failure: None,
             rejected: false,
             attempts: None,
             scheduling: None,
@@ -220,6 +222,9 @@ impl Storage for ControlledStore {
         self.inner.apply_schema(schema)
     }
     fn snapshot(&mut self) -> chunk_store::Result<Snapshot> {
+        if let Some(error) = self.snapshot_failure.take() {
+            return Err(chunk_store::Error::Io(error));
+        }
         if self.committed > 0
             && let Some(error) = self.snapshot_failure_after_commit.take()
         {
@@ -469,10 +474,25 @@ async fn system_post_commit_snapshot_failure_stops_lane_and_app_calls() {
     let snapshot = open(&directory).snapshot().unwrap();
     assert_eq!(snapshot.get(&key).unwrap().unwrap().value, document);
     assert!(matches!(query, Err(Error::CommitFailed | Error::Closed)), "app query survived snapshot failure");
-    assert!(
-        stopped || matches!(next, Err(Error::CommitFailed | Error::Closed)),
-        "system lane stayed open after a durable commit's snapshot failed"
-    );
+    assert!(stopped, "system lane stayed open after a durable commit's snapshot failed");
+    assert!(matches!(next, Err(Error::CommitFailed | Error::Closed)));
+}
+
+#[test]
+fn failed_initialization_returns_instead_of_hanging() {
+    let directory = tempfile::tempdir().unwrap();
+    let (notices, _) = signals::unbounded_channel();
+    let store = ControlledStore {
+        snapshot_failure: Some(std::io::Error::other("initial snapshot failed")),
+        ..ControlledStore::new(open(&directory), notices)
+    };
+    let (done, result) = mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let _ = done.send(Backend::new("local".into(), Box::new(store)).is_err());
+    });
+    assert!(result.recv_timeout(std::time::Duration::from_secs(10)).expect("backend construction hung"));
 }
 
 #[tokio::test]
