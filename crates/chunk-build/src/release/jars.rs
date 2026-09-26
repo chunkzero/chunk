@@ -27,17 +27,23 @@ struct Scan {
 type ScanKey = ([u8; 32], u32);
 
 /// Scans are memoized by JAR digest and Java version, so `chunk dev` rescans only JARs whose bytes changed. The cache
-/// holds at most [`CACHED_ENTRIES`] archive entries in total and starts over when a scan would exceed that, so
-/// verifying untrusted releases can't grow it without bound.
+/// holds at most [`CACHED_BYTES`] of retained scans and starts over when a scan would exceed that, so verifying
+/// untrusted releases can't grow it without bound.
 static SCANS: LazyLock<Mutex<Scans>> = LazyLock::new(Mutex::default);
 
-/// Two full classpaths' worth of archive entries.
-const CACHED_ENTRIES: usize = 400_000;
+const CACHED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct Scans {
     scans: HashMap<ScanKey, Arc<Scan>>,
-    entries: usize,
+    bytes: usize,
+}
+
+impl Scan {
+    /// An upper estimate of the memory a cached scan retains, including its record.
+    fn retained(&self) -> usize {
+        256 + self.classes.keys().map(|name| name.len() + 96).sum::<usize>()
+    }
 }
 
 impl Classpath {
@@ -49,11 +55,12 @@ impl Classpath {
         } else {
             let scan = Arc::new(scan_jar(bytes, label, java)?);
             let mut cache = SCANS.lock().unwrap_or_else(PoisonError::into_inner);
-            if cache.entries + scan.entries > CACHED_ENTRIES {
+            let retained = scan.retained();
+            if cache.bytes + retained > CACHED_BYTES {
                 *cache = Scans::default();
             }
-            if cache.scans.insert(key, scan.clone()).is_none() {
-                cache.entries += scan.entries;
+            if retained <= CACHED_BYTES && cache.scans.insert(key, scan.clone()).is_none() {
+                cache.bytes += retained;
             }
             scan
         };
