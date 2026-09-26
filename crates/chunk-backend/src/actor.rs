@@ -12,22 +12,24 @@ use chunk_contract::{Deployment, Function, FunctionKind, Visibility, validate_wi
 use chunk_js::{Cancellation, DeploymentId, Engine, Execution, Invocation, Limits, Mode};
 use chunk_store::{Operation, Revision, Storage, Write};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::{
     Error, Result,
     commit::{Committer, Job},
     reads::{Change, Dependencies, Host, View},
-    service::{Call, Command, Event, GroupUpdate, Request, Update},
+    service::{Call, Command, Event, Request, Update},
     timing::{Phase, Timer},
 };
 
 mod actions;
 mod commands;
 mod deployments;
+mod index;
 mod jobs;
 mod pipeline;
 mod subscriptions;
+mod watches;
 
 const MAX_DEPLOYMENTS: usize = 16;
 const MAX_SUBSCRIPTIONS: usize = 64;
@@ -45,24 +47,9 @@ struct Pending {
     operation: String,
     revision: Revision,
     writes: Vec<Write>,
-    changes: Vec<Change>,
+    changes: Arc<[Change]>,
     bytes: usize,
     staged: Timer,
-}
-
-struct Subscribed {
-    id: u64,
-    calls: Vec<Call>,
-    dependencies: Dependencies,
-    results: Vec<Result<Arc<str>>>,
-    sender: watch::Sender<Result<GroupUpdate>>,
-}
-
-struct Reevaluation {
-    view: Rc<View>,
-    changes: Option<Vec<Change>>,
-    ids: VecDeque<u64>,
-    published: Timer,
 }
 
 pub(crate) struct Actor {
@@ -71,8 +58,7 @@ pub(crate) struct Actor {
     /// Bounds the idle wait so due jobs dispatch without another event arriving.
     timer: tokio::runtime::Runtime,
     recovering: bool,
-    next_subscription: u64,
-    reevaluations: VecDeque<Reevaluation>,
+    watches: watches::Watches,
     js: Engine,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
     deploying: Option<(Arc<Deployment>, Request<()>)>,
@@ -85,7 +71,6 @@ pub(crate) struct Actor {
     pending: VecDeque<Pending>,
     pending_bytes: usize,
     deferred: VecDeque<(Update, Request<Update>)>,
-    subscriptions: Vec<Subscribed>,
     failure: Option<Error>,
 }
 
@@ -111,8 +96,7 @@ impl Actor {
             timer: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
             actions: actions::Actions::new(events, incarnation, effects),
             recovering: false,
-            next_subscription: 0,
-            reevaluations: VecDeque::new(),
+            watches: watches::Watches::new(snapshot.revision),
             js,
             versions,
             deploying: None,
@@ -125,7 +109,6 @@ impl Actor {
             pending: VecDeque::new(),
             pending_bytes: 0,
             deferred: VecDeque::new(),
-            subscriptions: Vec::new(),
             failure: None,
         })
     }
@@ -135,7 +118,7 @@ impl Actor {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
             }
-            let event = if !self.reevaluations.is_empty() {
+            let event = if self.watches.has_work() {
                 match incoming.try_recv() {
                     Ok(event) => Some(event),
                     Err(mpsc::error::TryRecvError::Empty) => {
@@ -154,7 +137,6 @@ impl Actor {
             let Some(event) = event else {
                 break;
             };
-            self.subscriptions.retain(|subscription| !subscription.sender.is_closed());
             match event {
                 Event::Scheduled { command, result } => {
                     self.outstanding -= 1;
@@ -467,9 +449,6 @@ impl Actor {
         self.actions.cancel();
         self.failure = Some(error.clone());
         self.reset_pending(error);
-        self.reevaluations.clear();
-        for subscription in self.subscriptions.drain(..) {
-            let _ = subscription.sender.send_replace(Err(error.clone()));
-        }
+        self.watches.fail(error);
     }
 }

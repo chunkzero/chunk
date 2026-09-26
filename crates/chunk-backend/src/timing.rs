@@ -21,10 +21,10 @@ pub enum Phase {
     Commit,
     /// A mutation was staged until the engine thread handled its durable acknowledgment.
     Durable,
-    /// Reevaluation of one affected subscription group.
+    /// Reevaluation of one subscribed query, shared by every subscriber with the same identity.
     Reevaluate,
-    /// A reevaluation batch was queued until every subscription in it was checked and
-    /// published. A coalesced batch reports only its latest commit.
+    /// A commit that affected subscriptions was acknowledged until the batch covering it
+    /// reevaluated every affected query. Commits coalesced into one batch each report their wait.
     FanOut,
 }
 

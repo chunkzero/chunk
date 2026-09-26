@@ -204,7 +204,7 @@ impl Actor {
             operation: mutation.operation.id.clone(),
             revision,
             writes,
-            changes,
+            changes: changes.into(),
             bytes,
             staged: Timer::start(),
         });
@@ -264,6 +264,6 @@ impl Actor {
             let (query, reply) = self.deferred.pop_front().expect("ready query");
             reply.finish(Ok(query));
         }
-        self.publish(&pending.changes);
+        self.watches.changed(update.revision, pending.changes);
     }
 }

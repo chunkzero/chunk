@@ -135,28 +135,29 @@ pub(crate) struct Change {
     pub after: Option<Value>,
 }
 
+/// What one evaluation read. Reading the caller counts: the result may then differ per caller.
 #[derive(Default)]
 pub(crate) struct Dependencies {
-    points: BTreeSet<DocumentKey>,
-    ranges: Vec<KeyRange>,
-    indexes: Vec<(IndexQuery, Vec<String>)>,
+    pub points: BTreeSet<DocumentKey>,
+    pub ranges: Vec<KeyRange>,
+    pub indexes: Vec<(IndexQuery, Vec<String>)>,
+    pub caller: bool,
 }
 
 impl Dependencies {
-    pub fn extend(&mut self, other: Self) {
-        self.points.extend(other.points);
-        self.ranges.extend(other.ranges);
-        self.indexes.extend(other.indexes);
-    }
     pub fn affected(&self, changes: &[Change]) -> bool {
         changes.iter().any(|change| {
             self.points.contains(&change.key)
                 || self.ranges.iter().any(|range| covers(range, &change.key))
-                || self.indexes.iter().any(|(query, fields)| {
-                    query.table == change.key.table
-                        && change.before.iter().chain(change.after.iter()).any(|value| query.matches(fields, value))
-                })
+                || self.indexes.iter().any(|(query, fields)| change.matches(query, fields))
         })
+    }
+}
+
+impl Change {
+    pub fn matches(&self, query: &IndexQuery, fields: &[String]) -> bool {
+        query.table == self.key.table
+            && self.before.iter().chain(self.after.iter()).any(|value| query.matches(fields, value))
     }
 }
 
@@ -204,6 +205,10 @@ impl Host {
 }
 
 impl ReadHost for Host {
+    fn read_caller(&mut self) {
+        self.trace.borrow_mut().caller = true;
+    }
+
     fn schedule_id(&self, sequence: u32) -> std::result::Result<String, String> {
         use sha2::Digest;
         let operation = self.operation.as_ref().ok_or("Scheduled jobs require a mutation operation")?;

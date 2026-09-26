@@ -1,4 +1,4 @@
-use super::{Actor, MAX_DEPLOYMENTS, Reevaluation};
+use super::{Actor, MAX_DEPLOYMENTS};
 use crate::{Error, Result, commit::Job, reads::View, service::Request};
 use chunk_contract::Deployment;
 use chunk_js::{DeploymentId, Limits};
@@ -51,13 +51,7 @@ impl Actor {
                 self.view = Rc::new(View::new(snapshot));
                 self.versions.insert(id, Some(deployment));
                 // Schema activation is a revision barrier; replace older reevaluation work.
-                self.reevaluations.clear();
-                self.reevaluations.push_back(Reevaluation {
-                    view: self.view.clone(),
-                    changes: None,
-                    ids: self.subscriptions.iter().map(|s| s.id).collect(),
-                    published: crate::timing::Timer::start(),
-                });
+                self.watches.barrier(self.view.base.revision);
                 reply.finish(Ok(()));
             }
             Err(error) => {
@@ -81,10 +75,11 @@ impl Actor {
             reply.finish(Err(Error::Cancelled));
             return;
         }
+        self.watches.sweep();
         if self.outstanding != 0
             || self.deploying.is_some()
             || self.releasing.is_some()
-            || self.subscriptions.iter().any(|s| s.calls.iter().any(|c| c.deployment == id))
+            || self.watches.references(&id)
             || self.mutations.values().any(|m| m.call.deployment == id)
             || self.actions.references(&id)
             || self.scheduled.references(&id)

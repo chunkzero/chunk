@@ -76,11 +76,11 @@ requests; all capacity rejections report the same `ResourceExhausted` status.
 Backend targets build `chunk-backend` with its `bench-support` feature, which exposes phase timings from the engine and
 commit threads without changing behavior. Phases are recorded after warmup: `queue` (admission until the engine thread
 takes a query or mutation), `query` and `mutation` (evaluation and validation), `prepare` and `commit` (SQLite work on
-the commit thread), `durable` (staged until the engine handles the commit acknowledgment), `reevaluate` (one
-subscription group) and `fanout` (commit acknowledgment until every subscription in the batch was reevaluated and
-published; a coalesced batch reports only its latest commit). Phases overlap; do not add or subtract their percentiles.
-`fanout.reply_to_all_delivered_us` is measured by the generator from the durable mutation reply to the last stream's
-delivery. `target_cpu_us_per_completed` divides target CPU, including drain, by completed operations.
+the commit thread), `durable` (staged until the engine handles the commit acknowledgment), `reevaluate` (one subscribed
+query; identical subscriptions share it) and `fanout` (commit acknowledgment until the batch covering it reevaluated
+every affected query; commits coalesced into one batch each report their wait). Phases overlap; do not add or subtract
+their percentiles. `fanout.reply_to_all_delivered_us` is measured by the generator from the durable mutation reply to
+the last stream's delivery. `target_cpu_us_per_completed` divides target CPU, including drain, by completed operations.
 
 `cargo bench -p chunk-js --bench engines -- target/bench/<run>/bundle` compares chunk-js's persistent `deno_core` engine
 with a persistent direct V8 context on the compiled bundle. Both get the same in-memory snapshot of 1,000 profiles, a 32
