@@ -108,7 +108,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<ControlConnection>, stop
     service.close_methods();
     operations.close();
     operations.wait().await;
-    let stopped = control.shutdown().await.map_err(io::Error::other);
+    let stopped = control.shutdown().await.and(control.close()).map_err(io::Error::other);
     result.and(stopped)
 }
 

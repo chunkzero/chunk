@@ -24,7 +24,8 @@ const TABLES: [&str; 8] = [META, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS
 pub(super) struct Store {
     system: System,
     scope: String,
-    _lock: ScopeLock,
+    /// Held until [`Store::close`]; a closed store neither loads nor commits.
+    lock: Option<ScopeLock>,
 }
 
 impl Store {
@@ -34,7 +35,19 @@ impl Store {
         let lock = system
             .lock_scope(&scope)
             .map_err(|_| Error::Invalid("another control authority already runs this deployment"))?;
-        Ok(Self { system, scope, _lock: lock })
+        Ok(Self { system, scope, lock: Some(lock) })
+    }
+
+    /// Releases the scope for the next authority, even while tasks of this one still hold it.
+    pub fn close(&mut self) {
+        self.lock = None;
+    }
+
+    fn open(&self) -> Result<()> {
+        if self.lock.is_none() {
+            return Err(Error::Stopped);
+        }
+        Ok(())
     }
 
     pub fn scope(&self) -> &str {
@@ -45,6 +58,7 @@ impl Store {
     /// accept any size, so no read budget applies: a smaller one could stop control from reopening state it already
     /// accepted.
     pub fn load(&self) -> Result<State> {
+        self.open()?;
         let snapshot = self.system.open(schema())?;
         let budget = &mut ReadBudget::new(usize::MAX, usize::MAX);
         let meta: Option<Meta> = snapshot
@@ -69,6 +83,7 @@ impl Store {
 
     /// Commits `writes` ahead of queued app commits, returning their revision.
     pub fn commit(&self, writes: Vec<Write>) -> Result<u64> {
+        self.open()?;
         Ok(self.system.commit(writes)?.0)
     }
 

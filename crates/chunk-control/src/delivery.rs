@@ -203,6 +203,12 @@ impl Control {
         Ok(Assignment::decode(bytes.as_slice())?)
     }
 
+    /// Stops committing and releases the deployment's scope, so another authority can open it while tasks of this one
+    /// still finish.
+    pub(crate) fn close(&self) -> Result<()> {
+        self.authority.close()
+    }
+
     /// Stops the owned runtime processes. Dropping control alone preserves them for recovery.
     /// # Errors
     /// Reports unresolved hosts; a failed stop must not be treated as a fencing acknowledgment.
