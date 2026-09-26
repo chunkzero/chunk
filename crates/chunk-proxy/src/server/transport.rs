@@ -3,6 +3,7 @@ use std::{
     future::{Future, poll_fn},
     io,
     pin::Pin,
+    sync::atomic::{AtomicI32, Ordering},
     task::{Context, Poll, ready},
     time::Duration,
 };
@@ -25,10 +26,17 @@ const RETAINED_CAPACITY: usize = 64 * 1024;
 /// reads a trickle cannot keep a backlog alive indefinitely.
 const MIN_WRITE_PROGRESS: usize = 16 * 1024;
 
+/// libdeflate level for outgoing packets: level 1 saves ~30% gateway CPU on chunk
+/// data but sends ~10% more bytes, and egress costs more than the CPU saved.
+/// `chunk-bench` overrides it before any compressor exists to compare levels.
+static DEFLATE_LEVEL: AtomicI32 = AtomicI32::new(6);
+
 thread_local! {
     // Every Minecraft packet is an independent zlib stream, so each worker
     // thread resets one shared state instead of allocating one per packet.
-    static DEFLATE: RefCell<Compressor> = RefCell::new(Compressor::new(CompressionLvl::default()));
+    static DEFLATE: RefCell<Compressor> = RefCell::new(Compressor::new(
+        CompressionLvl::new(DEFLATE_LEVEL.load(Ordering::Relaxed)).unwrap_or_default(),
+    ));
     static INFLATE: RefCell<Decompressor> = RefCell::new(Decompressor::new());
 }
 
@@ -311,6 +319,22 @@ fn encode_frame(output: &mut Vec<u8>, body: &[u8], compression: Option<usize>) -
         }
     }
     Ok(())
+}
+
+/// Sets the level for compressors created afterwards; existing threads keep theirs.
+#[cfg(feature = "bench-support")]
+pub(super) fn set_compression_level(level: i32) -> io::Result<()> {
+    CompressionLvl::new(level).map_err(|_| invalid_data("compression level must be 1..=12"))?;
+    DEFLATE_LEVEL.store(level, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Wire length of one frame, before encryption.
+#[cfg(feature = "bench-support")]
+pub(super) fn frame_len(body: &[u8], compression: Option<usize>) -> io::Result<usize> {
+    let mut output = Vec::new();
+    encode_frame(&mut output, body, compression)?;
+    Ok(output.len())
 }
 
 fn varint(output: &mut Vec<u8>, value: usize) -> io::Result<()> {

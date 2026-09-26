@@ -37,8 +37,11 @@ The proxy uses pre-established connections. It excludes Mojang login, configurat
 movement between servers and control polling. A feature-gated adapter calls the existing packet pump; normal proxy
 listeners and authentication policy are unchanged. Each request and response is checked byte-for-byte, including its
 sequence number. Default packet bodies are 32 bytes upstream and 1 KiB downstream with mixed compressibility. Try
-`--payload repeated`, `mixed` and `random`, and `--no-compression` / `--no-encryption` to distinguish costs. These
-opaque packets model transport work, not an actual Minecraft play session or representative traffic capture. Each
+`--payload repeated`, `mixed` and `random`, and `--no-compression` / `--no-encryption` to distinguish costs.
+`--payload chunk` sends a synthetic 25 KiB overworld chunk column (paletted sections, heightmaps and surface sky light,
+laid out like the real packet) downstream instead. `--compression-level` overrides the production zlib level in both
+processes, and the summary's `response` reports the body and framed (compressed, unencrypted) sizes. These opaque
+packets model transport work, not an actual Minecraft play session or representative traffic capture. Each
 connection has at most one outstanding round trip. `--burst N` makes the gameplay server answer each request with N
 response packets in one write, which exercises write batching; there is still no independent server broadcast, sustained
 one-way stream, slow reader or backpressure workload.
