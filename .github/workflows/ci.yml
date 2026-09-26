@@ -111,8 +111,23 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v5
+      - name: Install the pinned Bun
+        uses: jdx/mise-action@v3
+        with:
+          install_args: bun
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -121,4 +136,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:management
       - run: pnpm lint

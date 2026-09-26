@@ -1,0 +1,71 @@
+import { create } from "@bufbuild/protobuf";
+
+import { newId, randomToken, sha256 } from "../crypto.ts";
+import type { Db } from "../db.ts";
+import { type Token, TokenSchema } from "../gen/chunk/management/v1/auth_pb.ts";
+import type { Authenticator, Principal } from "../rpc/caller.ts";
+import { timestamp } from "../rpc/validate.ts";
+
+/** The single-tenant install's one person. */
+export const operator: Principal = { id: "operator", displayName: "Operator" };
+
+export interface TokenRow {
+  id: string;
+  principal_id: string;
+  name: string;
+  project_id: string | null;
+  create_time: Date;
+  expire_time: Date | null;
+}
+
+const secretPrefix = "chunk_";
+
+export function toToken(row: TokenRow): Token {
+  return create(TokenSchema, {
+    id: row.id,
+    name: row.name,
+    projectId: row.project_id ?? "",
+    createTime: timestamp(row.create_time),
+    expireTime: timestamp(row.expire_time),
+  });
+}
+
+export async function issueToken(
+  db: Db,
+  token: { principalId: string; name: string; projectId: string | undefined; expireTime: Date | undefined },
+): Promise<{ row: TokenRow; secret: string }> {
+  const secret = `${secretPrefix}${randomToken()}`;
+  const [row] = await db<TokenRow[]>`
+    insert into api_tokens (id, principal_id, name, project_id, secret_hash, expire_time)
+    values (${newId("tok")}, ${token.principalId}, ${token.name}, ${token.projectId ?? null}, ${sha256(secret)},
+      ${token.expireTime ?? null})
+    returning id, principal_id, name, project_id, create_time, expire_time`;
+  if (!row) throw new Error("token insert returned no row");
+  return { row, secret };
+}
+
+export async function findToken(db: Db, id: string): Promise<TokenRow | undefined> {
+  const [row] = await db<TokenRow[]>`
+    select id, principal_id, name, project_id, create_time, expire_time from api_tokens where id = ${id}`;
+  return row;
+}
+
+/** Records the operator's configured token once; revoking it sticks until the configured value changes. */
+export async function ensureOperatorToken(db: Db, secret: string): Promise<void> {
+  await db`
+    insert into api_tokens (id, principal_id, name, secret_hash)
+    values (${newId("tok")}, ${operator.id}, 'CHUNK_OPERATOR_TOKEN', ${sha256(secret)})
+    on conflict (secret_hash) do nothing`;
+}
+
+export function tokenAuthenticator(db: Db): Authenticator {
+  return {
+    async authenticate(bearer) {
+      const [row] = await db<{ id: string; principal_id: string; project_id: string | null }[]>`
+        select id, principal_id, project_id from api_tokens
+        where secret_hash = ${sha256(bearer)} and revoke_time is null and (expire_time is null or expire_time > now())`;
+      if (!row || row.principal_id !== operator.id) return undefined;
+      return { principal: operator, tokenId: row.id, projectId: row.project_id ?? undefined };
+    },
+  };
+}
