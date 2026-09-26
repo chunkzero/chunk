@@ -18,13 +18,14 @@ native Minecraft connection using the capability. `Inspect` reconciles the same 
 releasing the reservation. Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
-profile. A prepared slot is a reservation, not a second attached player. A claim's generation is an `(epoch, revision)`
-after every earlier control commit and no later than the commit that created it, since app commits share the log; its
-membership generation is that of the login it continues. Generations compare as pairs, because a restore starts a new
-epoch and may reuse revisions. The current wire contract carries a pair as one `uint64`, the epoch above 40 revision
-bits. The session and process have their own incarnations. Duplicate login is rejected while an earlier owner remains
-unresolved. An old cancellation cannot release a newer connection. Unactivated reservations expire after 60 seconds;
-active membership never expires solely because a control channel becomes unavailable.
+profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
+of the commit that created it: the system lane hands control that commit's revision before control computes its writes,
+even when app commits share the log. Its membership generation is that of the login it continues. Generations compare as
+pairs, because a restore starts a new epoch and may reuse revisions. The current wire contract carries a pair as one
+`uint64`, the epoch above 40 revision bits. The session and process have their own incarnations. Duplicate login is
+rejected while an earlier owner remains unresolved. An old cancellation cannot release a newer connection. Unactivated
+reservations expire after 60 seconds; active membership never expires solely because a control channel becomes
+unavailable.
 
 Control keeps its state as system tables (`chunk_hosts`, `chunk_sessions`, `chunk_players`, `chunk_claims`,
 `chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment backend's store, so an

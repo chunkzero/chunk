@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use chunk_backend::{ScopeLock, System};
-use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Snapshot, Write};
+use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Revision, Snapshot, Write};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{Capacity, Meta, Phase, State};
+use super::{Capacity, Generation, Meta, Phase, State, entities::Stamp};
 use crate::{Error, Result};
 
 pub(crate) const CLAIMS: &str = "chunk_claims";
@@ -81,18 +81,18 @@ impl Store {
         })
     }
 
-    /// Commits `writes` ahead of queued app commits, returning their revision.
-    pub fn commit(&self, writes: Vec<Write>) -> Result<u64> {
+    /// Commits `writes` ahead of queued app commits, stamped with the commit's generation, returning its revision.
+    pub fn commit(&self, epoch: u64, writes: Writes) -> Result<u64> {
         self.open()?;
-        Ok(self.system.commit(writes)?.0)
+        Ok(self.system.commit(move |revision| writes.stamp(epoch, revision))?.0)
     }
 
     /// The writes that turn `previous` into `next`.
-    pub fn writes(&self, previous: &State, next: &State) -> Result<Vec<Write>> {
-        let mut writes = Vec::new();
+    pub fn writes(&self, previous: &State, next: &State) -> Result<Writes> {
+        let mut writes = Writes::default();
         if previous.config != next.config || previous.method_sequence != next.method_sequence {
             let meta = Meta { config: next.config.clone(), method_sequence: next.method_sequence };
-            writes.push(Write { key: self.key(META, "control")?, value: Some(serde_json::to_value(meta)?) });
+            writes.put(self.key(META, "control")?, meta)?;
         }
         self.diff(HOSTS, &previous.hosts, &next.hosts, &mut writes)?;
         self.diff(SESSIONS, &previous.sessions, &next.sessions, &mut writes)?;
@@ -125,20 +125,68 @@ impl Store {
         Ok(rows)
     }
 
-    fn diff<T: PartialEq + Serialize>(
+    fn diff<T: Clone + PartialEq + Serialize + Stamp + Send + 'static>(
         &self,
         table: &str,
         previous: &BTreeMap<String, T>,
         next: &BTreeMap<String, T>,
-        writes: &mut Vec<Write>,
+        writes: &mut Writes,
     ) -> Result<()> {
         for id in previous.keys().filter(|id| !next.contains_key(*id)) {
-            writes.push(Write { key: self.key(table, id)?, value: None });
+            writes.ready.push(Write { key: self.key(table, id)?, value: None });
         }
         for (id, value) in next.iter().filter(|(id, value)| previous.get(*id) != Some(*value)) {
-            writes.push(Write { key: self.key(table, id)?, value: Some(serde_json::to_value(value)?) });
+            writes.put(self.key(table, id)?, value.clone())?;
         }
         Ok(())
+    }
+}
+
+/// Serializes a row that names [`Generation::PENDING`] once the commit's generation is known.
+type Pending = Box<dyn FnOnce(Generation) -> serde_json::Result<Value> + Send>;
+
+/// The writes of one update. Rows naming [`Generation::PENDING`] wait for their commit's revision, so the commit
+/// thread serializes only those.
+#[derive(Default)]
+pub(super) struct Writes {
+    ready: Vec<Write>,
+    pending: Vec<(DocumentKey, Pending)>,
+}
+
+impl Writes {
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty() && self.pending.is_empty()
+    }
+
+    /// Every written key, and whether the write removes it.
+    pub fn keys(&self) -> impl Iterator<Item = (&DocumentKey, bool)> {
+        let ready = self.ready.iter().map(|write| (&write.key, write.value.is_none()));
+        ready.chain(self.pending.iter().map(|(key, _)| (key, false)))
+    }
+
+    fn put<T: Serialize + Stamp + Send + 'static>(&mut self, key: DocumentKey, mut row: T) -> Result<()> {
+        if row.pending() {
+            let stamp = move |generation| {
+                row.stamp(generation);
+                serde_json::to_value(row)
+            };
+            self.pending.push((key, Box::new(stamp)));
+        } else {
+            self.ready.push(Write { key, value: Some(serde_json::to_value(row)?) });
+        }
+        Ok(())
+    }
+
+    fn stamp(self, epoch: u64, revision: Revision) -> chunk_backend::Result<Vec<Write>> {
+        let mut writes = self.ready;
+        if self.pending.is_empty() {
+            return Ok(writes);
+        }
+        let generation = Generation::new(epoch, revision.0).map_err(|_| chunk_store::Error::Capacity)?;
+        for (key, row) in self.pending {
+            writes.push(Write { key, value: Some(row(generation)?) });
+        }
+        Ok(writes)
     }
 }
 
@@ -155,7 +203,7 @@ pub fn clear(system: &System) -> Result<()> {
         }
     }
     if !writes.is_empty() {
-        system.commit(writes)?;
+        system.commit(move |_| Ok(writes))?;
     }
     Ok(())
 }

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Result};
 pub use entities::Generation;
+use entities::Stamp;
 pub(crate) use entities::{
     Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, Roster, SessionState,
 };
@@ -36,12 +37,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    /// A generation after every earlier control commit and no later than the commit that will apply the current
-    /// update, which may follow app commits.
-    pub fn next_generation(&self) -> Result<Generation> {
-        Generation::new(self.epoch, self.revision + 1)
-    }
-
     pub fn position(&self) -> Generation {
         Generation { epoch: self.epoch, revision: self.revision }
     }
@@ -59,6 +54,13 @@ impl State {
                 && claim.phase == Phase::Arrived
                 && self.players.get(&claim.player).and_then(|owner| owner.current.as_ref()) == Some(operation)
         })
+    }
+
+    /// Replaces [`Generation::PENDING`] with `generation`, the commit that applied the update.
+    fn stamp(&mut self, generation: Generation) {
+        self.claims.values_mut().for_each(|claim| claim.stamp(generation));
+        self.moves.values_mut().for_each(|intent| intent.stamp(generation));
+        entities::stamp_wire(&mut self.method_sequence, generation);
     }
 
     /// Clears `operation` from its player's ownership, forgetting players that no longer own a claim.
@@ -153,7 +155,8 @@ pub(crate) struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    /// Applies `change` to the current state and commits the rows it touched as one transaction.
+    /// Applies `change` to the current state and commits the rows it touched as one transaction. Rows that `change`
+    /// gave [`Generation::PENDING`] get the `(epoch, revision)` of that commit.
     pub fn update<T>(&mut self, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
         self.recover()?;
         let previous = self.authority.read()?;
@@ -163,11 +166,12 @@ impl Writer<'_> {
         if writes.is_empty() {
             return Ok(result);
         }
-        let rows = feed::rows(&writes, self.store.store.scope());
-        match self.store.store.commit(writes) {
+        let rows = feed::rows(writes.keys(), self.store.store.scope());
+        match self.store.store.commit(next.epoch, writes) {
             Ok(revision) if revision > previous.revision => {
                 next.revision = revision;
                 let position = next.position();
+                next.stamp(position);
                 self.authority.publish(next)?;
                 self.authority.feed.record(position, rows);
                 Ok(result)

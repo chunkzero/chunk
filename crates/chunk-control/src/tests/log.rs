@@ -20,7 +20,7 @@ async fn reopens_state_larger_than_the_default_scan_budget() {
     control
         .update(|state| {
             let template = state.claims["claim-0"].clone();
-            let generation = state.next_generation()?;
+            let generation = Generation::PENDING;
             for index in 1..512 {
                 let mut request = first.clone();
                 request.operation_id = format!("claim-{index}");

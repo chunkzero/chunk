@@ -458,10 +458,11 @@ async fn system_post_commit_snapshot_failure_stops_lane_and_app_calls() {
     system.open(schema).unwrap();
     let key = DocumentKey::new("chunk_claims", "claim").unwrap();
     let document = json!({"player": "alex"});
-    let _ = system.commit(vec![chunk_store::Write { key: key.clone(), value: Some(document.clone()) }]);
+    let write = chunk_store::Write { key: key.clone(), value: Some(document.clone()) };
+    let _ = system.commit(move |_| Ok(vec![write]));
 
     // A second lane request also waits until the first request's engine event has been sent.
-    let next = system.commit(Vec::new());
+    let next = system.commit(|_| Ok(Vec::new()));
     let stopped = system.stopped();
     let query = backend.query(call("get", json!({"id": "p"}))).await;
     drop(system);
@@ -508,9 +509,9 @@ async fn fatal_system_commit_failure_stops_lane_and_app_calls() {
         key: DocumentKey::new("chunk_claims", "claim").unwrap(),
         value: Some(json!({"player": "alex"})),
     };
-    assert!(system.commit(vec![write]).is_err());
+    assert!(system.commit(move |_| Ok(vec![write])).is_err());
     // The commit thread handles this after it notified the engine of the first failure.
-    assert!(matches!(system.commit(Vec::new()), Err(Error::CommitFailed)));
+    assert!(matches!(system.commit(|_| Ok(Vec::new())), Err(Error::CommitFailed)));
     assert!(system.stopped());
     assert!(matches!(backend.query(call("get", json!({"id": "p"}))).await, Err(Error::CommitFailed)));
 }

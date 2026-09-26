@@ -247,7 +247,7 @@ pub(crate) fn owner(state: &State, request: &ClaimRequest) -> Result<Owner> {
     Ok(Owner { player: player.clone(), membership: Some(previous.membership) })
 }
 
-/// Reserves a slot in `session` for `request`, created by the commit applying this update.
+/// Reserves a slot in `session` for `request`, whose generation is the commit applying this update.
 pub(crate) fn insert_claim(
     state: &mut State,
     request: &ClaimRequest,
@@ -255,7 +255,7 @@ pub(crate) fn insert_claim(
     session: String,
     roster: Option<String>,
 ) -> Result<()> {
-    let generation = state.next_generation()?;
+    let generation = Generation::PENDING;
     state.sessions.get_mut(&session).ok_or(Error::Invalid("missing selected session"))?.empty_since_ms = None;
     let player = state.players.entry(owner.player.clone()).or_default();
     if request.source.is_none() {

@@ -2,7 +2,7 @@ use chunk_proto::v1::{AbandonMoveRequest, ClaimIdentity, ClaimRequest, MovePlaye
 use prost::Message;
 
 use crate::{
-    Control, Error, Result,
+    Control, Error, Generation, Result,
     state::{MoveFailure, MoveIntent, Phase, State},
 };
 
@@ -111,7 +111,7 @@ pub(crate) fn queue(state: &mut State, config: &crate::Config, request: MovePlay
         config,
         destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
     )?;
-    let sequence = state.next_generation()?.wire();
+    let sequence = Generation::PENDING.wire();
     state.moves.insert(
         destination.operation_id.clone(),
         MoveIntent { request: destination.encode_to_vec(), canceled: false, sequence, failure: None },

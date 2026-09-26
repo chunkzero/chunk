@@ -3,6 +3,7 @@
 
 use std::{
     collections::{HashSet, VecDeque},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -17,9 +18,12 @@ use crate::{Backend, Error, Result, commit::Job};
 /// Operation IDs of system commits start with this; app operation IDs may not.
 pub(crate) const OPERATION_PREFIX: &str = "chunk/";
 
+/// Computes a system commit's writes from the revision it commits at.
+pub(crate) type Writes = Box<dyn FnOnce(Revision) -> Result<Vec<Write>> + Send>;
+
 pub(crate) enum SystemJob {
     Open { schema: DatabaseSchema, reply: mpsc::SyncSender<Result<Snapshot>> },
-    Commit { writes: Vec<Write>, reply: mpsc::SyncSender<Result<Revision>> },
+    Commit { writes: Writes, reply: mpsc::SyncSender<Result<Revision>> },
 }
 
 /// System jobs waiting for the commit thread, which drains them before each durable write.
@@ -133,15 +137,21 @@ impl System {
         result.recv().map_err(|_| Error::Closed)?
     }
 
-    /// Commits `writes` as one commit in the next durable write, ahead of queued app commits,
-    /// and returns its revision. Blocks until it is durable.
+    /// Commits the writes `writes` returns as one commit in the next durable write, ahead of queued app commits,
+    /// and returns its revision. The commit thread calls `writes` with that revision, so it must be cheap and must
+    /// not block. Blocks until the commit is durable.
     /// # Errors
-    /// Rejects writes outside system tables, reports rejected commits, and reports a
-    /// stopped or failed pipeline, after which the outcome may be unknown.
-    pub fn commit(&self, writes: Vec<Write>) -> Result<Revision> {
-        if !writes.iter().all(|write| is_system_table(&write.key.table)) {
-            return Err(Error::Invalid("system commit writes an app table"));
-        }
+    /// Rejects the commit when `writes` fails, panics or writes outside system tables. Reports rejected commits,
+    /// and a stopped or failed pipeline, after which the outcome may be unknown.
+    pub fn commit(&self, writes: impl FnOnce(Revision) -> Result<Vec<Write>> + Send + 'static) -> Result<Revision> {
+        let writes: Writes = Box::new(move |revision| {
+            let writes = catch_unwind(AssertUnwindSafe(move || writes(revision)))
+                .map_err(|_| Error::Invalid("system commit writes panicked"))??;
+            if !writes.iter().all(|write| is_system_table(&write.key.table)) {
+                return Err(Error::Invalid("system commit writes an app table"));
+            }
+            Ok(writes)
+        });
         let (reply, result) = mpsc::sync_channel(1);
         self.lane.submit(SystemJob::Commit { writes, reply })?;
         result.recv().map_err(|_| Error::Closed)?

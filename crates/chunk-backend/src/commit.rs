@@ -216,10 +216,12 @@ fn open(
     (advanced, snapshot)
 }
 
-type Replies = Vec<mpsc::SyncSender<Result<Revision>>>;
+/// Each submitted system commit's revision and reply.
+type Replies = Vec<(Revision, mpsc::SyncSender<Result<Revision>>)>;
 
 /// Installs system tables at once, reporting any revision that advanced, and turns system
-/// commits into the leading requests of the next durable write.
+/// commits into the leading requests of the next durable write, computing each one's writes
+/// from the revision it commits at. A commit whose writes fail is rejected alone.
 fn system_requests(
     store: &mut dyn Storage,
     sequence: &mut Sequence,
@@ -247,11 +249,18 @@ fn system_requests(
                 let _ = reply.send(Err(Error::CommitFailed));
                 continue;
             };
+            let writes = match writes(Revision(revision)) {
+                Ok(writes) => writes,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+            };
             let id = format!("{OPERATION_PREFIX}{}/{revision}", sequence.epoch.0);
             let operation = Operation { id, fingerprint: FINGERPRINT };
             let commit = Commit { expected, operation, writes, result: serde_json::Value::Null };
             requests.push(Request::Commit { commit, intents: Vec::new() });
-            replies.push(reply);
+            replies.push((Revision(revision), reply));
             expected = Revision(revision);
         }
     }
@@ -265,9 +274,9 @@ fn acknowledge(
     failed: &mut bool,
 ) -> (u64, Revision) {
     let mut committed = (0, Revision(0));
-    for reply in replies {
+    for (revision, reply) in replies {
         let result = match results.next().filter(|_| !*failed) {
-            Some(Ok(Reply::Committed(outcome))) => Ok(outcome.revision),
+            Some(Ok(Reply::Committed(outcome))) if outcome.revision == revision => Ok(revision),
             Some(Err(error)) => Err(Error::from(error)),
             _ => Err(Error::CommitFailed),
         };

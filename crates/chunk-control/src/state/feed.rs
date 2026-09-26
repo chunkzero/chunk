@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, sync::Mutex};
 
-use chunk_store::Write;
+use chunk_store::DocumentKey;
 use tokio::sync::watch;
 
 use super::{
@@ -31,20 +31,18 @@ pub struct Change {
 
 pub(super) type Row = (Table, String, bool);
 
-/// The claim and move rows among `writes`, whose IDs start with `scope`.
-pub(super) fn rows(writes: &[Write], scope: &str) -> Vec<Row> {
-    writes
-        .iter()
-        .filter_map(|write| {
-            let table = match write.key.table.as_str() {
-                CLAIMS => Table::Claims,
-                MOVES => Table::Moves,
-                _ => return None,
-            };
-            let id = write.key.id.strip_prefix(scope).unwrap_or(&write.key.id);
-            Some((table, id.to_owned(), write.value.is_none()))
-        })
-        .collect()
+/// The claim and move rows among written `keys`, whose IDs start with `scope`.
+pub(super) fn rows<'a>(keys: impl Iterator<Item = (&'a DocumentKey, bool)>, scope: &str) -> Vec<Row> {
+    keys.filter_map(|(key, removed)| {
+        let table = match key.table.as_str() {
+            CLAIMS => Table::Claims,
+            MOVES => Table::Moves,
+            _ => return None,
+        };
+        let id = key.id.strip_prefix(scope).unwrap_or(&key.id);
+        Some((table, id.to_owned(), removed))
+    })
+    .collect()
 }
 
 pub(crate) struct Feed {
