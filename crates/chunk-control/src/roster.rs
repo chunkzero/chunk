@@ -14,7 +14,7 @@ use prost::Message;
 
 use crate::{
     Control, Error, Result,
-    placement::{insert_claim, owner, select_room},
+    placement::{insert_claim, owner, reserved, select_room},
     state::{MoveFailure, Phase, Roster, State},
 };
 
@@ -79,9 +79,17 @@ impl Control {
             if let Some(roster) = state.rosters.get(&request.operation_id) {
                 return retried(state, roster, request);
             }
+            // A member operation that already ended or holds a claim is never reserved again: a surviving JVM may
+            // still hold its earlier generation.
             let destinations = commands
                 .into_iter()
-                .map(|command| crate::moves::queue(state, &self.config, command))
+                .map(|command| {
+                    let destination = crate::moves::queue(state, &self.config, command)?;
+                    if reserved(state, &destination)? {
+                        return Err(Error::Invalid("roster member operation already claimed"));
+                    }
+                    Ok(destination)
+                })
                 .collect::<Result<Vec<_>>>()?;
             let session = select_room(state, &self.config, &request.demand, &unavailable, destinations.len())?;
             for destination in &destinations {
