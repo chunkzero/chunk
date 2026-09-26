@@ -198,16 +198,23 @@ fn idle_host(directory: &tempfile::TempDir) -> ProcessHost {
     })
 }
 
-/// A host with a launch marker, left by a host that restarted, recording `boot` and `launched`.
+/// A host with a launch marker, left by a host that restarted, recording `boot`, `launch` and `launched`.
 fn marked(
     directory: &tempfile::TempDir,
     boot: Option<String>,
+    launch: &str,
     launched: Option<liveness::Launched>,
 ) -> (ProcessHost, String) {
     let host = idle_host(directory);
     let id = uuid::Uuid::new_v4().to_string();
-    let record =
-        LaunchRecord { process_id: "jvm".into(), generation: 1, token_sha256: digest("token"), boot, launched };
+    let record = LaunchRecord {
+        process_id: "jvm".into(),
+        generation: 1,
+        token_sha256: digest("token"),
+        boot,
+        launch: launch.into(),
+        launched,
+    };
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
     std::fs::write(host.path(&id, "launch").unwrap(), serde_json::to_vec(&record).unwrap()).unwrap();
     (host, id)
@@ -217,7 +224,7 @@ fn marked(
 #[test]
 fn a_launch_from_another_boot_is_confirmed_exited() {
     let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, Some("another-boot".into()), None);
+    let (host, id) = marked(&directory, Some("another-boot".into()), "", None);
     assert!(host.stopped(&id));
     assert!(host.path(&id, "exit").unwrap().is_file());
     assert!(host.unowned().unwrap().is_empty());
@@ -228,7 +235,7 @@ fn a_launch_whose_pid_is_gone_is_confirmed_exited() {
     let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let launched = liveness::Launched { pid: child.id(), started: liveness::started(child.id()).unwrap().unwrap() };
     let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, liveness::current_boot(), Some(launched));
+    let (host, id) = marked(&directory, liveness::current_boot(), "", Some(launched));
     assert!(!host.stopped(&id));
     assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
     child.kill().unwrap();
@@ -243,16 +250,38 @@ fn a_reused_pid_with_another_start_time_is_confirmed_exited() {
     let started = liveness::started(pid).unwrap().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let (host, id) =
-        marked(&directory, liveness::current_boot(), Some(liveness::Launched { pid, started: started + 1 }));
+        marked(&directory, liveness::current_boot(), "", Some(liveness::Launched { pid, started: started + 1 }));
     assert!(host.stopped(&id));
 }
 
 #[test]
 fn a_marker_without_boot_or_spawn_waits_for_an_exit_record() {
     let directory = tempfile::tempdir().unwrap();
-    let (host, id) = marked(&directory, None, None);
+    let (host, id) = marked(&directory, None, "", None);
     assert!(!host.stopped(&id));
     assert!(host.unresolved(&id));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launch_interrupted_before_its_spawn_is_confirmed_exited() {
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) = marked(&directory, liveness::current_boot(), &uuid::Uuid::new_v4().to_string(), None);
+    assert!(host.stopped(&id));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launch_interrupted_before_recording_its_spawn_is_found_by_its_launch_id() {
+    let launch = uuid::Uuid::new_v4().to_string();
+    let mut child = std::process::Command::new("sleep").arg("60").env(liveness::LAUNCH_ENV, &launch).spawn().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (host, id) = marked(&directory, liveness::current_boot(), &launch, None);
+    assert!(!host.stopped(&id));
+    assert_eq!(host.launch_record(&id).unwrap().launched.map(|launched| launched.pid), Some(child.id()));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(host.stopped(&id));
 }
 
 #[tokio::test]

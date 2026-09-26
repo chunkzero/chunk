@@ -154,6 +154,7 @@ impl ProcessHost {
                 .arg("-jar")
                 .arg(&jar)
                 .env("CHUNK_PROCESS_TOKEN", &process.token)
+                .env(liveness::LAUNCH_ENV, &record.launch)
                 .env("CHUNK_ENVIRONMENT", &self.config.deployment.environment)
                 .env("CHUNK_DEPLOYMENT", &self.config.deployment.deployment)
                 .env("CHUNK_CONTROL_ENDPOINT", endpoint)
@@ -216,11 +217,15 @@ impl ProcessHost {
         std::fs::File::open(&self.config.directory)?.sync_all()?;
         Ok(record)
     }
-    /// Adds the spawned JVM's PID and start time to its launch marker, replacing the marker atomically.
+    /// Adds the spawned JVM's PID and start time to its launch marker.
     fn record_spawn(&self, id: &str, record: &mut LaunchRecord, pid: Option<u32>) -> Result<()> {
         let pid = pid.ok_or(Error::Unresolved("JVM exited before its PID was read"))?;
         let started = liveness::started(pid)?.ok_or(Error::Unresolved("JVM exited before its start was read"))?;
         record.launched = Some(liveness::Launched { pid, started });
+        self.replace_launch(id, record)
+    }
+    /// Replaces `id`'s launch marker with `record` atomically.
+    fn replace_launch(&self, id: &str, record: &LaunchRecord) -> Result<()> {
         let (marker, staged) = (self.path(id, "launch")?, self.path(id, "launch.staged")?);
         match std::fs::remove_file(&staged) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
@@ -233,15 +238,35 @@ impl ProcessHost {
         std::fs::File::open(&self.config.directory)?.sync_all()?;
         Ok(())
     }
+    /// Whether no process carries `record`'s launch ID. Records the PID of one that does.
+    fn find_launch(&self, id: &str, record: &mut LaunchRecord) -> bool {
+        match liveness::find(&record.launch) {
+            Ok(None) => true,
+            Ok(Some(launched)) => {
+                record.launched = Some(launched);
+                if let Err(error) = self.replace_launch(id, record) {
+                    tracing::warn!(%error, host = id, "cannot record a found JVM's PID");
+                }
+                false
+            }
+            Err(error) => {
+                tracing::debug!(%error, host = id, "cannot tell whether an unrecorded JVM runs");
+                false
+            }
+        }
+    }
     fn launch_record(&self, id: &str) -> Option<LaunchRecord> {
         serde_json::from_slice(&std::fs::read(self.path(id, "launch").ok()?).ok()?).ok()
     }
-    /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does.
+    /// Whether `id`'s launch marker proves its JVM exited, recording the exit when it does. A marker written before
+    /// its JVM's PID gets the PID of the process carrying its launch ID, or proves the JVM never ran or exited.
     fn confirm_exit(&self, id: &str) -> bool {
-        if !self
-            .launch_record(id)
-            .is_some_and(|record| liveness::exited(record.boot.as_deref(), record.launched.as_ref()))
-        {
+        let Some(mut record) = self.launch_record(id) else {
+            return false;
+        };
+        let exited = liveness::exited(record.boot.as_deref(), record.launched.as_ref())
+            || (record.launched.is_none() && !record.launch.is_empty() && self.find_launch(id, &mut record));
+        if !exited {
             return false;
         }
         if let Err(error) = self.record_exit(id, b"exited while unowned") {
@@ -445,7 +470,7 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
 }
 
 /// What a launch marker records: the JVM's process identity and the SHA-256 digest of its credential, and what
-/// confirms its exit once no Child is owned. Markers without the boot and spawn wait for an exit record.
+/// confirms its exit once no Child is owned. Markers without the boot, launch ID and spawn wait for an exit record.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LaunchRecord {
     process_id: String,
@@ -453,6 +478,9 @@ struct LaunchRecord {
     token_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     boot: Option<String>,
+    /// The random ID passed to the JVM in [`liveness::LAUNCH_ENV`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    launch: String,
     /// Recorded once the JVM is spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launched: Option<liveness::Launched>,
@@ -465,6 +493,7 @@ impl LaunchRecord {
             generation: identity.generation,
             token_sha256: digest(token),
             boot: liveness::current_boot(),
+            launch: uuid::Uuid::new_v4().to_string(),
             launched: None,
         }
     }
