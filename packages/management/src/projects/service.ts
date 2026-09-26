@@ -106,7 +106,7 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
         throw invalid("sleeping_ping must be CACHE or WAKE");
       }
       const [row] = await sql<EnvironmentRow[]>`
-        update environments set sleeping_ping = ${sleepingPing ?? environment.sleeping_ping}
+        update environments set sleeping_ping = coalesce(${sleepingPing ?? null}::smallint, sleeping_ping)
         where id = ${environment.id}
         returning *`;
       if (!row) throw invalid("environment was deleted");

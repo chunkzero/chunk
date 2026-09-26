@@ -30,6 +30,8 @@ export async function scanArchive(
   const reader = archive.pipeThrough(new DecompressionStream("gzip")).getReader();
   const bytes = new ByteReader(reader, limits.maxExpandedBytes);
   const entries = new Map<string, ArchiveEntry>();
+  /** Every ancestor of a file seen so far; none of them may also be a file. */
+  const directories = new Set<string>();
   try {
     let longName: string | undefined;
     let count = 0;
@@ -60,6 +62,12 @@ export async function scanArchive(
       longName = undefined;
       if (!portablePath(path)) throw new Error(`the archive holds an invalid path: ${JSON.stringify(path)}`);
       if (entries.has(path)) throw new Error(`the archive holds ${path} twice`);
+      if (directories.has(path)) throw new Error(`the archive holds ${path} as both a file and a directory`);
+      for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
+        const ancestor = path.slice(0, slash);
+        if (entries.has(ancestor)) throw new Error(`the archive holds ${ancestor} as both a file and a directory`);
+        directories.add(ancestor);
+      }
       const limit = keep(path);
       if (limit !== undefined && size > limit) throw new Error(`${path} is larger than ${limit} bytes`);
       const hash = createHash("sha256");

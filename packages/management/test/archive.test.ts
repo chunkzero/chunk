@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { ArchiveLimits } from "../src/releases/archive.ts";
+import { type ArchiveLimits, scanArchive } from "../src/releases/archive.ts";
 import { verifyRelease } from "../src/releases/manifest.ts";
 import { type ArchiveOptions, rawArchive, releaseArchive } from "./fixtures.ts";
 
@@ -38,6 +38,49 @@ test("rejects releases whose payloads are missing or altered", async () => {
       }),
     }),
   ).rejects.toThrow("does not match its digest");
+});
+
+test("rejects backend metadata chunk build would not write", async () => {
+  const notJson = { "backend.json": "not JSON", "contract.json": "not JSON" };
+  await expect(broken({ replace: notJson })).rejects.toThrow("contract.json is not a JSON object");
+  await expect(broken({ replace: { "contract.json": '{"contract_version":2}' } })).rejects.toThrow("runtime_profile");
+  const backend = (fields: object) => ({
+    "backend.json": JSON.stringify({
+      contract_version: 2,
+      runtime_profile: "transactional_v1",
+      tables: {},
+      functions: {},
+      id: "r1",
+      source: "export default {};\n",
+      ...fields,
+    }),
+  });
+  await expect(broken({ replace: backend({ id: "r2" }) })).rejects.toThrow('names release "r2"');
+  await expect(broken({ replace: backend({ source: "other" }) })).rejects.toThrow("does not carry source.mjs");
+  await expect(broken({ replace: backend({ functions: { f: {} } }) })).rejects.toThrow("does not match contract.json");
+});
+
+test("rejects a path that is both a file and a directory, in either order", async () => {
+  const scan = (files: [string, string][]) =>
+    scanArchive(new Blob([rawArchive(files).bytes]).stream(), limits, () => undefined);
+  await expect(
+    scan([
+      ["assets", "x"],
+      ["assets/file.txt", "y"],
+    ]),
+  ).rejects.toThrow("both a file and a directory");
+  await expect(
+    scan([
+      ["assets/file.txt", "y"],
+      ["assets", "x"],
+    ]),
+  ).rejects.toThrow("both a file and a directory");
+  await expect(
+    scan([
+      ["assets/a/b.txt", "y"],
+      ["assets/a", "x"],
+    ]),
+  ).rejects.toThrow("both a file and a directory");
 });
 
 test("rejects archives that differ from their declaration or exceed the budget", async () => {

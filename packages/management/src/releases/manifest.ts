@@ -21,8 +21,18 @@ export interface ReleaseManifest {
 const manifestPath = "release.json";
 const maxManifestBytes = 16 * 1024 * 1024;
 const manifestVersion = 3;
-/** Files every release carries besides its apps and assets. */
-const backendFiles = ["backend.json", "contract.json", "source.mjs"];
+/** The backend files every release carries besides its apps and assets, with chunk_contract's size limits. */
+const backendFiles: Record<string, number> = {
+  "backend.json": 5 * 1024 * 1024,
+  "contract.json": 2 * 1024 * 1024,
+  "source.mjs": 4 * 1024 * 1024,
+};
+/** chunk_contract::CONTRACT_VERSION and the runtime profiles it knows. */
+const contractVersion = 2;
+const runtimeProfiles = ["transactional_v1"];
+/** Fields of `contract.json`; `backend.json` adds `id` and `source`. */
+const contractFields = ["contract_version", "runtime_profile", "tables", "functions"];
+const optionalContractFields = ["domains", "session_methods", "session_configurations", "destinations"];
 
 /**
  * Checks a stored archive in one pass: its size and digest against the declaration, its tar structure within
@@ -45,7 +55,9 @@ export async function verifyRelease(
       },
     }),
   );
-  const entries = await scanArchive(counted, limits, (path) => (path === manifestPath ? maxManifestBytes : undefined));
+  const entries = await scanArchive(counted, limits, (path) =>
+    path === manifestPath ? maxManifestBytes : backendFiles[path],
+  );
   if (sizeBytes !== expected.sizeBytes || hash.digest("hex") !== expected.sha256) {
     throw new Error("the archive does not match the declared size and digest");
   }
@@ -62,14 +74,76 @@ export async function verifyRelease(
   const payloads: [string, string | undefined][] = [
     ...apps.map((app): [string, string] => [app.jar, app.sha256]),
     ...Object.entries(assets),
-    ...backendFiles.map((path): [string, undefined] => [path, undefined]),
+    ...Object.keys(backendFiles).map((path): [string, undefined] => [path, undefined]),
   ];
   for (const [path, sha256] of payloads) {
     const entry = entries.get(path);
     if (!entry) throw new Error(`the archive is missing ${path}`);
     if (sha256 !== undefined && entry.sha256 !== sha256) throw new Error(`${path} does not match its digest`);
   }
+  const backend = backendProblem(id, (path) => entries.get(path)?.data ?? new Uint8Array());
+  if (backend !== undefined) throw new Error(backend);
   return text;
+}
+
+/**
+ * Checks the backend files the way `chunk build` writes them: `contract.json` is the compiled backend metadata, and
+ * `backend.json` is that metadata plus the release ID and the exact text of `source.mjs`.
+ */
+function backendProblem(releaseId: string, read: (path: string) => Uint8Array): string | undefined {
+  let source: string;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true }).decode(read("source.mjs"));
+  } catch {
+    return "source.mjs is not UTF-8";
+  }
+  const contract = parseJson(read("contract.json"));
+  if (!isRecord(contract)) return "contract.json is not a JSON object";
+  const problem = contractProblem(contract);
+  if (problem !== undefined) return `contract.json ${problem}`;
+  const backend = parseJson(read("backend.json"));
+  if (!isRecord(backend)) return "backend.json is not a JSON object";
+  const { id, source: backendSource, ...metadata } = backend;
+  if (id !== releaseId) return `backend.json names release ${JSON.stringify(id)}, not ${releaseId}`;
+  if (backendSource !== source) return "backend.json does not carry source.mjs";
+  if (!sameJson(metadata, contract)) return "backend.json does not match contract.json";
+  return undefined;
+}
+
+function contractProblem(contract: Record<string, unknown>): string | undefined {
+  const known = [...contractFields, ...optionalContractFields];
+  const unknown = Object.keys(contract).find((key) => !known.includes(key));
+  if (unknown !== undefined) return `has an unexpected field ${unknown}`;
+  if (contract.contract_version !== contractVersion) return `is not contract version ${contractVersion}`;
+  if (!runtimeProfiles.includes(contract.runtime_profile as string)) return "has an unknown runtime_profile";
+  if (!isRecord(contract.tables)) return "has no tables";
+  if (!isRecord(contract.functions) || Object.keys(contract.functions).length > 256) return "has invalid functions";
+  for (const field of optionalContractFields) {
+    if (field in contract && !isRecord(contract[field])) return `has an invalid ${field}`;
+  }
+  return undefined;
+}
+
+function parseJson(bytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Deep equality of parsed JSON, ignoring object key order. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((item, i) => sameJson(item, b[i]));
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keys = Object.keys(a);
+    return (
+      keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameJson(a[key], b[key]))
+    );
+  }
+  return a === b;
 }
 
 /** Describes the first way `value` differs from a release manifest, or undefined when it is one. */

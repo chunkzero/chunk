@@ -45,6 +45,8 @@ export interface ArchiveOptions {
   manifest?: (manifest: Record<string, unknown>) => unknown;
   /** Leaves out the paths it accepts. */
   omit?: (path: string) => boolean;
+  /** Replaces files' contents by path. */
+  replace?: Record<string, string>;
   badChecksum?: boolean;
 }
 
@@ -75,7 +77,13 @@ export function releaseArchive(
   const asset = encoder.encode("hello");
   const assetPath = `assets/${"a".repeat(120)}.txt`;
   files.push([assetPath, asset]);
-  for (const name of ["backend.json", "contract.json", "source.mjs"]) files.push([name, encoder.encode("{}")]);
+  const source = "export default {};\n";
+  const contract = { contract_version: 2, runtime_profile: "transactional_v1", tables: {}, functions: {} };
+  files.push(
+    ["source.mjs", encoder.encode(source)],
+    ["contract.json", encoder.encode(JSON.stringify(contract))],
+    ["backend.json", encoder.encode(JSON.stringify({ ...contract, id, source }))],
+  );
   const manifest = {
     id,
     version: 3,
@@ -85,7 +93,12 @@ export function releaseArchive(
     assets: { [assetPath]: sha256(asset) },
   };
   files.push(["release.json", encoder.encode(JSON.stringify(options.manifest?.(manifest) ?? manifest))]);
-  const kept = files.filter(([name]) => !options.omit?.(name));
+  const kept = files
+    .filter(([name]) => !options.omit?.(name))
+    .map(([name, bytes]): [string, Uint8Array] => {
+      const replacement = options.replace?.[name];
+      return [name, replacement === undefined ? bytes : encoder.encode(replacement)];
+    });
   const bytes = Bun.gzipSync(tar(kept, options.badChecksum));
   return { bytes, sha256: sha256(bytes), sizeBytes: BigInt(bytes.byteLength) };
 }
