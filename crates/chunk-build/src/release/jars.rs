@@ -26,18 +26,43 @@ struct Scan {
 /// A JAR's SHA-256 digest and the Java version it was scanned for.
 type ScanKey = ([u8; 32], u32);
 
-/// Scans are memoized by JAR digest and Java version, so `chunk dev` rescans only JARs whose bytes changed.
-static SCANS: LazyLock<Mutex<HashMap<ScanKey, Arc<Scan>>>> = LazyLock::new(Mutex::default);
+/// Scans are memoized by JAR digest and Java version, so `chunk dev` rescans only JARs whose bytes changed. The cache
+/// holds at most [`CACHED_BYTES`] of retained scans and starts over when a scan would exceed that, so verifying
+/// untrusted releases can't grow it without bound.
+static SCANS: LazyLock<Mutex<Scans>> = LazyLock::new(Mutex::default);
+
+const CACHED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct Scans {
+    scans: HashMap<ScanKey, Arc<Scan>>,
+    bytes: usize,
+}
+
+impl Scan {
+    /// An upper estimate of the memory a cached scan retains: its cache record and a partly filled tree node, then
+    /// each class's name, digest and share of the tree.
+    fn retained(&self) -> usize {
+        1024 + self.classes.keys().map(|name| name.len() + 160).sum::<usize>()
+    }
+}
 
 impl Classpath {
     pub fn add(&mut self, bytes: &[u8], label: &str, java: u32) -> io::Result<()> {
         let key = (Sha256::digest(bytes).into(), java);
-        let cached = SCANS.lock().unwrap_or_else(PoisonError::into_inner).get(&key).cloned();
+        let cached = SCANS.lock().unwrap_or_else(PoisonError::into_inner).scans.get(&key).cloned();
         let scan = if let Some(scan) = cached {
             scan
         } else {
             let scan = Arc::new(scan_jar(bytes, label, java)?);
-            SCANS.lock().unwrap_or_else(PoisonError::into_inner).insert(key, scan.clone());
+            let mut cache = SCANS.lock().unwrap_or_else(PoisonError::into_inner);
+            let retained = scan.retained();
+            if cache.bytes + retained > CACHED_BYTES {
+                *cache = Scans::default();
+            }
+            if retained <= CACHED_BYTES && cache.scans.insert(key, scan.clone()).is_none() {
+                cache.bytes += retained;
+            }
             scan
         };
         self.entries += scan.entries;
@@ -152,7 +177,7 @@ fn manifest_is_multi_release(bytes: &[u8]) -> io::Result<bool> {
 }
 
 /// Main manifest attributes with continuation lines joined.
-fn attributes(bytes: &[u8]) -> io::Result<Vec<String>> {
+pub(super) fn attributes(bytes: &[u8]) -> io::Result<Vec<String>> {
     let source = std::str::from_utf8(bytes).map_err(io::Error::other)?;
     let mut attributes: Vec<String> = Vec::new();
     for line in source.lines().take_while(|line| !line.is_empty()) {

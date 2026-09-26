@@ -7,6 +7,8 @@ use std::{
 use serde_json::{Value, json};
 use zip::{ZipWriter, write::SimpleFileOptions};
 
+mod verification;
+
 struct Fixture {
     root: tempfile::TempDir,
     inputs: ReleaseInputs,

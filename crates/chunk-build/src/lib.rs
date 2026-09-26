@@ -7,7 +7,10 @@ pub use compiler::compile;
 pub mod project;
 mod publication;
 mod release;
-pub use release::{JavaRuntime, JvmDescriptor, Release, ReleaseInputs, publish_release, read_jvm_descriptor};
+pub use release::{
+    ArchiveDigest, JavaRuntime, JvmDescriptor, Release, ReleaseInputs, UnpackLimits, VerifiedRelease, publish_release,
+    read_jvm_descriptor, unpack_release, verify_release,
+};
 mod sdk;
 pub use sdk::generate_sdk;
 

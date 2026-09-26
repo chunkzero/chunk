@@ -8,8 +8,11 @@ use std::{
 use sha2::{Digest, Sha256};
 
 pub(super) type Files = BTreeMap<String, Vec<u8>>;
-const MAX_BYTES: usize = 256 * 1024 * 1024;
-const MAX_FILES: usize = 4096;
+pub(super) const MAX_BYTES: usize = 256 * 1024 * 1024;
+pub(super) const MAX_FILES: usize = 4096;
+/// The most components and bytes an artifact path may have.
+pub(super) const MAX_COMPONENTS: usize = 18;
+pub(super) const MAX_PATH_BYTES: usize = 4096;
 
 pub(super) fn insert(files: &mut Files, name: String, bytes: Vec<u8>) -> io::Result<()> {
     relative_name(&name)?;
@@ -26,17 +29,20 @@ pub(super) fn insert(files: &mut Files, name: String, bytes: Vec<u8>) -> io::Res
     Ok(())
 }
 
-fn relative_name(name: &str) -> io::Result<()> {
+pub(super) fn relative_name(name: &str) -> io::Result<()> {
     if name.chars().any(|ch| ch.is_control() || "\\:*?\"<>|".contains(ch))
         || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' ']))
     {
         return Err(io::Error::other(format!("artifact path is not portable: {name:?}")));
     }
+    if name.len() > MAX_PATH_BYTES || name.split('/').count() > MAX_COMPONENTS {
+        return Err(io::Error::other("artifact path exceeds length or nesting limits"));
+    }
     Ok(())
 }
 
 pub(super) fn collect(directory: &Path, prefix: &str, files: &mut Files) -> io::Result<()> {
-    if prefix.matches('/').count() > 16 {
+    if prefix.split('/').count() > MAX_COMPONENTS - 1 {
         return Err(io::Error::other("artifact directory nesting exceeds local limit"));
     }
     if !fs::symlink_metadata(directory)?.is_dir() {
@@ -71,7 +77,7 @@ pub(super) fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn digest(files: &Files) -> String {
+pub(super) fn digest<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> String {
     let mut digest = Sha256::new();
     for (name, bytes) in files {
         digest.update((name.len() as u64).to_be_bytes());
@@ -148,19 +154,19 @@ fn link_unchanged(releases: &[PathBuf], name: &str, bytes: &[u8], path: &Path) -
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn rename_directory(source: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn rename_directory(source: &Path, destination: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE).map_err(Into::into)
 }
 
 #[cfg(windows)]
-fn rename_directory(source: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn rename_directory(source: &Path, destination: &Path) -> io::Result<()> {
     // Windows directory rename fails if the destination already exists.
     fs::rename(source, destination)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
-fn rename_directory(_: &Path, _: &Path) -> io::Result<()> {
+pub(super) fn rename_directory(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "atomic directory publication is unsupported on this OS"))
 }
 

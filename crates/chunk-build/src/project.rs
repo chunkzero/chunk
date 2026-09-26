@@ -62,11 +62,20 @@ pub struct LocalConfig {
     pub profiles: BTreeMap<String, MachineProfile>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineProfile {
     pub memory_mib: u32,
     pub max_sessions: u16,
+}
+
+impl MachineProfile {
+    pub(crate) fn valid(name: &str, profile: &Self) -> bool {
+        !name.is_empty()
+            && name.len() <= 128
+            && (128..=8192).contains(&profile.memory_mib)
+            && (1..=16).contains(&profile.max_sessions)
+    }
 }
 
 #[derive(Deserialize)]
@@ -238,14 +247,11 @@ impl LocalConfig {
             ));
         }
         for (name, profile) in &self.profiles {
-            if name.is_empty() || name.len() > 128 {
-                return Err(invalid(path, "local profile names must contain between 1 and 128 bytes"));
-            }
-            if !(128..=8192).contains(&profile.memory_mib) || !(1..=16).contains(&profile.max_sessions) {
+            if !MachineProfile::valid(name, profile) {
                 return Err(invalid(
                     path,
                     format!(
-                        "local.profiles.{name} requires memory_mib between 128 and 8192 and max_sessions between 1 and 16"
+                        "local.profiles.{name} requires a 1–128 byte name, memory_mib between 128 and 8192 and max_sessions between 1 and 16"
                     ),
                 ));
             }
