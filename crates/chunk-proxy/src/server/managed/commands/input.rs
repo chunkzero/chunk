@@ -56,6 +56,7 @@ impl Commands {
         tasks.platform.cleanup.clone().spawn(async move {
             let _permit = permit;
             let work = async {
+                let (tasks, _invocation) = tasks.invocation();
                 tasks.current(&origin, false)?;
                 origin.check(&tasks.platform).await?;
                 let allowed = tasks.allowed(&origin, &descriptors).await?;
@@ -99,6 +100,7 @@ impl Tasks {
         };
         let _ = self.output.try_send(Output::Packets {
             origin: Box::new(origin.clone()),
+            invocation: self.invocation.clone(),
             follow: false,
             packets: vec![packet],
             acknowledgment: None,
@@ -109,6 +111,7 @@ impl Tasks {
         self.output
             .send(Output::Packets {
                 origin: Box::new(origin.clone()),
+                invocation: self.invocation.clone(),
                 follow,
                 packets,
                 acknowledgment: Some(acknowledgment),

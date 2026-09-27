@@ -32,6 +32,8 @@ pub(super) struct Service {
     pub waiting: Arc<AtomicUsize>,
     pub replies: Arc<AtomicUsize>,
     pub release: Arc<tokio::sync::Notify>,
+    /// Commands finish at the next `release` once their effect is pending, without waiting for its acknowledgment.
+    pub outstanding: Arc<AtomicBool>,
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
@@ -118,6 +120,7 @@ impl Fixture {
             waiting: Arc::default(),
             replies: Arc::default(),
             release: Arc::default(),
+            outstanding: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
             published: Arc::new(watch::Sender::new(1)),
@@ -153,6 +156,7 @@ impl Fixture {
             tasks: Tasks {
                 platform,
                 connection: CancellationToken::new(),
+                invocation: CancellationToken::new(),
                 current,
                 output,
                 capacity: Arc::new(Semaphore::new(8)),

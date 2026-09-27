@@ -349,7 +349,7 @@ async fn query_suggestions_use_owned_range_and_current_permission() {
 }
 
 #[tokio::test]
-async fn a_command_follows_its_topic_again_from_the_gateway_stream_that_superseded_its_own() {
+async fn a_command_follows_its_topic_again_from_a_new_gateway_stream_while_its_effect_waits_to_be_written() {
     let mut fixture = Fixture::new().await;
     let (client, public) = tokio::io::duplex(16384);
     let mut public = Transport::new(public);
@@ -359,14 +359,44 @@ async fn a_command_follows_its_topic_again_from_the_gateway_stream_that_supersed
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
     fixture.commands.input(&unsigned("slow")).unwrap();
-    wait_count(&fixture.service.follows, 1).await;
+    wait_count(&fixture.service.waiting, 1).await;
+    fixture.service.release.notify_one();
+    let effect = tokio::time::timeout(Duration::from_secs(3), fixture.commands.receive()).await.unwrap();
     fixture.service.drop_stream();
     wait_count(&fixture.service.follows, 2).await;
-    fixture.service.release.notify_one();
-    output(&mut fixture.commands, &mut public).await;
+    // Past core's grace, the command still runs.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fixture.commands.publish(effect, &mut public).await.unwrap();
     assert_eq!(VarInt::decode(&mut client.read_frame(16384).await.unwrap().as_ref()).unwrap().0, SystemMessage::ID);
     wait_count(&fixture.service.replies, 1).await;
-    assert_eq!(fixture.service.runs.lock().unwrap().len(), 1);
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    assert!(!run.cancelled());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_commands_unwritten_effect_is_dropped_once_it_finished() {
+    let mut fixture = Fixture::new().await;
+    let (client, public) = tokio::io::duplex(16384);
+    let mut public = Transport::new(public);
+    let mut client = Transport::new(client);
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
+    fixture.commands.arrived();
+    output(&mut fixture.commands, &mut public).await;
+    client.read_frame(16384).await.unwrap();
+    fixture.service.outstanding.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("slow")).unwrap();
+    wait_count(&fixture.service.waiting, 1).await;
+    fixture.service.release.notify_one();
+    let effect = tokio::time::timeout(Duration::from_secs(3), fixture.commands.receive()).await.unwrap();
+    // Core finishes the command while its effect waits to be written.
+    fixture.service.release.notify_one();
+    let platform = fixture.commands.tasks.platform.clone();
+    platform.cleanup.close();
+    tokio::time::timeout(Duration::from_secs(3), platform.cleanup.wait()).await.unwrap();
+    fixture.commands.publish(effect, &mut public).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(100), client.read_frame(16384)).await.is_err());
+    assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 0);
     fixture.close().await;
 }
 

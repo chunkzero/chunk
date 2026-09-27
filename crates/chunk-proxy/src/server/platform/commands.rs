@@ -47,14 +47,9 @@ impl Platform {
         CommandTopic::open(self.sync.clone(), operation, None).await
     }
 
-    /// Acknowledges effect `sequence` of the command `topic` follows, once rendered or `failed`.
-    pub(in crate::server) async fn acknowledge(
-        &self,
-        topic: &CommandTopic,
-        sequence: u32,
-        failed: bool,
-    ) -> io::Result<()> {
-        let arguments = EffectArguments { operation_id: topic.operation.clone(), sequence, failed };
+    /// Acknowledges effect `sequence` of the command under `operation`, once rendered or `failed`.
+    pub(in crate::server) async fn acknowledge(&self, operation: &str, sequence: u32, failed: bool) -> io::Result<()> {
+        let arguments = EffectArguments { operation_id: operation.to_owned(), sequence, failed };
         let _: (EffectResult, _) = self.call("effect", "", &arguments, RPC_TIMEOUT).await?;
         Ok(())
     }
@@ -107,6 +102,11 @@ impl CommandTopic {
         };
         let updates = sync.subscribe(request).await?;
         Ok(Self { sync, operation, stream, updates, entries: BTreeMap::new() })
+    }
+
+    /// The operation ID the command started under.
+    pub fn operation(&self) -> &str {
+        &self.operation
     }
 
     /// The topic's next complete snapshot.

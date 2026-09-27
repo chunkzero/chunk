@@ -81,6 +81,8 @@ impl ClaimGuard {
 struct Assignment {
     /// The claim as hooks and commands name it.
     identity: ClaimIdentity,
+    /// The session the claim placed the player in.
+    #[cfg(feature = "test-support")]
     session: String,
     protocol: i32,
     preparation: PlayerPreparation,
@@ -99,6 +101,7 @@ impl Assignment {
                 membership_generation: membership,
                 delivery_generation: delivery,
             },
+            #[cfg(feature = "test-support")]
             session: assigned.session,
             protocol: assigned.protocol,
             preparation: PlayerPreparation {

@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub(super) enum Output {
     Permissions {
@@ -27,6 +27,8 @@ pub(super) enum Output {
     },
     Packets {
         origin: Box<Origin>,
+        /// Ends once the input they answer is done; unwritten packets are then dropped.
+        invocation: CancellationToken,
         follow: bool,
         packets: Vec<Vec<u8>>,
         acknowledgment: Option<oneshot::Sender<io::Result<()>>>,
@@ -36,6 +38,7 @@ pub(super) enum Output {
 struct Tasks {
     platform: Platform,
     connection: CancellationToken,
+    invocation: CancellationToken,
     current: watch::Receiver<Option<Origin>>,
     output: mpsc::Sender<Output>,
     /// Bounds the commands, suggestions and permission refreshes one connection has in flight.
@@ -54,6 +57,12 @@ impl Tasks {
             return Err(invalid_data("command player ownership changed"));
         }
         Ok(current)
+    }
+
+    /// A copy whose packets belong to a new invocation, which ends once the guard drops.
+    fn invocation(&self) -> (Self, DropGuard) {
+        let invocation = CancellationToken::new();
+        (Self { invocation: invocation.clone(), ..self.clone() }, invocation.drop_guard())
     }
 
     /// The commands `origin`'s player may run, from core's catalog for their session, which must match `descriptors`.
@@ -88,6 +97,7 @@ impl Commands {
             tasks: Tasks {
                 platform: platform.clone(),
                 connection: CancellationToken::new(),
+                invocation: CancellationToken::new(),
                 current,
                 output,
                 capacity: Arc::new(Semaphore::new(8)),
@@ -230,8 +240,13 @@ impl Commands {
                         .await?;
                 }
             }
-            Output::Packets { origin, follow, packets, acknowledgment } => {
-                let result = match self.tasks.current(&origin, follow) {
+            Output::Packets { origin, invocation, follow, packets, acknowledgment } => {
+                let live = if invocation.is_cancelled() {
+                    Err(invalid_data("command invocation ended"))
+                } else {
+                    self.tasks.current(&origin, follow)
+                };
+                let result = match live {
                     Ok(_) => {
                         async {
                             for packet in packets {

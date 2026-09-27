@@ -1,6 +1,8 @@
 //! The fake core's commands: the arrived player's catalog and suggestions, and commands that each hold one chat effect
 //! until the gateway acknowledges it, then finish. `slow` and `follow` first wait for `release`. A command topic
 //! follows one gateway stream, is stopped once a newer one opens, and cancels its command once the gateway leaves it.
+//! A started command, and one whose topic a newer gateway stream stopped, is cancelled unless followed within
+//! [`GRACE`].
 
 use super::Service;
 use chunk_proto::sync::v1::{
@@ -10,7 +12,10 @@ use chunk_proto::sync::v1::{
 use prost::Message;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, watch};
@@ -18,11 +23,33 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
+/// How long a command waits for a subscription.
+const GRACE: Duration = Duration::from_millis(500);
+
 /// A started command.
 #[derive(Clone)]
 pub(in crate::server::managed::commands) struct Run {
     state: Arc<watch::Sender<Pending>>,
     cancel: CancellationToken,
+    /// Subscriptions opened to the command's topic.
+    opened: Arc<AtomicUsize>,
+}
+
+impl Run {
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Cancels the command unless a subscription opens within [`GRACE`].
+    fn orphan(&self) {
+        let (run, opened) = (self.clone(), self.opened.load(Ordering::SeqCst));
+        tokio::spawn(async move {
+            tokio::time::sleep(GRACE).await;
+            if run.opened.load(Ordering::SeqCst) == opened {
+                run.cancel.cancel();
+            }
+        });
+    }
 }
 
 #[derive(Default)]
@@ -54,9 +81,13 @@ impl Service {
                 assert_eq!(player, Some("player"));
                 assert!(call.operation_id.starts_with("prep:"));
                 let input = CommandArguments::decode(call.arguments.as_slice()).unwrap().input;
-                let run =
-                    Run { state: Arc::new(watch::Sender::new(Pending::default())), cancel: self.watches.child_token() };
+                let run = Run {
+                    state: Arc::new(watch::Sender::new(Pending::default())),
+                    cancel: self.watches.child_token(),
+                    opened: Arc::default(),
+                };
                 self.runs.lock().unwrap().insert(call.operation_id.clone(), run.clone());
+                run.orphan();
                 tokio::spawn(self.clone().script(run, input));
                 Ok(CommandStarted {}.encode_to_vec())
             }
@@ -85,7 +116,11 @@ impl Service {
             }
             let effect = CommandEffect { effect: Some(command_effect::Effect::Message("done".into())) };
             run.state.send_modify(|pending| _ = pending.effects.insert(3, effect));
-            let _ = run.state.subscribe().wait_for(|pending| pending.effects.is_empty()).await;
+            if self.outstanding.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            } else {
+                let _ = run.state.subscribe().wait_for(|pending| pending.effects.is_empty()).await;
+            }
             let outcome = CommandOutcome { outcome: Some(command_outcome::Outcome::ResultJson(b"null".to_vec())) };
             run.state.send_modify(|pending| pending.outcome = Some(outcome));
         };
@@ -96,6 +131,7 @@ impl Service {
     pub(super) fn follow(&self, operation: &str, arguments: &[u8]) -> ReceiverStream<Result<Update, Status>> {
         let stream = CommandSubscription::decode(arguments).unwrap().stream;
         let run = self.runs.lock().unwrap().get(operation).cloned().expect("the command started");
+        run.opened.fetch_add(1, Ordering::SeqCst);
         self.follows.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = mpsc::channel(1);
         let service = self.clone();
@@ -106,7 +142,7 @@ impl Service {
                 if *service.stream.lock().unwrap() != stream {
                     let error = sync::Error { code: Code::Stopped.into(), message: "superseded".into() };
                     let _ = sender.send(Ok(Update { error: Some(error), ..Update::default() })).await;
-                    return;
+                    return run.orphan();
                 }
                 if std::mem::take(&mut first) || state.has_changed().unwrap_or(false) {
                     let (update, last) = snapshot(&state.borrow_and_update());
