@@ -115,8 +115,9 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
 async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_record() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    // The JVM closes its stdin, as app code calling `System.in.close()` does, and ignores requests to stop.
-    std::fs::write(&java, "#!/bin/sh\nexec 0<&-\nexec sleep 60\n").unwrap();
+    // The JVM closes its stdin, as app code calling `System.in.close()` does, logs its PID, and ignores requests to
+    // stop.
+    std::fs::write(&java, "#!/bin/sh\nexec 0<&-\necho $$\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
@@ -155,19 +156,37 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert_eq!(host.connection(&id).unwrap().token, process.token);
     assert!(host.adopt(&process.token, registration).is_err());
     assert!(!host.stopped(&id));
-    // A PID whose process started at another time is never killed, and the release stays unresolved.
+    // Without evidence that its PID still names the JVM, the JVM is never killed, and the release stays unresolved.
+    // On Linux the recorded PID's process started at another time; elsewhere no PID was recorded.
     let record = host.path(&id, "pid").unwrap();
-    let spawned = std::fs::read(&record).unwrap();
-    let mut reused: serde_json::Value = serde_json::from_slice(&spawned).unwrap();
-    reused["started"] = (reused["started"].as_u64().unwrap() + 1).into();
-    std::fs::write(&record, serde_json::to_vec(&reused).unwrap()).unwrap();
+    #[cfg(target_os = "linux")]
+    let spawned = {
+        let spawned = std::fs::read(&record).unwrap();
+        let mut reused: serde_json::Value = serde_json::from_slice(&spawned).unwrap();
+        reused["started"] = (reused["started"].as_u64().unwrap() + 1).into();
+        std::fs::write(&record, serde_json::to_vec(&reused).unwrap()).unwrap();
+        spawned
+    };
+    #[cfg(not(target_os = "linux"))]
+    assert!(!record.exists());
     assert!(!host.release(&id).await.unwrap());
     assert!(!host.stopped(&id));
-    // The JVM ignores its stop, so the host kills it after the grace; only its launch marker's lock confirms the exit.
-    std::fs::write(&record, &spawned).unwrap();
-    let releasing = Instant::now();
-    assert!(host.release(&id).await.unwrap());
-    assert!(releasing.elapsed() >= EXIT_GRACE);
+    #[cfg(target_os = "linux")]
+    {
+        // The JVM ignores its stop, so the host kills it after the grace; only its launch marker's lock confirms the
+        // exit.
+        std::fs::write(&record, &spawned).unwrap();
+        let releasing = Instant::now();
+        assert!(host.release(&id).await.unwrap());
+        assert!(releasing.elapsed() >= EXIT_GRACE);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Once the JVM exits, its launch marker's lock confirms it.
+        let log = std::fs::read_to_string(host.path(&id, "jvm.log").unwrap()).unwrap();
+        assert!(std::process::Command::new("kill").arg(log.trim()).status().unwrap().success());
+        assert!(host.release(&id).await.unwrap());
+    }
     assert!(host.stopped(&id));
 }
 

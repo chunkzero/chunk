@@ -134,8 +134,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     result.and(stopped).and(control.close().map_err(io::Error::other))
 }
 
-/// Once `closing` is cancelled, awaits accepted operations, stops the capacity executor and then every host, and only
-/// then cancels `transport`.
+/// Once `closing` is cancelled, stops admitting claims, awaits accepted operations, stops the capacity executor and
+/// then every host, and only then cancels `transport`.
 async fn stop_hosts(
     control: &Control,
     service: &Service,
@@ -147,6 +147,8 @@ async fn stop_hosts(
     closing.cancelled().await;
     service.close_watches();
     service.close_methods();
+    // Otherwise new claims, over either transport, could keep the tracker from ever emptying.
+    control.stop_admitting();
     let operations = service.operations();
     operations.close();
     operations.wait().await;

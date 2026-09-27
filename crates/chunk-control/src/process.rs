@@ -462,7 +462,7 @@ impl Host for ProcessHost {
         if process.adopted {
             stop_gracefully(&process).await;
             if !self.exits(id, EXIT_GRACE).await
-                && let Err(error) = pid::kill(&self.path(id, "pid")?).await
+                && let Err(error) = pid::kill(&self.path(id, "pid")?)
                 && !self.stopped(id)
             {
                 tracing::warn!(%error, host = id, "cannot kill an adopted JVM; its release stays unresolved");

@@ -157,6 +157,12 @@ impl Control {
         self.authority.close()
     }
 
+    /// Refuses new claims and rosters. Operations already admitted continue, and JVMs still register, report and
+    /// follow their desired state.
+    pub(crate) fn stop_admitting(&self) {
+        self.draining.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Stops the owned runtime processes directly, without recording it, since the environment store may have
     /// stopped; a JVM attached over sync is asked on its topic first. Dropping control alone preserves them for
     /// recovery.
@@ -164,7 +170,7 @@ impl Control {
     /// Reports unresolved hosts, including launches without a host row whose JVM may still run; a failed stop must not
     /// be treated as a fencing acknowledgment.
     pub async fn shutdown(&self) -> Result<()> {
-        self.draining.store(true, std::sync::atomic::Ordering::Release);
+        self.stop_admitting();
         // Placements check draining inside an update, which holds the writer until it has published. Taking the writer
         // once waits for every placement that saw control still admitting, so the hosts it reserved are read below.
         drop(self.authority.writer()?);

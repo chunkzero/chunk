@@ -277,6 +277,8 @@ struct FakeHost {
     terminated: Mutex<BTreeSet<String>>,
     /// Cannot confirm that a released runtime exited.
     unconfirmed: AtomicBool,
+    /// Keeps each JVM starting, so claims wait for it.
+    starting: AtomicBool,
     /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
     forgotten: AtomicBool,
     /// Runs once when a forgotten host is asked for its connection, after answering none.
@@ -326,7 +328,7 @@ impl Host for FakeHost {
         if self.stopped(id) {
             return Ok(Progress::Failed("JVM exited".into()));
         }
-        if self.forgotten.load(Ordering::Acquire) {
+        if self.forgotten.load(Ordering::Acquire) || self.starting.load(Ordering::Acquire) {
             return Ok(Progress::Pending);
         }
         Ok(Progress::Ready(Box::new(RuntimeConnection {
@@ -456,6 +458,7 @@ impl Fixture {
             ids: Mutex::default(),
             terminated: Mutex::default(),
             unconfirmed: AtomicBool::new(false),
+            starting: AtomicBool::new(false),
             forgotten: AtomicBool::new(false),
             missed: Mutex::default(),
             adopted: Mutex::default(),
