@@ -1,4 +1,5 @@
-//! Control's effects on a JVM registered over sync: placing, withdrawing and calling through its topic.
+//! Control's effects on a JVM registered over sync: placing and withdrawing through its topic, and recovering one
+//! that outlived core.
 
 use super::{
     jvm::{ACCEPTED, Launches, session, sessions},
@@ -9,7 +10,7 @@ use chunk_proto::{
         JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmMethodCall, JvmMethodPhase, JvmMethodResult, JvmReport,
         JvmSession, JvmSessionPhase, JvmSessionStatus,
     },
-    v1::{ActivateClaim, Assignment, ClaimPhase, PlayerStatus, SessionMethodPhase},
+    v1::{ActivateClaim, Assignment, ClaimPhase, PlayerStatus},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +23,7 @@ const CAPABILITY: [u8; 32] = [7; 32];
 /// once withdrawn or gone, answers method `score` with 7 and `hold` only once it is cancelled, and never answers
 /// `stuck`. Its players arrive and leave when a test says.
 #[derive(Clone)]
-struct SyncJvm {
+pub(super) struct SyncJvm {
     client: CoreClient<Channel>,
     host: String,
     held: Arc<Mutex<Held>>,
@@ -48,7 +49,7 @@ impl SyncJvm {
     }
 
     /// Opens a stream, which supersedes the previous one, and follows it until it ends.
-    async fn follow(&self) {
+    pub(super) async fn follow(&self) {
         let subscription = SubscribeRequest { topic: format!("jvm/{}", self.host), ..SubscribeRequest::default() };
         let mut updates = self.client.clone().subscribe(authorized(subscription, JVM)).await.unwrap().into_inner();
         self.apply(next(&mut updates).await, true).await;
@@ -164,11 +165,16 @@ impl SyncJvm {
         assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
     }
 
-    fn runnable(&self, operation: &str) -> bool {
+    /// Whether `operation` was runnable on the topic since the JVM last forgot what was.
+    pub(super) fn runnable(&self, operation: &str) -> bool {
         self.held.lock().unwrap().runnable.contains(operation)
     }
 
-    fn sees(&self, key: &str) -> bool {
+    pub(super) fn forget_runnable(&self) {
+        self.held.lock().unwrap().runnable.clear();
+    }
+
+    pub(super) fn sees(&self, key: &str) -> bool {
         let held = self.held.lock().unwrap();
         match key.split_once('/') {
             Some(("delivery", operation)) => held.deliveries.contains_key(operation),
@@ -204,12 +210,20 @@ fn delivery(operation: &str, generation: Option<Position>, phase: JvmDeliveryPha
     JvmDeliveryStatus { operation_id: operation.into(), generation, phase: phase.into(), capability }
 }
 
-/// The fake release, whose sessions declare methods `score`, `hold` and `stuck`.
+/// The generation of `operation`'s delivery in `update`.
+fn delivery_generation(update: &Update, operation: &str) -> Option<Position> {
+    let entry = update.upserts.iter().find(|entry| entry.key == format!("delivery/{operation}"))?;
+    let Some(State::Value(value)) = &entry.state else { return None };
+    JvmDelivery::decode(value.as_slice()).unwrap().generation
+}
+
+/// The fake release, whose sessions declare methods `score`, `hold` and `stuck`, each taking an optional `text`.
 fn release() -> chunk_control::Release {
     let mut release = runtime::release();
     let method = |name: &str| {
         serde_json::json!({"app": "bridge", "session": "default", "name": name,
-            "arguments": {"type": "object", "fields": {}}, "result": {"type": "integer"}})
+            "arguments": {"type": "object", "fields": {"text": {"schema": {"type": "string"}, "optional": true}}},
+            "result": {"type": "integer"}})
     };
     let methods = serde_json::json!({"version": 1, "methods": [method("score"), method("hold"), method("stuck")]});
     release.contracts.session_methods = Some(serde_json::from_value(methods).unwrap());
@@ -232,7 +246,7 @@ async fn place(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) 
 }
 
 /// Places the fake player and lets them arrive.
-async fn arrive(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) {
+pub(super) async fn arrive(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) {
     let (jvm, assignment) = place(fixture, launches).await;
     fixture.control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
     jvm.player("login", JvmDeliveryPhase::Arrived).await;
@@ -289,73 +303,6 @@ async fn a_withdrawal_reaches_a_jvm_that_reconnected_with_its_deliveries() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_methods_run_and_cancel_through_the_topic() {
-    let launches = Launches::default();
-    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    let (jvm, assignment) = arrive(&fixture, &launches).await;
-    let control = fixture.control.clone();
-    let captured = control.capture_session(assignment.claim.as_ref().unwrap()).unwrap();
-    let timeout = Duration::from_secs(10);
-
-    let score = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
-    let result = control.call_session_method(&score, &CancellationToken::new()).await.unwrap();
-    assert_eq!((result.phase(), result.result_json.as_str()), (SessionMethodPhase::Completed, "7"));
-    // A retry returns the recorded result rather than running the method again.
-    assert_eq!(control.call_session_method(&score, &CancellationToken::new()).await.unwrap(), result);
-
-    let hold = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
-    let cancellation = CancellationToken::new();
-    let call = {
-        let (control, hold, cancellation) = (control.clone(), hold.clone(), cancellation.clone());
-        tokio::spawn(async move { control.call_session_method(&hold, &cancellation).await })
-    };
-    while !jvm.sees(&format!("method/{}", hold.operation_id())) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    cancellation.cancel();
-    assert_eq!(call.await.unwrap().unwrap().phase(), SessionMethodPhase::Cancelled);
-    assert!(jvm.runnable(hold.operation_id()));
-
-    // A call cancelled before it reaches the topic is never runnable there.
-    let early = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
-    let result = control.call_session_method(&early, &cancellation).await.unwrap();
-    assert_eq!(result.phase(), SessionMethodPhase::Cancelled);
-    assert!(!jvm.runnable(early.operation_id()));
-    fixture.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_jvms_method_budget_rejects_new_calls_and_keeps_charging_unanswered_ones() {
-    let launches = Launches::default();
-    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    let (jvm, assignment) = arrive(&fixture, &launches).await;
-    let control = fixture.control.clone();
-    let captured = control.capture_session(assignment.claim.as_ref().unwrap()).unwrap();
-    let prepare =
-        |name| control.prepare_session_method(&captured, name, serde_json::json!({}), Duration::from_secs(10)).unwrap();
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-
-    // A method the JVM never answers stays on its topic after its outcome turned unknown.
-    let stuck = prepare("stuck");
-    assert_eq!(control.call_session_method(&stuck, &cancelled).await.unwrap().phase(), SessionMethodPhase::Unknown);
-    // Answered methods fill the rest of the 256 the budget holds, which then rejects new ones.
-    let mut answered = 0;
-    let rejected = loop {
-        match control.call_session_method(&prepare("hold"), &cancelled).await {
-            Ok(result) => assert_eq!(result.phase(), SessionMethodPhase::Cancelled),
-            Err(error) => break error,
-        }
-        answered += 1;
-        assert!(answered < 256, "the budget admitted too many methods");
-    };
-    assert!(matches!(rejected, chunk_control::Error::Capacity), "{rejected:?}");
-    assert_eq!(answered, 255);
-    assert!(jvm.sees(&format!("method/{}", stuck.operation_id())));
-    fixture.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_delivery_report_neither_supplies_nor_removes_a_capability() {
     let launches = Launches::default();
     let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
@@ -376,10 +323,7 @@ async fn a_stale_delivery_report_neither_supplies_nor_removes_a_capability() {
             break update;
         }
     };
-    let generation = first.upserts.iter().find(|entry| entry.key == "delivery/login").and_then(|entry| {
-        let Some(State::Value(value)) = &entry.state else { return None };
-        JvmDelivery::decode(value.as_slice()).unwrap().generation
-    });
+    let generation = delivery_generation(&first, "login");
     let stale = generation.map(|position| Position { revision: position.revision + 1, ..position });
     let status = |generation, phase, capability: [u8; 32]| JvmDeliveryStatus {
         capability: capability.to_vec(),
@@ -430,10 +374,7 @@ async fn a_survivor_serving_players_is_adopted_once_it_closes_those_the_log_lost
     let (id, _) = sessions(&first).pop_first().expect("a session");
     let keys: Vec<_> = first.upserts.iter().map(|entry| entry.key.as_str()).collect();
     assert!(keys.contains(&"delivery/login") && !keys.contains(&"delivery/lost"));
-    let generation = first.upserts.iter().find(|entry| entry.key == "delivery/login").and_then(|entry| {
-        let Some(State::Value(value)) = &entry.state else { return None };
-        JvmDelivery::decode(value.as_slice()).unwrap().generation
-    });
+    let generation = delivery_generation(&first, "login");
     let lost = Some(Position { epoch: 1, revision: 1 });
     let report = JvmReport {
         complete: true,
@@ -441,6 +382,7 @@ async fn a_survivor_serving_players_is_adopted_once_it_closes_those_the_log_lost
         deliveries: vec![
             delivery("login", generation, JvmDeliveryPhase::Arrived),
             delivery("lost", lost, JvmDeliveryPhase::Arrived),
+            delivery("closed", lost, JvmDeliveryPhase::Closed),
         ],
         health: None,
     };
@@ -460,6 +402,75 @@ async fn a_survivor_serving_players_is_adopted_once_it_closes_those_the_log_lost
     tokio::time::timeout(Duration::from_secs(10), reopened).await.expect("admission reopened");
     assert!(!survivor.0.lock().unwrap().released);
     phase(&fixture, Some(ClaimPhase::Arrived)).await;
+    // A retry of the lost operation the JVM first reported already closed is rejected rather than reserved again.
+    let mut retry = runtime::login();
+    retry.operation_id = "closed".into();
+    retry.identity.as_mut().unwrap().uuid = "00000000-0000-4000-8000-000000000002".into();
+    let retried = fixture.control.claim(retry).await;
+    assert!(matches!(retried, Err(chunk_control::Error::Invalid("claim operation lost in a restore"))), "{retried:?}");
+    drop(updates);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_survivors_player_whose_assignment_a_restore_lost_is_fenced() {
+    let launches = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
+    fixture.control.activate_release(release()).unwrap();
+    // Core restarts after reserving the claim but before recording its assignment.
+    let control = fixture.control.clone();
+    let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
+    let host = loop {
+        if let Some(host) = launches.host() {
+            break host;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    while delivery_generation(&next(&mut updates).await, "login").is_none() {}
+    claim.abort();
+    let _ = claim.await;
+    drop(updates);
+    let fixture = fixture.restart(Arc::new(Launches::of(&host, true))).await;
+
+    // The surviving JVM reports the player arrived at the claim's generation.
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = next(&mut updates).await;
+    let generation = delivery_generation(&first, "login");
+    assert!(generation.is_some());
+    let sessions = sessions(&first).into_iter().map(|(id, wanted)| JvmSessionStatus {
+        session_type: wanted.session_type,
+        capacity: wanted.capacity,
+        attached: 1,
+        ..session(&id, JvmSessionPhase::Ready)
+    });
+    let report = JvmReport {
+        complete: true,
+        sessions: sessions.collect(),
+        deliveries: vec![delivery("login", generation, JvmDeliveryPhase::Arrived)],
+        health: None,
+    };
+    assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
+    // Its topic leaves the delivery out, so the JVM disconnects the player, and admission waits until it has.
+    while delivery_generation(&next(&mut updates).await, "login").is_some() {}
+    let claim = fixture.control.claim(runtime::login()).await;
+    assert!(matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
+    let closed =
+        JvmReport { deliveries: vec![delivery("login", generation, JvmDeliveryPhase::Closed)], ..JvmReport::default() };
+    assert_eq!(fixture.report(&first.stream, &closed).await.outcome, ACCEPTED);
+    // Admission reopens, and a retry of the fenced operation is rejected.
+    let retried = async {
+        loop {
+            match fixture.control.claim(runtime::login()).await {
+                Err(chunk_control::Error::Busy) => tokio::time::sleep(Duration::from_millis(50)).await,
+                retried => return retried,
+            }
+        }
+    };
+    let retried = tokio::time::timeout(Duration::from_secs(10), retried).await.expect("admission reopened");
+    assert!(matches!(retried, Err(chunk_control::Error::Invalid("claim operation lost in a restore"))), "{retried:?}");
     drop(updates);
     fixture.stop().await;
 }

@@ -257,15 +257,21 @@ impl Control {
                 work.prune();
                 false
             });
-            // A closed delivery no open claim owns needs nothing more.
-            let done: Vec<_> = inventory
-                .deliveries
-                .iter()
-                .filter(|binding| binding.phase == DeliveryPhase::Closed as i32)
-                .filter_map(|binding| binding.delivery.as_ref())
-                .filter(|delivery| !owned(state, delivery))
-                .map(|delivery| delivery.operation_id.clone())
-                .collect();
+            // A closed delivery no open claim owns needs nothing more, once a recovering host's operation the log
+            // lost has its tombstone.
+            let recovering = self.recovery.pending()?.iter().any(|pending| pending == host);
+            let mut done = Vec::new();
+            for binding in &inventory.deliveries {
+                let Some(delivery) = binding.delivery.as_ref().filter(|delivery| !owned(state, delivery)) else {
+                    continue;
+                };
+                if binding.phase == DeliveryPhase::Closed as i32 {
+                    if recovering {
+                        crate::recovery::retire_unknown(state, delivery);
+                    }
+                    done.push(delivery.operation_id.clone());
+                }
+            }
             self.links.forget_deliveries(host, &done);
             if let Some(health) = health {
                 jvm.health = Some((Instant::now(), health));
@@ -294,8 +300,10 @@ impl Control {
             if let Some(stream) = jvm.stream.take() {
                 stream.end(&self.links, host);
             }
-            // The stopped JVM runs no more methods.
-            jvm.work.send_if_modified(|work| !std::mem::take(&mut work.methods).is_empty());
+            // Only a JVM its host confirmed stopped runs no more methods; one that may still run keeps their history.
+            if matches!(released, Ok(true)) {
+                jvm.work.send_if_modified(|work| !std::mem::take(&mut work.methods).is_empty());
+            }
         }
         released
     }

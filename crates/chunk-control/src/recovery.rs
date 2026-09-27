@@ -22,7 +22,7 @@ use crate::{
     client::{auth, channel},
     drain::retire_host,
     placement::runs_host,
-    state::{Capacity, Claim, Generation, HostState, Phase, SessionState},
+    state::{Capacity, Claim, Generation, HostState, Phase, SessionState, State},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -256,14 +256,29 @@ impl Control {
 
     /// Records a released tombstone for each delivery whose operation the log does not know, such as deliveries
     /// prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
-    /// player again under an operation ID the JVM already holds.
+    /// player again under an operation ID the JVM already holds. A claim whose assignment a restore lost while its
+    /// player joined is released as such a tombstone too: control can't adopt a delivery it never learned the
+    /// capability of, so it fences it.
     fn retire_unknown_operations(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
         self.update(|state| {
             let Some(inventory) = self.links.report(id, identity) else {
                 return Ok(());
             };
-            for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
-                state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
+            for binding in &inventory.deliveries {
+                let Some(delivery) = &binding.delivery else {
+                    continue;
+                };
+                let joined = [DeliveryPhase::Attached, DeliveryPhase::Arrived, DeliveryPhase::Withdrawing]
+                    .contains(&binding.phase());
+                let operation = &delivery.operation_id;
+                if joined
+                    && crate::jvm::owned(state, delivery)
+                    && state.claims.get(operation).is_some_and(|claim| claim.assignment.is_none())
+                {
+                    crate::delivery::release(state, operation)?;
+                    state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?.request.clear();
+                }
+                retire_unknown(state, delivery);
             }
             Ok(())
         })
@@ -318,7 +333,12 @@ fn orphan(identity: &ProcessIdentity) -> HostState {
     }
 }
 
-/// A released claim standing for `delivery`'s operation. Its empty request matches no retry.
+/// Records a released claim standing for `delivery`'s operation unless the log knows it. Its empty request matches no
+/// retry.
+pub(crate) fn retire_unknown(state: &mut State, delivery: &PlayerDelivery) {
+    state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
+}
+
 fn tombstone(delivery: &PlayerDelivery) -> Claim {
     let now = crate::now_ms();
     Claim {

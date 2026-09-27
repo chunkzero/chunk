@@ -23,7 +23,7 @@ pub(super) struct Launch {
     survivor: bool,
     pub(super) released: bool,
     /// Releases that fail before one stops the JVM.
-    refusals: usize,
+    pub(super) refusals: usize,
 }
 
 impl Launches {
