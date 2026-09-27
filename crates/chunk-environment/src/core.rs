@@ -238,13 +238,11 @@ impl Core {
     /// # Errors
     /// Reports a stopped backend or control.
     pub fn target(&self) -> io::Result<PlatformTarget> {
-        let control = self.control_connection()?;
         let gateway = self.gateway.clone().ok_or_else(|| io::Error::other("core has no gateway"))?;
         Ok(PlatformTarget {
-            core: control.endpoint.clone(),
+            core: self.control_connection()?.endpoint.clone(),
             gateway,
-            backend: self.backend_connection()?.clone(),
-            control_token: control.token.clone(),
+            deployment: self.backend_connection()?.deployment.clone(),
         })
     }
 

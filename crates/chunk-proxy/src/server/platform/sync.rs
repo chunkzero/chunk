@@ -4,12 +4,12 @@
 use std::{fmt, io, sync::OnceLock, time::Duration};
 
 use chunk_proto::sync::v1::{
-    CallRequest, Error, Position, call_response::Outcome, core_client::CoreClient, error::Code,
+    CallRequest, Error, Position, SubscribeRequest, Update, call_response::Outcome, core_client::CoreClient,
+    error::Code,
 };
-use prost::Message;
 use tokio::sync::watch;
 use tokio_util::sync::DropGuard;
-use tonic::transport::Channel;
+use tonic::{Streaming, transport::Channel};
 
 use super::{RPC_TIMEOUT, claims, claims::View, invalid_data};
 use crate::GatewayCredential;
@@ -48,37 +48,36 @@ impl Connection {
         claims::wait(view.clone(), ready).await
     }
 
-    /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's
-    /// position after it. A call core stops because the stream it named was superseded runs again on the topic's next
-    /// stream; any other stop fails the call. A runtime stop racing a stream change runs once more, under the same
-    /// operation, and is stopped again.
-    pub async fn call<R: Message + Default>(
-        &self,
-        method: &str,
-        operation: &str,
-        arguments: &impl Message,
-        timeout: Duration,
-    ) -> io::Result<(R, Option<Position>)> {
+    /// Runs `message` on the gateway's current stream, returning its result and control's position after it. A call
+    /// core stops because the stream it named was superseded runs again on the topic's next stream; any other stop
+    /// fails the call. A runtime stop racing a stream change runs once more, under the same operation, and is stopped
+    /// again.
+    pub async fn fenced(&self, mut message: CallRequest, timeout: Duration) -> io::Result<(Vec<u8>, Option<Position>)> {
         let mut stale = None;
         loop {
-            let stream =
-                self.claims(|view| view.stream().filter(|stream| Some(*stream) != stale.as_deref()).map(str::to_owned));
-            let stream = tokio::time::timeout(RPC_TIMEOUT, stream)
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "gateway topic unavailable"))??;
-            let message = CallRequest {
-                operation_id: operation.to_owned(),
-                method: format!("chunk:{method}"),
-                arguments: arguments.encode_to_vec(),
-                stream: stream.clone(),
-                ..CallRequest::default()
-            };
-            match self.send(message, timeout).await? {
-                Ok((result, position)) => return Ok((R::decode(result.as_slice()).map_err(invalid_data)?, position)),
-                Err(error) if error.code() == Code::Stopped && self.superseded(&stream) => stale = Some(stream),
+            message.stream = self.stream(stale.as_deref()).await?;
+            match self.send(message.clone(), timeout).await? {
+                Ok(result) => return Ok(result),
+                Err(error) if error.code() == Code::Stopped && self.superseded(&message.stream) => {
+                    stale = Some(std::mem::take(&mut message.stream));
+                }
                 Err(error) => return Err(io::Error::other(Failure(error))),
             }
         }
+    }
+
+    /// The gateway's current `gateway/<id>` stream once its view is live, other than `stale`.
+    pub async fn stream(&self, stale: Option<&str>) -> io::Result<String> {
+        let stream = self.claims(|view| view.stream().filter(|stream| Some(*stream) != stale).map(str::to_owned));
+        tokio::time::timeout(RPC_TIMEOUT, stream)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "gateway topic unavailable"))?
+    }
+
+    /// Subscribes to the topic `request` names.
+    pub async fn subscribe(&self, request: SubscribeRequest) -> io::Result<Streaming<Update>> {
+        let request = super::authorized(request, &self.gateway.credential)?;
+        Ok(self.client.clone().subscribe(request).await.map_err(io::Error::other)?.into_inner())
     }
 
     /// Runs `message`, which names no stream, returning its result.
@@ -102,7 +101,8 @@ impl Connection {
         }
     }
 
-    fn superseded(&self, stream: &str) -> bool {
+    /// Whether `stream` was superseded, as the claims follower left it.
+    pub fn superseded(&self, stream: &str) -> bool {
         self.claims.get().is_some_and(|(view, _)| view.borrow().superseded(stream))
     }
 }

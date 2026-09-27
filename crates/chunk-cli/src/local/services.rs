@@ -48,7 +48,7 @@ impl Shared {
 
     fn target(&self, version: &Version) -> io::Result<PlatformTarget> {
         let mut target = self.core.target()?;
-        target.backend.deployment.clone_from(&version.deployment);
+        target.deployment.clone_from(&version.deployment);
         Ok(target)
     }
 

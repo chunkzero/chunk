@@ -317,7 +317,7 @@ impl<'a> Managed<'a> {
     /// Sends later player connections to `deployment`, starting the gateway for the first one.
     async fn route(&self, deployment: &str) -> io::Result<()> {
         let mut target = self.core.target()?;
-        target.backend.deployment = deployment.into();
+        target.deployment = deployment.into();
         if let Some(gateway) = self.gateway.get() {
             gateway.retarget(target)?;
         } else if let Some(config) = &self.gateway_config {

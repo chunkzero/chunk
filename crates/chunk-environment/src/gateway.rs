@@ -55,9 +55,10 @@ impl Gateway {
 
     /// Sends later player connections to `target`.
     /// # Errors
-    /// Rejects core or backend endpoints the proxy cannot use.
+    /// Reports a proxy that isn't running.
     pub fn retarget(&self, target: PlatformTarget) -> io::Result<()> {
-        self.retarget.as_ref().ok_or_else(|| io::Error::other("proxy is not running"))?.replace(target)
+        self.retarget.as_ref().ok_or_else(|| io::Error::other("proxy is not running"))?.replace(target);
+        Ok(())
     }
 
     /// Whether the listener stopped.

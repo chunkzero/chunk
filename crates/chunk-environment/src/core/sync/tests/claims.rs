@@ -115,14 +115,7 @@ async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive
     let target = chunk_proxy::PlatformTarget {
         core: fixture.endpoint.clone(),
         gateway: chunk_proxy::GatewayCredential { id: "proxy".into(), credential: fixture.gateway.clone() },
-        backend: chunk_contract::BackendConnection {
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-            platform_token: None,
-            environment: "test".into(),
-            deployment: "test".into(),
-        },
-        control_token: fixture.cli.clone(),
+        deployment: "test".into(),
     };
     let login = chunk_proxy::testing::login(target, runtime::PLAYER, "player", runtime::demand("lobby"));
     let session = tokio::time::timeout(Duration::from_secs(30), login).await.unwrap().unwrap();

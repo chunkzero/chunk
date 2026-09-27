@@ -75,14 +75,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let platform = Platform::new(PlatformTarget {
         core: format!("http://{}", listener.local_addr().unwrap()),
         gateway: crate::GatewayCredential { id: "proxy".into(), credential: "gateway".into() },
-        control_token: "unused".into(),
-        backend: chunk_contract::BackendConnection {
-            platform_token: None,
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-            environment: "local".into(),
-            deployment: "example".into(),
-        },
+        deployment: "example".into(),
     })
     .unwrap();
     let server = tokio::spawn(

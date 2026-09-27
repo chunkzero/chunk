@@ -169,7 +169,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
     loop {
-        commands.bind(&guard.claim, &assignment.identity, &assignment.session)?;
+        commands.bind(&guard.claim, &assignment.identity)?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
@@ -232,12 +232,12 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 async fn claim_destination(login: &ClaimRequest, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
     loop {
         let platform = current.platform();
-        let deployment = &platform.target.backend.deployment;
+        let deployment = &platform.target.deployment;
         let mut claim =
             ClaimRequest { proxy_id: platform.proxy_id.clone(), deployment: deployment.clone(), ..login.clone() };
         claim.demand = match platform.route_claim(&claim).await {
             Ok(demand) => Some(demand),
-            Err(_) if current.platform().target.backend.deployment != *deployment => continue,
+            Err(_) if current.platform().target.deployment != *deployment => continue,
             Err(error) => return Err(error),
         };
         // Construct before sending: cancellation must cover a claim whose reply was lost.

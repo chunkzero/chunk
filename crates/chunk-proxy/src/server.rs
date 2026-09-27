@@ -90,12 +90,10 @@ pub struct Proxy {
 pub struct Retarget(Arc<RwLock<platform::Platform>>);
 
 impl Retarget {
-    /// # Errors
-    /// Rejects core or backend endpoints that are not loopback HTTP.
-    pub fn replace(&self, target: PlatformTarget) -> io::Result<()> {
+    /// Routes later connections through `target`'s deployment, keeping the current core client and gateway identity.
+    pub fn replace(&self, target: PlatformTarget) {
         let mut platform = self.0.write().unwrap_or_else(PoisonError::into_inner);
-        *platform = platform.retarget(target)?;
-        Ok(())
+        *platform = platform.retarget(target);
     }
 
     /// The platform later connections use.

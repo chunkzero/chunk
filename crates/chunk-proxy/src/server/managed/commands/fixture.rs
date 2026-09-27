@@ -5,17 +5,17 @@ pub(super) use core_service::Held;
 
 use super::*;
 use crate::server::platform::generation;
-use chunk_contract::{BackendConnection, CommandRoute};
+use chunk_contract::CommandRoute;
 use chunk_proto::{
     sync::v1::{self as sync, ClaimPhase, GatewayLogin, GatewayMove, core_server},
-    v1::*,
+    v1::{Identity, SessionDemand},
 };
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize},
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tonic::{Request, Response, Status};
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::{Request, Status};
 
 #[derive(Clone)]
 pub(super) struct Service {
@@ -25,14 +25,11 @@ pub(super) struct Service {
     pub commands: BTreeMap<String, Command>,
     pub allowed: Arc<AtomicBool>,
     pub catalog_unavailable: Arc<AtomicBool>,
-    pub pending_method: Arc<AtomicBool>,
-    pub cancels: Arc<AtomicUsize>,
+    /// Commands started, by operation ID.
+    pub runs: Arc<Mutex<BTreeMap<String, script::Run>>>,
+    /// Subscriptions opened to command topics.
+    pub follows: Arc<AtomicUsize>,
     pub waiting: Arc<AtomicUsize>,
-    pub prepared: Arc<AtomicUsize>,
-    pub methods: Arc<Mutex<Vec<PrepareSessionMethodRequest>>>,
-    pub starts: Arc<AtomicUsize>,
-    pub polls: Arc<AtomicUsize>,
-    pub reply_order: Arc<Mutex<Vec<u32>>>,
     pub replies: Arc<AtomicUsize>,
     pub release: Arc<tokio::sync::Notify>,
     /// Activations answered as waiting for the rest of a roster before one succeeds.
@@ -52,6 +49,7 @@ pub(super) struct Service {
     /// The newest stream; calls naming another are stopped.
     stream: Arc<Mutex<String>>,
     streams: Arc<AtomicUsize>,
+    prepared: Arc<AtomicUsize>,
     watches: CancellationToken,
 }
 
@@ -85,153 +83,12 @@ fn auth<T>(request: &Request<T>, token: &str) -> Result<(), Status> {
     }
     Ok(())
 }
-#[tonic::async_trait]
-impl backend_commands_server::BackendCommands for Service {
-    async fn catalog(&self, request: Request<CommandScope>) -> Result<Response<CommandCatalog>, Status> {
-        auth(&request, "platform")?;
-        assert_eq!(request.metadata().get("x-chunk-deployment").unwrap(), "deployment");
-        if self.catalog_unavailable.load(Ordering::SeqCst) {
-            return Err(Status::unavailable("commit pending"));
-        }
-        Ok(Response::new(CommandCatalog {
-            commands_json: serde_json::to_vec(&self.commands).unwrap(),
-            allowed_ids: if self.allowed.load(Ordering::SeqCst) {
-                self.commands.keys().cloned().collect()
-            } else {
-                vec![]
-            },
-        }))
-    }
-    async fn suggest(
-        &self,
-        request: Request<CommandSuggestionRequest>,
-    ) -> Result<Response<CommandSuggestionResult>, Status> {
-        auth(&request, "platform")?;
-        Ok(Response::new(CommandSuggestionResult { values: vec!["alpha".into(), "alpine".into(), "beta".into()] }))
-    }
-    async fn prepare(&self, request: Request<PrepareCommand>) -> Result<Response<PreparedCommand>, Status> {
-        auth(&request, "platform")?;
-        if !self.allowed.load(Ordering::SeqCst) {
-            return Err(Status::permission_denied("denied"));
-        }
-        self.prepared.fetch_add(1, Ordering::SeqCst);
-        let request = request.into_inner();
-        Ok(Response::new(PreparedCommand {
-            invocation_id: request.input.clone(),
-            follow_player: request.input == "follow",
-        }))
-    }
-    type RunStream = ReceiverStream<Result<CommandServerFrame, Status>>;
-    async fn run(
-        &self,
-        request: Request<tonic::Streaming<CommandClientFrame>>,
-    ) -> Result<Response<Self::RunStream>, Status> {
-        auth(&request, "platform")?;
-        let mut input = request.into_inner();
-        let Some(command_client_frame::Frame::Start(start)) = input.message().await?.and_then(|frame| frame.frame)
-        else {
-            return Err(Status::invalid_argument("missing start"));
-        };
-        Ok(Response::new(script::start(self.clone(), start.invocation_id, input)))
-    }
-}
-#[tonic::async_trait]
-impl local_control_server::LocalControl for Service {
-    type WatchStream = ReceiverStream<Result<ClaimUpdate, Status>>;
-    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn prepare_session_method(
-        &self,
-        request: Request<PrepareSessionMethodRequest>,
-    ) -> Result<Response<PreparedMethodHandle>, Status> {
-        auth(&request, "control")?;
-        self.methods.lock().unwrap().push(request.into_inner());
-        Ok(Response::new(PreparedMethodHandle {
-            operation_id: "captured-method".into(),
-            deadline_ms: 9_999_999_999_999,
-        }))
-    }
-    async fn start_prepared_method(
-        &self,
-        request: Request<PreparedMethodRequest>,
-    ) -> Result<Response<SessionMethodResult>, Status> {
-        auth(&request, "control")?;
-        self.starts.fetch_add(1, Ordering::SeqCst);
-        if self.pending_method.load(Ordering::SeqCst) {
-            return Ok(Response::new(SessionMethodResult {
-                operation_id: request.into_inner().operation_id,
-                phase: i32::from(SessionMethodPhase::Accepted),
-                result_json: String::new(),
-                error: None,
-            }));
-        }
-        Err(Status::unavailable("lost start response"))
-    }
-    async fn poll_prepared_method(
-        &self,
-        request: Request<PreparedMethodRequest>,
-    ) -> Result<Response<SessionMethodResult>, Status> {
-        auth(&request, "control")?;
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(SessionMethodResult {
-            operation_id: request.into_inner().operation_id,
-            phase: i32::from(if self.pending_method.load(Ordering::SeqCst) {
-                SessionMethodPhase::Accepted
-            } else {
-                SessionMethodPhase::Completed
-            }),
-            result_json: "42".into(),
-            error: None,
-        }))
-    }
-    async fn cancel_prepared_method(
-        &self,
-        request: Request<PreparedMethodRequest>,
-    ) -> Result<Response<SessionMethodResult>, Status> {
-        auth(&request, "control")?;
-        assert_eq!(request.get_ref().operation_id, "captured-method");
-        self.cancels.fetch_add(1, Ordering::SeqCst);
-        Err(Status::unimplemented("unused"))
-    }
-    async fn claim(&self, _: Request<ClaimRequest>) -> Result<Response<Assignment>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn activate(&self, _: Request<ActivateClaim>) -> Result<Response<Assignment>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn cancel(&self, _: Request<ClaimRequest>) -> Result<Response<ClaimIdentity>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn reconcile_departure(&self, _: Request<ClaimRequest>) -> Result<Response<DepartureStatus>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn move_player(&self, _: Request<MovePlayerRequest>) -> Result<Response<ClaimRequest>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn abandon_move(&self, _: Request<AbandonMoveRequest>) -> Result<Response<ClaimIdentity>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn drain(&self, _: Request<DrainRequest>) -> Result<Response<DrainStatus>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn nodes(&self, _: Request<NodesRequest>) -> Result<Response<NodeList>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn players(&self, _: Request<PlayersRequest>) -> Result<Response<PlayerList>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-    async fn shutdown_node(&self, _: Request<ShutdownNodeRequest>) -> Result<Response<NodeStatus>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-}
 
 pub(super) struct Fixture {
     pub commands: Commands,
     pub service: Service,
     pub claim: ClaimRequest,
     pub identity: ClaimIdentity,
-    pub session: String,
     stop: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
@@ -256,14 +113,9 @@ impl Fixture {
             commands,
             allowed: Arc::new(AtomicBool::new(true)),
             catalog_unavailable: Arc::default(),
-            pending_method: Arc::default(),
-            cancels: Arc::default(),
+            runs: Arc::default(),
+            follows: Arc::default(),
             waiting: Arc::default(),
-            prepared: Arc::default(),
-            methods: Arc::default(),
-            starts: Arc::default(),
-            polls: Arc::default(),
-            reply_order: Arc::default(),
             replies: Arc::default(),
             release: Arc::default(),
             roster_waits: Arc::default(),
@@ -276,6 +128,7 @@ impl Fixture {
             superseded: Arc::default(),
             stream: Arc::default(),
             streams: Arc::default(),
+            prepared: Arc::default(),
             watches: CancellationToken::new(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -285,22 +138,13 @@ impl Fixture {
         let server_service = service.clone();
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(backend_commands_server::BackendCommandsServer::new(server_service.clone()))
-                .add_service(core_server::CoreServer::new(server_service.clone()))
-                .add_service(local_control_server::LocalControlServer::new(server_service))
+                .add_service(core_server::CoreServer::new(server_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stopped.cancelled())
                 .await
                 .unwrap();
         });
-        let backend = BackendConnection {
-            endpoint: endpoint.clone(),
-            token: "application".into(),
-            platform_token: Some("platform".into()),
-            environment: "environment".into(),
-            deployment: "deployment".into(),
-        };
         let gateway = crate::GatewayCredential { id: "proxy".into(), credential: "gateway".into() };
-        let target = crate::PlatformTarget { core: endpoint, gateway, backend, control_token: "control".into() };
+        let target = crate::PlatformTarget { core: endpoint, gateway, deployment: "deployment".into() };
         let platform = Platform::new(target).unwrap();
         let manifest = Arc::new(serde_json::from_value::<DomainManifest>(serde_json::json!({"version":1,"apps":{"lobby":""},"scopes":{"":{"parent":null}},"hooks":{},"commands":service.commands})).unwrap());
         let (output, receiver) = mpsc::channel(32);
@@ -309,12 +153,9 @@ impl Fixture {
             tasks: Tasks {
                 platform,
                 connection: CancellationToken::new(),
-                invocation: CancellationToken::new(),
                 current,
                 output,
                 capacity: Arc::new(Semaphore::new(8)),
-                methods: Arc::new(Semaphore::new(8)),
-                effects: Arc::new(Semaphore::new(8)),
             },
             state,
             output: receiver,
@@ -326,9 +167,8 @@ impl Fixture {
             tree_received: false,
             refreshing: false,
         };
-        let session = String::from("session");
-        commands.bind(&claim, &identity, &session).unwrap();
-        Self { commands, service, claim, identity, session, stop, server }
+        commands.bind(&claim, &identity).unwrap();
+        Self { commands, service, claim, identity, stop, server }
     }
     /// Publishes the current claim state and waits until the platform's view reflects it.
     pub async fn sync(&self) {

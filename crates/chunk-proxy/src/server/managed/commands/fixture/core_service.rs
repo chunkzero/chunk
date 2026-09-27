@@ -1,5 +1,5 @@
-//! A fake of core's sync service: the `gateway/proxy` topic holding one claim, the `chunk:*` claim methods, and the
-//! deployment's root routing hook.
+//! A fake of core's sync service: the `gateway/proxy` topic holding one claim, the `chunk:*` claim and command
+//! methods, command topics, and the deployment's root routing hook.
 
 use super::Service;
 use chunk_proto::sync::v1::{
@@ -18,6 +18,11 @@ impl Service {
     pub fn publish(&self) -> sync::Position {
         self.published.send_modify(|position| *position += 1);
         self.position()
+    }
+
+    /// Ends the open gateway stream, which the gateway then follows again on a new one.
+    pub fn drop_stream(&self) {
+        self.superseded.notify_one();
     }
 
     fn position(&self) -> sync::Position {
@@ -78,6 +83,7 @@ impl Service {
                 self.publish();
                 WithdrawResult::default().encode_to_vec()
             }
+            "chunk:commands" | "chunk:suggest" | "chunk:command" | "chunk:effect" => return Ok(self.command(call)),
             _ => return Ok(Err(sync::Error { code: Code::Invalid.into(), message: "unused".into() })),
         }))
     }
@@ -94,9 +100,12 @@ impl Service {
                 .unwrap(),
             }
             .encode_to_vec()),
-            "chunk:prepare" => Ok(PrepareResult { operation_id: "prep:route".into() }.encode_to_vec()),
+            "chunk:prepare" => {
+                let operation_id = format!("prep:{}", self.prepared.fetch_add(1, Ordering::SeqCst));
+                Ok(PrepareResult { operation_id }.encode_to_vec())
+            }
             "shared/domains/hooks/route" => {
-                assert_eq!(call.operation_id, "prep:route");
+                assert!(call.operation_id.starts_with("prep:"));
                 let unroutable = self.logins.lock().unwrap().unroutable.take();
                 if let Some(unroutable) = unroutable {
                     let _ = unroutable.await;
@@ -166,6 +175,9 @@ impl core_server::Core for Service {
     type SubscribeStream = ReceiverStream<Result<Update, Status>>;
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         super::auth(&request, "gateway")?;
+        if let Some(operation) = request.get_ref().topic.strip_prefix("command/") {
+            return Ok(Response::new(self.follow(operation, &request.get_ref().arguments)));
+        }
         assert_eq!(request.get_ref().topic, "gateway/proxy");
         if self.watch_down.load(Ordering::SeqCst) {
             self.refused_watches.fetch_add(1, Ordering::SeqCst);

@@ -3,7 +3,7 @@ use std::{io, sync::Arc, time::Duration};
 use chunk_contract::DomainManifest;
 use chunk_proto::{
     sync::v1::{CallRequest, Caller, Position, PrepareResult},
-    v1::{SessionDemand, backend_commands_client::BackendCommandsClient, local_control_client::LocalControlClient},
+    v1::SessionDemand,
 };
 use prost::Message;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -18,9 +18,11 @@ use super::transport::invalid_data;
 use crate::PlatformTarget;
 
 mod claims;
+mod commands;
 mod native;
 mod sync;
 pub(in crate::server) use claims::{View, generation};
+pub(in crate::server) use commands::CommandUpdate;
 pub(in crate::server) use native::Lifecycle;
 pub(in crate::server) use sync::failure;
 
@@ -31,9 +33,6 @@ pub(super) struct Platform {
     pub target: PlatformTarget,
     pub cleanup: tokio_util::task::TaskTracker,
     pub proxy_id: String,
-    /// Control's local service, which command effects still move players and call session methods through.
-    pub control: LocalControlClient<Channel>,
-    pub commands: BackendCommandsClient<Channel>,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
     /// The domain manifest of the target's deployment, read once.
@@ -44,24 +43,17 @@ pub(super) struct Platform {
 impl Platform {
     pub fn new(target: PlatformTarget) -> io::Result<Self> {
         let sync = sync::Connection::new(&target.core, target.gateway.clone())?;
-        Self::with(target, Arc::new(sync), tokio_util::task::TaskTracker::new())
+        Ok(Self::with(target, Arc::new(sync), tokio_util::task::TaskTracker::new()))
     }
 
     /// A platform for `target` that keeps this one's core client, claims follower and cleanup tracking, and with them
     /// its core endpoint and gateway identity.
-    pub fn retarget(&self, target: PlatformTarget) -> io::Result<Self> {
+    pub fn retarget(&self, target: PlatformTarget) -> Self {
         Self::with(target, self.sync.clone(), self.cleanup.clone())
     }
 
-    fn with(
-        target: PlatformTarget,
-        sync: Arc<sync::Connection>,
-        cleanup: tokio_util::task::TaskTracker,
-    ) -> io::Result<Self> {
-        Ok(Self {
-            control: LocalControlClient::new(channel(&target.core)?).max_decoding_message_size(8 * 1024 * 1024),
-            commands: BackendCommandsClient::new(channel(&target.backend.endpoint)?)
-                .max_decoding_message_size(1024 * 1024),
+    fn with(target: PlatformTarget, sync: Arc<sync::Connection>, cleanup: tokio_util::task::TaskTracker) -> Self {
+        Self {
             manifest: Arc::default(),
             cleanup,
             proxy_id: sync.gateway().to_owned(),
@@ -69,11 +61,7 @@ impl Platform {
             status_hooks: Arc::new(Semaphore::new(64)),
             sync,
             target,
-        })
-    }
-
-    pub fn control_request<T>(&self, body: T) -> io::Result<Request<T>> {
-        request(body, &self.target.control_token)
+        }
     }
 
     /// Waits for a live view of this gateway's claims in which `ready` returns a value.
@@ -90,16 +78,23 @@ impl Platform {
         arguments: &impl Message,
         timeout: Duration,
     ) -> io::Result<(R, Option<Position>)> {
-        self.sync.call(method, operation, arguments, timeout).await
+        let message = CallRequest {
+            operation_id: operation.to_owned(),
+            method: format!("chunk:{method}"),
+            arguments: arguments.encode_to_vec(),
+            ..CallRequest::default()
+        };
+        self.fenced(message, timeout).await
     }
 
-    /// Authenticates `body` with `token` for this platform's backend environment and deployment.
-    pub fn backend_request<T>(&self, body: T, token: &str) -> io::Result<Request<T>> {
-        let backend = &self.target.backend;
-        let mut request = request(body, token)?;
-        request.metadata_mut().insert("x-chunk-environment", backend.environment.parse().map_err(invalid_data)?);
-        request.metadata_mut().insert("x-chunk-deployment", backend.deployment.parse().map_err(invalid_data)?);
-        Ok(request)
+    /// Runs `message` on the gateway's current stream, decoding its result.
+    async fn fenced<R: Message + Default>(
+        &self,
+        message: CallRequest,
+        timeout: Duration,
+    ) -> io::Result<(R, Option<Position>)> {
+        let (result, position) = self.sync.fenced(message, timeout).await?;
+        Ok((R::decode(result.as_slice()).map_err(invalid_data)?, position))
     }
 
     /// Calls app function or hook `method` of the target's deployment with JSON `arguments` under `operation`, which
@@ -115,7 +110,7 @@ impl Platform {
             operation_id: operation,
             method: method.to_owned(),
             arguments: serde_json::to_vec(arguments).map_err(invalid_data)?,
-            deployment: self.target.backend.deployment.clone(),
+            deployment: self.target.deployment.clone(),
             caller: player.map(|player| Caller { player: player.to_owned(), ..Caller::default() }),
             ..CallRequest::default()
         };
@@ -213,20 +208,10 @@ struct Status {
     max: u32,
 }
 
-pub(super) fn request<T>(body: T, token: &str) -> io::Result<Request<T>> {
-    let mut request = authorized(body, token)?;
-    request.set_timeout(RPC_TIMEOUT);
-    Ok(request)
-}
-
 fn authorized<T>(body: T, token: &str) -> io::Result<Request<T>> {
     let mut request = Request::new(body);
     request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().map_err(invalid_data)?);
     Ok(request)
-}
-
-fn channel(endpoint: &str) -> io::Result<Channel> {
-    Ok(self::endpoint(endpoint)?.connect_lazy())
 }
 
 fn endpoint(endpoint: &str) -> io::Result<Endpoint> {

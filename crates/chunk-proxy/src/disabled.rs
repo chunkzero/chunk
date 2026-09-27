@@ -14,9 +14,8 @@ pub enum Proxy {}
 pub enum Retarget {}
 
 impl Retarget {
-    /// # Errors
     /// Unreachable: a proxy cannot be constructed without a version.
-    pub fn replace(&self, _: PlatformTarget) -> io::Result<()> {
+    pub fn replace(&self, _: PlatformTarget) {
         match *self {}
     }
 }
