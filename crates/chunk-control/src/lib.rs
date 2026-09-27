@@ -2,7 +2,6 @@
 
 mod callers;
 mod capacity;
-mod client;
 mod delivery;
 mod drain;
 pub mod gateway;
@@ -293,8 +292,6 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("control message: {0}")]
     Decode(#[from] prost::DecodeError),
-    #[error("runtime RPC: {0}")]
-    Rpc(#[from] tonic::Status),
 }
 
 impl From<chunk_store::Error> for Error {

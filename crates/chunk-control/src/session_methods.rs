@@ -5,21 +5,18 @@ use chunk_proto::{
     sync::v1 as sync,
     v1::{
         Assignment, ClaimIdentity, PlayerDelivery, ProcessIdentity, SessionMethodCaller, SessionMethodPhase,
-        SessionMethodRequest, SessionMethodResult, session_methods_client::SessionMethodsClient,
+        SessionMethodRequest, SessionMethodResult,
     },
 };
 use prost::Message;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    Control, Error, Generation, Release, Result, RuntimeConnection,
-    client::{auth, channel},
-};
+use crate::{Control, Error, Generation, Release, Result, RuntimeConnection};
 
 pub(crate) const MAX_JSON: usize = 48 * 1024;
 
-/// How long a JVM registered over sync may take to answer a cancelled method before its outcome counts as unknown.
+/// How long a JVM may take to answer a cancelled method before its outcome counts as unknown.
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
 /// An authority-owned snapshot of one arrived player in one exact session generation.
@@ -164,58 +161,7 @@ impl Control {
         Ok(PreparedSessionMethod { target: target.clone(), request, result: method.result.clone() })
     }
 
-    /// Calls or polls the same operation. Cancellation can only prove non-execution while still queued.
-    /// # Errors
-    /// Rejects malformed authenticated replies. An unavailable reply returns UNKNOWN, retaining the same operation ID.
-    pub async fn call_session_method(
-        &self,
-        operation: &PreparedSessionMethod,
-        cancellation: &CancellationToken,
-    ) -> Result<SessionMethodResult> {
-        let runtime = self.host.connection(&operation.target.identity.runtime_id);
-        let Some(runtime) = runtime.filter(|runtime| runtime.identity == operation.target.identity) else {
-            return Ok(unknown(operation));
-        };
-        if runtime.over_sync() {
-            return self.call_over_sync(operation, cancellation).await;
-        }
-        let Ok(connection) = channel(&runtime).await else {
-            return Ok(unknown(operation));
-        };
-        let mut client = SessionMethodsClient::new(connection)
-            .max_decoding_message_size(MAX_JSON + 8192)
-            .max_encoding_message_size(MAX_JSON + 8192);
-        loop {
-            if cancellation.is_cancelled()
-                || crate::now_ms() >= operation.request.deadline_ms
-                || self.method_runtime(&operation.target).is_err()
-            {
-                let result = client.cancel(auth(&runtime, operation.request.clone(), 2)?).await;
-                return match result {
-                    Ok(reply) => validate_result(operation, reply.into_inner()),
-                    Err(_) => Ok(unknown(operation)),
-                };
-            }
-            let request = client.call(auth(&runtime, operation.request.clone(), 2)?);
-            let response = tokio::select! {
-                response = request => response,
-                () = cancellation.cancelled() => continue,
-            };
-            let result = match response {
-                Ok(reply) => validate_result(operation, reply.into_inner())?,
-                Err(_) => return Ok(unknown(operation)),
-            };
-            if result.phase != SessionMethodPhase::Accepted as i32 {
-                return Ok(result);
-            }
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(10)) => {},
-                () = cancellation.cancelled() => {},
-            }
-        }
-    }
-
-    /// Checks that the operation's JVM, if it registered over sync, has room for another method.
+    /// Checks that the operation's JVM, if it registered, has room for another method.
     /// # Errors
     /// Reports a full method budget as over capacity.
     pub(crate) fn admits_method(&self, operation: &PreparedSessionMethod) -> Result<()> {
@@ -225,16 +171,19 @@ impl Control {
     /// Puts the operation on its JVM's topic, unless it is already there, and waits for the JVM's result. A cancelled
     /// or expired call asks the JVM not to start it, and without an answer in time its outcome is unknown; the entry
     /// stays until the JVM answers, so a retry never runs the method again. A call already cancelled or expired goes
-    /// on the topic cancelled. A retry after its result's retention ended is unknown.
+    /// on the topic cancelled. A retry after its result's retention ended, or once the JVM is gone, is unknown.
     /// # Errors
-    /// Rejects a new method once its JVM's method budget is full.
-    async fn call_over_sync(
+    /// Rejects malformed results, and a new method once its JVM's method budget is full.
+    pub async fn call_session_method(
         &self,
         operation: &PreparedSessionMethod,
         cancellation: &CancellationToken,
     ) -> Result<SessionMethodResult> {
         let request = &operation.request;
         let host = &operation.target.identity.runtime_id;
+        if self.host.connection(host).is_none_or(|runtime| runtime.identity != operation.target.identity) {
+            return Ok(unknown(operation));
+        }
         let stopped = || {
             cancellation.is_cancelled()
                 || crate::now_ms() >= request.deadline_ms
@@ -273,11 +222,8 @@ impl Control {
         stop: &CancellationToken,
     ) -> SessionMethodResult {
         loop {
-            let mut response =
+            let response =
                 self.call_session_method(operation, cancellation).await.unwrap_or_else(|_| unknown(operation));
-            if response.phase == SessionMethodPhase::Accepted as i32 {
-                response = unknown(operation);
-            }
             if response.phase != SessionMethodPhase::Unknown as i32
                 || crate::now_ms() >= operation.deadline_ms()
                 || stop.is_cancelled()
@@ -324,7 +270,7 @@ fn unknown(operation: &PreparedSessionMethod) -> SessionMethodResult {
     }
 }
 
-/// The result a JVM registered over sync sent for `operation`, as its gameplay endpoint would state it.
+/// The result a JVM sent for `operation`, as control states it.
 fn from_sync(operation: &str, result: sync::JvmMethodResult) -> Result<SessionMethodResult> {
     let phase = match result.phase() {
         sync::JvmMethodPhase::Completed => SessionMethodPhase::Completed,

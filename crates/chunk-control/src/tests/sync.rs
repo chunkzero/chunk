@@ -1,4 +1,8 @@
 use super::*;
+use chunk_proto::{
+    sync::v1::JvmReport,
+    v1::{DeliveryInventory, DeliveryPhase, PlayerDelivery, ProcessReport},
+};
 
 /// Claims `operation` for a new player on the fake JVM, then closes the fake JVM's stream. Returns the claim's host.
 async fn claimed(fixture: &Fixture, control: &Control, operation: &str) -> String {
@@ -8,59 +12,55 @@ async fn claimed(fixture: &Fixture, control: &Control, operation: &str) -> Strin
     state.sessions[&state.claims[operation].session].host.clone()
 }
 
+/// Opens `stream` on `host`'s topic, as the host's JVM.
+fn open(control: &Arc<Control>, host: &str, stream: &str) -> crate::jvm::Topic {
+    crate::jvm::Topic::open(control, host, stream).unwrap().0
+}
+
+/// Everything the fake JVM holds on `host`, as a stream's first report states it.
+fn complete(fixture: &Fixture, host: &str) -> JvmReport {
+    JvmReport { complete: true, ..fixture.host.report(host) }
+}
+
+/// `report` with its only delivery set to `phase`.
+fn delivered(mut report: JvmReport, phase: JvmDeliveryPhase) -> JvmReport {
+    assert_eq!(report.deliveries.len(), 1);
+    report.deliveries[0].phase = phase.into();
+    report
+}
+
 #[tokio::test]
 async fn a_reported_arrival_reaches_the_watching_proxy_without_polling() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
-    // The stream finds its host by the JVM's runtime ID, which the fake JVM shares across hosts.
-    let host = crate::state::HostState::requested("build", "bridge", "local");
-    control
-        .update(|state| {
-            state.hosts.insert(fixture.runtime.identity.runtime_id.clone(), host);
-            Ok(())
-        })
-        .unwrap();
-    claimed(&fixture, &control, "arriving").await;
-    let (reports, inbound) = tokio::sync::mpsc::channel(4);
-    let (sender, mut desired) = tokio::sync::mpsc::channel(1);
-    let jvm = control.clone();
-    let inbound = tokio_stream::wrappers::ReceiverStream::new(inbound);
-    let stream = tokio::spawn(async move {
-        jvm.sync("test-runtime-credential".into(), inbound, sender, CancellationToken::new()).await;
-    });
-    reports.send(Ok(fixture.runtime.report())).await.unwrap();
-    let snapshot = desired.recv().await.unwrap().unwrap();
-    assert_eq!(snapshot.create.len(), 1);
-    assert!(snapshot.finish.is_empty());
-
+    control.claim(request("arriving", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     let (updates, mut watched) = tokio::sync::mpsc::channel(1);
     let proxy = control.clone();
     let watch = tokio::spawn(async move { proxy.watch("proxy-1".into(), updates, CancellationToken::new()).await });
     let [reserved] = watched.recv().await.unwrap().unwrap().claims.try_into().unwrap();
     assert_eq!(reserved.phase, ClaimPhase::Reserved as i32);
-    fixture.runtime.bindings.lock().unwrap().get_mut("arriving").unwrap().phase = DeliveryPhase::Arrived;
-    reports.send(Ok(fixture.runtime.report())).await.unwrap();
+    fixture.runtime.bindings.lock().unwrap().get_mut("arriving").unwrap().phase = JvmDeliveryPhase::Arrived;
     let update = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await.unwrap().unwrap().unwrap();
     let [arrived] = update.claims.try_into().unwrap();
     assert_eq!(arrived.phase, ClaimPhase::Arrived as i32);
     watch.abort();
-    stream.abort();
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn a_reconnecting_jvm_is_repaired_in_one_pass() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     control.claim(request("leaving", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     let host = claimed(&fixture, &control, "arriving").await;
     // While its stream is down, one player arrives and the other leaves.
     {
         let mut bindings = fixture.runtime.bindings.lock().unwrap();
-        bindings.get_mut("arriving").unwrap().phase = DeliveryPhase::Arrived;
-        bindings.get_mut("leaving").unwrap().phase = DeliveryPhase::Closed;
+        bindings.get_mut("arriving").unwrap().phase = JvmDeliveryPhase::Arrived;
+        bindings.get_mut("leaving").unwrap().phase = JvmDeliveryPhase::Closed;
     }
-    control.attach(&host, "test-runtime-credential", fixture.runtime.report()).await.unwrap();
+    let _topic = open(&control, &host, "reconnected");
+    control.report_jvm(&host, CREDENTIAL, "reconnected", complete(&fixture, &host)).unwrap();
     let state = control.state().unwrap();
     assert!(state.claims["arriving"].phase == Phase::Arrived);
     assert!(state.claims["leaving"].phase == Phase::Released);
@@ -68,40 +68,32 @@ async fn a_reconnecting_jvm_is_repaired_in_one_pass() {
 }
 
 #[tokio::test]
-async fn stale_generations_and_replaced_processes_cannot_write_back() {
-    let fixture = Fixture::new().await;
+async fn stale_generations_and_replaced_streams_cannot_write_back() {
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let host = claimed(&fixture, &control, "claimed").await;
-    let stream = control.attach(&host, "test-runtime-credential", fixture.runtime.report()).await.unwrap();
-    let mut stale = fixture.runtime.report();
-    let delivery = stale.deliveries[0].delivery.as_mut().unwrap();
-    delivery.owner_generation -= 1;
-    stale.deliveries[0].phase = DeliveryPhase::Closed as i32;
-    control.report(&host, stream, &stale).await.unwrap();
-    assert!(control.state().unwrap().claims["claimed"].phase == Phase::Reserved);
-
-    let mut replaced = fixture.runtime.report();
-    replaced.identity.as_mut().unwrap().process_id = "replaced".into();
-    replaced.deliveries[0].phase = DeliveryPhase::Closed as i32;
-    assert!(control.report(&host, stream, &replaced).await.is_err());
-    assert!(control.attach(&host, "another-credential", fixture.runtime.report()).await.is_err());
+    let _older = open(&control, &host, "older");
+    control.report_jvm(&host, CREDENTIAL, "older", complete(&fixture, &host)).unwrap();
+    let mut stale = delivered(fixture.host.report(&host), JvmDeliveryPhase::Closed);
+    stale.deliveries[0].generation.as_mut().unwrap().revision -= 1;
+    control.report_jvm(&host, CREDENTIAL, "older", stale).unwrap();
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Reserved);
 
     // Once a replacement stream reports an arrival, neither the old stream nor an older phase can undo it.
-    let mut attached = fixture.runtime.report();
-    attached.deliveries[0].phase = DeliveryPhase::Attached as i32;
-    let mut arrived = attached.clone();
-    arrived.deliveries[0].phase = DeliveryPhase::Arrived as i32;
-    let replacement = control.attach(&host, "test-runtime-credential", arrived).await.unwrap();
-    assert!(control.report(&host, stream, &attached).await.is_err());
-    control.report(&host, replacement, &attached).await.unwrap();
+    let _replacement = open(&control, &host, "replacement");
+    let arrived = delivered(complete(&fixture, &host), JvmDeliveryPhase::Arrived);
+    assert!(control.report_jvm(&host, "another-credential", "replacement", arrived.clone()).is_err());
+    control.report_jvm(&host, CREDENTIAL, "replacement", arrived).unwrap();
+    let attached = delivered(fixture.host.report(&host), JvmDeliveryPhase::Attached);
+    assert!(matches!(control.report_jvm(&host, CREDENTIAL, "older", attached.clone()), Err(Error::Stopped)));
+    control.report_jvm(&host, CREDENTIAL, "replacement", attached).unwrap();
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Arrived);
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let host = claimed(&fixture, &control, "held").await;
     let state = control.state().unwrap();
@@ -118,13 +110,12 @@ async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
         .unwrap();
     assert!(scope(&player).is_ok());
 
-    let stream = control.attach(&host, "test-runtime-credential", fixture.runtime.report()).await.unwrap();
-    let mut report = fixture.runtime.report();
+    let _topic = open(&control, &host, "held");
+    control.report_jvm(&host, CREDENTIAL, "held", complete(&fixture, &host)).unwrap();
     for (phase, held) in
-        [(DeliveryPhase::Attached, true), (DeliveryPhase::Withdrawing, true), (DeliveryPhase::Closed, false)]
+        [(JvmDeliveryPhase::Attached, true), (JvmDeliveryPhase::Withdrawing, true), (JvmDeliveryPhase::Closed, false)]
     {
-        report.deliveries[0].phase = phase as i32;
-        control.report(&host, stream, &report).await.unwrap();
+        control.report_jvm(&host, CREDENTIAL, "held", delivered(fixture.host.report(&host), phase)).unwrap();
         assert_eq!(scope(&player).is_ok(), held, "{phase:?}");
     }
     assert!(scope("another-player").is_err());

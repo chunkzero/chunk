@@ -10,23 +10,14 @@ pub struct MachineProfile {
     pub max_sessions: u16,
 }
 
-/// Private connection capability. Never include this record in diagnostics.
+/// A registered JVM's credential and identity, and the endpoint players connect to. Control reaches the JVM only
+/// through its `jvm/<host>` topic. Never include this record in diagnostics.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConnection {
-    pub endpoint: String,
     pub token: String,
     pub identity: ProcessIdentity,
     pub player_endpoint: String,
-}
-
-impl RuntimeConnection {
-    /// Whether the JVM registered over the sync protocol. It serves no control endpoint, so control reaches it only
-    /// through its `jvm/<host>` topic.
-    #[must_use]
-    pub fn over_sync(&self) -> bool {
-        self.endpoint.is_empty()
-    }
 }
 
 /// How far a host has come toward providing a runtime for its capacity request.

@@ -5,7 +5,7 @@ use prost::Message;
 
 #[tokio::test]
 async fn released_claims_and_their_moves_are_forgotten_after_retention_and_stay_forgotten() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     for operation in ["old", "recent"] {
         let claim = request(operation, &uuid::Uuid::new_v4().to_string());
@@ -37,7 +37,7 @@ async fn released_claims_and_their_moves_are_forgotten_after_retention_and_stay_
 
 #[tokio::test]
 async fn released_claims_stay_while_an_open_claim_of_their_move_references_them() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);
@@ -80,7 +80,7 @@ async fn released_claims_stay_while_an_open_claim_of_their_move_references_them(
 
 #[tokio::test]
 async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let source = request("source", &uuid::Uuid::new_v4().to_string());
     let first = control.claim(source.clone()).await.unwrap();
@@ -110,7 +110,7 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
 
 #[tokio::test]
 async fn players_are_forgotten_on_release_and_expired_claims_are_pruned() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let player = uuid::Uuid::new_v4().to_string();
     let claim = request("only", &player);
@@ -136,7 +136,7 @@ async fn players_are_forgotten_on_release_and_expired_claims_are_pruned() {
 
 #[tokio::test]
 async fn open_claims_are_unbounded_and_only_in_flight_work_is_refused_as_busy() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     control.claim(request("template", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     control

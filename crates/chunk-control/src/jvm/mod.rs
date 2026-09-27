@@ -1,7 +1,6 @@
 //! JVMs attached over the sync protocol. The `jvm/<host>` topic carries the sessions control wants the JVM to run,
 //! keyed `session/<id>` with `chunk.sync.v1.JvmSession` values; each open claim's delivery, keyed `delivery/<op>`; each
-//! session method the JVM has yet to answer, keyed `method/<op>`; and a `stop` entry once its host is releasing. The
-//! JVM's registration and reports go through the same registration, attach and report path as the supervisor's.
+//! session method the JVM has yet to answer, keyed `method/<op>`; and a `stop` entry once its host is releasing.
 //!
 //! Each host's entry, under one lock, is the only authority for which of its topic streams is current: opening a stream
 //! ends the previous one, and reports check their stream and apply their effects inside that lock. What the JVM
@@ -106,11 +105,6 @@ impl Jvms {
         self.0.lock().map_err(|_| Error::Unresolved("JVM registrations poisoned"))
     }
 
-    /// Whether `host`'s JVM registered over sync, so it pushes its health in reports instead of serving the probe.
-    pub fn pushes_health(&self, host: &str) -> bool {
-        self.0.lock().is_ok_and(|jvms| jvms.contains_key(host))
-    }
-
     /// The health `host`'s JVM last pushed, unless it has pushed none for 10 seconds.
     pub fn health(&self, host: &str) -> Option<ProcessHealth> {
         let jvms = self.0.lock().ok()?;
@@ -139,8 +133,8 @@ impl Jvms {
 }
 
 impl Control {
-    /// Registers the JVM running `host`, whose credential is `credential`, like a supervisor registration without a
-    /// control endpoint, so a JVM that outlived control re-attaches through it too. The first registration is frozen.
+    /// Registers the JVM running `host`, whose credential is `credential`. A JVM that outlived control re-attaches
+    /// through it too. The first registration is frozen.
     /// # Errors
     /// Rejects a changed registration, or one the host or the log does not match.
     pub fn register_jvm(&self, host: &str, credential: &str, registration: sync::JvmRegistration) -> Result<()> {
@@ -177,7 +171,7 @@ impl Control {
         self.stop_recovered(host, &identity, "its deployment is gone")
     }
 
-    /// The supervisor registration `registration` stands for: `host`'s process, which serves no control endpoint.
+    /// The process registration `registration` stands for: `host`'s process.
     fn process(&self, host: &str, registration: &sync::JvmRegistration) -> ProcessRegistration {
         let identity = ProcessIdentity {
             deployment: Some(DeploymentRef {
@@ -198,15 +192,14 @@ impl Control {
         }
     }
 
-    /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`, through the supervisor's
-    /// attach and report path. The commit checks that `stream` is current and applies the report's sessions,
-    /// deliveries, link and health under the JVMs' lock, so a superseded stream changes nothing and each stream
-    /// attaches once, with its first complete report. A report abandoned after that commit leaves its recovery to later
-    /// reports and claims.
+    /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`. The commit checks that
+    /// `stream` is current and applies the report's sessions, deliveries, link and health under the JVMs' lock, so a
+    /// superseded stream changes nothing and each stream attaches once, with its first complete report. A report
+    /// abandoned after that commit leaves its recovery to later reports and claims.
     /// # Errors
     /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one and
     /// malformed deliveries.
-    pub async fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
+    pub fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
         let prepared = |status: &sync::JvmDeliveryStatus| status.phase() == sync::JvmDeliveryPhase::Prepared;
         if report.deliveries.iter().any(|status| {
             status.operation_id.is_empty()
@@ -221,24 +214,17 @@ impl Control {
         let mut inventory =
             ProcessReport { identity: Some(runtime.identity.clone()), sessions, deliveries: Vec::new() };
         let health = report.health.map(|health| process_health(runtime.identity.clone(), health));
-        let attached = self.update(|state| {
+        let applied = self.update(|state| {
             let mut jvms = self.jvms.lock()?;
             let jvm = jvms.get_mut(host).ok_or(Error::Stopped)?;
             let current = jvm.stream.as_mut().filter(|current| current.id == stream).ok_or(Error::Stopped)?;
             let deliveries = report.deliveries.iter().map(|status| delivery(state, &runtime.identity, status));
             inventory.deliveries = deliveries.collect();
-            let attached = match current.link {
-                Some(link) => {
-                    self.merge_in(state, host, link, &inventory)?;
-                    None
-                }
-                None if report.complete => {
-                    let (link, runtime) = self.attach_in(state, host, credential, &inventory)?;
-                    current.link = Some(link);
-                    Some(runtime)
-                }
+            match current.link {
+                Some(link) => self.merge_in(state, host, link, &inventory)?,
+                None if report.complete => current.link = Some(self.attach_in(state, host, credential, &inventory)?),
                 None => return Err(Error::Invalid("a stream's first report must be complete")),
-            };
+            }
             if report.complete {
                 jvm.deliveries.clear();
             }
@@ -282,17 +268,15 @@ impl Control {
             if let Some(health) = health {
                 jvm.health = Some((Instant::now(), health));
             }
-            Ok(attached)
+            Ok(())
         });
         self.links.applied();
-        if let Some(runtime) = attached? {
-            self.fence_deliveries(host, &runtime, &inventory).await?;
-        }
-        self.resolve_recovery().await
+        applied?;
+        self.resolve_recovery()
     }
 
-    /// Stops `host`'s runtime through its host. A JVM registered over sync is first asked to stop on its topic, and
-    /// keeps its credential until its stream closes or the grace a stop request has passes; then its stream ends.
+    /// Stops `host`'s runtime through its host. A registered JVM is first asked to stop on its topic, and keeps its
+    /// credential until its stream closes or the grace a stop request has passes; then its stream ends.
     pub(crate) async fn release_host(&self, host: &str) -> Result<bool> {
         let stream = self.jvms.lock()?.get(host).map(|jvm| {
             jvm.work.send_if_modified(|work| !std::mem::replace(&mut work.stopping, true));
@@ -326,8 +310,8 @@ pub(crate) fn owned(state: &State, host: &str, delivery: &PlayerDelivery) -> boo
     })
 }
 
-/// The delivery `status` reports, as a supervisor's inventory states it. A JVM on sync names only a delivery's
-/// operation and generation; the rest is its claim's, when the log has one.
+/// The delivery `status` reports, as control's inventory states it. A JVM names only a delivery's operation and
+/// generation; the rest is its claim's, when the log has one.
 fn delivery(state: &State, identity: &ProcessIdentity, status: &sync::JvmDeliveryStatus) -> DeliveryInventory {
     let mut delivery = PlayerDelivery {
         operation_id: status.operation_id.clone(),

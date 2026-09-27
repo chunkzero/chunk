@@ -1,5 +1,5 @@
-//! Control's effects on a JVM registered over sync: it places, withdraws and calls through the JVM's topic, and learns
-//! each outcome from the JVM's reports and method results.
+//! Control's effects on a JVM: it places, withdraws and calls through the JVM's topic, and learns each outcome from
+//! the JVM's reports and method results.
 
 use std::time::Duration;
 
@@ -108,7 +108,7 @@ impl Method {
 }
 
 impl Jvms {
-    /// Checks that `host`'s JVM, if it registered over sync, has room in its method budget for `call`.
+    /// Checks that `host`'s JVM, if it registered, has room in its method budget for `call`.
     /// # Errors
     /// Reports a full budget as over capacity.
     pub fn admits(&self, host: &str, call: &sync::JvmMethodCall) -> Result<()> {
@@ -125,7 +125,7 @@ impl Jvms {
     }
 
     /// Puts session method `operation`, numbered `sequence`, on `host`'s topic unless it is already there, as for a
-    /// retry. `None` for a host whose JVM has not registered over sync, and for a method retired once its result's
+    /// retry. `None` for a host whose JVM has not registered, and for a method retired once its result's
     /// retention ended: its outcome is unknown, and the JVM is never asked about it again. The method counts against
     /// the JVM's method budget until the JVM answers it and its result's retention ends, or the JVM stops.
     /// # Errors
@@ -212,14 +212,14 @@ impl Control {
         Ok(())
     }
 
-    /// The destination metadata of `runtime`, a JVM registered over sync, which its registration stated.
+    /// The destination metadata of `runtime`, which its registration stated.
     pub(crate) fn jvm_configuration(
         &self,
         deployment: &DeploymentRef,
         runtime: &RuntimeConnection,
     ) -> Result<ConfigurationResponse> {
         let host = &runtime.identity.runtime_id;
-        let protocol = self.jvms.protocol(host).ok_or(Error::Unresolved("the JVM has not registered over sync"))?;
+        let protocol = self.jvms.protocol(host).ok_or(Error::Unresolved("the JVM has not registered"))?;
         Ok(ConfigurationResponse {
             deployment: Some(deployment.clone()),
             process_generation: runtime.identity.generation,
@@ -228,11 +228,11 @@ impl Control {
         })
     }
 
-    /// Waits for `runtime`, a JVM registered over sync, to report the delivery of claim `operation`, created at
-    /// `generation`, prepared, which its topic asks for.
+    /// Waits for `runtime`'s JVM to report the delivery of claim `operation`, created at `generation`, prepared, which
+    /// its topic asks for.
     /// # Errors
     /// Reports a delivery the JVM closed, whose claim was released, or that it did not prepare within 10 seconds.
-    pub(crate) async fn prepared_over_sync(
+    pub(crate) async fn prepared(
         &self,
         runtime: &RuntimeConnection,
         operation: &str,
@@ -250,11 +250,11 @@ impl Control {
         Ok(PlayerPreparation { operation_id: operation.into(), endpoint: runtime.player_endpoint.clone(), capability })
     }
 
-    /// Waits for the JVM running `host` over sync to close the delivery of withdrawing claim `operation`, created at
+    /// Waits for the JVM running `host` to close the delivery of withdrawing claim `operation`, created at
     /// `generation`, or for its claim to be released.
     /// # Errors
     /// Reports a delivery the JVM did not close within 10 seconds.
-    pub(crate) async fn withdrawn_over_sync(&self, host: &str, operation: &str, generation: Generation) -> Result<()> {
+    pub(crate) async fn withdrawn(&self, host: &str, operation: &str, generation: Generation) -> Result<()> {
         self.reported(host, operation, generation, |reported, released| {
             (released || reported.is_some_and(|(phase, _)| phase == DeliveryPhase::Closed)).then_some(Ok(()))
         })

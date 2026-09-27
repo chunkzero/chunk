@@ -119,9 +119,6 @@ impl Proxy {
         if config.compression_threshold.is_some_and(|threshold| threshold > chunk_protocol::MAX_FRAME_SIZE) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "compression threshold exceeds frame limit"));
         }
-        if config.platform.is_some() && config.gameplay.is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose managed platform or fixture gameplay"));
-        }
         let platform =
             config.platform.clone().map(platform::Platform::new).transpose()?.map(|p| Arc::new(RwLock::new(p)));
         let responses = Arc::new(Responses::new(&config)?);
@@ -195,7 +192,6 @@ impl Proxy {
                     let configuration_timeout = self.config.configuration_timeout;
                     let current = self.retarget();
                     let platform = current.as_ref().map(Retarget::platform);
-                    let gameplay = self.config.gameplay.clone();
                     connections.spawn(async move {
                         match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
                             Ok(Some(authenticated)) => {
@@ -205,7 +201,7 @@ impl Proxy {
                                     }
                                     return;
                                 }
-                                if let Err(error) = route(authenticated, gameplay.as_ref(), &limbo_packets, configuration_timeout).await {
+                                if let Err(error) = route(authenticated, &limbo_packets, configuration_timeout).await {
                                     tracing::debug!(%peer, %error, "player connection closed");
                                 }
                             }
@@ -229,15 +225,10 @@ impl Proxy {
 
 async fn route(
     authenticated: authentication::Authenticated<tokio::net::TcpStream>,
-    gameplay: Option<&crate::GameplayTarget>,
     limbo_packets: &limbo::Cache,
     deadline: Duration,
 ) -> io::Result<()> {
-    if let Some(target) = gameplay {
-        gameplay::serve(authenticated, target, deadline).await
-    } else {
-        limbo::wait_for_destination(authenticated, std::future::pending::<io::Result<()>>(), deadline, limbo_packets)
-            .await
-            .map(|_| ())
-    }
+    limbo::wait_for_destination(authenticated, std::future::pending::<io::Result<()>>(), deadline, limbo_packets)
+        .await
+        .map(|_| ())
 }

@@ -11,15 +11,13 @@ use std::{
 };
 
 use chunk_proto::v1::{
-    DeliveryPhase, PlayerDelivery, PlayerWithdrawal, ProcessIdentity, ProcessRegistration, ProcessReport, SessionPhase,
-    ShutdownNodeRequest, gameplay_client::GameplayClient,
+    DeliveryPhase, PlayerDelivery, ProcessIdentity, ProcessRegistration, ProcessReport, SessionPhase,
+    ShutdownNodeRequest,
 };
 use prost::Message;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
-    client::{auth, channel},
     drain::retire_host,
     placement::runs_host,
     state::{Capacity, Claim, Generation, HostState, Phase, SessionState, State},
@@ -31,7 +29,7 @@ const RECOVERY_WARNING: Duration = Duration::from_secs(30);
 /// Hosts whose surviving deliveries are not yet fenced.
 pub(crate) struct Recovery {
     pending: Mutex<Pending>,
-    resolving: AsyncMutex<()>,
+    resolving: Mutex<()>,
 }
 
 struct Pending {
@@ -47,7 +45,7 @@ impl Recovery {
     pub fn new(hosts: BTreeSet<String>) -> Self {
         let hosts = hosts.into_iter().map(|host| (host, 0)).collect();
         let pending = Pending { hosts, attachments: 0, deadline: Instant::now() + RECOVERY_WARNING };
-        Self { pending: Mutex::new(pending), resolving: AsyncMutex::new(()) }
+        Self { pending: Mutex::new(pending), resolving: Mutex::new(()) }
     }
 
     #[cfg(test)]
@@ -84,13 +82,13 @@ impl Control {
     /// Admits new claims once recovery has resolved, first trying to resolve it.
     /// # Errors
     /// Reports `Busy` while a surviving JVM's deliveries remain unfenced.
-    pub(crate) async fn admit(&self) -> Result<()> {
-        self.resolve_recovery().await?;
+    pub(crate) fn admit(&self) -> Result<()> {
+        self.resolve_recovery()?;
         if self.recovery.open()? { Ok(()) } else { Err(Error::Busy) }
     }
 
     /// Fences each pending host's surviving deliveries. Returns at once while another caller is resolving.
-    pub(crate) async fn resolve_recovery(&self) -> Result<()> {
+    pub(crate) fn resolve_recovery(&self) -> Result<()> {
         if self.recovery.open()? {
             return Ok(());
         }
@@ -99,7 +97,7 @@ impl Control {
         };
         let hosts = self.recovery.lock()?.hosts.clone();
         for (id, attachment) in hosts {
-            let resolved = match self.recover_host(&id).await {
+            let resolved = match self.recover_host(&id) {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     tracing::debug!(%error, host = id, "surviving deliveries remain unfenced");
@@ -122,7 +120,7 @@ impl Control {
         Ok(())
     }
 
-    async fn recover_host(&self, id: &str) -> Result<bool> {
+    fn recover_host(&self, id: &str) -> Result<bool> {
         let state = self.state()?;
         // Only a host missing now is an orphan; one removed later, after its capacity was released, is not.
         let orphan = !state.hosts.contains_key(id);
@@ -145,7 +143,7 @@ impl Control {
         };
         self.retire_unknown_operations(id, &runtime.identity)?;
         self.retire_unknown_sessions(id, &runtime.identity)?;
-        if !self.fence_deliveries(id, &runtime, &inventory).await? {
+        if !self.fenced(id, &inventory)? {
             return Ok(false);
         }
         if orphan {
@@ -239,7 +237,6 @@ impl Control {
         let state = self.state()?;
         if let Some(host) = state.hosts.get(&identity.runtime_id) {
             let connection = RuntimeConnection {
-                endpoint: registration.control_endpoint.clone(),
                 token: secret.into(),
                 identity: identity.clone(),
                 player_endpoint: registration.player_endpoint.clone(),
@@ -262,44 +259,17 @@ impl Control {
         })
     }
 
-    /// Withdraws open deliveries on `host` that no open claim on it owns with the same generations, using the generation
-    /// the JVM holds. `inventory` must be reported before state is read, so every delivery control prepared already
-    /// has its claim. Reports whether every such delivery is now withdrawn. A JVM registered over sync closes them
-    /// itself, since its topic leaves them out, so for it this only checks that it reported them closed.
-    pub(crate) async fn fence_deliveries(
-        &self,
-        host: &str,
-        runtime: &RuntimeConnection,
-        inventory: &ProcessReport,
-    ) -> Result<bool> {
+    /// Whether `host`'s JVM reported closed every delivery in `inventory` that no open claim on `host` owns with the
+    /// same generations. Its topic leaves those deliveries out, so the JVM closes them itself. `inventory` must be
+    /// reported before state is read, so every delivery control prepared already has its claim.
+    pub(crate) fn fenced(&self, host: &str, inventory: &ProcessReport) -> Result<bool> {
         let state = self.state()?;
-        let mut gameplay = None;
-        let mut fenced = true;
-        for binding in inventory.deliveries.iter().filter(|binding| binding.phase != DeliveryPhase::Closed as i32) {
-            let Some(delivery) = &binding.delivery else {
-                continue;
-            };
-            if crate::jvm::owned(&state, host, delivery) {
-                continue;
-            }
-            if runtime.over_sync() {
-                fenced = false;
-                continue;
-            }
-            let client = match &mut gameplay {
-                Some(client) => client,
-                None => gameplay.insert(GameplayClient::new(channel(runtime).await?)),
-            };
-            let withdrawal = PlayerWithdrawal {
-                operation_id: delivery.operation_id.clone(),
-                owner_generation: delivery.owner_generation,
-            };
-            if let Err(error) = client.withdraw_player(auth(runtime, withdrawal, 10)?).await {
-                tracing::debug!(%error, operation = delivery.operation_id, "unowned delivery withdrawal will be retried");
-                fenced = false;
-            }
-        }
-        Ok(fenced)
+        Ok(inventory
+            .deliveries
+            .iter()
+            .filter(|binding| binding.phase != DeliveryPhase::Closed as i32)
+            .filter_map(|binding| binding.delivery.as_ref())
+            .all(|delivery| crate::jvm::owned(&state, host, delivery)))
     }
 }
 

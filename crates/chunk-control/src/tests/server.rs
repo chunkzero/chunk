@@ -8,7 +8,7 @@ async fn run_releases_authority_before_returning_with_an_open_watch() {
     let mut failures = Vec::new();
     for attempt in 1..=ATTEMPTS {
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
-            let fixture = Fixture::new().await;
+            let fixture = Fixture::new();
             let environment = environment(&fixture.release);
             let store = chunk_store::SqliteStore::open(
                 fixture.directory.path().join("control.sqlite"),
@@ -102,7 +102,7 @@ fn authorized<T>(token: &str, message: T) -> Request<T> {
 
 #[tokio::test]
 async fn shutdown_refuses_new_claims_while_it_awaits_admitted_ones() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let (server, crate::server::Ready { connection, control }, stop, backend) = serve(&fixture).await;
     control.activate_release(fixture.release.clone()).unwrap();
     // While its JVM starts, an admitted claim waits for it.
@@ -137,7 +137,7 @@ async fn shutdown_refuses_new_claims_while_it_awaits_admitted_ones() {
 
 #[tokio::test]
 async fn shutdown_refuses_withdrawal_retries_while_a_withdrawal_stalls() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let (server, crate::server::Ready { connection, control }, stop, backend) = serve(&fixture).await;
     control.activate_release(fixture.release.clone()).unwrap();
     let jvm = CancellationToken::new();

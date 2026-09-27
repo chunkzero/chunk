@@ -1,19 +1,11 @@
 use super::*;
 use chunk_contract::{BackendConnection, ControlConnection};
-use chunk_proto::v1::{
-    DeploymentRef, ProcessHealth, ProcessIdentity, ProcessRegistration, WatchRequest,
-    backend_client::BackendClient,
-    local_control_client::LocalControlClient,
-    node_control_server::{NodeControl, NodeControlServer},
-    supervisor_client::SupervisorClient,
+use chunk_proto::{
+    sync::v1::{CallRequest, JvmRegistration, core_client::CoreClient},
+    v1::{WatchRequest, backend_client::BackendClient, local_control_client::LocalControlClient},
 };
-use std::{
-    collections::BTreeMap,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
-use tonic::{Request, Response, Status};
+use prost::Message;
+use std::{collections::BTreeMap, net::SocketAddr, path::Path};
 
 fn config(directory: &Path, bind: SocketAddr) -> Config {
     let bundle = chunk_contract::Deployment {
@@ -173,43 +165,19 @@ async fn a_fresh_start_refuses_a_backend_on_the_address_surviving_jvms_re_attach
     jvm.wait().unwrap();
 }
 
-/// A JVM of the previous control that exits once control stops it.
-struct Survivor {
-    jvm: Mutex<std::process::Child>,
-    /// The launch marker and previous discovery record, with their contents.
-    evidence: Vec<(PathBuf, Vec<u8>)>,
-    /// Whether that evidence was unchanged when control stopped the JVM.
-    stopped: Arc<Mutex<Option<bool>>>,
-}
-
-#[tonic::async_trait]
-impl NodeControl for Survivor {
-    async fn health(&self, _: Request<ProcessIdentity>) -> Result<Response<ProcessHealth>, Status> {
-        Ok(Response::new(ProcessHealth::default()))
-    }
-
-    async fn stop_process(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessIdentity>, Status> {
-        let unchanged = self.evidence.iter().all(|(path, bytes)| std::fs::read(path).ok().as_ref() == Some(bytes));
-        *self.stopped.lock().unwrap() = Some(unchanged);
-        let mut jvm = self.jvm.lock().unwrap();
-        jvm.kill().unwrap();
-        jvm.wait().unwrap();
-        Ok(Response::new(request.into_inner()))
-    }
-}
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_stops_a_survivor_that_re_attaches_at_its_launch_records_address_once_that_is_free() {
     stops_a_survivor_at_its_previous_control_address(true).await;
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_stops_a_survivor_without_a_recorded_address_at_the_previous_discovery_address() {
     stops_a_survivor_at_its_previous_control_address(false).await;
 }
 
+#[cfg(target_os = "linux")]
 async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
@@ -239,37 +207,47 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     std::fs::write(&marker, launch.to_string()).unwrap();
     let lock = std::fs::File::open(&marker).unwrap();
     lock.try_lock().unwrap();
-    let jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let node = listener.local_addr().unwrap();
-    let stopped = Arc::default();
-    let evidence = [&marker, &config.control_record].map(|path| (path.clone(), std::fs::read(path).unwrap())).into();
-    let survivor = Survivor { jvm: Mutex::new(jvm), evidence, stopped: Arc::clone(&stopped) };
-    let incoming = tonic::transport::server::TcpIncoming::from(listener);
-    tokio::spawn(
-        tonic::transport::Server::builder().add_service(NodeControlServer::new(survivor)).serve_with_incoming(incoming),
-    );
-    let identity = ProcessIdentity {
-        deployment: Some(DeploymentRef { environment: "test".into(), deployment: "previous".into() }),
-        runtime_id: id.into(),
+    let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
+    // As at launch, its PID and start time are recorded, which is how control kills a JVM it did not spawn.
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", jvm.id())).unwrap();
+    let started: u64 = stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19).unwrap().parse().unwrap();
+    let pid = serde_json::json!({"pid": jvm.id(), "started": started});
+    std::fs::write(nodes.join(format!("{id}.pid")), pid.to_string()).unwrap();
+    // Whether the marker and previous discovery record were unchanged the last time they were seen while it ran.
+    let evidence: Vec<_> =
+        [&marker, &config.control_record].map(|path| (path.clone(), std::fs::read(path).unwrap())).into();
+    let watched = tokio::task::spawn_blocking(move || {
+        let mut unchanged = true;
+        loop {
+            let seen = evidence.iter().all(|(path, bytes)| std::fs::read(path).ok().as_ref() == Some(bytes));
+            if jvm.try_wait().unwrap().is_some() {
+                return unchanged;
+            }
+            unchanged = seen;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let registration = JvmRegistration {
         process_id: "survivor".into(),
         generation: 1,
-        machine_profile: "small".into(),
+        app: "app".into(),
+        profile: "small".into(),
         artifact_digest: "artifact".into(),
-        app_id: "app".into(),
+        deployment: "previous".into(),
+        player_endpoint: "127.0.0.1:1".into(),
+        protocol: 776,
     };
-    let registration = ProcessRegistration {
-        identity: Some(identity),
-        control_endpoint: format!("http://{node}"),
-        player_endpoint: node.to_string(),
-    };
-    // Like a JVM, it retries registering at the endpoint it was launched with.
+    // Like a JVM, it retries registering at the endpoint it was launched with, until control answers.
     tokio::spawn(async move {
         loop {
             let attempt = async {
-                let mut client = SupervisorClient::connect(endpoint.clone()).await.ok()?;
-                client.register_process(authorized(registration.clone(), "survivor-credential")).await.ok()
+                let mut client = CoreClient::connect(endpoint.clone()).await.ok()?;
+                let call = CallRequest {
+                    method: "chunk:register".into(),
+                    arguments: registration.encode_to_vec(),
+                    ..CallRequest::default()
+                };
+                client.call(authorized(call, "survivor-credential")).await.ok()
             };
             if let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(500), attempt).await {
                 return;
@@ -280,10 +258,10 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
 
     let starting = tokio::spawn(Core::start(config, |_| {}));
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(stopped.lock().unwrap().is_none());
+    assert!(!watched.is_finished());
     drop(occupied);
     let core = tokio::time::timeout(Duration::from_secs(30), starting).await.unwrap().unwrap().unwrap();
-    assert_eq!(*stopped.lock().unwrap(), Some(true));
+    assert!(watched.await.unwrap());
     assert!(!marker.exists());
     assert_ne!(core.control_connection().unwrap().endpoint, format!("http://{previous}"));
     core.stop(|| {}).await.unwrap();

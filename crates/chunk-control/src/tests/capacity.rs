@@ -3,7 +3,7 @@ use crate::state::Capacity;
 
 #[tokio::test]
 async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launches() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let path = fixture.directory.path().join("control.sqlite");
     let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let waiting = request("waiting", &uuid::Uuid::new_v4().to_string());
@@ -20,20 +20,25 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
     claim.abort();
     assert!(claim.await.unwrap_err().is_cancelled());
 
-    control.cancel(waiting).await.unwrap();
-    assert!(control.state().unwrap().claims["waiting"].phase == Phase::Released);
+    // Without a JVM to confirm the withdrawal, cancelling leaves the claim withdrawing, and launches nothing.
+    assert!(control.cancel(waiting).await.is_err());
+    assert!(control.state().unwrap().claims["waiting"].phase == Phase::Withdrawing);
     assert!(fixture.host.ids.lock().unwrap().is_empty());
 
-    let executor = Executor::start(&control);
+    let (executor, jvm) = (Executor::start(&control), CancellationToken::new());
+    let follower = tokio::spawn(follow(control.clone(), fixture.host.clone(), jvm.clone()));
     eventually(|| control.state().unwrap().hosts[&host].capacity == Capacity::Ready).await;
     assert_eq!(*fixture.host.ids.lock().unwrap(), BTreeSet::from([host]));
+    eventually(|| control.state().unwrap().claims["waiting"].phase == Phase::Released).await;
     executor.stop().await;
+    jvm.cancel();
+    follower.await.unwrap();
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn a_restart_resumes_requested_and_releasing_capacity() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let path = fixture.directory.path().join("control.sqlite");
     let control = open(&path, fixture.release.clone(), fixture.host.clone()).unwrap();
     let claim = tokio::spawn({
@@ -60,9 +65,11 @@ async fn a_restart_resumes_requested_and_releasing_capacity() {
     drop(control);
 
     let control = fixture.control().await;
-    let state = control.state().unwrap();
-    assert_eq!(state.hosts[&requested].capacity, Capacity::Ready);
-    assert!(state.released(&releasing));
+    eventually(|| {
+        let state = control.state().unwrap();
+        state.hosts[&requested].capacity == Capacity::Ready && state.released(&releasing)
+    })
+    .await;
     assert_eq!(*fixture.host.ids.lock().unwrap(), BTreeSet::from([requested]));
     assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([releasing]));
     fixture.close().await;
@@ -70,7 +77,7 @@ async fn a_restart_resumes_requested_and_releasing_capacity() {
 
 #[tokio::test]
 async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let assignment = control.claim(request("active", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     fixture.arrive(&control, "active").await;
@@ -96,7 +103,7 @@ async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn shutdown_stops_the_host_of_a_placement_committing_while_it_drains() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control =
         open(&fixture.directory.path().join("control.sqlite"), fixture.release.clone(), fixture.host.clone()).unwrap();
     let (committing, paused) = std::sync::mpsc::channel();

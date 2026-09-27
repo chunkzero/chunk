@@ -45,7 +45,7 @@ fn bare(fixture: &Fixture) -> Arc<Control> {
 
 #[tokio::test]
 async fn resuming_inside_retained_history_sends_only_changes_and_a_snapshot_beyond_it() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = bare(&fixture);
     add(&control, "gateway", ["kept".into(), "released".into()]);
     let (_, first) = Topic::open(&control, "gateway", None).unwrap();
@@ -77,7 +77,7 @@ async fn resuming_inside_retained_history_sends_only_changes_and_a_snapshot_beyo
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_update_carries_the_state_at_its_position_while_commits_race() {
     const CLAIMS: usize = 200;
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = bare(&fixture);
     let mut positions = control.subscribe();
     let (mut topic, first) = Topic::open(&control, "gateway", None).unwrap();

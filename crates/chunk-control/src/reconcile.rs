@@ -11,7 +11,7 @@ impl Control {
     /// # Errors
     /// Reports durable-state errors. Individual unavailable runtimes are retained for a later pass.
     pub async fn reconcile_all(self: &Arc<Self>) -> Result<()> {
-        self.resolve_recovery().await?;
+        self.resolve_recovery()?;
         let state = self.state()?;
         let mut tasks = JoinSet::new();
         let permits = Arc::new(Semaphore::new(8));
@@ -38,7 +38,7 @@ impl Control {
             });
         }
         self.join_progressing_drains(tasks).await?;
-        self.reconcile_sessions().await?;
+        self.reconcile_sessions()?;
         self.retire_idle_hosts()?;
         self.progress_drains()?;
         Ok(())

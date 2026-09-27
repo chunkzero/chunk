@@ -501,12 +501,11 @@ async fn core_stops_within_its_grace_while_a_client_never_reads() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     use chunk_proto::v1::{ActivateClaim, ClaimPhase, MovePlayerRequest, PlayerList};
-    let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let (mut fixture, jvm) = runtime::with_jvm().await;
     let control = fixture.control.clone();
-    control.activate_release(runtime::release()).unwrap();
     let assignment = control.claim(runtime::login()).await.unwrap();
     let session = assignment.delivery.and_then(|delivery| delivery.session).unwrap().id;
+    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     // The JVM reports the arrival on its own stream.
     let arrived = |list: PlayerList| list.players.iter().any(|player| player.phase() == ClaimPhase::Arrived);
     while !arrived(control.players().unwrap()) {
@@ -540,7 +539,7 @@ async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     assert!(updates.message().await.unwrap().is_none());
     drop(updates);
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -579,9 +578,7 @@ async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_acts_only_for_players_it_holds_claims_for() {
-    let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    let (mut fixture, jvm) = runtime::with_jvm().await;
     fixture.control.claim(runtime::login()).await.unwrap();
     let holder = fixture.gateway.clone();
     let other = fixture.gateways.mint("other");
@@ -604,5 +601,5 @@ async fn a_gateway_acts_only_for_players_it_holds_claims_for() {
     assert_eq!(next(&mut foreign).await.error.map(|error| error.code()), Some(Code::Denied));
     drop((held, foreign));
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }

@@ -86,10 +86,11 @@ The build order is backend declarations → shared Java models/interfaces → ap
 method adapters. No generated TypeScript imports or previously compiled JVM classes are needed to bootstrap the build.
 `generateChunkSessionRegistry` writes a version-1 `META-INF/chunk/session-methods.json` and local method provider
 service; `compileChunkSessionMethods` compiles its direct-call adapters into the app JAR. The local bindings validate
-JSON inputs and outputs. Internal control dispatch authenticates captured player membership and process/session
-generations before invoking these adapters on the tick thread. The trusted Rust caller API is ready for action and
-command integration. The generated provider calls the existing live session instance; `SessionScope` continues to own
-its resources and cleanup. No additional component or dependency-injection framework is required for method dispatch.
+JSON inputs and outputs. The runtime runs a method from its `jvm/<host>` topic on the tick thread, through these
+adapters, only while the calling delivery's player has arrived in the session. The trusted Rust caller API is ready for
+action and command integration. The generated provider calls the existing live session instance; `SessionScope`
+continues to own its resources and cleanup. No additional component or dependency-injection framework is required for
+method dispatch.
 
 ## Explicit scoped components
 

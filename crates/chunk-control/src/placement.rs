@@ -1,16 +1,13 @@
 mod select;
 
 use chunk_proto::v1::{
-    Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery,
-    PlayerPreparation, PlayerRef, SessionRef, gameplay_client::GameplayClient,
+    Assignment, ClaimPhase, ClaimRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery, PlayerRef, SessionRef,
 };
 use prost::Message;
 use std::time::Duration;
-use tonic::transport::Channel;
 
 use crate::{
     Control, Error, Result, RuntimeConnection,
-    client::{auth, channel},
     state::{Capacity, Claim, Generation, HostState, Phase, State},
 };
 use select::select_session;
@@ -28,7 +25,7 @@ impl Control {
         if self.draining.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::Invalid("control draining"));
         }
-        self.admit().await?;
+        self.admit()?;
         let unavailable = self.unavailable()?;
         self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
@@ -47,12 +44,7 @@ impl Control {
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
-        // A JVM registered over sync is reached through its topic instead of its gameplay endpoint.
-        let channel = if runtime.over_sync() { None } else { Some(channel(&runtime).await?) };
-        let config = match &channel {
-            Some(channel) => configuration(deployment, &runtime, channel.clone()).await?,
-            None => self.jvm_configuration(deployment, &runtime)?,
-        };
+        let config = self.jvm_configuration(deployment, &runtime)?;
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
@@ -61,10 +53,7 @@ impl Control {
         // Control's desired state already asks the JVM for this session, and its topic for this delivery.
         self.session_ready(&session.host, &runtime, &claim.session).await?;
         let mut delivery = delivery(deployment, &runtime, &config, claim, &request);
-        let preparation = match channel {
-            Some(channel) => prepare(&runtime, channel, &delivery).await?,
-            None => self.prepared_over_sync(&runtime, &request.operation_id, claim.generation).await?,
-        };
+        let preparation = self.prepared(&runtime, &request.operation_id, claim.generation).await?;
         delivery.identity = None;
         let assignment = Assignment {
             claim: Some(claim.identity(&request.operation_id)),
@@ -163,42 +152,6 @@ fn delivery(
         protocol: config.protocol,
         runtime_id: runtime.identity.runtime_id.clone(),
     }
-}
-
-/// Asks `runtime`'s gameplay endpoint to prepare `delivery`.
-async fn prepare(
-    runtime: &RuntimeConnection,
-    channel: Channel,
-    delivery: &PlayerDelivery,
-) -> Result<PlayerPreparation> {
-    let preparation =
-        GameplayClient::new(channel).prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
-    if preparation.operation_id != delivery.operation_id
-        || preparation.capability.len() != 32
-        || preparation.endpoint != runtime.player_endpoint
-    {
-        return Err(Error::Invalid("invalid preparation"));
-    }
-    Ok(preparation)
-}
-
-async fn configuration(
-    deployment: &DeploymentRef,
-    runtime: &RuntimeConnection,
-    channel: Channel,
-) -> Result<ConfigurationResponse> {
-    let mut gameplay = GameplayClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
-    let config = gameplay
-        .configuration(auth(runtime, ConfigurationRequest { deployment: Some(deployment.clone()) }, 3)?)
-        .await?
-        .into_inner();
-    if config.deployment.as_ref() != Some(deployment)
-        || config.runtime_id != runtime.identity.runtime_id
-        || config.process_generation != runtime.identity.generation
-    {
-        return Err(Error::Invalid("configuration identity mismatch"));
-    }
-    Ok(config)
 }
 
 fn validate(request: &ClaimRequest) -> Result<()> {

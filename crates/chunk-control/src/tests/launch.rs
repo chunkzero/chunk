@@ -3,7 +3,7 @@ use chunk_proto::v1::NodePhase;
 
 #[tokio::test]
 async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let host_config = || crate::ProcessHostConfig {
         directory: fixture.directory.path().join("nodes"),
         backend: chunk_contract::BackendConnection {

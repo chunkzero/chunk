@@ -1,14 +1,7 @@
-use crate::{
-    Control, Error, Result,
-    client::{auth, channel},
-    drain::retire_host,
-    state::Capacity,
-};
-use chunk_proto::v1::{
-    NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest, node_control_client::NodeControlClient,
-};
+use crate::{Control, Error, Result, drain::retire_host, state::Capacity};
+use chunk_proto::v1::{NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest};
 use prost::Message;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::collections::BTreeSet;
 
 pub(crate) struct Observation {
     phase: NodePhase,
@@ -95,76 +88,41 @@ impl Control {
             .map(|(id, _)| id.clone())
             .collect())
     }
-    pub(crate) async fn poll_health(self: &Arc<Self>) -> Result<()> {
-        let mut tasks = tokio::task::JoinSet::new();
+    /// Records each running JVM's health from what it last pushed in its reports, and retires a host after three
+    /// unhealthy passes in a row, or once its JVM reports it is draining.
+    pub(crate) fn poll_health(&self) -> Result<()> {
         let state = self.state()?;
         for id in state.hosts.keys().filter(|id| !state.released(id)) {
-            let Some(connection) = self.host.connection(id) else {
+            if self.host.connection(id).is_none() {
                 continue;
-            };
-            let control = self.clone();
-            let id = id.clone();
-            // A JVM registered over sync pushes its health in reports, and one sample may stand for several passes.
-            let (pushed, sample) = (self.jvms.pushes_health(&id), self.jvms.health(&id));
-            tasks.spawn(async move {
-                let probe = async {
-                    let health = NodeControlClient::new(channel(&connection).await?)
-                        .health(auth(&connection, connection.identity.clone(), 2)?)
-                        .await?
-                        .into_inner();
-                    if health.identity.as_ref() != Some(&connection.identity) {
-                        return Err(Error::Invalid("health identity mismatch"));
-                    }
-                    Ok(health)
+            }
+            let health = self.jvms.health(id);
+            let terminate = {
+                let mut observations =
+                    self.observations.lock().map_err(|_| Error::Unresolved("health observations poisoned"))?;
+                let previous = observations.get(id);
+                let phase = match &health {
+                    Some(h) if h.draining => NodePhase::Draining,
+                    Some(h) if h.ready && h.tick_count > 0 && h.last_tick_age_millis <= 5000 => NodePhase::Online,
+                    _ => NodePhase::Unhealthy,
                 };
-                let health = if pushed {
-                    sample
+                let failures = if phase == NodePhase::Unhealthy {
+                    previous.map_or(1, |o| o.failures.saturating_add(1))
                 } else {
-                    tokio::time::timeout(Duration::from_secs(3), probe).await.ok().and_then(Result::ok)
+                    0
                 };
-                let terminate = {
-                    let mut observations =
-                        control.observations.lock().map_err(|_| Error::Unresolved("health observations poisoned"))?;
-                    let previous = observations.get(&id);
-                    let phase = match &health {
-                        None if pushed => NodePhase::Unhealthy,
-                        None => NodePhase::Unreachable,
-                        Some(h) if h.draining => NodePhase::Draining,
-                        Some(h)
-                            if !h.ready
-                                || h.tick_count == 0
-                                || h.last_tick_age_millis > 5000
-                                || (!pushed
-                                    && previous
-                                        .and_then(|o| o.health.as_ref())
-                                        .is_some_and(|p| h.tick_count <= p.tick_count)) =>
-                        {
-                            NodePhase::Unhealthy
-                        }
-                        Some(_) => NodePhase::Online,
-                    };
-                    let failures = if matches!(phase, NodePhase::Unreachable | NodePhase::Unhealthy) {
-                        previous.map_or(1, |o| o.failures.saturating_add(1))
-                    } else {
-                        0
-                    };
-                    let at = if health.is_some() { crate::now_ms() } else { previous.map_or(0, |o| o.at) };
-                    let retained = health.or_else(|| previous.and_then(|o| o.health.clone()));
-                    observations.insert(id.clone(), Observation { phase, health: retained, at, failures });
-                    failures >= 3 || phase == NodePhase::Draining
-                };
-                if terminate {
-                    control.shutdown_node(&ShutdownNodeRequest {
-                        operation_id: format!("health/{id}"),
-                        host_id: id,
-                        timeout_seconds: 0,
-                    })?;
-                }
-                Ok::<_, Error>(())
-            });
-        }
-        while let Some(result) = tasks.join_next().await {
-            result.map_err(|_| Error::Unresolved("health task failed"))??;
+                let at = if health.is_some() { crate::now_ms() } else { previous.map_or(0, |o| o.at) };
+                let retained = health.or_else(|| previous.and_then(|o| o.health.clone()));
+                observations.insert(id.clone(), Observation { phase, health: retained, at, failures });
+                failures >= 3 || phase == NodePhase::Draining
+            };
+            if terminate {
+                self.shutdown_node(&ShutdownNodeRequest {
+                    operation_id: format!("health/{id}"),
+                    host_id: id.clone(),
+                    timeout_seconds: 0,
+                })?;
+            }
         }
         Ok(())
     }

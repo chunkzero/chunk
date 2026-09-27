@@ -60,8 +60,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         let (control, executor) = (control.clone(), executor.clone());
         async move { control.run_capacity(&executor).await }
     });
-    // Ends the transport and the services' open streams once hosts have stopped, so a JVM following its topic over sync
-    // is still sent `stop`.
+    // Ends the transport and the services' open streams once hosts have stopped, so a JVM following its topic is still
+    // sent `stop`.
     let transport = CancellationToken::new();
     // Cancelled once control stops reconciling, so hosts can stop.
     let closing = CancellationToken::new();
@@ -93,11 +93,6 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
                 LocalControlServer::new(service.clone())
                     .max_decoding_message_size(65_536)
                     .max_encoding_message_size(8 * 1024 * 1024),
-            )
-            .add_service(
-                // A JVM's complete report lists every delivery it holds.
-                chunk_proto::v1::supervisor_server::SupervisorServer::new(service.clone())
-                    .max_decoding_message_size(8 * 1024 * 1024),
             )
             .serve_with_incoming_shutdown(incoming, shutdown);
         tokio::pin!(server);
@@ -181,7 +176,7 @@ pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationTo
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! { () = stop.cancelled() => break, _ = timer.tick() => {} }
-        if let Err(error) = control.poll_health().await {
+        if let Err(error) = control.poll_health() {
             tracing::warn!(%error, "node health poll failed");
         }
     }

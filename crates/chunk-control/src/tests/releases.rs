@@ -27,7 +27,7 @@ async fn arrived(fixture: &Fixture, control: &Control, operation: &str) -> Claim
 
 #[tokio::test]
 async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_moves_stay() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let first = arrived(&fixture, &control, "first").await;
     control.activate_release(next(&fixture)).unwrap();
@@ -58,7 +58,7 @@ async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_mov
 
 #[tokio::test]
 async fn a_retired_release_is_forgotten_once_its_last_host_is_released() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     assert!(control.retire_release("build").is_err());
@@ -79,7 +79,7 @@ async fn a_retired_release_is_forgotten_once_its_last_host_is_released() {
 
 #[tokio::test]
 async fn recovery_after_a_restart_keeps_every_live_release() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     let next = next(&fixture);
@@ -101,7 +101,7 @@ async fn recovery_after_a_restart_keeps_every_live_release() {
 
 #[tokio::test]
 async fn a_login_routed_with_a_retired_release_is_rejected_for_routing_again() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     control.activate_release(next(&fixture)).unwrap();
@@ -123,7 +123,7 @@ async fn a_login_routed_with_a_retired_release_is_rejected_for_routing_again() {
 
 #[tokio::test]
 async fn a_release_is_not_retired_while_a_launch_without_a_host_row_may_run_it() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     control.activate_release(next(&fixture)).unwrap();
@@ -150,9 +150,7 @@ async fn a_release_is_not_retired_while_a_launch_without_a_host_row_may_run_it()
 
 #[tokio::test]
 async fn an_orphan_whose_release_a_restore_lost_re_attaches_after_another_restart_and_stops() {
-    use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
-
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     let next = next(&fixture);
@@ -177,15 +175,7 @@ async fn an_orphan_whose_release_a_restore_lost_re_attaches_after_another_restar
     for restart in 0..2 {
         fixture.host.forgotten.store(true, Ordering::Release);
         let control = fixture.control().await;
-        let service =
-            crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
-        let mut registration = Request::new(ProcessRegistration {
-            identity: Some(ProcessIdentity { runtime_id: host.clone(), ..fixture.host.identity(&host) }),
-            control_endpoint: fixture.host.endpoint.clone(),
-            player_endpoint: "127.0.0.1:1".into(),
-        });
-        registration.metadata_mut().insert("authorization", "Bearer test-runtime-credential".parse().unwrap());
-        service.register_process(registration).await.unwrap();
+        control.register_jvm(&host, CREDENTIAL, fixture.host.registration(&host)).unwrap();
         fixture.recovered(&control).await;
         control.reconcile_all().await.unwrap();
         if restart == 0 {
