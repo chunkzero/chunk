@@ -19,8 +19,8 @@ use std::{
 const CAPABILITY: [u8; 32] = [7; 32];
 
 /// A JVM following its topic over sync. It runs each session it is asked for, prepares each delivery and closes it
-/// once withdrawn or gone, and answers method `score` with 7 and any other method only once it is cancelled. Its
-/// players arrive and leave when a test says.
+/// once withdrawn or gone, answers method `score` with 7 and `hold` only once it is cancelled, and never answers
+/// `stuck`. Its players arrive and leave when a test says.
 #[derive(Clone)]
 struct SyncJvm {
     client: CoreClient<Channel>,
@@ -33,8 +33,9 @@ struct Held {
     stream: String,
     sessions: BTreeMap<String, JvmSessionStatus>,
     deliveries: BTreeMap<String, JvmDeliveryStatus>,
-    /// Methods on the topic, and those answered.
+    /// Methods on the topic, those ever runnable there, and those answered.
     methods: BTreeMap<String, JvmMethodCall>,
+    runnable: BTreeSet<String>,
     answered: BTreeSet<String>,
 }
 
@@ -98,7 +99,11 @@ impl SyncJvm {
                         report.deliveries.push(status);
                     }
                 } else if let Some(operation) = entry.key.strip_prefix("method/") {
-                    held.methods.insert(operation.into(), JvmMethodCall::decode(value.as_slice()).unwrap());
+                    let call = JvmMethodCall::decode(value.as_slice()).unwrap();
+                    if !call.cancel {
+                        held.runnable.insert(operation.into());
+                    }
+                    held.methods.insert(operation.into(), call);
                 }
             }
             // A delivery whose key is gone closes, and is forgotten once reported closed.
@@ -126,7 +131,7 @@ impl SyncJvm {
                         "score" => {
                             JvmMethodResult { phase: JvmMethodPhase::Completed.into(), result_json: b"7".into() }
                         }
-                        _ if call.cancel => {
+                        "hold" if call.cancel => {
                             JvmMethodResult { phase: JvmMethodPhase::Cancelled.into(), ..Default::default() }
                         }
                         _ => return None,
@@ -157,6 +162,10 @@ impl SyncJvm {
         };
         let report = JvmReport { deliveries: vec![status], ..JvmReport::default() };
         assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
+    }
+
+    fn runnable(&self, operation: &str) -> bool {
+        self.held.lock().unwrap().runnable.contains(operation)
     }
 
     fn sees(&self, key: &str) -> bool {
@@ -195,14 +204,14 @@ fn delivery(operation: &str, generation: Option<Position>, phase: JvmDeliveryPha
     JvmDeliveryStatus { operation_id: operation.into(), generation, phase: phase.into(), capability }
 }
 
-/// The fake release, whose sessions declare methods `score` and `hold`.
+/// The fake release, whose sessions declare methods `score`, `hold` and `stuck`.
 fn release() -> chunk_control::Release {
     let mut release = runtime::release();
     let method = |name: &str| {
         serde_json::json!({"app": "bridge", "session": "default", "name": name,
             "arguments": {"type": "object", "fields": {}}, "result": {"type": "integer"}})
     };
-    let methods = serde_json::json!({"version": 1, "methods": [method("score"), method("hold")]});
+    let methods = serde_json::json!({"version": 1, "methods": [method("score"), method("hold"), method("stuck")]});
     release.contracts.session_methods = Some(serde_json::from_value(methods).unwrap());
     release
 }
@@ -305,6 +314,103 @@ async fn session_methods_run_and_cancel_through_the_topic() {
     }
     cancellation.cancel();
     assert_eq!(call.await.unwrap().unwrap().phase(), SessionMethodPhase::Cancelled);
+    assert!(jvm.runnable(hold.operation_id()));
+
+    // A call cancelled before it reaches the topic is never runnable there.
+    let early = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
+    let result = control.call_session_method(&early, &cancellation).await.unwrap();
+    assert_eq!(result.phase(), SessionMethodPhase::Cancelled);
+    assert!(!jvm.runnable(early.operation_id()));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jvms_method_budget_rejects_new_calls_and_keeps_charging_unanswered_ones() {
+    let launches = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
+    let (jvm, assignment) = arrive(&fixture, &launches).await;
+    let control = fixture.control.clone();
+    let captured = control.capture_session(assignment.claim.as_ref().unwrap()).unwrap();
+    let prepare =
+        |name| control.prepare_session_method(&captured, name, serde_json::json!({}), Duration::from_secs(10)).unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+
+    // A method the JVM never answers stays on its topic after its outcome turned unknown.
+    let stuck = prepare("stuck");
+    assert_eq!(control.call_session_method(&stuck, &cancelled).await.unwrap().phase(), SessionMethodPhase::Unknown);
+    // Answered methods fill the rest of the 256 the budget holds, which then rejects new ones.
+    let mut answered = 0;
+    let rejected = loop {
+        match control.call_session_method(&prepare("hold"), &cancelled).await {
+            Ok(result) => assert_eq!(result.phase(), SessionMethodPhase::Cancelled),
+            Err(error) => break error,
+        }
+        answered += 1;
+        assert!(answered < 256, "the budget admitted too many methods");
+    };
+    assert!(matches!(rejected, chunk_control::Error::Capacity), "{rejected:?}");
+    assert_eq!(answered, 255);
+    assert!(jvm.sees(&format!("method/{}", stuck.operation_id())));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_delivery_report_neither_supplies_nor_removes_a_capability() {
+    let launches = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
+    fixture.control.activate_release(release()).unwrap();
+    let control = fixture.control.clone();
+    let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
+    let host = loop {
+        if let Some(host) = launches.host() {
+            break host;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = loop {
+        let update = next(&mut updates).await;
+        if update.upserts.iter().any(|entry| entry.key == "delivery/login") {
+            break update;
+        }
+    };
+    let generation = first.upserts.iter().find(|entry| entry.key == "delivery/login").and_then(|entry| {
+        let Some(State::Value(value)) = &entry.state else { return None };
+        JvmDelivery::decode(value.as_slice()).unwrap().generation
+    });
+    let stale = generation.map(|position| Position { revision: position.revision + 1, ..position });
+    let status = |generation, phase, capability: [u8; 32]| JvmDeliveryStatus {
+        capability: capability.to_vec(),
+        ..delivery("login", generation, phase)
+    };
+    let report = |complete, deliveries| JvmReport { complete, deliveries, ..JvmReport::default() };
+
+    // A position past the revision's 40 bits is rejected rather than read as another epoch's.
+    let overflow =
+        generation.map(|position| Position { epoch: position.epoch - 1, revision: position.revision + (1 << 40) });
+    let invalid = report(true, vec![status(overflow, JvmDeliveryPhase::Prepared, [1; 32])]);
+    assert_eq!(code(&fixture.report(&first.stream, &invalid).await), Code::Invalid);
+    // Another generation's PREPARED supplies nothing, and its CLOSED removes nothing.
+    let mut prepared = report(true, vec![status(stale, JvmDeliveryPhase::Prepared, [1; 32])]);
+    prepared.sessions = sessions(&first)
+        .into_iter()
+        .map(|(id, wanted)| JvmSessionStatus {
+            session_type: wanted.session_type,
+            capacity: wanted.capacity,
+            ..session(&id, JvmSessionPhase::Ready)
+        })
+        .collect();
+    assert_eq!(fixture.report(&first.stream, &prepared).await.outcome, ACCEPTED);
+    let current = report(
+        false,
+        vec![status(generation, JvmDeliveryPhase::Prepared, [2; 32]), status(stale, JvmDeliveryPhase::Closed, [0; 32])],
+    );
+    assert_eq!(fixture.report(&first.stream, &current).await.outcome, ACCEPTED);
+    let assignment = claim.await.unwrap().unwrap();
+    assert_eq!(assignment.preparation.unwrap().capability, [2; 32]);
+    drop(updates);
     fixture.stop().await;
 }
 

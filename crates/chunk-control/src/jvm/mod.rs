@@ -50,8 +50,15 @@ struct Jvm {
     health: Option<(Instant, ProcessHealth)>,
     /// What control wants of the JVM beyond its log.
     work: watch::Sender<Work>,
-    /// The capability of each delivery the JVM last reported prepared.
-    capabilities: BTreeMap<String, Vec<u8>>,
+    /// What the JVM last reported of each open claim's delivery at the claim's generation, by operation ID.
+    deliveries: BTreeMap<String, Reported>,
+}
+
+/// A delivery's phase at `generation`, as its JVM reported it, with the capability it minted while prepared.
+struct Reported {
+    generation: u64,
+    phase: DeliveryPhase,
+    capability: Vec<u8>,
 }
 
 /// The part of a JVM's topic that control keeps in memory.
@@ -59,11 +66,13 @@ struct Jvm {
 pub(crate) struct Work {
     /// Whether control asked the JVM to stop.
     stopping: bool,
-    /// Session methods by operation ID. The topic carries those still awaiting their result.
+    /// Session methods by operation ID, within the JVM's method budget. The topic carries those still awaiting their
+    /// result.
     methods: BTreeMap<String, Method>,
 }
 
 struct Method {
+    /// The call, without its arguments once answered.
     call: sync::JvmMethodCall,
     /// The result the JVM sent, and when.
     result: Option<(Instant, sync::JvmMethodResult)>,
@@ -108,9 +117,12 @@ impl Jvms {
         Some(self.0.lock().ok()?.get(host)?.registration.protocol)
     }
 
-    /// The capability `host`'s JVM minted for `operation`'s delivery, while it reports it prepared.
-    pub fn capability(&self, host: &str, operation: &str) -> Option<Vec<u8>> {
-        self.0.lock().ok()?.get(host)?.capabilities.get(operation).cloned()
+    /// The phase `host`'s JVM last reported for `operation`'s delivery at `generation`, with the capability it minted
+    /// while prepared.
+    pub fn delivery(&self, host: &str, operation: &str, generation: Generation) -> Option<(DeliveryPhase, Vec<u8>)> {
+        let jvms = self.0.lock().ok()?;
+        let reported = jvms.get(host)?.deliveries.get(operation)?;
+        (reported.generation == generation.wire()).then(|| (reported.phase, reported.capability.clone()))
     }
 
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -141,7 +153,7 @@ impl Control {
                     stream: None,
                     health: None,
                     work: watch::Sender::default(),
-                    capabilities: BTreeMap::new(),
+                    deliveries: BTreeMap::new(),
                 });
                 Ok(())
             }
@@ -192,6 +204,7 @@ impl Control {
         let prepared = |status: &sync::JvmDeliveryStatus| status.phase() == sync::JvmDeliveryPhase::Prepared;
         if report.deliveries.iter().any(|status| {
             status.operation_id.is_empty()
+                || generation(status).is_none()
                 || status.phase() == sync::JvmDeliveryPhase::Unspecified
                 || (prepared(status) && status.capability.len() != 32)
         }) {
@@ -221,15 +234,29 @@ impl Control {
                 None => return Err(Error::Invalid("a stream's first report must be complete")),
             };
             if report.complete {
-                jvm.capabilities.clear();
+                jvm.deliveries.clear();
             }
-            for status in &report.deliveries {
-                if prepared(status) {
-                    jvm.capabilities.insert(status.operation_id.clone(), status.capability.clone());
-                } else {
-                    jvm.capabilities.remove(&status.operation_id);
+            // Only a delivery at its open claim's generation counts, so a stale one neither supplies nor removes the
+            // current one's capability.
+            for (status, binding) in report.deliveries.iter().zip(&inventory.deliveries) {
+                if let Some(delivery) = binding.delivery.as_ref().filter(|delivery| owned(state, delivery)) {
+                    let reported = Reported {
+                        generation: delivery.owner_generation,
+                        phase: binding.phase(),
+                        capability: status.capability.clone(),
+                    };
+                    jvm.deliveries.insert(status.operation_id.clone(), reported);
                 }
             }
+            jvm.deliveries.retain(|operation, reported| {
+                state.claims.get(operation).is_some_and(|claim| {
+                    claim.phase != Phase::Released && claim.generation.wire() == reported.generation
+                })
+            });
+            jvm.work.send_if_modified(|work| {
+                work.prune();
+                false
+            });
             // A closed delivery no open claim owns needs nothing more.
             let done: Vec<_> = inventory
                 .deliveries
@@ -263,8 +290,12 @@ impl Control {
             let _ = tokio::time::timeout(crate::process::STOP_GRACE, ended.cancelled()).await;
         }
         let released = self.host.release(host).await;
-        if let Some(Some(stream)) = self.jvms.lock()?.get_mut(host).map(|jvm| jvm.stream.take()) {
-            stream.end(&self.links, host);
+        if let Some(jvm) = self.jvms.lock()?.get_mut(host) {
+            if let Some(stream) = jvm.stream.take() {
+                stream.end(&self.links, host);
+            }
+            // The stopped JVM runs no more methods.
+            jvm.work.send_if_modified(|work| !std::mem::take(&mut work.methods).is_empty());
         }
         released
     }
@@ -282,13 +313,9 @@ pub(crate) fn owned(state: &State, delivery: &PlayerDelivery) -> bool {
 /// The delivery `status` reports, as a supervisor's inventory states it. A JVM on sync names only a delivery's
 /// operation and generation; the rest is its claim's, when the log has one.
 fn delivery(state: &State, identity: &ProcessIdentity, status: &sync::JvmDeliveryStatus) -> DeliveryInventory {
-    let generation = status
-        .generation
-        .as_ref()
-        .map_or(0, |position| Generation { epoch: position.epoch, revision: position.revision }.wire());
     let mut delivery = PlayerDelivery {
         operation_id: status.operation_id.clone(),
-        owner_generation: generation,
+        owner_generation: generation(status).map_or(0, Generation::wire),
         ..PlayerDelivery::default()
     };
     if let Some(claim) = state.claims.get(&status.operation_id) {
@@ -310,6 +337,12 @@ fn delivery(state: &State, identity: &ProcessIdentity, status: &sync::JvmDeliver
         sync::JvmDeliveryPhase::Closed => DeliveryPhase::Closed,
     };
     DeliveryInventory { delivery: Some(delivery), phase: phase.into() }
+}
+
+/// The generation `status` reports, unless it is out of range.
+fn generation(status: &sync::JvmDeliveryStatus) -> Option<Generation> {
+    let position = status.generation.as_ref()?;
+    Generation::new(position.epoch, position.revision).ok()
 }
 
 fn inventory(status: sync::JvmSessionStatus) -> SessionInventory {

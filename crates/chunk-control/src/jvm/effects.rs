@@ -5,18 +5,28 @@ use std::time::Duration;
 
 use chunk_proto::{
     sync::v1 as sync,
-    v1::{ConfigurationResponse, DeliveryPhase, DeploymentRef, PlayerPreparation, ProcessIdentity},
+    v1::{ConfigurationResponse, DeliveryPhase, DeploymentRef, PlayerPreparation},
 };
+use prost::Message;
 use tokio::{sync::watch, time::Instant};
 
 use super::{Jvms, Method, Work};
-use crate::{Control, Error, Generation, Result, RuntimeConnection, state::Phase};
+use crate::{Control, Error, Generation, Result, RuntimeConnection, session_methods::MAX_JSON, state::Phase};
 
 /// How long control waits for a JVM to report a delivery prepared or closed.
 const DELIVERY: Duration = Duration::from_secs(10);
 
-/// How long a JVM keeps a method's result for a retry of its call.
+/// How long control keeps a method's result for a retry of its call.
 const RESULT_RETENTION: Duration = Duration::from_secs(300);
+
+/// How many session methods control holds for one JVM, pending or answered.
+const MAX_METHODS: usize = 256;
+
+/// How many bytes of session methods control holds for one JVM.
+const MAX_METHOD_BYTES: usize = 8 * 1024 * 1024;
+
+/// The room a pending method holds for its result.
+const RESULT_RESERVE: usize = MAX_JSON + 1024;
 
 /// A session method on a JVM's topic, awaiting the JVM's result.
 pub(crate) struct MethodCall {
@@ -37,23 +47,68 @@ impl MethodCall {
     }
 }
 
+impl Work {
+    /// Drops the results kept past their retention.
+    pub(super) fn prune(&mut self) {
+        self.methods.retain(|_, method| method.result.as_ref().is_none_or(|(at, _)| at.elapsed() < RESULT_RETENTION));
+    }
+
+    /// Checks that a method holding `bytes` fits the JVM's method budget.
+    fn admit(&mut self, bytes: usize) -> Result<()> {
+        self.prune();
+        let held: usize = self.methods.values().map(Method::bytes).sum();
+        if self.methods.len() >= MAX_METHODS || held + bytes > MAX_METHOD_BYTES {
+            return Err(Error::Capacity);
+        }
+        Ok(())
+    }
+}
+
+impl Method {
+    /// The bytes the method holds: its call, and its result or room for one.
+    fn bytes(&self) -> usize {
+        self.call.encoded_len() + self.result.as_ref().map_or(RESULT_RESERVE, |(_, result)| result.encoded_len())
+    }
+}
+
 impl Jvms {
+    /// Checks that `host`'s JVM, if it registered over sync, has room in its method budget for `call`.
+    /// # Errors
+    /// Reports a full budget as over capacity.
+    pub fn admits(&self, host: &str, call: &sync::JvmMethodCall) -> Result<()> {
+        let jvms = self.lock()?;
+        let Some(jvm) = jvms.get(host) else {
+            return Ok(());
+        };
+        let mut admitted = Ok(());
+        jvm.work.send_if_modified(|work| {
+            admitted = work.admit(call.encoded_len() + RESULT_RESERVE);
+            false
+        });
+        admitted
+    }
+
     /// Puts session method `operation` on `host`'s topic unless it is already there, as for a retry. `None` for a host
-    /// whose JVM has not registered over sync.
-    pub fn call(&self, host: &str, operation: &str, call: sync::JvmMethodCall) -> Option<MethodCall> {
-        let jvms = self.lock().ok()?;
-        let jvm = jvms.get(host)?;
+    /// whose JVM has not registered over sync. The method counts against the JVM's method budget until the JVM answers
+    /// it and its result's retention ends, or the JVM stops.
+    /// # Errors
+    /// Reports a full budget as over capacity.
+    pub fn call(&self, host: &str, operation: &str, call: sync::JvmMethodCall) -> Result<Option<MethodCall>> {
+        let jvms = self.lock()?;
+        let Some(jvm) = jvms.get(host) else {
+            return Ok(None);
+        };
+        let mut admitted = Ok(());
         jvm.work.send_if_modified(|work| {
             if work.methods.contains_key(operation) {
                 return false;
             }
-            let retained =
-                |method: &Method| method.result.as_ref().is_none_or(|(at, _)| at.elapsed() < RESULT_RETENTION);
-            work.methods.retain(|_, method| retained(method));
-            work.methods.insert(operation.into(), Method { call, result: None });
-            true
+            let method = Method { call, result: None };
+            admitted = work.admit(method.bytes());
+            admitted.is_ok() && work.methods.insert(operation.into(), method).is_none()
         });
-        Some(MethodCall { work: jvm.work.subscribe(), operation: operation.into() })
+        admitted?;
+        Ok(Some(MethodCall { work: jvm.work.subscribe(), operation: operation.into() }))
     }
 
     /// Asks `host`'s JVM not to start session method `operation`.
@@ -87,7 +142,7 @@ impl Control {
         let completed = result.phase() == sync::JvmMethodPhase::Completed;
         if result.phase() == sync::JvmMethodPhase::Unspecified
             || (!completed && !result.result_json.is_empty())
-            || result.result_json.len() > crate::session_methods::MAX_JSON
+            || result.result_json.len() > MAX_JSON
         {
             return Err(Error::Invalid("invalid session method result"));
         }
@@ -96,12 +151,16 @@ impl Control {
         if jvm.stream.as_ref().is_none_or(|current| current.id != stream) {
             return Err(Error::Stopped);
         }
-        jvm.work.send_if_modified(|work| match work.methods.get_mut(operation) {
-            Some(method) if method.result.is_none() => {
-                method.result = Some((Instant::now(), result));
-                true
+        jvm.work.send_if_modified(|work| {
+            work.prune();
+            match work.methods.get_mut(operation) {
+                Some(method) if method.result.is_none() => {
+                    method.call.arguments_json = Vec::new();
+                    method.result = Some((Instant::now(), result));
+                    true
+                }
+                _ => false,
             }
-            _ => false,
         });
         Ok(())
     }
@@ -134,31 +193,28 @@ impl Control {
     ) -> Result<PlayerPreparation> {
         let host = &runtime.identity.runtime_id;
         let capability = self
-            .reported(host, &runtime.identity, operation, generation, |phase| match phase {
-                Some(DeliveryPhase::Closed) => Some(Err(Error::Unresolved("the JVM closed the delivery"))),
-                _ => self.jvms.capability(host, operation).map(Ok),
+            .reported(host, operation, generation, |reported| match reported {
+                Some((DeliveryPhase::Prepared, capability)) => Some(Ok(capability)),
+                Some((DeliveryPhase::Closed, _)) => Some(Err(Error::Unresolved("the JVM closed the delivery"))),
+                _ => None,
             })
             .await?;
         Ok(PlayerPreparation { operation_id: operation.into(), endpoint: runtime.player_endpoint.clone(), capability })
     }
 
-    /// Waits for `identity`, the JVM running `host` over sync, to close the delivery of withdrawing claim `operation`,
-    /// created at `generation`, or for its claim to be released.
+    /// Waits for the JVM running `host` over sync to close the delivery of withdrawing claim `operation`, created at
+    /// `generation`, or for its claim to be released.
     /// # Errors
     /// Reports a delivery the JVM did not close within 10 seconds.
-    pub(crate) async fn withdrawn_over_sync(
-        &self,
-        host: &str,
-        identity: &ProcessIdentity,
-        operation: &str,
-        generation: Generation,
-    ) -> Result<()> {
-        self.reported(host, identity, operation, generation, |phase| {
+    pub(crate) async fn withdrawn_over_sync(&self, host: &str, operation: &str, generation: Generation) -> Result<()> {
+        self.reported(host, operation, generation, |reported| {
             let released = self
                 .state()
                 .map(|state| state.claims.get(operation).is_none_or(|claim| claim.phase == Phase::Released));
             match released {
-                Ok(released) if released || phase == Some(DeliveryPhase::Closed) => Some(Ok(())),
+                Ok(released) if released || reported.is_some_and(|(phase, _)| phase == DeliveryPhase::Closed) => {
+                    Some(Ok(()))
+                }
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             }
@@ -166,24 +222,19 @@ impl Control {
         .await
     }
 
-    /// Checks the phase `host`'s JVM last reported for `operation`'s delivery at `generation` after each report, until
-    /// `check` returns an outcome.
+    /// Checks the phase and capability `host`'s JVM last reported for `operation`'s delivery at `generation` after each
+    /// report, until `check` returns an outcome.
     async fn reported<T>(
         &self,
         host: &str,
-        identity: &ProcessIdentity,
         operation: &str,
         generation: Generation,
-        check: impl Fn(Option<DeliveryPhase>) -> Option<Result<T>>,
+        check: impl Fn(Option<(DeliveryPhase, Vec<u8>)>) -> Option<Result<T>>,
     ) -> Result<T> {
         let mut reports = self.links.subscribe();
         let reported = async {
             loop {
-                let binding = self.links.delivery(host, identity, operation);
-                let binding = binding.filter(|binding| {
-                    binding.delivery.as_ref().is_some_and(|delivery| delivery.owner_generation == generation.wire())
-                });
-                if let Some(outcome) = check(binding.and_then(|binding| DeliveryPhase::try_from(binding.phase).ok())) {
+                if let Some(outcome) = check(self.jvms.delivery(host, operation, generation)) {
                     return outcome;
                 }
                 reports.changed().await.map_err(|_| Error::Unresolved("control stopped"))?;

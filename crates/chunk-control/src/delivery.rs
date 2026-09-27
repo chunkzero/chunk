@@ -103,7 +103,7 @@ impl Control {
             let runtime = self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
             // A JVM registered over sync sees the withdrawal on its topic and reports the delivery closed.
             if runtime.over_sync() {
-                self.withdrawn_over_sync(&host, &runtime.identity, &request.operation_id, claim.generation).await?;
+                self.withdrawn_over_sync(&host, &request.operation_id, claim.generation).await?;
                 return self.release_withdrawn(&request.operation_id, identity);
             }
             let withdrawn = GameplayClient::new(channel(&runtime).await?)

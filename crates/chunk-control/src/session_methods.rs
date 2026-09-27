@@ -215,9 +215,19 @@ impl Control {
         }
     }
 
+    /// Checks that the operation's JVM, if it registered over sync, has room for another method.
+    /// # Errors
+    /// Reports a full method budget as over capacity.
+    pub(crate) fn admits_method(&self, operation: &PreparedSessionMethod) -> Result<()> {
+        self.jvms.admits(&operation.target.identity.runtime_id, &sync_call(operation, false))
+    }
+
     /// Puts the operation on its JVM's topic, unless it is already there, and waits for the JVM's result. A cancelled
     /// or expired call asks the JVM not to start it, and without an answer in time its outcome is unknown; the entry
-    /// stays until the JVM answers, so a retry never runs the method again.
+    /// stays until the JVM answers, so a retry never runs the method again. A call already cancelled or expired goes
+    /// on the topic cancelled.
+    /// # Errors
+    /// Rejects a new method once its JVM's method budget is full.
     async fn call_over_sync(
         &self,
         operation: &PreparedSessionMethod,
@@ -225,15 +235,12 @@ impl Control {
     ) -> Result<SessionMethodResult> {
         let request = &operation.request;
         let host = &operation.target.identity.runtime_id;
-        let call = sync::JvmMethodCall {
-            session: request.session.as_ref().map(|session| session.id.clone()).unwrap_or_default(),
-            method: request.method.clone(),
-            arguments_json: request.arguments_json.clone().into_bytes(),
-            delivery: operation.target.delivery.operation_id.clone(),
-            deadline_ms: request.deadline_ms,
-            cancel: false,
+        let stopped = || {
+            cancellation.is_cancelled()
+                || crate::now_ms() >= request.deadline_ms
+                || self.method_runtime(&operation.target).is_err()
         };
-        let Some(mut call) = self.jvms.call(host, &request.operation_id, call) else {
+        let Some(mut call) = self.jvms.call(host, &request.operation_id, sync_call(operation, stopped()))? else {
             return Ok(unknown(operation));
         };
         let mut cancelled = None;
@@ -241,11 +248,7 @@ impl Control {
             if let Some(result) = call.result() {
                 return validate_result(operation, from_sync(&request.operation_id, result)?);
             }
-            if cancelled.is_none()
-                && (cancellation.is_cancelled()
-                    || crate::now_ms() >= request.deadline_ms
-                    || self.method_runtime(&operation.target).is_err())
-            {
+            if cancelled.is_none() && stopped() {
                 self.jvms.cancel(host, &request.operation_id);
                 cancelled = Some(tokio::time::Instant::now());
             }
@@ -269,6 +272,19 @@ impl Control {
             return Err(Error::Invalid("captured session changed"));
         }
         self.host.connection(&target.identity.runtime_id).ok_or(Error::Unresolved("method process unavailable"))
+    }
+}
+
+/// The operation as its JVM's topic carries it.
+fn sync_call(operation: &PreparedSessionMethod, cancel: bool) -> sync::JvmMethodCall {
+    let request = &operation.request;
+    sync::JvmMethodCall {
+        session: request.session.as_ref().map(|session| session.id.clone()).unwrap_or_default(),
+        method: request.method.clone(),
+        arguments_json: request.arguments_json.clone().into_bytes(),
+        delivery: operation.target.delivery.operation_id.clone(),
+        deadline_ms: request.deadline_ms,
+        cancel,
     }
 }
 

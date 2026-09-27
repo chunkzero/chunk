@@ -65,6 +65,7 @@ impl Methods {
             serde_json::from_str(&request.arguments_json).map_err(|_| Error::Invalid("invalid method JSON"))?,
             Duration::from_millis(u64::from(request.timeout_ms)),
         )?;
+        control.admits_method(&prepared)?;
         let bytes = prepared.retained_bytes()?.checked_add(RESULT_RESERVE).ok_or(Error::Capacity)?;
         state.make_room(bytes)?;
         let handle =
