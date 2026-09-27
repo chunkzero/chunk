@@ -1,6 +1,6 @@
 //! The operator's methods, `chunk:move_player` and `chunk:drain`, which only the CLI's credential may call. Each is
-//! transactional under a client-chosen operation ID, and runs as an accepted control operation, so shutdown refuses
-//! new ones and awaits running ones.
+//! transactional under a client-chosen `operator:` operation ID, which control binds to the method and arguments, and
+//! runs as an accepted control operation, so shutdown refuses new ones and awaits running ones.
 
 use super::{
     super::{
@@ -10,10 +10,7 @@ use super::{
     },
     decode,
 };
-use chunk_proto::{
-    sync::v1::{CallRequest, DrainArguments, Error, MovePlayerArguments, MovePlayerResult, Position},
-    v1 as control,
-};
+use chunk_proto::sync::v1::{CallRequest, DrainArguments, Error, MovePlayerArguments, MovePlayerResult, Position};
 use chunk_store::Revision;
 use prost::Message;
 
@@ -49,24 +46,18 @@ pub(super) async fn call(
     if !request.deployment.is_empty() || request.caller.is_some() || !request.stream.is_empty() {
         return Err(errors::invalid("an operator method takes no deployment, caller or stream"));
     }
-    if request.operation_id.is_empty() || request.operation_id.len() > OPERATION_BYTES {
-        return Err(errors::invalid("an operator method requires an operation ID of at most 128 bytes"));
+    if !request.operation_id.starts_with(app::OPERATOR) || request.operation_id.len() > OPERATION_BYTES {
+        return Err(errors::invalid(
+            "an operator method requires an operation ID of at most 128 bytes beginning with operator:",
+        ));
     }
-    app::reject_prepared(&request.operation_id)?;
     let control = service.control.clone();
     let operation = request.operation_id.clone();
     let result = match method {
         Method::MovePlayer => {
-            let MovePlayerArguments { player, destination } = decode(&request.arguments)?;
-            let demand = destination.map(|demand| control::SessionDemand {
-                key: demand.key,
-                session_type: demand.session_type,
-                machine_profile: demand.machine_profile,
-            });
-            let request =
-                control::MovePlayerRequest { operation_id: operation, player_id: player, demand, ..Default::default() };
-            let moved = service.operations.admit(async move { control.move_player(request) }).await;
-            moved.map(|_| MovePlayerResult {}.encode_to_vec())
+            let arguments: MovePlayerArguments = decode(&request.arguments)?;
+            let moved = service.operations.admit(async move { control.move_operator(&operation, &arguments) }).await;
+            moved.map(|()| MovePlayerResult {}.encode_to_vec())
         }
         Method::Drain => {
             let arguments: DrainArguments = decode(&request.arguments)?;

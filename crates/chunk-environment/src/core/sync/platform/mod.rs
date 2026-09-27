@@ -48,6 +48,7 @@ pub(super) async fn call(
     if request.operation_id.is_empty() {
         return Err(errors::invalid("a claim method requires an operation ID"));
     }
+    // A move's destination claim takes the move's ID, which may be the operator's; a login's must not.
     app::reject_prepared(&request.operation_id)?;
     service.fences.check(&request.stream, &principal.credential)?;
     let result = claims::call(service, id, method, request).await?;

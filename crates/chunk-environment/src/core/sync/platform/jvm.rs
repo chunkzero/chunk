@@ -83,7 +83,7 @@ pub(super) async fn call(
             if request.operation_id.is_empty() {
                 return Err(errors::invalid("a method result names the method's operation ID"));
             }
-            app::reject_prepared(&request.operation_id)?;
+            app::reject_reserved(&request.operation_id)?;
             let result: JvmMethodResult = decode(&request.arguments)?;
             let recorded = service.control.method_result(&host, &request.stream, &request.operation_id, result);
             recorded.map_err(|failure| errors::operation(&failure))?;

@@ -69,7 +69,8 @@ pub(super) fn operation(failure: &chunk_control::Error) -> Error {
             chunk_control::OPERATION_CHANGED
             | chunk_control::DRAIN_CHANGED
             | chunk_control::MOVE_CHANGED
-            | chunk_control::MOVE_NAMES_CLAIM,
+            | chunk_control::MOVE_NAMES_CLAIM
+            | chunk_control::OPERATOR_CALL_CHANGED,
         ) => Code::OperationMismatch,
         Control::Invalid(_) => Code::Invalid,
         Control::Capacity | Control::Busy => Code::Overloaded,
