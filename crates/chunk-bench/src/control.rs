@@ -1,56 +1,12 @@
-use std::{collections::BTreeSet, sync::Mutex};
-
 use anyhow::{Result, ensure};
-use chunk_control::{ControlConnection, Host, Progress, RuntimeConnection};
+use chunk_control::ControlConnection;
 use chunk_proto::v1::{
     ActivateClaim, ClaimPhase, ClaimRequest, Identity, SessionDemand, WatchRequest,
     local_control_client::LocalControlClient,
 };
 use tonic::{Request, transport::Channel};
 
-use crate::{
-    config::{Config, Scenario},
-    fixtures,
-};
-
-pub struct SyntheticHost {
-    endpoint: String,
-    stopped: Mutex<BTreeSet<String>>,
-}
-
-impl SyntheticHost {
-    pub fn new(endpoint: String) -> Self {
-        Self { endpoint, stopped: Mutex::default() }
-    }
-}
-
-#[tonic::async_trait]
-impl Host for SyntheticHost {
-    async fn ensure(&self, id: &str, _: &chunk_control::Release, _: &str, _: &str) -> chunk_control::Result<Progress> {
-        if self.stopped(id) {
-            return Ok(Progress::Failed("synthetic runtime stopped".into()));
-        }
-        Ok(Progress::Ready(Box::new(self.connection(id).expect("synthetic connection"))))
-    }
-
-    fn connection(&self, id: &str) -> Option<RuntimeConnection> {
-        Some(RuntimeConnection {
-            endpoint: self.endpoint.clone(),
-            token: format!("bench-{id}"),
-            player_endpoint: "127.0.0.1:1".into(),
-            identity: fixtures::identity(id),
-        })
-    }
-
-    async fn release(&self, id: &str) -> chunk_control::Result<bool> {
-        self.stopped.lock().expect("synthetic host lock").insert(id.into());
-        Ok(true)
-    }
-
-    fn stopped(&self, id: &str) -> bool {
-        self.stopped.lock().expect("synthetic host lock").contains(id)
-    }
-}
+use crate::config::{Config, Scenario};
 
 pub fn release() -> Result<chunk_control::Release> {
     Ok(serde_json::from_value(serde_json::json!({
@@ -105,7 +61,7 @@ impl Client {
     pub async fn arrive(&mut self, request: ClaimRequest) -> Result<()> {
         let assignment = self.client.claim(self.request(request)).await?.into_inner();
         ensure!(assignment.claim.is_some() && assignment.preparation.is_some(), "incomplete assignment");
-        // The runtime reports the arrival on its own stream, which may reach control after this activation.
+        // The synthetic JVM reports the arrival once the claim activates, which may reach control after this activation.
         for _ in 0..100 {
             let activation = ActivateClaim { claim: assignment.claim.clone() };
             if self.client.activate(self.request(activation)).await?.into_inner().phase == ClaimPhase::Arrived as i32 {

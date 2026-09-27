@@ -21,13 +21,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     backend,
     config::{Config, Scenario},
-    control, proxy, sync,
+    control, fixtures, proxy, sync,
 };
 
 #[derive(Serialize, Deserialize)]
 pub struct Init {
     pub config: Config,
-    /// Synthetic gameplay/runtime address, or the compiled deployment path for backend workloads.
+    /// The synthetic gameplay server's address, the compiled deployment path for backend workloads, or empty.
     pub backend: String,
     pub state: PathBuf,
     pub output: PathBuf,
@@ -165,19 +165,21 @@ pub async fn serve(init: Init) -> Result<()> {
             Ok(chunk_backend::Backend::new(environment, Box::new(store))?.system())
         })
         .await??;
+        let host = Arc::new(fixtures::SyntheticHost::default());
         let config = chunk_control::server::Config {
             connection: init.state.join("connection.json"),
             state: init.state.clone(),
             system,
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await?,
             control: chunk_control::Config { environment: release.deployment.environment.clone() },
-            host: Arc::new(control::SyntheticHost::new(init.backend)),
+            host: host.clone(),
             fresh: false,
             services: None,
         };
         let token = stop.clone();
         tasks.spawn(async move { Ok(chunk_control::server::run(config, ready, token).await?) });
         let started = receiver.await.context("control startup failed")?;
+        host.attach(&started.control);
         started.control.activate_release(release)?;
         let connection = started.connection;
         Ready { endpoint: connection.endpoint.clone(), control: Some(connection), backend: None, sync: None }

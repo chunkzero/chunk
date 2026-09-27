@@ -28,15 +28,15 @@ hardware when comparing results.
 
 ## Workloads
 
-| Workload             | One operation                                                        | Included work                                                                                                    |
-| -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `proxy-relay`        | Client packet → relay → synthetic gameplay response → relay → client | Production managed PLAY relay, framing, AES-128-CFB8 encryption and zlib compression over real TCP               |
-| `control-population` | Open a `Watch` stream and read its snapshot of every seeded claim    | Real authenticated gRPC, in-memory state reads, normal reconciliation, arrival and health tasks                  |
-| `control-churn`      | New `Claim` → `Activate` → `ReconcileDeparture`                      | Real authenticated gRPC, placement, runtime RPCs, ownership changes, durable SQLite commits and background tasks |
-| `backend-query`      | Load one player's profile through a `by_player` index                | Real authenticated backend gRPC, engine queue, JS evaluation, SQLite snapshot reads, contract validation         |
-| `backend-mutation`   | Save one player's profile (load, patch, return save count)           | As above, plus retry-context preparation and durable SQLite commit before the reply                              |
-| `backend-fanout`     | Raise one player's best score, then wait until every stream has it   | As above, plus reevaluation of every subscription and delivery over each watch stream                            |
-| `sync-queries`       | One app mutation through sync `Call` while `queries` streams follow  | Core's backend and control, sync authentication, position-only advances or reevaluation, and stream delivery     |
+| Workload             | One operation                                                        | Included work                                                                                                   |
+| -------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `proxy-relay`        | Client packet → relay → synthetic gameplay response → relay → client | Production managed PLAY relay, framing, AES-128-CFB8 encryption and zlib compression over real TCP              |
+| `control-population` | Open a `Watch` stream and read its snapshot of every seeded claim    | Real authenticated gRPC, in-memory state reads, normal reconciliation, arrival and health tasks                 |
+| `control-churn`      | New `Claim` → `Activate` → `ReconcileDeparture`                      | Real authenticated gRPC, placement, JVM reports, ownership changes, durable SQLite commits and background tasks |
+| `backend-query`      | Load one player's profile through a `by_player` index                | Real authenticated backend gRPC, engine queue, JS evaluation, SQLite snapshot reads, contract validation        |
+| `backend-mutation`   | Save one player's profile (load, patch, return save count)           | As above, plus retry-context preparation and durable SQLite commit before the reply                             |
+| `backend-fanout`     | Raise one player's best score, then wait until every stream has it   | As above, plus reevaluation of every subscription and delivery over each watch stream                           |
+| `sync-queries`       | One app mutation through sync `Call` while `queries` streams follow  | Core's backend and control, sync authentication, position-only advances or reevaluation, and stream delivery    |
 
 The proxy uses pre-established connections. It excludes Mojang login, configuration, command handling, admission,
 movement between servers and control streams. A feature-gated adapter calls the existing packet pump; normal proxy
@@ -51,8 +51,10 @@ has at most one outstanding round trip. `--burst N` makes the gameplay server an
 packets in one write, which exercises write batching; there is still no independent server broadcast, sustained one-way
 stream, slow reader or backpressure workload.
 
-Control populations are seeded through real claim and activation RPCs. Synthetic runtimes provide independent process
-identities, session inventories and instant player arrival; they do not launch JVMs or simulate game ticks, startup or
+Control populations are seeded through real claim and activation RPCs. Synthetic JVMs, one per host, follow their
+`jvm/<host>` topics inside the target process through control's API rather than the sync protocol's network transport,
+so their work counts toward the target's CPU and memory. They provide independent process identities, session
+inventories and player arrival as soon as a claim activates; they do not launch JVMs or simulate game ticks, startup or
 network failures. The target uses `chunk_control::server::run`, including its normal background tasks and on-disk SQLite
 settings. The fixture declares 128-player sessions, one session per process, and at most 32 processes.
 

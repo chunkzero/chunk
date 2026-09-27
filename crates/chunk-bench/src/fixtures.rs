@@ -1,22 +1,27 @@
-//! Synthetic runtime RPCs live in the generator process, outside target CPU/RSS.
+//! Synthetic JVMs: one per host control launches, following the host's `jvm/<host>` topic inside the target process
+//! as a JVM does over sync. Each runs every session at once, prepares every delivery, and arrives it once its claim
+//! activates; there is no JVM startup, player socket or world simulation.
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, OnceLock},
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
 };
 
 use anyhow::Result;
-use chunk_proto::v1::{
-    ConfigurationRequest, ConfigurationResponse, DeliveryInventory, DeliveryPhase, DeploymentRef, DesiredSessions,
-    PlayerDelivery, PlayerPreparation, PlayerWithdrawal, ProcessHealth, ProcessIdentity, ProcessReport,
-    SessionInventory, SessionPhase,
-    gameplay_server::{Gameplay, GameplayServer},
-    node_control_server::{NodeControl, NodeControlServer},
-    supervisor_client::SupervisorClient,
+use chunk_control::{Control, Host, Progress, Release, RuntimeConnection, jvm::Topic};
+use chunk_proto::{
+    sync::v1::{
+        self as sync, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmRegistration, JvmReport,
+        JvmSession, JvmSessionPhase, JvmSessionStatus,
+    },
+    v1::{ClaimPhase, DeploymentRef, ProcessIdentity, ProcessRegistration},
 };
-use tokio::{net::TcpListener, sync::mpsc};
-use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
-use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status};
+use prost::Message;
+
+const STREAM: &str = "synthetic";
+
+/// How often a synthetic JVM pushes its health.
+const HEALTH: Duration = Duration::from_secs(2);
 
 pub fn identity(id: &str) -> ProcessIdentity {
     ProcessIdentity {
@@ -30,183 +35,216 @@ pub fn identity(id: &str) -> ProcessIdentity {
     }
 }
 
+fn credential(id: &str) -> String {
+    format!("bench-{id}")
+}
+
+fn registration(id: &str) -> JvmRegistration {
+    let identity = identity(id);
+    JvmRegistration {
+        process_id: identity.process_id,
+        generation: identity.generation,
+        app: identity.app_id,
+        profile: identity.machine_profile,
+        artifact_digest: identity.artifact_digest,
+        deployment: "bench".into(),
+        player_endpoint: "127.0.0.1:1".into(),
+        protocol: 776,
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("synthetic host lock")
+}
+
 #[derive(Default)]
-struct Runtime {
-    sessions: BTreeMap<String, SessionInventory>,
-    deliveries: BTreeMap<String, DeliveryInventory>,
-    ticks: u64,
-    /// Reports to control over this runtime's stream.
-    reports: Option<mpsc::UnboundedSender<ProcessReport>>,
+pub struct SyntheticHost {
+    control: OnceLock<Weak<Control>>,
+    registered: Mutex<BTreeSet<String>>,
+    followed: Mutex<BTreeSet<String>>,
+    stopped: Mutex<BTreeSet<String>>,
 }
 
-impl Runtime {
-    fn report(&self, identity: &ProcessIdentity, sessions: Vec<SessionInventory>, deliveries: Vec<DeliveryInventory>) {
-        if let Some(reports) = &self.reports {
-            let _ = reports.send(ProcessReport { identity: Some(identity.clone()), sessions, deliveries });
+impl SyntheticHost {
+    /// Runs a synthetic JVM for each host `control` launches from now on.
+    pub fn attach(&self, control: &Arc<Control>) {
+        let _ = self.control.set(Arc::downgrade(control));
+    }
+}
+
+#[tonic::async_trait]
+impl Host for SyntheticHost {
+    async fn ensure(&self, id: &str, _: &Release, _: &str, _: &str) -> chunk_control::Result<Progress> {
+        if self.stopped(id) {
+            return Ok(Progress::Failed("synthetic runtime stopped".into()));
         }
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct Runtimes {
-    runtimes: Arc<Mutex<BTreeMap<String, Runtime>>>,
-    control: Arc<OnceLock<String>>,
-}
-
-impl Runtimes {
-    pub async fn serve(self, listener: TcpListener, stop: CancellationToken) -> Result<()> {
-        tonic::transport::Server::builder()
-            .add_service(GameplayServer::new(self.clone()))
-            .add_service(NodeControlServer::new(self))
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop.cancelled_owned())
-            .await?;
-        Ok(())
-    }
-
-    /// Sets the control endpoint each runtime streams its state to once control first calls it.
-    pub fn connect(&self, endpoint: String) {
-        let _ = self.control.set(endpoint);
-    }
-
-    /// Streams `id`'s state to control and follows its desired sessions until the stream ends.
-    async fn sync(self, id: String, reports: mpsc::UnboundedReceiver<ProcessReport>) -> Result<()> {
-        let endpoint = self.control.get().cloned().unwrap_or_default();
-        let mut request = Request::new(tokio_stream::wrappers::UnboundedReceiverStream::new(reports));
-        request.metadata_mut().insert("authorization", format!("Bearer bench-{id}").parse()?);
-        let mut desired = SupervisorClient::connect(endpoint).await?.sync(request).await?.into_inner();
-        while let Some(update) = desired.next().await {
-            self.apply(&id, update?).map_err(|error| anyhow::anyhow!("{error}"))?;
-        }
-        Ok(())
-    }
-
-    fn apply(&self, id: &str, desired: DesiredSessions) -> Result<(), Status> {
-        let mut runtimes = self.runtimes.lock().map_err(|_| Status::internal("fixture lock poisoned"))?;
-        let runtime = runtimes.entry(id.into()).or_default();
-        let mut changed = Vec::new();
-        for (command, phase) in desired
-            .create
-            .into_iter()
-            .map(|command| (command, SessionPhase::Ready))
-            .chain(desired.finish.into_iter().map(|command| (command, SessionPhase::Ended)))
+        if let Some(control) = self.control.get().and_then(Weak::upgrade)
+            && lock(&self.followed).insert(id.into())
         {
-            let session = command.session.ok_or_else(|| Status::invalid_argument("session"))?;
-            let inventory = SessionInventory {
-                session: Some(session.clone()),
-                generation: command.generation,
-                session_type: command.session_type,
-                capacity: command.capacity,
-                phase: phase as i32,
-                ..Default::default()
-            };
-            runtime.sessions.insert(session.id, inventory.clone());
-            changed.push(inventory);
-        }
-        runtime.report(&identity(id), changed, Vec::new());
-        Ok(())
-    }
-
-    fn call<T, R>(
-        &self,
-        request: Request<T>,
-        f: impl FnOnce(ProcessIdentity, &mut Runtime, T) -> Result<R, Status>,
-    ) -> Result<Response<R>, Status> {
-        let id = request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer bench-"))
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| Status::unauthenticated("benchmark runtime credential"))?;
-        let process = identity(id);
-        let mut runtimes = self.runtimes.lock().map_err(|_| Status::internal("fixture lock poisoned"))?;
-        let runtime = runtimes.entry(id.into()).or_default();
-        if runtime.reports.is_none() && self.control.get().is_some() {
-            let (reports, receiver) = mpsc::unbounded_channel();
-            let _ = reports.send(ProcessReport {
-                identity: Some(process.clone()),
-                sessions: runtime.sessions.values().cloned().collect(),
-                deliveries: runtime.deliveries.values().cloned().collect(),
-            });
-            runtime.reports = Some(reports);
-            let (runtimes, id) = (self.clone(), id.to_owned());
+            let id = id.to_owned();
             tokio::spawn(async move {
-                if let Err(error) = runtimes.sync(id, receiver).await {
-                    tracing::debug!(%error, "synthetic runtime stream ended");
+                if let Err(error) = follow(&control, &id).await {
+                    tracing::debug!(%error, host = id, "synthetic JVM stopped");
                 }
             });
         }
-        f(process, runtime, request.into_inner()).map(Response::new)
+        Ok(self.connection(id).map_or(Progress::Pending, |connection| Progress::Ready(Box::new(connection))))
+    }
+
+    fn connection(&self, id: &str) -> Option<RuntimeConnection> {
+        lock(&self.registered).contains(id).then(|| RuntimeConnection {
+            token: credential(id),
+            identity: identity(id),
+            player_endpoint: "127.0.0.1:1".into(),
+        })
+    }
+
+    fn register(&self, token: &str, registration: ProcessRegistration) -> chunk_control::Result<ProcessIdentity> {
+        let registered = registration.identity.unwrap_or_default();
+        let id = registered.runtime_id.clone();
+        if token != format!("Bearer {}", credential(&id)) || registered != identity(&id) {
+            return Err(chunk_control::Error::Invalid("unknown synthetic runtime"));
+        }
+        lock(&self.registered).insert(id);
+        Ok(registered)
+    }
+
+    async fn release(&self, id: &str) -> chunk_control::Result<bool> {
+        lock(&self.stopped).insert(id.into());
+        Ok(true)
+    }
+
+    fn stopped(&self, id: &str) -> bool {
+        lock(&self.stopped).contains(id)
     }
 }
 
-#[tonic::async_trait]
-impl Gameplay for Runtimes {
-    async fn configuration(
-        &self,
-        request: Request<ConfigurationRequest>,
-    ) -> Result<Response<ConfigurationResponse>, Status> {
-        self.call(request, |identity, _, requested| {
-            if requested.deployment != identity.deployment {
-                return Err(Status::failed_precondition("deployment"));
-            }
-            Ok(ConfigurationResponse {
-                deployment: identity.deployment,
-                process_generation: identity.generation,
-                protocol: 776,
-                runtime_id: identity.runtime_id,
-            })
-        })
-    }
-
-    async fn prepare_player(&self, request: Request<PlayerDelivery>) -> Result<Response<PlayerPreparation>, Status> {
-        self.call(request, |identity, runtime, delivery| {
-            if delivery.runtime_id != identity.runtime_id || delivery.process_generation != identity.generation {
-                return Err(Status::failed_precondition("delivery runtime identity"));
-            }
-            let operation = delivery.operation_id.clone();
-            // Instant synthetic arrival; no JVM startup, player socket or world simulation.
-            let inventory = DeliveryInventory { delivery: Some(delivery), phase: DeliveryPhase::Arrived as i32 };
-            runtime.deliveries.insert(operation.clone(), inventory.clone());
-            runtime.report(&identity, Vec::new(), vec![inventory]);
-            Ok(PlayerPreparation { operation_id: operation, endpoint: "127.0.0.1:1".into(), capability: vec![42; 32] })
-        })
-    }
-
-    async fn withdraw_player(&self, request: Request<PlayerWithdrawal>) -> Result<Response<PlayerWithdrawal>, Status> {
-        self.call(request, |identity, runtime, withdrawal| {
-            let binding =
-                runtime.deliveries.get_mut(&withdrawal.operation_id).ok_or_else(|| Status::not_found("delivery"))?;
-            if binding.delivery.as_ref().is_none_or(|delivery| delivery.owner_generation != withdrawal.owner_generation)
-            {
-                return Err(Status::failed_precondition("delivery generation"));
-            }
-            binding.phase = DeliveryPhase::Closed as i32;
-            let closed = binding.clone();
-            runtime.report(&identity, Vec::new(), vec![closed]);
-            Ok(withdrawal)
-        })
+/// Plays host `id`'s JVM until its topic asks it to stop: registers, follows the topic and reports what changed.
+async fn follow(control: &Arc<Control>, id: &str) -> Result<()> {
+    let credential = credential(id);
+    control.register_jvm(id, &credential, registration(id))?;
+    let (mut topic, first) = Topic::open(control, id, STREAM)?;
+    let mut jvm = Jvm::default();
+    let (mut update, mut complete, mut health) = (Some(first), true, true);
+    let mut interval = tokio::time::interval(HEALTH);
+    loop {
+        let mut report = JvmReport { complete, ..JvmReport::default() };
+        let stop = match update {
+            Some(update) => jvm.apply(&update, &mut report)?,
+            None => false,
+        };
+        jvm.arrive(control, &mut report)?;
+        if health {
+            jvm.ticks += 100;
+            report.health = Some(JvmHealth { ready: true, tick_count: jvm.ticks, ..JvmHealth::default() });
+        }
+        if complete || !(report.sessions.is_empty() && report.deliveries.is_empty() && report.health.is_none()) {
+            control.report_jvm(id, &credential, STREAM, report)?;
+        }
+        if stop {
+            return Ok(());
+        }
+        complete = false;
+        tokio::select! {
+            () = topic.changed() => health = false,
+            _ = interval.tick() => health = true,
+        }
+        update = topic.update()?;
     }
 }
 
-#[tonic::async_trait]
-impl NodeControl for Runtimes {
-    async fn health(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessHealth>, Status> {
-        self.call(request, |identity, runtime, requested| {
-            if identity != requested {
-                return Err(Status::failed_precondition("health runtime identity"));
+/// A delivery a synthetic JVM holds, for the player it names.
+struct Delivery {
+    status: JvmDeliveryStatus,
+    player: String,
+}
+
+#[derive(Default)]
+struct Jvm {
+    sessions: BTreeMap<String, JvmSessionStatus>,
+    deliveries: BTreeMap<String, Delivery>,
+    ticks: u64,
+}
+
+impl Jvm {
+    /// Runs or ends the sessions the topic lists, prepares its deliveries and closes those withdrawn or left out,
+    /// adding each change to `report`. Whether the topic asks the JVM to stop, which ends every session.
+    fn apply(&mut self, update: &sync::Update, report: &mut JvmReport) -> Result<bool> {
+        let stop = update.upserts.iter().any(|entry| entry.key == "stop");
+        let mut listed = BTreeSet::new();
+        for entry in &update.upserts {
+            let Some(sync::entry::State::Value(value)) = &entry.state else { continue };
+            if let Some(id) = entry.key.strip_prefix("session/") {
+                let wanted = JvmSession::decode(value.as_slice())?;
+                let phase = if wanted.finish || stop { JvmSessionPhase::Ended } else { JvmSessionPhase::Ready };
+                if self.sessions.get(id).is_none_or(|session| session.phase() != phase) {
+                    let status = JvmSessionStatus {
+                        id: id.into(),
+                        session_type: wanted.session_type,
+                        capacity: wanted.capacity,
+                        phase: phase.into(),
+                        ..JvmSessionStatus::default()
+                    };
+                    self.sessions.insert(id.into(), status.clone());
+                    report.sessions.push(status);
+                }
+            } else if let Some(operation) = entry.key.strip_prefix("delivery/") {
+                let wanted = JvmDelivery::decode(value.as_slice())?;
+                listed.insert(operation);
+                let held = self.deliveries.get(operation).map(|delivery| delivery.status.phase());
+                let phase = match held {
+                    None if !wanted.withdraw => JvmDeliveryPhase::Prepared,
+                    Some(phase) if !wanted.withdraw => phase,
+                    _ => JvmDeliveryPhase::Closed,
+                };
+                if held != Some(phase) {
+                    let prepared = phase == JvmDeliveryPhase::Prepared;
+                    let status = JvmDeliveryStatus {
+                        operation_id: operation.into(),
+                        generation: wanted.generation,
+                        phase: phase.into(),
+                        capability: if prepared { vec![42; 32] } else { Vec::new() },
+                    };
+                    let player = wanted.player.map(|player| player.uuid).unwrap_or_default();
+                    self.deliveries.insert(operation.into(), Delivery { status: status.clone(), player });
+                    report.deliveries.push(status);
+                }
             }
-            runtime.ticks += 100;
-            Ok(ProcessHealth { identity: Some(identity), ready: true, tick_count: runtime.ticks, ..Default::default() })
-        })
+        }
+        // A delivery the topic leaves out is closed, then forgotten.
+        self.deliveries.retain(|operation, delivery| {
+            if listed.contains(operation.as_str()) {
+                return true;
+            }
+            if delivery.status.phase() != JvmDeliveryPhase::Closed {
+                delivery.status.phase = JvmDeliveryPhase::Closed.into();
+                delivery.status.capability.clear();
+                report.deliveries.push(delivery.status.clone());
+            }
+            false
+        });
+        Ok(stop)
     }
 
-    async fn stop_process(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessIdentity>, Status> {
-        self.call(request, |identity, _, requested| {
-            if identity != requested {
-                return Err(Status::failed_precondition("stop runtime identity"));
+    /// Arrives each prepared delivery whose claim is activating, as when its player connects.
+    fn arrive(&mut self, control: &Control, report: &mut JvmReport) -> Result<()> {
+        let prepared = |delivery: &Delivery| delivery.status.phase() == JvmDeliveryPhase::Prepared;
+        if !self.deliveries.values().any(prepared) {
+            return Ok(());
+        }
+        let players = control.players()?.players;
+        let activating: BTreeSet<_> = players
+            .into_iter()
+            .filter(|player| player.phase() == ClaimPhase::Activating)
+            .filter_map(|player| player.identity.map(|identity| identity.uuid))
+            .collect();
+        for delivery in self.deliveries.values_mut().filter(|delivery| prepared(delivery)) {
+            if activating.contains(&delivery.player) {
+                delivery.status.phase = JvmDeliveryPhase::Arrived.into();
+                delivery.status.capability.clear();
+                report.deliveries.push(delivery.status.clone());
             }
-            Ok(identity)
-        })
+        }
+        Ok(())
     }
 }
