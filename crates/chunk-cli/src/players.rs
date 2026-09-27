@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
 
 use chunk_proto::sync::v1::{
     DrainArguments, DrainResult, MovePlayerArguments, MovePlayerResult, Node, NodePhase, SessionDemand,
@@ -54,26 +54,40 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
             let arguments = DrainArguments { target: Some(Target::Player(player)), timeout_seconds };
             let drained: DrainResult = core.call("drain", &operation_id, &arguments).await?;
             let patience = drained.deadline_ms.saturating_add(30_000).saturating_sub(now_ms());
-            tokio::time::timeout(Duration::from_millis(patience), stopped(&core, &drained.host)).await.map_err(
-                |_| io::Error::other("drain shutdown remains unresolved; retry with the same operation ID"),
-            )??;
+            stopped(&core, &drained.host, Duration::from_millis(patience)).await?;
             cliclack::log::success("Runtime drained.")?;
         }
     }
     Ok(())
 }
 
-/// Follows `nodes` until `host` stopped or is gone.
-async fn stopped(core: &Core, host: &str) -> io::Result<()> {
-    let mut nodes = core.follow::<Node>("nodes").await?;
-    loop {
-        if nodes.next().await?.get(host).is_none_or(|node| node.phase() == NodePhase::Stopped) {
-            return Ok(());
-        }
+/// Follows `nodes` until `host` stopped or is gone. Opening the topic and reading its first view take up to the call
+/// timeout, however little of `patience` is left, so a retry after the deadline still finds a stopped host; later views
+/// take up to `patience`.
+async fn stopped(core: &Core, host: &str, patience: Duration) -> io::Result<()> {
+    let done = |nodes: &BTreeMap<String, Node>| nodes.get(host).is_none_or(|node| node.phase() == NodePhase::Stopped);
+    let first = async {
+        let mut nodes = core.follow::<Node>("nodes").await?;
+        let stopped = done(nodes.next().await?);
+        io::Result::Ok((nodes, stopped))
+    };
+    let first = tokio::time::timeout(crate::core::TIMEOUT, first).await;
+    let (mut nodes, stopped) = first.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if stopped {
+        return Ok(());
     }
+    let later = async {
+        while !done(nodes.next().await?) {}
+        io::Result::Ok(())
+    };
+    let unresolved = |_| io::Error::other("drain shutdown remains unresolved; retry with the same operation ID");
+    tokio::time::timeout(patience, later).await.map_err(unresolved)?
 }
 
 fn now_ms() -> u64 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     u64::try_from(now.as_millis()).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod tests;

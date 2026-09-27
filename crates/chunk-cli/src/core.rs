@@ -9,7 +9,7 @@ use chunk_proto::sync::v1::{
 use prost::Message;
 use tonic::{Request, Streaming, transport::Channel};
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 /// Operator methods take operation IDs with this prefix.
 const OPERATION_PREFIX: &str = "operator:";
 /// Core sends messages of up to 16 MiB.
