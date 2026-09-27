@@ -1,27 +1,15 @@
 package dev.chunkzero.runtime.minestom.internal;
 
-import chunk.v1.Common.DeploymentRef;
-import chunk.v1.GameplayGrpc;
-import chunk.v1.GameplayOuterClass.ConfigurationRequest;
-import chunk.v1.GameplayOuterClass.ConfigurationResponse;
-import chunk.v1.GameplayOuterClass.PlayerDelivery;
-import chunk.v1.GameplayOuterClass.PlayerPreparation;
-import chunk.v1.GameplayOuterClass.PlayerSetup;
-import chunk.v1.GameplayOuterClass.PlayerWithdrawal;
-import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest;
-import chunk.v1.Supervision.DeliveryInventory;
-import chunk.v1.Supervision.DeliveryPhase;
-import chunk.v1.Supervision.ProcessReport;
-import chunk.v1.Supervision.SessionInventory;
+import chunk.sync.v1.Jvm.JvmDelivery;
+import chunk.sync.v1.Jvm.JvmDeliveryPhase;
+import chunk.sync.v1.Jvm.JvmDeliveryStatus;
+import chunk.sync.v1.Jvm.PlayerSetup;
+import chunk.v1.Supervision.SessionPhase;
 
 import dev.chunkzero.runtime.ManagedPlayer;
 import dev.chunkzero.runtime.SessionManager;
 
-import io.grpc.Status;
-import io.grpc.stub.StreamObserver;
-
 import net.kyori.adventure.text.Component;
-import net.minestom.server.MinecraftConstants;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.event.Event;
 import net.minestom.server.event.EventNode;
@@ -30,6 +18,7 @@ import net.minestom.server.event.player.AsyncPlayerPreLoginEvent;
 
 import org.jetbrains.annotations.ApiStatus;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,51 +30,32 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
+/**
+ * Runs the deliveries core's topic lists. It prepares each once its session is ready, admits its
+ * player through the {@code chunk:delivery} login plugin, and closes it once it is withdrawn or its
+ * key is gone. A delivery it can't prepare, or that is withdrawn first, is closed at once.
+ */
 @ApiStatus.Internal
-public final class GameplayService extends GameplayGrpc.GameplayImplBase {
+public final class GameplayService {
     private static final Pattern USERNAME = Pattern.compile("[A-Za-z0-9_]{1,16}");
+    private static final long WAIT_NANOS = TimeUnit.SECONDS.toNanos(30);
 
-    private final DeploymentRef deployment;
-    private final long generation;
     private final SessionManager manager;
     private final LongSupplier now;
-    private final String runtimeId;
-    private final Map<String, PreparedDelivery> preparations = new LinkedHashMap<>();
-    private final DeliveryFence owners = new DeliveryFence();
-    private final ConfigurationResponse configurationArtifact;
-    private final EventNode<Event> events = EventNode.all("gameplay-delivery");
-    private String endpoint = "";
     private final BooleanSupplier ready;
+    private final DeliveryFence owners = new DeliveryFence();
+    private final EventNode<Event> events = EventNode.all("gameplay-delivery");
+    // Guarded by itself, like the maps after it: the topic's latest deliveries, and those held.
+    private final Map<String, PreparedDelivery> preparations = new LinkedHashMap<>();
+    private Map<String, JvmDelivery> wanted = Map.of();
+    // Deliveries waiting for their session, since when, and those closed without preparing.
+    private final Map<String, Long> pending = new HashMap<>();
+    private final Map<String, JvmDelivery> refused = new HashMap<>();
 
-    public GameplayService(
-            DeploymentRef deployment,
-            long generation,
-            SessionManager manager,
-            LongSupplier now,
-            String runtimeId) {
-        this(deployment, generation, manager, now, runtimeId, () -> true);
-    }
-
-    public GameplayService(
-            DeploymentRef deployment,
-            long generation,
-            SessionManager manager,
-            LongSupplier now,
-            String runtimeId,
-            BooleanSupplier ready) {
-        this.ready = ready;
-        this.deployment = deployment;
-        this.generation = generation;
+    public GameplayService(SessionManager manager, LongSupplier now, BooleanSupplier ready) {
         this.manager = manager;
         this.now = now;
-        this.runtimeId = runtimeId;
-        configurationArtifact =
-                ConfigurationResponse.newBuilder()
-                        .setDeployment(deployment)
-                        .setProcessGeneration(generation)
-                        .setRuntimeId(runtimeId)
-                        .setProtocol(MinecraftConstants.PROTOCOL_VERSION)
-                        .build();
+        this.ready = ready;
         manager.setWithdraw(
                 id -> {
                     synchronized (preparations) {
@@ -95,7 +65,6 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
                                                 prepared ->
                                                         prepared.getDelivery()
                                                                 .getSession()
-                                                                .getId()
                                                                 .equals(id))
                                         .map(PreparedDelivery::close)
                                         .toArray(CompletableFuture<?>[]::new);
@@ -105,14 +74,6 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
         events.addListener(AsyncPlayerPreLoginEvent.class, this::preLogin);
         events.addListener(AsyncPlayerConfigurationEvent.class, this::configure);
         manager.getProcess().eventHandler().addChild(events);
-    }
-
-    public String getEndpoint() {
-        return endpoint;
-    }
-
-    public void setEndpoint(String endpoint) {
-        this.endpoint = endpoint;
     }
 
     private void preLogin(AsyncPlayerPreLoginEvent event) {
@@ -156,139 +117,129 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
         }
     }
 
-    @Override
-    public void configuration(
-            ConfigurationRequest request, StreamObserver<ConfigurationResponse> response) {
-        if (!request.getDeployment().equals(deployment)) {
-            response.onError(
-                    Status.PERMISSION_DENIED
-                            .withDescription("Deployment mismatch")
-                            .asRuntimeException());
-            return;
-        }
-        response.onNext(configurationArtifact);
-        response.onCompleted();
-    }
-
-    @Override
-    public void preparePlayer(PlayerDelivery request, StreamObserver<PlayerPreparation> response) {
-        try {
-            PlayerPreparation result;
-            synchronized (preparations) {
-                validate(request);
-                var prepared = preparations.get(request.getOperationId());
-                if (prepared != null) {
-                    if (!prepared.getDelivery().equals(request)) {
-                        throw new IllegalArgumentException(
-                                "Operation reused with different delivery");
-                    }
-                } else {
-                    if (!ready.getAsBoolean()) throw new IllegalStateException("Server not ready");
-                    if (preparations.size() >= 4096) {
-                        throw new IllegalStateException(
-                                "Process preparation history capacity reached");
-                    }
-                    var session =
-                            manager.get(
-                                    request.getSession().getId(), request.getSessionGeneration());
-                    var reserved =
-                            preparations.values().stream()
-                                    .filter(
-                                            candidate ->
-                                                    candidate
-                                                                    .getDelivery()
-                                                                    .getSession()
-                                                                    .equals(request.getSession())
-                                                            && !candidate.isReleased())
-                                    .count();
-                    if (reserved >= session.getCommand().getCapacity())
-                        throw new IllegalStateException("Session full");
-                    prepared =
-                            new PreparedDelivery(request, owners, now, session, manager.getTicks());
-                    preparations.put(request.getOperationId(), prepared);
-                }
-                result = prepared.result(endpoint);
-            }
-            response.onNext(result);
-            response.onCompleted();
-        } catch (Exception ignored) {
-            response.onError(
-                    Status.FAILED_PRECONDITION
-                            .withDescription("Delivery rejected")
-                            .asRuntimeException());
-        }
-    }
-
-    public void authorizeMethodCaller(SessionMethodRequest request) {
+    /** Runs the topic's latest deliveries, keyed by operation ID. */
+    public void apply(Map<String, JvmDelivery> deliveries) {
         synchronized (preparations) {
-            var prepared = preparations.get(request.getCaller().getDeliveryOperationId());
-            if (prepared == null || !prepared.authorizes(request)) {
-                throw new IllegalArgumentException("Stale session method caller");
-            }
+            wanted = Map.copyOf(deliveries);
+            preparations.forEach(
+                    (operation, prepared) -> {
+                        var delivery = wanted.get(operation);
+                        if (delivery == null || delivery.getWithdraw()) prepared.close();
+                    });
+            refused.keySet().retainAll(wanted.keySet());
+            pending.keySet().retainAll(wanted.keySet());
+            wanted.forEach(
+                    (operation, delivery) -> {
+                        if (!preparations.containsKey(operation) && !refused.containsKey(operation))
+                            pending.putIfAbsent(operation, now.getAsLong());
+                    });
+            settle();
         }
     }
 
+    /** Prepares waiting deliveries whose session became ready, and closes expired ones. */
     public void flush() {
         synchronized (preparations) {
             preparations.values().forEach(PreparedDelivery::checkDeadline);
+            settle();
         }
     }
 
-    public List<DeliveryInventory> deliveries() {
+    /** Prepares or refuses each waiting delivery it can, and forgets those closed and gone. */
+    private void settle() {
+        for (var operation : List.copyOf(pending.keySet())) {
+            var delivery = wanted.get(operation);
+            var phase = manager.phase(delivery.getSession());
+            if (phase == SessionPhase.SESSION_PHASE_READY && !delivery.getWithdraw()) {
+                try {
+                    prepare(operation, delivery);
+                } catch (RuntimeException error) {
+                    refused.put(operation, delivery);
+                }
+            } else if (delivery.getWithdraw()
+                    || !ready.getAsBoolean()
+                    || (phase != null && phase != SessionPhase.SESSION_PHASE_STARTING)
+                    || now.getAsLong() - pending.get(operation) >= WAIT_NANOS) {
+                refused.put(operation, delivery);
+            } else continue;
+            pending.remove(operation);
+        }
+        preparations
+                .entrySet()
+                .removeIf(
+                        entry ->
+                                !wanted.containsKey(entry.getKey())
+                                        && entry.getValue().isReleased());
+    }
+
+    private void prepare(String operation, JvmDelivery delivery) {
+        if (!ready.getAsBoolean()) throw new IllegalStateException("Server not ready");
+        var identity = delivery.getPlayer();
+        if (!USERNAME.matcher(identity.getUsername()).matches()
+                || !UUID.fromString(identity.getUuid()).toString().equals(identity.getUuid())) {
+            throw new IllegalArgumentException("Invalid player identity");
+        }
+        if (preparations.size() >= 4096)
+            throw new IllegalStateException("Process delivery capacity reached");
+        var session = manager.get(delivery.getSession(), 1);
+        var reserved =
+                preparations.values().stream()
+                        .filter(
+                                candidate ->
+                                        candidate
+                                                        .getDelivery()
+                                                        .getSession()
+                                                        .equals(delivery.getSession())
+                                                && !candidate.isReleased())
+                        .count();
+        if (reserved >= session.getCommand().getCapacity())
+            throw new IllegalStateException("Session full");
+        preparations.put(
+                operation,
+                new PreparedDelivery(
+                        operation, delivery, owners, now, session, manager.getTicks()));
+    }
+
+    /** Whether the player of delivery {@code operation} is in session {@code session}. */
+    public boolean arrived(String operation, String session) {
         synchronized (preparations) {
-            return preparations.values().stream().map(PreparedDelivery::inventory).toList();
+            var prepared = preparations.get(operation);
+            return prepared != null && prepared.arrivedIn(session);
         }
     }
 
-    public List<SessionInventory> sessions() {
-        return inventory().getSessionsList();
+    public List<JvmDeliveryStatus> deliveries() {
+        return deliveries(new HashMap<>());
     }
 
-    /** Every session with its prepared deliveries counted, and every delivery. */
-    public ProcessReport inventory() {
-        var deliveries = deliveries();
-        var prepared = new HashMap<String, Integer>();
-        for (var delivery : deliveries) {
-            if (delivery.getPhase() == DeliveryPhase.DELIVERY_PHASE_PREPARED)
-                prepared.merge(delivery.getDelivery().getSession().getId(), 1, Integer::sum);
-        }
-        var report = ProcessReport.newBuilder().addAllDeliveries(deliveries);
-        for (var session : manager.inventory()) {
-            report.addSessions(
-                    session.toBuilder()
-                            .setPrepared(prepared.getOrDefault(session.getSession().getId(), 0)));
-        }
-        return report.build();
-    }
-
-    @Override
-    public void withdrawPlayer(
-            PlayerWithdrawal request, StreamObserver<PlayerWithdrawal> response) {
-        PreparedDelivery stream;
+    /**
+     * Every delivery it holds, including those closed whose key remains, counting those PREPARED in
+     * each session into {@code prepared}.
+     */
+    public List<JvmDeliveryStatus> deliveries(Map<String, Integer> prepared) {
         synchronized (preparations) {
-            stream = preparations.get(request.getOperationId());
+            var statuses = new ArrayList<JvmDeliveryStatus>();
+            preparations
+                    .values()
+                    .forEach(
+                            delivery -> {
+                                var status = delivery.status();
+                                statuses.add(status);
+                                if (status.getPhase()
+                                        == JvmDeliveryPhase.JVM_DELIVERY_PHASE_PREPARED)
+                                    prepared.merge(
+                                            delivery.getDelivery().getSession(), 1, Integer::sum);
+                            });
+            refused.forEach(
+                    (operation, delivery) ->
+                            statuses.add(
+                                    JvmDeliveryStatus.newBuilder()
+                                            .setOperationId(operation)
+                                            .setGeneration(delivery.getGeneration())
+                                            .setPhase(JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
+                                            .build()));
+            return statuses;
         }
-        if (stream == null) {
-            response.onError(Status.NOT_FOUND.asRuntimeException());
-            return;
-        }
-        if (stream.getDelivery().getOwnerGeneration() != request.getOwnerGeneration()) {
-            response.onError(Status.FAILED_PRECONDITION.asRuntimeException());
-            return;
-        }
-        stream.close()
-                .whenComplete(
-                        (ignored, error) -> {
-                            if (error != null) {
-                                response.onError(
-                                        Status.INTERNAL
-                                                .withDescription("Withdrawal failed")
-                                                .asRuntimeException());
-                            } else {
-                                response.onNext(request);
-                                response.onCompleted();
-                            }
-                        });
     }
 
     public void close() {
@@ -296,43 +247,5 @@ public final class GameplayService extends GameplayGrpc.GameplayImplBase {
         synchronized (preparations) {
             preparations.values().forEach(PreparedDelivery::close);
         }
-    }
-
-    private void validate(PlayerDelivery delivery) {
-        if (delivery.getSerializedSize() > 65_536)
-            throw new IllegalArgumentException("Delivery exceeds size limit");
-        if (!delivery.getDeployment().equals(deployment)
-                || delivery.getProcessGeneration() != generation
-                || !delivery.getRuntimeId().equals(runtimeId)) {
-            throw new IllegalArgumentException("Stale process or deployment");
-        }
-        if (delivery.getProtocol() != MinecraftConstants.PROTOCOL_VERSION) {
-            throw new IllegalArgumentException("Incompatible destination protocol");
-        }
-        if (isBlank(delivery.getSession().getId())
-                || delivery.getOperationId().isEmpty()
-                || delivery.getOperationId().length() > 128) {
-            throw new IllegalArgumentException("Unknown session or operation");
-        }
-        if (isBlank(delivery.getPlayer().getId())
-                || delivery.getOwnerGeneration() <= 0
-                || delivery.getMembershipGeneration() <= 0
-                || isBlank(delivery.getProxyId())
-                || isBlank(delivery.getConnectionId())) {
-            throw new IllegalArgumentException("Invalid player ownership");
-        }
-        var identity = delivery.getIdentity();
-        if (!USERNAME.matcher(identity.getUsername()).matches()
-                || !UUID.fromString(identity.getUuid()).toString().equals(identity.getUuid())) {
-            throw new IllegalArgumentException("Invalid player identity");
-        }
-    }
-
-    private static boolean isBlank(String value) {
-        return value.chars()
-                .allMatch(
-                        character ->
-                                Character.isWhitespace(character)
-                                        || Character.isSpaceChar(character));
     }
 }

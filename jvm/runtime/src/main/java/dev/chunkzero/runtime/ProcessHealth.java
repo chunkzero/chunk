@@ -1,14 +1,13 @@
 package dev.chunkzero.runtime;
 
-import chunk.v1.Supervision;
-import chunk.v1.Supervision.ProcessIdentity;
+import chunk.sync.v1.Jvm.JvmHealth;
 
 import java.lang.management.ManagementFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Engine progress is recorded on ticks, independently of the RPC threads. */
+/** Engine progress is recorded on ticks, independently of the thread that reports it. */
 final class ProcessHealth {
     private final AtomicLong ticks;
     private volatile long lastTick;
@@ -40,7 +39,7 @@ final class ProcessHealth {
         return ready.get() && !draining.get();
     }
 
-    Supervision.ProcessHealth snapshot(ProcessIdentity identity) {
+    JvmHealth snapshot() {
         var memory = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
         long count = 0;
         long millis = 0;
@@ -51,11 +50,10 @@ final class ProcessHealth {
         var os = ManagementFactory.getOperatingSystemMXBean();
         var cpu =
                 os instanceof com.sun.management.OperatingSystemMXBean metrics
-                        ? metrics.getProcessCpuLoad()
-                        : -1;
+                        ? Math.max(0, metrics.getProcessCpuLoad())
+                        : 0;
         var last = lastTick;
-        return Supervision.ProcessHealth.newBuilder()
-                .setIdentity(identity)
+        return JvmHealth.newBuilder()
                 .setReady(acceptsWork())
                 .setDraining(draining.get())
                 .setTickCount(ticks.get())

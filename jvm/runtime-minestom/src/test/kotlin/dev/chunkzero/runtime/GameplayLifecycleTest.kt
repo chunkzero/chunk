@@ -1,42 +1,20 @@
 package dev.chunkzero.runtime
 
-import chunk.v1.Common.DeploymentRef
-import chunk.v1.Common.Identity
-import chunk.v1.Common.PlayerRef
+import chunk.sync.v1.CoreOuterClass.Position
+import chunk.sync.v1.Gateway.PlayerIdentity
+import chunk.sync.v1.Jvm.JvmDelivery
+import chunk.sync.v1.Jvm.JvmDeliveryPhase
+import chunk.sync.v1.Jvm.PlayerSetup
 import chunk.v1.Common.SessionRef
-import chunk.v1.GameplayGrpc
-import chunk.v1.GameplayOuterClass.PlayerDelivery
-import chunk.v1.GameplayOuterClass.PlayerSetup
-import chunk.v1.GameplayOuterClass.PlayerWithdrawal
-import chunk.v1.SessionMethodsOuterClass.SessionMethodCaller
-import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest
-import chunk.v1.Supervision.DeliveryPhase
 import chunk.v1.Supervision.SessionCommand
 import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.minestom.internal.GameplayService
-import io.grpc.Status
-import io.grpc.StatusRuntimeException
-import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
-import net.minestom.server.MinecraftConstants
 import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
 import net.minestom.server.network.ConnectionState
-import net.minestom.server.network.packet.client.common.ClientSettingsPacket
-import net.minestom.server.network.packet.client.configuration.ClientFinishConfigurationPacket
-import net.minestom.server.network.packet.client.configuration.ClientSelectKnownPacksPacket
-import net.minestom.server.network.packet.client.handshake.ClientHandshakePacket
-import net.minestom.server.network.packet.client.login.ClientLoginAcknowledgedPacket
-import net.minestom.server.network.packet.client.login.ClientLoginPluginResponsePacket
-import net.minestom.server.network.packet.client.login.ClientLoginStartPacket
-import net.minestom.server.network.packet.client.play.ClientTeleportConfirmPacket
-import net.minestom.server.network.packet.server.configuration.FinishConfigurationPacket
-import net.minestom.server.network.packet.server.configuration.SelectKnownPacksPacket
-import net.minestom.server.network.packet.server.login.LoginPluginRequestPacket
 import net.minestom.server.network.packet.server.login.LoginSuccessPacket
-import net.minestom.server.network.packet.server.play.PlayerPositionAndLookPacket
-import net.minestom.server.network.player.ClientSettings
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -91,21 +69,7 @@ class GameplayLifecycleTest {
                         },
                 ),
             )
-        val deployment =
-            DeploymentRef
-                .newBuilder()
-                .setEnvironment("local")
-                .setDeployment("test")
-                .build()
-        val service = GameplayService(deployment, 1, manager, System::nanoTime, "bridge")
-        val server =
-            NettyServerBuilder
-                .forAddress(
-                    InetSocketAddress("127.0.0.1", 0),
-                ).addService(service)
-                .build()
-                .start()
-        val channel = NettyChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
+        val service = GameplayService(manager, System::nanoTime) { true }
         val sockets = mutableListOf<Socket>()
         minecraft
             .schedulerManager()
@@ -117,7 +81,6 @@ class GameplayLifecycleTest {
                     .tick(1),
             ).schedule()
         minecraft.start(InetSocketAddress("127.0.0.1", 0))
-        service.endpoint = "127.0.0.1:${minecraft.server().port}"
         try {
             fun command(id: String) =
                 SessionCommand
@@ -131,85 +94,49 @@ class GameplayLifecycleTest {
                     .build()
             manager.create(command("a")).get(3, TimeUnit.SECONDS)
             manager.create(command("b")).get(3, TimeUnit.SECONDS)
-
-            fun stub() = GameplayGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
             val uuid = UUID.randomUUID().toString()
+            val wanted = mutableMapOf<String, JvmDelivery>()
 
             fun delivery(
                 session: String,
                 generation: Long,
-            ) = PlayerDelivery
+            ) = JvmDelivery
                 .newBuilder()
-                .setDeployment(deployment)
-                .setProcessGeneration(1)
-                .setRuntimeId("bridge")
-                .setOperationId("delivery-$generation")
-                .setSession(SessionRef.newBuilder().setId(session))
-                .setSessionGeneration(1)
-                .setMembershipGeneration(1)
-                .setProxyId("test-proxy")
-                .setConnectionId("test-connection")
-                .setOwnerGeneration(generation)
-                .setPlayer(PlayerRef.newBuilder().setId(uuid))
-                .setIdentity(Identity.newBuilder().setUuid(uuid).setUsername("test"))
-                .setProtocol(
-                    MinecraftConstants.PROTOCOL_VERSION,
-                ).build()
+                .setSession(session)
+                .setGeneration(Position.newBuilder().setEpoch(1).setRevision(generation))
+                .setPlayer(PlayerIdentity.newBuilder().setUuid(uuid).setUsername("test"))
+                .build()
 
-            fun connect(request: PlayerDelivery): Socket {
-                val prepared = stub().preparePlayer(request)
-                val socket = Socket("127.0.0.1", prepared.endpoint.substringAfter(':').toInt())
-                sockets.add(socket)
-                socket.soTimeout = 10_000
-                socket.send(
-                    0,
-                    ClientHandshakePacket.SERIALIZER,
-                    ClientHandshakePacket(
-                        MinecraftConstants.PROTOCOL_VERSION,
-                        "localhost",
-                        25565,
-                        ClientHandshakePacket.Intent.LOGIN,
-                    ),
-                )
-                socket.send(
-                    0,
-                    ClientLoginStartPacket.SERIALIZER,
-                    ClientLoginStartPacket(request.identity.username, UUID.fromString(request.identity.uuid)),
-                )
-                val challenge = socket.packet(ConnectionState.LOGIN) as LoginPluginRequestPacket
+            fun phase(operation: String) = service.deliveries().single { it.operationId == operation }.phase
+
+            fun await(
+                operation: String,
+                phase: JvmDeliveryPhase,
+            ) {
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                while (phase(operation) != phase) {
+                    check(System.nanoTime() < deadline) { "$operation never reached $phase" }
+                    Thread.sleep(10)
+                }
+            }
+
+            fun connect(
+                operation: String,
+                request: JvmDelivery,
+            ): Socket {
+                wanted[operation] = request
+                service.apply(wanted)
+                val prepared = service.deliveries().single { it.operationId == operation }
                 val setup =
                     PlayerSetup
                         .newBuilder()
-                        .setOperationId(
-                            request.operationId,
-                        ).setCapability(prepared.capability)
+                        .setOperationId(operation)
+                        .setCapability(prepared.capability)
                         .build()
-                socket.send(
-                    2,
-                    ClientLoginPluginResponsePacket.SERIALIZER,
-                    ClientLoginPluginResponsePacket(challenge.messageId(), setup.toByteArray()),
-                )
+                val socket = login(minecraft.server().port, "test", UUID.fromString(uuid), setup)
+                sockets.add(socket)
                 check(socket.packet(ConnectionState.LOGIN) is LoginSuccessPacket) { "Admission rejected" }
-                socket.send(3, ClientLoginAcknowledgedPacket.SERIALIZER, ClientLoginAcknowledgedPacket())
-                socket.send(0, ClientSettingsPacket.SERIALIZER, ClientSettingsPacket(ClientSettings.DEFAULT))
-                while (true) {
-                    when (socket.packet(ConnectionState.CONFIGURATION)) {
-                        is SelectKnownPacksPacket -> {
-                            socket.send(
-                                7,
-                                ClientSelectKnownPacksPacket.SERIALIZER,
-                                ClientSelectKnownPacksPacket(emptyList()),
-                            )
-                        }
-
-                        is FinishConfigurationPacket -> {
-                            break
-                        }
-
-                        else -> {}
-                    }
-                }
-                socket.send(3, ClientFinishConfigurationPacket.SERIALIZER, ClientFinishConfigurationPacket())
+                socket.configure()
                 return socket
             }
 
@@ -217,91 +144,31 @@ class GameplayLifecycleTest {
                 socket: Socket,
                 operation: String,
             ) {
-                val readerFailure = CompletableFuture<Unit>()
-                Thread.startVirtualThread {
-                    try {
-                        while (true) {
-                            val packet = socket.packet(ConnectionState.PLAY)
-                            if (packet is PlayerPositionAndLookPacket) {
-                                socket.send(
-                                    0,
-                                    ClientTeleportConfirmPacket.SERIALIZER,
-                                    ClientTeleportConfirmPacket(packet.teleportId()),
-                                )
-                            }
-                        }
-                    } catch (error: Exception) {
-                        readerFailure.completeExceptionally(error)
-                    }
-                }
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-                while (service.deliveries().single { it.delivery.operationId == operation }.phase !=
-                    DeliveryPhase.DELIVERY_PHASE_ARRIVED
-                ) {
-                    if (readerFailure.isDone) readerFailure.join()
-                    check(System.nanoTime() < deadline) {
-                        "Player never arrived: ${minecraft.connectionManager().onlinePlayers.map {
-                            Triple(
-                                it.lastSentTeleportId,
-                                it.lastReceivedTeleportId,
-                                (it as ManagedPlayer).initialization?.isDone,
-                            )
-                        }}"
-                    }
-                    Thread.sleep(10)
-                }
+                socket.confirmTeleports()
+                await(operation, JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED)
             }
-            val first = delivery("a", 1)
-            val firstSocket = connect(first)
-            arrive(firstSocket, first.operationId)
-            val methodCaller =
-                SessionMethodRequest
-                    .newBuilder()
-                    .setSession(first.session)
-                    .setSessionGeneration(1)
-                    .setCaller(
-                        SessionMethodCaller
-                            .newBuilder()
-                            .setDeliveryOperationId(first.operationId)
-                            .setPlayer(first.player)
-                            .setOwnerGeneration(1)
-                            .setMembershipGeneration(1),
-                    ).build()
-            service.authorizeMethodCaller(methodCaller)
-            assertThrows(IllegalArgumentException::class.java) {
-                service.authorizeMethodCaller(
-                    methodCaller.toBuilder().setCaller(methodCaller.caller.toBuilder().setOwnerGeneration(2)).build(),
-                )
+
+            fun withdraw(operation: String) {
+                wanted[operation] =
+                    wanted
+                        .getValue(operation)
+                        .toBuilder()
+                        .setWithdraw(true)
+                        .build()
+                service.apply(wanted)
             }
+            arrive(connect("first", delivery("a", 1)), "first")
+            assertTrue(service.arrived("first", "a"))
+            assertFalse(service.arrived("first", "b"))
             val oldPlayer = minecraft.connectionManager().onlinePlayers.single()
-            val destination = delivery("b", 2)
-            assertThrows(IllegalStateException::class.java) { connect(destination) }
-            val withdrawal =
-                PlayerWithdrawal
-                    .newBuilder()
-                    .setOperationId(
-                        first.operationId,
-                    ).setOwnerGeneration(1)
-                    .build()
-            assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
-            assertEquals(withdrawal, stub().withdrawPlayer(withdrawal))
-            val unprepared =
-                assertThrows(StatusRuntimeException::class.java) {
-                    stub().withdrawPlayer(withdrawal.toBuilder().setOperationId(UUID.randomUUID().toString()).build())
-                }
-            assertEquals(Status.Code.NOT_FOUND, unprepared.status.code)
-            val stale =
-                assertThrows(StatusRuntimeException::class.java) {
-                    stub().withdrawPlayer(withdrawal.toBuilder().setOwnerGeneration(2).build())
-                }
-            assertEquals(Status.Code.FAILED_PRECONDITION, stale.status.code)
-            assertThrows(IllegalArgumentException::class.java) { service.authorizeMethodCaller(methodCaller) }
+            assertThrows(IllegalStateException::class.java) { connect("destination", delivery("b", 2)) }
+            withdraw("first")
+            await("first", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
+            assertFalse(service.arrived("first", "a"))
             assertTrue(oldPlayer.isRemoved)
             assertTrue(oldPlayer in closedPlayers)
             assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
-            val next = delivery("b", 3)
-            val nextSocket = connect(next)
-            arrive(nextSocket, next.operationId)
+            arrive(connect("next", delivery("b", 3)), "next")
             manager.finish(command("a")).get(3, TimeUnit.SECONDS)
             val current = minecraft.connectionManager().onlinePlayers.single()
             assertEquals(uuid, current.uuid.toString())
@@ -313,53 +180,29 @@ class GameplayLifecycleTest {
             )
             assertTrue(current.isOnline)
             assertEquals(setOf(oldPlayer), closedPlayers)
-            stub().withdrawPlayer(
-                PlayerWithdrawal
-                    .newBuilder()
-                    .setOperationId(next.operationId)
-                    .setOwnerGeneration(3)
-                    .build(),
-            )
+            withdraw("next")
+            await("next", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
             manager.create(command("c").toBuilder().setSessionType("gated").build()).get(3, TimeUnit.SECONDS)
-            val pending = delivery("c", 4)
-            connect(pending)
+            connect("pending", delivery("c", 4))
             joinStarted.get(3, TimeUnit.SECONDS)
-            assertTrue(
-                service.deliveries().none {
-                    it.delivery.operationId == pending.operationId &&
-                        it.phase == DeliveryPhase.DELIVERY_PHASE_ARRIVED
-                },
+            assertTrue(phase("pending") != JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED)
+            withdraw("pending")
+            assertThrows(IllegalStateException::class.java) { connect("conflicting", delivery("c", 5)) }
+            assertEquals(
+                JvmDeliveryPhase.JVM_DELIVERY_PHASE_WITHDRAWING,
+                phase("pending"),
+                "Withdrawal must await the old asynchronous join",
             )
-            val pendingWithdrawal =
-                PlayerWithdrawal
-                    .newBuilder()
-                    .setOperationId(
-                        pending.operationId,
-                    ).setOwnerGeneration(4)
-                    .build()
-            val withdrawn = CompletableFuture.supplyAsync { stub().withdrawPlayer(pendingWithdrawal) }
-            val conflicting = delivery("c", 5)
-            assertThrows(IllegalStateException::class.java) { connect(conflicting) }
-            assertTrue(!withdrawn.isDone, "Withdrawal must await the old asynchronous join")
             joinFinished.complete(null)
-            assertEquals(pendingWithdrawal, withdrawn.get(3, TimeUnit.SECONDS))
-            val replacement = delivery("c", 6)
-            val replacementSocket = connect(replacement)
-            arrive(replacementSocket, replacement.operationId)
-            stub().withdrawPlayer(
-                PlayerWithdrawal
-                    .newBuilder()
-                    .setOperationId(replacement.operationId)
-                    .setOwnerGeneration(6)
-                    .build(),
-            )
+            await("pending", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
+            arrive(connect("replacement", delivery("c", 6)), "replacement")
+            withdraw("replacement")
+            await("replacement", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
             manager.finish(command("c")).get(3, TimeUnit.SECONDS)
             manager.finish(command("b")).get(3, TimeUnit.SECONDS)
         } finally {
             sockets.forEach { it.close() }
             service.close()
-            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
-            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS)
             minecraft.stop()
         }
     }

@@ -41,20 +41,23 @@ and artifact hashes; control uses it to select the app and profile, verify the J
 with the chosen capacity. The JVM enforces those commands without loading a deployment manifest. Changing deployment
 requirements creates a new release while preserving the executable bytes.
 
-The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_ENVIRONMENT`, `CHUNK_DEPLOYMENT`, `CHUNK_CONTROL_ENDPOINT`,
-`CHUNK_INSTANCE_ID`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST`,
-`CHUNK_APP_ID`, `CHUNK_BACKEND_ENDPOINT` and `CHUNK_BACKEND_TOKEN`. `ChunkProcess.connect()` verifies the exact backend
-deployment before returning. There is no deployment fallback or standalone unbound fixture mode.
+The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT` (read as `CHUNK_CONTROL_ENDPOINT`
+when unset), `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST` and
+`CHUNK_APP_ID`. There is no deployment fallback or standalone unbound fixture mode.
 
-`ready()` registers the frozen process only after application initialization. Control polls the authenticated
-`NodeControl` health RPC every five seconds. JVM RPC threads report engine progress recorded by the tick thread, heap
-use, GC counters, CPU load and session/player counts. Three failed or stale-progress polls request termination; a
-reachable RPC thread alone does not establish engine health. Missing measurements retain their observation timestamp.
+`ready()` registers the frozen process with core's `chunk:register` only after application initialization, retrying
+while core is unavailable. Core checks that the deployment is active, and a refused registration fails `ready()`. The
+JVM then follows its `jvm/<host>` topic for the sessions, deliveries and session methods to run and whether to stop, and
+reports with `chunk:report` on a channel of its own: everything it holds on each new stream, then what changed, with its
+health at least every three seconds. Core counts a JVM unhealthy once it has reported no health for ten seconds. Health
+carries engine progress recorded by the tick thread, heap use, GC counters, CPU load and session/player counts, so a
+responsive link alone does not establish engine health. A broken or superseded stream registers and subscribes again.
 
 `shutdownRequested()` provides a completion stage; `awaitShutdown()` is the blocking main-thread equivalent.
-`requestShutdown()` lets the app stop accepting work and notify its shutdown handler. The app closes engine resources
-when shutdown is requested. The host allows a bounded graceful shutdown, then kills the owned process if necessary and
-waits for exit. Player ownership is released only after withdrawal or confirmed process exit.
+`requestShutdown()` lets the app stop accepting work and notify its shutdown handler; core's `stop` entry requests it
+too. The app closes engine resources when shutdown is requested. The host allows a bounded graceful shutdown, then kills
+the owned process if necessary and waits for exit. Player ownership is released only after withdrawal or confirmed
+process exit.
 
 The proxy connects directly to Minestom's loopback Minecraft listener. Single-use `chunk:delivery` capabilities
 authorize native login. There is no per-server Rust process or intermediate TCP relay. Minestom owns configuration,
@@ -78,10 +81,10 @@ node; and registered `AutoCloseable` resources such as subscriptions. `getEvents
 notifications, its admitted players' events, and events of its instances and the entities in them. Direct process
 registrations require explicit cleanup. Ending, including after failed creation, withdraws deliveries, waits for
 leave/finish hooks, then cancels the scope's tasks, closes its resources, unregisters its instances and detaches its
-node. Sessions share the process's memory, threads and failures; a scope is not a sandbox. A process retains at most 256
-session identities and 4096 delivery operations; exhausting history requires a replacement process. Stuck customer
-futures retain ownership until a host deadline terminates the process; they never produce a false withdrawal
-acknowledgment.
+node. Sessions share the process's memory, threads and failures; a scope is not a sandbox. A process runs at most 256
+live sessions and holds at most 4096 deliveries at once. Its delivery fence remembers up to 65,536 players; exhausting
+that history requires a replacement process. Stuck customer futures retain ownership until a host deadline terminates
+the process; they never produce a false withdrawal acknowledgment.
 
 ## Components
 
@@ -145,23 +148,25 @@ The scope is disposed during a destroy callback: its identity remains readable, 
 unavailable. Minestom listeners target concrete classes; listening to the `SessionEvent` interface does not subscribe to
 every implementation.
 
-Delivery pins session generation as well as process/deployment and player ownership. A prepared delivery reserves
-capacity. Native Minecraft login attaches the player. `onJoin` begins after Minestom spawn completes, so it can send
-player UI and start asynchronous backend work. Arrival requires the join stage and the latest teleport acknowledgment.
-Withdrawal fences output immediately, waits for pending Minestom spawn callbacks and the join stage, removes the old
-player and completes its leave hook before releasing UUID ownership. The proxy must acknowledge withdrawal before
-activating that UUID elsewhere in the JVM. Managed proxy moves prepare a new TCP delivery while the source plays,
-confirm withdrawal, drive both client configuration acknowledgments, and activate the destination on the existing public
-connection.
+Core places each player on the JVM as a `delivery/<op>` entry. The JVM prepares it once its session is ready, reserving
+capacity, and reports it PREPARED with a single-use capability it mints, which the gateway presents through the
+`chunk:delivery` login plugin within 30 seconds. A player is admitted under one delivery at a time, each with a newer
+claim generation than the last. Native Minecraft login attaches the player. `onJoin` begins after Minestom spawn
+completes, so it can send player UI and start asynchronous backend work. Arrival requires the join stage and the latest
+teleport acknowledgment. Withdrawing a delivery, or removing its key, fences output immediately, waits for pending
+Minestom spawn callbacks and the join stage, removes the old player and completes its leave hook before releasing UUID
+ownership and reporting the delivery CLOSED. Until then, app code may still name the player as its caller, so saves on
+leave work. Session methods arrive as `method/<op>` entries: each runs once on the tick thread while its player is
+arrived, unless cancelled or past its deadline first, and its result goes back through `chunk:method_result`. Managed
+proxy moves prepare a new TCP delivery while the source plays, confirm withdrawal, drive both client configuration
+acknowledgments, and activate the destination on the existing public connection.
 
-The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at
-`CHUNK_CONTROL_ENDPOINT` with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player.
-Core derives the caller app code sees, including the registered app ID, so function arguments do not choose that
-identity. Control's `CHUNK_BACKEND_FILE` passes the backend's private connection to app JVMs as `CHUNK_BACKEND_ENDPOINT`
-and `CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT` and checks that exact
-deployment with the backend's `CheckDeployment` before reporting ready. Missing configuration, an unavailable backend,
-or a missing deployment fails startup. Use `scope.operationId(player, action)` for a mutation that should happen once
-per player delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
+The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at `CHUNK_CORE_ENDPOINT`
+with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player. Core derives the caller
+app code sees, including the registered app ID, so function arguments do not choose that identity. The JVM requires an
+explicit `CHUNK_DEPLOYMENT`, which core checks when the JVM registers. Missing configuration or an inactive deployment
+fails startup. Use `scope.operationId(player, action)` for a mutation that should happen once per player delivery. It
+returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
 `scope.coroutines.backend(scope.backend, player)` for a player-bound client whose calls and watches close on departure.
 Session clients close on disposal. The [local example](../../examples/local/README.md) demonstrates persistent coins,
 visits and subscription updates, including stale state during backend disconnection. Sessions own their instances, event

@@ -191,6 +191,8 @@ impl ProcessHost {
                 .env("CHUNK_PROCESS_TOKEN", &process.token)
                 .env("CHUNK_ENVIRONMENT", &deployment.environment)
                 .env("CHUNK_DEPLOYMENT", &deployment.deployment)
+                .env("CHUNK_CORE_ENDPOINT", endpoint)
+                // The endpoint's older name, for runtime JARs that predate `CHUNK_CORE_ENDPOINT`.
                 .env("CHUNK_CONTROL_ENDPOINT", endpoint)
                 .env("CHUNK_INSTANCE_ID", id)
                 .env("CHUNK_PROCESS_ID", &process.identity.process_id)
@@ -198,8 +200,6 @@ impl ProcessHost {
                 .env("CHUNK_MACHINE_PROFILE", profile)
                 .env("CHUNK_ARTIFACT_DIGEST", &artifact.sha256)
                 .env("CHUNK_APP_ID", app)
-                .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
-                .env("CHUNK_BACKEND_TOKEN", &backend.token)
                 .stdin(Stdio::from(gate))
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))

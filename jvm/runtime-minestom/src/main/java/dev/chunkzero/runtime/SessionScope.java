@@ -253,9 +253,17 @@ public final class SessionScope {
         if (!ACTION.matcher(action).matches())
             throw new IllegalArgumentException("Invalid operation action");
         if (!players.contains(player)) throw new IllegalArgumentException("Player is not admitted");
-        var binding = ((ManagedPlayer) player).getBinding();
+        var generation = ((ManagedPlayer) player).getBinding().getGeneration();
         return new OperationId(
-                id + "/" + player.getUuid() + "/" + binding.getOwnerGeneration() + "/" + action);
+                id
+                        + "/"
+                        + player.getUuid()
+                        + "/"
+                        + generation.getEpoch()
+                        + "."
+                        + generation.getRevision()
+                        + "/"
+                        + action);
     }
 
     public CompletionStage<Void> finish() {

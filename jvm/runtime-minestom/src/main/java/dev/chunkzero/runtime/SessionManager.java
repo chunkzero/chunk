@@ -226,6 +226,14 @@ public final class SessionManager {
                 || phase == SessionPhase.SESSION_PHASE_FAILED;
     }
 
+    /** The phase of session {@code id}, or null while this manager has no record of it. */
+    public @Nullable SessionPhase phase(String id) {
+        var session = sessions.get(id);
+        if (session != null) return session.phase;
+        var outcome = outcomes.get(id);
+        return outcome == null ? null : outcome.getPhase();
+    }
+
     public ManagedSession get(String id, long generation) {
         var session = sessions.get(id);
         if (session == null) throw new IllegalArgumentException("Unknown session");

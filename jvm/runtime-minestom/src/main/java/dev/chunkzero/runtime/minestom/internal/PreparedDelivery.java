@@ -1,12 +1,10 @@
 package dev.chunkzero.runtime.minestom.internal;
 
-import chunk.v1.Common.Identity;
-import chunk.v1.GameplayOuterClass.PlayerDelivery;
-import chunk.v1.GameplayOuterClass.PlayerPreparation;
-import chunk.v1.GameplayOuterClass.PlayerSetup;
-import chunk.v1.SessionMethodsOuterClass.SessionMethodRequest;
-import chunk.v1.Supervision.DeliveryInventory;
-import chunk.v1.Supervision.DeliveryPhase;
+import chunk.sync.v1.Gateway.PlayerIdentity;
+import chunk.sync.v1.Jvm.JvmDelivery;
+import chunk.sync.v1.Jvm.JvmDeliveryPhase;
+import chunk.sync.v1.Jvm.JvmDeliveryStatus;
+import chunk.sync.v1.Jvm.PlayerSetup;
 import chunk.v1.Supervision.SessionPhase;
 
 import com.google.protobuf.ByteString;
@@ -30,9 +28,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
-/** Single-use admission record; terminal history retains no live player references. */
+/**
+ * A delivery the JVM prepared: a slot in its session and the capability it minted, which admits the
+ * player once. Once closed it holds no live player references.
+ */
 final class PreparedDelivery {
-    private final PlayerDelivery delivery;
+    private final String operation;
+    private final JvmDelivery delivery;
     private final DeliveryFence owners;
     private final LongSupplier now;
     private final SessionManager.ManagedSession session;
@@ -47,14 +49,16 @@ final class PreparedDelivery {
     private final CompletableFuture<Void> removed = new CompletableFuture<>();
     private boolean arrived;
     private boolean joinStarted;
-    private @Nullable DeliveryInventory inventory;
+    private @Nullable JvmDeliveryStatus status;
 
     PreparedDelivery(
-            PlayerDelivery delivery,
+            String operation,
+            JvmDelivery delivery,
             DeliveryFence owners,
             LongSupplier now,
             SessionManager.ManagedSession session,
             TickExecutor ticks) {
+        this.operation = operation;
         this.delivery = delivery;
         this.owners = owners;
         this.now = now;
@@ -64,12 +68,12 @@ final class PreparedDelivery {
         openedAt = now.getAsLong();
     }
 
-    PlayerDelivery getDelivery() {
+    JvmDelivery getDelivery() {
         return delivery;
     }
 
-    synchronized boolean authorizes(SessionMethodRequest request) {
-        var caller = request.getCaller();
+    /** Whether the player is in {@code id}, the delivery's session. */
+    synchronized boolean arrivedIn(String id) {
         return !closed
                 && arrived
                 && player != null
@@ -77,11 +81,7 @@ final class PreparedDelivery {
                 && connection != null
                 && connection.isOnline()
                 && session.getPhase() == SessionPhase.SESSION_PHASE_READY
-                && delivery.getSession().equals(request.getSession())
-                && delivery.getSessionGeneration() == request.getSessionGeneration()
-                && delivery.getPlayer().equals(caller.getPlayer())
-                && delivery.getMembershipGeneration() == caller.getMembershipGeneration()
-                && delivery.getOwnerGeneration() == caller.getOwnerGeneration();
+                && delivery.getSession().equals(id);
     }
 
     synchronized boolean owns(PlayerConnection current) {
@@ -102,33 +102,26 @@ final class PreparedDelivery {
         return session.getScope().getInstances().getFirst();
     }
 
-    synchronized DeliveryInventory inventory() {
+    synchronized JvmDeliveryStatus status() {
         checkDeadline();
-        DeliveryPhase phase;
-        if (closed && !isReleased()) phase = DeliveryPhase.DELIVERY_PHASE_WITHDRAWING;
-        else if (closed) phase = DeliveryPhase.DELIVERY_PHASE_CLOSED;
-        else if (arrived) phase = DeliveryPhase.DELIVERY_PHASE_ARRIVED;
+        JvmDeliveryPhase phase;
+        if (closed && !isReleased()) phase = JvmDeliveryPhase.JVM_DELIVERY_PHASE_WITHDRAWING;
+        else if (closed) phase = JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED;
+        else if (arrived) phase = JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED;
         else if (connection != null && connection.getClientState() == ConnectionState.PLAY) {
-            phase = DeliveryPhase.DELIVERY_PHASE_ATTACHED;
-        } else phase = DeliveryPhase.DELIVERY_PHASE_PREPARED;
-        if (inventory == null || inventory.getPhase() != phase) {
-            inventory =
-                    DeliveryInventory.newBuilder()
-                            .setDelivery(delivery.toBuilder().clearIdentity())
-                            .setPhase(phase)
-                            .build();
+            phase = JvmDeliveryPhase.JVM_DELIVERY_PHASE_ATTACHED;
+        } else phase = JvmDeliveryPhase.JVM_DELIVERY_PHASE_PREPARED;
+        if (status == null || status.getPhase() != phase) {
+            var next =
+                    JvmDeliveryStatus.newBuilder()
+                            .setOperationId(operation)
+                            .setGeneration(delivery.getGeneration())
+                            .setPhase(phase);
+            if (phase == JvmDeliveryPhase.JVM_DELIVERY_PHASE_PREPARED)
+                next.setCapability(ByteString.copyFrom(capability));
+            status = next.build();
         }
-        return inventory;
-    }
-
-    synchronized PlayerPreparation result(String endpoint) {
-        checkDeadline();
-        if (closed) throw new IllegalStateException("Delivery closed");
-        return PlayerPreparation.newBuilder()
-                .setOperationId(delivery.getOperationId())
-                .setEndpoint(endpoint)
-                .setCapability(ByteString.copyFrom(capability))
-                .build();
+        return status;
     }
 
     synchronized GameProfile consume(
@@ -137,15 +130,15 @@ final class PreparedDelivery {
         if (closed || consumed || session.getPhase() != SessionPhase.SESSION_PHASE_READY) {
             throw new IllegalStateException("Delivery unavailable");
         }
-        if (!setup.getOperationId().equals(delivery.getOperationId())
+        if (!setup.getOperationId().equals(operation)
                 || !MessageDigest.isEqual(capability, setup.getCapability().toByteArray())) {
             throw new IllegalArgumentException("Invalid delivery capability");
         }
-        var profile = profile(delivery.getIdentity());
+        var profile = profile(delivery.getPlayer());
         if (!presented.uuid().equals(profile.uuid()) || !presented.name().equals(profile.name())) {
             throw new IllegalArgumentException("Player identity mismatch");
         }
-        owners.claim(delivery.getIdentity().getUuid(), delivery.getOwnerGeneration());
+        owners.claim(delivery.getPlayer().getUuid(), delivery.getGeneration());
         consumed = true;
         connection = accepted;
         return profile;
@@ -231,8 +224,8 @@ final class PreparedDelivery {
                                 if (error == null) {
                                     if (consumed)
                                         owners.release(
-                                                delivery.getIdentity().getUuid(),
-                                                delivery.getOwnerGeneration());
+                                                delivery.getPlayer().getUuid(),
+                                                delivery.getGeneration());
                                     removed.complete(null);
                                 } else {
                                     removed.completeExceptionally(error);
@@ -242,7 +235,7 @@ final class PreparedDelivery {
         return removed;
     }
 
-    private static GameProfile profile(Identity identity) {
+    private static GameProfile profile(PlayerIdentity identity) {
         return new GameProfile(
                 UUID.fromString(identity.getUuid()),
                 identity.getUsername(),
