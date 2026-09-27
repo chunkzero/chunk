@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// Control's accepted operations, which run to completion even if their call is dropped, and which control awaits
 /// before it stops hosts. Once shutdown begins, external operations are refused, so the operations it awaits are
-/// finite.
+/// finite. A JVM's reports are not among them, so a JVM reporting throughout shutdown can't keep its host running.
 #[derive(Clone, Default)]
 pub struct Operations {
     pub(crate) tracker: TaskTracker,
@@ -30,14 +30,6 @@ impl Operations {
             }
             self.tracker.spawn(operation)
         };
-        task.await.unwrap_or(Err(Error::Unresolved("the control operation's task failed")))
-    }
-
-    /// Runs a JVM's report, which shutdown still applies while it stops the JVM's host.
-    /// # Errors
-    /// Reports the report's own errors or a failed task.
-    pub async fn report(&self, report: impl Future<Output = Result<()>> + Send + 'static) -> Result<()> {
-        let task = self.tracker.spawn(report);
         task.await.unwrap_or(Err(Error::Unresolved("the control operation's task failed")))
     }
 

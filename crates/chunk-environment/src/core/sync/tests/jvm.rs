@@ -371,6 +371,7 @@ async fn a_jvm_that_outlived_core_re_attaches_by_registering() {
     assert_eq!(next(&mut unadopted).await.error.map(|error| error.code()), Some(Code::Denied));
     let report = JvmReport { complete: true, ..JvmReport::default() };
     assert_eq!(code(&fixture.jvm_call(JVM, "chunk:report", "", &report).await), Code::Denied);
+    assert_eq!(code(&fixture.jvm_call(JVM, "chunk:prepare", "", &()).await), Code::Denied);
 
     assert_eq!(fixture.register().await.host, host);
     let mut updates = fixture.follow_jvm(JVM, &host).await;
@@ -379,6 +380,59 @@ async fn a_jvm_that_outlived_core_re_attaches_by_registering() {
     let report = complete(&id, JvmSessionPhase::Ready, None);
     assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
     drop(updates);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_stops_a_jvm_that_keeps_reporting() {
+    let jvm = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let host = place(&fixture, &jvm).await;
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = next(&mut updates).await;
+    let (id, _) = sessions(&first).pop_first().expect("a session");
+    let ready = complete(&id, JvmSessionPhase::Ready, None);
+    assert_eq!(fixture.report(&first.stream, &ready).await.outcome, ACCEPTED);
+
+    // Overlapping reports keep arriving until the JVM's credential lapses or core stops serving.
+    let message = CallRequest {
+        method: "chunk:report".into(),
+        arguments: ready.encode_to_vec(),
+        stream: first.stream.clone(),
+        ..CallRequest::default()
+    };
+    let reporters: Vec<_> = (0..16)
+        .map(|_| {
+            let (mut client, message) = (fixture.client.clone(), message.clone());
+            tokio::spawn(async move { while client.call(authorized(message.clone(), JVM)).await.is_ok() {} })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(20), fixture.close()).await.expect("shutdown stopped the host");
+    assert!(jvm.0.lock().unwrap().released);
+    for reporter in reporters {
+        reporter.await.unwrap();
+    }
+    drop(updates);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jvm_whose_deployment_a_restore_lost_is_stopped_instead_of_awaited() {
+    // Core restarts over a log that lost both the surviving JVM's host and its deployment.
+    let jvm = Launches::of("host-1", true);
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let lost = JvmRegistration { deployment: "lost".into(), ..registration() };
+    assert_eq!(code(&fixture.jvm_call(JVM, "chunk:register", "", &lost).await), Code::Contract);
+    let stopped = async {
+        while !jvm.0.lock().unwrap().released {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), stopped).await.expect("control stopped the JVM");
+    // Recovery doesn't wait for the stopped JVM, so claims aren't refused as busy.
+    let claim = fixture.control.claim(runtime::login()).await;
+    assert!(!matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
     fixture.stop().await;
 }
 

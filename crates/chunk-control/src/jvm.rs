@@ -93,6 +93,44 @@ impl Control {
         if self.jvms.lock()?.get(host).is_some_and(|jvm| jvm.registration != registration) {
             return changed();
         }
+        // Registering may commit, so it runs outside the JVMs' lock.
+        self.register(&format!("Bearer {credential}"), self.process(host, &registration))?;
+        match self.jvms.lock()?.entry(host.into()) {
+            btree_map::Entry::Occupied(jvm) if jvm.get().registration != registration => changed(),
+            btree_map::Entry::Occupied(_) => Ok(()),
+            btree_map::Entry::Vacant(entry) => {
+                let stopping = watch::Sender::new(false);
+                entry.insert(Jvm { registration, stream: None, health: None, stopping });
+                Ok(())
+            }
+        }
+    }
+
+    /// Re-attaches the JVM that outlived control on `host`, whose credential is `credential`, only to stop it, as when
+    /// a restore lost the deployment it runs. Its launch record authenticates it as a registration does, so its host
+    /// kills it by its verified PID once the stop grace passes, and recovery counts the host resolved once it exits.
+    /// # Errors
+    /// Rejects a registration its launch record or the log does not match.
+    pub fn stop_survivor(
+        self: &Arc<Self>,
+        host: &str,
+        credential: &str,
+        registration: &sync::JvmRegistration,
+    ) -> Result<()> {
+        self.register(&format!("Bearer {credential}"), self.process(host, registration))?;
+        let (control, host) = (self.clone(), host.to_owned());
+        tokio::spawn(async move {
+            match control.release_host(&host).await {
+                Ok(true) => tracing::info!(host, "stopped a JVM whose deployment is gone"),
+                Ok(false) => tracing::warn!(host, "a JVM whose deployment is gone may still run"),
+                Err(error) => tracing::warn!(%error, host, "cannot stop a JVM whose deployment is gone"),
+            }
+        });
+        Ok(())
+    }
+
+    /// The supervisor registration `registration` stands for: `host`'s process, which serves no control endpoint.
+    fn process(&self, host: &str, registration: &sync::JvmRegistration) -> ProcessRegistration {
         let identity = ProcessIdentity {
             deployment: Some(DeploymentRef {
                 environment: self.config.environment.clone(),
@@ -105,28 +143,17 @@ impl Control {
             artifact_digest: registration.artifact_digest.clone(),
             app_id: registration.app.clone(),
         };
-        let process = ProcessRegistration {
+        ProcessRegistration {
             identity: Some(identity),
             control_endpoint: String::new(),
             player_endpoint: registration.player_endpoint.clone(),
-        };
-        // Registering may commit, so it runs outside the JVMs' lock.
-        self.register(&format!("Bearer {credential}"), process)?;
-        match self.jvms.lock()?.entry(host.into()) {
-            btree_map::Entry::Occupied(jvm) if jvm.get().registration != registration => changed(),
-            btree_map::Entry::Occupied(_) => Ok(()),
-            btree_map::Entry::Vacant(entry) => {
-                let stopping = watch::Sender::new(false);
-                entry.insert(Jvm { registration, stream: None, health: None, stopping });
-                Ok(())
-            }
         }
     }
 
     /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`, through the supervisor's
     /// attach and report path. The commit checks that `stream` is current and applies the report's sessions, link and
     /// health under the JVMs' lock, so a superseded stream changes nothing and each stream attaches once, with its
-    /// first complete report.
+    /// first complete report. A report abandoned after that commit leaves its recovery to later reports and claims.
     /// # Errors
     /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one.
     pub async fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {

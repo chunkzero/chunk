@@ -34,11 +34,10 @@ pub(super) async fn call(
     method: Method,
     request: &CallRequest,
 ) -> Result<(Option<Position>, Vec<u8>), Error> {
-    let host = match (&principal.class, method) {
-        (Class::Jvm { host }, _) | (Class::Unadopted { host }, Method::Register) => host.clone(),
-        (Class::Unadopted { .. }, Method::Report) => return Err(errors::denied("the JVM must register again first")),
-        _ => return Err(errors::denied("only a JVM registers and reports")),
+    let (Class::Jvm { host } | Class::Unadopted { host }) = &principal.class else {
+        return Err(errors::denied("only a JVM registers and reports"));
     };
+    let host = host.clone();
     if !request.deployment.is_empty() || request.caller.is_some() {
         return Err(errors::invalid("a JVM method takes no deployment or caller"));
     }
@@ -50,19 +49,26 @@ pub(super) async fn call(
             let registration: JvmRegistration = decode(&request.arguments)?;
             let unknown = |_| errors::error(Code::Contract, "unknown deployment");
             let deployment = DeploymentId::new(&registration.deployment).map_err(unknown)?;
-            let backend = service.app.backend();
-            backend.check_deployment(deployment).await.map_err(|failure| errors::backend(&failure))?;
+            if let Err(failure) = service.app.backend().check_deployment(deployment).await {
+                // A JVM that outlived core but whose deployment a restore lost can never register, so control adopts
+                // it by its launch record only to stop it.
+                if matches!(principal.class, Class::Unadopted { .. })
+                    && matches!(failure, chunk_backend::Error::Unknown)
+                {
+                    let stopped = service.control.stop_survivor(&host, &principal.credential, &registration);
+                    stopped.map_err(|failure| errors::operation(&failure))?;
+                }
+                return Err(errors::backend(&failure));
+            }
             let registered = service.control.register_jvm(&host, &principal.credential, registration);
             registered.map_err(|failure| errors::operation(&failure))?;
             Ok((None, JvmRegistered { host }.encode_to_vec()))
         }
         Method::Report => {
             let report: JvmReport = decode(&request.arguments)?;
-            let (control, credential, stream) =
-                (service.control.clone(), principal.credential.clone(), request.stream.clone());
-            let reported =
-                service.operations.report(async move { control.report_jvm(&host, &credential, &stream, report).await });
-            reported.await.map_err(|failure| errors::operation(&failure))?;
+            // Not an accepted operation: shutdown must not wait on a JVM that keeps reporting before it stops it.
+            let reported = service.control.report_jvm(&host, &principal.credential, &request.stream, report).await;
+            reported.map_err(|failure| errors::operation(&failure))?;
             let generation = *service.control.subscribe().borrow();
             Ok((position(generation.epoch, Revision(generation.revision)), Vec::new()))
         }

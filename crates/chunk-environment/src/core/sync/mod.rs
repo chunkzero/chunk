@@ -95,6 +95,9 @@ impl SyncService {
         if request.arguments.len() > ARGUMENT_BYTES {
             return Err(errors::invalid("arguments exceed 1 MiB"));
         }
+        if matches!(principal.class, auth::Class::Unadopted { .. }) && request.method != "chunk:register" {
+            return Err(errors::denied("the JVM must register again first"));
+        }
         if let Some(method) = request.method.strip_prefix("chunk:") {
             return platform::call(self, principal, method, &request).await;
         }
