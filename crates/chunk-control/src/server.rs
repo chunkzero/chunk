@@ -86,7 +86,11 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             }
         };
         let connections = chunk_service::Connections::default();
-        let incoming = TcpListenerStream::new(listener).map(|stream| stream.map(|stream| connections.track(stream)));
+        let incoming = TcpListenerStream::new(listener).map(|stream| {
+            let stream = stream?;
+            stream.set_nodelay(true)?;
+            Ok::<_, io::Error>(connections.track(stream))
+        });
         let server = tonic::transport::Server::builder()
             .add_routes(routes)
             .add_service(
