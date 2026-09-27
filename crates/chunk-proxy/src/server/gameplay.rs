@@ -1,9 +1,6 @@
-use std::{io, time::Duration};
+use std::io;
 
-use chunk_proto::v1::{
-    ConfigurationRequest, ConfigurationResponse, DeploymentRef, Identity, PlayerDelivery, PlayerPreparation, PlayerRef,
-    PlayerSetup, Property, SessionRef, gameplay_client::GameplayClient,
-};
+use chunk_proto::v1::{Identity, PlayerPreparation, PlayerSetup, Property};
 use chunk_protocol::{
     McString, RemainingBytes, VarInt, decode_packet,
     versions::v26_2::{
@@ -12,62 +9,13 @@ use chunk_protocol::{
     },
 };
 use prost::Message;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
-};
-use tonic::{Request, transport::Channel};
+use tokio::net::TcpStream;
 
 use super::{
     authentication::Authenticated,
     configuration,
-    transport::{Transport, WRITE_TIMEOUT, invalid_data, within},
+    transport::{Transport, invalid_data},
 };
-use crate::GameplayTarget;
-
-struct Destination {
-    client: GameplayClient<Channel>,
-    target: GameplayTarget,
-}
-
-impl Destination {
-    fn request<T>(&self, body: T) -> io::Result<Request<T>> {
-        let mut request = Request::new(body);
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {}", self.target.token).parse().map_err(invalid_data)?);
-        Ok(request)
-    }
-
-    async fn prepare_player(&mut self, delivery: PlayerDelivery) -> io::Result<PlayerPreparation> {
-        let request = self.request(delivery)?;
-        within(WRITE_TIMEOUT, async {
-            self.client.prepare_player(request).await.map(tonic::Response::into_inner).map_err(io::Error::other)
-        })
-        .await
-    }
-}
-
-async fn destination(target: &GameplayTarget) -> io::Result<(Destination, ConfigurationResponse)> {
-    let channel = Channel::from_shared(target.endpoint.clone())
-        .map_err(invalid_data)?
-        .connect_timeout(WRITE_TIMEOUT)
-        .connect()
-        .await
-        .map_err(io::Error::other)?;
-    let mut destination =
-        Destination { client: GameplayClient::new(channel).max_decoding_message_size(65_536), target: target.clone() };
-    let deployment = DeploymentRef { environment: target.environment.clone(), deployment: target.deployment.clone() };
-    let request = destination.request(ConfigurationRequest { deployment: Some(deployment.clone()) })?;
-    let configuration = within(WRITE_TIMEOUT, async {
-        destination.client.configuration(request).await.map(tonic::Response::into_inner).map_err(io::Error::other)
-    })
-    .await?;
-    if configuration.deployment != Some(deployment) || configuration.process_generation == 0 {
-        return Err(invalid_data("invalid gameplay configuration identity"));
-    }
-    Ok((destination, configuration))
-}
 
 pub(super) fn identity(profile: &LoginSuccess) -> Identity {
     Identity {
@@ -83,62 +31,6 @@ pub(super) fn identity(profile: &LoginSuccess) -> Identity {
                 signature: p.signature.as_ref().map(|s| s.as_str().into()),
             })
             .collect(),
-    }
-}
-
-fn delivery<S>(authenticated: &Authenticated<S>, config: &ConfigurationResponse) -> io::Result<PlayerDelivery> {
-    let identity = identity(&authenticated.profile);
-    Ok(PlayerDelivery {
-        deployment: config.deployment.clone(),
-        process_generation: config.process_generation,
-        operation_id: uuid::Uuid::new_v4().to_string(),
-        session: Some(SessionRef { id: "bridge".into() }),
-        player: Some(PlayerRef { id: identity.uuid.clone() }),
-        // Fixture-only ownership until the control plane supplies placement generations.
-        owner_generation: u64::try_from(
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_nanos(),
-        )
-        .map_err(invalid_data)?,
-        identity: Some(identity),
-        protocol: authenticated.protocol_version,
-        runtime_id: config.runtime_id.clone(),
-        session_generation: 1,
-        membership_generation: 1,
-        proxy_id: "bridge-fixture".into(),
-        connection_id: uuid::Uuid::new_v4().to_string(),
-    })
-}
-
-pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
-    authenticated: Authenticated<S>,
-    target: &GameplayTarget,
-    deadline: Duration,
-) -> io::Result<()> {
-    let (mut authenticated, mut settings, (mut destination, config)) =
-        configuration::wait_for_destination(authenticated, destination(target), deadline).await?;
-    if config.protocol != authenticated.protocol_version {
-        return Err(invalid_data("destination protocol differs from authenticated client"));
-    }
-    let delivery = delivery(&authenticated, &config)?;
-    let operation = delivery.operation_id.clone();
-    let prepared = destination.prepare_player(delivery).await?;
-    if prepared.operation_id != operation || prepared.capability.len() != 32 {
-        return Err(invalid_data("invalid player preparation"));
-    }
-    let mut internal = within(deadline, login(&authenticated, &settings, prepared)).await?;
-    within(deadline, Box::pin(configuration::relay(&mut authenticated.transport, &mut internal, &mut settings)))
-        .await?;
-    tracing::info!("authenticated player admitted to Minestom listener");
-    // Minestom owns the normal configuration and play exchange on this socket.
-    loop {
-        tokio::select! {
-            frame = authenticated.transport.read_frame(configuration::FRAME_LIMIT) => {
-                within(WRITE_TIMEOUT, internal.write_body(&frame?)).await?;
-            }
-            frame = internal.read_frame(chunk_protocol::MAX_FRAME_SIZE) => {
-                within(WRITE_TIMEOUT, authenticated.transport.write_body(&frame?)).await?;
-            }
-        }
     }
 }
 
