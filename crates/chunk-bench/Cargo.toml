@@ -11,12 +11,10 @@ publish = false
 anyhow = "1"
 chunk-backend = { path = "../chunk-backend", features = ["bench-support"] }
 chunk-build = { path = "../chunk-build" }
-chunk-contract = { path = "../chunk-contract" }
 chunk-control = { path = "../chunk-control" }
 chunk-environment = { path = "../chunk-environment" }
 chunk-proto = { path = "../chunk-proto" }
 chunk-proxy = { path = "../chunk-proxy", features = ["bench-support"] }
-chunk-store = { path = "../chunk-store" }
 clap = { version = "4", features = ["derive"] }
 hdrhistogram = { version = "7", default-features = false, features = ["serialization"] }
 prost = "0.14.3"

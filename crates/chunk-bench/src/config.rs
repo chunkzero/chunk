@@ -10,24 +10,14 @@ pub enum Scenario {
     ControlChurn,
     BackendQuery,
     BackendMutation,
-    BackendFanout,
     SyncQueries,
 }
 
 impl Scenario {
     /// Workloads served from the compiled backend bundle.
     pub fn is_backend(self) -> bool {
-        matches!(self, Self::BackendQuery | Self::BackendMutation | Self::BackendFanout | Self::SyncQueries)
+        matches!(self, Self::BackendQuery | Self::BackendMutation | Self::SyncQueries)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum Subscription {
-    /// Everyone watches the identical leaderboard query.
-    Shared,
-    /// Everyone watches their own standing: the leaderboard plus their profile.
-    PerPlayer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -59,7 +49,7 @@ pub struct Config {
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
     /// Total operations/second. Defaults: relay 2000, population 100, churn 10, backend query 1000,
-    /// mutation 100, fan-out 10, sync queries 100.
+    /// mutation 100, sync queries 100.
     #[arg(long)]
     pub rate: Option<u32>,
     /// Established proxy connections or independent control/backend RPC lanes.
@@ -68,14 +58,9 @@ pub struct Config {
     /// Arrived players (control) or player profiles (backend) seeded before the workload.
     #[arg(long, default_value_t = 128)]
     pub population: u32,
-    /// Query subscriptions held open while writes run. Defaults: backend fan-out 64, sync queries 5000.
-    #[arg(long)]
-    pub subscribers: Option<u32>,
-    /// Backend fan-out: subscriptions per watch-group stream; each stream has its own connection.
-    #[arg(long, default_value_t = 1)]
-    pub group_size: u32,
-    #[arg(long, value_enum, default_value_t = Subscription::Shared)]
-    pub subscription: Subscription,
+    /// Sync queries: query subscriptions held open while writes run.
+    #[arg(long, default_value_t = 5000)]
+    pub subscribers: u32,
     /// Sync queries: what each write changes.
     #[arg(long, value_enum, default_value_t = Writes::Unrelated)]
     pub writes: Writes,
@@ -131,14 +116,10 @@ impl Config {
     pub fn rate(&self) -> u32 {
         self.rate.unwrap_or(match self.scenario {
             Scenario::ProxyRelay => 2000,
-            Scenario::ControlChurn | Scenario::BackendFanout => 10,
+            Scenario::ControlChurn => 10,
             Scenario::BackendQuery => 1000,
             Scenario::ControlPopulation | Scenario::BackendMutation | Scenario::SyncQueries => 100,
         })
-    }
-
-    pub fn subscribers(&self) -> u32 {
-        self.subscribers.unwrap_or(if self.scenario == Scenario::SyncQueries { 5000 } else { 64 })
     }
 
     pub fn compression(&self) -> Option<usize> {
@@ -150,13 +131,10 @@ impl Config {
         ensure!((1..=4096).contains(&self.concurrency), "concurrency must be 1..=4096");
         let population = if self.scenario.is_backend() { 100_000 } else { 1024 };
         ensure!((1..=population).contains(&self.population), "population must be 1..={population}");
-        ensure!(
-            (1..=100_000).contains(&self.subscribers()) && (1..=1024).contains(&self.group_size),
-            "subscribers must be 1..=100000 and group size 1..=1024"
-        );
+        ensure!((1..=100_000).contains(&self.subscribers), "subscribers must be 1..=100000");
         ensure!((1..=10_000).contains(&self.streams_per_connection), "streams per connection must be 1..=10000");
         ensure!(
-            self.slow_readers <= self.subscribers() && (1..=600_000).contains(&self.slow_read_ms),
+            self.slow_readers <= self.subscribers && (1..=600_000).contains(&self.slow_read_ms),
             "slow readers must be at most the subscribers, and their read delay 1..=600000 ms"
         );
         ensure!(

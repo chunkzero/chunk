@@ -11,7 +11,8 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use chunk_proto::sync::v1::{
-    CallRequest, Entry, SubscribeRequest, Update, call_response::Outcome, core_client::CoreClient, entry::State,
+    CallRequest, Entry, Position, SubscribeRequest, Update, call_response::Outcome, core_client::CoreClient,
+    entry::State,
 };
 use hdrhistogram::Histogram;
 use prost::Message;
@@ -25,7 +26,7 @@ use crate::{
     metrics,
 };
 
-const DEPLOYMENT: &str = "bench";
+pub const DEPLOYMENT: &str = "bench";
 /// How long after the last write's reply prompt readers may take to observe it before it counts as unobserved.
 const DRAIN: Duration = Duration::from_secs(2);
 const QUERY: &str = r#"{"top": {"function": "shared/leaderboard/top", "arguments": {}}}"#;
@@ -36,18 +37,33 @@ pub struct Connection {
     pub endpoint: String,
     /// Control's credential, which the CLI presents.
     pub cli: String,
-    /// The in-process gateway's credential.
+    /// The in-process gateway's ID and credential.
+    pub gateway_id: String,
     pub gateway: String,
 }
 
-async fn connect(endpoint: &str) -> Result<CoreClient<Channel>> {
+pub async fn connect(endpoint: &str) -> Result<CoreClient<Channel>> {
     Ok(CoreClient::connect(endpoint.to_owned()).await?.max_decoding_message_size(16 << 20))
 }
 
-fn request<T>(body: T, credential: &str) -> Result<Request<T>> {
+pub fn request<T>(body: T, credential: &str) -> Result<Request<T>> {
     let mut request = Request::new(body);
     request.metadata_mut().insert("authorization", format!("Bearer {credential}").parse()?);
     Ok(request)
+}
+
+/// Makes `message` as `credential`, returning its result and position, or failing with the error core returned.
+pub async fn call(
+    rpc: &mut CoreClient<Channel>,
+    credential: &str,
+    message: CallRequest,
+) -> Result<(Vec<u8>, Option<Position>)> {
+    let response = rpc.call(request(message, credential)?).await?.into_inner();
+    match response.outcome {
+        Some(Outcome::Result(result)) => Ok((result, response.position)),
+        Some(Outcome::Error(error)) => bail!("{:?}: {}", error.code(), error.message),
+        None => bail!("call without an outcome"),
+    }
 }
 
 /// Runs a mutation and returns the revision it committed.
@@ -58,20 +74,15 @@ async fn mutate(
     method: &str,
     arguments: &Value,
 ) -> Result<u64> {
-    let call = CallRequest {
+    let message = CallRequest {
         operation_id: operation,
         method: method.into(),
         arguments: arguments.to_string().into_bytes(),
         deployment: DEPLOYMENT.into(),
         ..CallRequest::default()
     };
-    let response = rpc.call(request(call, credential)?).await?.into_inner();
-    match response.outcome {
-        Some(Outcome::Result(_)) => {}
-        Some(Outcome::Error(error)) => bail!("{:?}: {}", error.code(), error.message),
-        None => bail!("call without an outcome"),
-    }
-    Ok(response.position.context("write without a position")?.revision)
+    let (_, position) = call(rpc, credential, message).await?;
+    Ok(position.context("write without a position")?.revision)
 }
 
 /// Seeds player profiles in batches through the bundle's own mutation, as the CLI.
@@ -278,7 +289,7 @@ impl Streams {
 /// a connection, and waits for each snapshot. The last `slow_readers` streams wait before each read, on connections
 /// no prompt stream shares.
 pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<Streams>> {
-    let total = config.subscribers();
+    let total = config.subscribers;
     let prompt = total - config.slow_readers;
     let per_connection = config.streams_per_connection;
     let connections = prompt.div_ceil(per_connection) + config.slow_readers.div_ceil(per_connection);
@@ -340,7 +351,6 @@ pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chunk_proto::sync::v1::Position;
 
     fn update(revision: u64) -> Update {
         Update { position: Some(Position { epoch: 1, revision }), ..Update::default() }

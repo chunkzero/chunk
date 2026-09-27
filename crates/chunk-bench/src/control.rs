@@ -1,12 +1,24 @@
-use anyhow::{Result, ensure};
-use chunk_control::ControlConnection;
-use chunk_proto::v1::{
-    ActivateClaim, ClaimPhase, ClaimRequest, Identity, SessionDemand, WatchRequest,
-    local_control_client::LocalControlClient,
-};
-use tonic::{Request, transport::Channel};
+//! Control workloads: core's in-process gateway admitting and releasing synthetic players over the sync protocol, as a
+//! proxy does, against the synthetic JVMs in `fixtures.rs`.
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::config::{Config, Scenario};
+use anyhow::{Context, Result, bail, ensure};
+use chunk_proto::sync::v1::{
+    ActivateResult, CallRequest, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim, GatewayLogin,
+    PlayerIdentity, SessionDemand, SubscribeRequest, Update, claim_result, core_client::CoreClient, entry::State,
+};
+use prost::Message;
+use tokio::sync::watch;
+use tokio_util::task::AbortOnDropHandle;
+use tonic::{Streaming, transport::Channel};
+
+use crate::{
+    config::{Config, Scenario},
+    sync,
+};
+
+/// Each open claim's phase, by operation ID.
+type Claims = BTreeMap<String, ClaimPhase>;
 
 pub fn release() -> Result<chunk_control::Release> {
     Ok(serde_json::from_value(serde_json::json!({
@@ -19,12 +31,11 @@ pub fn release() -> Result<chunk_control::Release> {
     }))?)
 }
 
-pub fn claim(index: u64) -> ClaimRequest {
-    ClaimRequest {
-        operation_id: format!("bench-{index:08}"),
-        proxy_id: "bench-proxy".into(),
+/// Player `index`'s login, under the operation ID it returns.
+fn login(index: u64) -> (String, ClaimArguments) {
+    let login = GatewayLogin {
         connection_id: format!("connection-{index:08}"),
-        identity: Some(Identity {
+        player: Some(PlayerIdentity {
             uuid: uuid::Uuid::from_u128(u128::from(index) + 1).to_string(),
             username: "bench".into(),
             properties: vec![],
@@ -34,66 +45,147 @@ pub fn claim(index: u64) -> ClaimRequest {
             session_type: "bench/default".into(),
             machine_profile: "bench".into(),
         }),
-        source: None,
         deployment: String::new(),
+    };
+    (format!("bench-{index:08}"), ClaimArguments { login: Some(login) })
+}
+
+/// Subscribes to the gateway's topic, returning the stream, its ID and its snapshot.
+async fn subscribe(
+    rpc: &mut CoreClient<Channel>,
+    connection: &sync::Connection,
+) -> Result<(Streaming<Update>, String, Claims)> {
+    let subscription =
+        SubscribeRequest { topic: format!("gateway/{}", connection.gateway_id), ..SubscribeRequest::default() };
+    let mut updates = rpc.subscribe(sync::request(subscription, &connection.gateway)?).await?.into_inner();
+    let mut claims = Claims::new();
+    let mut stream = String::new();
+    loop {
+        let update = updates.message().await?.context("gateway topic closed before its snapshot")?;
+        if !update.stream.is_empty() {
+            stream.clone_from(&update.stream);
+        }
+        let continued = update.continued;
+        apply(&mut claims, update)?;
+        if !continued {
+            return Ok((updates, stream, claims));
+        }
+    }
+}
+
+fn apply(claims: &mut Claims, update: Update) -> Result<()> {
+    if let Some(error) = update.error {
+        bail!("gateway topic ended: {:?}: {}", error.code(), error.message);
+    }
+    if update.snapshot {
+        claims.clear();
+    }
+    for operation in &update.removed {
+        claims.remove(operation);
+    }
+    for entry in update.upserts {
+        let Some(State::Value(value)) = entry.state else { bail!("gateway claim entry without a value") };
+        claims.insert(entry.key, GatewayClaim::decode(value.as_slice())?.phase());
+    }
+    Ok(())
+}
+
+/// Checks that a fresh snapshot holds exactly `expected` claims, all arrived. It supersedes any earlier stream.
+pub async fn verify_population(connection: &sync::Connection, expected: u32) -> Result<()> {
+    let (_, _, claims) = subscribe(&mut sync::connect(&connection.endpoint).await?, connection).await?;
+    ensure!(claims.len() == expected as usize, "{} claims instead of the population of {expected}", claims.len());
+    ensure!(claims.values().all(|phase| *phase == ClaimPhase::Arrived), "population not arrived");
+    Ok(())
+}
+
+/// One `gateway/<id>` stream, which every lane's claim calls name and whose view they wait on.
+pub struct Gateway {
+    stream: String,
+    claims: watch::Receiver<Claims>,
+    _follower: AbortOnDropHandle<()>,
+}
+
+impl Gateway {
+    pub async fn follow(connection: &sync::Connection) -> Result<Arc<Self>> {
+        let (mut updates, stream, first) =
+            subscribe(&mut sync::connect(&connection.endpoint).await?, connection).await?;
+        let (sender, claims) = watch::channel(first);
+        let follower = tokio::spawn(async move {
+            let mut pending = Vec::new();
+            while let Ok(Some(update)) = updates.message().await {
+                let continued = update.continued;
+                pending.push(update);
+                if continued {
+                    continue;
+                }
+                let mut applied = Ok(());
+                sender.send_modify(|claims| applied = pending.drain(..).try_for_each(|update| apply(claims, update)));
+                if let Err(error) = applied {
+                    tracing::debug!(%error, "gateway topic stopped");
+                    return;
+                }
+            }
+        });
+        Ok(Arc::new(Self { stream, claims, _follower: AbortOnDropHandle::new(follower) }))
     }
 }
 
 pub struct Client {
-    client: LocalControlClient<Channel>,
-    authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii>,
+    rpc: CoreClient<Channel>,
+    connection: sync::Connection,
+    gateway: Arc<Gateway>,
 }
 
 impl Client {
-    pub async fn connect(connection: &ControlConnection) -> Result<Self> {
-        Ok(Self {
-            client: LocalControlClient::connect(connection.endpoint.clone()).await?,
-            authorization: format!("Bearer {}", connection.token).parse()?,
-        })
+    pub async fn connect(connection: &sync::Connection, gateway: Arc<Gateway>) -> Result<Self> {
+        Ok(Self { rpc: sync::connect(&connection.endpoint).await?, connection: connection.clone(), gateway })
     }
 
-    fn request<T>(&self, body: T) -> Request<T> {
-        let mut request = Request::new(body);
-        request.metadata_mut().insert("authorization", self.authorization.clone());
-        request
+    /// Calls `chunk:<method>` on the claim under `operation`, naming the gateway's stream.
+    async fn call<R: Message + Default>(
+        &mut self,
+        method: &str,
+        operation: &str,
+        arguments: &impl Message,
+    ) -> Result<R> {
+        let message = CallRequest {
+            operation_id: operation.into(),
+            method: format!("chunk:{method}"),
+            arguments: arguments.encode_to_vec(),
+            stream: self.gateway.stream.clone(),
+            ..CallRequest::default()
+        };
+        let (result, _) = sync::call(&mut self.rpc, &self.connection.gateway, message).await?;
+        Ok(R::decode(result.as_slice())?)
     }
 
-    pub async fn arrive(&mut self, request: ClaimRequest) -> Result<()> {
-        let assignment = self.client.claim(self.request(request)).await?.into_inner();
-        ensure!(assignment.claim.is_some() && assignment.preparation.is_some(), "incomplete assignment");
-        // The synthetic JVM reports the arrival once the claim activates, which may reach control after this activation.
-        for _ in 0..100 {
-            let activation = ActivateClaim { claim: assignment.claim.clone() };
-            if self.client.activate(self.request(activation)).await?.into_inner().phase == ClaimPhase::Arrived as i32 {
-                return Ok(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    /// Claims player `index`'s login, activates it and waits for the gateway's topic to show it arrived.
+    pub async fn arrive(&mut self, index: u64) -> Result<String> {
+        let (operation, login) = login(index);
+        let claimed: ClaimResult = self.call("claim", &operation, &login).await?;
+        match claimed.outcome {
+            Some(claim_result::Outcome::Assignment(_)) => {}
+            outcome => bail!("claim not assigned: {outcome:?}"),
         }
-        anyhow::bail!("synthetic player did not arrive")
+        let activated: ActivateResult = self.call("activate", &operation, &()).await?;
+        ensure!(!activated.waiting, "activation waiting for a roster");
+        let mut claims = self.gateway.claims.clone();
+        claims
+            .wait_for(|claims| claims.get(&operation) == Some(&ClaimPhase::Arrived))
+            .await
+            .context("gateway topic stopped")?;
+        Ok(operation)
     }
 
     pub async fn execute(&mut self, sequence: u64, config: &Config) -> Result<()> {
         if config.scenario == Scenario::ControlPopulation {
-            let request = self.request(WatchRequest { proxy_id: "bench-proxy".into() });
-            let snapshot = self.client.watch(request).await?.into_inner().message().await?;
-            let snapshot = snapshot.ok_or_else(|| anyhow::anyhow!("claim stream closed"))?;
-            ensure!(snapshot.snapshot && snapshot.claims.len() == config.population as usize, "incomplete snapshot");
+            let (_, _, claims) = subscribe(&mut self.rpc, &self.connection).await?;
+            ensure!(claims.len() == config.population as usize, "incomplete snapshot");
         } else {
-            let request = claim(sequence + u64::from(config.population));
-            self.arrive(request.clone()).await?;
-            let departure = self.client.reconcile_departure(self.request(request)).await?.into_inner();
-            ensure!(departure.departed, "synthetic player departure unconfirmed");
+            let operation = self.arrive(sequence + u64::from(config.population)).await?;
+            let departed: DepartResult = self.call("depart", &operation, &()).await?;
+            ensure!(departed.departed, "synthetic player departure unconfirmed");
         }
-        Ok(())
-    }
-
-    pub async fn verify_population(&mut self, expected: u32) -> Result<()> {
-        let players = self.client.players(self.request(chunk_proto::v1::PlayersRequest {})).await?.into_inner();
-        ensure!(players.players.len() == expected as usize, "seeded population differs from requested population");
-        ensure!(
-            players.players.iter().all(|player| player.phase == ClaimPhase::Arrived as i32),
-            "population not arrived"
-        );
         Ok(())
     }
 }
