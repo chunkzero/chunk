@@ -1,4 +1,4 @@
-use chunk_proto::v1::{NodePhase, NodeStatus};
+use chunk_proto::sync::v1::{ClaimPhase, Node, NodePhase, OperatorPlayer, SessionDemand};
 use ratatui::{Terminal, backend::TestBackend};
 
 use super::*;
@@ -35,12 +35,10 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
     model.apply(Event::Deployments(vec![Deployment {
         id: "d87ec655".into(),
         state: "current".into(),
-        nodes: vec![NodeStatus {
-            app_id: "lobby".into(),
-            host_id: "5a9e4aba-1234".into(),
-            phase: NodePhase::Online.into(),
-            ..Default::default()
-        }],
+        nodes: vec![(
+            "5a9e4aba-1234".into(),
+            Node { app: "lobby".into(), phase: NodePhase::Online.into(), ..Default::default() },
+        )],
         players: Vec::new(),
         destinations: Vec::new(),
     }]));
@@ -63,21 +61,20 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
 fn players_tab_lists_filters_and_shows_the_move_form() {
     let mut model = Model::new();
     model.apply(Event::Step { name: "Ready", state: Step::Done("connect".into()) });
-    let player = |name: &str| chunk_proto::v1::PlayerStatus {
-        identity: Some(chunk_proto::v1::Identity {
-            uuid: format!("{name}-uuid"),
+    let player = |name: &str| {
+        let player = OperatorPlayer {
             username: name.into(),
-            properties: Vec::new(),
-        }),
-        demand: Some(chunk_proto::v1::SessionDemand {
-            session_type: "lobby/default".into(),
-            key: "main".into(),
+            demand: Some(SessionDemand {
+                session_type: "lobby/default".into(),
+                key: "main".into(),
+                ..Default::default()
+            }),
+            app: "lobby".into(),
+            host: "5a9e4aba-1234".into(),
+            phase: ClaimPhase::Arrived.into(),
             ..Default::default()
-        }),
-        app_id: "lobby".into(),
-        host_id: "5a9e4aba-1234".into(),
-        phase: chunk_proto::v1::ClaimPhase::Arrived.into(),
-        ..Default::default()
+        };
+        (format!("{name}-uuid"), player)
     };
     model.apply(Event::Deployments(vec![Deployment {
         id: "d87ec655".into(),
@@ -90,11 +87,7 @@ fn players_tab_lists_filters_and_shows_the_move_form() {
             .chain([("lobby/main".into(), "lobby/default", "main".into())])
             .map(|(name, session_type, key)| crate::local::report::Destination {
                 name,
-                demand: chunk_proto::v1::SessionDemand {
-                    session_type: session_type.into(),
-                    key,
-                    machine_profile: "local".into(),
-                },
+                demand: SessionDemand { session_type: session_type.into(), key, machine_profile: "local".into() },
             })
             .collect(),
     }]));

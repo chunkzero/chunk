@@ -560,6 +560,7 @@ dependencies = [
  "dirs",
  "notify",
  "process-wrap",
+ "prost",
  "ratatui",
  "serde",
  "serde_json",

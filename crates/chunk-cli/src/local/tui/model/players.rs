@@ -1,4 +1,4 @@
-use chunk_proto::v1::PlayerStatus;
+use chunk_proto::sync::v1::OperatorPlayer;
 
 use super::{Model, Tab};
 use crate::local::{
@@ -22,7 +22,7 @@ pub(in super::super) struct MoveForm {
 
 impl Model {
     /// Players matching the search, by name, with the release that serves each.
-    pub fn roster(&self) -> Vec<(&Deployment, &PlayerStatus)> {
+    pub fn roster(&self) -> Vec<(&Deployment, &(String, OperatorPlayer))> {
         let filter = self.filter.to_lowercase();
         let mut players: Vec<_> = self
             .deployments
@@ -30,7 +30,7 @@ impl Model {
             .flat_map(|deployment| deployment.players.iter().map(move |player| (deployment, player)))
             .filter(|(_, player)| filter.is_empty() || matches(player, &filter))
             .collect();
-        players.sort_by_key(|(_, player)| name(player).to_lowercase());
+        players.sort_by_key(|(_, (_, player))| player.username.to_lowercase());
         players
     }
 
@@ -38,9 +38,9 @@ impl Model {
         self.deployments.iter().map(|deployment| deployment.players.len()).sum()
     }
 
-    pub fn selected_player(&self) -> Option<(usize, &Deployment, &PlayerStatus)> {
+    pub fn selected_player(&self) -> Option<(usize, &Deployment, &(String, OperatorPlayer))> {
         let roster = self.roster();
-        let index = self.player.as_deref().and_then(|id| roster.iter().position(|(_, p)| id_of(p) == id));
+        let index = self.player.as_deref().and_then(|id| roster.iter().position(|(_, (uuid, _))| uuid == id));
         let index = index.unwrap_or(0);
         roster.get(index).map(|&(deployment, player)| (index, deployment, player))
     }
@@ -49,7 +49,7 @@ impl Model {
         let index = self.selected_player().map_or(0, |(index, ..)| index);
         let roster = self.roster();
         let index = index.saturating_add_signed(offset).min(roster.len().saturating_sub(1));
-        self.player = roster.get(index).map(|(_, player)| id_of(player).to_owned());
+        self.player = roster.get(index).map(|(_, (uuid, _))| uuid.clone());
     }
 
     pub fn search(&mut self) {
@@ -64,7 +64,7 @@ impl Model {
 
     /// Opens the move form for the selected player with their current destination chosen.
     pub fn start_move(&mut self) {
-        let Some((_, deployment, player)) = self.selected_player() else { return };
+        let Some((_, deployment, (uuid, player))) = self.selected_player() else { return };
         let current = player.demand.as_ref();
         let choice = deployment
             .destinations
@@ -77,8 +77,8 @@ impl Model {
             .unwrap_or(0);
         self.input = Some(Input::Move(MoveForm {
             deployment: deployment.id.clone(),
-            player: id_of(player).to_owned(),
-            name: name(player).to_owned(),
+            player: uuid.clone(),
+            name: player.username.clone(),
             destinations: deployment.destinations.clone(),
             choice,
         }));
@@ -150,19 +150,11 @@ impl Model {
     }
 }
 
-fn matches(player: &PlayerStatus, filter: &str) -> bool {
+fn matches((uuid, player): &(String, OperatorPlayer), filter: &str) -> bool {
     let demand = player.demand.as_ref();
-    [name(player), id_of(player), &player.app_id, &player.host_id]
+    [player.username.as_str(), uuid, &player.app, &player.host]
         .into_iter()
         .chain(demand.map(|d| d.session_type.as_str()))
         .chain(demand.map(|d| d.key.as_str()))
         .any(|field| field.to_lowercase().contains(filter))
-}
-
-pub(in super::super) fn name(player: &PlayerStatus) -> &str {
-    player.identity.as_ref().map_or("", |identity| identity.username.as_str())
-}
-
-pub(in super::super) fn id_of(player: &PlayerStatus) -> &str {
-    player.identity.as_ref().map_or("", |identity| identity.uuid.as_str())
 }

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::{io, path::PathBuf, process::ExitCode};
 mod building;
 mod cleaning;
+mod core;
 mod creation;
 mod generation;
 mod local;

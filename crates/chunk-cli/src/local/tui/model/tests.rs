@@ -1,4 +1,4 @@
-use chunk_proto::v1::NodeStatus;
+use chunk_proto::sync::v1::{Node, OperatorPlayer, SessionDemand};
 
 use crate::local::Command;
 
@@ -12,7 +12,7 @@ fn nodes(model: &mut Model, hosts: &[&str]) {
     model.apply(Event::Deployments(vec![Deployment {
         id: "release".into(),
         state: "current".into(),
-        nodes: hosts.iter().map(|host| NodeStatus { host_id: (*host).into(), ..Default::default() }).collect(),
+        nodes: hosts.iter().map(|host| ((*host).into(), Node::default())).collect(),
         players: Vec::new(),
         destinations: Vec::new(),
     }]));
@@ -126,30 +126,16 @@ fn source_index_matches_tab_order() {
     }
 }
 
-fn player(name: &str, key: &str) -> chunk_proto::v1::PlayerStatus {
-    chunk_proto::v1::PlayerStatus {
-        identity: Some(chunk_proto::v1::Identity {
-            uuid: format!("{name}-id"),
-            username: name.into(),
-            properties: Vec::new(),
-        }),
-        demand: Some(chunk_proto::v1::SessionDemand {
-            session_type: "lobby/default".into(),
-            key: key.into(),
-            machine_profile: "local".into(),
-        }),
-        ..Default::default()
-    }
+fn player(name: &str, key: &str) -> (String, OperatorPlayer) {
+    let demand =
+        SessionDemand { session_type: "lobby/default".into(), key: key.into(), machine_profile: "local".into() };
+    (format!("{name}-id"), OperatorPlayer { username: name.into(), demand: Some(demand), ..Default::default() })
 }
 
 fn destination(name: &str, session_type: &str, key: &str) -> crate::local::report::Destination {
     crate::local::report::Destination {
         name: name.into(),
-        demand: chunk_proto::v1::SessionDemand {
-            session_type: session_type.into(),
-            key: key.into(),
-            machine_profile: "local".into(),
-        },
+        demand: SessionDemand { session_type: session_type.into(), key: key.into(), machine_profile: "local".into() },
     }
 }
 
@@ -169,7 +155,7 @@ fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
     }]));
     model.select(1);
     assert!(model.tab() == Tab::Players);
-    assert_eq!(model.selected_player().map(|(_, _, p)| name(p)), Some("Dinnerbone"));
+    assert_eq!(model.selected_player().map(|(_, _, (_, p))| p.username.as_str()), Some("Dinnerbone"));
 
     model.search();
     for character in "ARENA".chars() {

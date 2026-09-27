@@ -38,6 +38,7 @@ process-wrap = { version = "10", default-features = false, features = [
 ] }
 tokio-util = "0.7"
 tonic = "0.14.6"
+prost = "0.14.4"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,5 +1,5 @@
 use super::*;
-use chunk_proto::v1::ProcessHealth;
+use chunk_proto::sync::v1::JvmHealth;
 
 fn release(id: &str, jar: &str) -> Release {
     Release {
@@ -13,12 +13,9 @@ fn release(id: &str, jar: &str) -> Release {
     }
 }
 
-fn node(phase: NodePhase, players: u32) -> NodeStatus {
-    NodeStatus {
-        phase: phase.into(),
-        health: Some(ProcessHealth { players, ..Default::default() }),
-        ..Default::default()
-    }
+fn node(phase: NodePhase, players: u32) -> (String, Node) {
+    let health = Some(JvmHealth { players, ..JvmHealth::default() });
+    (String::new(), Node { phase: phase.into(), health, ..Node::default() })
 }
 
 #[test]

@@ -2,10 +2,10 @@ use super::{Reporter, Settings, Staged, report::Destination};
 use chunk_build::Release;
 use chunk_contract::ControlConnection;
 use chunk_environment::{Core, CoreConfig, Gateway, GatewayConfig, PlatformTarget};
-use chunk_proto::v1::{
-    MovePlayerRequest, NodePhase, NodeStatus, NodesRequest, PlayerStatus, PlayersRequest, SessionDemand,
-};
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use chunk_proto::sync::v1::{MovePlayerArguments, MovePlayerResult, Node, OperatorPlayer, SessionDemand};
+use std::{collections::BTreeMap, convert::Infallible, io, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::watch;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// The backend, control and proxy that outlive every release.
 pub(super) struct Shared {
@@ -178,18 +178,50 @@ fn destinations(manifest: Option<&chunk_contract::DestinationManifest>) -> Vec<D
         .collect()
 }
 
-/// The nodes and players control reports, or an error while it is unreachable.
-pub(super) async fn observe(connection: &ControlConnection) -> io::Result<(Vec<NodeStatus>, Vec<PlayerStatus>)> {
-    let request = async {
-        let mut client = crate::players::client(connection).await?;
-        let nodes = client.nodes(crate::players::auth(NodesRequest {}, &connection.token)?);
-        let mut nodes = nodes.await.map_err(io::Error::other)?.into_inner().nodes;
-        // Stopped nodes stay listed for their logs, below the running ones.
-        nodes.sort_by_key(|node| node.phase == NodePhase::Stopped as i32);
-        let players = client.players(crate::players::auth(PlayersRequest {}, &connection.token)?);
-        Ok((nodes, players.await.map_err(io::Error::other)?.into_inner().players))
-    };
-    tokio::time::timeout(Duration::from_secs(2), request).await.map_err(io::Error::other)?
+/// The nodes and players core reports, by host ID and by UUID.
+#[derive(Clone)]
+pub(super) struct Observed {
+    pub nodes: BTreeMap<String, Node>,
+    pub players: BTreeMap<String, OperatorPlayer>,
+}
+
+/// Follows core's `nodes` and `players` topics until the guard drops; `None` while core is unreachable. A broken
+/// subscription starts over from a snapshot a second later.
+pub(super) fn observe(connection: ControlConnection) -> (watch::Receiver<Option<Observed>>, DropGuard) {
+    let (sender, receiver) = watch::channel(None);
+    let stop = CancellationToken::new();
+    let guard = stop.clone().drop_guard();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                result = follow(&connection, &sender) => {
+                    let Err(error) = result;
+                    tracing::debug!(%error, "operator topics interrupted");
+                }
+            }
+            sender.send_replace(None);
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    });
+    (receiver, guard)
+}
+
+/// Publishes each whole view of both topics until either subscription breaks.
+async fn follow(connection: &ControlConnection, sender: &watch::Sender<Option<Observed>>) -> io::Result<Infallible> {
+    let core = crate::core::Core::connect(connection).await?;
+    let (mut nodes, mut players) = (core.follow("nodes").await?, core.follow("players").await?);
+    let mut observed = Observed { nodes: nodes.next().await?.clone(), players: players.next().await?.clone() };
+    loop {
+        sender.send_replace(Some(observed.clone()));
+        tokio::select! {
+            view = nodes.next() => observed.nodes = view?.clone(),
+            view = players.next() => observed.players = view?.clone(),
+        }
+    }
 }
 
 /// Queues a move of `player` to `demand` on their existing connection.
@@ -198,17 +230,11 @@ pub(super) async fn move_player(
     player: String,
     demand: SessionDemand,
 ) -> io::Result<()> {
-    let mut client = crate::players::client(connection).await?;
-    let request = MovePlayerRequest {
-        operation_id: uuid::Uuid::new_v4().to_string(),
-        player_id: player,
-        demand: Some(demand),
-        expected_source: None,
-        expected_connection_id: String::new(),
-    };
-    client
-        .move_player(crate::players::auth(request, &connection.token)?)
-        .await
-        .map_err(|status| io::Error::other(status.message().to_owned()))?;
+    let arguments = MovePlayerArguments { player, destination: Some(demand) };
+    let operation = crate::core::operation(None);
+    crate::core::Core::connect(connection)
+        .await?
+        .call::<MovePlayerResult>("move_player", &operation, &arguments)
+        .await?;
     Ok(())
 }

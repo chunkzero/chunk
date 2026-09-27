@@ -1,4 +1,4 @@
-use chunk_proto::v1::{ClaimPhase, PlayerStatus};
+use chunk_proto::sync::v1::{ClaimPhase, OperatorPlayer};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use super::{
-    super::model::{Input, Model, MoveForm, id_of, name},
+    super::model::{Input, Model, MoveForm},
     nodes::{count, short},
 };
 
@@ -53,13 +53,13 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
         frame.render_widget(Line::from(format!("  {empty}")).dark_gray(), list);
         return;
     }
-    let items = roster.iter().map(|(_, player)| {
+    let items = roster.iter().map(|(_, (_, player))| {
         let (label, color) = state(player);
         let demand = player.demand.clone().unwrap_or_default();
         ListItem::new(vec![
             Line::from(vec![
                 Span::styled("● ", Style::new().fg(color)),
-                Span::raw(name(player)).bold(),
+                Span::raw(player.username.as_str()).bold(),
                 Span::raw(format!(" · {label}")).dark_gray(),
             ]),
             Line::from(format!("  {}:{}", demand.session_type, demand.key)).dark_gray(),
@@ -77,7 +77,7 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     let [header, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
     let [heading, metadata] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(header);
     let metadata_block = Block::default().borders(Borders::BOTTOM).border_style(Style::new().dark_gray());
-    let Some((_, deployment, player)) = model.selected_player() else {
+    let Some((_, deployment, (uuid, player))) = model.selected_player() else {
         frame.render_widget(Line::from("No player selected").bold(), heading);
         frame.render_widget(
             Paragraph::new(count(model.player_count(), "player")).dark_gray().block(metadata_block),
@@ -88,10 +88,13 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     };
     let (label, color) = state(player);
     frame.render_widget(
-        Line::from(vec![Span::raw(format!("{}  ", name(player))).bold(), Span::styled(label, Style::new().fg(color))]),
+        Line::from(vec![
+            Span::raw(format!("{}  ", player.username)).bold(),
+            Span::styled(label, Style::new().fg(color)),
+        ]),
         heading,
     );
-    let mut identity = id_of(player).to_owned();
+    let mut identity = uuid.clone();
     if player.since_ms > 0 {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
         let since = u64::try_from(now).unwrap_or(u64::MAX).saturating_sub(player.since_ms);
@@ -106,7 +109,7 @@ fn render_detail(frame: &mut Frame, model: &Model, area: Rect) {
     let demand = player.demand.clone().unwrap_or_default();
     let mut lines = [
         ("Session", format!("{} · {}", demand.session_type, demand.key)),
-        ("Node", format!("{} · {}", player.app_id, short(&player.host_id))),
+        ("Node", format!("{} · {}", player.app, short(&player.host))),
         ("Release", format!("{} · {}", short(&deployment.id), deployment.state)),
         ("Profile", demand.machine_profile),
     ]
@@ -140,7 +143,7 @@ fn render_picker(frame: &mut Frame, form: &MoveForm, area: Rect) {
 
 /// Appends the latest move outcome below the detail lines.
 fn render_result<'a>(frame: &mut Frame, model: &'a Model, mut lines: Vec<Line<'a>>, area: Rect) {
-    let failure = model.selected_player().and_then(|(_, _, player)| player.last_move_failure.as_ref());
+    let failure = model.selected_player().and_then(|(_, _, (_, player))| player.last_move_failure.as_ref());
     if let Some(failure) = failure {
         let destination = failure
             .destination
@@ -162,18 +165,18 @@ fn render_result<'a>(frame: &mut Frame, model: &'a Model, mut lines: Vec<Line<'a
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn state(player: &PlayerStatus) -> (&'static str, Color) {
+fn state(player: &OperatorPlayer) -> (&'static str, Color) {
     if player.last_move_failure.is_some() {
         return ("move failed", Color::Red);
     }
     if player.moving {
         return ("moving", Color::Yellow);
     }
-    match ClaimPhase::try_from(player.phase).unwrap_or(ClaimPhase::Unspecified) {
+    match player.phase() {
         ClaimPhase::Arrived => ("online", Color::Green),
         ClaimPhase::Reserved | ClaimPhase::Activating | ClaimPhase::Attached => ("joining", Color::Yellow),
         ClaimPhase::Withdrawing => ("leaving", Color::Yellow),
-        ClaimPhase::Released | ClaimPhase::Unspecified => ("offline", Color::DarkGray),
+        ClaimPhase::Unspecified => ("offline", Color::DarkGray),
     }
 }
 
