@@ -1,10 +1,13 @@
 //! A JVM's registration, reports and method results, `chunk:register`, `chunk:report` and `chunk:method_result`, which
 //! control applies. The JVM's host comes from its credential.
 
-use super::super::{
-    SyncService, app,
-    auth::{Class, Principal},
-    errors, position,
+use super::{
+    super::{
+        SyncService, app,
+        auth::{Class, Principal},
+        errors, position,
+    },
+    decode,
 };
 use chunk_js::DeploymentId;
 use chunk_proto::sync::v1::{
@@ -87,8 +90,4 @@ pub(super) async fn call(
             Ok((None, Vec::new()))
         }
     }
-}
-
-fn decode<T: Message + Default>(arguments: &[u8]) -> Result<T, Error> {
-    T::decode(arguments).map_err(|_| errors::invalid("arguments are not the method's message"))
 }

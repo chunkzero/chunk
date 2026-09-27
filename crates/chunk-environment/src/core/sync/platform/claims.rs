@@ -2,7 +2,7 @@
 //! `chunk:activate`, `chunk:withdraw`, `chunk:abandon_move` and `chunk:depart`. The call's operation ID names the
 //! claim, which must be the calling gateway's.
 
-use super::{super::SyncService, errors};
+use super::{super::SyncService, decode, errors};
 use chunk_control::{ALREADY_OWNED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim};
 use chunk_proto::{
     sync::v1::{
@@ -185,8 +185,4 @@ fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
         endpoint: preparation.endpoint,
         capability: preparation.capability,
     })
-}
-
-fn decode<T: Message + Default>(arguments: &[u8]) -> Result<T, Error> {
-    T::decode(arguments).map_err(|_| errors::invalid("arguments are not the method's message"))
 }

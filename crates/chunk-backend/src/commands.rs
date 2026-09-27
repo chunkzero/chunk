@@ -2,14 +2,20 @@ use std::sync::Arc;
 
 use chunk_contract::Schema;
 use chunk_js::{DeploymentId, Json};
-use chunk_proto::v1::CommandScope;
+use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
 use tokio::sync::mpsc;
 
-use crate::{Call, service::Request};
+use crate::{
+    ActionHandle, ActionId, Backend, Call, Error, Result,
+    service::{Command, Request},
+};
 
 pub(crate) mod effects;
 mod transport;
 pub use transport::CommandService;
+
+/// Platform effects a command may have pending at once.
+const PENDING_EFFECTS: usize = 8;
 
 #[derive(Clone)]
 pub(crate) enum Purpose {
@@ -82,6 +88,141 @@ impl Prepared {
             arguments: serde_json::Value::Null.into(),
             caller: serde_json::Value::Null.into(),
         }
+    }
+}
+
+/// The operation ID effect `sequence` of command invocation `invocation` names in its receipt.
+pub(crate) fn effect_operation(invocation: &str, sequence: u32) -> String {
+    format!("action/{invocation}/platform/{sequence}")
+}
+
+/// Checks the `result` JSON an effect's performer returned, `None` if the effect failed, against what the command
+/// expects of it.
+pub(crate) fn effect_result(invocation: &str, effect: &PlatformEffect, result: Option<&[u8]>) -> Result<Arc<str>> {
+    let result = result.ok_or(Error::Invalid("command effect failed; earlier effects may have completed"))?;
+    if result.len() > 64 * 1024 {
+        return Err(Error::Invalid("command effect result limit"));
+    }
+    let mut value = serde_json::from_slice(result)?;
+    effect.result.normalize_api(&mut value);
+    chunk_contract::validate_wire_value(&value).map_err(Error::Invalid)?;
+    if !effect.result.accepts(&value)
+        || (effect.receipt && value["operationId"] != effect_operation(invocation, effect.sequence))
+    {
+        return Err(Error::Contract);
+    }
+    Ok(serde_json::to_string(&value)?.into())
+}
+
+/// A platform effect a running command asked for, validated against its scope, which its runner performs and then
+/// finishes. Dropping it fails the effect.
+pub struct CommandEffect {
+    effect: PlatformEffect,
+    invocation: String,
+}
+
+impl CommandEffect {
+    /// Numbers the command's effects; each is unique to its invocation.
+    #[must_use]
+    pub fn sequence(&self) -> u32 {
+        self.effect.sequence
+    }
+
+    /// The effect as a `chunk_contract::Effect` in JSON.
+    #[must_use]
+    pub fn request(&self) -> &Json {
+        &self.effect.request
+    }
+
+    /// The operation ID unique to this effect, which its receipt names.
+    #[must_use]
+    pub fn operation_id(&self) -> String {
+        effect_operation(&self.invocation, self.effect.sequence)
+    }
+
+    /// Whether the command stopped waiting for the effect.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.effect.reply.cancellation.is_cancelled()
+    }
+
+    /// Finishes an effect whose result is a receipt of its acceptance.
+    pub fn accept(self) {
+        let receipt = serde_json::json!({"state": "accepted", "operationId": self.operation_id()});
+        self.finish(Some(receipt.to_string().as_bytes()));
+    }
+
+    /// Finishes the effect with its `result` JSON, or `None` if it failed.
+    pub fn finish(self, result: Option<&[u8]>) {
+        let result = effect_result(&self.invocation, &self.effect, result);
+        self.effect.reply.finish(result);
+    }
+}
+
+/// The platform effects a command started with [`Backend::start_command`] asks for.
+pub struct CommandEffects {
+    receiver: mpsc::Receiver<PlatformEffect>,
+    invocation: String,
+}
+
+impl CommandEffects {
+    /// The next effect, or `None` once no more can come through this receiver, as for a retry that joined a command
+    /// already started.
+    pub async fn recv(&mut self) -> Option<CommandEffect> {
+        let effect = self.receiver.recv().await?;
+        Some(CommandEffect { effect, invocation: self.invocation.clone() })
+    }
+}
+
+impl Backend {
+    /// The commands `scope` sees in deployment `id`, and which of them its permission queries allow.
+    /// # Errors
+    /// Rejects an invalid scope, an unknown deployment and failed permission queries.
+    pub async fn command_catalog(&self, id: DeploymentId, scope: CommandScope) -> Result<CommandCatalog> {
+        let bytes = scope_bytes(&scope);
+        self.submit_sized(bytes, |reply| Command::Catalog { id, scope, reply }).await
+    }
+
+    /// The values the suggestion query `request` names offers for its input.
+    /// # Errors
+    /// Rejects an invalid scope or input, a query the command doesn't declare, and a failed query.
+    pub async fn command_suggestions(
+        &self,
+        id: DeploymentId,
+        request: CommandSuggestionRequest,
+    ) -> Result<CommandSuggestionResult> {
+        let bytes = request.scope.as_ref().map_or(0, scope_bytes)
+            + request.command_id.len()
+            + request.query.len()
+            + request.input.len();
+        self.submit_sized(bytes, |reply| Command::Suggest { id, request, reply }).await
+    }
+
+    /// Starts `command` with `input` for `scope` in `deployment` under an identity from
+    /// [`Self::allocate_action_id`], through the same admission as [`Self::start_action`], and retains its outcome.
+    /// `caller` identifies who asked, so only a retry repeating the command, input and caller joins it; a retry's
+    /// effects stay with the first start.
+    /// # Errors
+    /// Rejects identities this backend didn't allocate, mismatched requests, commands the scope may not run, invalid
+    /// input and exhausted capacity.
+    pub async fn start_command(
+        &self,
+        id: ActionId,
+        deployment: DeploymentId,
+        scope: CommandScope,
+        command: String,
+        input: String,
+        caller: Json,
+    ) -> Result<(ActionHandle, CommandEffects)> {
+        let invocation = id.to_string();
+        let (effects, receiver) = mpsc::channel(PENDING_EFFECTS);
+        let call =
+            Call { deployment, function: command, arguments: serde_json::json!({"input": input}).into(), caller };
+        let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len();
+        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects }));
+        let handle =
+            self.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: true, reply }).await?;
+        Ok((handle, CommandEffects { receiver, invocation }))
     }
 }
 

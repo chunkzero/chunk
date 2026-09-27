@@ -86,10 +86,7 @@ impl App {
     /// outlives a dropped call, so a retry finds its outcome. A hook runs within its call, whose drop cancels it, and a
     /// retry then finds it cancelled.
     async fn effect(&self, hook: bool, operation: &str, call: Call) -> Result<Update, Error> {
-        let Some(id) = operation.strip_prefix(PREPARED) else {
-            return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
-        };
-        let id = prepared_id(id)?;
+        let id = prepared(operation)?;
         let outcome = if hook {
             let mut handle = self.backend.start_hook(id, call).await.map_err(|failure| errors::backend(&failure))?;
             handle.outcome().await
@@ -137,6 +134,14 @@ impl App {
     fn cached(&self, deployment: &str) -> Option<Arc<BTreeMap<String, Kind>>> {
         self.functions.lock().ok()?.get(deployment).cloned()
     }
+}
+
+/// The action identity prepared `operation` names.
+pub(super) fn prepared(operation: &str) -> Result<ActionId, Error> {
+    let Some(id) = operation.strip_prefix(PREPARED) else {
+        return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
+    };
+    prepared_id(id)
 }
 
 fn prepared_id(id: &str) -> Result<ActionId, Error> {

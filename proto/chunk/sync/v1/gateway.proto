@@ -179,3 +179,99 @@ message ManifestResult {
   // The deployment's domain manifest as JSON, with its scopes, apps, hooks and commands. Empty when it declares none.
   bytes manifest_json = 2;
 }
+
+// Commands. A gateway runs the commands of the deployment its player's session runs, for a player whose claim it holds
+// and that has arrived. Only a gateway may call these, and each call names its current `gateway/<id>` stream in
+// `CallRequest.stream`, as the claim methods do. Every method but `chunk:effect` names the player in its caller, and
+// none takes a deployment: core derives the command's scope from control's state, the session the player's claim is
+// delivered to, the deployment its host runs and the domain of the session's app.
+// - `chunk:commands` takes no arguments and returns CommandsResult.
+// - `chunk:suggest` takes SuggestArguments and returns SuggestResult.
+// - `chunk:command` runs a command as an effectful call under an operation ID `chunk:prepare` issued. It takes
+//   CommandArguments and returns CommandResult once the command finishes. Core performs the command's `enter` and
+//   session method effects itself, and sends its chat, action bar and title effects to the gateway on the
+//   `command/<op>` topic, where `<op>` is the operation ID. A retry joins the running command or returns its outcome;
+//   its effects stay on the first call's topic.
+// - `chunk:effect` acknowledges one effect from a `command/<op>` topic. It takes EffectArguments and no caller or
+//   operation ID, and returns EffectResult. The command's effect resolves with the acknowledgment.
+//
+// The `command/<op>` topic holds the effects the command running under `<op>` waits for the gateway to render to its
+// player, each until the gateway acknowledges it. Only the gateway running the command may subscribe, with no
+// arguments, deployment or caller, and it may subscribe before calling `chunk:command`. Each entry's key is an effect's
+// sequence number in decimal and its value a CommandEffect. Every update is a snapshot without a position. At most 8
+// effects are pending at once; the command's later ones fail until the gateway acknowledges some. The stream ends with
+// STOPPED once the command finishes, which fails the effects still pending.
+
+// The result of `chunk:commands`.
+message CommandsResult {
+  // The commands the player's session sees, as JSON: a map from command ID to its descriptor in the domain manifest.
+  bytes commands_json = 1;
+  // The IDs of the commands the player may run.
+  repeated string allowed = 2;
+}
+
+// Arguments of `chunk:suggest`.
+message SuggestArguments {
+  // The command the input selects.
+  string command_id = 1;
+  // One of the command's declared suggestion queries.
+  string query = 2;
+  // The command input typed so far, without its leading slash.
+  string input = 3;
+  // The cursor's position in `input`, in UTF-16 code units.
+  uint32 cursor = 4;
+}
+
+// The result of `chunk:suggest`.
+message SuggestResult {
+  // At most 64 suggestions.
+  repeated string values = 1;
+}
+
+// Arguments of `chunk:command`.
+message CommandArguments {
+  // The command to run.
+  string command_id = 1;
+  // The command input, without its leading slash, which core parses again.
+  string input = 2;
+}
+
+// The result of `chunk:command`.
+message CommandResult {
+  // What the command's handler returned, as JSON.
+  bytes result_json = 1;
+}
+
+// An effect the gateway renders to the player a command runs for.
+message CommandEffect {
+  oneof effect {
+    // A chat message.
+    string message = 1;
+    // An action bar message.
+    string action_bar = 2;
+    // A title.
+    CommandTitle title = 3;
+  }
+}
+
+// A title, with an optional subtitle.
+message CommandTitle {
+  string title = 1;
+  optional string subtitle = 2;
+}
+
+// Arguments of `chunk:effect`.
+message EffectArguments {
+  // The operation ID of the command the effect belongs to.
+  string operation_id = 1;
+  // The effect's sequence number, its key on the command's topic.
+  uint32 sequence = 2;
+  // The gateway couldn't render the effect.
+  bool failed = 3;
+}
+
+// The result of `chunk:effect`.
+message EffectResult {
+  // No such effect is pending, as when it was already acknowledged or its command finished, so nothing changed.
+  bool unknown = 1;
+}

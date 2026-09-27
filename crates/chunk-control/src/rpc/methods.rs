@@ -114,39 +114,12 @@ impl Methods {
         let control = control.clone();
         tasks.spawn(async move {
             let _completion = Completion { methods: methods.clone(), id: prepared.operation_id().into() };
-            let result = methods.execute(&control, &prepared, &cancellation).await;
+            let result = control.run_session_method(&prepared, &cancellation, &methods.shutdown).await;
             if let Ok(mut state) = methods.state() {
                 state.finish(prepared.operation_id(), result);
             }
         });
         Ok(result(id, SessionMethodPhase::Accepted))
-    }
-    async fn execute(
-        &self,
-        control: &Control,
-        prepared: &PreparedSessionMethod,
-        cancellation: &CancellationToken,
-    ) -> SessionMethodResult {
-        loop {
-            let mut response = control
-                .call_session_method(prepared, cancellation)
-                .await
-                .unwrap_or_else(|_| result(prepared.operation_id(), SessionMethodPhase::Unknown));
-            if response.phase == SessionMethodPhase::Accepted as i32 {
-                response = result(prepared.operation_id(), SessionMethodPhase::Unknown);
-            }
-            if response.phase != SessionMethodPhase::Unknown as i32
-                || crate::now_ms() >= prepared.deadline_ms()
-                || self.shutdown.is_cancelled()
-            {
-                return response;
-            }
-            // Only the frozen operation is retried; unknown transport outcomes never mint another call.
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(100)) => {},
-                () = self.shutdown.cancelled() => { cancellation.cancel(); },
-            }
-        }
     }
     pub(super) fn poll(&self, id: &str, cancel: bool) -> Result<SessionMethodResult> {
         validate_handle(id)?;

@@ -25,7 +25,7 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
-pub use callers::{SessionScope, StoredClaim};
+pub use callers::{ArrivedClaim, SessionScope, StoredClaim};
 pub use session_methods::{CapturedSession, PreparedSessionMethod};
 
 use std::{

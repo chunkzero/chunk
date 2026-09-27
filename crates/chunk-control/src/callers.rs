@@ -13,6 +13,17 @@ pub struct SessionScope {
     pub deployment: String,
 }
 
+/// A player's current claim, arrived through a gateway, and where it's delivered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivedClaim {
+    pub request: ClaimRequest,
+    pub identity: ClaimIdentity,
+    pub session: String,
+    pub session_type: String,
+    /// The session's app and the deployment its host runs.
+    pub scope: SessionScope,
+}
+
 /// A claim, or a move control queued, as stored under its operation ID.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredClaim {
@@ -65,6 +76,29 @@ impl Control {
         let Some(owner) = state.players.get(player) else { return Ok(false) };
         let held = [&owner.current, &owner.pending].into_iter().flatten();
         Ok(held.filter_map(|operation| state.claims.get(operation)).any(|claim| claim.proxy == gateway))
+    }
+
+    /// `player`'s current claim, which must be held through `gateway` and have arrived.
+    /// # Errors
+    /// Rejects a player without such a claim as invalid.
+    pub fn arrived_claim(&self, gateway: &str, player: &str) -> Result<ArrivedClaim> {
+        let state = self.state()?;
+        let operation = state.players.get(player).and_then(|owner| owner.current.as_ref());
+        let claim = operation.and_then(|operation| state.claims.get(operation).map(|claim| (operation, claim)));
+        let arrived = claim.filter(|(_, claim)| claim.proxy == gateway && claim.phase == Phase::Arrived);
+        let (operation, claim) = arrived.ok_or(Error::Invalid("the gateway holds no arrived claim for this player"))?;
+        if claim.request.is_empty() {
+            return Err(Error::Invalid("claim operation lost in a restore"));
+        }
+        let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing claim session"))?;
+        let host = state.hosts.get(&session.host).ok_or(Error::Invalid("unknown host"))?;
+        Ok(ArrivedClaim {
+            request: ClaimRequest::decode(claim.request.as_slice())?,
+            identity: claim.identity(operation),
+            session: claim.session.clone(),
+            session_type: session.session_type.clone(),
+            scope: SessionScope { app: host.app.clone(), deployment: host.release.clone() },
+        })
     }
 
     /// The claim or queued move stored under `operation`, if any.

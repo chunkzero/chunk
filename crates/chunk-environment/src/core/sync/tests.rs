@@ -1,4 +1,5 @@
 mod claims;
+mod commands;
 mod effects;
 mod hooks;
 mod jvm;
@@ -26,10 +27,29 @@ export async function bump(ctx, by) { return await ctx.runMutation('add', by); }
 export async function slow(ctx, by) { await ctx.runMutation('add', by); await ctx.sleep(1000); return await ctx.runMutation('add', by); }
 export function fill(ctx, text) { return text; }
 export function login(ctx) { return {allow: true, reason: JSON.stringify(ctx.caller)}; }
+export function choices(ctx) { return ['one', 'two']; }
+export async function say(ctx, {arguments: {text}}) {
+  const method = {app: 'bridge', session: 'default', name: 'status'};
+  if (text === 'enter') {
+    await ctx.platform({kind: 'enter', destination: {key: 'arena', session_type: 'bridge/default', machine_profile: 'small'}});
+  } else if (text === 'status') {
+    const status = await ctx.platform({kind: 'session_call', method, arguments: {limit: 1}});
+    if (status !== 7) throw new Error(`unexpected status ${status}`);
+  } else if (text === 'wait') {
+    await ctx.sleep(300);
+  } else {
+    await ctx.platform({kind: 'message', text});
+  }
+  return null;
+}
 ";
 const LOGIN: &str = "shared/domains/hooks/login";
+const SAY: &str = "scopes/commands/say";
 
 fn deployment() -> Deployment {
+    let suggestion = serde_json::json!({
+        "type": "object", "fields": {"input": {"schema": {"type": "string"}}, "cursor": {"schema": {"type": "integer"}}}
+    });
     let function = |kind, arguments| Function {
         kind,
         visibility: Visibility::Public,
@@ -46,13 +66,29 @@ fn deployment() -> Deployment {
         ("bump", function(FunctionKind::Action, Schema::Integer)),
         ("slow", function(FunctionKind::Action, Schema::Integer)),
         ("fill", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
+        (
+            "choices",
+            Function {
+                visibility: Visibility::Internal,
+                result: Schema::Array { items: Box::new(Schema::String) },
+                ..function(FunctionKind::Query, serde_json::from_value(suggestion).unwrap())
+            },
+        ),
     ];
     let domains = serde_json::json!({
-        "version": 1, "scopes": {"": {"parent": null}}, "apps": {},
-        "hooks": {LOGIN: {"domain": "", "event": "player.login", "export": "login"}}
+        "version": 1, "scopes": {"": {"parent": null}}, "apps": {"bridge": ""},
+        "hooks": {LOGIN: {"domain": "", "event": "player.login", "export": "login"}},
+        "commands": {SAY: {
+            "domain": "", "name": "say", "aliases": [], "export": "say", "follow_player": false,
+            "routes": [{"literals": [], "arguments": [{"name": "text", "parser": "word", "suggestions": {"query": "choices"}}]}]
+        }}
     });
     Deployment {
-        contracts: Contracts { domains: Some(serde_json::from_value(domains).unwrap()), ..Contracts::default() },
+        contracts: Contracts {
+            domains: Some(serde_json::from_value(domains).unwrap()),
+            session_methods: Some(serde_json::from_value(runtime::session_methods()).unwrap()),
+            ..Contracts::default()
+        },
         contract_version: 2,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: "test".into(),

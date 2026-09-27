@@ -264,6 +264,33 @@ impl Control {
         }
     }
 
+    /// Calls `operation` until it finishes, calling the same frozen operation again while its outcome is unknown,
+    /// until its deadline passes or `stop` fires, which cancels it through `cancellation`.
+    pub async fn run_session_method(
+        &self,
+        operation: &PreparedSessionMethod,
+        cancellation: &CancellationToken,
+        stop: &CancellationToken,
+    ) -> SessionMethodResult {
+        loop {
+            let mut response =
+                self.call_session_method(operation, cancellation).await.unwrap_or_else(|_| unknown(operation));
+            if response.phase == SessionMethodPhase::Accepted as i32 {
+                response = unknown(operation);
+            }
+            if response.phase != SessionMethodPhase::Unknown as i32
+                || crate::now_ms() >= operation.deadline_ms()
+                || stop.is_cancelled()
+            {
+                return response;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(100)) => {},
+                () = stop.cancelled() => cancellation.cancel(),
+            }
+        }
+    }
+
     pub(crate) fn method_runtime(&self, target: &CapturedSession) -> Result<RuntimeConnection> {
         let current = self.capture_session(&target.claim)?;
         if current.identity != target.identity
