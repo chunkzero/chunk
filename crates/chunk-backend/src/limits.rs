@@ -18,7 +18,7 @@ pub(crate) const SUBSCRIPTION_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MUTATION_BYTES: usize = 32 * 1024 * 1024;
 /// Each live action reserves its engine's heap limit.
 pub(crate) const ACTION_BYTES: usize = 256 * 1024 * 1024;
-/// Retained action outcomes and prepared action identities.
+/// Retained action outcomes, live actions and prepared action identities; outcomes give way first.
 pub(crate) const RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -37,7 +37,7 @@ pub enum Limit {
     SubscriptionMemory,
     #[error("live actions reached 256 MiB of engine heap")]
     ActionMemory,
-    #[error("retained action outcomes and prepared action identities reached 64 MiB")]
+    #[error("live actions and prepared action identities reached 64 MiB of retention")]
     Retention,
     #[error("scheduled jobs reached the store's job budget; retry once jobs finish or expire")]
     Jobs,

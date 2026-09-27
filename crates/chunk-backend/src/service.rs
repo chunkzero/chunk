@@ -161,6 +161,8 @@ pub(crate) enum Command {
         purpose: crate::commands::Purpose,
         id: ActionId,
         call: Call,
+        /// Whether the outcome stays retained after the action finishes, for retries by ID.
+        retain: bool,
         reply: Request<ActionHandle>,
     },
     ActionStatus {
@@ -513,6 +515,7 @@ impl Backend {
             purpose: crate::commands::Purpose::Function,
             id,
             call,
+            retain: true,
             reply,
         })
         .await
@@ -532,8 +535,9 @@ impl Backend {
         self.submit(|reply| Command::Functions { id, reply }).await
     }
 
+    /// Runs a hook for a caller that never retries it by ID, so its outcome isn't retained once it finishes.
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
-        self.start_hook(self.allocate_action_id().await?, call).await?.outcome().await
+        self.launch_hook(self.allocate_action_id().await?, call, false).await?.outcome().await
     }
 
     /// Starts the hook `call` names under an identity from [`Self::allocate_action_id`], as
@@ -542,12 +546,17 @@ impl Backend {
     /// Rejects identities this backend didn't allocate, mismatched requests, unknown hooks, untrusted hook context or
     /// exhausted capacity. Dropping an acceptance future cancels its scope.
     pub async fn start_hook(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
+        self.launch_hook(id, call, true).await
+    }
+
+    async fn launch_hook(&self, id: ActionId, call: Call, retain: bool) -> Result<ActionHandle> {
         call.validate_limit(512)?;
         let bytes = id.incarnation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::StartAction {
             purpose: crate::commands::Purpose::Hook,
             id,
             call,
+            retain,
             reply,
         })
         .await

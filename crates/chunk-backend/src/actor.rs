@@ -261,7 +261,9 @@ impl Actor {
                     .collect()
             })),
             Command::PrepareAction { reply } => reply.finish(self.actions.prepare()),
-            Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),
+            Command::StartAction { purpose, id, call, retain, reply } => {
+                self.start_action(id, call, purpose, retain, reply);
+            }
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),
             Command::JobControl { command, reply } => self.job_control(command, reply),

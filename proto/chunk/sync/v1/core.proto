@@ -167,8 +167,9 @@ message Error {
 // The result of `chunk:prepare`, which issues the operation ID of one effectful call: an app action, or for a gateway,
 // a hook. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call issues one
 // ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued before it
-// restarted or restored, gets OUTCOME_UNKNOWN. An unused ID stays valid for 24 hours by default, and `chunk:prepare`
-// gets OVERLOADED while retained IDs and outcomes fill their budget.
+// restarted or restored, gets OUTCOME_UNKNOWN, as does one whose outcome core retired. Core retains an outcome for up
+// to 24 hours, or less under memory pressure (oldest completed first), and an unused ID for 24 hours. `chunk:prepare`
+// gets OVERLOADED only while running calls and unused IDs fill the retention budget.
 // Issued IDs begin with `prep:`, which is reserved: actions and hooks require such an ID, and mutations and claim
 // methods reject one as INVALID.
 message PrepareResult {

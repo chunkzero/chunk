@@ -19,7 +19,7 @@ use crate::{
     service::{Call, Event, Request, Update},
 };
 
-/// How long a finished action's outcome stays retained, and a prepared identity nothing started stays valid.
+/// How long a finished action's outcome stays retained at most, and a prepared identity nothing started stays valid.
 const RETENTION: Duration = Duration::from_hours(24);
 /// Retained bytes each record or prepared identity charges beyond its call and result.
 const ENTRY_BYTES: usize = 256;
@@ -36,6 +36,8 @@ struct Record {
     worker: Option<JoinHandle<()>>,
     /// Bytes this record retains.
     bytes: usize,
+    /// Whether the record outlives its action, so a retry by ID finds the outcome.
+    retain: bool,
 }
 
 pub(super) struct Actions {
@@ -44,9 +46,10 @@ pub(super) struct Actions {
     /// Identities `prepare` issued that nothing started yet, by sequence, with when each expires.
     prepared: BTreeMap<u64, Instant>,
     records: BTreeMap<ActionId, Record>,
-    /// Finished records, oldest first, with when each expires.
+    /// Retained finished records, oldest first, with when each expires.
     finished: VecDeque<(Instant, ActionId)>,
-    /// Bytes prepared identities and records retain, at most [`RETAINED_BYTES`] unless results overshoot it.
+    /// Bytes prepared identities and records retain. Finished records are evicted, oldest first, to keep it within
+    /// [`RETAINED_BYTES`]; prepared identities and live records alone may not exceed it.
     retained: usize,
     events: mpsc::Sender<Event>,
     slots: Arc<Semaphore>,
@@ -106,9 +109,7 @@ impl Actions {
         self.expire();
         let sequence = self.next;
         let next = sequence.checked_add(1).ok_or(Error::Invalid("action identity exhausted"))?;
-        if self.retained + ENTRY_BYTES > RETAINED_BYTES {
-            return Err(Limit::Retention.exceeded());
-        }
+        self.make_room(ENTRY_BYTES)?;
         self.next = next;
         self.retained += ENTRY_BYTES;
         self.prepared.insert(sequence, Instant::now() + RETENTION);
@@ -124,14 +125,28 @@ impl Actions {
             entry.remove();
             self.retained -= ENTRY_BYTES;
         }
-        while let Some((expiry, _)) = self.finished.front()
-            && *expiry <= now
-        {
-            let (_, id) = self.finished.pop_front().expect("front exists");
-            if let Some(record) = self.records.remove(&id) {
-                self.retained -= record.bytes;
+        while self.finished.front().is_some_and(|(expiry, _)| *expiry <= now) {
+            self.evict_oldest();
+        }
+    }
+
+    /// Evicts the oldest finished records until `bytes` more fit the budget, which fails once prepared identities and
+    /// live records alone leave no room.
+    fn make_room(&mut self, bytes: usize) -> Result<()> {
+        while self.retained + bytes > RETAINED_BYTES {
+            if !self.evict_oldest() {
+                return Err(Limit::Retention.exceeded());
             }
         }
+        Ok(())
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some((_, id)) = self.finished.pop_front() else { return false };
+        if let Some(record) = self.records.remove(&id) {
+            self.retained -= record.bytes;
+        }
+        true
     }
 
     /// Admits a record of `bytes` under `id`, which must be prepared unless it's `trusted`, consuming its preparation.
@@ -143,15 +158,26 @@ impl Actions {
             return Err(Limit::ActionMemory.exceeded());
         }
         let released = if trusted { 0 } else { ENTRY_BYTES };
-        if self.retained - released + bytes > RETAINED_BYTES {
-            return Err(Limit::Retention.exceeded());
-        }
+        self.make_room(bytes - released)?;
         if !trusted {
             self.prepared.remove(&id.sequence);
         }
         self.retained = self.retained - released + bytes;
         Ok(())
     }
+}
+
+/// Identifies a request as sent, so only a retry repeating it replays its outcome.
+fn fingerprint(purpose: &crate::commands::Purpose, call: &Call) -> Result<[u8; 32]> {
+    let request = (
+        "action-v1",
+        purpose.name(),
+        call.deployment.as_str(),
+        &call.function,
+        call.arguments.as_str(),
+        call.caller.as_str(),
+    );
+    Ok(Sha256::digest(serde_json::to_vec(&request)?).into())
 }
 
 impl Drop for Actions {
@@ -171,13 +197,14 @@ impl Actor {
         id: ActionId,
         call: Call,
         purpose: crate::commands::Purpose,
+        retain: bool,
         reply: Request<ActionHandle>,
     ) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        let result = self.launch_action(id, call, None, purpose, &reply.cancellation);
+        let result = self.launch_action(id, call, None, purpose, retain, &reply.cancellation);
         reply.finish(result);
     }
 
@@ -187,20 +214,13 @@ impl Actor {
         mut call: Call,
         durable_identity: Option<String>,
         purpose: crate::commands::Purpose,
+        retain: bool,
         request_cancellation: &Cancellation,
     ) -> Result<ActionHandle> {
         let hook = matches!(purpose, crate::commands::Purpose::Hook);
         self.actions.expire();
         // A retained outcome replays before the deployment is checked, since it outlives the deployment's release.
-        let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
-            "action-v1",
-            purpose.name(),
-            call.deployment.as_str(),
-            &call.function,
-            call.arguments.as_str(),
-            call.caller.as_str(),
-        ))?)
-        .into();
+        let fingerprint = fingerprint(&purpose, &call)?;
         if let Some(record) = self.actions.records.get(&id) {
             if record.fingerprint != fingerprint {
                 return Err(Error::OperationMismatch);
@@ -287,6 +307,7 @@ impl Actor {
                 cancellation,
                 worker: Some(worker),
                 bytes,
+                retain,
             },
         );
         Ok(ActionHandle { id, status: receiver, scope })
@@ -321,17 +342,23 @@ impl Actor {
     }
 
     pub(super) fn finish_action(&mut self, id: &ActionId, result: Result<Arc<str>>) {
-        if let Some(record) = self.actions.records.get_mut(id) {
-            record.cancellation.cancel();
-            let bytes = result.as_ref().map_or_else(|error| error.to_string().len(), |json| json.len());
-            record.status.send_replace(ActionStatus::Finished(result));
-            if let Some(worker) = record.worker.take() {
-                let _ = worker.join();
-                record.bytes += bytes;
-                self.actions.retained += bytes;
-                self.actions.finished.push_back((Instant::now() + RETENTION, id.clone()));
-            }
+        let Some(record) = self.actions.records.get_mut(id) else { return };
+        record.cancellation.cancel();
+        let bytes = result.as_ref().map_or_else(|error| error.to_string().len(), |json| json.len());
+        record.status.send_replace(ActionStatus::Finished(result));
+        let Some(worker) = record.worker.take() else { return };
+        let _ = worker.join();
+        if !record.retain {
+            let bytes = record.bytes;
+            self.actions.records.remove(id);
+            self.actions.retained -= bytes;
+            return;
         }
+        record.bytes += bytes;
+        self.actions.retained += bytes;
+        self.actions.finished.push_back((Instant::now() + RETENTION, id.clone()));
+        // Over budget, older outcomes give way; prepared identities and live records alone always fit.
+        let _ = self.actions.make_room(0);
     }
 
     pub(super) fn action_platform(&mut self, id: &ActionId, sequence: u32, request: &Json, reply: Request<Arc<str>>) {

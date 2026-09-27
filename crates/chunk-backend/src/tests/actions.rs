@@ -176,11 +176,22 @@ async fn backend_loss_keeps_partial_mutations_but_action_identity_cannot_restart
 }
 
 #[tokio::test]
-async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retained() {
+async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retained_within_budget() {
     let directory = tempfile::tempdir().unwrap();
     let backend = backend(&directory);
     let mut version = deployment("old", 1);
     version.source.push_str("\nexport function complete() { return 42; }");
+    version.source.push_str("\nexport function large(ctx, text) { return text; }");
+    version.functions.insert(
+        "large".into(),
+        Function {
+            kind: FunctionKind::Action,
+            visibility: Visibility::Public,
+            export: "large".into(),
+            arguments: Schema::String,
+            result: Schema::String,
+        },
+    );
     version.functions.insert(
         "complete".into(),
         Function {
@@ -223,7 +234,24 @@ async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retain
     let mut replay = backend.start_action(first.clone(), call("old", "complete", "alice", json!(null))).await.unwrap();
     assert_eq!(&*replay.outcome().await.unwrap(), "42");
     assert!(matches!(
-        backend.action_status(first, json!({"player":"alice"}).into()).await,
+        backend.action_status(first.clone(), json!({"player":"alice"}).into()).await,
         Ok(ActionStatus::Finished(Ok(value))) if &*value == "42"
     ));
+
+    // Outcomes past the 64 MiB budget evict the oldest first and never block new work.
+    let large = || call("old", "large", "alice", json!("x".repeat(1_000_000)));
+    let mut newest = None;
+    for _ in 0..35 {
+        let id = backend.allocate_action_id().await.unwrap();
+        let mut action = backend.start_action(id.clone(), large()).await.unwrap();
+        assert_eq!(action.outcome().await.unwrap().len(), 1_000_002);
+        newest = Some(id);
+    }
+    assert!(matches!(
+        backend.start_action(first, call("old", "complete", "alice", json!(null))).await,
+        Err(Error::ActionOutcomeUnknown)
+    ));
+    let mut replay = backend.start_action(newest.unwrap(), large()).await.unwrap();
+    assert_eq!(replay.outcome().await.unwrap().len(), 1_000_002);
+    backend.allocate_action_id().await.unwrap();
 }
