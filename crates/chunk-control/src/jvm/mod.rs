@@ -13,7 +13,7 @@ mod topic;
 pub use topic::Topic;
 
 use std::{
-    collections::{BTreeMap, btree_map},
+    collections::{BTreeMap, BTreeSet, btree_map},
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
@@ -69,12 +69,15 @@ pub(crate) struct Work {
     /// Session methods by operation ID, within the JVM's method budget. The topic carries those still awaiting their
     /// result.
     methods: BTreeMap<String, Method>,
-    /// The highest sequence of the methods put on the topic. Sequences increase, so one at or below it that
-    /// `methods` no longer holds was retired.
-    issued: u64,
+    /// The sequences of the methods whose results' retention ended, so a retry of one is unknown instead of asking
+    /// the JVM again.
+    retired: BTreeSet<u64>,
+    /// Every sequence at or below this was retired too, once `retired` overflowed.
+    retired_below: u64,
 }
 
 struct Method {
+    sequence: u64,
     /// The call, without its arguments once answered.
     call: sync::JvmMethodCall,
     /// The result the JVM sent, and when.
@@ -305,7 +308,7 @@ impl Control {
             }
             // Only a JVM its host confirmed stopped runs no more methods; one that may still run keeps their history.
             if matches!(released, Ok(true)) {
-                jvm.work.send_if_modified(|work| !std::mem::take(&mut work.methods).is_empty());
+                jvm.work.send_if_modified(Work::forget_methods);
             }
         }
         released

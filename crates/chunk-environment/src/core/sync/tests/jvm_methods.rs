@@ -18,6 +18,13 @@ async fn session_methods_run_and_cancel_through_the_topic() {
     assert_eq!((result.phase(), result.result_json.as_str()), (SessionMethodPhase::Completed, "7"));
     // A retry returns the recorded result rather than running the method again.
     assert_eq!(control.call_session_method(&score, &CancellationToken::new()).await.unwrap(), result);
+    // A method prepared earlier runs even when first called after a later one ran.
+    let earlier = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
+    let later = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
+    for method in [&later, &earlier] {
+        let result = control.call_session_method(method, &CancellationToken::new()).await.unwrap();
+        assert_eq!(result.phase(), SessionMethodPhase::Completed);
+    }
 
     let hold = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
     let cancellation = CancellationToken::new();

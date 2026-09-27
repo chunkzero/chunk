@@ -28,6 +28,9 @@ const MAX_METHOD_BYTES: usize = 8 * 1024 * 1024;
 /// The room a pending method holds for its result.
 const RESULT_RESERVE: usize = MAX_JSON + 1024;
 
+/// How many retired methods control remembers individually for one JVM.
+const MAX_RETIRED: usize = 65_536;
+
 /// A session method on a JVM's topic, awaiting the JVM's result.
 pub(crate) struct MethodCall {
     work: watch::Receiver<Work>,
@@ -48,9 +51,42 @@ impl MethodCall {
 }
 
 impl Work {
-    /// Drops the results kept past their retention.
+    /// Drops the results kept past their retention, retiring their methods.
     pub(super) fn prune(&mut self) {
-        self.methods.retain(|_, method| method.result.as_ref().is_none_or(|(at, _)| at.elapsed() < RESULT_RETENTION));
+        let mut expired = Vec::new();
+        self.methods.retain(|_, method| {
+            let kept = method.result.as_ref().is_none_or(|(at, _)| at.elapsed() < RESULT_RETENTION);
+            if !kept {
+                expired.push(method.sequence);
+            }
+            kept
+        });
+        for sequence in expired {
+            self.retire(sequence);
+        }
+    }
+
+    /// Records the method numbered `sequence` as retired. Past the cap, the lowest retired sequence raises
+    /// `retired_below` instead.
+    fn retire(&mut self, sequence: u64) {
+        self.retired.insert(sequence);
+        while self.retired.len() > MAX_RETIRED {
+            if let Some(lowest) = self.retired.pop_first() {
+                self.retired_below = self.retired_below.max(lowest);
+            }
+        }
+    }
+
+    /// Whether the method numbered `sequence`, which `methods` does not hold, was retired.
+    fn retired(&self, sequence: u64) -> bool {
+        sequence <= self.retired_below || self.retired.contains(&sequence)
+    }
+
+    /// Forgets every method, retired ones too, as for a JVM its host confirmed stopped. Whether any was held.
+    pub(super) fn forget_methods(&mut self) -> bool {
+        self.retired.clear();
+        self.retired_below = 0;
+        !std::mem::take(&mut self.methods).is_empty()
     }
 
     /// Checks that a method holding `bytes` fits the JVM's method budget.
@@ -89,10 +125,9 @@ impl Jvms {
     }
 
     /// Puts session method `operation`, numbered `sequence`, on `host`'s topic unless it is already there, as for a
-    /// retry. `None` for a host whose JVM has not registered over sync, and for a method no longer held whose
-    /// sequence was already issued, as once its result's retention ended: its outcome is unknown, and the JVM is never
-    /// asked about it again. The method counts against the JVM's method budget until the JVM answers it and its
-    /// result's retention ends, or the JVM stops.
+    /// retry. `None` for a host whose JVM has not registered over sync, and for a method retired once its result's
+    /// retention ended: its outcome is unknown, and the JVM is never asked about it again. The method counts against
+    /// the JVM's method budget until the JVM answers it and its result's retention ends, or the JVM stops.
     /// # Errors
     /// Reports a full budget as over capacity.
     pub fn call(
@@ -112,18 +147,13 @@ impl Jvms {
             if work.methods.contains_key(operation) {
                 return false;
             }
-            if sequence <= work.issued {
+            if work.retired(sequence) {
                 held = Ok(false);
                 return false;
             }
-            let method = Method { call, result: None };
+            let method = Method { sequence, call, result: None };
             held = work.admit(method.bytes()).map(|()| true);
-            if held.is_err() {
-                return false;
-            }
-            work.issued = sequence;
-            work.methods.insert(operation.into(), method);
-            true
+            held.is_ok() && work.methods.insert(operation.into(), method).is_none()
         });
         Ok(held?.then(|| MethodCall { work: jvm.work.subscribe(), operation: operation.into() }))
     }
@@ -260,9 +290,8 @@ impl Control {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_method_whose_result_expired_is_unknown_and_never_asked_again() {
-        let jvms = Jvms::default();
+    /// Jvms with one JVM, on `host`.
+    fn jvms() -> Jvms {
         let jvm = super::super::Jvm {
             registration: sync::JvmRegistration::default(),
             stream: None,
@@ -270,19 +299,53 @@ mod tests {
             work: watch::Sender::default(),
             deliveries: std::collections::BTreeMap::new(),
         };
-        let work = jvm.work.subscribe();
+        let jvms = Jvms::default();
         jvms.lock().unwrap().insert("host".into(), jvm);
-        let call = || sync::JvmMethodCall { method: "score".into(), ..sync::JvmMethodCall::default() };
-        assert!(jvms.call("host", "jvm/5", 5, call()).unwrap().is_some());
-        // The JVM completed it, and its result's retention has since ended.
+        jvms
+    }
+
+    fn call(jvms: &Jvms, sequence: u64) -> Option<MethodCall> {
+        let call = sync::JvmMethodCall { method: "score".into(), ..sync::JvmMethodCall::default() };
+        jvms.call("host", &format!("jvm/{sequence}"), sequence, call).unwrap()
+    }
+
+    /// Records the JVM completing method `sequence` at `at`.
+    fn complete(jvms: &Jvms, sequence: u64, at: Instant) {
         let completed =
             sync::JvmMethodResult { phase: sync::JvmMethodPhase::Completed.into(), result_json: b"7".into() };
-        let answered = Instant::now().checked_sub(RESULT_RETENTION).unwrap();
         jvms.lock().unwrap()["host"].work.send_modify(|work| {
-            work.methods.get_mut("jvm/5").unwrap().result = Some((answered, completed));
+            work.methods.get_mut(&format!("jvm/{sequence}")).unwrap().result = Some((at, completed));
         });
-        assert!(jvms.call("host", "jvm/5", 5, call()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_method_whose_result_expired_is_unknown_and_never_asked_again() {
+        let jvms = jvms();
+        let work = jvms.lock().unwrap()["host"].work.subscribe();
+        assert!(call(&jvms, 5).is_some());
+        complete(&jvms, 5, Instant::now().checked_sub(RESULT_RETENTION).unwrap());
+        assert!(call(&jvms, 5).is_none());
         assert!(work.borrow().methods.is_empty());
-        assert!(jvms.call("host", "jvm/6", 6, call()).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_method_first_called_after_a_later_one_retired_still_runs() {
+        let jvms = jvms();
+        assert!(call(&jvms, 2).is_some());
+        complete(&jvms, 2, Instant::now().checked_sub(RESULT_RETENTION).unwrap());
+        let first = call(&jvms, 1).expect("a first call runs");
+        complete(&jvms, 1, Instant::now());
+        assert_eq!(first.result().unwrap().phase(), sync::JvmMethodPhase::Completed);
+        assert!(call(&jvms, 2).is_none());
+    }
+
+    #[test]
+    fn retired_methods_past_the_cap_are_retired_by_watermark() {
+        let mut work = Work::default();
+        for sequence in (1..=MAX_RETIRED as u64 + 1).map(|sequence| sequence * 2) {
+            work.retire(sequence);
+        }
+        assert_eq!((work.retired.len(), work.retired_below), (MAX_RETIRED, 2));
+        assert!(work.retired(1) && work.retired(2) && !work.retired(3) && work.retired(4));
     }
 }
