@@ -265,8 +265,8 @@ fn subscription_reruns_get_a_turn_under_continuous_foreground_queries() {
     let mut actor = Actor::new(
         Box::new(crate::tests::open(&directory)),
         events,
-        "test".into(),
         crate::ActionEffects::new("test".into()).unwrap(),
+        crate::limits::ACTION_BYTES,
         1,
         Arc::default(),
         Arc::new(Semaphore::new(crate::limits::REQUEST_BYTES)),

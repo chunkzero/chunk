@@ -12,7 +12,9 @@ fn now() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
 }
 fn backend(directory: &tempfile::TempDir) -> Backend {
-    Backend::new("jobs".into(), Box::new(SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap())).unwrap()
+    let store = SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap();
+    let effects = crate::ActionEffects::new("jobs".into()).unwrap();
+    Backend::with_action_bytes("jobs".into(), Box::new(store), effects, crate::limits::ACTION_BYTES).unwrap()
 }
 fn call(version: &str, function: &str, player: &str, arguments: serde_json::Value) -> Call {
     Call {

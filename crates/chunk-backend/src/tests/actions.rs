@@ -5,7 +5,7 @@ use chunk_js::DeploymentId;
 use chunk_store::SqliteStore;
 use serde_json::json;
 
-use crate::{ActionStatus, Backend, Call, Error, Limit};
+use crate::{ActionEffects, ActionStatus, Backend, Call, Error, Limit, limits::ACTION_BYTES};
 
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
@@ -79,6 +79,57 @@ fn call(version: &str, function: &str, player: &str, arguments: serde_json::Valu
 fn backend(directory: &tempfile::TempDir) -> Backend {
     Backend::new("test".into(), Box::new(SqliteStore::open(directory.path().join("actions.db"), "test").unwrap()))
         .unwrap()
+}
+
+fn budgeted(directory: &tempfile::TempDir, action_bytes: usize) -> Backend {
+    let store = SqliteStore::open(directory.path().join("actions.db"), "test").unwrap();
+    Backend::with_action_bytes("test".into(), Box::new(store), ActionEffects::new("test".into()).unwrap(), action_bytes)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_burst_past_the_action_budget_waits_for_live_actions_to_finish() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, ACTION_BYTES);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let burst: Vec<_> = (0..12)
+        .map(|player| {
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                let id = backend.allocate_action_id().await?;
+                backend.start_action(id, call("old", "flow", &player.to_string(), json!(100))).await?.outcome().await
+            })
+        })
+        .collect();
+    for action in burst {
+        assert_eq!(&*action.await.unwrap().unwrap(), "2");
+    }
+}
+
+#[tokio::test]
+async fn actions_are_refused_once_queued_ones_wait_too_long_for_the_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, chunk_js::Limits::default().heap_bytes);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let mut held = backend
+        .start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "held", json!(-1)))
+        .await
+        .unwrap();
+    let queued = {
+        let backend = backend.clone();
+        tokio::spawn(async move {
+            let id = backend.allocate_action_id().await?;
+            backend.start_action(id, call("old", "flow", "queued", json!(0))).await?.outcome().await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(matches!(
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "late", json!(0))).await,
+        Err(Error::Overloaded(Limit::ActionMemory))
+    ));
+    backend.mutate("release-held".into(), call("old", "publicIncrement", "release-held", json!(null))).await.unwrap();
+    assert_eq!(&*held.outcome().await.unwrap(), "2");
+    assert_eq!(&*queued.await.unwrap().unwrap(), "2");
 }
 
 #[tokio::test]
@@ -176,7 +227,7 @@ async fn backend_loss_keeps_partial_mutations_but_action_identity_cannot_restart
 }
 
 #[tokio::test]
-async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retained_within_budget() {
+async fn finished_action_outcomes_stay_retained_within_budget() {
     let directory = tempfile::tempdir().unwrap();
     let backend = backend(&directory);
     let mut version = deployment("old", 1);
@@ -203,28 +254,6 @@ async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retain
         },
     );
     backend.deploy(version).await.unwrap();
-    let mut actions = Vec::new();
-    for player in 0..8 {
-        actions.push(
-            backend
-                .start_action(
-                    backend.allocate_action_id().await.unwrap(),
-                    call("old", "flow", &player.to_string(), json!(30_000)),
-                )
-                .await
-                .unwrap(),
-        );
-    }
-    assert!(matches!(
-        backend
-            .start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "overflow", json!(30_000)))
-            .await,
-        Err(Error::Overloaded(Limit::ActionMemory))
-    ));
-    for action in &mut actions {
-        action.cancel();
-        assert!(action.outcome().await.is_err());
-    }
     let first = backend.allocate_action_id().await.unwrap();
     for index in 0..33 {
         let id = if index == 0 { first.clone() } else { backend.allocate_action_id().await.unwrap() };

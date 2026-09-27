@@ -18,13 +18,17 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch
 use crate::{
     ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result,
     actor::Actor,
-    limits::{EngineQueue, Limit, REQUEST_BYTES, REQUEST_OVERHEAD},
+    limits::{EngineQueue, Limit, REQUEST_BYTES, REQUEST_OVERHEAD, action_bytes},
 };
 
 /// Admission is bounded by `limits::REQUEST_BYTES`; this only bounds the channel's own memory.
 const EVENTS: usize = 65_536;
 /// Query engines beyond this rarely pay for their memory: one engine per core, up to four.
 const MAX_READERS: usize = 4;
+
+fn default_readers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get).min(MAX_READERS)
+}
 
 #[derive(Clone)]
 pub struct Call {
@@ -357,18 +361,34 @@ impl Backend {
     /// # Errors
     /// Reports invalid scope, thread, snapshot or JS initialization failures.
     pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
-        let readers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get).min(MAX_READERS);
-        Self::start(environment, store, effects, readers)
+        Self::start(environment, store, effects, default_readers(), action_bytes())
     }
 
     /// Starts with exactly `readers` query engines.
     #[cfg(test)]
     pub(crate) fn with_readers(environment: String, store: Box<dyn Storage>, readers: usize) -> Result<Self> {
         let effects = ActionEffects::new(environment.clone())?;
-        Self::start(environment, store, effects, readers)
+        Self::start(environment, store, effects, readers, crate::limits::ACTION_BYTES)
     }
 
-    fn start(environment: String, store: Box<dyn Storage>, effects: ActionEffects, readers: usize) -> Result<Self> {
+    /// Starts with a live-action budget of exactly `action_bytes`.
+    #[cfg(test)]
+    pub(crate) fn with_action_bytes(
+        environment: String,
+        store: Box<dyn Storage>,
+        effects: ActionEffects,
+        action_bytes: usize,
+    ) -> Result<Self> {
+        Self::start(environment, store, effects, default_readers(), action_bytes)
+    }
+
+    fn start(
+        environment: String,
+        store: Box<dyn Storage>,
+        effects: ActionEffects,
+        readers: usize,
+        action_bytes: usize,
+    ) -> Result<Self> {
         effects.validate_environment(&environment)?;
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("environment identity"));
@@ -382,10 +402,9 @@ impl Backend {
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let outgoing = events.clone();
-        let incarnation = uuid::Uuid::new_v4().to_string();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, incarnation, effects, readers, dequeued, retained) {
+            match Actor::new(store, outgoing, effects, action_bytes, readers, dequeued, retained) {
                 Ok(actor) => {
                     if ready.send(Ok(actor.lane())).is_ok() {
                         actor.run(incoming, &stop);

@@ -144,10 +144,11 @@ fn configured(directory: &tempfile::TempDir, origin: &str, timeout: Duration) ->
         .unwrap()
         .with_deployment(DeploymentId::new("allowed").unwrap(), grants)
         .unwrap();
-    Backend::with_action_effects(
+    Backend::with_action_bytes(
         "test".into(),
         Box::new(SqliteStore::open(directory.path().join("effects.db"), "test").unwrap()),
         effects,
+        crate::limits::ACTION_BYTES,
     )
     .unwrap()
 }

@@ -15,7 +15,7 @@ use super::Actor;
 use crate::{
     ActionHandle, ActionId, ActionIdentity, ActionStatus, Error, Result,
     actions::{Host, Scope},
-    limits::{ACTION_BYTES, Limit, RETAINED_BYTES},
+    limits::{Limit, QUEUE_WAIT, RETAINED_BYTES},
     service::{Call, Event, Request, Update},
 };
 
@@ -41,8 +41,22 @@ struct Record {
     retain: bool,
 }
 
+/// A start waiting for a live action to finish.
+struct Waiting {
+    id: ActionId,
+    call: Call,
+    purpose: crate::commands::Purpose,
+    retain: bool,
+    reply: Request<ActionHandle>,
+    since: Instant,
+}
+
 pub(super) struct Actions {
     incarnation: String,
+    /// Live actions the heap budget admits, each reserving its engine's heap limit.
+    pub limit: usize,
+    /// Starts the budget can't admit yet, oldest first; at most [`Self::limit`] wait.
+    waiting: VecDeque<Waiting>,
     next: u64,
     /// Identities `prepare` issued that nothing started yet, by sequence, with when each expires.
     prepared: BTreeMap<u64, Instant>,
@@ -59,17 +73,21 @@ pub(super) struct Actions {
 }
 
 impl Actions {
-    pub fn new(events: mpsc::Sender<Event>, incarnation: String, effects: crate::ActionEffects) -> Self {
+    pub fn new(events: mpsc::Sender<Event>, incarnation: String, effects: crate::ActionEffects, budget: usize) -> Self {
+        let limit = budget / Limits::default().heap_bytes;
         Self {
             incarnation,
+            limit,
+            waiting: VecDeque::new(),
             next: 1,
             prepared: BTreeMap::new(),
             records: BTreeMap::new(),
             finished: VecDeque::new(),
             retained: 0,
             events,
-            slots: Arc::new(Semaphore::new(32)),
-            external_slots: Arc::new(Semaphore::new(8)),
+            // Per admitted action, four transaction or platform calls and one HTTP effect may be in flight.
+            slots: Arc::new(Semaphore::new(4 * limit)),
+            external_slots: Arc::new(Semaphore::new(limit)),
             effects,
         }
     }
@@ -92,10 +110,26 @@ impl Actions {
         }
     }
 
-    /// Each live action reserves its engine's heap limit.
     pub fn capacity(&self) -> bool {
-        let live = self.records.values().filter(|record| record.worker.is_some()).count();
-        (live + 1) * chunk_js::Limits::default().heap_bytes <= ACTION_BYTES
+        self.records.values().filter(|record| record.worker.is_some()).count() < self.limit
+    }
+
+    /// Queues a start the budget can't admit yet. It's refused once queued starts wait too long or fill the queue.
+    fn wait(&mut self, waiting: Waiting) {
+        self.waiting.retain(|waiting| !waiting.reply.cancellation.is_cancelled());
+        if self.waiting.len() >= self.limit
+            || self.waiting.front().is_some_and(|front| front.since.elapsed() > QUEUE_WAIT)
+        {
+            waiting.reply.finish(Err(Limit::ActionMemory.exceeded()));
+        } else {
+            self.waiting.push_back(waiting);
+        }
+    }
+
+    pub fn refuse_waiting(&mut self, error: &Error) {
+        for waiting in self.waiting.drain(..) {
+            waiting.reply.finish(Err(error.clone()));
+        }
     }
 
     /// The `:job:` suffix keeps job identities outside the client-allocated incarnation, so `admit`
@@ -225,8 +259,23 @@ impl Actor {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        let result = self.launch_action(id, call, None, purpose, retain, &reply.cancellation);
-        reply.finish(result);
+        match self.launch_action(id.clone(), call.clone(), None, purpose.clone(), retain, &reply.cancellation) {
+            Err(Error::Overloaded(Limit::ActionMemory)) => {
+                self.actions.wait(Waiting { id, call, purpose, retain, reply, since: Instant::now() });
+            }
+            result => reply.finish(result),
+        }
+    }
+
+    /// Starts queued actions as live ones finish.
+    pub(super) fn dispatch_actions(&mut self) {
+        while self.failure.is_none()
+            && !self.actions.waiting.is_empty()
+            && self.actions.capacity()
+            && let Some(Waiting { id, call, purpose, retain, reply, .. }) = self.actions.waiting.pop_front()
+        {
+            self.start_action(id, call, purpose, retain, reply);
+        }
     }
 
     pub(super) fn launch_action(
