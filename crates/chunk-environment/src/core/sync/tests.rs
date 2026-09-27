@@ -1,5 +1,6 @@
 mod claims;
 mod effects;
+mod hooks;
 mod jvm;
 mod runtime;
 
