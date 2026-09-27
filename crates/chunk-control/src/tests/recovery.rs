@@ -161,3 +161,57 @@ async fn a_jvm_paused_between_adoption_and_its_recovery_stamp_is_still_fenced() 
     assert_eq!(fixture.runtime.bindings.lock().unwrap()["stray"].phase, DeliveryPhase::Closed);
     fixture.close().await;
 }
+
+#[test]
+fn recovery_fences_its_hosts_unassigned_reservations_but_never_another_hosts() {
+    let mut state = crate::state::State::default();
+    let generation = crate::state::Generation::new(1, 5).unwrap();
+    for host in ["a", "b"] {
+        let session = crate::state::SessionState {
+            empty_since_ms: None,
+            finish_requested: false,
+            finished: false,
+            host: host.into(),
+            session_type: "bridge/default".into(),
+            demand_key: "lobby".into(),
+            capacity: 8,
+            configuration: serde_json::json!({}),
+            retired: false,
+        };
+        state.sessions.insert(host.into(), session);
+        let claim = crate::state::Claim {
+            request: host.as_bytes().to_vec(),
+            player: host.into(),
+            proxy: "proxy-1".into(),
+            membership: generation,
+            generation,
+            session: host.into(),
+            phase: Phase::Reserved,
+            assignment: None,
+            activated: false,
+            created_at_ms: 0,
+            released_at_ms: None,
+            roster: None,
+        };
+        state.claims.insert(host.into(), claim);
+    }
+    // Recovering host A's JVM reports its own reservation prepared and B's, by operation and generation, arrived.
+    let binding = |operation: &str, phase: DeliveryPhase| DeliveryInventory {
+        delivery: Some(PlayerDelivery {
+            operation_id: operation.into(),
+            owner_generation: generation.wire(),
+            membership_generation: generation.wire(),
+            ..PlayerDelivery::default()
+        }),
+        phase: phase.into(),
+    };
+    let report = ProcessReport {
+        deliveries: vec![binding("a", DeliveryPhase::Prepared), binding("b", DeliveryPhase::Arrived)],
+        ..ProcessReport::default()
+    };
+    crate::recovery::retire_unowned(&mut state, "a", &report).unwrap();
+    let (a, b) = (&state.claims["a"], &state.claims["b"]);
+    assert!(a.phase == Phase::Released && a.request.is_empty());
+    assert!(b.phase == Phase::Reserved && b.request == b"b");
+    assert!(!crate::jvm::owned(&state, "a", report.deliveries[1].delivery.as_ref().unwrap()));
+}

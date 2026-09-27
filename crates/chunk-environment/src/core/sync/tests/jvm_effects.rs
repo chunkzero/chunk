@@ -230,8 +230,11 @@ fn release() -> chunk_control::Release {
     release
 }
 
-/// Places the fake player on a JVM registered over sync, returning it and the claim's assignment.
-async fn place(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) {
+/// Starts claiming the fake player, returning the claim and the host control launches for it.
+async fn claiming(
+    fixture: &Fixture,
+    launches: &Launches,
+) -> (tokio::task::JoinHandle<chunk_control::Result<Assignment>>, String) {
     fixture.control.activate_release(release()).unwrap();
     let control = fixture.control.clone();
     let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
@@ -241,6 +244,12 @@ async fn place(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) 
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    (claim, host)
+}
+
+/// Places the fake player on a JVM registered over sync, returning it and the claim's assignment.
+async fn place(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) {
+    let (claim, host) = claiming(fixture, launches).await;
     let jvm = SyncJvm::start(fixture, &host).await;
     (jvm, claim.await.unwrap().unwrap())
 }
@@ -306,15 +315,7 @@ async fn a_withdrawal_reaches_a_jvm_that_reconnected_with_its_deliveries() {
 async fn a_stale_delivery_report_neither_supplies_nor_removes_a_capability() {
     let launches = Launches::default();
     let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    fixture.control.activate_release(release()).unwrap();
-    let control = fixture.control.clone();
-    let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
-    let host = loop {
-        if let Some(host) = launches.host() {
-            break host;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    let (claim, host) = claiming(&fixture, &launches).await;
     fixture.register().await;
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     let first = loop {
@@ -413,19 +414,45 @@ async fn a_survivor_serving_players_is_adopted_once_it_closes_those_the_log_lost
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_survivors_player_whose_assignment_a_restore_lost_is_fenced() {
+async fn a_jvm_closing_a_delivery_before_its_assignment_releases_the_reservation() {
     let launches = Launches::default();
     let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    fixture.control.activate_release(release()).unwrap();
-    // Core restarts after reserving the claim but before recording its assignment.
-    let control = fixture.control.clone();
-    let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
-    let host = loop {
-        if let Some(host) = launches.host() {
-            break host;
+    let (claim, host) = claiming(&fixture, &launches).await;
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = loop {
+        let update = next(&mut updates).await;
+        if delivery_generation(&update, "login").is_some() {
+            break update;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    let generation = delivery_generation(&first, "login");
+    let sessions = sessions(&first).into_iter().map(|(id, wanted)| JvmSessionStatus {
+        session_type: wanted.session_type,
+        capacity: wanted.capacity,
+        ..session(&id, JvmSessionPhase::Ready)
+    });
+    let report = JvmReport {
+        complete: true,
+        sessions: sessions.collect(),
+        deliveries: vec![delivery("login", generation, JvmDeliveryPhase::Closed)],
+        health: None,
+    };
+    assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
+    assert!(claim.await.unwrap().is_err());
+    // The reservation is released, so the delivery leaves the topic.
+    while delivery_generation(&next(&mut updates).await, "login").is_some() {}
+    phase(&fixture, None).await;
+    drop(updates);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_survivors_delivery_whose_assignment_a_restore_lost_is_fenced() {
+    let launches = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
+    // Core restarts after reserving the claim but before recording its assignment.
+    let (claim, host) = claiming(&fixture, &launches).await;
     fixture.register().await;
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     while delivery_generation(&next(&mut updates).await, "login").is_none() {}
@@ -434,7 +461,7 @@ async fn a_survivors_player_whose_assignment_a_restore_lost_is_fenced() {
     drop(updates);
     let fixture = fixture.restart(Arc::new(Launches::of(&host, true))).await;
 
-    // The surviving JVM reports the player arrived at the claim's generation.
+    // The surviving JVM reports the delivery prepared at the claim's generation, which a gateway could still attach.
     fixture.register().await;
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     let first = next(&mut updates).await;
@@ -443,17 +470,17 @@ async fn a_survivors_player_whose_assignment_a_restore_lost_is_fenced() {
     let sessions = sessions(&first).into_iter().map(|(id, wanted)| JvmSessionStatus {
         session_type: wanted.session_type,
         capacity: wanted.capacity,
-        attached: 1,
+        prepared: 1,
         ..session(&id, JvmSessionPhase::Ready)
     });
     let report = JvmReport {
         complete: true,
         sessions: sessions.collect(),
-        deliveries: vec![delivery("login", generation, JvmDeliveryPhase::Arrived)],
+        deliveries: vec![delivery("login", generation, JvmDeliveryPhase::Prepared)],
         health: None,
     };
     assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
-    // Its topic leaves the delivery out, so the JVM disconnects the player, and admission waits until it has.
+    // Its topic leaves the delivery out, so the JVM closes it, and admission waits until it has.
     while delivery_generation(&next(&mut updates).await, "login").is_some() {}
     let claim = fixture.control.claim(runtime::login()).await;
     assert!(matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");

@@ -88,27 +88,44 @@ impl Jvms {
         admitted
     }
 
-    /// Puts session method `operation` on `host`'s topic unless it is already there, as for a retry. `None` for a host
-    /// whose JVM has not registered over sync. The method counts against the JVM's method budget until the JVM answers
-    /// it and its result's retention ends, or the JVM stops.
+    /// Puts session method `operation`, numbered `sequence`, on `host`'s topic unless it is already there, as for a
+    /// retry. `None` for a host whose JVM has not registered over sync, and for a method no longer held whose
+    /// sequence was already issued, as once its result's retention ended: its outcome is unknown, and the JVM is never
+    /// asked about it again. The method counts against the JVM's method budget until the JVM answers it and its
+    /// result's retention ends, or the JVM stops.
     /// # Errors
     /// Reports a full budget as over capacity.
-    pub fn call(&self, host: &str, operation: &str, call: sync::JvmMethodCall) -> Result<Option<MethodCall>> {
+    pub fn call(
+        &self,
+        host: &str,
+        operation: &str,
+        sequence: u64,
+        call: sync::JvmMethodCall,
+    ) -> Result<Option<MethodCall>> {
         let jvms = self.lock()?;
         let Some(jvm) = jvms.get(host) else {
             return Ok(None);
         };
-        let mut admitted = Ok(());
+        let mut held = Ok(true);
         jvm.work.send_if_modified(|work| {
+            work.prune();
             if work.methods.contains_key(operation) {
                 return false;
             }
+            if sequence <= work.issued {
+                held = Ok(false);
+                return false;
+            }
             let method = Method { call, result: None };
-            admitted = work.admit(method.bytes());
-            admitted.is_ok() && work.methods.insert(operation.into(), method).is_none()
+            held = work.admit(method.bytes()).map(|()| true);
+            if held.is_err() {
+                return false;
+            }
+            work.issued = sequence;
+            work.methods.insert(operation.into(), method);
+            true
         });
-        admitted?;
-        Ok(Some(MethodCall { work: jvm.work.subscribe(), operation: operation.into() }))
+        Ok(held?.then(|| MethodCall { work: jvm.work.subscribe(), operation: operation.into() }))
     }
 
     /// Asks `host`'s JVM not to start session method `operation`.
@@ -184,7 +201,7 @@ impl Control {
     /// Waits for `runtime`, a JVM registered over sync, to report the delivery of claim `operation`, created at
     /// `generation`, prepared, which its topic asks for.
     /// # Errors
-    /// Reports a delivery the JVM closed, or did not prepare within 10 seconds.
+    /// Reports a delivery the JVM closed, whose claim was released, or that it did not prepare within 10 seconds.
     pub(crate) async fn prepared_over_sync(
         &self,
         runtime: &RuntimeConnection,
@@ -193,7 +210,8 @@ impl Control {
     ) -> Result<PlayerPreparation> {
         let host = &runtime.identity.runtime_id;
         let capability = self
-            .reported(host, operation, generation, |reported| match reported {
+            .reported(host, operation, generation, |reported, released| match reported {
+                _ if released => Some(Err(Error::Invalid("claim no longer reserved"))),
                 Some((DeliveryPhase::Prepared, capability)) => Some(Ok(capability)),
                 Some((DeliveryPhase::Closed, _)) => Some(Err(Error::Unresolved("the JVM closed the delivery"))),
                 _ => None,
@@ -207,34 +225,26 @@ impl Control {
     /// # Errors
     /// Reports a delivery the JVM did not close within 10 seconds.
     pub(crate) async fn withdrawn_over_sync(&self, host: &str, operation: &str, generation: Generation) -> Result<()> {
-        self.reported(host, operation, generation, |reported| {
-            let released = self
-                .state()
-                .map(|state| state.claims.get(operation).is_none_or(|claim| claim.phase == Phase::Released));
-            match released {
-                Ok(released) if released || reported.is_some_and(|(phase, _)| phase == DeliveryPhase::Closed) => {
-                    Some(Ok(()))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            }
+        self.reported(host, operation, generation, |reported, released| {
+            (released || reported.is_some_and(|(phase, _)| phase == DeliveryPhase::Closed)).then_some(Ok(()))
         })
         .await
     }
 
-    /// Checks the phase and capability `host`'s JVM last reported for `operation`'s delivery at `generation` after each
-    /// report, until `check` returns an outcome.
+    /// Checks the phase and capability `host`'s JVM last reported for `operation`'s delivery at `generation`, and
+    /// whether its claim is released, after each report, until `check` returns an outcome.
     async fn reported<T>(
         &self,
         host: &str,
         operation: &str,
         generation: Generation,
-        check: impl Fn(Option<(DeliveryPhase, Vec<u8>)>) -> Option<Result<T>>,
+        check: impl Fn(Option<(DeliveryPhase, Vec<u8>)>, bool) -> Option<Result<T>>,
     ) -> Result<T> {
         let mut reports = self.links.subscribe();
         let reported = async {
             loop {
-                if let Some(outcome) = check(self.jvms.delivery(host, operation, generation)) {
+                let released = self.state()?.claims.get(operation).is_none_or(|claim| claim.phase == Phase::Released);
+                if let Some(outcome) = check(self.jvms.delivery(host, operation, generation), released) {
                     return outcome;
                 }
                 reports.changed().await.map_err(|_| Error::Unresolved("control stopped"))?;
@@ -243,5 +253,36 @@ impl Control {
         tokio::time::timeout(DELIVERY, reported)
             .await
             .unwrap_or(Err(Error::Unresolved("the JVM did not report the delivery in time")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_method_whose_result_expired_is_unknown_and_never_asked_again() {
+        let jvms = Jvms::default();
+        let jvm = super::super::Jvm {
+            registration: sync::JvmRegistration::default(),
+            stream: None,
+            health: None,
+            work: watch::Sender::default(),
+            deliveries: std::collections::BTreeMap::new(),
+        };
+        let work = jvm.work.subscribe();
+        jvms.lock().unwrap().insert("host".into(), jvm);
+        let call = || sync::JvmMethodCall { method: "score".into(), ..sync::JvmMethodCall::default() };
+        assert!(jvms.call("host", "jvm/5", 5, call()).unwrap().is_some());
+        // The JVM completed it, and its result's retention has since ended.
+        let completed =
+            sync::JvmMethodResult { phase: sync::JvmMethodPhase::Completed.into(), result_json: b"7".into() };
+        let answered = Instant::now().checked_sub(RESULT_RETENTION).unwrap();
+        jvms.lock().unwrap()["host"].work.send_modify(|work| {
+            work.methods.get_mut("jvm/5").unwrap().result = Some((answered, completed));
+        });
+        assert!(jvms.call("host", "jvm/5", 5, call()).unwrap().is_none());
+        assert!(work.borrow().methods.is_empty());
+        assert!(jvms.call("host", "jvm/6", 6, call()).unwrap().is_some());
     }
 }

@@ -225,7 +225,7 @@ impl Control {
     /// Puts the operation on its JVM's topic, unless it is already there, and waits for the JVM's result. A cancelled
     /// or expired call asks the JVM not to start it, and without an answer in time its outcome is unknown; the entry
     /// stays until the JVM answers, so a retry never runs the method again. A call already cancelled or expired goes
-    /// on the topic cancelled.
+    /// on the topic cancelled. A retry after its result's retention ended is unknown.
     /// # Errors
     /// Rejects a new method once its JVM's method budget is full.
     async fn call_over_sync(
@@ -240,7 +240,8 @@ impl Control {
                 || crate::now_ms() >= request.deadline_ms
                 || self.method_runtime(&operation.target).is_err()
         };
-        let Some(mut call) = self.jvms.call(host, &request.operation_id, sync_call(operation, stopped()))? else {
+        let call = self.jvms.call(host, &request.operation_id, request.sequence, sync_call(operation, stopped()))?;
+        let Some(mut call) = call else {
             return Ok(unknown(operation));
         };
         let mut cancelled = None;

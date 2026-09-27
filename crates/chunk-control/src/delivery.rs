@@ -218,8 +218,9 @@ impl Control {
     }
 }
 
-/// Records the phase a JVM reported for one delivery. A report for a claim control has not prepared yet, or that does
-/// not match the claim's generations, session and process, is ignored.
+/// Records the phase a JVM reported for one delivery. A report that does not match the claim's generations, session
+/// and process is ignored, as is one for a claim control has not prepared yet unless it closed the delivery, which
+/// releases the reservation.
 pub(crate) fn apply(
     state: &mut State,
     host: &str,
@@ -233,7 +234,7 @@ pub(crate) fn apply(
     let Some(claim) = state.claims.get(operation) else {
         return Ok(());
     };
-    if claim.phase == Phase::Released || claim.assignment.is_none() {
+    if claim.phase == Phase::Released || (claim.assignment.is_none() && binding.phase != DeliveryPhase::Closed as i32) {
         return Ok(());
     }
     if !owns(state, claim, host, identity, delivery) {

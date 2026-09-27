@@ -75,7 +75,7 @@ impl Control {
         let attached = self.update(|state| self.attach_in(state, host, token, &report));
         self.links.applied();
         let (stream, runtime) = attached?;
-        self.fence_deliveries(&runtime, &report).await?;
+        self.fence_deliveries(host, &runtime, &report).await?;
         self.resolve_recovery().await?;
         Ok(stream)
     }

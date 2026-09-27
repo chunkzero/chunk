@@ -36,8 +36,10 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
     configured_destinations(&mut fixture);
     let control = fixture.control().await;
     let small = demand("small", "small");
-    fixture.runtime.lost_preparation.store(true, Ordering::Release);
+    // The JVM is unreachable, so it holds no delivery for the reservation, which the retry after recovery prepares.
+    fixture.runtime.available.store(false, Ordering::Release);
     assert!(control.claim(small.clone()).await.is_err());
+    fixture.runtime.available.store(true, Ordering::Release);
     let reserved = control.state().unwrap().claims["small"].session.clone();
     drop(control);
     let control = fixture.control().await;

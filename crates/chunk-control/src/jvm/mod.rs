@@ -69,6 +69,9 @@ pub(crate) struct Work {
     /// Session methods by operation ID, within the JVM's method budget. The topic carries those still awaiting their
     /// result.
     methods: BTreeMap<String, Method>,
+    /// The highest sequence of the methods put on the topic. Sequences increase, so one at or below it that
+    /// `methods` no longer holds was retired.
+    issued: u64,
 }
 
 struct Method {
@@ -236,10 +239,10 @@ impl Control {
             if report.complete {
                 jvm.deliveries.clear();
             }
-            // Only a delivery at its open claim's generation counts, so a stale one neither supplies nor removes the
-            // current one's capability.
+            // Only a delivery at the generation of an open claim on this host counts, so a stale one or another host's
+            // neither supplies nor removes the current one's capability.
             for (status, binding) in report.deliveries.iter().zip(&inventory.deliveries) {
-                if let Some(delivery) = binding.delivery.as_ref().filter(|delivery| owned(state, delivery)) {
+                if let Some(delivery) = binding.delivery.as_ref().filter(|delivery| owned(state, host, delivery)) {
                     let reported = Reported {
                         generation: delivery.owner_generation,
                         phase: binding.phase(),
@@ -262,7 +265,7 @@ impl Control {
             let recovering = self.recovery.pending()?.iter().any(|pending| pending == host);
             let mut done = Vec::new();
             for binding in &inventory.deliveries {
-                let Some(delivery) = binding.delivery.as_ref().filter(|delivery| !owned(state, delivery)) else {
+                let Some(delivery) = binding.delivery.as_ref().filter(|delivery| !owned(state, host, delivery)) else {
                     continue;
                 };
                 if binding.phase == DeliveryPhase::Closed as i32 {
@@ -280,7 +283,7 @@ impl Control {
         });
         self.links.applied();
         if let Some(runtime) = attached? {
-            self.fence_deliveries(&runtime, &inventory).await?;
+            self.fence_deliveries(host, &runtime, &inventory).await?;
         }
         self.resolve_recovery().await
     }
@@ -309,12 +312,14 @@ impl Control {
     }
 }
 
-/// Whether an open claim owns `delivery` with the same generations.
-pub(crate) fn owned(state: &State, delivery: &PlayerDelivery) -> bool {
+/// Whether an open claim on one of `host`'s sessions owns `delivery`, which `host` reported, with the same
+/// generations.
+pub(crate) fn owned(state: &State, host: &str, delivery: &PlayerDelivery) -> bool {
     state.claims.get(&delivery.operation_id).is_some_and(|claim| {
         claim.phase != Phase::Released
             && claim.generation.wire() == delivery.owner_generation
             && claim.membership.wire() == delivery.membership_generation
+            && state.sessions.get(&claim.session).is_some_and(|session| session.host == host)
     })
 }
 
