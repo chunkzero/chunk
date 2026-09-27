@@ -7,12 +7,14 @@
 //   log, so an update may change it at an unchanged position, as may a drain whose deadline passed.
 // - `players`: each player with a current claim. Each entry's key is the player's UUID and its value an OperatorPlayer.
 //
-// Methods are transactional and take a client-chosen operation ID of at most 128 bytes, not a `prep:` one, and no
-// deployment, caller or stream. A retry returns the first outcome, and one with other arguments fails with
-// OPERATION_MISMATCH. A result's position is control's state after the call, which the topics reach.
+// Methods are transactional and take no deployment, caller or stream. Their operation IDs are client-chosen, at most
+// 128 bytes, and begin with `operator:`, which is reserved: an app call, or any other method whose caller chooses its
+// operation ID, rejects an `operator:` ID as INVALID. The first call under an ID binds it to its method and arguments
+// in the commit that takes effect. A retry returns the first outcome, and a call under the ID with the other method
+// or other arguments fails with OPERATION_MISMATCH. A result's position is control's state after the call, which the
+// topics reach.
 // - `chunk:move_player` takes MovePlayerArguments and returns MovePlayerResult. It queues a move for the gateway
-//   holding the player's claim, which carries it out by claiming the destination under the move's operation ID. An
-//   operation ID that already names a claim fails with OPERATION_MISMATCH.
+//   holding the player's claim, which carries it out by claiming the destination under the move's operation ID.
 // - `chunk:drain` takes DrainArguments and returns DrainResult. It retires a host: the host takes no new players,
 //   core moves its players away, and stops it once it is empty or its deadline passed. Follow its progress on `nodes`.
 syntax = "proto3";

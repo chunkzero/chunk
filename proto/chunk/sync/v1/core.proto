@@ -9,9 +9,9 @@
 // messages declared by each `chunk:*` method or platform topic otherwise.
 //
 // Operations. Methods that write require an operation ID; reads, and idempotent `chunk:register` and `chunk:report`,
-// ignore it, except a reserved `prep:` ID (see PrepareResult). A duplicate of a running operation waits for its
-// outcome instead of running again. A retry must repeat the first request, and one whose method, arguments or caller
-// differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
+// ignore it, except a reserved `prep:` ID (see PrepareResult) or `operator:` ID (see operator.proto). A duplicate of
+// a running operation waits for its outcome instead of running again. A retry must repeat the first request, and one
+// whose method, arguments or caller differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
 // - Transactional methods (mutations, `chunk:commit`) take effect only by committing. Core records a committed
 //   outcome with the commit, and a retry returns it until retention expires (24 hours by default). A failure
 //   committed nothing, so its retry runs again, as does a retry after expiry or after a restore lost the commit.
