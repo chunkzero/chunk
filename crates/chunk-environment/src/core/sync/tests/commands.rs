@@ -26,22 +26,33 @@ struct Gateway {
 }
 
 async fn arrived() -> Arrived {
-    use chunk_proto::v1::{ActivateClaim, ClaimPhase};
+    let arrived = connected().await;
+    arrived.arrive().await;
+    arrived
+}
+
+/// Core with gateway `proxy` holding its topic stream and the fake JVM, before the player arrived.
+async fn connected() -> Arrived {
     let (fixture, jvm) = runtime::with_jvm().await;
     let (updates, gateway) = Gateway::follow_own(&fixture, fixture.gateway.clone(), "proxy").await;
-    let assignment = fixture.control.claim(runtime::login()).await.unwrap();
-    fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
-    let arrived = |fixture: &Fixture| {
-        let players = fixture.control.players().unwrap().players;
-        players.iter().any(|player| player.phase() == ClaimPhase::Arrived)
-    };
-    while !arrived(&fixture) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     Arrived { fixture, updates, gateway, jvm }
 }
 
 impl Arrived {
+    /// Claims and activates the player's login, then waits until they arrived.
+    async fn arrive(&self) {
+        use chunk_proto::v1::{ActivateClaim, ClaimPhase};
+        let assignment = self.fixture.control.claim(runtime::login()).await.unwrap();
+        self.fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+        let arrived = |fixture: &Fixture| {
+            let players = fixture.control.players().unwrap().players;
+            players.iter().any(|player| player.phase() == ClaimPhase::Arrived)
+        };
+        while !arrived(&self.fixture) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Another gateway, and its `gateway/<id>` stream.
     async fn other(&self) -> (Gateway, Streaming<Update>) {
         let (updates, other) = Gateway::follow_own(&self.fixture, self.fixture.gateways.mint("other"), "other").await;
@@ -233,14 +244,16 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_subscription_waits_through_a_rejected_start_for_one_that_starts() {
-    let arrived = arrived().await;
+async fn a_subscription_waits_through_a_rejected_start_for_a_retry_of_the_same_request() {
+    let arrived = connected().await;
     let gateway = &arrived.gateway;
     let operation = gateway.prepare().await;
     let mut topic = gateway.follow(&operation).await;
-    let arguments = CommandArguments { command_id: "scopes/commands/missing".into(), input: "missing".into() };
-    let rejected = gateway.call(&operation, "chunk:command", &arguments).await;
+    // The player has yet to arrive.
+    let rejected = gateway.say(&operation, "say wait").await;
     assert!(matches!(rejected.outcome, Some(Outcome::Error(_))));
+    assert_eq!(code(&gateway.say(&operation, "say other").await), Code::OperationMismatch);
+    arrived.arrive().await;
     decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
     assert_eq!(returned(&outcome(&mut topic).await), b"null");
     arrived.stop().await;

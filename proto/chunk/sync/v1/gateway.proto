@@ -191,10 +191,11 @@ message ManifestResult {
 // - `chunk:command` starts a command as an effectful call under an operation ID `chunk:prepare` issued. It takes
 //   CommandArguments and a caller naming the player, and returns CommandStarted once the backend admitted the command,
 //   which then belongs to the calling gateway credential. It resolves the operation ID first: under an unused one it
-//   derives the command's scope from the player's current claim, and a rejection leaves the ID unused. A retry under
-//   an ID whose command started returns CommandStarted again without consulting the player's claim or deployment; one
-//   by another credential gets DENIED, and one that changes the command, input or player, or under an ID that ran an
-//   action or hook, gets OPERATION_MISMATCH. At most 4 retries and subscriptions wait while the backend admits the
+//   derives the command's scope from the player's current claim, and a rejection leaves the ID unused, though one a
+//   subscription reserved keeps the command, input and player its first start named. A retry under an ID whose command
+//   started returns CommandStarted again without consulting the player's claim or deployment; one by another
+//   credential gets DENIED, and one that changes the command, input or player, or under an ID that ran an action or
+//   hook, gets OPERATION_MISMATCH. At most 4 retries and subscriptions wait while the backend admits the
 //   command; later ones get UNAVAILABLE, as does a waiting retry whose command was rejected. A start under an ID whose
 //   subscription closed before the command started gets STOPPED.
 // - `chunk:effect` acknowledges one effect from a `command/<op>` topic. It takes EffectArguments and no caller or

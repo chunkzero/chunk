@@ -1,8 +1,9 @@
 //! Commands gateways started, by operation ID, while a subscription waits for them to start, while they start and run,
-//! and while a subscription follows them once finished: the gateway credential each belongs to and the request it
-//! started, the packet effects it holds until that gateway acknowledges them, the one subscription following it, and its
-//! outcome. Held effects and outcomes are charged against the backend's request memory until they drop. A command whose
-//! subscription closed before it started stays in its place for [`CLOSED`], refusing a start.
+//! and while a subscription follows them once finished: the gateway credential each belongs to and the request its first
+//! start asked for, the packet effects it holds until that gateway acknowledges them, the one subscription following it,
+//! and its outcome. Held effects and outcomes are charged against the backend's request memory until they drop. A
+//! command whose subscription closed before it started stays in its place for [`CLOSED`], refusing a start, charged by
+//! that subscription's charge until then.
 
 use super::errors;
 use chunk_backend::{Backend, CommandRequest, RequestCharge};
@@ -13,22 +14,33 @@ use chunk_service::same_secret;
 use prost::Message;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, PoisonError, atomic::AtomicUsize},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 mod starting;
+#[cfg(test)]
+mod tests;
 
 use starting::Waiting;
-pub(super) use starting::{Awaiting, closed_before_start};
+pub(super) use starting::closed_before_start;
 
 /// Packet effects a command may have pending at once.
 const PENDING: usize = 8;
 /// How long a started command waits for its first subscription, or for another once a superseded gateway stream ended
 /// its last, before it's cancelled. Any other end of its subscription cancels it at once.
 const GRACE: Duration = Duration::from_secs(5);
+/// How long core refuses the start of a command whose subscription closed before it started: longer than a gateway waits
+/// for a start.
+const CLOSED: Duration = Duration::from_secs(60);
+/// Request memory a command whose subscription closed before it started holds besides its operation ID and owner: its
+/// run, its place in the runs, and the task that forgets it.
+pub(super) const RECORD: usize = 1024;
 
 /// A command's outcome as its topic's final entry holds it, charged for as long as core holds it.
 pub(super) struct Outcome {
@@ -77,40 +89,41 @@ impl Runs {
     }
 
     /// Follows the command under `operation` for `credential` until the returned subscription drops or a newer one
-    /// supersedes it. `run`, which started, follows it unless another run holds the operation's place; a finished `run`
-    /// holds the place while followed, so every subscription to a command supersedes the one before. Fails once
-    /// `superseded` is cancelled, as when the gateway stream the subscription names was superseded while it waited.
+    /// supersedes it: the run in its place, else `found`, else a reservation of the unused ID for `credential`,
+    /// cancelled through `cancel`. A finished run holds the place while followed, so every subscription to a command
+    /// supersedes the one before. `charge` covers the subscription, and once it closes the command before it started,
+    /// the command's place until it's forgotten. Fails once `superseded` is cancelled, as when the gateway stream the
+    /// subscription names was superseded, or once the command's subscription closed before it started.
     pub fn follow(
         self: &Arc<Self>,
         operation: &str,
-        run: Arc<Run>,
+        found: Option<Arc<Run>>,
         credential: &str,
         superseded: &CancellationToken,
+        cancel: CancellationToken,
+        charge: RequestCharge,
     ) -> Result<(watch::Receiver<Pending>, Subscription), Error> {
         let mut runs = self.lock();
         let current = runs.get(operation).cloned();
-        let run = current.clone().unwrap_or(run);
+        let run = current.clone().or(found);
+        let run = run.unwrap_or_else(|| Arc::new(Run::new(credential, None, Phase::Starting, cancel)));
         run.permits(credential, None)?;
         if superseded.is_cancelled() {
             return Err(errors::error(Code::Stopped, "a newer gateway stream superseded the one named"));
         }
-        let mut id = None;
+        let mut followed = Ok((0, false));
         run.state.send_if_modified(|pending| {
-            if matches!(pending.phase, Phase::Starting) {
-                return false;
-            }
-            pending.opened += 1;
-            id = Some(pending.opened);
-            pending.following = id;
-            pending.orphaned = None;
-            true
+            followed = pending.follow(&run.waiting);
+            followed.is_ok()
         });
-        let id = id.ok_or_else(|| errors::error(Code::Unavailable, "retry the command"))?;
+        let (id, waiting) = followed?;
         if current.is_none() {
             runs.insert(operation.to_owned(), run.clone());
         }
         drop(runs);
-        let subscription = Subscription { runs: self.clone(), operation: operation.to_owned(), run: run.clone(), id };
+        let operation = operation.to_owned();
+        let subscription =
+            Subscription { runs: self.clone(), operation, run: run.clone(), id, waiting, charge: Some(charge) };
         Ok((run.state.subscribe(), subscription))
     }
 }
@@ -119,7 +132,7 @@ pub(super) struct Run {
     /// The gateway credential whose `chunk:command` started the command, or whose subscription reserved its place.
     owner: String,
     state: watch::Sender<Pending>,
-    /// Calls waiting for the command to start.
+    /// Calls and subscriptions waiting for the command to start.
     waiting: AtomicUsize,
     /// Cancels the command's work: its handler and the effects core performs for it.
     cancel: CancellationToken,
@@ -137,11 +150,9 @@ enum Phase {
 
 pub(super) struct Pending {
     phase: Phase,
-    /// What the `chunk:command` that started the command asked for, unless no start arrived or the run only reports a
+    /// What the first `chunk:command` under the command's ID asked for, unless none arrived or the run only reports a
     /// finished command.
     request: Option<CommandRequest>,
-    /// Subscriptions waiting for the command to start.
-    awaiting: usize,
     effects: BTreeMap<u32, Held>,
     /// The subscription following the command, numbered by `opened`; a newer one supersedes it.
     following: Option<u64>,
@@ -158,15 +169,7 @@ struct Held {
 
 impl Run {
     fn new(owner: &str, request: Option<CommandRequest>, phase: Phase, cancel: CancellationToken) -> Self {
-        let pending = Pending {
-            phase,
-            request,
-            awaiting: 0,
-            effects: BTreeMap::new(),
-            following: None,
-            opened: 0,
-            orphaned: None,
-        };
+        let pending = Pending { phase, request, effects: BTreeMap::new(), following: None, opened: 0, orphaned: None };
         Self { owner: owner.to_owned(), state: watch::Sender::new(pending), waiting: AtomicUsize::new(0), cancel }
     }
 
@@ -204,9 +207,12 @@ impl Run {
         matches!(self.state.borrow().phase, Phase::Closed)
     }
 
-    /// Marks the starting command started, which waits [`GRACE`] for its first subscription.
-    pub fn start(&self) {
+    /// Marks the starting command started, which waits [`GRACE`] for a subscription unless one follows it. Fails with
+    /// STOPPED once its subscription closed before it started.
+    pub fn start(&self) -> Result<(), Error> {
+        let mut closed = false;
         self.state.send_if_modified(|pending| {
+            closed = matches!(pending.phase, Phase::Closed);
             let starting = matches!(pending.phase, Phase::Starting);
             if starting {
                 pending.phase = Phase::Running;
@@ -214,6 +220,7 @@ impl Run {
             }
             starting
         });
+        if closed { Err(closed_before_start()) } else { Ok(()) }
     }
 
     /// Resolves once the running command has had no subscription for as long as it may.
@@ -276,13 +283,17 @@ impl Run {
         Ok(true)
     }
 
-    /// Marks the command finished with `outcome`, failing the effects still pending.
+    /// Marks the running command finished with `outcome`, failing the effects still pending.
     pub fn finish(&self, outcome: Result<Outcome, Error>) {
         let mut effects = BTreeMap::new();
-        self.state.send_modify(|pending| {
+        self.state.send_if_modified(|pending| {
+            if !matches!(pending.phase, Phase::Running) {
+                return false;
+            }
             pending.phase = Phase::Finished(outcome);
             pending.orphaned = None;
             effects = std::mem::take(&mut pending.effects);
+            true
         });
         for held in effects.into_values() {
             held.effect.finish(None);
@@ -290,13 +301,16 @@ impl Run {
     }
 }
 
-/// The subscription following a command. Once it drops, the running command is cancelled, and the finished one
-/// leaves the runs.
+/// The subscription following a command. Once it drops, the command is cancelled: one yet to start is closed, which
+/// refuses its start until it's forgotten [`CLOSED`] later, and the finished one leaves the runs.
 pub(super) struct Subscription {
     runs: Arc<Runs>,
     operation: String,
     run: Arc<Run>,
     id: u64,
+    /// Whether the subscription is one of the calls waiting for the command to start.
+    waiting: bool,
+    charge: Option<RequestCharge>,
 }
 
 impl Subscription {
@@ -322,18 +336,34 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let (mut cancel, mut finished) = (false, false);
+        if self.waiting {
+            self.run.waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        let (mut cancel, mut closed, mut finished) = (false, false, false);
         self.run.state.send_if_modified(|pending| {
             if pending.following != Some(self.id) {
                 return false;
             }
             pending.following = None;
-            cancel = matches!(pending.phase, Phase::Running);
+            closed = pending.waits();
+            if closed {
+                pending.phase = Phase::Closed;
+            }
+            cancel = closed || matches!(pending.phase, Phase::Running);
             finished = matches!(pending.phase, Phase::Finished(_));
             true
         });
         if cancel {
             self.run.cancel.cancel();
+        }
+        if closed {
+            let (runs, run, charge) = (self.runs.clone(), self.run.clone(), self.charge.take());
+            let operation = std::mem::take(&mut self.operation);
+            tokio::spawn(async move {
+                tokio::time::sleep(CLOSED).await;
+                runs.remove(&operation, &run);
+                drop(charge);
+            });
         }
         if finished {
             self.runs.settle(&self.operation, &self.run);
@@ -354,22 +384,5 @@ impl Pending {
             (effects.map(|(sequence, held)| entry(sequence.to_string(), held.value.encode_to_vec())).collect(), false)
         };
         Ok((Update { snapshot: true, upserts, ..Update::default() }, finished))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_closed_subscription_cancels_its_command_even_once_another_follows() {
-        let (runs, operation, stream) = (Arc::new(Runs::default()), "prep:a:1", CancellationToken::new());
-        let request = CommandRequest::new("say", "say wait", "player");
-        let (run, _) = runs.begin(operation, "gateway", request, CancellationToken::new()).unwrap();
-        run.start();
-        let (_, first) = runs.follow(operation, run.clone(), "gateway", &stream).unwrap();
-        drop(first);
-        let (_, _second) = runs.follow(operation, run.clone(), "gateway", &stream).unwrap();
-        assert!(run.token().is_cancelled());
     }
 }

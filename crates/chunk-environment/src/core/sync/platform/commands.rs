@@ -123,6 +123,7 @@ async fn start(
         if !run.started().await? {
             return Err(errors::error(Code::Unavailable, "retry the command"));
         }
+        run.permits(credential, Some(fingerprint))?;
         return Ok(CommandStarted {});
     }
     let starting = Starting {
@@ -174,7 +175,10 @@ impl Starting {
         let Self { control, backend, runs, run, operation, gateway, player, .. } = self;
         match admitted {
             Ok(Admitted::Started { origin, follow, handle, effects }) => {
-                run.start();
+                if let Err(error) = run.start() {
+                    handle.cancel();
+                    return Err(error);
+                }
                 let origin = *origin;
                 let performer = effects::Performer {
                     control,
@@ -192,6 +196,7 @@ impl Starting {
                 });
             }
             Ok(Admitted::Retained(result)) => {
+                run.start()?;
                 run.finish(outcome(&backend, result));
                 runs.settle(&operation, &run);
             }

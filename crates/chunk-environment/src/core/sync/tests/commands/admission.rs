@@ -248,6 +248,30 @@ async fn stalled_command_subscriptions_stay_charged_until_their_streams_drop() {
     arrived.stop().await;
 }
 
+#[tokio::test]
+async fn reservations_closed_before_their_commands_started_stay_charged_until_forgotten() {
+    let fixture = Fixture::start().await;
+    let (updates, gateway) = Gateway::follow_own(&fixture, fixture.gateway.clone(), "proxy").await;
+    let backend = fixture.backend.clone();
+    let idle = backend.request_bytes();
+    for _ in 0..32 {
+        let mut topic = gateway.follow(&gateway.prepare().await).await;
+        assert!(next(&mut topic).await.upserts.is_empty());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let records = idle + 32 * crate::core::sync::runs::RECORD;
+    assert!(backend.request_bytes() >= records, "closed reservations were released at once");
+
+    tokio::time::pause();
+    tokio::time::sleep(Duration::from_secs(59)).await;
+    assert!(backend.request_bytes() >= records, "closed reservations were released early");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    until(|| backend.request_bytes() <= idle).await;
+    tokio::time::resume();
+    drop(updates);
+    fixture.stop().await;
+}
+
 /// The arrived gateway on a client that never reads, whose streams have no room.
 async fn stalled(arrived: &Arrived) -> Gateway {
     let endpoint = Endpoint::from_shared(arrived.fixture.endpoint.clone()).unwrap();
