@@ -98,3 +98,35 @@ async fn stale_generations_and_replaced_processes_cannot_write_back() {
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Arrived);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
+    let fixture = Fixture::new().await;
+    let control = fixture.control().await;
+    let host = claimed(&fixture, &control, "held").await;
+    let state = control.state().unwrap();
+    let (session, player) = (state.claims["held"].session.clone(), state.claims["held"].player.clone());
+    let scope = |player| control.session_scope(&host, &session, Some(player));
+    assert!(state.claims["held"].phase == Phase::Reserved);
+    assert!(scope(&player).is_ok());
+    // The JVM runs join hooks before core applies its Attached report.
+    control
+        .update(|state| {
+            state.claims.get_mut("held").unwrap().phase = Phase::Activating;
+            Ok(())
+        })
+        .unwrap();
+    assert!(scope(&player).is_ok());
+
+    let stream = control.attach(&host, "test-runtime-credential", fixture.runtime.report()).await.unwrap();
+    let mut report = fixture.runtime.report();
+    for (phase, held) in
+        [(DeliveryPhase::Attached, true), (DeliveryPhase::Withdrawing, true), (DeliveryPhase::Closed, false)]
+    {
+        report.deliveries[0].phase = phase as i32;
+        control.report(&host, stream, &report).await.unwrap();
+        assert_eq!(scope(&player).is_ok(), held, "{phase:?}");
+    }
+    assert!(scope("another-player").is_err());
+    fixture.close().await;
+}

@@ -27,6 +27,10 @@ public record GroupState(boolean stale, Optional<Snapshot> snapshot, Optional<St
             return revision;
         }
 
+        List<QueryResult<?>> results() {
+            return results;
+        }
+
         @SuppressWarnings("unchecked")
         public <T> QueryResult<T> result(BoundQuery<T> query) {
             int index = queries.indexOf(query);

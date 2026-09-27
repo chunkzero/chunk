@@ -38,7 +38,8 @@ impl Grant {
 }
 
 /// The caller for `class` acting as `caller` in `deployment`. A gateway may name a player it holds a claim for; a
-/// JVM must name a session its host runs in `deployment` and may name a player who arrived on it; the CLI names none.
+/// JVM must name a session its host runs in `deployment` and may name a player whose current claim is delivered to it,
+/// from reservation until the delivery closes; the CLI names none.
 pub(super) fn derive(
     control: &Control,
     class: &Class,

@@ -383,16 +383,16 @@ async fn core_stops_within_its_grace_while_a_client_never_reads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
-    use chunk_proto::v1::{ActivateClaim, MovePlayerRequest};
+    use chunk_proto::v1::{ActivateClaim, ClaimPhase, MovePlayerRequest, PlayerList};
     let (jvm, server) = runtime::Runtime::start();
     let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
     let control = fixture.control.clone();
     control.activate_release(runtime::release()).unwrap();
     let assignment = control.claim(runtime::login()).await.unwrap();
     let session = assignment.delivery.and_then(|delivery| delivery.session).unwrap().id;
-    let host = jvm.host().unwrap();
     // The JVM reports the arrival on its own stream.
-    while control.session_scope(&host, &session, Some(runtime::PLAYER)).is_err() {
+    let arrived = |list: PlayerList| list.players.iter().any(|player| player.phase() == ClaimPhase::Arrived);
+    while !arrived(control.players().unwrap()) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 

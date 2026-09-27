@@ -106,7 +106,7 @@ class SessionBackendTest {
                 TOKEN,
                 "local",
                 "build-a",
-                null,
+                endpoint,
                 "runtime",
                 "process",
                 1,
