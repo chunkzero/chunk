@@ -154,21 +154,20 @@ activating that UUID elsewhere in the JVM. Managed proxy moves prepare a new TCP
 confirm withdrawal, drive both client configuration acknowledgments, and activate the destination on the existing public
 connection.
 
-The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at `CHUNK_CONTROL_ENDPOINT`
-with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player. Core derives the caller
-app code sees, including the registered app ID, so function arguments do not choose that identity. Control's
-`CHUNK_BACKEND_FILE` passes the backend's private connection to app JVMs as `CHUNK_BACKEND_ENDPOINT` and
-`CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT` and checks that exact
-deployment with the backend's `CheckDeployment` before reporting ready. Missing
-configuration, an unavailable backend, or a missing deployment fails startup. Use `scope.operationId(player, action)`
-for a mutation that should happen once per player delivery. It returns a typed `OperationId`; retry an uncertain result
-with the same ID and arguments. Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client whose
-calls and watches close on departure. Session clients close on disposal. The
-[local example](../../examples/local/README.md) demonstrates persistent coins, visits and subscription updates,
-including stale state during backend disconnection. Sessions own their instances, event handlers and scoped resources.
-Session hooks run through the process tick executor. Withdrawal waits for pending joins and initialization, removes the
-player and runs its leave hook before releasing the ownership fence. Arrival is reported after spawn and teleport
-acknowledgment.
+The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at
+`CHUNK_CONTROL_ENDPOINT` with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player.
+Core derives the caller app code sees, including the registered app ID, so function arguments do not choose that
+identity. Control's `CHUNK_BACKEND_FILE` passes the backend's private connection to app JVMs as `CHUNK_BACKEND_ENDPOINT`
+and `CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT` and checks that exact
+deployment with the backend's `CheckDeployment` before reporting ready. Missing configuration, an unavailable backend,
+or a missing deployment fails startup. Use `scope.operationId(player, action)` for a mutation that should happen once
+per player delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
+`scope.coroutines.backend(scope.backend, player)` for a player-bound client whose calls and watches close on departure.
+Session clients close on disposal. The [local example](../../examples/local/README.md) demonstrates persistent coins,
+visits and subscription updates, including stale state during backend disconnection. Sessions own their instances, event
+handlers and scoped resources. Session hooks run through the process tick executor. Withdrawal waits for pending joins
+and initialization, removes the player and runs its leave hook before releasing the ownership fence. Arrival is reported
+after spawn and teleport acknowledgment.
 
 Kotlin applications depend on `jvm:runtime-minestom-kotlin`, import `dev.chunkzero.runtime.coroutines`, and can extend
 `CoroutineSession` and implement suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` is a
