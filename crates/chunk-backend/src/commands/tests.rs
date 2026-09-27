@@ -68,7 +68,7 @@ export function choices() {return ['one','two'];}
 export function read(ctx) {return ctx.db.get('state','count')?.value ?? 0;}
 export function count(ctx) {const value=read(ctx)+1;ctx.db.put('state','count',{value});return value;}
 export function revoke(ctx,args) {ctx.db.put('state','denied',{value:args});return null;}
-export async function notify(ctx,args) {await ctx.runMutation('count',{}); if(args.arguments.text==='session') { const result=await ctx.platform({kind:'session_call',method:{app:'lobby',session:'main',name:'status'},arguments:{limit:1}}); if(result!==7) throw Error('unexpected result'); return null; } if(args.arguments.text==='wait') await ctx.sleep(400); await ctx.platform({kind:'message',text:args.arguments.text});return null;}
+export async function notify(ctx,args) {await ctx.runMutation('count',{}); if(args.arguments.text==='session') { const result=await ctx.platform({kind:'session_call',method:{app:'lobby',session:'main',name:'status'},arguments:{limit:1}}); if(result!==7) throw Error('unexpected result'); return null; } if(args.arguments.text==='fanout') { await Promise.all(Array.from({length:8},()=>ctx.platform({kind:'message',text:'fanout'}))); return null; } if(args.arguments.text==='wait') await ctx.sleep(400); await ctx.platform({kind:'message',text:args.arguments.text});return null;}
 export function hidden() {return null;}
 export async function ambient(ctx) {await ctx.platform({kind:'message',text:'forbidden'});return null;}
 ".into(),
@@ -413,6 +413,47 @@ async fn session_calls_validate_declared_reply_contract_before_resuming_handler(
         assert_eq!(completion(frame(&mut output).await), expected);
     }
     assert_eq!(fixture.count().await, 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn larger_action_budgets_hold_more_platform_effects_in_flight() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(directory.path().join("commands.db"), "test").unwrap();
+    // Sixteen live actions, with four transaction or platform effects each.
+    let budget = 16 * chunk_js::Limits::default().heap_bytes;
+    let effects = crate::ActionEffects::new("test".into()).unwrap();
+    let backend = Backend::with_action_bytes("test".into(), Box::new(store), effects, budget).unwrap();
+    backend.deploy(deployment()).await.unwrap();
+    let mut fixture = Fixture::with_backend(directory, backend).await;
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        let prepared = fixture.prepare("notify fanout").await;
+        let (owner, mut output) = fixture.run(&prepared.invocation_id).await;
+        assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
+        let mut effects = Vec::new();
+        for _ in 0..8 {
+            let command_server_frame::Frame::Effect(effect) = frame(&mut output).await else {
+                panic!("effect refused")
+            };
+            effects.push(effect);
+        }
+        runs.push((owner, output, effects));
+    }
+    // Forty effects are unanswered at once, past the 32 the smallest budget admits.
+    for (owner, mut output, effects) in runs {
+        for effect in effects {
+            let result = json!({"state":"accepted","operationId":effect.operation_id});
+            let reply = wire::CommandEffectReply {
+                sequence: effect.sequence,
+                result_json: serde_json::to_vec(&result).unwrap(),
+                error: String::new(),
+            };
+            let frame = wire::CommandClientFrame { frame: Some(command_client_frame::Frame::Reply(reply)) };
+            owner.send(frame).await.unwrap();
+        }
+        assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Succeeded);
+    }
     fixture.close().await;
 }
 

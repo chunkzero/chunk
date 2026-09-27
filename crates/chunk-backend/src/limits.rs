@@ -74,7 +74,9 @@ pub(crate) fn machine_memory(read: impl Fn(&Path) -> io::Result<String>) -> Opti
 /// The lowest memory limit on the process's cgroup or any ancestor visible through its memory controller's mounts,
 /// given `/proc/self/mountinfo`, `/proc/self/cgroup` and a reader for the mounted files. The controller is the v1
 /// memory hierarchy when the process has one, and otherwise the v2 hierarchy. `usize::MAX` means no visible level
-/// limits memory; `None` means the controller, the process's group or a limit couldn't be resolved.
+/// limits memory; `None` means the controller, the process's group or a limit couldn't be resolved. A missing file is
+/// unresolved, as when the group was removed after the process left it, unless it's a v2 group without memory
+/// interface files: the hierarchy's root, or a group whose parent doesn't enable the memory controller.
 fn cgroup_limit(mountinfo: &str, groups: &str, read: impl Fn(&Path) -> io::Result<String>) -> Option<usize> {
     let membership = |member: fn(&str) -> bool| {
         groups.lines().find_map(|line| {
@@ -106,6 +108,17 @@ fn cgroup_limit(mountinfo: &str, groups: &str, read: impl Fn(&Path) -> io::Resul
         return mounts.is_empty().then_some(usize::MAX);
     };
     let file = if v1 { "memory.limit_in_bytes" } else { "memory.max" };
+    // `cgroup.controllers` exists on every v2 group and `cgroup.type` on every one but the root.
+    let uncontrolled = |directory: &Path| {
+        read(&directory.join("cgroup.controllers")).is_ok_and(|controllers| {
+            !controllers.split_whitespace().any(|name| name == "memory")
+                || read(&directory.join("cgroup.type")).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+    };
+    let limit_at = |directory: &Path| match read(&directory.join(file)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !v1 && uncontrolled(directory) => Some(usize::MAX),
+        file => parse_limit(file),
+    };
     let (mut exposed, mut lowest) = (false, usize::MAX);
     for (_, root, point) in mounts.iter().filter(|(memory_v1, ..)| *memory_v1 == v1) {
         // The mount exposes the hierarchy below `root`; the process's group must lie within it.
@@ -114,13 +127,13 @@ fn cgroup_limit(mountinfo: &str, groups: &str, read: impl Fn(&Path) -> io::Resul
             continue;
         };
         let mut directory = PathBuf::from(point);
-        let mut limit = parse_limit(read(&directory.join(file)))?;
+        let mut limit = limit_at(&directory)?;
         for component in relative.split('/').filter(|component| !component.is_empty()) {
             if component == ".." {
                 return None;
             }
             directory.push(component);
-            limit = limit.min(parse_limit(read(&directory.join(file)))?);
+            limit = limit.min(limit_at(&directory)?);
         }
         if v1 {
             // Covers ancestors above the mount's root, which a subtree mount hides.
@@ -142,13 +155,9 @@ fn unescape(field: &str) -> String {
     field.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 }
 
-/// A limit file's bytes; `usize::MAX` when it's unlimited or absent, and `None` when it can't be read or parsed.
+/// A limit file's bytes; `usize::MAX` when it's unlimited, and `None` when it can't be read or parsed.
 fn parse_limit(file: io::Result<String>) -> Option<usize> {
-    let text = match file {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(usize::MAX),
-        file => file.ok()?,
-    };
-    match text.trim() {
+    match file.ok()?.trim() {
         "max" => Some(usize::MAX),
         bytes => Some(usize::try_from(bytes.parse::<u64>().ok()?).unwrap_or(usize::MAX)),
     }

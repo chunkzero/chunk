@@ -123,22 +123,27 @@ fn cgroup_limits_take_the_strictest_group_up_to_the_controller_mount() {
         crate::limits::machine_memory(|path| read(&files, path))
     };
     let v2 = "30 23 0:26 / /sys/fs/cgroup rw,nosuid shared:4 - cgroup2 cgroup2 rw,nsdelegate\n";
+    // The hierarchy's root has no `memory.max`, nor a `cgroup.type`.
+    let root = ("/sys/fs/cgroup/cgroup.controllers", "cpu memory pids\n");
     let parent = ("/sys/fs/cgroup/parent/memory.max", "2147483648\n");
     assert_eq!(
-        memory(v2, "0::/parent/leaf\n", &[parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "4294967296\n")]),
+        memory(v2, "0::/parent/leaf\n", &[root, parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "4294967296\n")]),
         Some(2 * GIB)
     );
     assert_eq!(
-        memory(v2, "0::/parent/leaf\n", &[parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "max\n")]),
+        memory(v2, "0::/parent/leaf\n", &[root, parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "max\n")]),
         Some(2 * GIB)
     );
-    assert_eq!(memory(v2, "0::/parent/leaf\n", &[]), Some(64 * GIB));
+    assert_eq!(memory(v2, "0::/\n", &[root]), Some(64 * GIB));
+    // A group whose parent doesn't enable the memory controller has no memory files.
+    let uncontrolled = ("/sys/fs/cgroup/parent/leaf/cgroup.controllers", "cpu pids\n");
+    assert_eq!(memory(v2, "0::/parent/leaf\n", &[root, parent, uncontrolled]), Some(2 * GIB));
     // Mountinfo escapes spaces in mount roots and mount points.
     assert_eq!(
         memory(
             "30 23 0:26 /pods\\040a /mnt/cgroup\\040memory rw - cgroup2 cgroup2 rw\n",
             "0::/pods a/leaf\n",
-            &[("/mnt/cgroup memory/leaf/memory.max", "1073741824\n")]
+            &[("/mnt/cgroup memory/memory.max", "max\n"), ("/mnt/cgroup memory/leaf/memory.max", "1073741824\n")]
         ),
         Some(GIB)
     );
@@ -151,6 +156,7 @@ fn cgroup_limits_take_the_strictest_group_up_to_the_controller_mount() {
         ("/sys/fs/cgroup/cpu/memory.limit_in_bytes", "1"),
         ("/mnt/memory/memory.limit_in_bytes", unlimited),
         ("/mnt/memory/pod/memory.limit_in_bytes", "1073741824"),
+        ("/mnt/memory/pod/memory.stat", "hierarchical_memory_limit 9223372036854771712\n"),
     ];
     assert_eq!(memory(v1, groups, &v1_files), Some(GIB));
     // The subtree mount hides `/`, whose limit only the group's hierarchical limit reveals.
@@ -168,6 +174,11 @@ fn cgroup_limits_take_the_strictest_group_up_to_the_controller_mount() {
     assert_eq!(memory(v2, "0::/../outside\n", &[]), None);
     assert_eq!(memory(v1, "4:memory:/elsewhere/pod\n", &[]), None);
     assert_eq!(memory(v2, "0::/parent/leaf\n", &[(parent.0, UNREADABLE)]), None);
+    // Missing files are unknown, as when the process moved and its old group was removed.
+    assert_eq!(memory(v2, "0::/parent/leaf\n", &[root]), None);
+    assert_eq!(memory(v2, "0::/parent/leaf\n", &[root, parent]), None);
+    assert_eq!(memory(v2, "0::/\n", &[root, ("/sys/fs/cgroup/cgroup.type", "domain\n")]), None);
+    assert_eq!(memory(v1, groups, &v1_files[..3]), None);
     assert_eq!(memory(v2, "0::/parent/leaf\n", &[(parent.0, "2 GiB")]), None);
     assert_eq!(memory(v1, groups, &[("/mnt/memory/pod/memory.stat", UNREADABLE)]), None);
     assert_eq!(memory(v1, groups, &[("/mnt/memory/pod/memory.stat", "cache 0\n")]), None);

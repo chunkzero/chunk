@@ -59,19 +59,20 @@ for the live-action budget. Memory budgets cover admitted requests including rep
 each charged its input plus 1 KiB and any retained result), pending mutations with their staged writes and results (32
 MiB), subscriptions with their latest results (256 MiB), and live actions at their 32 MiB engine heap limit (an eighth
 of the machine's memory or of the lowest cgroup memory limit on the process's group and its ancestors, at least 256 MiB,
-and exactly 256 MiB when either can't be read). Limits on ancestors a cgroup namespace hides can't be observed. Actions
-past that budget queue, at most as many as it admits, until a live action finishes. A queued start that needs no new
-action, such as a duplicate of one that started, resolves at once, and a cancelled one releases its admission at once. A
-result, error or read set that grows past the subscription budget closes the subscriptions that share it. Each refusal
-is `Error::Overloaded` naming its `Limit`; `Error::Busy` remains for state conflicts such as a deployment change in
-progress. At most 16 deployments are resident. These are logical bounds, not an RSS limit. JS retains its own source,
-heap, capability and payload budgets. Release a deployment after its mutations and subscriptions drain. Release durably
-removes the bundle and permanently retires its identity before unloading the runtime. It cannot be reactivated under the
-same ID. Data and schema remain shared; release never drops application tables or operation outcomes. Uncommitted
-operation IDs remain bound to the retired deployment and return `OperationMismatch` if retried against another
-deployment. Clients must use new operation IDs for those requests. Committed outcomes remain recoverable through a
-retained deployment exposing the same mutation. If a retained bundle prevents startup, open the store with exclusive
-writer authority and call `Storage::release_deployment` with its ID before constructing the backend again.
+and exactly 256 MiB when either can't be read). A missing cgroup file counts as unreadable, except `memory.max` on the
+v2 root or on a group whose parent doesn't enable the memory controller. Limits on ancestors a cgroup namespace hides
+can't be observed. Actions past that budget queue, at most as many as it admits, until a live action finishes. A queued
+start that needs no new action, such as a duplicate of one that started, resolves at once, and a cancelled one releases
+its admission at once. A result, error or read set that grows past the subscription budget closes the subscriptions that
+share it. Each refusal is `Error::Overloaded` naming its `Limit`; `Error::Busy` remains for state conflicts such as a
+deployment change in progress. At most 16 deployments are resident. These are logical bounds, not an RSS limit. JS
+retains its own source, heap, capability and payload budgets. Release a deployment after its mutations and subscriptions
+drain. Release durably removes the bundle and permanently retires its identity before unloading the runtime. It cannot
+be reactivated under the same ID. Data and schema remain shared; release never drops application tables or operation
+outcomes. Uncommitted operation IDs remain bound to the retired deployment and return `OperationMismatch` if retried
+against another deployment. Clients must use new operation IDs for those requests. Committed outcomes remain recoverable
+through a retained deployment exposing the same mutation. If a retained bundle prevents startup, open the store with
+exclusive writer authority and call `Storage::release_deployment` with its ID before constructing the backend again.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
