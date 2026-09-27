@@ -5,7 +5,7 @@ use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Revision, S
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use super::{Capacity, Generation, Meta, Phase, State, entities::Stamp};
+use super::{Capacity, Generation, Meta, OperatorMethod, Phase, State, entities::Stamp};
 use crate::{Error, Result};
 
 pub(crate) const CLAIMS: &str = "chunk_claims";
@@ -17,7 +17,8 @@ const SESSIONS: &str = "chunk_sessions";
 const PLAYERS: &str = "chunk_players";
 const DRAINS: &str = "chunk_drains";
 const ROSTERS: &str = "chunk_rosters";
-const TABLES: [&str; 9] = [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS];
+const OPERATOR_CALLS: &str = "chunk_operator_calls";
+const TABLES: [&str; 10] = [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS, OPERATOR_CALLS];
 
 /// Control state as system tables in the environment's store, which one control authority owns exclusively.
 pub(super) struct Store {
@@ -75,7 +76,7 @@ impl Store {
             .map(|document| serde_json::from_value(document.value))
             .transpose()?;
         let meta = meta.unwrap_or_default();
-        Ok(State {
+        let mut state = State {
             config: meta.config,
             method_sequence: meta.method_sequence,
             current: meta.current,
@@ -85,11 +86,16 @@ impl Store {
             players: scan(&snapshot, PLAYERS, budget)?,
             claims: scan(&snapshot, CLAIMS, budget)?,
             moves: scan(&snapshot, MOVES, budget)?,
+            move_sources: BTreeMap::new(),
             drains: scan(&snapshot, DRAINS, budget)?,
+            operator_calls: scan(&snapshot, OPERATOR_CALLS, budget)?,
             rosters: scan(&snapshot, ROSTERS, budget)?,
             epoch: self.system.epoch().0,
             revision: snapshot.revision.0,
-        })
+        };
+        let moves: Vec<_> = state.moves.keys().cloned().collect();
+        state.index_moves(&State::default(), moves.iter().map(String::as_str));
+        Ok(state)
     }
 
     /// Commits `writes` ahead of queued app commits, stamped with the commit's generation, returning its revision.
@@ -120,6 +126,7 @@ impl Store {
         diff(MOVES, &previous.moves, &next.moves, &mut writes)?;
         diff(DRAINS, &previous.drains, &next.drains, &mut writes)?;
         diff(ROSTERS, &previous.rosters, &next.rosters, &mut writes)?;
+        diff(OPERATOR_CALLS, &previous.operator_calls, &next.operator_calls, &mut writes)?;
         Ok(writes)
     }
 }
@@ -234,6 +241,7 @@ fn schema() -> DatabaseSchema {
         },
         DRAINS: {"request": string, "host": string, "deadline_ms": integer, "automatic": boolean},
         ROSTERS: {"version": integer, "members": strings, "ready": strings, "admitted": boolean},
+        OPERATOR_CALLS: {"method": {"type": "enum", "values": OperatorMethod::NAMES}, "digest": string},
     });
     let tables = tables.as_object().into_iter().flatten().map(|(table, fields)| {
         let fields: serde_json::Map<_, _> = fields

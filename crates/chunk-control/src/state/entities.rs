@@ -96,6 +96,26 @@ pub(crate) struct Drain {
     pub automatic: bool,
 }
 
+/// The method and arguments an operator's operation ID was first used for.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct OperatorCall {
+    pub method: OperatorMethod,
+    /// SHA-256 of the encoded arguments.
+    #[serde(with = "bytes")]
+    pub digest: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OperatorMethod {
+    MovePlayer,
+    Drain,
+}
+
+impl OperatorMethod {
+    pub const NAMES: [&str; 2] = ["move_player", "drain"];
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MoveIntent {
     #[serde(with = "bytes")]
@@ -306,6 +326,7 @@ impl Stamp for HostState {}
 impl Stamp for SessionState {}
 impl Stamp for PlayerState {}
 impl Stamp for Drain {}
+impl Stamp for OperatorCall {}
 impl Stamp for Roster {}
 impl Stamp for ReleaseState {}
 

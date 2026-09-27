@@ -90,8 +90,15 @@ impl Control {
             .collect())
     }
     /// Records each running JVM's health from what it last pushed in its reports, and retires a host after three
-    /// unhealthy passes in a row, or once its JVM reports it is draining.
+    /// unhealthy passes in a row, or once its JVM reports it is draining. Announces the pass even when a retirement
+    /// fails, since its observations changed.
     pub(crate) fn poll_health(&self) -> Result<()> {
+        let polled = self.observe_health();
+        self.observed.send_modify(|passes| *passes += 1);
+        polled
+    }
+
+    fn observe_health(&self) -> Result<()> {
         let state = self.state()?;
         for id in state.hosts.keys().filter(|id| !state.released(id)) {
             if self.host.connection(id).is_none() {
@@ -125,7 +132,6 @@ impl Control {
                 })?;
             }
         }
-        self.observed.send_modify(|passes| *passes += 1);
         Ok(())
     }
 

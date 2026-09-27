@@ -79,6 +79,9 @@ pub const MOVE_CHANGED: &str = "move operation changed";
 /// Control's reply to a move whose operation ID already names a claim.
 pub const MOVE_NAMES_CLAIM: &str = "move operation already names a claim";
 
+/// Control's reply to an operator's operation ID first used for another method or other arguments.
+pub const OPERATOR_CALL_CHANGED: &str = "operator operation first used for another call";
+
 /// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

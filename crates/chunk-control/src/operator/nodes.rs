@@ -74,12 +74,14 @@ impl Nodes {
     }
 
     fn diff(&mut self, snapshot: bool) -> Result<Option<sync::Update>> {
+        let now = crate::now_ms();
         let state = self.control.state()?;
         let nodes = nodes(&state, self.control.statuses(&state)?);
         self.wake = nodes
             .values()
             .filter(|node| node.phase() == sync::NodePhase::Draining)
             .map(|node| node.drain_deadline_ms)
+            .filter(|&deadline| deadline > now)
             .min();
         let upserts: Vec<_> = nodes
             .iter()

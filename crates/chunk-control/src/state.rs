@@ -3,19 +3,20 @@ pub(crate) mod feed;
 mod store;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
+use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Release, Result};
 pub use entities::Generation;
 use entities::Stamp;
 pub(crate) use entities::{
-    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, Phase, PlayerState, ReleaseState, Roster,
-    SessionState,
+    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase, PlayerState,
+    ReleaseState, Roster, SessionState,
 };
 
 #[derive(Clone, Default)]
@@ -30,7 +31,11 @@ pub(crate) struct State {
     pub claims: BTreeMap<String, Claim>,
     pub method_sequence: u64,
     pub moves: BTreeMap<String, MoveIntent>,
+    /// The operation IDs of the moves out of each claim, by the claim's operation ID. Derived from `moves`, not stored.
+    pub move_sources: BTreeMap<String, BTreeSet<String>>,
     pub drains: BTreeMap<String, Drain>,
+    /// What each of the operator's operation IDs is bound to.
+    pub operator_calls: BTreeMap<String, OperatorCall>,
     pub rosters: BTreeMap<String, Roster>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
@@ -91,6 +96,26 @@ impl State {
         }
         let release = release.release.clone();
         Ok((name, release))
+    }
+
+    /// Re-indexes [`State::move_sources`] for the `written` moves, as they were in `previous` and are now.
+    fn index_moves<'a>(&mut self, previous: &State, written: impl IntoIterator<Item = &'a str>) {
+        let source = |intent: &MoveIntent| {
+            ClaimRequest::decode(intent.request.as_slice()).ok()?.source.map(|source| source.operation_id)
+        };
+        for id in written {
+            if let Some(from) = previous.moves.get(id).and_then(source)
+                && let Some(ids) = self.move_sources.get_mut(&from)
+            {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.move_sources.remove(&from);
+                }
+            }
+            if let Some(from) = self.moves.get(id).and_then(source) {
+                self.move_sources.entry(from).or_default().insert(id.to_owned());
+            }
+        }
     }
 
     /// Replaces [`Generation::PENDING`] with `generation`, the commit that applied the update.
@@ -212,6 +237,8 @@ impl Writer<'_> {
             return Ok(result);
         }
         let touched = feed::touched(&previous, &next, writes.keys().map(|(key, _)| key));
+        let moves = writes.keys().filter(|(key, _)| key.table == store::MOVES).map(|(key, _)| key.id.as_str());
+        next.index_moves(&previous, moves);
         #[cfg(test)]
         if let Some(committing) = self.authority.committing.lock().ok().and_then(|mut hook| hook.take()) {
             committing();
