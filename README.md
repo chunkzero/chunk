@@ -175,9 +175,10 @@ join the newest one. When only backend code changed, existing sessions stay on t
 When app JARs changed, every earlier version stops once it is empty or after `--drain-seconds` (default 30),
 disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every
 session immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
-automatic rebuilds. Reloads do not preserve gameplay state. Development releases live in `.chunk/local/releases`; each
-is deleted once no running version uses it, and a new session first clears the previous one's control state and JVM
-logs.
+automatic rebuilds. `--offline-logins` accepts players without Mojang authentication, as vanilla offline mode does, so
+scripted bots can join; use it only for local testing. Reloads do not preserve gameplay state. Development releases live
+in `.chunk/local/releases`; each is deleted once no running version uses it, and a new session first clears the previous
+one's control state and JVM logs.
 
 The `chunk-environment` binary runs an environment's services in one process and calls the same libraries as
 `chunk dev`. `CHUNK_SERVICES` selects them: `core,gateway,exec` (the default) or `core,exec`. Core is the backend and

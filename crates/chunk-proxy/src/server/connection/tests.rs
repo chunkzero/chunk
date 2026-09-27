@@ -19,7 +19,8 @@ async fn status_allows_clean_eof_but_rejects_truncated_ping() {
         client.shutdown().await.unwrap();
         let responses = Responses::new(&Config::default()).unwrap();
         let result =
-            serve(server, &responses, &Authentication::new().await.unwrap(), Duration::from_secs(10), None, None).await;
+            serve(server, &responses, &Authentication::new(false).await.unwrap(), Duration::from_secs(10), None, None)
+                .await;
         if suffix.is_empty() {
             result.unwrap();
         } else {
@@ -36,10 +37,11 @@ async fn incomplete_handshake_has_a_total_deadline() {
     let (mut client, server) = tokio::io::duplex(64);
     client.write_all(&[0x80]).await.unwrap();
     let responses = Responses::new(&Config::default()).unwrap();
-    let error = serve(server, &responses, &Authentication::new().await.unwrap(), Duration::from_secs(10), None, None)
-        .await
-        .err()
-        .unwrap();
+    let error =
+        serve(server, &responses, &Authentication::new(false).await.unwrap(), Duration::from_secs(10), None, None)
+            .await
+            .err()
+            .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
 }

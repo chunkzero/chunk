@@ -9,7 +9,7 @@ use tokio::{
 
 async fn mock_session(response: String) -> (Authentication, JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut auth = Authentication::new().await.unwrap();
+    let mut auth = Authentication::new(false).await.unwrap();
     auth.endpoint = Url::parse(&format!("http://{}/hasJoined", listener.local_addr().unwrap())).unwrap();
     auth.client = Client::builder()
         .no_proxy()
@@ -112,6 +112,35 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
 }
 
 #[tokio::test]
+async fn offline_login_skips_encryption_and_uses_the_vanilla_offline_uuid() {
+    timeout(Duration::from_secs(5), async {
+        let auth = Authentication::new(true).await.unwrap();
+        let (client, server) = tokio::io::duplex(8192);
+        let mut client = Transport::new(client);
+        let server = async {
+            let accepted = auth.login(Transport::new(server), 776, Some(256)).await.unwrap();
+            assert_eq!(accepted.profile.uuid.0, *uuid::uuid!("b50ad385-829d-3141-a216-7e7d7539ba7f").as_bytes());
+        };
+        let client = async {
+            client
+                .write_packet(&LoginStart { username: McString::new("Notch").unwrap(), player_uuid: Uuid([0xff; 16]) })
+                .await
+                .unwrap();
+            // The first reply is unencrypted Set Compression rather than an Encryption Request.
+            decode_packet::<SetCompression>(&client.read_frame(4096).await.unwrap()).unwrap();
+            client.enable_compression(256);
+            let profile = decode_packet::<LoginSuccess>(&client.read_frame(4096).await.unwrap()).unwrap();
+            assert_eq!(profile.username.as_str(), "Notch");
+            assert!(profile.properties.as_slice().is_empty());
+            client.write_packet(&LoginAcknowledged).await.unwrap();
+        };
+        tokio::join!(server, client);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn rejected_session_receives_an_encrypted_disconnect() {
     timeout(Duration::from_secs(5), async {
         let (auth, request_task) = mock_session(http_response("204 No Content", "")).await;
@@ -154,7 +183,7 @@ async fn session_service_fails_closed_on_bad_status_and_oversized_bodies() {
 
 #[tokio::test]
 async fn rsa_response_requires_matching_nonce_and_exact_secret_length() {
-    let auth = Authentication::new().await.unwrap();
+    let auth = Authentication::new(false).await.unwrap();
     let token = [1, 2, 3, 4];
     let request = EncryptionRequest {
         server_id: McString::new("").unwrap(),

@@ -9,6 +9,8 @@ pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub motd: String,
     pub max_connections: NonZeroUsize,
+    /// Accepts unauthenticated logins; only `chunk dev` sets this, for local testing.
+    pub offline_logins: bool,
 }
 
 impl GatewayConfig {
@@ -16,7 +18,7 @@ impl GatewayConfig {
     #[must_use]
     pub fn new(bind: SocketAddr) -> Self {
         let defaults = chunk_proxy::Config::default();
-        Self { bind, motd: defaults.motd, max_connections: defaults.max_connections }
+        Self { bind, motd: defaults.motd, max_connections: defaults.max_connections, offline_logins: false }
     }
 }
 
@@ -36,6 +38,7 @@ impl Gateway {
                 platform: Some(target),
                 motd: config.motd,
                 max_connections: config.max_connections,
+                offline_logins: config.offline_logins,
                 ..Default::default()
             },
         )

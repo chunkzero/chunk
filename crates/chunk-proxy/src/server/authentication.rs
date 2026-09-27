@@ -8,6 +8,7 @@ use chunk_protocol::{
     },
 };
 use openssl::{
+    hash::{MessageDigest, hash},
     pkey::Private,
     rand::rand_bytes,
     rsa::{Padding, Rsa},
@@ -29,6 +30,7 @@ pub(super) struct Authentication {
     public_key: Vec<u8>,
     client: Client,
     endpoint: Url,
+    offline: bool,
 }
 
 /// An authenticated identity and its connection, after Login Acknowledged.
@@ -39,7 +41,8 @@ pub(super) struct Authenticated<S> {
 }
 
 impl Authentication {
-    pub(super) async fn new() -> io::Result<Self> {
+    /// With `offline`, logins skip encryption and Mojang verification, as vanilla offline mode does.
+    pub(super) async fn new(offline: bool) -> io::Result<Self> {
         let key = tokio::task::spawn_blocking(|| Rsa::generate(1024)).await.map_err(io::Error::other)??;
         let public_key = key.public_key_to_der()?;
         let client = Client::builder()
@@ -49,7 +52,8 @@ impl Authentication {
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(io::Error::other)?;
-        Ok(Self { key, public_key, client, endpoint: Url::parse(SESSION_SERVER).map_err(io::Error::other)? })
+        let endpoint = Url::parse(SESSION_SERVER).map_err(io::Error::other)?;
+        Ok(Self { key, public_key, client, endpoint, offline })
     }
 
     pub(super) async fn login<S: AsyncRead + AsyncWrite + Unpin>(
@@ -72,6 +76,28 @@ impl Authentication {
         if !valid_username(start.username.as_str()) {
             return Err(invalid_data("invalid login username"));
         }
+        let profile = if self.offline {
+            offline_profile(start.username.as_str())?
+        } else {
+            self.authenticate(transport, start.username.as_str()).await?
+        };
+        if let Some(threshold) = compression {
+            transport
+                .write_packet(&SetCompression { threshold: VarInt(i32::try_from(threshold).map_err(invalid_data)?) })
+                .await?;
+            transport.enable_compression(threshold);
+        }
+        transport.write_packet(&profile).await?;
+        decode_packet::<LoginAcknowledged>(&transport.read_frame(LOGIN_FRAME_LIMIT).await?).map_err(invalid_data)?;
+        Ok(profile)
+    }
+
+    /// Encrypts the connection and verifies the session with Mojang.
+    async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        transport: &mut Transport<S>,
+        username: &str,
+    ) -> io::Result<LoginSuccess> {
         let mut token = [0; 4];
         rand_bytes(&mut token)?;
         transport
@@ -87,8 +113,8 @@ impl Authentication {
         let secret = self.shared_secret(&response, token)?;
         transport.enable_encryption(&secret)?;
         let hash = server_hash(&secret, &self.public_key);
-        let profile = match self.verify(start.username.as_str(), &hash).await {
-            Ok(profile) => profile,
+        match self.verify(username, &hash).await {
+            Ok(profile) => Ok(profile),
             Err(error) => {
                 let rejection = LoginDisconnect {
                     reason: McString::new(r#"{"text":"Unable to authenticate with Minecraft. Please try again."}"#)
@@ -96,18 +122,9 @@ impl Authentication {
                 };
                 let _ = transport.write_packet(&rejection).await;
                 let _ = transport.shutdown().await;
-                return Err(error);
+                Err(error)
             }
-        };
-        if let Some(threshold) = compression {
-            transport
-                .write_packet(&SetCompression { threshold: VarInt(i32::try_from(threshold).map_err(invalid_data)?) })
-                .await?;
-            transport.enable_compression(threshold);
         }
-        transport.write_packet(&profile).await?;
-        decode_packet::<LoginAcknowledged>(&transport.read_frame(LOGIN_FRAME_LIMIT).await?).map_err(invalid_data)?;
-        Ok(profile)
     }
 
     fn shared_secret(&self, response: &EncryptionResponse, token: [u8; 4]) -> io::Result<Zeroizing<[u8; 16]>> {
@@ -153,6 +170,18 @@ impl Authentication {
         }
         parse_profile(&body, username)
     }
+}
+
+/// The profile vanilla offline mode assigns: Java's `UUID.nameUUIDFromBytes("OfflinePlayer:" + name)` and no properties.
+fn offline_profile(username: &str) -> io::Result<LoginSuccess> {
+    let digest = hash(MessageDigest::md5(), format!("OfflinePlayer:{username}").as_bytes())?;
+    let uuid = uuid::Builder::from_md5_bytes(digest.as_ref().try_into().expect("MD5 digest length")).into_uuid();
+    Ok(LoginSuccess {
+        session_id: Uuid(*uuid::Uuid::new_v4().as_bytes()),
+        uuid: Uuid(uuid.into_bytes()),
+        username: McString::new(username).map_err(invalid_data)?,
+        properties: BoundedArray::new(Vec::new()).map_err(invalid_data)?,
+    })
 }
 
 fn valid_username(name: &str) -> bool {
