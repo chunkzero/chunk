@@ -85,15 +85,19 @@ fn cell(engine: &str, workload: &str, bundle: &Path) -> Result<()> {
     let data = host::seed();
     let inputs: Vec<_> = (0..host::PLAYERS)
         .map(|player| {
-            let caller = json!({"session": "bench-session", "app": "bench", "player": format!("p{player}")});
-            let arguments = if mode == Mode::Mutation {
-                let inventory: Vec<_> = (0..16)
-                    .map(|slot| json!({"item": format!("item-{}", (player + slot) % 64), "count": 1 + slot}))
-                    .collect();
-                json!({"coins": player, "xp": player * 3, "level": 1 + player % 50, "best": player * 7,
-                    "inventory": inventory})
-            } else {
-                json!({})
+            // chunk-bench calls these functions as the CLI, naming the player in the arguments.
+            let caller = json!({"kind": "cli"});
+            let name = format!("p{player}");
+            let arguments = match (mode, function) {
+                (Mode::Mutation, _) => {
+                    let inventory: Vec<_> = (0..16)
+                        .map(|slot| json!({"item": format!("item-{}", (player + slot) % 64), "count": 1 + slot}))
+                        .collect();
+                    json!({"player": name, "coins": player, "xp": player * 3, "level": 1 + player % 50,
+                        "best": player * 7, "inventory": inventory})
+                }
+                (_, "shared/players/load") => json!({"player": name}),
+                _ => json!({}),
             };
             (Json::from(caller), Json::from(arguments))
         })

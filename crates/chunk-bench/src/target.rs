@@ -117,14 +117,7 @@ pub async fn serve(init: Init) -> Result<()> {
         ready
     } else {
         let core = core(&init).await?;
-        let control = core.control_connection()?;
-        let gateway = core.target()?.gateway;
-        let connection = sync::Connection {
-            endpoint: control.endpoint.clone(),
-            cli: control.token.clone(),
-            gateway_id: gateway.id,
-            gateway: gateway.credential,
-        };
+        let connection = connection(&core)?;
         let token = stop.clone();
         tasks.spawn(async move {
             token.cancelled().await;
@@ -157,9 +150,21 @@ pub async fn serve(init: Init) -> Result<()> {
     Ok(())
 }
 
+/// Core's sync endpoint with the CLI's and its in-process gateway's credentials.
+pub fn connection(core: &chunk_environment::Core) -> Result<sync::Connection> {
+    let control = core.control_connection()?;
+    let gateway = core.target()?.gateway;
+    Ok(sync::Connection {
+        endpoint: control.endpoint.clone(),
+        cli: control.token.clone(),
+        gateway_id: gateway.id,
+        gateway: gateway.credential,
+    })
+}
+
 /// Starts core: on the compiled bundle for backend workloads, or on synthetic hosts serving the control fixture's
 /// release.
-async fn core(init: &Init) -> Result<chunk_environment::Core> {
+pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
     let state = init.state.join("core");
     let config = chunk_environment::CoreConfig {
         bundle: init.config.scenario.is_backend().then(|| init.backend.clone().into()),

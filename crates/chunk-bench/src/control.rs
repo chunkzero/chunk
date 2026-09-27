@@ -8,7 +8,7 @@ use chunk_proto::sync::v1::{
     PlayerIdentity, SessionDemand, SubscribeRequest, Update, claim_result, core_client::CoreClient, entry::State,
 };
 use prost::Message;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio_util::task::AbortOnDropHandle;
 use tonic::{Streaming, transport::Channel};
 
@@ -102,6 +102,8 @@ pub async fn verify_population(connection: &sync::Connection, expected: u32) -> 
 pub struct Gateway {
     stream: String,
     claims: watch::Receiver<Claims>,
+    /// Held while a lane reads a fresh snapshot, since each subscription supersedes the gateway's previous stream.
+    snapshots: Mutex<()>,
     _follower: AbortOnDropHandle<()>,
 }
 
@@ -126,7 +128,7 @@ impl Gateway {
                 }
             }
         });
-        Ok(Arc::new(Self { stream, claims, _follower: AbortOnDropHandle::new(follower) }))
+        Ok(Arc::new(Self { stream, claims, snapshots: Mutex::new(()), _follower: AbortOnDropHandle::new(follower) }))
     }
 }
 
@@ -179,6 +181,7 @@ impl Client {
 
     pub async fn execute(&mut self, sequence: u64, config: &Config) -> Result<()> {
         if config.scenario == Scenario::ControlPopulation {
+            let _turn = self.gateway.snapshots.lock().await;
             let (_, _, claims) = subscribe(&mut self.rpc, &self.connection).await?;
             ensure!(claims.len() == config.population as usize, "incomplete snapshot");
         } else {
@@ -187,5 +190,42 @@ impl Client {
             ensure!(departed.departed, "synthetic player departure unconfirmed");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn population_lanes_reading_snapshots_at_once_do_not_supersede_each_other() {
+        let state = tempfile::tempdir().unwrap();
+        let config = Config::parse_from(["bench", "control-population", "--population", "4"]);
+        let path = state.path().to_owned();
+        let init =
+            crate::target::Init { config: config.clone(), backend: String::new(), state: path.clone(), output: path };
+        let core = crate::target::core(&init).await.unwrap();
+        let connection = crate::target::connection(&core).unwrap();
+        let gateway = Gateway::follow(&connection).await.unwrap();
+        let mut seeder = Client::connect(&connection, gateway.clone()).await.unwrap();
+        for index in 0..4 {
+            seeder.arrive(index).await.unwrap();
+        }
+        let mut lanes = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let mut client = Client::connect(&connection, gateway.clone()).await.unwrap();
+            let config = config.clone();
+            lanes.spawn(async move {
+                for sequence in 0..4 {
+                    client.execute(sequence, &config).await?;
+                }
+                anyhow::Ok(())
+            });
+        }
+        while let Some(lane) = lanes.join_next().await {
+            lane.unwrap().unwrap();
+        }
+        core.stop(|| {}).await.unwrap();
     }
 }
