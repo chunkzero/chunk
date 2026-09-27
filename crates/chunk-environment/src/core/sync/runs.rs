@@ -1,13 +1,20 @@
-//! Commands gateways started, by operation ID, while they start and run: the gateway credential each belongs to, the
-//! packet effects it holds until that gateway acknowledges them, the subscriptions following it, and its outcome.
+//! Commands gateways started, by operation ID, while they start and run: the gateway credential each belongs to and
+//! the request it started, the packet effects it holds until that gateway acknowledges them, the subscription
+//! following it, and its outcome.
 
 use super::errors;
-use chunk_proto::sync::v1::{CommandEffect, CommandOutcome, Entry, Error, Update, command_outcome, entry::State};
+use chunk_backend::CommandRequest;
+use chunk_proto::sync::v1::{
+    CommandEffect, CommandOutcome, Entry, Error, Update, command_outcome, entry::State, error::Code,
+};
 use chunk_service::same_secret;
 use prost::Message;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
@@ -15,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Packet effects a command may have pending at once.
 const PENDING: usize = 8;
+/// Calls that may wait at once for a command to start: duplicate starts, and subscriptions that raced its start.
+const WAITERS: usize = 4;
 /// How long a started command waits for its first subscription, or for another once a superseded gateway stream ended
 /// its last, before it's cancelled.
 const GRACE: Duration = Duration::from_secs(5);
@@ -32,14 +41,20 @@ pub(super) fn outcome(result: chunk_backend::Result<Arc<str>>) -> CommandOutcome
 pub(super) struct Runs(Mutex<HashMap<String, Arc<Run>>>);
 
 impl Runs {
-    /// The command under `operation`, or a new one `owner` starts, cancelled through `cancel`, which the second value
-    /// marks.
-    pub fn begin(&self, operation: &str, owner: &str, cancel: CancellationToken) -> (Arc<Run>, bool) {
+    /// The command under `operation`, or a new one `owner` starts for `request`, cancelled through `cancel`, which the
+    /// second value marks.
+    pub fn begin(
+        &self,
+        operation: &str,
+        owner: &str,
+        request: CommandRequest,
+        cancel: CancellationToken,
+    ) -> (Arc<Run>, bool) {
         let mut runs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(run) = runs.get(operation) {
             return (run.clone(), false);
         }
-        let run = Arc::new(Run::new(owner, Phase::Starting, cancel));
+        let run = Arc::new(Run::new(owner, Some(request), Phase::Starting, cancel));
         runs.insert(operation.to_owned(), run.clone());
         (run, true)
     }
@@ -60,7 +75,11 @@ impl Runs {
 pub(super) struct Run {
     /// The gateway credential whose `chunk:command` started the command.
     owner: String,
+    /// What that `chunk:command` asked for, unless the run only reports a finished command.
+    request: Option<CommandRequest>,
     state: watch::Sender<Pending>,
+    /// Calls waiting for the command to start.
+    waiting: AtomicUsize,
     /// Cancels the command's work: its handler and the effects core performs for it.
     cancel: CancellationToken,
 }
@@ -75,7 +94,9 @@ enum Phase {
 pub(super) struct Pending {
     phase: Phase,
     effects: BTreeMap<u32, Held>,
-    subscribers: usize,
+    /// The subscription following the command, numbered by `opened`; a newer one supersedes it.
+    following: Option<u64>,
+    opened: u64,
     /// When the running command is cancelled unless a subscription opens first.
     orphaned: Option<Instant>,
 }
@@ -86,37 +107,48 @@ struct Held {
 }
 
 impl Run {
-    fn new(owner: &str, phase: Phase, cancel: CancellationToken) -> Self {
-        let pending = Pending { phase, effects: BTreeMap::new(), subscribers: 0, orphaned: None };
-        Self { owner: owner.to_owned(), state: watch::Sender::new(pending), cancel }
+    fn new(owner: &str, request: Option<CommandRequest>, phase: Phase, cancel: CancellationToken) -> Self {
+        let pending = Pending { phase, effects: BTreeMap::new(), following: None, opened: 0, orphaned: None };
+        Self {
+            owner: owner.to_owned(),
+            request,
+            state: watch::Sender::new(pending),
+            waiting: AtomicUsize::new(0),
+            cancel,
+        }
     }
 
     /// A command of `owner` that finished with `outcome` and whose run is gone, for a subscription to report.
     pub fn finished(owner: &str, outcome: CommandOutcome) -> Arc<Self> {
-        Arc::new(Self::new(owner, Phase::Finished(outcome), CancellationToken::new()))
+        Arc::new(Self::new(owner, None, Phase::Finished(outcome), CancellationToken::new()))
     }
 
-    /// Checks that `credential` started the command.
-    pub fn permits(&self, credential: &str) -> Result<(), Error> {
-        if same_secret(&self.owner, credential) {
-            Ok(())
-        } else {
-            Err(errors::denied("another gateway ran this command"))
+    /// Checks that `credential` started the command, and for `request`, if given.
+    pub fn permits(&self, credential: &str, request: Option<CommandRequest>) -> Result<(), Error> {
+        if !same_secret(&self.owner, credential) {
+            return Err(errors::denied("another gateway ran this command"));
         }
+        if request.is_some_and(|request| self.request != Some(request)) {
+            return Err(errors::error(Code::OperationMismatch, "the operation ID started another command"));
+        }
+        Ok(())
     }
 
-    /// Waits until the command started or was rejected, returning whether it started.
-    pub async fn started(&self) -> bool {
+    /// Waits until the command started or was rejected, returning whether it started, or UNAVAILABLE if as many calls
+    /// wait for it already as may.
+    pub async fn started(&self) -> Result<bool, Error> {
         let mut state = self.state.subscribe();
-        let phase = state.wait_for(|pending| !matches!(pending.phase, Phase::Starting)).await;
-        phase.is_ok_and(|pending| !matches!(pending.phase, Phase::Rejected))
+        let starting = |pending: &Pending| matches!(pending.phase, Phase::Starting);
+        let _waiting = if starting(&state.borrow()) { Some(Waiting::enter(&self.waiting)?) } else { None };
+        let phase = state.wait_for(|pending| !starting(pending)).await;
+        Ok(phase.is_ok_and(|pending| !matches!(pending.phase, Phase::Rejected)))
     }
 
     /// Marks the command started, which waits [`GRACE`] for its first subscription.
     pub fn start(&self) {
         self.state.send_modify(|pending| {
             pending.phase = Phase::Running;
-            pending.orphaned = (pending.subscribers == 0).then(|| Instant::now() + GRACE);
+            pending.orphaned = pending.following.is_none().then(|| Instant::now() + GRACE);
         });
     }
 
@@ -125,13 +157,16 @@ impl Run {
         self.state.send_modify(|pending| pending.phase = Phase::Rejected);
     }
 
-    /// Follows the command until the returned subscription drops.
+    /// Follows the command until the returned subscription drops or a newer one supersedes it.
     pub fn follow(self: &Arc<Self>) -> (watch::Receiver<Pending>, Subscription) {
+        let mut id = 0;
         self.state.send_modify(|pending| {
-            pending.subscribers += 1;
+            pending.opened += 1;
+            id = pending.opened;
+            pending.following = Some(id);
             pending.orphaned = None;
         });
-        (self.state.subscribe(), Subscription { run: self.clone(), superseded: false })
+        (self.state.subscribe(), Subscription { run: self.clone(), id, superseded: false })
     }
 
     /// Resolves once the running command has had no subscription for as long as it may.
@@ -182,7 +217,7 @@ impl Run {
     pub fn acknowledge(&self, credential: &str, sequence: u32, failed: bool) -> Result<bool, Error> {
         let mut held = Ok(None);
         self.state.send_if_modified(|pending| {
-            held = self.permits(credential).map(|()| pending.effects.remove(&sequence));
+            held = self.permits(credential, None).map(|()| pending.effects.remove(&sequence));
             matches!(held, Ok(Some(_)))
         });
         let Some(Held { effect, .. }) = held? else { return Ok(false) };
@@ -208,13 +243,37 @@ impl Run {
     }
 }
 
-/// A subscription following a command, which the command may be cancelled without once it drops.
+/// One of at most [`WAITERS`] calls waiting for a command to start.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn enter(waiting: &'a AtomicUsize) -> Result<Self, Error> {
+        let entered =
+            waiting.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| (count < WAITERS).then_some(count + 1));
+        entered.map_err(|_| errors::error(Code::Unavailable, "too many calls wait for this command to start"))?;
+        Ok(Self(waiting))
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The subscription following a command, which the command may be cancelled without once it drops.
 pub(super) struct Subscription {
     run: Arc<Run>,
+    id: u64,
     superseded: bool,
 }
 
 impl Subscription {
+    /// Whether a newer subscription follows the command instead.
+    pub fn replaced(&self, pending: &Pending) -> bool {
+        pending.following != Some(self.id)
+    }
+
     /// Marks the subscription as ending because its gateway stream was superseded, which leaves the command
     /// [`GRACE`] for the gateway to follow it again.
     pub fn superseded(&mut self) {
@@ -225,11 +284,15 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         let grace = if self.superseded { GRACE } else { Duration::ZERO };
-        self.run.state.send_modify(|pending| {
-            pending.subscribers -= 1;
-            if pending.subscribers == 0 && matches!(pending.phase, Phase::Running) {
+        self.run.state.send_if_modified(|pending| {
+            if pending.following != Some(self.id) {
+                return false;
+            }
+            pending.following = None;
+            if matches!(pending.phase, Phase::Running) {
                 pending.orphaned = Some(Instant::now() + grace);
             }
+            true
         });
     }
 }

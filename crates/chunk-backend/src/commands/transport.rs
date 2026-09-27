@@ -73,7 +73,7 @@ impl backend_commands_server::BackendCommands for CommandService {
         request: Request<wire::CommandScope>,
     ) -> std::result::Result<Response<wire::CommandCatalog>, Status> {
         let id = self.platform.binding(&request)?;
-        let catalog = bounded(self.backend.command_catalog(id, request.into_inner())).await?;
+        let catalog = bounded(self.backend.command_catalog(id, request.into_inner(), None)).await?;
         Ok(Response::new(catalog))
     }
     async fn suggest(
@@ -81,7 +81,7 @@ impl backend_commands_server::BackendCommands for CommandService {
         request: Request<wire::CommandSuggestionRequest>,
     ) -> std::result::Result<Response<wire::CommandSuggestionResult>, Status> {
         let id = self.platform.binding(&request)?;
-        let suggestions = bounded(self.backend.command_suggestions(id, request.into_inner())).await?;
+        let suggestions = bounded(self.backend.command_suggestions(id, request.into_inner(), None)).await?;
         Ok(Response::new(suggestions))
     }
     async fn prepare(
@@ -235,6 +235,7 @@ async fn owner_run(
         input: prepared.input,
         effects,
         owner: None,
+        caller: None,
     }));
     let invocation = id.to_string();
     let acceptance =

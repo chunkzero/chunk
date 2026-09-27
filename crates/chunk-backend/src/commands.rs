@@ -36,8 +36,8 @@ impl Purpose {
     pub fn command(self) -> Option<Arc<CommandBinding>> {
         if let Self::Command(binding) = self { Some(binding) } else { None }
     }
-    /// The digest of who started a command, which only they may resolve it by.
-    pub fn owner(&self) -> Option<[u8; 32]> {
+    /// Who started a command, which only they may resolve it by, and what they asked for.
+    pub fn owner(&self) -> Option<Owner> {
         if let Self::Command(binding) = self { binding.owner } else { None }
     }
     /// Bytes the command's binding retains while it runs.
@@ -70,13 +70,43 @@ pub(crate) struct CommandBinding {
     pub scope: CommandScope,
     pub input: String,
     pub effects: mpsc::Sender<PlatformEffect>,
-    /// The digest of the credential that started the command, if [`Backend::start_command`] did.
-    pub owner: Option<[u8; 32]>,
+    /// Who started the command, if [`Backend::start_command`] did.
+    pub owner: Option<Owner>,
+    /// The caller the command's handler and permission queries see, rather than one derived from its scope.
+    pub caller: Option<Json>,
 }
 
 impl CommandBinding {
     pub fn bytes(&self) -> usize {
-        scope_bytes(&self.scope) + self.input.len()
+        scope_bytes(&self.scope) + self.input.len() + self.caller.as_ref().map_or(0, |caller| caller.as_str().len())
+    }
+}
+
+/// The digest of the credential that started a command and of what it asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Owner {
+    pub credential: [u8; 32],
+    pub request: CommandRequest,
+}
+
+/// A digest of what a command's client asked for: the command, its input and the player it runs for. A retry under
+/// the command's identity must repeat it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandRequest([u8; 32]);
+
+impl CommandRequest {
+    #[must_use]
+    pub fn new(command: &str, input: &str, player: &str) -> Self {
+        let mut digest = Sha256::new();
+        for part in [command, input, player] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part);
+        }
+        Self(digest.finalize().into())
+    }
+
+    pub(crate) fn digest(self) -> [u8; 32] {
+        self.0
     }
 }
 
@@ -90,7 +120,7 @@ pub enum CommandIdentity {
     Started(ActionStatus),
     /// A command another owner started.
     Foreign,
-    /// An action or hook.
+    /// An action or hook, or a command the owner started with another request.
     Other,
 }
 
@@ -218,40 +248,56 @@ impl CommandEffects {
 }
 
 impl Backend {
-    /// The commands `scope` sees in deployment `id`, and which of them its permission queries allow.
+    /// The commands `scope` sees in deployment `id`, and which of them its permission queries allow. The queries see
+    /// `caller`, or without one, a caller derived from `scope`.
     /// # Errors
     /// Rejects an invalid scope, an unknown deployment and failed permission queries.
-    pub async fn command_catalog(&self, id: DeploymentId, scope: CommandScope) -> Result<CommandCatalog> {
-        let bytes = scope_bytes(&scope);
-        self.submit_sized(bytes, |reply| Command::Catalog { id, scope, reply }).await
+    pub async fn command_catalog(
+        &self,
+        id: DeploymentId,
+        scope: CommandScope,
+        caller: Option<Json>,
+    ) -> Result<CommandCatalog> {
+        let bytes = scope_bytes(&scope) + caller.as_ref().map_or(0, |caller| caller.as_str().len());
+        self.submit_sized(bytes, |reply| Command::Catalog { id, scope, caller, reply }).await
     }
 
-    /// The values the suggestion query `request` names offers for its input.
+    /// The values the suggestion query `request` names offers for its input. The query and the command's permission
+    /// query see `caller`, or without one, a caller derived from the request's scope.
     /// # Errors
     /// Rejects an invalid scope or input, a query the command doesn't declare, and a failed query.
     pub async fn command_suggestions(
         &self,
         id: DeploymentId,
         request: CommandSuggestionRequest,
+        caller: Option<Json>,
     ) -> Result<CommandSuggestionResult> {
         let bytes = request.scope.as_ref().map_or(0, scope_bytes)
             + request.command_id.len()
             + request.query.len()
-            + request.input.len();
-        self.submit_sized(bytes, |reply| Command::Suggest { id, request, reply }).await
+            + request.input.len()
+            + caller.as_ref().map_or(0, |caller| caller.as_str().len());
+        self.submit_sized(bytes, |reply| Command::Suggest { id, request, caller, reply }).await
     }
 
-    /// Resolves `id` for `owner` without consulting any deployment.
+    /// Resolves `id` for `owner` without consulting any deployment, checking that the command `owner` started there
+    /// was for `request`, if given.
     /// # Errors
     /// Reports an identity this backend didn't allocate, or whose outcome is gone, as unknown.
-    pub async fn command_identity(&self, id: ActionId, owner: &str) -> Result<CommandIdentity> {
+    pub async fn command_identity(
+        &self,
+        id: ActionId,
+        owner: &str,
+        request: Option<CommandRequest>,
+    ) -> Result<CommandIdentity> {
         let owner = owner_digest(owner);
-        self.submit_sized(id.incarnation.len(), |reply| Command::OwnedIdentity { id, owner, reply }).await
+        self.submit_sized(id.incarnation.len(), |reply| Command::OwnedIdentity { id, owner, request, reply }).await
     }
 
     /// Starts `command` with `input` for `scope` in `deployment` under an identity from
     /// [`Self::allocate_action_id`], through the same admission as [`Self::start_action`], and retains its outcome for
-    /// `owner`, whom [`Self::command_identity`] resolves it for. `caller` is the handler's `ctx.caller`.
+    /// `owner`, whom [`Self::command_identity`] resolves it for as long as they repeat `request`. The handler, its
+    /// permission queries and its transactions see `caller`.
     /// # Errors
     /// Rejects identities this backend didn't allocate, mismatched requests, commands the scope may not run, invalid
     /// input and exhausted capacity.
@@ -260,6 +306,7 @@ impl Backend {
         &self,
         id: ActionId,
         owner: &str,
+        request: CommandRequest,
         deployment: DeploymentId,
         scope: CommandScope,
         command: String,
@@ -268,11 +315,11 @@ impl Backend {
     ) -> Result<(ActionHandle, CommandEffects)> {
         let invocation = id.to_string();
         let (effects, receiver) = mpsc::channel(PENDING_EFFECTS);
-        let call =
-            Call { deployment, function: command, arguments: serde_json::json!({"input": input}).into(), caller };
-        let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len();
-        let owner = Some(owner_digest(owner));
-        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner }));
+        let arguments = serde_json::json!({"input": input}).into();
+        let call = Call { deployment, function: command, arguments, caller: caller.clone() };
+        let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len() + caller.as_str().len();
+        let owner = Some(Owner { credential: owner_digest(owner), request });
+        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner, caller: Some(caller) }));
         let handle =
             self.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: true, reply }).await?;
         Ok((handle, CommandEffects { receiver, invocation }))

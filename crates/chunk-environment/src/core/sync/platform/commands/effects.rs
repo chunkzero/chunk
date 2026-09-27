@@ -10,6 +10,7 @@ use chunk_proto::{
     v1::{MovePlayerRequest, SessionDemand, SessionMethodPhase},
 };
 use std::{sync::Arc, time::Duration};
+use tokio::task::JoinSet;
 
 /// How long a session method effect may take.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,33 +27,42 @@ pub(super) struct Performer {
 }
 
 impl Performer {
-    /// Performs the command's effects until it finishes, then returns its outcome. The command is cancelled once
-    /// nothing follows it, and its work still pending once it fails.
+    /// Performs the command's effects until its handler returned and the session methods it started settled, then
+    /// returns its outcome. The command is cancelled, handler and session methods alike, once nothing follows it or
+    /// core stops, and its session methods still pending once it fails.
     pub async fn drive(self, mut handle: ActionHandle, mut effects: CommandEffects) -> chunk_backend::Result<Arc<str>> {
         let cancel = self.run.token();
-        let mut open = true;
-        let outcome = loop {
+        let (mut open, mut outcome, mut sessions, mut stopped) = (true, None, JoinSet::new(), false);
+        loop {
             tokio::select! {
-                outcome = handle.outcome() => break outcome,
-                effect = effects.recv(), if open => match effect {
-                    Some(effect) => self.perform(effect),
+                result = handle.outcome(), if outcome.is_none() => {
+                    if result.is_err() {
+                        cancel.cancel();
+                    }
+                    outcome = Some(result);
+                }
+                effect = effects.recv(), if open && outcome.is_none() => match effect {
+                    Some(effect) => self.perform(effect, &mut sessions),
                     None => open = false,
                 },
-                () = self.run.abandoned(), if !cancel.is_cancelled() => {
-                    cancel.cancel();
+                _ = sessions.join_next(), if !sessions.is_empty() => {}
+                () = self.run.abandoned(), if !cancel.is_cancelled() => cancel.cancel(),
+                () = cancel.cancelled(), if !stopped => {
+                    stopped = true;
                     handle.cancel();
                 }
             }
-        };
-        if outcome.is_err() {
-            cancel.cancel();
+            if sessions.is_empty()
+                && let Some(outcome) = outcome.take()
+            {
+                return outcome;
+            }
         }
-        outcome
     }
 
     /// Performs `effect`, which fails once the player's claim is no longer the command's, or for a command that
     /// follows its player, once they left the connection it started on.
-    fn perform(&self, effect: CommandEffect) {
+    fn perform(&self, effect: CommandEffect, sessions: &mut JoinSet<()>) {
         if effect.is_cancelled() || self.run.token().is_cancelled() {
             return effect.finish(None);
         }
@@ -69,8 +79,12 @@ impl Performer {
             Effect::ActionBar { text } => command_effect::Effect::ActionBar(text),
             Effect::Title { title, subtitle } => command_effect::Effect::Title(CommandTitle { title, subtitle }),
             Effect::Enter { destination } => return self.enter(effect, current, destination),
-            Effect::SessionCall { method, arguments } => return self.session(effect, method.name, arguments, false),
-            Effect::SessionSend { method, arguments } => return self.session(effect, method.name, arguments, true),
+            Effect::SessionCall { method, arguments } => {
+                return self.session(sessions, effect, method.name, arguments, false);
+            }
+            Effect::SessionSend { method, arguments } => {
+                return self.session(sessions, effect, method.name, arguments, true);
+            }
         };
         self.run.publish(effect, sync::CommandEffect { effect: Some(packet) });
     }
@@ -96,10 +110,17 @@ impl Performer {
 
     /// Calls session method `name` on the session the command started in, unless the command is cancelled first. A
     /// call's effect resolves with the method's result; a send's once the method is prepared, while it runs on and
-    /// holds the effect's admission.
-    fn session(&self, effect: CommandEffect, name: String, arguments: serde_json::Value, send: bool) {
+    /// holds the effect's admission. Either keeps the command running until it settles.
+    fn session(
+        &self,
+        sessions: &mut JoinSet<()>,
+        effect: CommandEffect,
+        name: String,
+        arguments: serde_json::Value,
+        send: bool,
+    ) {
         let (control, cancel, origin) = (self.control.clone(), self.run.token(), self.origin.identity.clone());
-        tokio::spawn(async move {
+        sessions.spawn(async move {
             if cancel.is_cancelled() {
                 return effect.finish(None);
             }

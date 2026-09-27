@@ -130,11 +130,13 @@ pub(crate) enum Command {
     Catalog {
         id: DeploymentId,
         scope: chunk_proto::v1::CommandScope,
+        caller: Option<Json>,
         reply: Request<chunk_proto::v1::CommandCatalog>,
     },
     Suggest {
         id: DeploymentId,
         request: chunk_proto::v1::CommandSuggestionRequest,
+        caller: Option<Json>,
         reply: Request<chunk_proto::v1::CommandSuggestionResult>,
     },
     Prepare {
@@ -174,6 +176,7 @@ pub(crate) enum Command {
     OwnedIdentity {
         id: ActionId,
         owner: [u8; 32],
+        request: Option<crate::CommandRequest>,
         reply: Request<crate::CommandIdentity>,
     },
     StartAction {

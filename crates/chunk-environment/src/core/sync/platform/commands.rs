@@ -1,6 +1,7 @@
 //! A gateway's commands: `chunk:commands`, `chunk:suggest`, `chunk:command` and `chunk:effect`. Core derives a new
 //! command's scope from its player's arrived claim, and the command runs through the backend's action admission, then
-//! on until it finishes or nothing follows its `command/<op>` topic.
+//! on until it finishes or nothing follows its `command/<op>` topic. Permission and suggestion queries, and the
+//! command's handler, see the gateway caller of its player.
 
 mod effects;
 
@@ -11,10 +12,10 @@ use super::{
     },
     decode,
 };
-use chunk_backend::{ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity};
+use chunk_backend::{ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity, CommandRequest};
 use chunk_contract::DomainManifest;
 use chunk_control::{ArrivedClaim, Control};
-use chunk_js::DeploymentId;
+use chunk_js::{DeploymentId, Json};
 use chunk_proto::{
     sync::v1::{
         CallRequest, CommandArguments, CommandOutcome, CommandStarted, CommandsResult, EffectArguments, EffectResult,
@@ -51,7 +52,7 @@ pub(super) async fn call(
     gateway: &str,
     credential: &str,
     method: Method,
-    request: &CallRequest,
+    request: CallRequest,
 ) -> Result<Vec<u8>, Error> {
     let (control, backend) = (&service.control, service.app.backend());
     let result = match method {
@@ -60,17 +61,19 @@ pub(super) async fn call(
                 return Err(errors::invalid("chunk:commands takes no arguments"));
             }
             app::reject_prepared(&request.operation_id)?;
-            let Origin { deployment, scope, .. } = origin(control, backend, gateway, player(request)?).await?;
-            let catalog =
-                backend.command_catalog(deployment, scope).await.map_err(|failure| errors::backend(&failure))?;
+            let player = player(&request)?;
+            let Origin { deployment, scope, .. } = origin(control, backend, gateway, player).await?;
+            let catalog = backend.command_catalog(deployment, scope, Some(caller(player))).await;
+            let catalog = catalog.map_err(|failure| errors::backend(&failure))?;
             CommandsResult { commands_json: catalog.commands_json, allowed: catalog.allowed_ids }.encode_to_vec()
         }
         Method::Suggest => {
             let SuggestArguments { command_id, query, input, cursor } = decode(&request.arguments)?;
             app::reject_prepared(&request.operation_id)?;
-            let Origin { deployment, scope, .. } = origin(control, backend, gateway, player(request)?).await?;
-            let request = CommandSuggestionRequest { scope: Some(scope), command_id, query, input, cursor };
-            let suggestions = backend.command_suggestions(deployment, request).await;
+            let player = player(&request)?;
+            let Origin { deployment, scope, .. } = origin(control, backend, gateway, player).await?;
+            let suggestion = CommandSuggestionRequest { scope: Some(scope), command_id, query, input, cursor };
+            let suggestions = backend.command_suggestions(deployment, suggestion, Some(caller(player))).await;
             SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))?.values }.encode_to_vec()
         }
         Method::Command => start(service, gateway, credential, request).await?.encode_to_vec(),
@@ -91,35 +94,39 @@ pub(super) async fn call(
 }
 
 /// Starts the command `request` names under its prepared operation ID for `credential`, or finds the one started
-/// there, and returns once the backend admitted it.
+/// there for the same request, and returns once the backend admitted it.
 async fn start(
     service: &SyncService,
     gateway: &str,
     credential: &str,
-    request: &CallRequest,
+    request: CallRequest,
 ) -> Result<CommandStarted, Error> {
     let id = app::prepared(&request.operation_id)?;
     let CommandArguments { command_id, input } = decode(&request.arguments)?;
-    let player = player(request)?;
-    let run = loop {
-        let (run, new) = service.runs.begin(&request.operation_id, credential, service.stop.child_token());
-        run.permits(credential)?;
-        if new {
-            break run;
+    let player = player(&request)?.to_owned();
+    let fingerprint = CommandRequest::new(&command_id, &input, &player);
+    let operation = request.operation_id.clone();
+    drop(request);
+    let (run, new) = service.runs.begin(&operation, credential, fingerprint, service.stop.child_token());
+    run.permits(credential, Some(fingerprint))?;
+    if !new {
+        // A duplicate waits holding only the run, and a rejected start leaves the ID for the gateway to retry.
+        drop((command_id, input, player));
+        if !run.started().await? {
+            return Err(errors::error(Code::Unavailable, "retry the command"));
         }
-        if run.started().await {
-            return Ok(CommandStarted {});
-        }
-    };
+        return Ok(CommandStarted {});
+    }
     let starting = Starting {
         control: service.control.clone(),
         backend: service.app.backend().clone(),
         runs: service.runs.clone(),
         run,
-        operation: request.operation_id.clone(),
+        operation,
         gateway: gateway.to_owned(),
         credential: credential.to_owned(),
-        player: player.to_owned(),
+        player,
+        fingerprint,
     };
     // The start outlives a dropped call, so a retry finds the command it admitted.
     let started = tokio::spawn(starting.start(id, command_id, input)).await;
@@ -137,6 +144,7 @@ struct Starting {
     gateway: String,
     credential: String,
     player: String,
+    fingerprint: CommandRequest,
 }
 
 enum Admitted {
@@ -182,7 +190,8 @@ impl Starting {
 
     async fn admit(&self, id: ActionId, command: String, input: String) -> Result<Admitted, Error> {
         let failed = |failure: chunk_backend::Error| errors::backend(&failure);
-        match self.backend.command_identity(id.clone(), &self.credential).await.map_err(failed)? {
+        let identity = self.backend.command_identity(id.clone(), &self.credential, Some(self.fingerprint)).await;
+        match identity.map_err(failed)? {
             CommandIdentity::Unused => {}
             CommandIdentity::Started(ActionStatus::Finished(result)) => return Ok(Admitted::Retained(outcome(result))),
             CommandIdentity::Started(ActionStatus::Running) => {
@@ -190,14 +199,17 @@ impl Starting {
             }
             CommandIdentity::Foreign => return Err(errors::denied("another gateway ran this command")),
             CommandIdentity::Other => {
-                return Err(errors::error(Code::OperationMismatch, "the operation ID ran an action or hook"));
+                return Err(errors::error(Code::OperationMismatch, "the operation ID ran another request"));
             }
         }
         let Origin { claim, deployment, scope, manifest } =
             origin(&self.control, &self.backend, &self.gateway, &self.player).await?;
         let follow = manifest.commands.get(&command).is_some_and(|command| command.follow_player);
-        let caller = serde_json::json!({"kind": "gateway", "player": self.player}).into();
-        let started = self.backend.start_command(id, &self.credential, deployment, scope, command, input, caller).await;
+        let (credential, caller) = (&self.credential, caller(&self.player));
+        let started = self
+            .backend
+            .start_command(id, credential, self.fingerprint, deployment, scope, command, input, caller)
+            .await;
         let (handle, effects) = started.map_err(failed)?;
         Ok(Admitted::Started { origin: Box::new(claim), follow, handle, effects })
     }
@@ -207,6 +219,11 @@ impl Starting {
 fn player(request: &CallRequest) -> Result<&str, Error> {
     let caller = request.caller.as_ref().filter(|caller| caller.session.is_empty() && !caller.player.is_empty());
     Ok(&caller.ok_or_else(|| errors::invalid("a command method names the player it runs for"))?.player)
+}
+
+/// The caller a command for `player` runs as.
+fn caller(player: &str) -> Json {
+    serde_json::json!({"kind": "gateway", "player": player}).into()
 }
 
 /// Where a command runs: its player's arrived claim, the deployment and domain manifest of the claim's session, and

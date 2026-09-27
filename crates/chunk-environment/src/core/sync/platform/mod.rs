@@ -20,8 +20,12 @@ pub(super) async fn call(
     service: &SyncService,
     principal: &Principal,
     method: &str,
-    request: &CallRequest,
+    request: CallRequest,
 ) -> Result<(Option<Position>, Vec<u8>), Error> {
+    if let Some(method) = commands::Method::parse(method) {
+        return commands(service, principal, method, request).await;
+    }
+    let request = &request;
     match method {
         "prepare" => return Ok((None, prepare(service, request).await?.encode_to_vec())),
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
@@ -29,16 +33,6 @@ pub(super) async fn call(
     }
     if let Some(method) = jvm::Method::parse(method) {
         return jvm::call(service, principal, method, request).await;
-    }
-    if let Some(method) = commands::Method::parse(method) {
-        let Class::Gateway { id } = &principal.class else {
-            return Err(errors::denied("only a gateway runs commands"));
-        };
-        if !request.deployment.is_empty() {
-            return Err(errors::invalid("a command method takes no deployment"));
-        }
-        service.fences.check(&request.stream, &principal.credential)?;
-        return Ok((None, commands::call(service, id, &principal.credential, method, request).await?));
     }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {
@@ -55,6 +49,23 @@ pub(super) async fn call(
     let result = claims::call(service, id, method, request).await?;
     let generation = *service.control.subscribe().borrow();
     Ok((position(generation.epoch, Revision(generation.revision)), result))
+}
+
+/// Runs command method `method` for `principal`, which must be a gateway naming its current stream.
+async fn commands(
+    service: &SyncService,
+    principal: &Principal,
+    method: commands::Method,
+    request: CallRequest,
+) -> Result<(Option<Position>, Vec<u8>), Error> {
+    let Class::Gateway { id } = &principal.class else {
+        return Err(errors::denied("only a gateway runs commands"));
+    };
+    if !request.deployment.is_empty() {
+        return Err(errors::invalid("a command method takes no deployment"));
+    }
+    service.fences.check(&request.stream, &principal.credential)?;
+    Ok((None, commands::call(service, id, &principal.credential, method, request).await?))
 }
 
 /// Issues the operation ID of one effectful call.

@@ -101,8 +101,8 @@ impl SyncService {
         if matches!(principal.class, auth::Class::Unadopted { .. }) && request.method != "chunk:register" {
             return Err(errors::denied("the JVM must register again first"));
         }
-        if let Some(method) = request.method.strip_prefix("chunk:") {
-            return platform::call(self, principal, method, &request).await;
+        if let Some(method) = request.method.strip_prefix("chunk:").map(str::to_owned) {
+            return platform::call(self, principal, &method, request).await;
         }
         let outcome = self.call_app(principal, request).await?;
         Ok((position(self.epoch, outcome.revision), outcome.json.as_bytes().to_vec()))

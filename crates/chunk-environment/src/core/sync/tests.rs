@@ -28,6 +28,10 @@ export async function slow(ctx, by) { await ctx.runMutation('add', by); await ct
 export function fill(ctx, text) { return text; }
 export function login(ctx) { return {allow: true, reason: JSON.stringify(ctx.caller)}; }
 export function choices(ctx) { return ['one', 'two']; }
+export function permit(ctx) {
+  const {kind, player, ...rest} = ctx.caller;
+  return kind === 'gateway' && player === '00000000-0000-0000-0000-000000000001' && Object.keys(rest).length === 0;
+}
 export async function say(ctx, {arguments: {text}}) {
   const method = {app: 'bridge', session: 'default', name: 'status'};
   if (text === 'enter') {
@@ -37,6 +41,11 @@ export async function say(ctx, {arguments: {text}}) {
     if (status !== 7) throw new Error(`unexpected status ${status}`);
   } else if (text === 'wait') {
     await ctx.sleep(300);
+  } else if (text === 'hold') {
+    await ctx.sleep(1000);
+  } else if (text === 'detached') {
+    ctx.platform({kind: 'session_call', method, arguments: {limit: 0}}).catch(() => {});
+    await ctx.sleep(200);
   } else if (text === 'write') {
     await ctx.sleep(300);
     await ctx.runMutation('add', 1);
@@ -79,12 +88,20 @@ fn deployment() -> Deployment {
                 ..function(FunctionKind::Query, serde_json::from_value(suggestion).unwrap())
             },
         ),
+        (
+            "permit",
+            Function {
+                visibility: Visibility::Internal,
+                result: Schema::Boolean,
+                ..function(FunctionKind::Query, Schema::Object { fields: std::collections::BTreeMap::new() })
+            },
+        ),
     ];
     let domains = serde_json::json!({
         "version": 1, "scopes": {"": {"parent": null}}, "apps": {"bridge": ""},
         "hooks": {LOGIN: {"domain": "", "event": "player.login", "export": "login"}},
         "commands": {SAY: {
-            "domain": "", "name": "say", "aliases": [], "export": "say", "follow_player": false,
+            "domain": "", "name": "say", "aliases": [], "export": "say", "permission": "permit", "follow_player": false,
             "routes": [{"literals": [], "arguments": [{"name": "text", "parser": "word", "suggestions": {"query": "choices"}}]}]
         }}
     });

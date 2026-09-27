@@ -1,6 +1,7 @@
 //! The `command/<op>` topic: the packet effects the command started under prepared operation ID `<op>` waits for its
 //! gateway to render, sent as snapshots, then its outcome. Only the gateway credential that started the command may
-//! follow it, on its current gateway stream, and the command is cancelled once nothing follows it.
+//! follow it, on its current gateway stream, through one subscription at a time, and the command is cancelled once
+//! nothing follows it.
 
 use super::{
     super::{
@@ -47,8 +48,8 @@ pub(super) async fn open(
     let superseded = service.fences.follow(&arguments.stream, &principal.credential)?;
     let running = match service.runs.get(operation) {
         Some(run) => {
-            run.permits(&principal.credential)?;
-            run.started().await.then_some(run)
+            run.permits(&principal.credential, None)?;
+            run.started().await?.then_some(run)
         }
         None => None,
     };
@@ -68,7 +69,7 @@ pub(super) async fn open(
 
 /// The command `credential` started under `id` that no longer runs, as the backend retains it.
 async fn retained(service: &SyncService, id: chunk_backend::ActionId, credential: &str) -> Result<Arc<Run>, Error> {
-    let identity = service.app.backend().command_identity(id, credential).await;
+    let identity = service.app.backend().command_identity(id, credential, None).await;
     match identity.map_err(|failure| errors::backend(&failure))? {
         CommandIdentity::Started(ActionStatus::Finished(result)) => Ok(Run::finished(credential, outcome(result))),
         CommandIdentity::Started(ActionStatus::Running) => Err(errors::error(Code::Unavailable, "retry the command")),
@@ -80,12 +81,19 @@ async fn retained(service: &SyncService, id: chunk_backend::ActionId, credential
 
 impl Command {
     /// Sends a snapshot of the pending effects whenever they change, then the command's outcome, until the client
-    /// leaves, core stops, the credential lapses or the gateway stream it names is superseded.
+    /// leaves, core stops, the credential lapses, or the gateway stream it names or the subscription itself is
+    /// superseded.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         let Self { mut pending, mut subscription, stream, superseded, grant } = self;
         let mut first = Some(stream);
         loop {
-            let (update, finished) = pending.borrow_and_update().snapshot();
+            let (update, finished) = {
+                let current = pending.borrow_and_update();
+                if subscription.replaced(&current) {
+                    return sender.fail(errors::error(Code::Stopped, "a newer subscription follows the command"));
+                }
+                current.snapshot()
+            };
             if !send(&grant, &sender, Update { stream: first.take().unwrap_or_default(), ..update }) || finished {
                 return;
             }

@@ -66,7 +66,7 @@ impl Gateway {
     }
 
     async fn call(&self, operation: &str, method: &str, arguments: &impl Message) -> CallResponse {
-        call(self.client.clone(), &self.credential, &self.stream, operation, method, arguments).await
+        call(self.client.clone(), &self.credential, &self.stream, operation, method, arguments, runtime::PLAYER).await
     }
 
     async fn prepare(&self) -> String {
@@ -75,10 +75,16 @@ impl Gateway {
         decoded::<PrepareResult>(&response.into_inner()).operation_id
     }
 
+    /// Starts `command` with `input` for `player` under prepared `operation`.
+    async fn start(&self, operation: &str, command: &str, input: &str, player: &str) -> CallResponse {
+        let arguments = CommandArguments { command_id: command.into(), input: input.into() };
+        let (client, credential, stream) = (self.client.clone(), &self.credential, &self.stream);
+        call(client, credential, stream, operation, "chunk:command", &arguments, player).await
+    }
+
     /// Starts `say` with `input` under prepared `operation`.
     async fn say(&self, operation: &str, input: &str) -> CallResponse {
-        let arguments = CommandArguments { command_id: SAY.into(), input: input.into() };
-        self.call(operation, "chunk:command", &arguments).await
+        self.start(operation, SAY, input, runtime::PLAYER).await
     }
 
     /// Follows the command under `operation`.
@@ -99,8 +105,8 @@ impl Gateway {
     }
 }
 
-/// Calls platform method `method` as `credential` on gateway stream `stream`, naming the player for the methods that
-/// take one.
+/// Calls platform method `method` as `credential` on gateway stream `stream`, naming `player` for the methods that take
+/// one.
 async fn call(
     mut client: CoreClient<Channel>,
     credential: &str,
@@ -108,8 +114,9 @@ async fn call(
     operation: &str,
     method: &str,
     arguments: &impl Message,
+    player: &str,
 ) -> CallResponse {
-    let player = Caller { session: String::new(), player: runtime::PLAYER.into() };
+    let player = Caller { session: String::new(), player: player.into() };
     let message = CallRequest {
         operation_id: operation.into(),
         method: method.into(),
@@ -157,10 +164,21 @@ fn failure(update: &Update) -> Option<Code> {
     update.error.as_ref().map(chunk_proto::sync::v1::Error::code)
 }
 
+/// Waits up to 10 seconds for `condition`.
+async fn until(condition: impl Fn() -> bool) {
+    let met = async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), met).await.expect("the condition held in time");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_reads_the_commands_and_suggestions_its_arrived_player_sees() {
     let arrived = arrived().await;
     let gateway = &arrived.gateway;
+    // `say`'s permission query allows only the player's gateway caller.
     let CommandsResult { commands_json, allowed } = decoded(&gateway.call("", "chunk:commands", &()).await);
     let commands: serde_json::Value = serde_json::from_slice(&commands_json).unwrap();
     assert_eq!((commands[SAY]["name"].as_str(), allowed.as_slice()), (Some("say"), [SAY.to_owned()].as_slice()));
@@ -258,6 +276,120 @@ async fn a_cancelled_commands_queued_session_call_never_runs() {
     }
     assert_eq!(arrived.jvm.methods().0, 0);
     assert!(failed(&outcome(&mut gateway.follow(&operation).await).await));
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_that_changes_the_command_input_or_player_is_a_mismatch() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    let mut effects = gateway.follow(&operation).await;
+    let changed = [
+        ("scopes/commands/other", "say wait", runtime::PLAYER),
+        (SAY, "say hello", runtime::PLAYER),
+        (SAY, "say wait", "00000000-0000-0000-0000-000000000002"),
+    ];
+    for finished in [false, true] {
+        if finished {
+            assert_eq!(returned(&outcome(&mut effects).await), b"null");
+        }
+        for (command, input, player) in changed {
+            let retried = gateway.start(&operation, command, input, player).await;
+            assert_eq!(code(&retried), Code::OperationMismatch, "{command} {input} {player}, finished: {finished}");
+        }
+    }
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_newer_subscription_supersedes_the_one_following_a_command() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    let mut first = gateway.follow(&operation).await;
+    next(&mut first).await;
+    let mut second = gateway.follow(&operation).await;
+    next(&mut second).await;
+    assert_eq!(failure(&next(&mut first).await), Some(Code::Stopped));
+    assert!(first.message().await.unwrap().is_none());
+    assert_eq!(returned(&outcome(&mut second).await), b"null");
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_starts_beyond_four_waiting_for_admission_get_unavailable() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    // These hold all 24 live actions for a second, so the next start waits for admission.
+    let holds: Vec<_> = (0..24)
+        .map(|_| {
+            let gateway = gateway.clone();
+            tokio::spawn(
+                async move { decoded::<CommandStarted>(&gateway.say(&gateway.prepare().await, "say hold").await) },
+            )
+        })
+        .collect();
+    for hold in holds {
+        hold.await.unwrap();
+    }
+    let operation = gateway.prepare().await;
+    let starts: Vec<_> = (0..6)
+        .map(|_| {
+            let (gateway, operation) = (gateway.clone(), operation.clone());
+            tokio::spawn(async move { gateway.say(&operation, "say wait").await })
+        })
+        .collect();
+    let mut unavailable = 0;
+    for start in starts {
+        let response = start.await.unwrap();
+        if !matches!(response.outcome, Some(Outcome::Result(_))) {
+            assert_eq!(code(&response), Code::Unavailable);
+            unavailable += 1;
+        }
+    }
+    assert_eq!(unavailable, 1);
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_that_returned_runs_until_its_session_call_settles_and_closing_its_topic_cancels_the_call() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say detached").await);
+    let mut effects = gateway.follow(&operation).await;
+    next(&mut effects).await;
+    until(|| arrived.jvm.methods().1 > 0).await;
+    // The handler returns 200 ms after the call; the call keeps the command and its topic open.
+    let quiet = tokio::time::timeout(Duration::from_millis(600), effects.message()).await;
+    assert!(quiet.is_err(), "the command finished while its session call was queued");
+    drop(effects);
+    until(|| arrived.jvm.methods().2 > 0).await;
+    assert_eq!(arrived.jvm.methods().0, 0);
+    assert_eq!(returned(&outcome(&mut gateway.follow(&operation).await).await), b"null");
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_stopping_cancels_a_sleeping_command_before_it_writes() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say write").await);
+    // Core stops within the grace a command waits for its first subscription.
+    arrived.fixture.stop.cancel();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let get = chunk_backend::Call {
+        deployment: chunk_js::DeploymentId::new("test").unwrap(),
+        function: "get".into(),
+        arguments: serde_json::Value::Null.into(),
+        caller: serde_json::json!({"kind": "cli"}).into(),
+    };
+    assert_eq!(&*arrived.fixture.backend.query(get).await.unwrap().json, "0");
     arrived.stop().await;
 }
 
