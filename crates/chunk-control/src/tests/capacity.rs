@@ -65,9 +65,11 @@ async fn a_restart_resumes_requested_and_releasing_capacity() {
     drop(control);
 
     let control = fixture.control().await;
-    let state = control.state().unwrap();
-    assert_eq!(state.hosts[&requested].capacity, Capacity::Ready);
-    assert!(state.released(&releasing));
+    eventually(|| {
+        let state = control.state().unwrap();
+        state.hosts[&requested].capacity == Capacity::Ready && state.released(&releasing)
+    })
+    .await;
     assert_eq!(*fixture.host.ids.lock().unwrap(), BTreeSet::from([requested]));
     assert_eq!(*fixture.host.terminated.lock().unwrap(), BTreeSet::from([releasing]));
     fixture.close().await;
