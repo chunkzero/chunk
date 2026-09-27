@@ -11,7 +11,7 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{ActionEffects, ActionGrants, Backend, Call, HttpBinding, HttpMethod};
+use crate::{ActionEffects, ActionGrants, ActionStatus, Backend, Call, HttpBinding, HttpMethod, limits::ACTION_BYTES};
 
 struct Fixture {
     origin: String,
@@ -128,7 +128,7 @@ fn call(deployment: &str, function: &str, args: Value) -> Call {
         caller: json!({"player":"alice"}).into(),
     }
 }
-fn configured(directory: &tempfile::TempDir, origin: &str, timeout: Duration) -> Backend {
+fn configured(directory: &tempfile::TempDir, origin: &str, timeout: Duration, action_bytes: usize) -> Backend {
     let grants = ActionGrants::default()
         .with_http(
             "api".into(),
@@ -148,7 +148,7 @@ fn configured(directory: &tempfile::TempDir, origin: &str, timeout: Duration) ->
         "test".into(),
         Box::new(SqliteStore::open(directory.path().join("effects.db"), "test").unwrap()),
         effects,
-        crate::limits::ACTION_BYTES,
+        action_bytes,
     )
     .unwrap()
 }
@@ -168,7 +168,7 @@ async fn outcome(backend: &Backend, deployment: &str, path: &str) -> Value {
 async fn external_grants_default_deny_and_bind_environment_deployment_and_origin() {
     let mut fixture = Fixture::start().await;
     let directory = tempfile::tempdir().unwrap();
-    let backend = configured(&directory, &fixture.origin, Duration::from_secs(1));
+    let backend = configured(&directory, &fixture.origin, Duration::from_secs(1), ACTION_BYTES);
     backend.deploy(deployment("allowed")).await.unwrap();
     backend.deploy(deployment("other")).await.unwrap();
     assert_eq!(outcome(&backend, "other", "ok").await["state"], "rejected");
@@ -233,7 +233,7 @@ async fn external_grants_default_deny_and_bind_environment_deployment_and_origin
 async fn http_bounds_and_partial_failures_report_unknown_without_retries() {
     let mut fixture = Fixture::start().await;
     let directory = tempfile::tempdir().unwrap();
-    let backend = configured(&directory, &fixture.origin, Duration::from_millis(80));
+    let backend = configured(&directory, &fixture.origin, Duration::from_millis(80), ACTION_BYTES);
     backend.deploy(deployment("allowed")).await.unwrap();
     for path in ["large", "streamLarge", "drop", "slow"] {
         let result = outcome(&backend, "allowed", path).await;
@@ -259,7 +259,7 @@ async fn http_bounds_and_partial_failures_report_unknown_without_retries() {
 async fn cancelling_after_server_observes_request_leaves_effect_uncertain_and_foreground_free() {
     let mut fixture = Fixture::start().await;
     let directory = tempfile::tempdir().unwrap();
-    let backend = configured(&directory, &fixture.origin, Duration::from_secs(5));
+    let backend = configured(&directory, &fixture.origin, Duration::from_secs(5), ACTION_BYTES);
     backend.deploy(deployment("allowed")).await.unwrap();
     let mut action = backend
         .start_action(
@@ -292,6 +292,38 @@ async fn cancelling_after_server_observes_request_leaves_effect_uncertain_and_fo
     assert!(rejected["reason"].as_str().unwrap().contains("concurrency"));
     fanout.cancel();
     assert!(fanout.outcome().await.is_err());
+    drop(backend);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn larger_action_budgets_raise_live_action_http_and_job_limits() {
+    use super::jobs::{now, schedule, state};
+    let mut fixture = Fixture::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    // Sixteen live actions, with an HTTP slot each and a quarter of them for jobs.
+    let budget = 16 * chunk_js::Limits::default().heap_bytes;
+    let backend = configured(&directory, &fixture.origin, Duration::from_secs(5), budget);
+    backend.deploy(deployment("allowed")).await.unwrap();
+    backend.deploy(super::jobs::deployment("old", 1)).await.unwrap();
+    let mut requests = Vec::new();
+    for _ in 0..12 {
+        let run = call("allowed", "run", json!({"binding":"api","path":"slow"}));
+        requests.push(backend.start_action(backend.allocate_action_id().await.unwrap(), run).await.unwrap());
+    }
+    for _ in 0..12 {
+        assert!(fixture.observed().await.contains("/api/slow"));
+    }
+    // The fixture holds each request for two seconds, so all twelve actions and requests are live at once.
+    assert!(requests.iter().all(|action| matches!(action.status(), ActionStatus::Running)));
+    for index in 0..4 {
+        let id = schedule(&backend, &format!("job-{index}"), now(), 30_000).await;
+        state(&backend, &id, chunk_store::JobState::Running).await;
+    }
+    for mut action in requests {
+        let result: String = serde_json::from_str(&action.outcome().await.unwrap()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["state"], "completed");
+    }
     drop(backend);
     fixture.close().await;
 }
