@@ -2,6 +2,8 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import chunk.sync.v1.CoreOuterClass.Position;
+import chunk.sync.v1.Jvm.JvmDelivery;
 import chunk.v1.BackendGrpc;
 import chunk.v1.BackendOuterClass.BackendMutation;
 import chunk.v1.BackendOuterClass.BackendQuery;
@@ -9,7 +11,6 @@ import chunk.v1.BackendOuterClass.BackendResult;
 import chunk.v1.BackendOuterClass.BackendUpdate;
 import chunk.v1.BackendOuterClass.BackendWatchGroup;
 import chunk.v1.Common.SessionRef;
-import chunk.v1.GameplayOuterClass.PlayerDelivery;
 import chunk.v1.Supervision.SessionCommand;
 
 import com.google.protobuf.ByteString;
@@ -151,7 +152,10 @@ class CoinCommandTest {
                 connection.setClientState(ConnectionState.PLAY);
                 var player = new ManagedPlayer(connection, new GameProfile(uuid, "player"));
                 player.setBinding(
-                        PlayerDelivery.newBuilder().setOwnerGeneration(generation).build());
+                        JvmDelivery.newBuilder()
+                                .setGeneration(
+                                        Position.newBuilder().setEpoch(1).setRevision(generation))
+                                .build());
                 var managed = manager.get(destination, 1);
                 try {
                     await(ticks, managed.join(player));
@@ -165,7 +169,7 @@ class CoinCommandTest {
                     assertEquals(uuid.toString(), caller.get("player").asString());
                     assertEquals(destination, caller.get("session").asString());
                     assertEquals(
-                            destination + "/" + uuid + "/" + generation + "/coin-0",
+                            destination + "/" + uuid + "/1." + generation + "/coin-0",
                             call.getOperationId());
                 } finally {
                     await(ticks, managed.leave(player));
