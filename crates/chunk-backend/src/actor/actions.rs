@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     rc::Rc,
     sync::{Arc, Weak},
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chunk_contract::{Deployment, Function, FunctionKind, validate_wire_value};
@@ -15,11 +15,14 @@ use super::Actor;
 use crate::{
     ActionHandle, ActionId, ActionStatus, Error, Result,
     actions::{Host, Scope},
-    limits::{ACTION_BYTES, Limit},
+    limits::{ACTION_BYTES, Limit, RETAINED_BYTES},
     service::{Call, Event, Request, Update},
 };
 
-const MAX_RECORDS: usize = 32;
+/// How long a finished action's outcome stays retained, and a prepared identity nothing started stays valid.
+const RETENTION: Duration = Duration::from_hours(24);
+/// Retained bytes each record or prepared identity charges beyond its call and result.
+const ENTRY_BYTES: usize = 256;
 
 struct Record {
     operation_prefix: String,
@@ -31,12 +34,20 @@ struct Record {
     scope: Weak<Scope>,
     cancellation: Cancellation,
     worker: Option<JoinHandle<()>>,
+    /// Bytes this record retains.
+    bytes: usize,
 }
 
 pub(super) struct Actions {
     incarnation: String,
-    retired: u64,
+    next: u64,
+    /// Identities `prepare` issued that nothing started yet, by sequence, with when each expires.
+    prepared: BTreeMap<u64, Instant>,
     records: BTreeMap<ActionId, Record>,
+    /// Finished records, oldest first, with when each expires.
+    finished: VecDeque<(Instant, ActionId)>,
+    /// Bytes prepared identities and records retain, at most [`RETAINED_BYTES`] unless results overshoot it.
+    retained: usize,
     events: mpsc::Sender<Event>,
     slots: Arc<Semaphore>,
     external_slots: Arc<Semaphore>,
@@ -47,8 +58,11 @@ impl Actions {
     pub fn new(events: mpsc::Sender<Event>, incarnation: String, effects: crate::ActionEffects) -> Self {
         Self {
             incarnation,
-            retired: 0,
+            next: 1,
+            prepared: BTreeMap::new(),
             records: BTreeMap::new(),
+            finished: VecDeque::new(),
+            retained: 0,
             events,
             slots: Arc::new(Semaphore::new(32)),
             external_slots: Arc::new(Semaphore::new(8)),
@@ -87,28 +101,55 @@ impl Actions {
         ActionId { incarnation: format!("{}:job:{}", self.incarnation, job.id), sequence: u64::from(job.attempt) }
     }
 
-    fn admit(&mut self, id: &ActionId, trusted: bool) -> Result<()> {
-        if !trusted && (id.incarnation != self.incarnation || id.sequence <= self.retired) {
+    /// Issues the identity of one action, valid until it starts or [`RETENTION`] passes.
+    pub fn prepare(&mut self) -> Result<ActionId> {
+        self.expire();
+        let sequence = self.next;
+        let next = sequence.checked_add(1).ok_or(Error::Invalid("action identity exhausted"))?;
+        if self.retained + ENTRY_BYTES > RETAINED_BYTES {
+            return Err(Limit::Retention.exceeded());
+        }
+        self.next = next;
+        self.retained += ENTRY_BYTES;
+        self.prepared.insert(sequence, Instant::now() + RETENTION);
+        Ok(ActionId { incarnation: self.incarnation.clone(), sequence })
+    }
+
+    /// Forgets prepared identities and finished records older than [`RETENTION`].
+    fn expire(&mut self) {
+        let now = Instant::now();
+        while let Some(entry) = self.prepared.first_entry()
+            && *entry.get() <= now
+        {
+            entry.remove();
+            self.retained -= ENTRY_BYTES;
+        }
+        while let Some((expiry, _)) = self.finished.front()
+            && *expiry <= now
+        {
+            let (_, id) = self.finished.pop_front().expect("front exists");
+            if let Some(record) = self.records.remove(&id) {
+                self.retained -= record.bytes;
+            }
+        }
+    }
+
+    /// Admits a record of `bytes` under `id`, which must be prepared unless it's `trusted`, consuming its preparation.
+    fn admit(&mut self, id: &ActionId, trusted: bool, bytes: usize) -> Result<()> {
+        if !trusted && (id.incarnation != self.incarnation || !self.prepared.contains_key(&id.sequence)) {
             return Err(Error::ActionOutcomeUnknown);
         }
         if !self.capacity() {
             return Err(Limit::ActionMemory.exceeded());
         }
-        if self.records.len() >= MAX_RECORDS {
-            let retired = self
-                .records
-                .iter()
-                .find(|(_, record)| record.worker.is_none())
-                .map(|(id, _)| id.clone())
-                .ok_or(Error::Busy)?;
-            if retired.incarnation == self.incarnation {
-                self.retired = self.retired.max(retired.sequence);
-            }
-            self.records.remove(&retired);
+        let released = if trusted { 0 } else { ENTRY_BYTES };
+        if self.retained - released + bytes > RETAINED_BYTES {
+            return Err(Limit::Retention.exceeded());
         }
-        if !trusted && id.sequence <= self.retired {
-            return Err(Error::ActionOutcomeUnknown);
+        if !trusted {
+            self.prepared.remove(&id.sequence);
         }
+        self.retained = self.retained - released + bytes;
         Ok(())
     }
 }
@@ -149,8 +190,8 @@ impl Actor {
         request_cancellation: &Cancellation,
     ) -> Result<ActionHandle> {
         let hook = matches!(purpose, crate::commands::Purpose::Hook);
-        let (deployment, function, writable) =
-            self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
+        self.actions.expire();
+        // A retained outcome replays before the deployment is checked, since it outlives the deployment's release.
         let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
             "action-v1",
             purpose.name(),
@@ -167,11 +208,14 @@ impl Actor {
             let scope = record.scope.upgrade().unwrap_or_else(|| Arc::new(Scope(record.cancellation.clone())));
             return Ok(ActionHandle { id, status: record.status.subscribe(), scope });
         }
-        self.actions.admit(&id, durable_identity.is_some())?;
+        let (deployment, function, writable) =
+            self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
+        let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
+        let bytes = ENTRY_BYTES + id.incarnation.len() + operation_prefix.len() + call.bytes();
+        self.actions.admit(&id, durable_identity.is_some(), bytes)?;
         let seed = durable_identity.as_ref().map_or(id.sequence, |identity| {
             u64::from_be_bytes(Sha256::digest(identity.as_bytes())[..8].try_into().expect("digest prefix"))
         });
-        let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
         let invocation_identity = durable_identity.unwrap_or_else(|| id.to_string());
         let cancellation = Cancellation::default();
         let scope = Arc::new(Scope(cancellation.clone()));
@@ -228,7 +272,8 @@ impl Actor {
                 });
                 worker_cancellation.cancel();
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });
-            })?;
+            })
+            .inspect_err(|_| self.actions.retained -= bytes)?;
         self.actions.records.insert(
             id.clone(),
             Record {
@@ -241,6 +286,7 @@ impl Actor {
                 scope: Arc::downgrade(&scope),
                 cancellation,
                 worker: Some(worker),
+                bytes,
             },
         );
         Ok(ActionHandle { id, status: receiver, scope })
@@ -277,9 +323,13 @@ impl Actor {
     pub(super) fn finish_action(&mut self, id: &ActionId, result: Result<Arc<str>>) {
         if let Some(record) = self.actions.records.get_mut(id) {
             record.cancellation.cancel();
+            let bytes = result.as_ref().map_or_else(|error| error.to_string().len(), |json| json.len());
             record.status.send_replace(ActionStatus::Finished(result));
             if let Some(worker) = record.worker.take() {
                 let _ = worker.join();
+                record.bytes += bytes;
+                self.actions.retained += bytes;
+                self.actions.finished.push_back((Instant::now() + RETENTION, id.clone()));
             }
         }
     }

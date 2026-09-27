@@ -372,7 +372,7 @@ async fn regular_actions_do_not_inherit_platform_capabilities() {
     let mut action = fixture
         .backend
         .start_action(
-            fixture.backend.allocate_action_id().unwrap(),
+            fixture.backend.allocate_action_id().await.unwrap(),
             Call {
                 deployment: DeploymentId::new("commands").unwrap(),
                 function: "ambient".into(),
@@ -522,6 +522,10 @@ async fn command_start_admission_charges_retained_scope_and_input() {
     let prepared = Prepared { deployment: id, scope, command, input, follow_player: false };
     let bytes = prepared.call().bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
     reply.finish(Ok(prepared));
+    crate::tests::pending(preparation.as_mut()).await;
+    let Event::Request { command, .. } = incoming.try_recv().unwrap() else { panic!("expected an action identity") };
+    let Command::PrepareAction { reply } = *command else { panic!("expected an action identity") };
+    reply.finish(Ok(crate::ActionId { incarnation: "test-incarnation".into(), sequence: 1 }));
     let invocation = preparation.await.unwrap().into_inner().invocation_id;
     let (_sender, _output) = fixture.run(&invocation).await;
     let event = tokio::time::timeout(Duration::from_secs(2), incoming.recv()).await.unwrap().unwrap();

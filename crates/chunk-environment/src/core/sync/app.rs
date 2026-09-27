@@ -15,6 +15,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Begins every operation ID `chunk:prepare` issues, which only actions and hooks accept.
+pub(super) const PREPARED: &str = "prep:";
+
+/// Rejects an operation ID `chunk:prepare` issued, for a write that isn't an action or hook.
+pub(super) fn reject_prepared(operation: &str) -> Result<(), Error> {
+    if operation.starts_with(PREPARED) {
+        return Err(errors::invalid("operation IDs from chunk:prepare are only for actions and hooks"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Function(FunctionKind),
@@ -51,6 +62,7 @@ impl App {
                 return Err(errors::invalid("a mutation requires an operation ID"));
             }
             Kind::Function(FunctionKind::Mutation) => {
+                reject_prepared(&operation)?;
                 let result = self.backend.mutate(operation, call).await;
                 if let Ok(update) = &result {
                     self.nudges.nudge(&principal.credential, update.revision);
@@ -69,11 +81,11 @@ impl App {
     /// Runs an action, or a hook, under `operation` and returns its outcome, which touches no single commit. The run
     /// outlives a dropped call, so a retry finds its outcome.
     async fn effect(&self, hook: bool, operation: &str, call: Call) -> Result<Update, Error> {
-        if operation.is_empty() {
+        let Some(id) = operation.strip_prefix(PREPARED) else {
             return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
-        }
+        };
         let unknown = || errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID");
-        let id: ActionId = operation.parse().map_err(|_| unknown())?;
+        let id: ActionId = id.parse().map_err(|_| unknown())?;
         let backend = self.backend.clone();
         let run = tokio::spawn(async move {
             let mut handle =

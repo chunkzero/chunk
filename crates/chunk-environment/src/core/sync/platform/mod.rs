@@ -3,7 +3,7 @@
 mod claims;
 
 use super::{
-    SyncService,
+    SyncService, app,
     auth::{Class, Principal},
     errors, position,
 };
@@ -21,7 +21,7 @@ pub(super) async fn call(
     request: &CallRequest,
 ) -> Result<(Option<Position>, Vec<u8>), Error> {
     match method {
-        "prepare" => return Ok((None, prepare(service, request)?.encode_to_vec())),
+        "prepare" => return Ok((None, prepare(service, request).await?.encode_to_vec())),
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
         _ => {}
     }
@@ -35,6 +35,7 @@ pub(super) async fn call(
     if request.operation_id.is_empty() {
         return Err(errors::invalid("a claim method requires an operation ID"));
     }
+    app::reject_prepared(&request.operation_id)?;
     service.fences.check(&request.stream, &principal.credential)?;
     let result = claims::call(service, id, method, request).await?;
     let generation = *service.control.subscribe().borrow();
@@ -52,7 +53,7 @@ async fn run<T: Send + 'static>(
 }
 
 /// Issues the operation ID of one effectful call.
-fn prepare(service: &SyncService, request: &CallRequest) -> Result<PrepareResult, Error> {
+async fn prepare(service: &SyncService, request: &CallRequest) -> Result<PrepareResult, Error> {
     if !request.operation_id.is_empty()
         || !request.arguments.is_empty()
         || !request.deployment.is_empty()
@@ -60,8 +61,8 @@ fn prepare(service: &SyncService, request: &CallRequest) -> Result<PrepareResult
     {
         return Err(errors::invalid("chunk:prepare takes no operation ID, arguments, deployment or caller"));
     }
-    let id = service.app.backend().allocate_action_id().map_err(|failure| errors::backend(&failure))?;
-    Ok(PrepareResult { operation_id: id.to_string() })
+    let id = service.app.backend().allocate_action_id().await.map_err(|failure| errors::backend(&failure))?;
+    Ok(PrepareResult { operation_id: format!("{}{id}", app::PREPARED) })
 }
 
 /// The domain manifest of the deployment `request` names, or of the current release's.

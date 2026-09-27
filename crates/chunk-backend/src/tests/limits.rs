@@ -75,7 +75,7 @@ async fn mutation_admission_charges_retained_operation_ids() {
 #[tokio::test]
 async fn action_status_admission_charges_retained_ids_and_callers() {
     let (backend, _incoming, memory) = Backend::held_ingress();
-    let id = backend.allocate_action_id().unwrap();
+    let id = crate::ActionId { incarnation: "test-incarnation".into(), sequence: 1 };
     let caller: chunk_js::Json = json!({"player": "x".repeat(4096)}).into();
     let bytes = id.incarnation.len() + caller.as_str().len();
     let mut status = Box::pin(backend.action_status(id, caller));

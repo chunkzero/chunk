@@ -154,7 +154,7 @@ fn configured(directory: &tempfile::TempDir, origin: &str, timeout: Duration) ->
 async fn outcome(backend: &Backend, deployment: &str, path: &str) -> Value {
     let mut action = backend
         .start_action(
-            backend.allocate_action_id().unwrap(),
+            backend.allocate_action_id().await.unwrap(),
             call(deployment, "run", json!({"binding":"api","path":path})),
         )
         .await
@@ -200,7 +200,7 @@ async fn external_grants_default_deny_and_bind_environment_deployment_and_origin
     );
     for version in ["allowed", "other"] {
         let mut action = backend
-            .start_action(backend.allocate_action_id().unwrap(), call(version, "secret", json!(null)))
+            .start_action(backend.allocate_action_id().await.unwrap(), call(version, "secret", json!(null)))
             .await
             .unwrap();
         if version == "allowed" {
@@ -210,13 +210,13 @@ async fn external_grants_default_deny_and_bind_environment_deployment_and_origin
         }
     }
     let mut credential = backend
-        .start_action(backend.allocate_action_id().unwrap(), call("allowed", "credential", json!(null)))
+        .start_action(backend.allocate_action_id().await.unwrap(), call("allowed", "credential", json!(null)))
         .await
         .unwrap();
     credential.outcome().await.unwrap();
     assert!(fixture.observed().await.contains("authorization: fixture-secret"));
     let mut leak = backend
-        .start_action(backend.allocate_action_id().unwrap(), call("allowed", "leak", json!(null)))
+        .start_action(backend.allocate_action_id().await.unwrap(), call("allowed", "leak", json!(null)))
         .await
         .unwrap();
     let error = leak.outcome().await.unwrap_err().to_string();
@@ -242,7 +242,7 @@ async fn http_bounds_and_partial_failures_report_unknown_without_retries() {
     }
     let mut oversized = backend
         .start_action(
-            backend.allocate_action_id().unwrap(),
+            backend.allocate_action_id().await.unwrap(),
             call("allowed", "run", json!({"binding":"api","path":"ok","body":"x".repeat(64*1024+1),"method":"POST"})),
         )
         .await
@@ -262,7 +262,7 @@ async fn cancelling_after_server_observes_request_leaves_effect_uncertain_and_fo
     backend.deploy(deployment("allowed")).await.unwrap();
     let mut action = backend
         .start_action(
-            backend.allocate_action_id().unwrap(),
+            backend.allocate_action_id().await.unwrap(),
             call("allowed", "run", json!({"binding":"api","path":"slow"})),
         )
         .await
@@ -280,7 +280,7 @@ async fn cancelling_after_server_observes_request_leaves_effect_uncertain_and_fo
     assert!(duplicate.outcome().await.is_err());
     assert!(fixture.requests.try_recv().is_err());
     let mut fanout = backend
-        .start_action(backend.allocate_action_id().unwrap(), call("allowed", "fanout", json!(null)))
+        .start_action(backend.allocate_action_id().await.unwrap(), call("allowed", "fanout", json!(null)))
         .await
         .unwrap();
     for _ in 0..8 {
@@ -327,7 +327,7 @@ fn http_crash_worker() {
         )
         .unwrap();
         backend.deploy(deployment("allowed")).await.unwrap();
-        let id = backend.allocate_action_id().unwrap();
+        let id = backend.allocate_action_id().await.unwrap();
         std::fs::write(
             directory.join("invocation.json"),
             serde_json::to_vec(&json!({"incarnation":id.incarnation,"sequence":id.sequence})).unwrap(),

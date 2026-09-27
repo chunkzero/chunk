@@ -19,6 +19,7 @@ export function touch(ctx) { ctx.db.put('counters', 'other', {value: 1}); return
 export function boom(ctx) { throw 'x'.repeat(17 * 1024 * 1024); }
 export function big(ctx) { return 'x'.repeat(900 * 1024) + get(ctx); }
 export async function bump(ctx, by) { return await ctx.runMutation('add', by); }
+export async function slow(ctx, by) { await ctx.runMutation('add', by); await ctx.sleep(1000); return await ctx.runMutation('add', by); }
 export function login(ctx) { return {allow: true, reason: JSON.stringify(ctx.caller)}; }
 ";
 const LOGIN: &str = "shared/domains/hooks/login";
@@ -38,6 +39,7 @@ fn deployment() -> Deployment {
         ("boom", function(FunctionKind::Query, Schema::Null)),
         ("big", Function { result: Schema::String, ..function(FunctionKind::Query, Schema::Null) }),
         ("bump", function(FunctionKind::Action, Schema::Integer)),
+        ("slow", function(FunctionKind::Action, Schema::Integer)),
     ];
     let domains = serde_json::json!({
         "version": 1, "scopes": {"": {"parent": null}}, "apps": {},

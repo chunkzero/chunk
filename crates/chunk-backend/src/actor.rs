@@ -260,6 +260,7 @@ impl Actor {
                     .map(|(name, function)| (name.clone(), function.kind))
                     .collect()
             })),
+            Command::PrepareAction { reply } => reply.finish(self.actions.prepare()),
             Command::StartAction { purpose, id, call, reply } => self.start_action(id, call, purpose, reply),
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),

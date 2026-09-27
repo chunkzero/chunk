@@ -108,7 +108,7 @@ impl backend_commands_server::BackendCommands for CommandService {
             reply,
         }))
         .await?;
-        let id = self.backend.allocate_action_id().map_err(|error| status(&error))?;
+        let id = self.backend.allocate_action_id().await.map_err(|error| status(&error))?;
         let invocation_id = id.to_string();
         let follow_player = prepared.follow_player;
         let mut entries = self.entries.lock().await;

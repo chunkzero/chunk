@@ -26,29 +26,72 @@ fn login() -> String {
     .to_string()
 }
 
+/// Runs action `slow`, which adds 2 twice with a second between, under `operation` as `credential`.
+async fn slow(mut client: CoreClient<Channel>, credential: String, operation: String) -> CallResponse {
+    let message = CallRequest {
+        operation_id: operation,
+        method: "slow".into(),
+        arguments: "2".into(),
+        deployment: "test".into(),
+        ..CallRequest::default()
+    };
+    client.call(authorized(message, &credential)).await.unwrap().into_inner()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_prepared_action_runs_once_and_its_retry_returns_the_outcome() {
+async fn a_prepared_action_runs_once_and_its_retry_returns_the_outcome_after_its_deployment_retires() {
     let mut fixture = Fixture::start().await;
     let cli = fixture.cli.clone();
     let operation = fixture.prepare(&cli).await;
     let first = fixture.call(&cli, &operation, "bump", "2").await;
     assert_eq!(first.outcome, Some(Outcome::Result(b"2".to_vec())));
     assert_eq!(fixture.call(&cli, &operation, "bump", "2").await, first);
-    assert_eq!(code(&fixture.call(&cli, &operation, "bump", "3").await), Code::OperationMismatch);
     assert_eq!(fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"2".to_vec())));
+
+    assert!(fixture.backend.release(DeploymentId::new("test").unwrap()).await.unwrap());
+    assert_eq!(fixture.call(&cli, &operation, "bump", "2").await, first);
+    assert_eq!(code(&fixture.call(&cli, &operation, "bump", "3").await), Code::OperationMismatch);
     fixture.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn operation_ids_core_did_not_prepare_have_unknown_outcomes() {
+async fn a_dropped_action_keeps_running_and_concurrent_retries_share_its_one_outcome() {
+    let mut fixture = Fixture::start().await;
+    let cli = fixture.cli.clone();
+    let operation = fixture.prepare(&cli).await;
+    let first = tokio::spawn(slow(fixture.client.clone(), cli.clone(), operation.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.call(&cli, "", "get", "null").await.outcome != Some(Outcome::Result(b"2".to_vec())) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    first.abort();
+
+    let retry = || slow(fixture.client.clone(), cli.clone(), operation.clone());
+    let (one, other) = tokio::join!(retry(), retry());
+    assert_eq!(one.outcome, Some(Outcome::Result(b"4".to_vec())));
+    assert_eq!(other, one);
+    assert_eq!(retry().await, one);
+    assert_eq!(fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"4".to_vec())));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn effects_require_prepared_operation_ids_which_mutations_reject() {
     let mut fixture = Fixture::start().await;
     let cli = fixture.cli.clone();
     let prepared = fixture.prepare(&cli).await;
+    assert_eq!(code(&fixture.call(&cli, "not-prepared", "bump", "1").await), Code::Invalid);
     let (incarnation, _) = prepared.rsplit_once(':').unwrap();
     let unissued = format!("{incarnation}:{}", u64::MAX);
-    for operation in ["not-prepared", "00000000-0000-0000-0000-000000000000:1", &unissued] {
+    for operation in ["prep:not-prepared", "prep:00000000-0000-0000-0000-000000000000:1", &unissued] {
         assert_eq!(code(&fixture.call(&cli, operation, "bump", "1").await), Code::OutcomeUnknown, "{operation}");
     }
+
+    assert_eq!(code(&fixture.call(&cli, &prepared, "add", "1").await), Code::Invalid);
+    assert_eq!(fixture.call(&cli, &prepared, "bump", "1").await.outcome, Some(Outcome::Result(b"1".to_vec())));
     fixture.stop().await;
 }
 

@@ -88,6 +88,7 @@ message CallRequest {
 
 message CallResponse {
   // The commit a write created, or the state a read observed. Unset on error and for methods that touch no state.
+  // Unset for actions and hooks too, whose effects may span any number of commits.
   Position position = 1;
   oneof outcome {
     bytes result = 2;
@@ -166,7 +167,10 @@ message Error {
 // The result of `chunk:prepare`, which issues the operation ID of one effectful call: an app action, or for a gateway,
 // a hook. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call issues one
 // ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued before it
-// restarted or restored, gets OUTCOME_UNKNOWN.
+// restarted or restored, gets OUTCOME_UNKNOWN. An unused ID stays valid for 24 hours by default, and `chunk:prepare`
+// gets OVERLOADED while retained IDs and outcomes fill their budget.
+// Issued IDs begin with `prep:`, which is reserved: actions and hooks require such an ID, and mutations and claim
+// methods reject one as INVALID.
 message PrepareResult {
   // The issued operation ID.
   string operation_id = 1;

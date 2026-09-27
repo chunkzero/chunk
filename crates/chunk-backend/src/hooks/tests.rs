@@ -88,7 +88,10 @@ async fn only_platform_authority_can_invoke_named_hooks_and_ping_is_read_only() 
         &message.caller_json,
     )
     .unwrap();
-    assert!(matches!(backend.start_action(backend.allocate_action_id().unwrap(), call).await, Err(Error::Unknown)));
+    assert!(matches!(
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call).await,
+        Err(Error::Unknown)
+    ));
     let mut arbitrary = invocation("login");
     arbitrary.hook = "increment".into();
     assert!(service.invoke(request(arbitrary, PLATFORM, "hooks")).await.is_err());
