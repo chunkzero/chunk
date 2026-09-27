@@ -1,9 +1,8 @@
 import { mutation, query, v } from "#chunk";
-import type { JsonValue, QueryContext } from "#chunk";
+import type { PlayerId, QueryContext } from "#chunk";
 
 import { item } from "./schema/index.ts";
 
-const identity = v.object({ session: v.session(), app: v.string(), player: v.player() });
 const progress = {
   coins: v.integer(),
   xp: v.integer(),
@@ -19,20 +18,18 @@ const profile = v.object({
   saves: v.integer(),
 });
 
-export const player = (caller: JsonValue) => identity.parse(caller).player;
-
-export function own({ db, caller }: QueryContext) {
+export function find({ db }: QueryContext, player: PlayerId) {
   return db
     .query("profiles")
-    .withIndex("by_player", (q) => q.eq("player", player(caller)))
+    .withIndex("by_player", (q) => q.eq("player", player))
     .unique();
 }
 
 export const load = query({
-  args: {},
+  args: { player: v.player() },
   returns: v.nullable(profile),
-  handler: (ctx) => {
-    const found = own(ctx);
+  handler: (ctx, { player }) => {
+    const found = find(ctx, player);
     if (!found) return null;
     const { _id, rank: _rank, ...rest } = found;
     return rest;
@@ -40,10 +37,10 @@ export const load = query({
 });
 
 export const save = mutation({
-  args: progress,
+  args: { player: v.player(), ...progress },
   returns: v.integer(),
-  handler: (ctx, args) => {
-    const found = own(ctx);
+  handler: (ctx, { player, ...args }) => {
+    const found = find(ctx, player);
     if (!found) throw new Error("Profile missing");
     const saves = found.saves + 1;
     ctx.db.patch(found._id, { ...args, rank: -args.best, lastSeen: Date.now(), saves });

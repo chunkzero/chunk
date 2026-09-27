@@ -6,15 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use chunk_contract::BackendConnection;
-use chunk_control::ControlConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::oneshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -36,8 +33,7 @@ pub struct Init {
 #[derive(Serialize, Deserialize)]
 pub struct Ready {
     pub endpoint: String,
-    pub control: Option<ControlConnection>,
-    pub backend: Option<BackendConnection>,
+    /// Core's, for every workload but the relay.
     pub sync: Option<sync::Connection>,
 }
 
@@ -114,75 +110,20 @@ pub async fn serve(init: Init) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     let ready = if init.config.scenario == Scenario::ProxyRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let ready = Ready { endpoint: listener.local_addr()?.to_string(), control: None, backend: None, sync: None };
+        let ready = Ready { endpoint: listener.local_addr()?.to_string(), sync: None };
         let token = stop.clone();
         let (address, config) = (init.backend.clone(), init.config.clone());
         tasks.spawn(async move { proxy::target(listener, &address, &config, token).await });
         ready
-    } else if init.config.scenario == Scenario::SyncQueries {
-        chunk_backend::observe(backend::observe);
-        let state = init.state.join("core");
-        let config = chunk_environment::CoreConfig {
-            bundle: Some(init.backend.clone().into()),
-            environment: backend::ENVIRONMENT.into(),
-            backend_record: state.join("backend.json"),
-            control_record: state.join("control.json"),
-            state,
-            backend_bind: "127.0.0.1:0".parse()?,
-            control_bind: "127.0.0.1:0".parse()?,
-            fresh: false,
-        };
-        let core = chunk_environment::Core::start(config, |_| {}).await?;
-        let control = core.control_connection()?;
-        let gateway = core.target()?.gateway.credential;
-        let connection = sync::Connection { endpoint: control.endpoint.clone(), cli: control.token.clone(), gateway };
+    } else {
+        let core = core(&init).await?;
+        let connection = connection(&core)?;
         let token = stop.clone();
         tasks.spawn(async move {
             token.cancelled().await;
             Ok(core.stop(|| {}).await?)
         });
-        Ready { endpoint: connection.endpoint.clone(), control: None, backend: None, sync: Some(connection) }
-    } else if init.config.scenario.is_backend() {
-        chunk_backend::observe(backend::observe);
-        let (ready, receiver) = oneshot::channel();
-        let config = chunk_backend::server::Config {
-            bundle: Some(init.backend.clone().into()),
-            environment: backend::ENVIRONMENT.into(),
-            state: init.state.join("backend"),
-            connection: init.state.join("backend-connection.json"),
-            bind: "127.0.0.1:0".parse()?,
-        };
-        let token = stop.clone();
-        tasks.spawn(async move { Ok(chunk_backend::server::run(config, ready, token).await?) });
-        let connection = receiver.await.context("backend startup failed")?.connection;
-        Ready { endpoint: connection.endpoint.clone(), control: None, backend: Some(connection), sync: None }
-    } else {
-        let (ready, receiver) = oneshot::channel();
-        let release = control::release()?;
-        let (path, environment) = (init.state.join("environment.sqlite"), release.deployment.environment.clone());
-        let system = tokio::task::spawn_blocking(move || -> Result<_> {
-            let store = chunk_store::SqliteStore::open(path, &environment)?;
-            Ok(chunk_backend::Backend::new(environment, Box::new(store))?.system())
-        })
-        .await??;
-        let host = Arc::new(fixtures::SyntheticHost::default());
-        let config = chunk_control::server::Config {
-            connection: init.state.join("connection.json"),
-            state: init.state.clone(),
-            system,
-            listener: tokio::net::TcpListener::bind("127.0.0.1:0").await?,
-            control: chunk_control::Config { environment: release.deployment.environment.clone() },
-            host: host.clone(),
-            fresh: false,
-            services: None,
-        };
-        let token = stop.clone();
-        tasks.spawn(async move { Ok(chunk_control::server::run(config, ready, token).await?) });
-        let started = receiver.await.context("control startup failed")?;
-        host.attach(&started.control);
-        started.control.activate_release(release)?;
-        let connection = started.connection;
-        Ready { endpoint: connection.endpoint.clone(), control: Some(connection), backend: None, sync: None }
+        Ready { endpoint: connection.endpoint.clone(), sync: Some(connection) }
     };
     println!("{}", serde_json::to_string(&ready)?);
     let mut input = BufReader::new(tokio::io::stdin()).lines();
@@ -207,4 +148,41 @@ pub async fn serve(init: Init) -> Result<()> {
         result??;
     }
     Ok(())
+}
+
+/// Core's sync endpoint with the CLI's and its in-process gateway's credentials.
+pub fn connection(core: &chunk_environment::Core) -> Result<sync::Connection> {
+    let control = core.control_connection()?;
+    let gateway = core.target()?.gateway;
+    Ok(sync::Connection {
+        endpoint: control.endpoint.clone(),
+        cli: control.token.clone(),
+        gateway_id: gateway.id,
+        gateway: gateway.credential,
+    })
+}
+
+/// Starts core: on the compiled bundle for backend workloads, or on synthetic hosts serving the control fixture's
+/// release.
+pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
+    let state = init.state.join("core");
+    let config = chunk_environment::CoreConfig {
+        bundle: init.config.scenario.is_backend().then(|| init.backend.clone().into()),
+        environment: backend::ENVIRONMENT.into(),
+        backend_record: state.join("backend.json"),
+        control_record: state.join("control.json"),
+        state,
+        backend_bind: "127.0.0.1:0".parse()?,
+        control_bind: "127.0.0.1:0".parse()?,
+        fresh: false,
+    };
+    if init.config.scenario.is_backend() {
+        chunk_backend::observe(backend::observe);
+        return Ok(chunk_environment::Core::start(config, |_| {}).await?);
+    }
+    let host = Arc::new(fixtures::SyntheticHost::default());
+    let core = chunk_environment::Core::start_with_host(config, host.clone()).await?;
+    host.attach(&core.control()?);
+    core.control()?.activate_release(control::release()?)?;
+    Ok(core)
 }

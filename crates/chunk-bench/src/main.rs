@@ -20,8 +20,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use hdrhistogram::Histogram;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -113,85 +112,57 @@ async fn run(config: Arc<Config>, output: &Path) -> Result<()> {
     shutdown
 }
 
-/// Subscriptions a workload holds open and reports on beside its operations.
-enum Subscriptions {
-    Backend(Arc<backend::Fanout>),
-    Sync(Arc<sync::Streams>),
-}
-
-impl Subscriptions {
-    fn reset(&self) -> Result<()> {
-        match self {
-            Self::Backend(fanout) => fanout.reset(),
-            Self::Sync(streams) => streams.reset()?,
-        }
-        Ok(())
-    }
-
-    /// Waits for outstanding deliveries, then returns the measurement at that instant, its delivery histogram and
-    /// the file name for it.
-    async fn freeze(&self) -> (Value, Histogram<u64>, &'static str) {
-        match self {
-            Self::Backend(fanout) => {
-                let (summary, histogram) = fanout.freeze();
-                (summary, histogram, "measured-delivery.hdr")
-            }
-            Self::Sync(streams) => {
-                streams.drain().await;
-                let (summary, histogram) = streams.freeze();
-                (summary, histogram, "measured-observed.hdr")
-            }
-        }
-    }
-}
-
-async fn clients(config: &Config, target: &target::Target) -> Result<(VecDeque<load::Client>, Option<Subscriptions>)> {
+async fn clients(
+    config: &Config,
+    target: &target::Target,
+) -> Result<(VecDeque<load::Client>, Option<Arc<sync::Streams>>)> {
     let mut clients = VecDeque::new();
-    if let Some(connection) = &target.ready.sync {
-        eprintln!("Seeding {} player profiles…", config.population);
-        sync::seed(connection, config.population).await?;
-        eprintln!(
-            "Opening {} sync query streams, {} per connection…",
-            config.subscribers(),
-            config.streams_per_connection
-        );
-        let streams = sync::subscribe(connection, config).await?;
-        for _ in 0..config.concurrency {
-            clients.push_back(load::Client::Sync(sync::Writer::connect(connection, config, streams.clone()).await?));
-        }
-        return Ok((clients, Some(Subscriptions::Sync(streams))));
-    }
-    let mut fanout = None;
-    if let Some(connection) = &target.ready.backend {
-        eprintln!("Seeding {} player profiles…", config.population);
-        backend::seed(connection, config.population).await?;
-        if config.scenario == Scenario::BackendFanout {
-            eprintln!("Opening {} subscriptions in groups of {}…", config.subscribers(), config.group_size);
-            fanout = Some(backend::subscribe(connection, config).await?);
-        }
-        for _ in 0..config.concurrency {
-            clients.push_back(load::Client::Backend(backend::Client::connect(connection, fanout.clone()).await?));
-        }
-    } else if let Some(connection) = &target.ready.control {
-        eprintln!("Seeding {} arrived players through control RPCs…", config.population);
-        let mut client = control::Client::connect(connection).await?;
-        for index in 0..config.population {
-            tokio::time::timeout(Duration::from_secs(30), client.arrive(control::claim(u64::from(index))))
-                .await?
-                .with_context(|| format!("seeding arrived player {} of {}", index + 1, config.population))?;
-        }
-        client.verify_population(config.population).await?;
-        for _ in 0..config.concurrency {
-            clients.push_back(load::Client::Control(control::Client::connect(connection).await?));
-        }
-    } else {
+    let Some(connection) = &target.ready.sync else {
         for _ in 0..config.concurrency {
             let mut client = proxy::Client::connect(&target.ready.endpoint, config).await?;
             tokio::time::timeout(Duration::from_secs(10), client.exchange(u64::MAX)).await??;
             clients.push_back(load::Client::Proxy(client));
         }
+        return Ok((clients, None));
+    };
+    if config.scenario.is_backend() {
+        eprintln!("Seeding {} player profiles…", config.population);
+        sync::seed(connection, config.population).await?;
     }
-    Ok((clients, fanout.map(Subscriptions::Backend)))
+    match config.scenario {
+        Scenario::SyncQueries => {
+            eprintln!(
+                "Opening {} sync query streams, {} per connection…",
+                config.subscribers, config.streams_per_connection
+            );
+            let streams = sync::subscribe(connection, config).await?;
+            for _ in 0..config.concurrency {
+                let writer = sync::Writer::connect(connection, config, streams.clone()).await?;
+                clients.push_back(load::Client::Sync(writer));
+            }
+            return Ok((clients, Some(streams)));
+        }
+        Scenario::BackendQuery | Scenario::BackendMutation => {
+            for _ in 0..config.concurrency {
+                clients.push_back(load::Client::Backend(backend::Client::connect(connection).await?));
+            }
+        }
+        _ => {
+            eprintln!("Seeding {} arrived players through sync claim calls…", config.population);
+            let mut client = control::Client::connect(connection, control::Gateway::follow(connection).await?).await?;
+            for index in 0..config.population {
+                tokio::time::timeout(Duration::from_secs(30), client.arrive(u64::from(index)))
+                    .await?
+                    .with_context(|| format!("seeding arrived player {} of {}", index + 1, config.population))?;
+            }
+            control::verify_population(connection, config.population).await?;
+            let gateway = control::Gateway::follow(connection).await?;
+            for _ in 0..config.concurrency {
+                clients.push_back(load::Client::Control(control::Client::connect(connection, gateway.clone()).await?));
+            }
+        }
+    }
+    Ok((clients, None))
 }
 
 async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Target) -> Result<()> {
@@ -217,8 +188,8 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     warmup.write(&output, "warmup")?;
     ensure!(warmup.errors.is_empty(), "warmup operations failed: {:?}", warmup.errors);
     target.reset().await?;
-    if let Some(subscriptions) = &subscriptions {
-        subscriptions.reset()?;
+    if let Some(streams) = &subscriptions {
+        streams.reset()?;
     }
     let monitor_stop = CancellationToken::new();
     let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone());
@@ -231,7 +202,10 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
         )
         .await;
         let fanout = match &subscriptions {
-            Some(subscriptions) => Some(subscriptions.freeze().await),
+            Some(streams) => {
+                streams.drain().await;
+                Some(streams.freeze())
+            }
             None => None,
         };
         monitor_stop.cancel();
@@ -240,7 +214,7 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     let ((stats, fanout), samples) = tokio::join!(workload, monitor);
     let stats = stats?;
     let fanout = fanout
-        .map(|(summary, histogram, file)| metrics::save(&histogram, &output.join(file)).map(|()| summary))
+        .map(|(summary, histogram)| metrics::save(&histogram, &output.join("measured-observed.hdr")).map(|()| summary))
         .transpose()?;
     stats.write(&output, "measured")?;
     let samples = samples?;
@@ -258,9 +232,10 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
     serde_json::to_writer_pretty(File::create(output.join("summary.json"))?, &report)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     if stats.errors.is_empty()
-        && let Some(connection) = &target.ready.control
+        && matches!(config.scenario, Scenario::ControlPopulation | Scenario::ControlChurn)
+        && let Some(connection) = &target.ready.sync
     {
-        control::Client::connect(connection).await?.verify_population(config.population).await?;
+        control::verify_population(connection, config.population).await?;
     }
     Ok(())
 }
