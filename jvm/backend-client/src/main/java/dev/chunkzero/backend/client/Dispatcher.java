@@ -8,6 +8,7 @@ import java.util.ArrayDeque;
  * exits only after its current callback returns.
  */
 final class Dispatcher {
+    private static final ThreadLocal<Boolean> DISPATCHING = ThreadLocal.withInitial(() -> false);
     private final ArrayDeque<GroupSubscription> ready = new ArrayDeque<>();
     private Thread thread;
     private GroupSubscription running;
@@ -20,17 +21,19 @@ final class Dispatcher {
         else notifyAll();
     }
 
-    synchronized boolean runsOn(Thread current) {
-        return thread == current;
+    /** Whether this thread runs callbacks for any session. */
+    static boolean dispatching() {
+        return DISPATCHING.get();
     }
 
     /**
-     * Interrupts {@code subscription}'s callback in progress and waits for it to return. Waiting
-     * continues through interrupts, which it restores.
+     * Interrupts {@code subscription}'s callback in progress, unless on its own thread, and if
+     * {@code wait} waits for it to return. Waiting continues through interrupts, which it restores.
      */
-    synchronized void finish(GroupSubscription subscription) {
-        if (running != subscription) return;
+    synchronized void finish(GroupSubscription subscription, boolean wait) {
+        if (running != subscription || thread == Thread.currentThread()) return;
         thread.interrupt();
+        if (!wait) return;
         boolean interrupted = false;
         while (running == subscription) {
             try {
@@ -58,6 +61,7 @@ final class Dispatcher {
     }
 
     private void run() {
+        DISPATCHING.set(true);
         while (true) {
             GroupSubscription next;
             synchronized (this) {

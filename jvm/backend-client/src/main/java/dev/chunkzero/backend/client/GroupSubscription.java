@@ -240,13 +240,13 @@ final class GroupSubscription implements AutoCloseable {
     }
 
     /**
-     * Stops later callbacks, then interrupts one in progress and waits for it, unless called from a
-     * callback or during a session's close.
+     * Stops later callbacks and interrupts one in progress, then waits for it unless called from
+     * any session's callback or during a session's close.
      */
     @Override
     public void close() {
         shut();
-        if (owner.mayWait()) owner.dispatcher.finish(this);
+        owner.dispatcher.finish(this, BackendSession.mayWait());
     }
 
     /** Stops the stream and later callbacks. */

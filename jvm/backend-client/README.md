@@ -38,8 +38,8 @@ original bound query object. Per-query errors are values. Transport interruption
 session runs its observers in order on one virtual thread, never on gRPC threads; a slow observer receives only the
 latest state and delays the session's other watches. Closing a watch or scope prevents later callbacks: it interrupts a
 callback in progress and waits for it to return, so an observer that ignores interrupts can hang close. Closing from
-inside a callback, or from a call's completion handler that a close runs, doesn't wait; the outer closer does.
-Nontransient failures remain stale with an error until closed.
+inside any session's callback, or from a call's completion handler that a close runs, still interrupts but doesn't wait;
+the outer closer waits. Nontransient failures remain stale with an error until closed.
 
 The public runtime classpath contains Java libraries only. The protobuf module uses the Java convention plugin because
 it generates Java sources exclusively. Focused check: `./gradlew :jvm:backend-client:test`.

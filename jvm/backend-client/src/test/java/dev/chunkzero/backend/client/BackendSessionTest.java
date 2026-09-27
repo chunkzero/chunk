@@ -572,20 +572,63 @@ class BackendSessionTest {
         assertTrue(reentered.get());
     }
 
+    @Test
+    void callbacksClosingEachOthersSessionsAcrossRootsDoNotDeadlock() throws Exception {
+        var first = create(Duration.ofSeconds(5));
+        var second = create(Duration.ofSeconds(5));
+        var entered = new CountDownLatch(2);
+        var returned = new CountDownLatch(2);
+        // Each callback closes the other root once both run.
+        for (var pair : List.of(List.of(first, second), List.of(second, first))) {
+            var scope = pair.get(0).forPlayer(new PlayerId("cross-" + entered.getCount()));
+            var other = pair.get(1);
+            runInCallback(
+                    scope,
+                    () -> {
+                        entered.countDown();
+                        while (entered.getCount() > 0) Thread.onSpinWait();
+                        other.close();
+                        returned.countDown();
+                    });
+        }
+        assertTrue(returned.await(2, TimeUnit.SECONDS), "callbacks deadlocked");
+        closeWithin(first);
+        closeWithin(second);
+    }
+
+    @Test
+    void aCallbackClosingASiblingsWatchStillInterruptsIt() throws Exception {
+        var interrupted = new CountDownLatch(1);
+        var blocked =
+                runInCallback(
+                        session.forPlayer(new PlayerId("blocked")),
+                        () -> {
+                            try {
+                                new CountDownLatch(1).await();
+                            } catch (InterruptedException error) {
+                                interrupted.countDown();
+                            }
+                        });
+        runInCallback(session.forPlayer(new PlayerId("sibling")), () -> close(blocked));
+        assertTrue(interrupted.await(2, TimeUnit.SECONDS));
+    }
+
     /** Runs {@code body} in a callback of a watch in {@code scope}, returning once it has begun. */
-    private void runInCallback(BackendSession scope, Runnable body) throws Exception {
+    private AutoCloseable runInCallback(BackendSession scope, Runnable body) throws Exception {
         var entered = new CountDownLatch(1);
-        scope.watchGroup(
-                List.of(scope.bind(READ, 1L)),
-                state -> {
-                    if (state.stale()) return;
-                    entered.countDown();
-                    body.run();
-                });
+        var watch =
+                scope.watchGroup(
+                        List.of(scope.bind(READ, 1L)),
+                        state -> {
+                            if (state.stale()) return;
+                            entered.countDown();
+                            body.run();
+                        });
         watchFor(scope.identity.player().orElseThrow().value())
                 .response()
                 .onNext(snapshot(1, value("0", "1")));
         assertTrue(entered.await(2, TimeUnit.SECONDS));
+        return watch;
     }
 
     /**

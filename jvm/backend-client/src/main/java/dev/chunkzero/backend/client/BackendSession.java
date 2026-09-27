@@ -36,7 +36,6 @@ public final class BackendSession implements AutoCloseable {
     final Set<GroupSubscription> watches = ConcurrentHashMap.newKeySet();
     final Dispatcher dispatcher = new Dispatcher();
     final AtomicBoolean closed = new AtomicBoolean();
-    private final BackendSession root;
     private final Set<CompletableFuture<?>> calls = ConcurrentHashMap.newKeySet();
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
     private final Duration deadline;
@@ -54,16 +53,14 @@ public final class BackendSession implements AutoCloseable {
                 new LegacyTransport(channel, credential, environment, deployment),
                 identity,
                 scheduler,
-                deadline,
-                null);
+                deadline);
     }
 
     private BackendSession(
             Transport transport,
             SessionIdentity identity,
             ScheduledExecutorService scheduler,
-            Duration deadline,
-            BackendSession parent) {
+            Duration deadline) {
         if (deadline.isNegative()
                 || deadline.isZero()
                 || deadline.compareTo(Duration.ofMinutes(5)) > 0)
@@ -72,7 +69,6 @@ public final class BackendSession implements AutoCloseable {
         this.identity = Objects.requireNonNull(identity);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.deadline = deadline;
-        root = parent == null ? this : parent.root;
     }
 
     /**
@@ -88,11 +84,7 @@ public final class BackendSession implements AutoCloseable {
             ScheduledExecutorService scheduler,
             Duration deadline) {
         return new BackendSession(
-                new CoreTransport(channel, credential, deployment),
-                identity,
-                scheduler,
-                deadline,
-                null);
+                new CoreTransport(channel, credential, deployment), identity, scheduler, deadline);
     }
 
     public BackendSession forPlayer(PlayerId player) {
@@ -102,8 +94,7 @@ public final class BackendSession implements AutoCloseable {
                         new SessionIdentity(
                                 identity.session(), identity.app(), Optional.of(player)),
                         scheduler,
-                        deadline,
-                        this);
+                        deadline);
         children.removeIf(BackendSession::finished);
         children.add(child);
         if (closed.get()) child.close();
@@ -219,8 +210,8 @@ public final class BackendSession implements AutoCloseable {
 
     /**
      * Closes the session and its player children, and returns once none of their callbacks runs.
-     * Closing from inside a callback, or from a handler that another close runs, doesn't wait; the
-     * outer closer does. Waiting continues through interrupts, which it restores.
+     * Closing from inside any session's callback, or from a handler that another close runs,
+     * doesn't wait; the outer closer does. Waiting continues through interrupts, which it restores.
      */
     @Override
     public void close() {
@@ -248,8 +239,8 @@ public final class BackendSession implements AutoCloseable {
     }
 
     /** Whether this thread may wait for callbacks: it is neither closing nor running one. */
-    boolean mayWait() {
-        return !CLOSING.get() && !root.runsCallbacksOn(Thread.currentThread());
+    static boolean mayWait() {
+        return !CLOSING.get() && !Dispatcher.dispatching();
     }
 
     /** Closes this subtree without waiting, collecting its callback threads. */
@@ -260,11 +251,6 @@ public final class BackendSession implements AutoCloseable {
         var thread = dispatcher.stop();
         if (thread != null) threads.add(thread);
         calls.forEach(call -> call.cancel(false));
-    }
-
-    private boolean runsCallbacksOn(Thread thread) {
-        return dispatcher.runsOn(thread)
-                || children.stream().anyMatch(child -> child.runsCallbacksOn(thread));
     }
 
     private boolean finished() {
