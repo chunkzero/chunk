@@ -76,6 +76,13 @@ impl Jvms {
         (sampled.elapsed() <= HEALTH).then(|| health.clone())
     }
 
+    /// Whether `inventory`, reported on `host`, may hold players control cannot fence. A JVM registered over sync
+    /// reports no deliveries, so its empty delivery inventory is truthful only while its sessions hold no players.
+    pub fn unfenceable(&self, host: &str, inventory: &ProcessReport) -> bool {
+        self.pushes_health(host)
+            && inventory.sessions.iter().any(|session| session.prepared > 0 || session.attached > 0)
+    }
+
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
         if let Ok(mut jvms) = self.lock() {
             jvms.retain(|host, _| keep(host));
@@ -107,26 +114,14 @@ impl Control {
     }
 
     /// Re-attaches the JVM that outlived control on `host`, whose credential is `credential`, only to stop it, as when
-    /// a restore lost the deployment it runs. Its launch record authenticates it as a registration does, so its host
-    /// kills it by its verified PID once the stop grace passes, and recovery counts the host resolved once it exits.
+    /// a restore lost the deployment it runs. Its launch record authenticates it as a registration does, and its host
+    /// row, recreated if a restore lost it, is released, so its host kills it by its verified PID until it exits, and
+    /// recovery counts the host resolved only then.
     /// # Errors
     /// Rejects a registration its launch record or the log does not match.
-    pub fn stop_survivor(
-        self: &Arc<Self>,
-        host: &str,
-        credential: &str,
-        registration: &sync::JvmRegistration,
-    ) -> Result<()> {
-        self.register(&format!("Bearer {credential}"), self.process(host, registration))?;
-        let (control, host) = (self.clone(), host.to_owned());
-        tokio::spawn(async move {
-            match control.release_host(&host).await {
-                Ok(true) => tracing::info!(host, "stopped a JVM whose deployment is gone"),
-                Ok(false) => tracing::warn!(host, "a JVM whose deployment is gone may still run"),
-                Err(error) => tracing::warn!(%error, host, "cannot stop a JVM whose deployment is gone"),
-            }
-        });
-        Ok(())
+    pub fn stop_survivor(&self, host: &str, credential: &str, registration: &sync::JvmRegistration) -> Result<()> {
+        let identity = self.register(&format!("Bearer {credential}"), self.process(host, registration))?;
+        self.stop_recovered(host, &identity, "its deployment is gone")
     }
 
     /// The supervisor registration `registration` stands for: `host`'s process, which serves no control endpoint.
@@ -159,8 +154,9 @@ impl Control {
     pub async fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
         let runtime = self.host.connection(host).ok_or(Error::Invalid("unregistered or replaced process"))?;
         let sessions = report.sessions.into_iter().map(inventory).collect();
-        let inventory = ProcessReport { identity: Some(runtime.identity.clone()), sessions, deliveries: Vec::new() };
-        let health = report.health.map(|health| process_health(runtime.identity, health));
+        let mut inventory =
+            ProcessReport { identity: Some(runtime.identity.clone()), sessions, deliveries: Vec::new() };
+        let health = report.health.map(|health| process_health(runtime.identity.clone(), health));
         let attached = self.update(|state| {
             let mut jvms = self.jvms.lock()?;
             let jvm = jvms.get_mut(host).ok_or(Error::Stopped)?;
@@ -171,6 +167,10 @@ impl Control {
                     None
                 }
                 None if report.complete => {
+                    // The report holds no deliveries, so attaching keeps those the host's link already holds.
+                    if let Some(retained) = self.links.report(host, &runtime.identity) {
+                        inventory.deliveries = retained.deliveries;
+                    }
                     let (link, runtime) = self.attach_in(state, host, credential, &inventory)?;
                     current.link = Some(link);
                     Some(runtime)

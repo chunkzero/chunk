@@ -113,7 +113,7 @@ impl ProcessHost {
                 Ok(Some(process))
             }
             Err(error) => {
-                // No child was spawned, and the launch lock excludes another attempt for this ID.
+                // No JVM started, and the launch lock excludes another attempt for this ID.
                 processes.failed.insert(id.into());
                 if let Err(persist) = self.record_exit(id, b"launch failed") {
                     tracing::error!(%persist, host = id, "cannot persist failed JVM launch");
@@ -178,10 +178,13 @@ impl ProcessHost {
         // re-attach after a restart. The JVM inherits the marker's lock, and control's handle closes once the spawn
         // returns, so only the JVM holds the lock.
         let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token, endpoint))?;
+        let (gate, mut open) = io::pipe()?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
-            let mut command = Command::new(&distribution.java);
+            let mut command = Command::new("/bin/sh");
             command
+                .args(["-c", GATE, "sh"])
+                .arg(&distribution.java)
                 .arg(format!("-Xmx{}m", size.memory_mib))
                 .arg("-jar")
                 .arg(&jar)
@@ -197,20 +200,26 @@ impl ProcessHost {
                 .env("CHUNK_APP_ID", app)
                 .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
                 .env("CHUNK_BACKEND_TOKEN", &backend.token)
-                .stdin(Stdio::null())
+                .stdin(Stdio::from(gate))
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))
                 .kill_on_drop(true);
             inherit_lock(&mut command, marker)?;
             command.spawn()
         })();
-        let child = child?;
-        // After control restarts, the JVM's recorded PID is the only way to kill it.
-        if let Some(pid) = child.id()
-            && let Err(error) = pid::record(&pid_path, pid)
-        {
-            tracing::error!(%error, host = id, "cannot record the JVM's PID");
+        let mut child = child?;
+        // After control restarts, the JVM's recorded PID is the only way to kill it, so the JVM starts only once its PID
+        // is recorded. Exec keeps the gate's PID and start time.
+        let recorded = child
+            .id()
+            .ok_or(Error::Unresolved("the JVM exited before it started"))
+            .and_then(|pid| pid::record(&pid_path, pid))
+            .and_then(|()| Ok(open.write_all(b"\n")?));
+        if let Err(error) = recorded {
+            let _ = child.start_kill();
+            return Err(error);
         }
+        drop(open);
         let owned = process.clone();
         tokio::spawn(async move {
             match own_child(child, &owned).await {
@@ -585,6 +594,10 @@ fn inherit_lock(command: &mut Command, lock: File) -> io::Result<()> {
 fn inherit_lock(_command: &mut Command, _lock: File) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "JVM launches require Unix"))
 }
+
+/// Runs its arguments once control writes a line to its stdin, and nothing if control closes stdin first, as when it
+/// crashes. The JVM then reads stdin at its end.
+const GATE: &str = r#"read -r _ && exec "$@""#;
 
 fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))

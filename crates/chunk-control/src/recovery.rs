@@ -143,6 +143,10 @@ impl Control {
         let Some(inventory) = self.links.report(id, &runtime.identity) else {
             return Ok(false);
         };
+        if self.jvms.unfenceable(id, &inventory) {
+            self.stop_recovered(id, &runtime.identity, "its surviving players cannot be fenced")?;
+            return Ok(false);
+        }
         self.retire_unknown_operations(id, &runtime.identity)?;
         self.retire_unknown_sessions(id, &runtime.identity)?;
         if !self.fence_deliveries(&runtime, &inventory).await? {
@@ -200,17 +204,25 @@ impl Control {
             if state.hosts.contains_key(id) {
                 return Ok(());
             }
-            let release = identity.deployment.as_ref().map(|deployment| deployment.deployment.as_str());
-            let host = HostState {
-                capacity: Capacity::Ready,
-                ..HostState::requested(release.unwrap_or_default(), &identity.app_id, &identity.machine_profile)
-            };
-            state.hosts.insert(id.into(), host);
+            state.hosts.insert(id.into(), orphan(identity));
             let operation = format!("orphan/{id}");
             let request =
                 ShutdownNodeRequest { operation_id: operation.clone(), host_id: id.into(), timeout_seconds: 0 };
             retire_host(state, operation, request.encode_to_vec(), 0, true, |_| Ok(id.into()))
         })
+    }
+
+    /// Stops the JVM that outlived control on `id` for `reason` by releasing its host, recording a host row a restore
+    /// lost as [`Self::retire_orphan`] does. The capacity executor retries the release until the host confirms the JVM
+    /// exited, and recovery resolves the host only once its capacity is released.
+    pub(crate) fn stop_recovered(&self, id: &str, identity: &ProcessIdentity, reason: &str) -> Result<()> {
+        self.update(|state| {
+            state.hosts.entry(id.into()).or_insert_with(|| orphan(identity));
+            crate::capacity::stop(state, id, Some(reason.into()));
+            Ok(())
+        })?;
+        self.wake_capacity();
+        Ok(())
     }
 
     /// Accepts a JVM registration. A JVM launched before control restarted re-attaches only if its host adopts it,
@@ -298,6 +310,15 @@ impl Control {
             }
         }
         Ok(fenced)
+    }
+}
+
+/// A ready host row for the JVM `identity` names, whose row a restore lost.
+fn orphan(identity: &ProcessIdentity) -> HostState {
+    let release = identity.deployment.as_ref().map(|deployment| deployment.deployment.as_str());
+    HostState {
+        capacity: Capacity::Ready,
+        ..HostState::requested(release.unwrap_or_default(), &identity.app_id, &identity.machine_profile)
     }
 }
 

@@ -302,3 +302,24 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
     std::fs::write(host.path(&id, "launch").unwrap(), b"").unwrap();
     assert!(host.adopt("credential", registration).is_err());
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_jvm_whose_pid_cannot_be_recorded_never_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let (java, started) = (directory.path().join("java"), directory.path().join("started"));
+    std::fs::write(&java, format!("#!/bin/sh\ntouch {}\nexec sleep 60\n", started.display())).unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut artifact = crate::tests::test_app();
+    let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
+    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
+    let host = host(directory.path(), java);
+    host.configure("http://127.0.0.1:1".into()).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::create_dir_all(host.path(&id, "pid").unwrap()).unwrap();
+    assert!(matches!(host.ensure(&id, &release(artifact), "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(host.stopped(&id));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!started.exists());
+}

@@ -22,6 +22,8 @@ struct Launch {
     registration: Option<ProcessRegistration>,
     survivor: bool,
     released: bool,
+    /// Releases that fail before one stops the JVM.
+    refusals: usize,
 }
 
 impl Launches {
@@ -49,7 +51,12 @@ impl chunk_control::Host for Launches {
         Ok(self.connection(&host).filter(|_| host == id).map_or(Progress::Pending, |c| Progress::Ready(Box::new(c))))
     }
     async fn release(&self, _: &str) -> chunk_control::Result<bool> {
-        self.0.lock().unwrap().released = true;
+        let mut launch = self.0.lock().unwrap();
+        if launch.refusals > 0 {
+            launch.refusals -= 1;
+            return Ok(false);
+        }
+        launch.released = true;
         Ok(true)
     }
     fn stopped(&self, _: &str) -> bool {
@@ -419,8 +426,10 @@ async fn shutdown_stops_a_jvm_that_keeps_reporting() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_jvm_whose_deployment_a_restore_lost_is_stopped_instead_of_awaited() {
-    // Core restarts over a log that lost both the surviving JVM's host and its deployment.
+    // Core restarts over a log that lost both the surviving JVM's host and its deployment. Its first release fails, as
+    // when its host cannot open its pidfd.
     let jvm = Launches::of("host-1", true);
+    jvm.0.lock().unwrap().refusals = 1;
     let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
     let lost = JvmRegistration { deployment: "lost".into(), ..registration() };
     assert_eq!(code(&fixture.jvm_call(JVM, "chunk:register", "", &lost).await), Code::Contract);
@@ -433,6 +442,41 @@ async fn a_jvm_whose_deployment_a_restore_lost_is_stopped_instead_of_awaited() {
     // Recovery doesn't wait for the stopped JVM, so claims aren't refused as busy.
     let claim = fixture.control.claim(runtime::login()).await;
     assert!(!matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_survivor_serving_a_player_whose_claim_a_restore_lost_is_stopped_before_admission_reopens() {
+    let jvm = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let host = place(&fixture, &jvm).await;
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let (id, _) = sessions(&next(&mut updates).await).pop_first().expect("a session");
+    drop(updates);
+
+    // Core restarts over a log that kept the host and its session but not the claim of the player the JVM serves.
+    let survivor = Launches::of(&host, true);
+    let fixture = fixture.restart(Arc::new(survivor.clone())).await;
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = next(&mut updates).await;
+    let serving = JvmSessionStatus { attached: 1, ..session(&id, JvmSessionPhase::Ready) };
+    let report = JvmReport { complete: true, sessions: vec![serving], health: None };
+    assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
+    // Without the player's delivery control cannot fence it, so it stops the JVM and admits nothing until it has.
+    let claim = fixture.control.claim(runtime::login()).await;
+    assert!(matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
+    assert!(!survivor.0.lock().unwrap().released);
+    while !next(&mut updates).await.upserts.iter().any(|entry| entry.key == "stop") {}
+    drop(updates);
+    let reopened = async {
+        while matches!(fixture.control.claim(runtime::login()).await, Err(chunk_control::Error::Busy)) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), reopened).await.expect("admission reopened");
+    assert!(survivor.0.lock().unwrap().released);
     fixture.stop().await;
 }
 

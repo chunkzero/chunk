@@ -1,10 +1,11 @@
 //! The PID of each spawned JVM, with its start time, so a JVM re-attached after control restarted can still be killed,
 //! and a later process reusing its PID never is. Start times come from `/proc` and the kill goes through a pidfd, so
-//! only Linux kills a re-attached JVM; elsewhere, or on a kernel without pidfds, none is killed.
+//! only Linux records and kills a re-attached JVM; elsewhere, or on a kernel without pidfds, none is killed.
 
 use crate::{Error, Result};
-use std::{io::Write, path::Path};
+use std::path::Path;
 
+#[cfg(target_os = "linux")]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Spawned {
     pid: u32,
@@ -13,11 +14,18 @@ struct Spawned {
 }
 
 /// Records at `path` that the JVM spawned as `pid`.
+#[cfg(target_os = "linux")]
 pub(super) fn record(path: &Path, pid: u32) -> Result<()> {
+    use std::io::Write;
     let spawned = Spawned { pid, started: started(pid)? };
     let mut file = chunk_service::private_file(path)?;
     file.write_all(&serde_json::to_vec(&spawned)?)?;
     file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn record(_path: &Path, _pid: u32) -> Result<()> {
     Ok(())
 }
 
@@ -42,6 +50,7 @@ pub(super) fn kill(_path: &Path) -> Result<()> {
 }
 
 /// When `pid` started, from `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
 fn started(pid: u32) -> Result<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     // The command name, in parentheses, may hold spaces; the start time is the 20th field after it.
