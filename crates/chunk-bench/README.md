@@ -19,10 +19,12 @@ just bench sync-queries --subscribers 5000 --rate 100 --writes related --own-wri
 ```
 
 `just bench --help` lists the parameters. Defaults are 2 seconds of warmup, 10 seconds of measurement, 64
-connections/RPC lanes, and two Tokio worker threads each for target and generator. No CPU affinity or resource quotas
-are applied unless you pass `--target-cpus 12-13` (runs the target under `taskset -c`) and start the generator under
-`taskset` yourself; `config.json` records the arguments. Run benchmarks sequentially on an otherwise quiet machine and
-repeat each point. Use the same build, payload, duration and hardware when comparing results.
+connections/RPC lanes, two generator Tokio worker threads, and as many target worker threads as the available
+parallelism, matching `chunk-environment`'s `#[tokio::main]` runtime; `--target-threads` overrides it. No CPU affinity
+or resource quotas are applied unless you pass `--target-cpus 12-13` (runs the target under `taskset -c`; set
+`--target-threads` to match) and start the generator under `taskset` yourself; `config.json` records the arguments. Run
+benchmarks sequentially on an otherwise quiet machine and repeat each point. Use the same build, payload, duration and
+hardware when comparing results.
 
 ## Workloads
 
@@ -84,7 +86,8 @@ in-process gateway's credential, `--streams-per-connection` to a connection, the
 sync `Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams
 only advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
 writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
-record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read. Setup
+record, changing every stream's result. The last `--slow-readers` streams wait `--slow-read-ms` before each read, on
+their own connections (still `--streams-per-connection` each), so no prompt stream shares a connection with them. Setup
 fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an ended stream. The `fanout`
 summary reports stream updates, position-only updates, changed entries and encoded update bytes per second (excluding
 gRPC and HTTP/2 framing), query errors, streams that ended, and `reply_to_observed_us`: from a measured write's reply

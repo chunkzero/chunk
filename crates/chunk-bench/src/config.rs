@@ -85,7 +85,7 @@ pub struct Config {
     /// Sync queries: subscription streams multiplexed on each connection.
     #[arg(long, default_value_t = 100)]
     pub streams_per_connection: u32,
-    /// Sync queries: streams that wait `--slow-read-ms` before each read; excluded from lag.
+    /// Sync queries: streams that wait `--slow-read-ms` before each read, on their own connections; excluded from lag.
     #[arg(long, default_value_t = 0)]
     pub slow_readers: u32,
     #[arg(long, default_value_t = 5000)]
@@ -93,7 +93,8 @@ pub struct Config {
     /// Pin the target process with `taskset -c`, e.g. `12-13`. Pin the generator by running under taskset.
     #[arg(long)]
     pub target_cpus: Option<String>,
-    #[arg(long, default_value_t = 2)]
+    /// Target Tokio worker threads. Defaults to the available parallelism, as `chunk-environment`'s `#[tokio::main]`.
+    #[arg(long, default_value_t = available_parallelism())]
     pub target_threads: usize,
     #[arg(long, default_value_t = 2)]
     pub generator_threads: usize,
@@ -120,6 +121,10 @@ pub struct Config {
     /// libdeflate level (1..=12) for the target and generator; defaults to the production level.
     #[arg(long)]
     pub compression_level: Option<i32>,
+}
+
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 impl Config {
@@ -161,7 +166,7 @@ impl Config {
             "target CPUs must be a taskset list such as 12-13"
         );
         ensure!(
-            (1..=64).contains(&self.target_threads) && (1..=64).contains(&self.generator_threads),
+            (1..=1024).contains(&self.target_threads) && (1..=64).contains(&self.generator_threads),
             "invalid thread count"
         );
         ensure!((1..=60_000).contains(&self.timeout_ms), "timeout must be 1..=60000 ms");
