@@ -3,7 +3,7 @@ use crate::{Control, ControlConnection, Host, Service};
 use chunk_proto::v1::local_control_server::LocalControlServer;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Builds services served beside control's own on its listener, from control, its credential, a token cancelled when
@@ -81,6 +81,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
                 service.close_watches();
             }
         };
+        let connections = chunk_service::Connections::default();
+        let incoming = TcpListenerStream::new(listener).map(|stream| stream.map(|stream| connections.track(stream)));
         let server = tonic::transport::Server::builder()
             .add_routes(routes)
             .add_service(
@@ -93,7 +95,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
                 chunk_proto::v1::supervisor_server::SupervisorServer::new(service.clone())
                     .max_decoding_message_size(8 * 1024 * 1024),
             )
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown);
+            .serve_with_incoming_shutdown(incoming, shutdown);
         tokio::pin!(server);
         let reconcile = async {
             let mut timer = tokio::time::interval(Duration::from_secs(2));
@@ -113,19 +115,15 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         tokio::pin!(health);
         tracing::info!(%address, "control ready");
         let result = tokio::select! {
-            () = &mut health => Ok(()),
-            result = &mut server => result.map_err(io::Error::other),
-            reconciled = &mut reconcile => {
+            result = &mut server => {
                 stop.cancel();
-                let shutdown = match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
-                    Ok(result) => result.map_err(io::Error::other),
-                    Err(_) => Err(io::Error::other("control transport shutdown timed out")),
-                };
-                return reconciled.and(shutdown);
+                return result.map_err(io::Error::other).and(reconcile.await);
             }
+            () = &mut health => reconcile.await,
+            reconciled = &mut reconcile => reconciled,
         };
         stop.cancel();
-        result.and(reconcile.await)
+        result.and(connections.drain("control", server).await.map_err(io::Error::other))
     }
     .await;
     // Every exit closes open watches, so none keeps this authority's scope after `run` returns.
