@@ -1,14 +1,16 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chunk_proto::v1::{
-    BackendMutation, BackendResult, BackendUpdate, BackendWatchGroup,
-    backend_server::{Backend, BackendServer},
+use chunk_proto::sync::v1::{
+    self as sync, CallResponse, ManifestResult, SubscribeRequest, Update, call_response,
+    core_server::{Core, CoreServer},
+    error::Code,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tonic::{Response, Status};
+use tonic::Response;
 
 use super::*;
 
+/// A fake core whose deployment declares no domain manifest, so its legacy `shared/proxy/*` queries answer.
 #[derive(Clone, Default)]
 struct Hooks {
     mode: Arc<AtomicUsize>,
@@ -16,27 +18,26 @@ struct Hooks {
     routes: Arc<AtomicUsize>,
 }
 
-#[tonic::async_trait]
-impl Backend for Hooks {
-    async fn query(&self, request: Request<BackendQuery>) -> Result<Response<BackendResult>, Status> {
-        assert_eq!(request.metadata().get("authorization").unwrap(), "Bearer test-token");
-        assert_eq!(request.metadata().get("x-chunk-environment").unwrap(), "local");
-        assert_eq!(request.metadata().get("x-chunk-deployment").unwrap(), "example");
-        let call = request.into_inner();
-        let caller: Value = serde_json::from_slice(&call.caller_json).unwrap();
-        assert_eq!(caller["kind"], "proxy");
-        assert!(caller["proxyId"].as_str().is_some_and(|value| !value.is_empty()));
-        let result = match call.function.as_str() {
+impl Hooks {
+    fn run(&self, call: &CallRequest) -> Result<Vec<u8>, sync::Error> {
+        assert_eq!(call.deployment, "example");
+        assert!(call.stream.is_empty() && call.caller.is_none());
+        if call.method == "chunk:manifest" {
+            return Ok(ManifestResult { deployment: call.deployment.clone(), manifest_json: vec![] }.encode_to_vec());
+        }
+        assert!(call.operation_id.is_empty());
+        let failed = |message: &str| Err(sync::Error { code: Code::Unavailable.into(), message: message.into() });
+        let result = match call.method.as_str() {
             "shared/proxy/status" => {
                 self.status.fetch_add(1, Ordering::SeqCst);
                 if self.mode.load(Ordering::SeqCst) == 1 {
-                    return Err(Status::unavailable("offline"));
+                    return failed("offline");
                 }
                 json!({"motd": "Live backend", "online": 2, "max": 16})
             }
             "shared/proxy/admit" => {
                 if self.mode.load(Ordering::SeqCst) == 2 {
-                    return Err(Status::deadline_exceeded("hook deadline"));
+                    return failed("hook deadline");
                 }
                 json!({"allow": self.mode.load(Ordering::SeqCst) == 0, "reason": "Closed"})
             }
@@ -46,20 +47,24 @@ impl Backend for Hooks {
             }
             _ => panic!("unexpected hook"),
         };
-        Ok(Response::new(BackendResult { revision: 1, result_json: serde_json::to_vec(&result).unwrap() }))
+        Ok(serde_json::to_vec(&result).unwrap())
+    }
+}
+
+#[tonic::async_trait]
+impl Core for Hooks {
+    async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, tonic::Status> {
+        assert_eq!(request.metadata().get("authorization").unwrap(), "Bearer gateway");
+        let outcome = match self.run(request.get_ref()) {
+            Ok(result) => call_response::Outcome::Result(result),
+            Err(error) => call_response::Outcome::Error(error),
+        };
+        Ok(Response::new(CallResponse { position: None, outcome: Some(outcome) }))
     }
 
-    async fn check_deployment(&self, _: Request<()>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-
-    async fn mutate(&self, _: Request<BackendMutation>) -> Result<Response<BackendResult>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-
-    type WatchGroupStream = ReceiverStream<Result<BackendUpdate, Status>>;
-    async fn watch_group(&self, _: Request<BackendWatchGroup>) -> Result<Response<Self::WatchGroupStream>, Status> {
-        Err(Status::unimplemented("unused"))
+    type SubscribeStream = ReceiverStream<Result<Update, tonic::Status>>;
+    async fn subscribe(&self, _: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("unused"))
     }
 }
 
@@ -68,13 +73,13 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hooks = Hooks::default();
     let platform = Platform::new(PlatformTarget {
-        core: "http://127.0.0.1:1".into(),
-        gateway: crate::GatewayCredential { id: "proxy".into(), credential: "unused".into() },
+        core: format!("http://{}", listener.local_addr().unwrap()),
+        gateway: crate::GatewayCredential { id: "proxy".into(), credential: "gateway".into() },
         control_token: "unused".into(),
         backend: chunk_contract::BackendConnection {
             platform_token: None,
-            endpoint: format!("http://{}", listener.local_addr().unwrap()),
-            token: "test-token".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            token: "unused".into(),
             environment: "local".into(),
             deployment: "example".into(),
         },
@@ -82,7 +87,7 @@ async fn status_is_live_and_failed_admission_never_routes() {
     .unwrap();
     let server = tokio::spawn(
         tonic::transport::Server::builder()
-            .add_service(BackendServer::new(hooks.clone()))
+            .add_service(CoreServer::new(hooks.clone()))
             .serve_with_incoming(TcpListenerStream::new(listener)),
     );
     let good = platform.status("localhost").await.unwrap();

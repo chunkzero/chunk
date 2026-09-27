@@ -82,20 +82,22 @@ impl App {
         result.map_err(|failure| errors::backend(&failure))
     }
 
-    /// Runs an action, or a hook, under `operation` and returns its outcome, which touches no single commit. The run
-    /// outlives a dropped call, so a retry finds its outcome.
+    /// Runs an action, or a hook, under `operation` and returns its outcome, which touches no single commit. An action
+    /// outlives a dropped call, so a retry finds its outcome. A hook runs within its call, whose drop cancels it, and a
+    /// retry then finds it cancelled.
     async fn effect(&self, hook: bool, operation: &str, call: Call) -> Result<Update, Error> {
         let Some(id) = operation.strip_prefix(PREPARED) else {
             return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
         };
         let id = prepared_id(id)?;
-        let backend = self.backend.clone();
-        let run = tokio::spawn(async move {
-            let mut handle =
-                if hook { backend.start_hook(id, call).await } else { backend.start_action(id, call).await }?;
+        let outcome = if hook {
+            let mut handle = self.backend.start_hook(id, call).await.map_err(|failure| errors::backend(&failure))?;
             handle.outcome().await
-        });
-        let outcome = run.await.map_err(|_| errors::error(Code::OutcomeUnknown, "the effectful call's task failed"))?;
+        } else {
+            let backend = self.backend.clone();
+            let run = tokio::spawn(async move { backend.start_action(id, call).await?.outcome().await });
+            run.await.map_err(|_| errors::error(Code::OutcomeUnknown, "the effectful call's task failed"))?
+        };
         let json = outcome.map_err(|failure| errors::backend(&failure))?;
         Ok(Update { revision: Revision(0), json })
     }

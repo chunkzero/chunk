@@ -73,19 +73,32 @@ impl Connection {
                 stream: stream.clone(),
                 ..CallRequest::default()
             };
-            let mut request = super::authorized(message, &self.gateway.credential)?;
-            request.set_timeout(timeout);
-            let response = self.client.clone().call(request).await.map_err(io::Error::other)?.into_inner();
-            match response.outcome {
-                Some(Outcome::Result(result)) => {
-                    return Ok((R::decode(result.as_slice()).map_err(invalid_data)?, response.position));
-                }
-                Some(Outcome::Error(error)) if error.code() == Code::Stopped && self.superseded(&stream) => {
-                    stale = Some(stream);
-                }
-                Some(Outcome::Error(error)) => return Err(io::Error::other(Failure(error))),
-                None => return Err(invalid_data("core returned no outcome")),
+            match self.send(message, timeout).await? {
+                Ok((result, position)) => return Ok((R::decode(result.as_slice()).map_err(invalid_data)?, position)),
+                Err(error) if error.code() == Code::Stopped && self.superseded(&stream) => stale = Some(stream),
+                Err(error) => return Err(io::Error::other(Failure(error))),
             }
+        }
+    }
+
+    /// Runs `message`, which names no stream, returning its result.
+    pub async fn unfenced(&self, message: CallRequest) -> io::Result<Vec<u8>> {
+        let outcome = self.send(message, RPC_TIMEOUT).await?;
+        outcome.map(|(result, _)| result).map_err(|error| io::Error::other(Failure(error)))
+    }
+
+    async fn send(
+        &self,
+        message: CallRequest,
+        timeout: Duration,
+    ) -> io::Result<Result<(Vec<u8>, Option<Position>), Error>> {
+        let mut request = super::authorized(message, &self.gateway.credential)?;
+        request.set_timeout(timeout);
+        let response = self.client.clone().call(request).await.map_err(io::Error::other)?.into_inner();
+        match response.outcome {
+            Some(Outcome::Result(result)) => Ok(Ok((result, response.position))),
+            Some(Outcome::Error(error)) => Ok(Err(error)),
+            None => Err(invalid_data("core returned no outcome")),
         }
     }
 

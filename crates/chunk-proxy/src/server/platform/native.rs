@@ -1,55 +1,37 @@
 use std::{io, sync::Arc};
 
 use chunk_contract::{DomainManifest, HookEvent};
-use chunk_proto::v1::{ClaimRequest, InvokeHook, SessionDemand, backend_hooks_client::BackendHooksClient};
+use chunk_proto::{
+    sync::v1::{CallRequest, ManifestResult},
+    v1::{ClaimRequest, SessionDemand},
+};
+use prost::Message;
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
-use tonic::transport::Channel;
 
-use super::{Admission, Platform, RPC_TIMEOUT, Route, Status, channel, invalid_data};
+use super::{Admission, Platform, RPC_TIMEOUT, Route, Status, invalid_data};
 
 mod lifecycle;
 pub(in crate::server) use lifecycle::Lifecycle;
 
-#[derive(Clone)]
-pub(super) struct Native {
-    client: BackendHooksClient<Channel>,
-    manifest: Arc<OnceCell<Option<Arc<DomainManifest>>>>,
-}
-
-impl Native {
-    pub(super) fn new(endpoint: &str) -> io::Result<Self> {
-        Ok(Self { client: BackendHooksClient::new(channel(endpoint)?), manifest: Arc::default() })
-    }
-}
-
 impl Platform {
+    /// The domain manifest of the target's deployment, or `None` when it declares none and the app's legacy
+    /// `shared/proxy/*` hooks apply.
     pub(in crate::server) async fn manifest(&self) -> io::Result<Option<Arc<DomainManifest>>> {
-        self.native
-            .manifest
+        self.manifest
             .get_or_try_init(|| async {
-                let request = self.backend_request((), &self.target.backend.token)?;
-                let response = match self.native.client.clone().manifest(request).await {
-                    Ok(response) => response.into_inner(),
-                    Err(error)
-                        if error.code() == tonic::Code::Unimplemented
-                            && self.target.backend.platform_token.is_none() =>
-                    {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(io::Error::other(error)),
+                let deployment = &self.target.backend.deployment;
+                let message = CallRequest {
+                    method: "chunk:manifest".into(),
+                    deployment: deployment.clone(),
+                    ..CallRequest::default()
                 };
-                if response.deployment != self.target.backend.deployment {
+                let response = self.sync.unfenced(message).await?;
+                let response = ManifestResult::decode(response.as_slice()).map_err(invalid_data)?;
+                if response.deployment != *deployment {
                     return Err(invalid_data("hook manifest deployment mismatch"));
                 }
                 if response.manifest_json.is_empty() {
                     return Ok(None);
-                }
-                if self.target.backend.platform_token.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "native hooks require platform authority",
-                    ));
                 }
                 let manifest: DomainManifest = serde_json::from_slice(&response.manifest_json).map_err(invalid_data)?;
                 manifest.validate().map_err(invalid_data)?;
@@ -67,10 +49,9 @@ impl Platform {
             };
             let mut payload = payload(claim)?;
             payload["destination"] = Value::Null;
-            let caller = caller(claim, None);
-            self.run_hooks(&manifest, HookEvent::PlayerLogin, &[String::new()], &payload, &caller).await?;
+            self.run_hooks(&manifest, HookEvent::PlayerLogin, &[String::new()], &payload, None).await?;
             let routed = self
-                .run_hooks(&manifest, HookEvent::PlayerRoute, &[String::new()], &payload, &caller)
+                .run_hooks(&manifest, HookEvent::PlayerRoute, &[String::new()], &payload, None)
                 .await?
                 .ok_or_else(|| invalid_data("native domains require a root routing responder"))?;
             let route: Route = serde_json::from_value(routed.clone()).map_err(invalid_data)?;
@@ -82,7 +63,7 @@ impl Platform {
             let domain = domain(&manifest, &demand)?;
             payload["destination"] = routed;
             let scopes = ancestors(domain);
-            self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes[1..], &payload, &caller).await?;
+            self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes[1..], &payload, None).await?;
             Ok(demand)
         })
         .await
@@ -104,10 +85,11 @@ impl Platform {
             payload["destination"] = demand_json(demand);
             payload["sourceDomain"] = domain(&manifest, source_demand)?.into();
             let scopes = ancestors(domain(&manifest, demand)?);
-            let caller = caller(destination, destination.source.as_ref());
+            // The player holds their source claim throughout.
+            let player = destination.identity.as_ref().map(|identity| identity.uuid.as_str());
             // Entry authorization is fresh for every move, including common ancestors.
-            self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes, &payload, &caller).await?;
-            self.run_hooks(&manifest, HookEvent::PlayerBeforeMove, &scopes, &payload, &caller).await?;
+            self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes, &payload, player).await?;
+            self.run_hooks(&manifest, HookEvent::PlayerBeforeMove, &scopes, &payload, player).await?;
             Ok(())
         })
         .await
@@ -121,7 +103,7 @@ impl Platform {
                 HookEvent::ServerPing,
                 &[String::new()],
                 &json!({"eventId":uuid::Uuid::new_v4().to_string(),"host":host}),
-                &json!({"kind":"proxy","proxyId":self.proxy_id}),
+                None,
             )
             .await?
             .ok_or_else(|| invalid_data("native domains require a ping responder"))?;
@@ -134,7 +116,7 @@ impl Platform {
         event: HookEvent,
         scopes: &[String],
         payload: &Value,
-        caller: &Value,
+        player: Option<&str>,
     ) -> io::Result<Option<Value>> {
         let mut result = None;
         for scope in scopes {
@@ -144,7 +126,7 @@ impl Platform {
             for (id, _) in hooks {
                 let mut payload = payload.clone();
                 payload["domain"] = scope.clone().into();
-                let value = self.invoke_hook(id, event, payload, caller.clone()).await?;
+                let value = self.invoke_hook(id, event, &payload, player).await?;
                 if event.admission() {
                     let admission: Admission = serde_json::from_value(value.clone()).map_err(invalid_data)?;
                     admission.check()?;
@@ -155,28 +137,18 @@ impl Platform {
         Ok(result)
     }
 
-    async fn invoke_hook(&self, id: &str, event: HookEvent, payload: Value, caller: Value) -> io::Result<Value> {
+    /// Runs hook `id` as an effectful call, naming `player` as the caller while this gateway holds their claim.
+    async fn invoke_hook(
+        &self,
+        id: &str,
+        event: HookEvent,
+        payload: &Value,
+        player: Option<&str>,
+    ) -> io::Result<Value> {
         let capacity = if event == HookEvent::ServerPing { &self.status_hooks } else { &self.hooks };
         let _permit = capacity.try_acquire().map_err(|_| io::Error::other("native hook capacity exhausted"))?;
-        let token = self
-            .target
-            .backend
-            .platform_token
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "missing platform hook authority"))?;
-        let mut caller = caller;
-        caller["environment"] = self.target.backend.environment.clone().into();
-        caller["deployment"] = self.target.backend.deployment.clone().into();
-        let request = self.backend_request(
-            InvokeHook {
-                hook: id.into(),
-                arguments_json: serde_json::to_vec(&payload).map_err(invalid_data)?,
-                caller_json: serde_json::to_vec(&caller).map_err(invalid_data)?,
-            },
-            token,
-        )?;
-        let response = self.native.client.clone().invoke(request).await.map_err(io::Error::other)?.into_inner();
-        serde_json::from_slice(&response.result_json).map_err(invalid_data)
+        let operation = self.prepare().await?;
+        self.call_app(operation, id, payload, player).await
     }
 }
 
@@ -204,12 +176,6 @@ fn ancestors(domain: &str) -> Vec<String> {
 fn payload(claim: &ClaimRequest) -> io::Result<Value> {
     let player = claim.identity.as_ref().ok_or_else(|| invalid_data("missing authenticated identity"))?;
     Ok(json!({"eventId":claim.operation_id,"player":{"uuid":player.uuid,"username":player.username}}))
-}
-
-fn caller(claim: &ClaimRequest, identity: Option<&chunk_proto::v1::ClaimIdentity>) -> Value {
-    json!({"kind":"proxy","proxyId":claim.proxy_id,"connectionId":claim.connection_id,"operationId":claim.operation_id,
-        "membershipGeneration":identity.map(|id|id.membership_generation.to_string()),
-        "deliveryGeneration":identity.map(|id|id.delivery_generation.to_string())})
 }
 
 fn demand_json(demand: &SessionDemand) -> Value {

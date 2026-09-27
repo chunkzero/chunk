@@ -79,30 +79,6 @@ pub(super) struct Movement {
     pub failure: Option<(String, String)>,
 }
 
-#[tonic::async_trait]
-impl backend_hooks_server::BackendHooks for Service {
-    async fn manifest(&self, request: Request<()>) -> Result<Response<HookManifest>, Status> {
-        auth(&request, "application")?;
-        Ok(Response::new(HookManifest {
-            deployment: request.metadata().get("x-chunk-deployment").unwrap().to_str().unwrap().into(),
-            manifest_json: serde_json::to_vec(&serde_json::json!({
-                "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}},
-                "hooks":{"shared/domains/hooks/route":{"domain":"","event":"player.route","export":"route"}}
-            }))
-            .unwrap(),
-        }))
-    }
-    async fn invoke(&self, request: Request<InvokeHook>) -> Result<Response<HookResult>, Status> {
-        auth(&request, "platform")?;
-        let unroutable = self.logins.lock().unwrap().unroutable.take();
-        if let Some(unroutable) = unroutable {
-            let _ = unroutable.await;
-            return Err(Status::unavailable("routing failed"));
-        }
-        let route = serde_json::json!({"key":"lobby","session_type":"lobby/default","machine_profile":"local"});
-        Ok(Response::new(HookResult { result_json: serde_json::to_vec(&route).unwrap() }))
-    }
-}
 fn auth<T>(request: &Request<T>, token: &str) -> Result<(), Status> {
     if request.metadata().get("authorization").is_none_or(|value| value != format!("Bearer {token}").as_str()) {
         return Err(Status::unauthenticated("wrong role"));
@@ -309,7 +285,6 @@ impl Fixture {
         let server_service = service.clone();
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(backend_hooks_server::BackendHooksServer::new(server_service.clone()))
                 .add_service(backend_commands_server::BackendCommandsServer::new(server_service.clone()))
                 .add_service(core_server::CoreServer::new(server_service.clone()))
                 .add_service(local_control_server::LocalControlServer::new(server_service))
