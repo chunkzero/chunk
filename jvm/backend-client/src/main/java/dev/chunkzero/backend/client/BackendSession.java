@@ -15,27 +15,28 @@ import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /** Owns calls and watches; its channel and scheduler belong to the parent runtime. */
 public final class BackendSession implements AutoCloseable {
+    // Set while this thread closes a session, so a close it causes doesn't wait.
+    private static final ThreadLocal<Boolean> CLOSING = ThreadLocal.withInitial(() -> false);
     final Transport transport;
     final SessionIdentity identity;
     final ScheduledExecutorService scheduler;
     final Set<GroupSubscription> watches = ConcurrentHashMap.newKeySet();
     final Dispatcher dispatcher = new Dispatcher();
     final AtomicBoolean closed = new AtomicBoolean();
-    // Counted down once the closer has closed everything the session owns.
-    private final CountDownLatch swept = new CountDownLatch(1);
+    private final BackendSession root;
     private final Set<CompletableFuture<?>> calls = ConcurrentHashMap.newKeySet();
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
     private final Duration deadline;
@@ -53,14 +54,16 @@ public final class BackendSession implements AutoCloseable {
                 new LegacyTransport(channel, credential, environment, deployment),
                 identity,
                 scheduler,
-                deadline);
+                deadline,
+                null);
     }
 
     private BackendSession(
             Transport transport,
             SessionIdentity identity,
             ScheduledExecutorService scheduler,
-            Duration deadline) {
+            Duration deadline,
+            BackendSession parent) {
         if (deadline.isNegative()
                 || deadline.isZero()
                 || deadline.compareTo(Duration.ofMinutes(5)) > 0)
@@ -69,6 +72,7 @@ public final class BackendSession implements AutoCloseable {
         this.identity = Objects.requireNonNull(identity);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.deadline = deadline;
+        root = parent == null ? this : parent.root;
     }
 
     /**
@@ -84,7 +88,11 @@ public final class BackendSession implements AutoCloseable {
             ScheduledExecutorService scheduler,
             Duration deadline) {
         return new BackendSession(
-                new CoreTransport(channel, credential, deployment), identity, scheduler, deadline);
+                new CoreTransport(channel, credential, deployment),
+                identity,
+                scheduler,
+                deadline,
+                null);
     }
 
     public BackendSession forPlayer(PlayerId player) {
@@ -94,7 +102,8 @@ public final class BackendSession implements AutoCloseable {
                         new SessionIdentity(
                                 identity.session(), identity.app(), Optional.of(player)),
                         scheduler,
-                        deadline);
+                        deadline,
+                        this);
         children.removeIf(BackendSession::finished);
         children.add(child);
         if (closed.get()) child.close();
@@ -209,34 +218,58 @@ public final class BackendSession implements AutoCloseable {
     }
 
     /**
-     * Closes the session's calls, watches and player children, and returns once none of their
-     * callbacks runs, including when another thread started closing it. A callback closing its own
-     * session doesn't wait for itself. Waiting continues through interrupts, which it restores.
+     * Closes the session and its player children, and returns once none of their callbacks runs.
+     * Closing from inside a callback, or from a handler that another close runs, doesn't wait; the
+     * outer closer does. Waiting continues through interrupts, which it restores.
      */
     @Override
     public void close() {
-        if (closed.compareAndSet(false, true)) {
-            children.forEach(BackendSession::close);
-            calls.forEach(call -> call.cancel(false));
-            watches.forEach(GroupSubscription::close);
-            dispatcher.stop();
-            swept.countDown();
+        var threads = new ArrayList<Thread>();
+        boolean nested = CLOSING.get();
+        CLOSING.set(true);
+        try {
+            shut(threads);
+        } finally {
+            CLOSING.set(nested);
         }
-        if (dispatcher.isCurrent()) return;
+        if (!mayWait()) return;
         boolean interrupted = false;
-        while (true) {
-            try {
-                swept.await();
-                break;
-            } catch (InterruptedException error) {
-                interrupted = true;
+        for (var thread : threads) {
+            while (true) {
+                try {
+                    thread.join();
+                    break;
+                } catch (InterruptedException error) {
+                    interrupted = true;
+                }
             }
         }
-        dispatcher.join();
         if (interrupted) Thread.currentThread().interrupt();
     }
 
+    /** Whether this thread may wait for callbacks: it is neither closing nor running one. */
+    boolean mayWait() {
+        return !CLOSING.get() && !root.runsCallbacksOn(Thread.currentThread());
+    }
+
+    /** Closes this subtree without waiting, collecting its callback threads. */
+    private void shut(List<Thread> threads) {
+        closed.set(true);
+        children.forEach(child -> child.shut(threads));
+        watches.forEach(GroupSubscription::shut);
+        var thread = dispatcher.stop();
+        if (thread != null) threads.add(thread);
+        calls.forEach(call -> call.cancel(false));
+    }
+
+    private boolean runsCallbacksOn(Thread thread) {
+        return dispatcher.runsOn(thread)
+                || children.stream().anyMatch(child -> child.runsCallbacksOn(thread));
+    }
+
     private boolean finished() {
-        return swept.getCount() == 0 && dispatcher.finished();
+        return closed.get()
+                && dispatcher.terminated()
+                && children.stream().allMatch(BackendSession::finished);
     }
 }

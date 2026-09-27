@@ -4,7 +4,8 @@ import java.util.ArrayDeque;
 
 /**
  * Runs a session's observer callbacks in order on one virtual thread, started on first use. A
- * subscription is queued once per pending state and delivers only its latest state.
+ * subscription is queued once per pending state and delivers only its latest state. The thread
+ * exits only after its current callback returns.
  */
 final class Dispatcher {
     private final ArrayDeque<GroupSubscription> ready = new ArrayDeque<>();
@@ -19,16 +20,16 @@ final class Dispatcher {
         else notifyAll();
     }
 
-    synchronized boolean isCurrent() {
-        return Thread.currentThread() == thread;
+    synchronized boolean runsOn(Thread current) {
+        return thread == current;
     }
 
     /**
-     * Interrupts {@code subscription}'s callback in progress and waits for it to return, unless
-     * called from that callback's thread.
+     * Interrupts {@code subscription}'s callback in progress and waits for it to return. Waiting
+     * continues through interrupts, which it restores.
      */
     synchronized void finish(GroupSubscription subscription) {
-        if (running != subscription || isCurrent()) return;
+        if (running != subscription) return;
         thread.interrupt();
         boolean interrupted = false;
         while (running == subscription) {
@@ -41,34 +42,18 @@ final class Dispatcher {
         if (interrupted) Thread.currentThread().interrupt();
     }
 
-    /** Stops later callbacks and interrupts one in progress. */
-    synchronized void stop() {
-        stopped = true;
-        ready.clear();
-        if (thread != null) thread.interrupt();
-        notifyAll();
+    /** Stops later callbacks and interrupts one in progress; returns the thread, if started. */
+    synchronized Thread stop() {
+        if (!stopped) {
+            stopped = true;
+            ready.clear();
+            if (thread != null) thread.interrupt();
+            notifyAll();
+        }
+        return thread;
     }
 
-    /** Waits for the thread to exit after {@link #stop}, unless called from it. */
-    void join() {
-        Thread current;
-        synchronized (this) {
-            current = thread;
-        }
-        if (current == null || current == Thread.currentThread()) return;
-        boolean interrupted = false;
-        while (true) {
-            try {
-                current.join();
-                break;
-            } catch (InterruptedException error) {
-                interrupted = true;
-            }
-        }
-        if (interrupted) Thread.currentThread().interrupt();
-    }
-
-    synchronized boolean finished() {
+    synchronized boolean terminated() {
         return stopped && (thread == null || !thread.isAlive());
     }
 

@@ -364,7 +364,7 @@ class BackendSessionTest {
                                 try {
                                     (last ? blocked : release).await();
                                 } catch (InterruptedException error) {
-                                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                                    pause();
                                     cleaned.countDown();
                                 }
                             });
@@ -480,7 +480,7 @@ class BackendSessionTest {
                             try {
                                 new CountDownLatch(1).await();
                             } catch (InterruptedException error) {
-                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                                pause();
                                 cleaned.set(true);
                             }
                         });
@@ -514,6 +514,100 @@ class BackendSessionTest {
         Thread.sleep(50);
         assertEquals(0, late.get());
         assertEquals(1, fresh.get());
+    }
+
+    @Test
+    void aChildCallbackClosingItsParentDuringItsCloseDoesNotDeadlock() throws Exception {
+        var parent = create(Duration.ofSeconds(5));
+        var cleaned = new AtomicBoolean();
+        runInCallback(
+                parent.forPlayer(new PlayerId("reentrant")),
+                () -> {
+                    try {
+                        new CountDownLatch(1).await();
+                    } catch (InterruptedException closing) {
+                        parent.close();
+                        pause();
+                        cleaned.set(true);
+                    }
+                });
+        closeWithin(parent);
+        assertTrue(cleaned.get());
+    }
+
+    @Test
+    void closeWaitsForADescendantCallbackThatStartedTheClosure() throws Exception {
+        var parent = create(Duration.ofSeconds(5));
+        var closedInside = new CountDownLatch(1);
+        var cleaned = new AtomicBoolean();
+        runInCallback(
+                parent.forPlayer(new PlayerId("initiator")),
+                () -> {
+                    parent.close();
+                    closedInside.countDown();
+                    // The closure interrupted this thread.
+                    Thread.interrupted();
+                    pause();
+                    cleaned.set(true);
+                });
+        assertTrue(closedInside.await(2, TimeUnit.SECONDS));
+        closeWithin(parent);
+        assertTrue(cleaned.get());
+    }
+
+    @Test
+    void aCompletionHandlerClosingTheClosingSessionDoesNotDeadlock() throws Exception {
+        var parent = create(Duration.ofSeconds(5));
+        var child = parent.forPlayer(new PlayerId("pending"));
+        var pending = child.query(new QueryRef<Void, Long>("shared/partial", NULL, INTEGER), null);
+        var reentered = new AtomicBoolean();
+        pending.whenComplete(
+                (value, error) -> {
+                    child.close();
+                    parent.close();
+                    reentered.set(true);
+                });
+        closeWithin(parent);
+        assertTrue(pending.isCancelled());
+        assertTrue(reentered.get());
+    }
+
+    /** Runs {@code body} in a callback of a watch in {@code scope}, returning once it has begun. */
+    private void runInCallback(BackendSession scope, Runnable body) throws Exception {
+        var entered = new CountDownLatch(1);
+        scope.watchGroup(
+                List.of(scope.bind(READ, 1L)),
+                state -> {
+                    if (state.stale()) return;
+                    entered.countDown();
+                    body.run();
+                });
+        watchFor(scope.identity.player().orElseThrow().value())
+                .response()
+                .onNext(snapshot(1, value("0", "1")));
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+    }
+
+    /**
+     * Sleeps 100 ms through a callback's cleanup. Unlike parking, an earlier interrupt can't cut it
+     * short; a later one is restored afterwards.
+     */
+    private static void pause() {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100);
+        boolean interrupted = false;
+        for (long left; (left = deadline - System.nanoTime()) > 0; ) {
+            try {
+                TimeUnit.NANOSECONDS.sleep(left);
+            } catch (InterruptedException error) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private static void closeWithin(BackendSession scope) throws InterruptedException {
+        var closer = Thread.startVirtualThread(scope::close);
+        assertTrue(closer.join(Duration.ofSeconds(3)), "close deadlocked");
     }
 
     private static void close(AutoCloseable closeable) {
