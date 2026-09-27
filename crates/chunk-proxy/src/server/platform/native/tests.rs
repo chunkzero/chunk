@@ -24,7 +24,7 @@ use tonic::{Request, Response};
 use super::*;
 
 /// A fake core that reads domain manifests from `backend` and runs its hooks as core does: each under an operation ID
-/// `chunk:prepare` issued, running on after a dropped call.
+/// `chunk:prepare` issued, within its call, whose drop cancels it.
 #[derive(Clone)]
 struct Hooks {
     backend: Backend,
@@ -60,9 +60,8 @@ impl Hooks {
         self.callers.lock().unwrap().push((call.method.clone(), caller.clone()));
         let arguments = Json::parse(std::str::from_utf8(&call.arguments).unwrap()).unwrap();
         let call = Call { deployment, function: call.method, arguments, caller: caller.into() };
-        let backend = self.backend.clone();
-        let run = tokio::spawn(async move { backend.start_hook(id, call).await?.outcome().await });
-        Ok(run.await.unwrap().map_err(failed)?.as_bytes().to_vec())
+        let mut handle = self.backend.start_hook(id, call).await.map_err(failed)?;
+        Ok(handle.outcome().await.map_err(failed)?.as_bytes().to_vec())
     }
 }
 
@@ -234,9 +233,8 @@ async fn move_cancels_default_notifications_but_follow_player_retains_its_captur
     fixture.platform.cleanup.close();
     tokio::time::timeout(Duration::from_secs(3), fixture.platform.cleanup.wait()).await.unwrap();
     let trace = fixture.trace().await;
-    // Core runs the cancelled hook on, but the gateway moves on without waiting for it.
-    assert!(trace.contains("enter-start,follow-start,"), "{trace}");
     assert!(trace.contains("follow-end"), "{trace}");
+    assert!(!trace.contains("enter-end"), "{trace}");
     drop(lifecycle);
     fixture.close().await;
 }
@@ -252,6 +250,29 @@ async fn notification_execution_preserves_the_order_of_domain_transitions() {
     tokio::time::timeout(Duration::from_secs(3), fixture.platform.cleanup.wait()).await.unwrap();
     assert_eq!(fixture.trace().await, "root,route,parent,lobby,enter-start,enter-end,follow-start,follow-end,");
     assert_eq!(fixture.callers()[4..], ["enter=alice", "follow=alice"]);
+    drop(lifecycle);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn an_expired_notification_batch_cancels_its_running_hook() {
+    let fixture = Fixture::new().await;
+    let arena = ClaimRequest {
+        demand: Some(SessionDemand {
+            key: "arena".into(),
+            session_type: "arena/default".into(),
+            machine_profile: "local".into(),
+        }),
+        ..claim("login")
+    };
+    assert!(fixture.platform.manifest().await.unwrap().is_some());
+    let mut lifecycle = Lifecycle::new(fixture.platform.clone());
+    lifecycle.arrived(&arena).unwrap();
+    fixture.platform.cleanup.close();
+    tokio::time::timeout(Duration::from_secs(6), fixture.platform.cleanup.wait()).await.unwrap();
+    // The batch's deadline passed a second before `stall` would have ended.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(fixture.trace().await, "enter-start,enter-end,hold-start,hold-end,stall-start,");
     drop(lifecycle);
     fixture.close().await;
 }
@@ -278,6 +299,8 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         ("", HookEvent::ServerPing, "ping"),
         ("", HookEvent::PlayerConnect, "enter"),
         ("games/lobby", HookEvent::DomainEnter, "follow"),
+        ("games/arena", HookEvent::PlayerConnect, "hold"),
+        ("games/arena", HookEvent::DomainEnter, "stall"),
     ]
     .into_iter()
     .enumerate()
@@ -297,7 +320,10 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         let body=match event {
             HookEvent::ServerPing=>"return {motd:'native',online:0,max:10};".into(),
             HookEvent::PlayerRoute=>"await ctx.runMutation('record','route'); return {key:'lobby',session_type:'lobby/default',machine_profile:'local'};".into(),
-            HookEvent::PlayerConnect|HookEvent::DomainEnter=>format!("await ctx.runMutation('record','{name}-start'); await ctx.sleep(300); await ctx.runMutation('record','{name}-end'); return null;"),
+            HookEvent::PlayerConnect|HookEvent::DomainEnter=>{
+                let sleep = if scope == "games/arena" { 3000 } else { 300 };
+                format!("await ctx.runMutation('record','{name}-start'); await ctx.sleep({sleep}); await ctx.runMutation('record','{name}-end'); return null;")
+            }
             _=>format!("await ctx.runMutation('record','{name}'); return {{allow:!(await ctx.runQuery('banned',null)),reason:'Banned'}};"),
         };
         write!(source, "\nexport async function {export}(ctx) {{ {body} }}").unwrap();
