@@ -143,10 +143,6 @@ impl Control {
         let Some(inventory) = self.links.report(id, &runtime.identity) else {
             return Ok(false);
         };
-        if self.jvms.unfenceable(id, &inventory) {
-            self.stop_recovered(id, &runtime.identity, "its surviving players cannot be fenced")?;
-            return Ok(false);
-        }
         self.retire_unknown_operations(id, &runtime.identity)?;
         self.retire_unknown_sessions(id, &runtime.identity)?;
         if !self.fence_deliveries(&runtime, &inventory).await? {
@@ -275,7 +271,8 @@ impl Control {
 
     /// Withdraws open deliveries that no open claim in the log owns with the same generations, using the generation
     /// the JVM holds. `inventory` must be reported before state is read, so every delivery control prepared already
-    /// has its claim. Reports whether every such delivery is now withdrawn.
+    /// has its claim. Reports whether every such delivery is now withdrawn. A JVM registered over sync closes them
+    /// itself, since its topic leaves them out, so for it this only checks that it reported them closed.
     pub(crate) async fn fence_deliveries(
         &self,
         runtime: &RuntimeConnection,
@@ -288,12 +285,11 @@ impl Control {
             let Some(delivery) = &binding.delivery else {
                 continue;
             };
-            let owned = state.claims.get(&delivery.operation_id).is_some_and(|claim| {
-                claim.phase != Phase::Released
-                    && claim.generation.wire() == delivery.owner_generation
-                    && claim.membership.wire() == delivery.membership_generation
-            });
-            if owned {
+            if crate::jvm::owned(&state, delivery) {
+                continue;
+            }
+            if runtime.over_sync() {
+                fenced = false;
                 continue;
             }
             let client = match &mut gameplay {

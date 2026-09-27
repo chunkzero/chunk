@@ -2,6 +2,7 @@ mod claims;
 mod effects;
 mod hooks;
 mod jvm;
+mod jvm_effects;
 mod runtime;
 
 use super::*;

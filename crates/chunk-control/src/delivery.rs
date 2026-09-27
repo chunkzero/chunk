@@ -101,6 +101,11 @@ impl Control {
         }
         if !state.released(&host) {
             let runtime = self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
+            // A JVM registered over sync sees the withdrawal on its topic and reports the delivery closed.
+            if runtime.over_sync() {
+                self.withdrawn_over_sync(&host, &runtime.identity, &request.operation_id, claim.generation).await?;
+                return self.release_withdrawn(&request.operation_id, identity);
+            }
             let withdrawn = GameplayClient::new(channel(&runtime).await?)
                 .withdraw_player(auth(
                     &runtime,
@@ -118,11 +123,16 @@ impl Control {
                 Err(error) => return Err(error.into()),
             }
         }
+        self.release_withdrawn(&request.operation_id, identity)
+    }
+
+    /// Releases withdrawn claim `operation`, unless something else already has.
+    fn release_withdrawn(&self, operation: &str, identity: ClaimIdentity) -> Result<ClaimIdentity> {
         self.update(|state| {
-            if state.claims.get(&request.operation_id).is_some_and(|claim| claim.phase == Phase::Released) {
+            if state.claims.get(operation).is_some_and(|claim| claim.phase == Phase::Released) {
                 return Ok(());
             }
-            release(state, &request.operation_id)
+            release(state, operation)
         })?;
         Ok(identity)
     }

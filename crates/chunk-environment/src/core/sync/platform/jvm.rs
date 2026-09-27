@@ -1,13 +1,15 @@
-//! A JVM's registration and reports, `chunk:register` and `chunk:report`, which control applies like the
-//! supervisor's. The JVM's host comes from its credential.
+//! A JVM's registration, reports and method results, `chunk:register`, `chunk:report` and `chunk:method_result`, which
+//! control applies. The JVM's host comes from its credential.
 
 use super::super::{
-    SyncService,
+    SyncService, app,
     auth::{Class, Principal},
     errors, position,
 };
 use chunk_js::DeploymentId;
-use chunk_proto::sync::v1::{CallRequest, Error, JvmRegistered, JvmRegistration, JvmReport, Position, error::Code};
+use chunk_proto::sync::v1::{
+    CallRequest, Error, JvmMethodResult, JvmRegistered, JvmRegistration, JvmReport, Position, error::Code,
+};
 use chunk_store::Revision;
 use prost::Message;
 
@@ -15,6 +17,7 @@ use prost::Message;
 pub(super) enum Method {
     Register,
     Report,
+    Result,
 }
 
 impl Method {
@@ -22,6 +25,7 @@ impl Method {
         Some(match name {
             "register" => Self::Register,
             "report" => Self::Report,
+            "method_result" => Self::Result,
             _ => return None,
         })
     }
@@ -71,6 +75,16 @@ pub(super) async fn call(
             reported.map_err(|failure| errors::operation(&failure))?;
             let generation = *service.control.subscribe().borrow();
             Ok((position(generation.epoch, Revision(generation.revision)), Vec::new()))
+        }
+        Method::Result => {
+            if request.operation_id.is_empty() {
+                return Err(errors::invalid("a method result names the method's operation ID"));
+            }
+            app::reject_prepared(&request.operation_id)?;
+            let result: JvmMethodResult = decode(&request.arguments)?;
+            let recorded = service.control.method_result(&host, &request.stream, &request.operation_id, result);
+            recorded.map_err(|failure| errors::operation(&failure))?;
+            Ok((None, Vec::new()))
         }
     }
 }
