@@ -54,20 +54,25 @@ same store and recover outcomes by operation ID; a failed acknowledgment may fol
 automatically retries a speculative suffix.
 
 Admission is bounded by queue time and memory rather than counts. New requests are refused once queued work of the same
-kind has waited over 500 ms: requests for the engine thread, queries for a read engine, or mutations to commit. Memory
-budgets cover admitted requests including replies waiting for durability (64 MiB, each charged its input plus 1 KiB and
-any retained result), pending mutations with their staged writes and results (32 MiB), subscriptions with their latest
-results (256 MiB), and live actions at their 32 MiB engine heap limit (256 MiB). A result, error or read set that grows
-past the subscription budget closes the subscriptions that share it. Each refusal is `Error::Overloaded` naming its
-`Limit`; `Error::Busy` remains for state conflicts such as a deployment change in progress. At most 16 deployments are
-resident. These are logical bounds, not an RSS limit. JS retains its own source, heap, capability and payload budgets.
-Release a deployment after its mutations and subscriptions drain. Release durably removes the bundle and permanently
-retires its identity before unloading the runtime. It cannot be reactivated under the same ID. Data and schema remain
-shared; release never drops application tables or operation outcomes. Uncommitted operation IDs remain bound to the
-retired deployment and return `OperationMismatch` if retried against another deployment. Clients must use new operation
-IDs for those requests. Committed outcomes remain recoverable through a retained deployment exposing the same mutation.
-If a retained bundle prevents startup, open the store with exclusive writer authority and call
-`Storage::release_deployment` with its ID before constructing the backend again.
+kind has waited over 500 ms: requests for the engine thread, queries for a read engine, mutations to commit, or actions
+for the live-action budget. Memory budgets cover admitted requests including replies waiting for durability (64 MiB,
+each charged its input plus 1 KiB and any retained result), pending mutations with their staged writes and results (32
+MiB), subscriptions with their latest results (256 MiB), and live actions at their 32 MiB engine heap limit (an eighth
+of the machine's memory or of the lowest cgroup memory limit on the process's group and its ancestors, at least 256 MiB,
+and exactly 256 MiB when either can't be read). A missing cgroup file counts as unreadable, except `memory.max` on the
+v2 root or on a group whose parent doesn't enable the memory controller. Limits on ancestors a cgroup namespace hides
+can't be observed. Actions past that budget queue, at most as many as it admits, until a live action finishes. A queued
+start that needs no new action, such as a duplicate of one that started, resolves at once, and a cancelled one releases
+its admission at once. A result, error or read set that grows past the subscription budget closes the subscriptions that
+share it. Each refusal is `Error::Overloaded` naming its `Limit`; `Error::Busy` remains for state conflicts such as a
+deployment change in progress. At most 16 deployments are resident. These are logical bounds, not an RSS limit. JS
+retains its own source, heap, capability and payload budgets. Release a deployment after its mutations and subscriptions
+drain. Release durably removes the bundle and permanently retires its identity before unloading the runtime. It cannot
+be reactivated under the same ID. Data and schema remain shared; release never drops application tables or operation
+outcomes. Uncommitted operation IDs remain bound to the retired deployment and return `OperationMismatch` if retried
+against another deployment. Clients must use new operation IDs for those requests. Committed outcomes remain recoverable
+through a retained deployment exposing the same mutation. If a retained bundle prevents startup, open the store with
+exclusive writer authority and call `Storage::release_deployment` with its ID before constructing the backend again.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
@@ -118,12 +123,12 @@ records and rejects retired IDs instead of executing them again; allocating IDs 
 in retirement. A new backend incarnation makes old IDs unknown. Actions are never automatically retried.
 
 Actions run in separate bounded workers with fresh V8 isolates, so sleep, transaction waits and CPU work do not occupy
-the foreground environment actor. Limits are eight live actions, 32 MiB managed heap and separately 32 MiB ArrayBuffer
-backing storage per action, 30 seconds from acceptance (initialization also has the one-second module budget), 256
-effects per invocation, eight pending effects per invocation, and 32 pending action transaction requests per
-environment. Inputs, effect replies and results are each at most 1 MiB. Status records retain bounded request/result
-payloads. These logical limits exclude V8/native overhead. Shutdown cancels workers and joins them after closing their
-reply path.
+the foreground environment actor. Limits are the live-action budget above (eight actions at its 256 MiB floor), 32 MiB
+managed heap and separately 32 MiB ArrayBuffer backing storage per action, 30 seconds from acceptance (initialization
+also has the one-second module budget), 256 effects per invocation, eight pending effects per invocation, and four
+pending action transaction requests and one HTTP request per admitted action across the environment. Inputs, effect
+replies and results are each at most 1 MiB. Status records retain bounded request/result payloads. These logical limits
+exclude V8/native overhead. Shutdown cancels workers and joins them after closing their reply path.
 
 Every nested query/mutation goes through the original environment's actor against a fresh snapshot. The host captures
 the original caller and deployment; arguments cannot replace either authority. Internal references are permitted through
@@ -192,11 +197,11 @@ full originating caller; job arguments cannot select a caller, environment or de
 call a mutation to record intent.
 
 `Backend` starts a local timer and dispatches due jobs automatically, checking at most every 100 milliseconds when the
-actor is available. At most two scheduled jobs run within the live-action memory budget. Busy action capacity leaves
-jobs pending, or retains an already-durable claim until a worker is available. The commit thread durably changes
-`pending` to `running` before any action starts. SQLite keeps job metadata and wake state in private tables, separate
-from application schema. Other storage adapters must implement atomic scheduling; nonempty intents fail closed by
-default.
+actor is available. Scheduled jobs run within the live-action memory budget, using at most a quarter of the actions it
+admits (two at its floor). Busy action capacity leaves jobs pending, or retains an already-durable claim until a worker
+is available. The commit thread durably changes `pending` to `running` before any action starts. SQLite keeps job
+metadata and wake state in private tables, separate from application schema. Other storage adapters must implement
+atomic scheduling; nonempty intents fail closed by default.
 
 A successful action records `succeeded` and a result up to 64 KiB; an oversized result or exhausted result retention
 capacity records `failed` without that result. Observed application or contract errors also record `failed`; this does
@@ -263,7 +268,7 @@ Prepared identities expire after 60 seconds; at most 64 prepared/retained entrie
 evict unstarted or terminal entries earlier. Process restart loses this ephemeral history. Preparation alone does not
 retain a deployment; accepted execution retains it until its worker exits.
 
-Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, eight live actions and 256
+Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, live-action budget and 256
 total effects. Each platform stream has at most eight pending effects. The backend checks the original command's
 permission again before every nested transaction and platform effect. Functions and hooks have no platform capability;
 hooks also retain their read-only rules and default denial of HTTP/secrets. `followPlayer` changes eligible proxy effect

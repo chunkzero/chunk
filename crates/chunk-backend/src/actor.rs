@@ -92,8 +92,8 @@ impl Actor {
     pub fn new(
         store: Box<dyn Storage>,
         events: mpsc::Sender<Event>,
-        incarnation: String,
         effects: crate::ActionEffects,
+        action_bytes: usize,
         readers: usize,
         queue: Arc<EngineQueue>,
         memory: Arc<tokio::sync::Semaphore>,
@@ -115,7 +115,7 @@ impl Actor {
         Ok(Self {
             scheduled: jobs::Scheduled::new(scheduled),
             timer: tokio::runtime::Builder::new_current_thread().enable_time().build()?,
-            actions: actions::Actions::new(events, incarnation, effects),
+            actions: actions::Actions::new(events, uuid::Uuid::new_v4().to_string(), effects, action_bytes),
             recovering: false,
             watches: watches::Watches::new(snapshot.revision),
             js,
@@ -214,6 +214,7 @@ impl Actor {
                 Event::Wake => {}
             }
             if !stopped.load(Ordering::Acquire) {
+                self.dispatch_actions();
                 self.dispatch_jobs();
             }
             self.dispatch();
@@ -422,6 +423,7 @@ impl Actor {
 
     fn fail(&mut self, error: &Error) {
         self.actions.cancel();
+        self.actions.refuse_waiting(error);
         self.failure = Some(error.clone());
         self.reset_pending(error);
         for waiting in self.reads.drain(..) {

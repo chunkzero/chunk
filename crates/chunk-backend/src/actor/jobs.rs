@@ -229,7 +229,8 @@ impl Actor {
             }
             return;
         }
-        if self.scheduled.active.len() >= 2 || !self.actions.capacity() {
+        // Jobs take at most a quarter of the live actions, leaving the rest to interactive work.
+        if self.scheduled.active.len() >= (self.actions.limit / 4).max(1) || !self.actions.capacity() {
             return;
         }
         let now = now();

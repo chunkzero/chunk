@@ -8,11 +8,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{Backend, Call, Error};
 
-fn now() -> i64 {
+pub(super) fn now() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
 }
 fn backend(directory: &tempfile::TempDir) -> Backend {
-    Backend::new("jobs".into(), Box::new(SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap())).unwrap()
+    let store = SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap();
+    let effects = crate::ActionEffects::new("jobs".into()).unwrap();
+    Backend::with_action_bytes("jobs".into(), Box::new(store), effects, crate::limits::ACTION_BYTES).unwrap()
 }
 fn call(version: &str, function: &str, player: &str, arguments: serde_json::Value) -> Call {
     Call {
@@ -22,7 +24,7 @@ fn call(version: &str, function: &str, player: &str, arguments: serde_json::Valu
         caller: json!({"player":player}).into(),
     }
 }
-fn deployment(id: &str, increment: i32) -> Deployment {
+pub(super) fn deployment(id: &str, increment: i32) -> Deployment {
     let schedule: Schema = serde_json::from_value(
         json!({"type":"object","fields":{"at":{"schema":{"type":"integer"}},"delay":{"schema":{"type":"integer"}}}}),
     )
@@ -74,7 +76,7 @@ export function retry(ctx,args) {{ ctx.scheduler.retry(args.id,args.at,args.ack)
 async fn job(backend: &Backend, id: &str) -> Job {
     backend.job(id.into(), json!({"player":"alice"}).into()).await.unwrap()
 }
-async fn state(backend: &Backend, id: &str, expected: JobState) -> Job {
+pub(super) async fn state(backend: &Backend, id: &str, expected: JobState) -> Job {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let job = job(backend, id).await;
@@ -90,7 +92,7 @@ async fn state(backend: &Backend, id: &str, expected: JobState) -> Job {
 async fn count(backend: &Backend, player: &str) -> i64 {
     serde_json::from_str(&backend.query(call("old", "read", player, json!(null))).await.unwrap().json).unwrap()
 }
-async fn schedule(backend: &Backend, operation: &str, at: i64, delay: i64) -> String {
+pub(super) async fn schedule(backend: &Backend, operation: &str, at: i64, delay: i64) -> String {
     serde_json::from_str(
         &backend
             .mutate(operation.into(), call("old", "schedule", "alice", json!({"at":at,"delay":delay})))

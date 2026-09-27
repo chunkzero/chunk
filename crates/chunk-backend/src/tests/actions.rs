@@ -5,7 +5,7 @@ use chunk_js::DeploymentId;
 use chunk_store::SqliteStore;
 use serde_json::json;
 
-use crate::{ActionStatus, Backend, Call, Error, Limit};
+use crate::{ActionEffects, ActionHandle, ActionStatus, Backend, Call, Error, Limit, limits::ACTION_BYTES};
 
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
@@ -79,6 +79,126 @@ fn call(version: &str, function: &str, player: &str, arguments: serde_json::Valu
 fn backend(directory: &tempfile::TempDir) -> Backend {
     Backend::new("test".into(), Box::new(SqliteStore::open(directory.path().join("actions.db"), "test").unwrap()))
         .unwrap()
+}
+
+fn budgeted(directory: &tempfile::TempDir, action_bytes: usize) -> Backend {
+    let store = SqliteStore::open(directory.path().join("actions.db"), "test").unwrap();
+    Backend::with_action_bytes("test".into(), Box::new(store), ActionEffects::new("test".into()).unwrap(), action_bytes)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_burst_past_the_action_budget_waits_for_live_actions_to_finish() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, ACTION_BYTES);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let burst: Vec<_> = (0..12)
+        .map(|player| {
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                let id = backend.allocate_action_id().await?;
+                backend.start_action(id, call("old", "flow", &player.to_string(), json!(100))).await?.outcome().await
+            })
+        })
+        .collect();
+    for action in burst {
+        assert_eq!(&*action.await.unwrap().unwrap(), "2");
+    }
+}
+
+/// Starts an action that runs until [`release`] lets `player`'s actions finish.
+async fn hold(backend: &Backend, player: &str) -> ActionHandle {
+    let id = backend.allocate_action_id().await.unwrap();
+    backend.start_action(id, call("old", "flow", player, json!(-1))).await.unwrap()
+}
+
+async fn release(backend: &Backend, player: &str) {
+    let operation = format!("release-{player}");
+    backend.mutate(operation.clone(), call("old", "publicIncrement", &operation, json!(null))).await.unwrap();
+}
+
+#[tokio::test]
+async fn actions_are_refused_once_queued_ones_wait_too_long_for_the_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, 2 * chunk_js::Limits::default().heap_bytes);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let held = [hold(&backend, "a").await, hold(&backend, "b").await];
+    let queued = {
+        let backend = backend.clone();
+        tokio::spawn(async move {
+            let id = backend.allocate_action_id().await?;
+            backend.start_action(id, call("old", "flow", "queued", json!(0))).await?.outcome().await
+        })
+    };
+    // The queue has room for another start, so only its age refuses this one.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(matches!(
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "late", json!(0))).await,
+        Err(Error::Overloaded(Limit::ActionMemory))
+    ));
+    release(&backend, "a").await;
+    release(&backend, "b").await;
+    for mut action in held {
+        assert_eq!(&*action.outcome().await.unwrap(), "2");
+    }
+    assert_eq!(&*queued.await.unwrap().unwrap(), "2");
+}
+
+#[tokio::test]
+async fn queued_duplicates_join_the_action_their_first_start_launches() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, 2 * chunk_js::Limits::default().heap_bytes);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let (mut finishing, _held) = (hold(&backend, "a").await, hold(&backend, "b").await);
+    let id = backend.allocate_action_id().await.unwrap();
+    let request = call("old", "flow", "duplicate", json!(-1));
+    let mut first = Box::pin(backend.start_action(id.clone(), request.clone()));
+    let mut second = Box::pin(backend.start_action(id, request));
+    crate::tests::pending(first.as_mut()).await;
+    crate::tests::pending(second.as_mut()).await;
+    // The queue holds as many starts as the budget admits.
+    assert!(matches!(
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "full", json!(0))).await,
+        Err(Error::Overloaded(Limit::ActionMemory))
+    ));
+    release(&backend, "a").await;
+    finishing.outcome().await.unwrap();
+    let first = first.await.unwrap();
+    let mut second = tokio::time::timeout(Duration::from_secs(5), second).await.unwrap().unwrap();
+    drop(first);
+    release(&backend, "duplicate").await;
+    assert_eq!(&*second.outcome().await.unwrap(), "2");
+}
+
+#[tokio::test]
+async fn cancelled_queued_starts_release_their_request_memory_while_actions_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = budgeted(&directory, chunk_js::Limits::default().heap_bytes);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let id = backend.allocate_action_id().await.unwrap();
+    let held = backend.start_action(id, call("old", "flow", "held", json!(30_000))).await.unwrap();
+    let read = || backend.query(call("old", "read", "held", json!(null)));
+    // Once its first mutation reads back, the sleeping action sends the actor nothing that could reclaim the start.
+    while &*read().await.unwrap().json != "1" {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let id = backend.allocate_action_id().await.unwrap();
+    let mut queued = Box::pin(backend.start_action(id, call("old", "flow", &"x".repeat(64 * 1024), json!(0))));
+    crate::tests::pending(queued.as_mut()).await;
+    // A later request's reply means the actor queued the start. Then every other byte of request memory is taken.
+    backend.allocate_action_id().await.unwrap();
+    let memory = backend.request_memory();
+    let _rest = memory.clone().try_acquire_many_owned(u32::try_from(memory.available_permits()).unwrap()).unwrap();
+    assert!(matches!(read().await, Err(Error::Overloaded(Limit::RequestMemory))));
+    drop(queued);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while read().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(held.status(), ActionStatus::Running));
 }
 
 #[tokio::test]
@@ -176,7 +296,7 @@ async fn backend_loss_keeps_partial_mutations_but_action_identity_cannot_restart
 }
 
 #[tokio::test]
-async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retained_within_budget() {
+async fn finished_action_outcomes_stay_retained_within_budget() {
     let directory = tempfile::tempdir().unwrap();
     let backend = backend(&directory);
     let mut version = deployment("old", 1);
@@ -203,28 +323,6 @@ async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retain
         },
     );
     backend.deploy(version).await.unwrap();
-    let mut actions = Vec::new();
-    for player in 0..8 {
-        actions.push(
-            backend
-                .start_action(
-                    backend.allocate_action_id().await.unwrap(),
-                    call("old", "flow", &player.to_string(), json!(30_000)),
-                )
-                .await
-                .unwrap(),
-        );
-    }
-    assert!(matches!(
-        backend
-            .start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "overflow", json!(30_000)))
-            .await,
-        Err(Error::Overloaded(Limit::ActionMemory))
-    ));
-    for action in &mut actions {
-        action.cancel();
-        assert!(action.outcome().await.is_err());
-    }
     let first = backend.allocate_action_id().await.unwrap();
     for index in 0..33 {
         let id = if index == 0 { first.clone() } else { backend.allocate_action_id().await.unwrap() };
