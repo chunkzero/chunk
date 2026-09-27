@@ -29,8 +29,8 @@ impl Control {
         self.host.authenticate(credential)
     }
 
-    /// `session`, which `host` must run. A named `player` must be delivered to it through their current claim, from
-    /// the JVM holding their connection until it reports the delivery closed.
+    /// `session`, which `host` must run. A named `player` must be delivered to it through their current claim, in any
+    /// phase from its reservation until the delivery closes or the claim is released.
     /// # Errors
     /// Rejects a session `host` does not run and a player not held on it as invalid, and a finished session as stopped.
     pub fn session_scope(&self, host: &str, session: &str, player: Option<&str>) -> Result<SessionScope> {
@@ -43,8 +43,7 @@ impl Control {
         if let Some(player) = player {
             let claim = state.players.get(player).and_then(|owner| owner.current.as_ref());
             let claim = claim.and_then(|operation| state.claims.get(operation));
-            let held = |phase| matches!(phase, Phase::Attached | Phase::Arrived | Phase::Withdrawing);
-            if !claim.is_some_and(|claim| claim.session == session && held(claim.phase)) {
+            if !claim.is_some_and(|claim| claim.session == session && claim.phase != Phase::Released) {
                 return Err(Error::Invalid("player is not delivered to this session"));
             }
         }
