@@ -39,10 +39,11 @@ impl Method {
     }
 }
 
-/// Runs `method` for `gateway`, returning its encoded result.
+/// Runs `method` for `gateway`, which presents `credential`, returning its encoded result.
 pub(super) async fn call(
     service: &SyncService,
     gateway: &str,
+    credential: &str,
     method: Method,
     request: &CallRequest,
 ) -> Result<Vec<u8>, Error> {
@@ -66,15 +67,15 @@ pub(super) async fn call(
             let suggestions = backend.command_suggestions(deployment, request).await;
             SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))?.values }.encode_to_vec()
         }
-        Method::Command => run(service, gateway, request).await?.encode_to_vec(),
+        Method::Command => run(service, gateway, credential, request).await?.encode_to_vec(),
         Method::Effect => {
             if request.caller.is_some() || !request.operation_id.is_empty() {
                 return Err(errors::invalid("chunk:effect takes no caller or operation ID"));
             }
             let EffectArguments { operation_id, sequence, failed } = decode(&request.arguments)?;
             let run = service.runs.get(&operation_id);
-            if run.as_ref().is_some_and(|run| run.gateway != gateway) {
-                return Err(errors::denied("another gateway runs this command"));
+            if let Some(run) = &run {
+                run.permits(credential)?;
             }
             let acknowledged = run.is_some_and(|run| run.acknowledge(sequence, failed));
             EffectResult { unknown: !acknowledged }.encode_to_vec()
@@ -83,14 +84,20 @@ pub(super) async fn call(
     Ok(result)
 }
 
-/// Starts the command `request` names under its prepared operation ID, or joins it, and returns its outcome. The run
-/// outlives a dropped call, so a retry finds its outcome.
-async fn run(service: &SyncService, gateway: &str, request: &CallRequest) -> Result<CommandResult, Error> {
+/// Starts the command `request` names under its prepared operation ID, binding it to `credential`, or joins it, and
+/// returns its outcome. The run outlives a dropped call, so a retry finds its outcome.
+async fn run(
+    service: &SyncService,
+    gateway: &str,
+    credential: &str,
+    request: &CallRequest,
+) -> Result<CommandResult, Error> {
     let id = app::prepared(&request.operation_id)?;
     let CommandArguments { command_id, input } = decode(&request.arguments)?;
     let Origin { claim, deployment, scope, manifest } = origin(service, gateway, request).await?;
     let follow = manifest.commands.get(&command_id).is_some_and(|command| command.follow_player);
-    let run = service.runs.open(&request.operation_id, gateway)?;
+    let run = service.runs.open(&request.operation_id);
+    run.start(credential)?;
     let caller = serde_json::json!({"kind": "gateway", "player": scope.player_uuid}).into();
     let performer = effects::Performer {
         control: service.control.clone(),

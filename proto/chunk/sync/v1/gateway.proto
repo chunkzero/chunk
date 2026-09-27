@@ -196,11 +196,20 @@ message ManifestResult {
 //   operation ID, and returns EffectResult. The command's effect resolves with the acknowledgment.
 //
 // The `command/<op>` topic holds the effects the command running under `<op>` waits for the gateway to render to its
-// player, each until the gateway acknowledges it. Only the gateway running the command may subscribe, with no
-// arguments, deployment or caller, and it may subscribe before calling `chunk:command`. Each entry's key is an effect's
-// sequence number in decimal and its value a CommandEffect. Every update is a snapshot without a position. At most 8
-// effects are pending at once; the command's later ones fail until the gateway acknowledges some. The stream ends with
-// STOPPED once the command finishes, which fails the effects still pending.
+// player, each until the gateway acknowledges it. A command belongs to the gateway credential whose `chunk:command`
+// started it: only that credential may follow its topic or acknowledge its effects, and any other gets DENIED. A
+// subscription takes a CommandSubscription as its arguments and no deployment or caller, and it may begin before
+// `chunk:command`; its stream ends with DENIED if another credential then starts the command. Each entry's key is an
+// effect's sequence number in decimal and its value a CommandEffect. Every update is a snapshot without a position. At
+// most 8 effects are pending at once; the command's later ones fail until the gateway acknowledges some. The stream
+// ends with STOPPED once the gateway stream it names is superseded, after which the gateway may follow the command
+// again from its new stream, and once the command finishes, which fails the effects still pending.
+
+// Arguments of a `command/<op>` subscription.
+message CommandSubscription {
+  // The gateway's current `gateway/<id>` stream.
+  string stream = 1;
+}
 
 // The result of `chunk:commands`.
 message CommandsResult {

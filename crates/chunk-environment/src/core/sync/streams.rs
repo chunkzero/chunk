@@ -111,9 +111,16 @@ impl Fences {
 
     /// Checks that `stream` is the current stream of a fenced topic `credential` opened.
     pub fn check(&self, stream: &str, credential: &str) -> Result<(), Error> {
+        self.follow(stream, credential).map(drop)
+    }
+
+    /// Checks that `stream` is the current stream of a fenced topic `credential` opened, returning the token
+    /// cancelled once a newer stream supersedes it.
+    pub fn follow(&self, stream: &str, credential: &str) -> Result<CancellationToken, Error> {
         let fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let current = fences.values().any(|fence| fence.stream == stream && fence.credential == credential);
-        current.then_some(()).ok_or_else(|| errors::error(Code::Stopped, "the stream was superseded or is unknown"))
+        let current = fences.values().find(|fence| fence.stream == stream && fence.credential == credential);
+        let current = current.map(|fence| fence.superseded.clone());
+        current.ok_or_else(|| errors::error(Code::Stopped, "the stream was superseded or is unknown"))
     }
 }
 

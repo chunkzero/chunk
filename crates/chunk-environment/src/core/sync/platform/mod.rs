@@ -38,7 +38,7 @@ pub(super) async fn call(
             return Err(errors::invalid("a command method takes no deployment"));
         }
         service.fences.check(&request.stream, &principal.credential)?;
-        return Ok((None, commands::call(service, id, method, request).await?));
+        return Ok((None, commands::call(service, id, &principal.credential, method, request).await?));
     }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {

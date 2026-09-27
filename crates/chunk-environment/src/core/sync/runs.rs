@@ -2,6 +2,7 @@
 
 use super::errors;
 use chunk_proto::sync::v1::{CommandEffect, Entry, Error, Update, entry::State};
+use chunk_service::same_secret;
 use prost::Message;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -17,19 +18,16 @@ const PENDING: usize = 8;
 pub(super) struct Runs(Mutex<HashMap<String, Weak<Run>>>);
 
 impl Runs {
-    /// The command under `operation`, which must be `gateway`'s, opened if nothing holds it.
-    pub fn open(&self, operation: &str, gateway: &str) -> Result<Arc<Run>, Error> {
+    /// The command under `operation`, opened if nothing holds it.
+    pub fn open(&self, operation: &str) -> Arc<Run> {
         let mut runs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         runs.retain(|_, run| run.strong_count() > 0);
         if let Some(run) = runs.get(operation).and_then(Weak::upgrade) {
-            if run.gateway != gateway {
-                return Err(errors::denied("another gateway runs this command"));
-            }
-            return Ok(run);
+            return run;
         }
-        let run = Arc::new(Run { gateway: gateway.to_owned(), state: watch::Sender::new(Pending::default()) });
+        let run = Arc::new(Run { state: watch::Sender::new(Pending::default()) });
         runs.insert(operation.to_owned(), Arc::downgrade(&run));
-        Ok(run)
+        run
     }
 
     /// The open command under `operation`.
@@ -39,12 +37,13 @@ impl Runs {
 }
 
 pub(super) struct Run {
-    pub gateway: String,
     state: watch::Sender<Pending>,
 }
 
 #[derive(Default)]
 pub(super) struct Pending {
+    /// The gateway credential whose `chunk:command` started the command.
+    owner: Option<String>,
     effects: BTreeMap<u32, Held>,
     finished: bool,
 }
@@ -55,6 +54,25 @@ struct Held {
 }
 
 impl Run {
+    /// Binds the command to the gateway `credential` starting it, unless another started it.
+    pub fn start(&self, credential: &str) -> Result<(), Error> {
+        let mut started = Ok(());
+        self.state.send_if_modified(|pending| {
+            if pending.owner.is_some() {
+                started = pending.permits(credential);
+                return false;
+            }
+            pending.owner = Some(credential.to_owned());
+            true
+        });
+        started
+    }
+
+    /// Checks that `credential` started the command, or that it hasn't started.
+    pub fn permits(&self, credential: &str) -> Result<(), Error> {
+        self.state.borrow().permits(credential)
+    }
+
     /// Holds `effect` for the gateway to render as `value`, or fails it while the command already has as many
     /// pending as it may, or finished.
     pub fn publish(&self, effect: chunk_backend::CommandEffect, value: CommandEffect) {
@@ -107,6 +125,14 @@ impl Run {
 }
 
 impl Pending {
+    /// Checks that `credential` started the command, or that it hasn't started.
+    pub fn permits(&self, credential: &str) -> Result<(), Error> {
+        match &self.owner {
+            Some(owner) if !same_secret(owner, credential) => Err(errors::denied("another gateway ran this command")),
+            _ => Ok(()),
+        }
+    }
+
     pub fn finished(&self) -> bool {
         self.finished
     }

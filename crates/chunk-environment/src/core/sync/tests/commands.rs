@@ -2,8 +2,8 @@
 
 use super::*;
 use chunk_proto::sync::v1::{
-    CommandArguments, CommandEffect, CommandResult, CommandsResult, EffectArguments, EffectResult, GatewayClaim,
-    PrepareResult, SuggestArguments, SuggestResult, command_effect,
+    CommandArguments, CommandEffect, CommandResult, CommandSubscription, CommandsResult, EffectArguments, EffectResult,
+    GatewayClaim, PrepareResult, SuggestArguments, SuggestResult, command_effect,
 };
 
 /// Core with the player arrived through gateway `proxy`, the gateway's topic stream and its ID, and the fake JVM.
@@ -105,19 +105,37 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
     let (mut fixture, updates, stream, server) = arrived().await;
     let (client, gateway) = (fixture.client.clone(), fixture.gateway.clone());
     let operation = prepare(&fixture).await;
-    let topic = SubscribeRequest { topic: format!("command/{operation}"), ..SubscribeRequest::default() };
-    let mut effects = fixture.client.subscribe(authorized(topic, &gateway)).await.unwrap().into_inner();
+    let topic = |stream: &str| SubscribeRequest {
+        topic: format!("command/{operation}"),
+        arguments: CommandSubscription { stream: stream.into() }.encode_to_vec(),
+        ..SubscribeRequest::default()
+    };
+    let mut effects = fixture.client.subscribe(authorized(topic(&stream), &gateway)).await.unwrap().into_inner();
     let first = next(&mut effects).await;
     assert!(first.snapshot && first.upserts.is_empty() && !first.stream.is_empty());
 
     let running = tokio::spawn(say(client.clone(), gateway.clone(), stream.clone(), operation.clone(), "say hello"));
-    let pending = next(&mut effects).await;
+    let mut pending = next(&mut effects).await;
+    while pending.upserts.is_empty() {
+        pending = next(&mut effects).await;
+    }
     let [Entry { key, state: Some(State::Value(value)) }] = pending.upserts.as_slice() else {
         panic!("expected one pending effect, got {pending:?}");
     };
     let effect = CommandEffect::decode(value.as_slice()).unwrap().effect;
     assert_eq!(effect, Some(command_effect::Effect::Message("hello".into())));
     let ack = EffectArguments { operation_id: operation.clone(), sequence: key.parse().unwrap(), failed: false };
+
+    // Only the gateway that started the command follows it and acknowledges its effects.
+    let other = fixture.gateways.mint("other");
+    let subscription = SubscribeRequest { topic: "gateway/other".into(), ..SubscribeRequest::default() };
+    let mut foreign = fixture.client.subscribe(authorized(subscription, &other)).await.unwrap().into_inner();
+    let foreign_stream = next(&mut foreign).await.stream;
+    let mut denied = fixture.client.subscribe(authorized(topic(&foreign_stream), &other)).await.unwrap().into_inner();
+    assert_eq!(next(&mut denied).await.error.map(|error| error.code()), Some(Code::Denied));
+    let foreign_ack = call(client.clone(), &other, &foreign_stream, "", "chunk:effect", &ack).await;
+    assert_eq!(code(&foreign_ack), Code::Denied);
+
     let acknowledged = call(client.clone(), &gateway, &stream, "", "chunk:effect", &ack).await;
     assert!(!decoded::<EffectResult>(&acknowledged).unknown);
     let finished = running.await.unwrap();
@@ -130,8 +148,8 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
     assert_eq!(last.error.map(|error| error.code()), Some(Code::Stopped));
     let repeated = call(client.clone(), &gateway, &stream, "", "chunk:effect", &ack).await;
     assert!(decoded::<EffectResult>(&repeated).unknown);
-    assert_eq!(say(client, gateway, stream, operation, "say hello").await, finished);
-    drop(updates);
+    assert_eq!(say(client, gateway, stream, operation.clone(), "say hello").await, finished);
+    drop((updates, foreign));
     fixture.stop().await;
     server.abort();
 }
