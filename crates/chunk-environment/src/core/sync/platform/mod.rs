@@ -46,16 +46,6 @@ pub(super) async fn call(
     Ok((position(generation.epoch, Revision(generation.revision)), result))
 }
 
-/// Runs `operation` on control's tracker, so a dropped call doesn't abandon it midway and control awaits it before
-/// stopping.
-async fn run<T: Send + 'static>(
-    service: &SyncService,
-    operation: impl Future<Output = chunk_control::Result<T>> + Send + 'static,
-) -> chunk_control::Result<T> {
-    let outcome = service.operations.spawn(operation).await;
-    outcome.unwrap_or(Err(chunk_control::Error::Unresolved("the control operation's task failed")))
-}
-
 /// Issues the operation ID of one effectful call.
 async fn prepare(service: &SyncService, request: &CallRequest) -> Result<PrepareResult, Error> {
     if !request.operation_id.is_empty()

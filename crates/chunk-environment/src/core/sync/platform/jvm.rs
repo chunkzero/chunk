@@ -1,13 +1,10 @@
 //! A JVM's registration and reports, `chunk:register` and `chunk:report`, which control applies like the
 //! supervisor's. The JVM's host comes from its credential.
 
-use super::{
-    super::{
-        SyncService,
-        auth::{Class, Principal},
-        errors, position,
-    },
-    run,
+use super::super::{
+    SyncService,
+    auth::{Class, Principal},
+    errors, position,
 };
 use chunk_js::DeploymentId;
 use chunk_proto::sync::v1::{CallRequest, Error, JvmRegistered, JvmRegistration, JvmReport, Position, error::Code};
@@ -63,7 +60,8 @@ pub(super) async fn call(
             let report: JvmReport = decode(&request.arguments)?;
             let (control, credential, stream) =
                 (service.control.clone(), principal.credential.clone(), request.stream.clone());
-            let reported = run(service, async move { control.report_jvm(&host, &credential, &stream, report).await });
+            let reported =
+                service.operations.report(async move { control.report_jvm(&host, &credential, &stream, report).await });
             reported.await.map_err(|failure| errors::operation(&failure))?;
             let generation = *service.control.subscribe().borrow();
             Ok((position(generation.epoch, Revision(generation.revision)), Vec::new()))

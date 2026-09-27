@@ -44,6 +44,8 @@ struct FakeRuntime {
     available: AtomicBool,
     lost_reply: AtomicBool,
     lost_withdrawal: AtomicBool,
+    /// Holds each withdrawal unanswered while set.
+    stalled_withdrawal: AtomicBool,
     stopped: AtomicBool,
     withdrawals: AtomicUsize,
     ticks: AtomicUsize,
@@ -252,6 +254,9 @@ impl Gameplay for RuntimeService {
         request: Request<PlayerWithdrawal>,
     ) -> std::result::Result<Response<PlayerWithdrawal>, Status> {
         self.check(&request)?;
+        while self.stalled_withdrawal.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let withdrawal = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
         // Like the JVM: an operation it never prepared is not found, and another generation is refused.
@@ -432,6 +437,7 @@ impl Fixture {
             available: AtomicBool::new(true),
             lost_reply: AtomicBool::new(false),
             lost_withdrawal: AtomicBool::new(false),
+            stalled_withdrawal: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             withdrawals: AtomicUsize::new(0),
             ticks: AtomicUsize::new(0),

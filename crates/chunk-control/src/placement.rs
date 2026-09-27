@@ -24,6 +24,10 @@ impl Control {
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         validate(&request)?;
         let operation = self.operation(&request.operation_id)?;
+        // Checked before recovery's JVM calls, and again where the reservation commits.
+        if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Invalid("control draining"));
+        }
         self.admit().await?;
         let unavailable = self.unavailable()?;
         self.update(|state| {

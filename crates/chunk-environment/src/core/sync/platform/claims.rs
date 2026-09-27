@@ -2,7 +2,7 @@
 //! `chunk:activate`, `chunk:withdraw`, `chunk:abandon_move` and `chunk:depart`. The call's operation ID names the
 //! claim, which must be the calling gateway's.
 
-use super::{super::SyncService, errors, run};
+use super::{super::SyncService, errors};
 use chunk_control::{ALREADY_OWNED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim};
 use chunk_proto::{
     sync::v1::{
@@ -77,7 +77,7 @@ async fn claim(
         (None, None) => return Err(errors::invalid("no move is queued under this operation ID")),
     };
     let control = service.control.clone();
-    let outcome = match run(service, async move { control.claim(request).await }).await {
+    let outcome = match service.operations.admit(async move { control.claim(request).await }).await {
         Ok(assignment) => Outcome::Assignment(assigned(assignment)?),
         Err(Failure::Unresolved(ROUTE_AGAIN)) => Outcome::Refusal(ClaimRefusal::RouteAgain.into()),
         Err(Failure::Invalid(ALREADY_OWNED)) => Outcome::Refusal(ClaimRefusal::AlreadyConnected.into()),
@@ -91,7 +91,7 @@ async fn activate(service: &SyncService, gateway: &str, operation: &str) -> Resu
     let identity = identity.ok_or_else(|| errors::invalid("no claim under this operation ID"))?;
     let control = service.control.clone();
     let activation = control::ActivateClaim { claim: Some(identity) };
-    match run(service, async move { control.activate(activation).await }).await {
+    match service.operations.admit(async move { control.activate(activation).await }).await {
         Ok(_) => Ok(ActivateResult { waiting: false }),
         Err(Failure::Unresolved(ROSTER_WAITING)) => Ok(ActivateResult { waiting: true }),
         Err(failure) => Err(errors::operation(&failure)),
@@ -110,7 +110,7 @@ async fn withdraw(
         return Ok(WithdrawResult { unknown: true });
     };
     let control = service.control.clone();
-    let withdrawn = run(service, async move {
+    let withdrawn = service.operations.admit(async move {
         match reason {
             Some(reason) => {
                 control.abandon_move(control::AbandonMoveRequest { claim: Some(stored.request), reason }).await
@@ -127,7 +127,7 @@ async fn depart(service: &SyncService, gateway: &str, operation: &str) -> Result
     let stored = held(service, gateway, operation)?;
     let stored = stored.ok_or_else(|| errors::invalid("no claim under this operation ID"))?;
     let control = service.control.clone();
-    let status = run(service, async move { control.reconcile_departure(stored.request).await });
+    let status = service.operations.admit(async move { control.reconcile_departure(stored.request).await });
     let status = status.await.map_err(|failure| errors::operation(&failure))?;
     Ok(DepartResult { departed: status.departed })
 }

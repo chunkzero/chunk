@@ -1,16 +1,16 @@
 //! Embeddable control server with explicit host ownership.
-use crate::{Control, ControlConnection, Host, Service};
+use crate::{Control, ControlConnection, Host, Operations, Service};
 use chunk_proto::v1::local_control_server::LocalControlServer;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 
 /// Builds services served beside control's own on its listener, from control, its credential, a token cancelled when
-/// the transport begins shutting down, after hosts have stopped, which must end their open streams, and the tracker of
-/// accepted operations, which control awaits before it stops hosts.
+/// the transport begins shutting down, after hosts have stopped, which must end their open streams, and control's
+/// accepted operations, which it awaits before it stops hosts.
 pub type Services =
-    Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, TaskTracker) -> tonic::service::Routes + Send>;
+    Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, Operations) -> tonic::service::Routes + Send>;
 
 pub struct Config {
     /// Holds the credential and the host's local files; durable state lives in the environment's store.
@@ -134,7 +134,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     result.and(stopped).and(control.close().map_err(io::Error::other))
 }
 
-/// Once `closing` is cancelled, stops admitting claims, awaits accepted operations, stops the capacity executor and
+/// Once `closing` is cancelled, stops admitting operations, awaits accepted ones, stops the capacity executor and
 /// then every host, and only then cancels `transport`.
 async fn stop_hosts(
     control: &Control,
@@ -147,7 +147,7 @@ async fn stop_hosts(
     closing.cancelled().await;
     service.close_watches();
     service.close_methods();
-    // Otherwise new claims, over either transport, could keep the tracker from ever emptying.
+    // Otherwise new operations, over either transport, could keep the tracker from ever emptying.
     control.stop_admitting();
     let operations = service.operations();
     operations.close();

@@ -11,6 +11,7 @@ mod idle;
 pub mod jvm;
 mod moves;
 mod nodes;
+mod operations;
 mod placement;
 mod players;
 mod process;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub use host::{Distribution, Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
+pub use operations::Operations;
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
 pub use rpc::Service;
