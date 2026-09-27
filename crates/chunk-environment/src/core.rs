@@ -39,6 +39,8 @@ pub struct Core {
     connection: Option<BackendConnection>,
     control: Option<Running>,
     host: Option<Arc<chunk_control::ProcessHost>>,
+    /// Runs control's hosts in place of local JVMs.
+    injected_host: Option<Arc<dyn chunk_control::Host>>,
     authority: Option<chunk_control::server::Ready>,
     /// Every gateway's credential, which the sync protocol authenticates.
     gateways: Arc<sync::Gateways>,
@@ -52,7 +54,20 @@ impl Core {
     /// # Errors
     /// Reports an unreadable gateway ID, and backend and control startup errors.
     pub async fn start(config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
-        let mut core = Self::default();
+        Self::default().launch(config, on_backend).await
+    }
+
+    /// Starts core as [`Self::start`] does, with control running every host on `host` rather than as a local JVM.
+    /// For benchmarks, whose synthetic hosts run in process.
+    /// # Errors
+    /// As [`Self::start`].
+    #[doc(hidden)]
+    pub async fn start_with_host(config: CoreConfig, host: Arc<dyn chunk_control::Host>) -> io::Result<Self> {
+        Self { injected_host: Some(host), ..Self::default() }.launch(config, |_| {}).await
+    }
+
+    async fn launch(self, config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
+        let mut core = self;
         let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
@@ -150,8 +165,13 @@ impl Core {
     }
 
     async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener, record: PathBuf) -> io::Result<()> {
-        let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
-        self.host = Some(host.clone());
+        let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
+            host.clone()
+        } else {
+            let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
+            self.host = Some(host.clone());
+            host
+        };
         let backend = self.handle.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
