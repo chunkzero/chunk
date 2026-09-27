@@ -15,7 +15,7 @@ fn policy(fixture: &mut Fixture, overflow: &str) {
 #[tokio::test]
 async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() {
     for (overflow, accepted, sessions) in [("reject", 2, 1), ("replicate", 4, 2)] {
-        let mut fixture = Fixture::new().await;
+        let mut fixture = Fixture::new();
         policy(&mut fixture, overflow);
         let control = fixture.control().await;
         let mut calls = tokio::task::JoinSet::new();
@@ -84,13 +84,14 @@ async fn declared_pools_coalesce_concurrent_demand_and_pin_policy_and_version() 
 }
 
 #[tokio::test]
-async fn lost_preparation_recovers_the_original_reservation() {
-    let mut fixture = Fixture::new().await;
+async fn a_preparation_the_jvm_missed_recovers_the_original_reservation() {
+    let mut fixture = Fixture::new();
     policy(&mut fixture, "reject");
     let control = fixture.control().await;
     let claim = request("lost", &uuid::Uuid::new_v4().to_string());
-    fixture.runtime.lost_preparation.store(true, Ordering::Release);
+    fixture.runtime.stalled_preparation.store(true, Ordering::Release);
     assert!(control.claim(claim.clone()).await.is_err());
+    fixture.runtime.stalled_preparation.store(false, Ordering::Release);
     let original = control.state().unwrap().claims["lost"].clone();
     let recovered = control.claim(claim.clone()).await.unwrap();
     assert_eq!(recovered.claim.unwrap(), original.identity("lost"));
@@ -104,7 +105,7 @@ async fn lost_preparation_recovers_the_original_reservation() {
 
 #[tokio::test]
 async fn empty_expiry_counts_reservations_and_waits_for_the_jvm_to_confirm_the_finish() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     policy(&mut fixture, "reject");
     let control = fixture.control().await;
     let claim = request("reserved", &uuid::Uuid::new_v4().to_string());
@@ -145,7 +146,7 @@ async fn empty_expiry_counts_reservations_and_waits_for_the_jvm_to_confirm_the_f
 
 #[tokio::test]
 async fn failed_creation_frees_its_capacity_and_finish_requires_current_claim() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     policy(&mut fixture, "reject");
     let control = fixture.control().await;
     let claim = request("failed", &uuid::Uuid::new_v4().to_string());
@@ -160,7 +161,7 @@ async fn failed_creation_frees_its_capacity_and_finish_requires_current_claim() 
     assert_ne!(next.delivery.unwrap().session.unwrap().id, session);
     fixture.close().await;
 
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let claim = request("arrived", &uuid::Uuid::new_v4().to_string());
     let identity = control.claim(claim.clone()).await.unwrap().claim.unwrap();

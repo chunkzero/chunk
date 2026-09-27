@@ -1,6 +1,6 @@
 //! A gateway's claim lifecycle over `chunk:*` calls.
 
-use super::*;
+use super::{runtime::with_jvm, *};
 use chunk_proto::{
     sync::v1::{
         AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim,
@@ -90,9 +90,7 @@ fn result<T: Message + Default>(response: &CallResponse) -> T {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_claims_activates_and_sees_its_player_arrive() {
-    let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm)).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    let (mut fixture, jvm) = with_jvm().await;
     let gateway = fixture.gateway.clone();
     let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
 
@@ -108,14 +106,12 @@ async fn a_gateway_claims_activates_and_sees_its_player_arrive() {
     assert_eq!(claim.generation, assignment.generation);
     drop(updates);
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive() {
-    let (jvm, server) = runtime::Runtime::start();
-    let fixture = Fixture::with_host(Arc::new(jvm)).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    let (fixture, jvm) = with_jvm().await;
     let target = chunk_proxy::PlatformTarget {
         core: fixture.endpoint.clone(),
         gateway: chunk_proxy::GatewayCredential { id: "proxy".into(), credential: fixture.gateway.clone() },
@@ -132,7 +128,7 @@ async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive
     let session = tokio::time::timeout(Duration::from_secs(30), login).await.unwrap().unwrap();
     assert!(!session.is_empty());
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -156,9 +152,7 @@ async fn claim_calls_naming_a_superseded_or_foreign_stream_are_stopped() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claim_replays_its_outcome_and_rejects_a_changed_request_or_another_gateway() {
-    let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm)).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    let (mut fixture, jvm) = with_jvm().await;
     let gateway = fixture.gateway.clone();
     let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
     let stream = first.stream.as_str();
@@ -188,14 +182,12 @@ async fn a_claim_replays_its_outcome_and_rejects_a_changed_request_or_another_ga
     assert_eq!(code(&withdrawn), Code::Denied);
     drop((updates, foreign));
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_abandons_a_move_then_withdraws_its_arrived_claim_and_departs() {
-    let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm)).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    let (mut fixture, jvm) = with_jvm().await;
     let gateway = fixture.gateway.clone();
     let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
     let stream = first.stream.as_str();
@@ -215,7 +207,7 @@ async fn a_gateway_abandons_a_move_then_withdraws_its_arrived_claim_and_departs(
     assert!(result::<DepartResult>(&departed).departed);
     drop(updates);
     fixture.stop().await;
-    server.abort();
+    jvm.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

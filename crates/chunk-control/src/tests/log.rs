@@ -5,7 +5,7 @@ use prost::Message;
 
 #[tokio::test]
 async fn reopens_state_larger_than_the_default_scan_budget() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let mut first = request("claim-0", &uuid::Uuid::new_v4().to_string());
     first.identity.as_mut().unwrap().properties.push(chunk_proto::v1::Property {
@@ -95,7 +95,7 @@ const REVISION_MASK: u64 = (1 << 40) - 1;
 
 #[tokio::test]
 async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_revisions() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
     let control = fixture.control().await;
@@ -137,8 +137,8 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     fixture.recovered(&control).await;
     {
         let bindings = fixture.runtime.bindings.lock().unwrap();
-        assert_eq!(bindings["lost"].phase, DeliveryPhase::Closed);
-        assert_eq!(bindings["kept"].phase, DeliveryPhase::Prepared);
+        assert_eq!(bindings["lost"].phase, JvmDeliveryPhase::Closed);
+        assert_eq!(bindings["kept"].phase, JvmDeliveryPhase::Prepared);
     }
 
     // The lost operation is retired with the generations the JVM holds; retrying it reserves nothing.
@@ -168,9 +168,7 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
 
 #[tokio::test]
 async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission() {
-    use chunk_proto::v1::{ProcessRegistration, supervisor_server::Supervisor};
-
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
     drop(fixture.control().await);
@@ -200,17 +198,10 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     control.reconcile_all().await.unwrap();
     assert!(matches!(control.claim(relogin.clone()).await, Err(Error::Busy)));
 
-    let service = crate::Service::new(control.clone(), "control-group-credential-with-32-characters".into()).unwrap();
-    let mut registration = Request::new(ProcessRegistration {
-        identity: Some(ProcessIdentity { runtime_id: host.clone(), ..fixture.runtime.identity.clone() }),
-        control_endpoint: fixture.host.endpoint.clone(),
-        player_endpoint: "127.0.0.1:1".into(),
-    });
-    registration.metadata_mut().insert("authorization", "Bearer test-runtime-credential".parse().unwrap());
-    service.register_process(registration).await.unwrap();
+    control.register_jvm(&host, CREDENTIAL, fixture.host.registration(&host)).unwrap();
     fixture.recovered(&control).await;
-    control.admit().await.unwrap();
-    assert_eq!(fixture.runtime.bindings.lock().unwrap()["lost"].phase, DeliveryPhase::Closed);
+    control.admit().unwrap();
+    assert_eq!(fixture.runtime.bindings.lock().unwrap()["lost"].phase, JvmDeliveryPhase::Closed);
     let state = control.state().unwrap();
     assert!(state.claims["lost"].phase == Phase::Released);
 
@@ -222,14 +213,14 @@ async fn a_surviving_jvm_whose_host_creation_was_lost_is_fenced_before_admission
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
     assert!(!state.hosts.contains_key(&host) && state.drains.is_empty());
-    drop((service, control));
+    drop(control);
     fixture.control().await.claim(relogin).await.unwrap();
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn a_session_whose_creation_a_restore_lost_on_a_surviving_host_is_finished_before_admission() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let path = fixture.directory.path().join("control.sqlite");
     let storage = Arc::new(Memory::default());
     let control = fixture.control().await;
@@ -242,14 +233,9 @@ async fn a_session_whose_creation_a_restore_lost_on_a_surviving_host_is_finished
 
     // The JVM creates a second session on the same host, but the commit recording it is lost.
     let session = uuid::Uuid::new_v4().to_string();
-    let command = SessionCommand {
-        session: Some(chunk_proto::v1::SessionRef { id: session.clone() }),
-        generation: 1,
-        session_type: "bridge/default".into(),
-        capacity: 2,
-        ..Default::default()
-    };
-    fixture.runtime.sessions.lock().unwrap().insert(session.clone(), command);
+    let running =
+        chunk_proto::sync::v1::JvmSession { session_type: "bridge/default".into(), capacity: 2, ..Default::default() };
+    fixture.runtime.sessions.lock().unwrap().insert(session.clone(), running);
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
@@ -257,7 +243,7 @@ async fn a_session_whose_creation_a_restore_lost_on_a_surviving_host_is_finished
 
     // Admission opens once the JVM confirms it ended the session.
     let control = fixture.control().await;
-    control.admit().await.unwrap();
+    control.admit().unwrap();
     assert!(fixture.runtime.ended_sessions.lock().unwrap().contains(&session));
     assert!(control.state().unwrap().sessions[&session].finished);
     fixture.close().await;

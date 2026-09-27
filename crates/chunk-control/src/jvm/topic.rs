@@ -91,16 +91,11 @@ impl Topic {
 
     fn entries(&self) -> Result<(Generation, BTreeMap<String, Vec<u8>>)> {
         let state = self.control.state()?;
-        let runtime = self.control.host.connection(&self.host);
-        let runtime = runtime.ok_or(Error::Invalid("unregistered or replaced process"))?;
+        if self.control.host.connection(&self.host).is_none() {
+            return Err(Error::Invalid("unregistered or replaced process"));
+        }
         let mut entries = BTreeMap::new();
-        for (id, (finish, command)) in crate::sync::desired(&state, &self.host, &runtime.identity)? {
-            let session = sync::JvmSession {
-                session_type: command.session_type,
-                capacity: command.capacity,
-                configuration_json: command.configuration_json,
-                finish,
-            };
+        for (id, session) in crate::sync::desired(&state, &self.host)? {
             entries.insert(format!("session/{id}"), session.encode_to_vec());
         }
         for (operation, delivery) in deliveries(&state, &self.host)? {

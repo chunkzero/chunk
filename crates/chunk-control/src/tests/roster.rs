@@ -3,8 +3,8 @@ use crate::{RosterMember, RosterMove};
 use chunk_proto::v1::{ClaimIdentity, MovePlayerRequest};
 
 /// Sessions of capacity 4, and one `arena` session at most.
-async fn fixture() -> Fixture {
-    let mut fixture = Fixture::new().await;
+fn fixture() -> Fixture {
+    let mut fixture = Fixture::new();
     let app: chunk_contract::AppArtifact = serde_json::from_value(serde_json::json!({"id":"bridge","jar":"app.jar",
         "sha256":"artifact","java_version":25,"sessions":{"default":{"machine_profile":"local","capacity":4}}}))
     .unwrap();
@@ -48,7 +48,7 @@ fn roster(operation: &str, version: u64, members: &[(String, ClaimIdentity)]) ->
 
 #[tokio::test]
 async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a_destination() {
-    let fixture = fixture().await;
+    let fixture = fixture();
     let control = fixture.control().await;
     let mut players = Vec::new();
     for index in 0..6 {
@@ -95,7 +95,7 @@ async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a
 
 #[tokio::test]
 async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
-    let fixture = fixture().await;
+    let fixture = fixture();
     let control = fixture.control().await;
     let (first, second, third) = (
         arrive(&fixture, &control, "a").await,
@@ -164,7 +164,7 @@ async fn new_rosters_reject_terminal_member_operations_without_changing_state() 
     for (case, prepare, fail) in
         [("prepared then canceled", true, false), ("canceled before preparation", false, false), ("failed", true, true)]
     {
-        let fixture = fixture().await;
+        let fixture = fixture();
         let control = fixture.control().await;
         let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
         // Reserve the fresh member first to exercise rollback of the whole roster.
@@ -223,7 +223,7 @@ async fn new_rosters_reject_terminal_member_operations_without_changing_state() 
 
 #[tokio::test]
 async fn canceling_a_roster_before_preparation_releases_its_reservations() {
-    let fixture = fixture().await;
+    let fixture = fixture();
     let control = fixture.control().await;
     let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
     let destinations = control.move_roster(&roster("party", 1, &members)).unwrap();

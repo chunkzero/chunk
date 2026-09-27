@@ -37,7 +37,7 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     assert!(host.process(&id).unwrap().is_some());
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
-        control_endpoint: "http://127.0.0.1:1".into(),
+        control_endpoint: String::new(),
         player_endpoint: "127.0.0.1:2".into(),
     };
     let token = format!("Bearer {}", process.token);
@@ -294,7 +294,7 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
     let id = uuid::Uuid::new_v4().to_string();
     let registration = ProcessRegistration {
         identity: Some(ProcessIdentity { runtime_id: id.clone(), app_id: "bridge".into(), ..Default::default() }),
-        control_endpoint: "http://127.0.0.1:1".into(),
+        control_endpoint: String::new(),
         player_endpoint: "127.0.0.1:2".into(),
     };
     assert!(host.adopt("credential", registration.clone()).is_err());

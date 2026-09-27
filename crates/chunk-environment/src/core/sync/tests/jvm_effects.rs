@@ -20,8 +20,9 @@ use std::{
 const CAPABILITY: [u8; 32] = [7; 32];
 
 /// A JVM following its topic over sync. It runs each session it is asked for, prepares each delivery and closes it
-/// once withdrawn or gone, answers method `score` with 7 and `hold` only once it is cancelled, and never answers
-/// `stuck`. Its players arrive and leave when a test says.
+/// once withdrawn or gone, answers methods `score` and `status` with 7, `hold` and `status` with `limit` 0 only once
+/// they are cancelled, and never answers `stuck`. Its players arrive and leave when a test says. It closes its stream
+/// once asked to stop.
 #[derive(Clone)]
 pub(super) struct SyncJvm {
     client: CoreClient<Channel>,
@@ -38,12 +39,30 @@ struct Held {
     methods: BTreeMap<String, JvmMethodCall>,
     runnable: BTreeSet<String>,
     answered: BTreeSet<String>,
+    /// How many methods it completed, held until cancelled, and cancelled.
+    counts: (usize, usize, usize),
+}
+
+/// Whether the JVM answers `call` only once it is cancelled.
+fn holds(call: &JvmMethodCall) -> bool {
+    call.method == "hold" || (call.method == "status" && call.arguments_json.windows(9).any(|w| w == b"\"limit\":0"))
 }
 
 impl SyncJvm {
     async fn start(fixture: &Fixture, host: &str) -> Self {
-        fixture.register().await;
-        let jvm = Self { client: fixture.client.clone(), host: host.into(), held: Arc::default() };
+        Self::connect(fixture.client.clone(), host).await
+    }
+
+    /// Registers `host`'s JVM through `client` and follows its topic.
+    pub(super) async fn connect(client: CoreClient<Channel>, host: &str) -> Self {
+        let registration = CallRequest {
+            method: "chunk:register".into(),
+            arguments: super::jvm::registration().encode_to_vec(),
+            ..CallRequest::default()
+        };
+        let registered = client.clone().call(authorized(registration, JVM)).await.unwrap().into_inner();
+        assert!(matches!(registered.outcome, Some(Outcome::Result(_))), "{registered:?}");
+        let jvm = Self { client, host: host.into(), held: Arc::default() };
         jvm.follow().await;
         jvm
     }
@@ -59,7 +78,12 @@ impl SyncJvm {
                 if update.error.is_some() {
                     return;
                 }
+                // Like a JVM that exits once asked to stop, it closes its stream after reporting.
+                let stop = update.upserts.iter().any(|entry| entry.key == "stop");
                 jvm.apply(update, false).await;
+                if stop {
+                    return;
+                }
             }
         });
     }
@@ -101,8 +125,8 @@ impl SyncJvm {
                     }
                 } else if let Some(operation) = entry.key.strip_prefix("method/") {
                     let call = JvmMethodCall::decode(value.as_slice()).unwrap();
-                    if !call.cancel {
-                        held.runnable.insert(operation.into());
+                    if !call.cancel && held.runnable.insert(operation.into()) && holds(&call) {
+                        held.counts.1 += 1;
                     }
                     held.methods.insert(operation.into(), call);
                 }
@@ -129,11 +153,11 @@ impl SyncJvm {
                 .filter(|(operation, _)| !answered.contains(*operation))
                 .filter_map(|(operation, call)| {
                     let result = match call.method.as_str() {
-                        "score" => {
-                            JvmMethodResult { phase: JvmMethodPhase::Completed.into(), result_json: b"7".into() }
-                        }
-                        "hold" if call.cancel => {
+                        _ if holds(call) && call.cancel => {
                             JvmMethodResult { phase: JvmMethodPhase::Cancelled.into(), ..Default::default() }
+                        }
+                        "score" | "status" if !holds(call) => {
+                            JvmMethodResult { phase: JvmMethodPhase::Completed.into(), result_json: b"7".into() }
                         }
                         _ => return None,
                     };
@@ -147,13 +171,20 @@ impl SyncJvm {
         }
         for (operation, result) in answers {
             if self.call("chunk:method_result", &operation, &stream, &result).await.outcome == ACCEPTED {
-                self.held.lock().unwrap().answered.insert(operation);
+                let mut held = self.held.lock().unwrap();
+                if held.answered.insert(operation) {
+                    match result.phase() {
+                        JvmMethodPhase::Completed => held.counts.0 += 1,
+                        JvmMethodPhase::Cancelled => held.counts.2 += 1,
+                        _ => {}
+                    }
+                }
             }
         }
     }
 
     /// Moves the player of `operation`'s delivery on, reporting it in `phase`.
-    async fn player(&self, operation: &str, phase: JvmDeliveryPhase) {
+    pub(super) async fn player(&self, operation: &str, phase: JvmDeliveryPhase) {
         let (stream, status) = {
             let mut held = self.held.lock().unwrap();
             let generation = held.deliveries.get(operation).expect("a held delivery").generation;
@@ -163,6 +194,18 @@ impl SyncJvm {
         };
         let report = JvmReport { deliveries: vec![status], ..JvmReport::default() };
         assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
+    }
+
+    /// How many methods the JVM completed, held until cancelled, and cancelled.
+    pub(super) fn methods(&self) -> (usize, usize, usize) {
+        self.held.lock().unwrap().counts
+    }
+
+    /// The operations whose deliveries the JVM holds prepared.
+    pub(super) fn prepared(&self) -> Vec<String> {
+        let held = self.held.lock().unwrap();
+        let prepared = held.deliveries.iter().filter(|(_, status)| status.phase() == JvmDeliveryPhase::Prepared);
+        prepared.map(|(operation, _)| operation.clone()).collect()
     }
 
     /// Whether `operation` was runnable on the topic since the JVM last forgot what was.

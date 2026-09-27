@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn queued_moves_reach_the_watching_proxy_without_polling() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("source", &uuid);

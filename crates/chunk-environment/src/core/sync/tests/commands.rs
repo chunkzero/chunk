@@ -14,8 +14,7 @@ struct Arrived {
     fixture: Fixture,
     updates: Streaming<Update>,
     gateway: Gateway,
-    jvm: runtime::Runtime,
-    server: JoinHandle<()>,
+    jvm: runtime::Running,
 }
 
 /// A gateway's credential and its current `gateway/<id>` stream.
@@ -27,12 +26,11 @@ struct Gateway {
 }
 
 async fn arrived() -> Arrived {
-    use chunk_proto::v1::ClaimPhase;
-    let (jvm, server) = runtime::Runtime::start();
-    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    use chunk_proto::v1::{ActivateClaim, ClaimPhase};
+    let (fixture, jvm) = runtime::with_jvm().await;
     let (updates, gateway) = Gateway::follow_own(&fixture, fixture.gateway.clone(), "proxy").await;
-    fixture.control.claim(runtime::login()).await.unwrap();
+    let assignment = fixture.control.claim(runtime::login()).await.unwrap();
+    fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     let arrived = |fixture: &Fixture| {
         let players = fixture.control.players().unwrap().players;
         players.iter().any(|player| player.phase() == ClaimPhase::Arrived)
@@ -40,7 +38,7 @@ async fn arrived() -> Arrived {
     while !arrived(&fixture) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Arrived { fixture, updates, gateway, jvm, server }
+    Arrived { fixture, updates, gateway, jvm }
 }
 
 impl Arrived {
@@ -53,7 +51,7 @@ impl Arrived {
     async fn stop(self) {
         drop(self.updates);
         self.fixture.stop().await;
-        self.server.abort();
+        self.jvm.abort();
     }
 }
 

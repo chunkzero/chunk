@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
 use chunk_proto::v1::{ClaimIdentity, SessionInventory, SessionPhase};
-use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
     Control, Error, Result,
@@ -27,34 +24,23 @@ impl Control {
         })
     }
 
-    pub(crate) async fn reconcile_sessions(self: &Arc<Self>) -> Result<()> {
+    pub(crate) fn reconcile_sessions(&self) -> Result<()> {
         let state = self.state()?;
-        let permits = Arc::new(Semaphore::new(8));
-        let mut tasks = JoinSet::new();
         for id in state
             .hosts
             .keys()
             .filter(|id| state.sessions.values().any(|session| &session.host == *id && !session.finished))
         {
-            let id = id.clone();
-            let control = self.clone();
-            let permits = permits.clone();
-            tasks.spawn(async move {
-                let Ok(_permit) = permits.acquire_owned().await else {
-                    return;
-                };
-                if let Err(error) = control.reconcile_host_sessions(&id).await {
-                    tracing::debug!(%error, host=id, "destination disposition remains unresolved");
-                }
-            });
+            if let Err(error) = self.reconcile_host_sessions(id) {
+                tracing::debug!(%error, host = id, "destination disposition remains unresolved");
+            }
         }
-        self.join_progressing_drains(tasks).await?;
         Ok(())
     }
 
-    /// Reapplies what `host`'s JVM last reported, fences deliveries the log does not own, and asks the JVM to end
-    /// sessions that emptied past their timeout or retired.
-    pub(crate) async fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
+    /// Reapplies what `host`'s JVM last reported, and asks the JVM to end sessions that emptied past their timeout or
+    /// retired.
+    fn reconcile_host_sessions(&self, host: &str) -> Result<()> {
         let state = self.state()?;
         if state.released(host) {
             return Ok(());
@@ -66,11 +52,9 @@ impl Control {
         if !crate::placement::runs_host(&state, &runtime, expected) {
             return Err(Error::Invalid("session cleanup runtime mismatch"));
         }
-        let Some(report) = self.links.report(host, &runtime.identity) else {
+        if self.links.report(host, &runtime.identity).is_none() {
             return Ok(());
-        };
-        // Unfenced deliveries are retried on the next pass.
-        self.fence_deliveries(host, &runtime, &report).await?;
+        }
         let now = crate::now_ms();
         self.update(|state| {
             self.reapply(state, host, &runtime.identity)?;

@@ -96,7 +96,6 @@ impl chunk_control::Host for Launches {
         let launch = self.0.lock().unwrap();
         let registration = launch.registration.clone().filter(|_| launch.host.as_deref() == Some(id))?;
         Some(RuntimeConnection {
-            endpoint: registration.control_endpoint,
             token: JVM.into(),
             identity: registration.identity?,
             player_endpoint: registration.player_endpoint,
@@ -112,7 +111,7 @@ impl chunk_control::Host for Launches {
     }
 }
 
-fn registration() -> JvmRegistration {
+pub(super) fn registration() -> JvmRegistration {
     JvmRegistration {
         process_id: "jvm".into(),
         generation: 1,

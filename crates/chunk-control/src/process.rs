@@ -1,8 +1,5 @@
-use crate::{
-    Distribution, Error, Host, ProcessHostConfig, Progress, Release, Result, RuntimeConnection,
-    client::{auth, channel},
-};
-use chunk_proto::v1::{ProcessIdentity, ProcessRegistration, node_control_client::NodeControlClient};
+use crate::{Distribution, Error, Host, ProcessHostConfig, Progress, Release, Result, RuntimeConnection};
+use chunk_proto::v1::{ProcessIdentity, ProcessRegistration};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,7 +48,6 @@ impl Process {
         Some(RuntimeConnection {
             identity: self.identity.clone(),
             token: self.token.clone(),
-            endpoint: registration.control_endpoint,
             player_endpoint: registration.player_endpoint,
         })
     }
@@ -378,7 +374,7 @@ impl Host for ProcessHost {
         if process.stop.is_cancelled() || process.stopped.load(Ordering::Acquire) {
             return Err(Error::Stopped);
         }
-        validate_endpoints(&registration)?;
+        validate_endpoint(&registration)?;
         let mut frozen = process.registration.lock().map_err(|_| Error::Unresolved("registration poisoned"))?;
         if frozen.as_ref().is_some_and(|previous| previous != &registration) {
             return Err(Error::Invalid("registration changed"));
@@ -415,7 +411,7 @@ impl Host for ProcessHost {
         found
     }
     fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
-        validate_endpoints(&registration)?;
+        validate_endpoint(&registration)?;
         let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
         let id = identity.runtime_id.clone();
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
@@ -468,15 +464,13 @@ impl Host for ProcessHost {
         process.stop.cancel();
         // A re-attached JVM has no Child, so it is killed by its recorded PID after the same grace an owned one gets,
         // and only its launch marker can confirm it exited.
-        if process.adopted {
-            stop_gracefully(&process).await;
-            if !self.exits(id, EXIT_GRACE).await
-                && let Err(error) = pid::kill(&self.path(id, "pid")?)
-                && !self.stopped(id)
-            {
-                tracing::warn!(%error, host = id, "cannot kill an adopted JVM; its release stays unresolved");
-                return Ok(false);
-            }
+        if process.adopted
+            && !self.exits(id, EXIT_GRACE).await
+            && let Err(error) = pid::kill(&self.path(id, "pid")?)
+            && !self.stopped(id)
+        {
+            tracing::warn!(%error, host = id, "cannot kill an adopted JVM; its release stays unresolved");
+            return Ok(false);
         }
         Ok(self.exits(id, Duration::from_secs(12)).await)
     }
@@ -543,7 +537,6 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         exit = child.wait() => { exit?; return Ok(()); }
         () = process.stop.cancelled() => {}
     }
-    stop_gracefully(process).await;
     if let Ok(result) = tokio::time::timeout(EXIT_GRACE, child.wait()).await {
         result?;
     } else {
@@ -609,34 +602,13 @@ pub(crate) const STOP_GRACE: Duration = Duration::from_secs(3);
 /// How long a JVM asked to stop may take to exit before control kills it.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// Asks the JVM to stop over its control endpoint. One registered over sync has none; its topic's `stop` entry asks it.
-async fn stop_gracefully(process: &Process) {
-    if let Some(connection) = process.connection().filter(|connection| !connection.endpoint.is_empty()) {
-        let graceful = async {
-            NodeControlClient::new(channel(&connection).await?)
-                .stop_process(auth(&connection, connection.identity.clone(), 2)?)
-                .await?;
-            Ok::<_, Error>(())
-        };
-        let _ = tokio::time::timeout(STOP_GRACE, graceful).await;
-    }
-}
-
-/// Requires loopback endpoints. A JVM registered over the sync protocol serves no control endpoint.
-fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
-    let control = Some(&registration.control_endpoint).filter(|endpoint| !endpoint.is_empty());
-    for endpoint in control.into_iter().chain([&registration.player_endpoint]) {
-        let address: std::net::SocketAddr = endpoint
-            .strip_prefix("http://")
-            .unwrap_or(endpoint)
-            .parse()
-            .map_err(|_| Error::Invalid("process endpoint"))?;
-        if !address.ip().is_loopback() || address.port() == 0 {
-            return Err(Error::Invalid("process requires loopback"));
-        }
-    }
-    if control.is_some_and(|endpoint| !endpoint.starts_with("http://")) {
-        return Err(Error::Invalid("control endpoint scheme"));
+/// Requires a loopback player endpoint.
+fn validate_endpoint(registration: &ProcessRegistration) -> Result<()> {
+    let endpoint = &registration.player_endpoint;
+    let address: std::net::SocketAddr =
+        endpoint.strip_prefix("http://").unwrap_or(endpoint).parse().map_err(|_| Error::Invalid("process endpoint"))?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(Error::Invalid("process requires loopback"));
     }
     Ok(())
 }

@@ -15,7 +15,7 @@ fn auth<T>(value: T, token: &str) -> Request<T> {
 
 #[tokio::test]
 async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     fixture.release.contracts.session_methods = Some(super::session_methods::method_contract());
     let control = fixture.control().await;
     let source = request("method-source", &uuid::Uuid::new_v4().to_string());
@@ -42,7 +42,6 @@ async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
         client.poll_prepared_method(auth(operation.clone(), TOKEN)).await.unwrap().into_inner().phase,
         SessionMethodPhase::Accepted as i32
     );
-    fixture.runtime.lost_reply.store(true, Ordering::Release);
     assert_eq!(
         client.start_prepared_method(auth(operation.clone(), TOKEN)).await.unwrap().into_inner().phase,
         SessionMethodPhase::Accepted as i32
@@ -118,7 +117,7 @@ async fn prepared_methods_authenticate_pinned_handles_and_start_only_once() {
 
 #[tokio::test]
 async fn prepared_methods_bound_pending_handles_and_cancel_before_shutdown_wait() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     fixture.release.contracts.session_methods = Some(super::session_methods::method_contract());
     let control = fixture.control().await;
     let source = request("method-capacity", &uuid::Uuid::new_v4().to_string());
@@ -168,7 +167,7 @@ async fn prepared_methods_bound_pending_handles_and_cancel_before_shutdown_wait(
 
 #[tokio::test]
 async fn captured_moves_reject_replaced_connections_even_for_existing_operations() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new();
     let control = fixture.control().await;
     let uuid = uuid::Uuid::new_v4().to_string();
     let source = request("move-source", &uuid);
@@ -214,7 +213,7 @@ async fn captured_moves_reject_replaced_connections_even_for_existing_operations
 
 #[tokio::test]
 async fn pinned_method_configuration_validates_declarations_and_keeps_empty_compatibility() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     let serialized = serde_json::to_value(&fixture.release).unwrap();
     assert!(serialized.get("session_methods").is_none());
     let decoded: Release = serde_json::from_value(serialized).unwrap();

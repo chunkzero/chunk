@@ -1,13 +1,12 @@
 use chunk_proto::v1::{
     ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, DeliveryInventory, DeliveryPhase,
-    PlayerDelivery, PlayerWithdrawal, ProcessIdentity, gameplay_client::GameplayClient,
+    PlayerDelivery, ProcessIdentity,
 };
 use prost::Message;
 use std::collections::BTreeSet;
 
 use crate::{
     Control, Error, Result,
-    client::{auth, channel},
     state::{Claim, Phase, State},
 };
 
@@ -18,7 +17,7 @@ impl Control {
     /// has fenced surviving JVMs.
     pub async fn activate(&self, request: ActivateClaim) -> Result<Assignment> {
         let identity = request.claim.as_ref().ok_or(Error::Invalid("missing claim identity"))?;
-        self.admit().await?;
+        self.admit()?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
@@ -54,9 +53,9 @@ impl Control {
         self.reconcile(&identity.operation_id)
     }
 
-    /// Withdraws only this exact operation and releases capacity after affirmative fencing.
+    /// Withdraws only this exact operation and releases capacity once its JVM reports the delivery closed.
     /// # Errors
-    /// Unreachable control channels retain the reservation and membership.
+    /// A JVM that does not confirm the withdrawal retains the reservation and membership.
     pub async fn cancel(&self, request: ClaimRequest) -> Result<ClaimIdentity> {
         self.cancel_with_failure(request, None).await
     }
@@ -99,29 +98,10 @@ impl Control {
         if abandoned {
             return Ok(identity);
         }
+        // The JVM sees the withdrawal on its topic and reports the delivery closed.
         if !state.released(&host) {
-            let runtime = self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
-            // A JVM registered over sync sees the withdrawal on its topic and reports the delivery closed.
-            if runtime.over_sync() {
-                self.withdrawn_over_sync(&host, &request.operation_id, claim.generation).await?;
-                return self.release_withdrawn(&request.operation_id, identity);
-            }
-            let withdrawn = GameplayClient::new(channel(&runtime).await?)
-                .withdraw_player(auth(
-                    &runtime,
-                    PlayerWithdrawal {
-                        operation_id: request.operation_id.clone(),
-                        owner_generation: claim.generation.wire(),
-                    },
-                    10,
-                )?)
-                .await;
-            match withdrawn {
-                Ok(_) => {}
-                // A late preparation cannot activate after this operation is canceled.
-                Err(error) if error.code() == tonic::Code::NotFound && claim.assignment.is_none() => {}
-                Err(error) => return Err(error.into()),
-            }
+            self.host.connection(&host).ok_or(Error::Unresolved("runtime unavailable"))?;
+            self.withdrawn(&host, &request.operation_id, claim.generation).await?;
         }
         self.release_withdrawn(&request.operation_id, identity)
     }
@@ -174,8 +154,7 @@ impl Control {
     }
 
     /// Stops the owned runtime processes directly, without recording it, since the environment store may have
-    /// stopped; a JVM attached over sync is asked on its topic first. Dropping control alone preserves them for
-    /// recovery.
+    /// stopped; each JVM is asked on its topic first. Dropping control alone preserves them for recovery.
     /// # Errors
     /// Reports unresolved hosts, including launches without a host row whose JVM may still run; a failed stop must not
     /// be treated as a fencing acknowledgment.

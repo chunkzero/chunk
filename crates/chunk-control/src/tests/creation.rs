@@ -32,20 +32,21 @@ fn demand(operation: &str, key: &str) -> ClaimRequest {
 
 #[tokio::test]
 async fn one_implementation_uses_frozen_destination_capacity_and_configuration_across_recovery() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     configured_destinations(&mut fixture);
     let control = fixture.control().await;
-    let small = demand("small", "small");
-    // The JVM is unreachable, so it holds no delivery for the reservation, which the retry after recovery prepares.
+    control.claim(demand("large-0", "large")).await.unwrap();
+    // The JVM is unreachable, so the claim fails once its session is reserved.
     fixture.runtime.available.store(false, Ordering::Release);
-    assert!(control.claim(small.clone()).await.is_err());
+    assert!(control.claim(demand("small", "small")).await.is_err());
     fixture.runtime.available.store(true, Ordering::Release);
     let reserved = control.state().unwrap().claims["small"].session.clone();
     drop(control);
+    // Recovery fences the reservation, which has no assignment, and a new login reuses its session.
     let control = fixture.control().await;
-    let recovered = control.claim(small).await.unwrap();
+    let recovered = control.claim(demand("small-again", "small")).await.unwrap();
     assert_eq!(recovered.delivery.unwrap().session.unwrap().id, reserved);
-    for index in 0..3 {
+    for index in 1..3 {
         control.claim(demand(&format!("large-{index}"), "large")).await.unwrap();
     }
     assert!(matches!(control.claim(demand("small-full", "small")).await, Err(Error::Capacity)));
@@ -89,7 +90,7 @@ async fn one_implementation_uses_frozen_destination_capacity_and_configuration_a
 
 #[tokio::test]
 async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_launch() {
-    let mut fixture = Fixture::new().await;
+    let mut fixture = Fixture::new();
     configured_destinations(&mut fixture);
     for configuration in [json!({}), json!({"map":"ocean"}), json!({"map":"forest","extra":true}), json!([])] {
         let mut config = fixture.release.clone();

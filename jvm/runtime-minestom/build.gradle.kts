@@ -17,7 +17,7 @@ dependencies {
     api(project(":jvm:backend-client"))
     api(libs.minestom)
     implementation(project(":jvm:proto"))
-    implementation(libs.grpc.netty)
+    testImplementation(libs.grpc.netty)
     runtimeOnly(libs.slf4j.simple)
     testImplementation(kotlin("stdlib"))
 }
