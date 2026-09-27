@@ -38,6 +38,8 @@ pub struct Config {
     pub compression_threshold: Option<usize>,
     /// Deadline for configuration waiting and for the subsequent registry exchange.
     pub configuration_timeout: Duration,
+    /// Accepts logins without encryption or Mojang verification, as vanilla offline mode does. Local testing only.
+    pub offline_logins: bool,
 }
 
 impl Default for Config {
@@ -50,6 +52,7 @@ impl Default for Config {
             connection_timeout: Duration::from_secs(10),
             compression_threshold: Some(256),
             configuration_timeout: Duration::from_secs(300),
+            offline_logins: false,
         }
     }
 }

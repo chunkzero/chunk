@@ -125,7 +125,12 @@ impl Proxy {
         let platform =
             config.platform.clone().map(platform::Platform::new).transpose()?.map(|p| Arc::new(RwLock::new(p)));
         let responses = Arc::new(Responses::new(&config)?);
-        let authentication = Arc::new(Authentication::new().await?);
+        if config.offline_logins {
+            tracing::warn!(
+                "OFFLINE LOGINS ENABLED: players are not authenticated and can join under any name; for local testing only"
+            );
+        }
+        let authentication = Arc::new(Authentication::new(config.offline_logins).await?);
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");

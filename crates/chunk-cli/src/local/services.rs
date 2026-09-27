@@ -141,7 +141,10 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
     }
     reporter.running("Proxy", settings.bind);
     let gateway = match shared.target(&version) {
-        Ok(target) => Gateway::start(GatewayConfig::new(settings.bind), target).await,
+        Ok(target) => {
+            let config = GatewayConfig { offline_logins: settings.offline_logins, ..GatewayConfig::new(settings.bind) };
+            Gateway::start(config, target).await
+        }
         Err(error) => Err(error),
     };
     match gateway {

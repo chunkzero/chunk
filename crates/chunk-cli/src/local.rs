@@ -47,6 +47,9 @@ pub(crate) struct Options {
     /// After a JVM change, disconnect players still on the old release after this many seconds.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(0..=120))]
     drain_seconds: u64,
+    /// Accept logins without Mojang authentication, using offline-mode UUIDs. For local testing only.
+    #[arg(long)]
+    offline_logins: bool,
 }
 
 struct Settings {
@@ -54,6 +57,7 @@ struct Settings {
     bind: SocketAddr,
     backend_bind: SocketAddr,
     control_bind: SocketAddr,
+    offline_logins: bool,
 }
 
 /// A packaged release checked against its Java runtime and projected into a control release.
@@ -137,8 +141,13 @@ async fn serve(
     reporter.running("Java", format!("Checking Java {required}+"));
     let staged = stage(&project, built, options.java.as_deref(), &stop).await?;
     reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
-    let settings =
-        Settings { state, bind: options.bind, backend_bind: options.backend_bind, control_bind: options.control_bind };
+    let settings = Settings {
+        state,
+        bind: options.bind,
+        backend_bind: options.backend_bind,
+        control_bind: options.control_bind,
+        offline_logins: options.offline_logins,
+    };
     let watched = if options.no_watch {
         None
     } else {
