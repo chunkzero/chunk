@@ -2,8 +2,9 @@ package dev.chunkzero.backend.client;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import chunk.v1.BackendGrpc;
-import chunk.v1.BackendOuterClass.*;
+import chunk.sync.v1.CoreGrpc;
+import chunk.sync.v1.CoreOuterClass.*;
+import chunk.sync.v1.CoreOuterClass.Error;
 
 import com.google.protobuf.ByteString;
 
@@ -41,13 +42,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 class BackendSessionTest {
+    private static final String CREDENTIAL = "test-credential-with-at-least-32-bytes";
     private static final JsonType<Void> NULL =
             JsonType.of(new TypeReference<Void>() {}, BackendValues::checkNull);
     private static final JsonType<Long> INTEGER =
             JsonType.of(new TypeReference<Long>() {}, BackendValues::checkInteger);
+    private static final QueryRef<Long, Long> READ =
+            new QueryRef<>("shared/read", INTEGER, INTEGER);
     private final Fixture fixture = new Fixture();
     private Server server;
     private ManagedChannel channel;
@@ -66,16 +69,10 @@ class BackendSessionTest {
                                             Metadata headers,
                                             ServerCallHandler<Q, R> next) {
                                         assertEquals(
-                                                "local",
+                                                "Bearer " + CREDENTIAL,
                                                 headers.get(
                                                         Metadata.Key.of(
-                                                                "x-chunk-environment",
-                                                                Metadata.ASCII_STRING_MARSHALLER)));
-                                        assertEquals(
-                                                "immutable-build",
-                                                headers.get(
-                                                        Metadata.Key.of(
-                                                                "x-chunk-deployment",
+                                                                "authorization",
                                                                 Metadata.ASCII_STRING_MARSHALLER)));
                                         return next.startCall(call, headers);
                                     }
@@ -92,10 +89,9 @@ class BackendSessionTest {
     }
 
     private BackendSession create(Duration deadline) {
-        return new BackendSession(
+        return BackendSession.overCore(
                 channel,
-                "test-credential-with-at-least-32-bytes",
-                "local",
+                CREDENTIAL,
                 "immutable-build",
                 new SessionIdentity(
                         new SessionId("s1"), "duels", Optional.of(new PlayerId("trusted"))),
@@ -139,16 +135,15 @@ class BackendSessionTest {
         assertEquals(2, fixture.calls.size());
         assertEquals(fixture.calls.get(0), fixture.calls.get(1));
         var request = fixture.calls.get(0);
+        assertEquals(operation.value(), request.getOperationId());
+        assertEquals("immutable-build", request.getDeployment());
         assertEquals(
-                "trusted",
-                BackendJson.mapper()
-                        .readTree(request.getCallerJson().toStringUtf8())
-                        .get("player")
-                        .asString());
+                Caller.newBuilder().setSession("s1").setPlayer("trusted").build(),
+                request.getCaller());
         assertEquals(
                 "spoof",
                 BackendJson.mapper()
-                        .readTree(request.getArgumentsJson().toStringUtf8())
+                        .readTree(request.getArguments().toStringUtf8())
                         .get("player")
                         .asString());
         assertTrue(fixture.deadlineObserved);
@@ -164,38 +159,47 @@ class BackendSessionTest {
     void emptyArgumentOverloadsRetainTypedPayloadsRetryIdsAndFullWatchState() throws Exception {
         var profile = new BackendClient(session).shared().profile();
         assertEquals(3L, profile.total().get(2, TimeUnit.SECONDS));
-        assertEquals("shared/profile/total", fixture.calls.getFirst().getFunction());
-        assertEquals("{}", fixture.calls.getFirst().getArgumentsJson().toStringUtf8());
+        assertEquals("shared/profile/total", fixture.calls.getFirst().getMethod());
+        assertEquals("{}", fixture.calls.getFirst().getArguments().toStringUtf8());
 
         var operation = OperationId.create();
-        assertThrows(
-                ExecutionException.class, () -> profile.reward(operation).get(2, TimeUnit.SECONDS));
+        var error =
+                assertThrows(
+                        ExecutionException.class,
+                        () -> profile.reward(operation).get(2, TimeUnit.SECONDS));
+        assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(error.getCause()).getCode());
         var recovered =
                 profile.reward(new BackendTypes.Shared.Profile.RewardArgs(), operation)
                         .get(2, TimeUnit.SECONDS);
         assertTrue(recovered.ok());
         assertEquals(fixture.calls.get(1), fixture.calls.get(2));
-        assertEquals("{}", fixture.calls.get(1).getArgumentsJson().toStringUtf8());
+        assertEquals("{}", fixture.calls.get(1).getArguments().toStringUtf8());
 
         var states = new LinkedBlockingQueue<WatchState<Long>>();
-        try (var watch = profile.watchTotal(states::add)) {
-            assertNotNull(watch);
+        Watch watch;
+        try (var subscription = profile.watchTotal(states::add)) {
+            assertNotNull(subscription);
             var initial = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(initial);
             assertTrue(initial.stale());
             assertTrue(initial.snapshot().isEmpty());
+            watch = fixture.watches.poll(2, TimeUnit.SECONDS);
+            assertNotNull(watch);
+            assertEquals("queries", watch.request().getTopic());
+            assertEquals("immutable-build", watch.request().getDeployment());
+            assertEquals(
+                    "{\"0\":{\"function\":\"shared/profile/total\",\"arguments\":{}}}",
+                    watch.request().getArguments().toStringUtf8());
+            assertFalse(watch.request().hasAfter());
+            watch.response().onNext(snapshot(1, value("0", "3")));
             var fresh = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(fresh);
             assertFalse(fresh.stale());
             assertTrue(fresh.error().isEmpty());
             assertEquals(1L, fresh.snapshot().orElseThrow().revision());
             assertEquals(3L, fresh.snapshot().orElseThrow().result().valueOrThrow());
-            var request = fixture.watchRequests.poll(2, TimeUnit.SECONDS);
-            assertNotNull(request);
-            assertEquals("shared/profile/total", request.getQueries(0).getFunction());
-            assertEquals("{}", request.getQueries(0).getArgumentsJson().toStringUtf8());
         }
-        assertTrue(fixture.watchCancelled.await(2, TimeUnit.SECONDS));
+        assertTrue(watch.cancelled().await(2, TimeUnit.SECONDS));
     }
 
     @Test
@@ -216,29 +220,46 @@ class BackendSessionTest {
 
     @Test
     void groupedWatchSignalsStaleThenReplacesOneConsistentSnapshot() throws Exception {
-        var reference = new QueryRef<Long, Long>("shared/read", INTEGER, INTEGER);
-        var first = session.bind(reference, 1L);
-        var second = session.bind(reference, 2L);
+        var first = session.bind(READ, 1L);
+        var second = session.bind(READ, 2L);
         var states = new LinkedBlockingQueue<GroupState>();
-        try (var watch = session.watchGroup(List.of(first, second), states::add)) {
-            assertNotNull(watch);
+        try (var subscription = session.watchGroup(List.of(first, second), states::add)) {
+            assertNotNull(subscription);
             var initial = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(initial);
             assertTrue(initial.stale());
             assertTrue(initial.snapshot().isEmpty());
+            var watch = fixture.watches.poll(2, TimeUnit.SECONDS);
+            assertNotNull(watch);
+            watch.response()
+                    .onNext(
+                            snapshot(
+                                    1,
+                                    value("0", "1"),
+                                    Entry.newBuilder()
+                                            .setKey("1")
+                                            .setError(
+                                                    Error.newBuilder()
+                                                            .setCode(Error.Code.CODE_APPLICATION)
+                                                            .setMessage("missing document"))
+                                            .build()));
             var fresh = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(fresh);
             assertFalse(fresh.stale());
             assertEquals(1, fresh.snapshot().orElseThrow().revision());
             assertEquals(1L, fresh.snapshot().orElseThrow().result(first).valueOrThrow());
-            assertInstanceOf(
-                    QueryResult.Failure.class, fresh.snapshot().orElseThrow().result(second));
-            fixture.watch.onError(Status.UNAVAILABLE.asRuntimeException());
+            assertEquals(
+                    new QueryResult.Failure<Long>("missing document"),
+                    fresh.snapshot().orElseThrow().result(second));
+            watch.response().onError(Status.UNAVAILABLE.asRuntimeException());
             var stale = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(stale);
             assertTrue(stale.stale());
             assertEquals(fresh.snapshot(), stale.snapshot());
-            var recovered = states.poll(3, TimeUnit.SECONDS);
+            var next = fixture.watches.poll(3, TimeUnit.SECONDS);
+            assertNotNull(next);
+            next.response().onNext(snapshot(2, value("0", "2"), value("1", "3")));
+            var recovered = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(recovered);
             assertFalse(recovered.stale());
             assertEquals(2, recovered.snapshot().orElseThrow().revision());
@@ -248,12 +269,150 @@ class BackendSessionTest {
     }
 
     @Test
+    void brokenWatchResumesAfterItsLastAppliedPosition() throws Exception {
+        var states = new LinkedBlockingQueue<GroupState>();
+        try (var subscription = session.watchGroup(List.of(session.bind(READ, 1L)), states::add)) {
+            assertNotNull(subscription);
+            assertTrue(states.poll(2, TimeUnit.SECONDS).stale());
+            var watch = fixture.watches.poll(2, TimeUnit.SECONDS);
+            watch.response()
+                    .onNext(snapshot(1, value("0", "1")).toBuilder().setStream("a").build());
+            assertEquals(1L, value(states.poll(2, TimeUnit.SECONDS), 1));
+            // A position-only update moves the resume point without a new state, and a continued
+            // update the break cuts short is discarded.
+            watch.response().onNext(Update.newBuilder().setPosition(at(2)).build());
+            watch.response()
+                    .onNext(
+                            Update.newBuilder()
+                                    .setPosition(at(3))
+                                    .addUpserts(value("0", "3"))
+                                    .setContinued(true)
+                                    .build());
+            watch.response().onError(Status.UNAVAILABLE.asRuntimeException());
+            var stale = states.poll(2, TimeUnit.SECONDS);
+            assertTrue(stale.stale());
+            assertEquals(1, stale.snapshot().orElseThrow().revision());
+            assertEquals(1L, stale.snapshot().orElseThrow().results().getFirst().valueOrThrow());
+
+            var resumed = fixture.watches.poll(3, TimeUnit.SECONDS);
+            assertEquals(
+                    Cursor.newBuilder().setStream("a").setPosition(at(2)).build(),
+                    resumed.request().getAfter());
+            resumed.response()
+                    .onNext(Update.newBuilder().setPosition(at(3)).setStream("b").build());
+            assertEquals(1L, value(states.poll(2, TimeUnit.SECONDS), 3));
+            resumed.response()
+                    .onNext(
+                            Update.newBuilder()
+                                    .setPosition(at(4))
+                                    .addUpserts(value("0", "4"))
+                                    .setContinued(true)
+                                    .build());
+            resumed.response().onNext(Update.newBuilder().setPosition(at(4)).build());
+            assertEquals(4L, value(states.poll(2, TimeUnit.SECONDS), 4));
+
+            resumed.response()
+                    .onNext(
+                            Update.newBuilder()
+                                    .setError(
+                                            Error.newBuilder()
+                                                    .setCode(Error.Code.CODE_STOPPED)
+                                                    .setMessage("superseded"))
+                                    .build());
+            var stopped = states.poll(2, TimeUnit.SECONDS);
+            assertTrue(stopped.stale());
+            assertTrue(stopped.error().orElseThrow().contains("superseded"));
+            var restarted = fixture.watches.poll(3, TimeUnit.SECONDS);
+            assertFalse(restarted.request().hasAfter());
+        }
+    }
+
+    @Test
+    void slowObserverDoesNotHoldBackAnotherWatchOnTheChannel() throws Exception {
+        // Callbacks run on the channel's transport thread, which an observer blocking there would
+        // hold for every stream.
+        var direct =
+                ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort())
+                        .usePlaintext()
+                        .directExecutor()
+                        .build();
+        var release = new CountDownLatch(1);
+        var slowStates = new LinkedBlockingQueue<GroupState>();
+        try (var shared =
+                        BackendSession.overCore(
+                                direct,
+                                CREDENTIAL,
+                                "immutable-build",
+                                new SessionIdentity(new SessionId("s1"), "duels", Optional.empty()),
+                                scheduler,
+                                Duration.ofSeconds(5));
+                var slow =
+                        shared.watchGroup(
+                                List.of(shared.bind(READ, 1L)),
+                                state -> {
+                                    slowStates.add(state);
+                                    if (state.stale()) return;
+                                    try {
+                                        release.await();
+                                    } catch (InterruptedException error) {
+                                        Thread.currentThread().interrupt();
+                                    }
+                                })) {
+            assertNotNull(slow);
+            var slowWatch = fixture.watches.poll(2, TimeUnit.SECONDS);
+            assertNotNull(slowWatch);
+            slowWatch.response().onNext(snapshot(1, value("0", "1")));
+            // Larger than gRPC's default 4 MiB inbound message limit.
+            var large = "\"" + "x".repeat(5 * 1024 * 1024) + "\"";
+            for (int revision = 2; revision <= 4; revision++)
+                slowWatch
+                        .response()
+                        .onNext(
+                                Update.newBuilder()
+                                        .setPosition(at(revision))
+                                        .addUpserts(
+                                                Entry.newBuilder()
+                                                        .setKey("0")
+                                                        .setError(
+                                                                Error.newBuilder()
+                                                                        .setMessage(large)))
+                                        .build());
+
+            var fastStates = new LinkedBlockingQueue<GroupState>();
+            try (var fast = shared.watchGroup(List.of(shared.bind(READ, 2L)), fastStates::add)) {
+                assertNotNull(fast);
+                assertTrue(fastStates.poll(2, TimeUnit.SECONDS).stale());
+                var fastWatch = fixture.watches.poll(2, TimeUnit.SECONDS);
+                assertNotNull(fastWatch);
+                fastWatch.response().onNext(snapshot(1, value("0", "2")));
+                assertEquals(2L, value(fastStates.poll(2, TimeUnit.SECONDS), 1));
+            } finally {
+                release.countDown();
+            }
+            var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            long revision = 0;
+            while (revision != 4 && System.nanoTime() < deadline) {
+                var state = slowStates.poll(100, TimeUnit.MILLISECONDS);
+                if (state != null && !state.stale())
+                    revision = state.snapshot().orElseThrow().revision();
+            }
+            assertEquals(4, revision);
+        } finally {
+            direct.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void successfulNullWatchResultIsAValue() throws Exception {
         var states = new LinkedBlockingQueue<WatchState<Void>>();
         var reference = new QueryRef<Void, Void>("shared/null", NULL, NULL);
-        try (var watch = session.watch(reference, null, states::add)) {
-            assertNotNull(watch);
+        try (var subscription = session.watch(reference, null, states::add)) {
+            assertNotNull(subscription);
             assertTrue(states.poll(2, TimeUnit.SECONDS).stale());
+            fixture.watches
+                    .poll(2, TimeUnit.SECONDS)
+                    .response()
+                    .onNext(snapshot(1, value("0", "null")));
             var fresh = states.poll(2, TimeUnit.SECONDS);
             assertNotNull(fresh);
             assertFalse(fresh.stale());
@@ -275,6 +434,7 @@ class BackendSessionTest {
         assertTrue(fixture.cancelled.await(2, TimeUnit.SECONDS));
         var read = new QueryRef<Void, Long>("shared/read", NULL, INTEGER);
         assertEquals(3L, b.query(read, null).get(2, TimeUnit.SECONDS));
+        assertEquals("b", fixture.calls.getLast().getCaller().getPlayer());
         try (var shortDeadline = create(Duration.ofMillis(50))) {
             var error =
                     assertThrows(
@@ -288,102 +448,97 @@ class BackendSessionTest {
         assertTrue(b.query(read, null).isCancelled());
     }
 
-    private static final class Fixture extends BackendGrpc.BackendImplBase {
-        final ConcurrentHashMap<String, BackendResult> saved = new ConcurrentHashMap<>();
-        final CopyOnWriteArrayList<BackendMutation> calls = new CopyOnWriteArrayList<>();
-        final AtomicInteger watches = new AtomicInteger();
+    private static Position at(long revision) {
+        return Position.newBuilder().setEpoch(1).setRevision(revision).build();
+    }
+
+    private static Entry value(String key, String json) {
+        return Entry.newBuilder().setKey(key).setValue(ByteString.copyFromUtf8(json)).build();
+    }
+
+    private static Update snapshot(long revision, Entry... entries) {
+        return Update.newBuilder()
+                .setPosition(at(revision))
+                .setSnapshot(true)
+                .setStream("stream")
+                .addAllUpserts(List.of(entries))
+                .build();
+    }
+
+    /** The single query's value in a fresh state at {@code revision}. */
+    private static Object value(GroupState state, long revision) {
+        assertNotNull(state);
+        assertFalse(state.stale());
+        var snapshot = state.snapshot().orElseThrow();
+        assertEquals(revision, snapshot.revision());
+        return snapshot.results().getFirst().valueOrThrow();
+    }
+
+    private record Watch(
+            SubscribeRequest request,
+            ServerCallStreamObserver<Update> response,
+            CountDownLatch cancelled) {}
+
+    private static final class Fixture extends CoreGrpc.CoreImplBase {
+        final ConcurrentHashMap<String, CallResponse> saved = new ConcurrentHashMap<>();
+        final CopyOnWriteArrayList<CallRequest> calls = new CopyOnWriteArrayList<>();
         final CountDownLatch hanging = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
-        final CountDownLatch watchCancelled = new CountDownLatch(1);
-        final LinkedBlockingQueue<BackendWatchGroup> watchRequests = new LinkedBlockingQueue<>();
-        final LinkedBlockingQueue<StreamObserver<BackendResult>> partial =
+        final LinkedBlockingQueue<StreamObserver<CallResponse>> partial =
                 new LinkedBlockingQueue<>();
-        volatile StreamObserver<BackendUpdate> watch;
+        final LinkedBlockingQueue<Watch> watches = new LinkedBlockingQueue<>();
         volatile boolean deadlineObserved;
 
         @Override
-        public void query(BackendQuery request, StreamObserver<BackendResult> response) {
-            deadlineObserved = Context.current().getDeadline() != null;
-            calls.add(
-                    BackendMutation.newBuilder()
-                            .setFunction(request.getFunction())
-                            .setArgumentsJson(request.getArgumentsJson())
-                            .setCallerJson(request.getCallerJson())
-                            .build());
-            if (request.getFunction().equals("shared/partial")) {
-                response.onNext(
-                        BackendResult.newBuilder()
-                                .setRevision(1)
-                                .setResultJson(ByteString.copyFromUtf8("3"))
-                                .build());
-                partial.add(response);
-                return;
-            }
-            if (request.getFunction().equals("shared/hang")) {
-                ((ServerCallStreamObserver<BackendResult>) response)
-                        .setOnCancelHandler(cancelled::countDown);
-                hanging.countDown();
-                return;
-            }
-            {
-                response.onNext(
-                        BackendResult.newBuilder()
-                                .setRevision(1)
-                                .setResultJson(ByteString.copyFromUtf8("3"))
-                                .build());
-                response.onCompleted();
-                return;
-            }
-        }
-
-        @Override
-        public void mutate(BackendMutation request, StreamObserver<BackendResult> response) {
+        public void call(CallRequest request, StreamObserver<CallResponse> response) {
             deadlineObserved = Context.current().getDeadline() != null;
             calls.add(request);
-            var result =
-                    BackendResult.newBuilder()
-                            .setRevision(1)
-                            .setResultJson(
-                                    ByteString.copyFromUtf8("{\"ok\":true,\"session\":\"s1\"}"))
-                            .build();
-            if (saved.putIfAbsent(request.getOperationId(), result) == null)
-                response.onError(Status.UNAVAILABLE.asRuntimeException());
-            else {
-                response.onNext(saved.get(request.getOperationId()));
-                response.onCompleted();
+            switch (request.getMethod()) {
+                case "shared/partial" -> {
+                    response.onNext(result("3"));
+                    partial.add(response);
+                }
+                case "shared/hang" -> {
+                    ((ServerCallStreamObserver<CallResponse>) response)
+                            .setOnCancelHandler(cancelled::countDown);
+                    hanging.countDown();
+                }
+                default -> {
+                    var result =
+                            request.getOperationId().isEmpty()
+                                    ? result("3")
+                                    : result("{\"ok\":true,\"session\":\"s1\"}");
+                    if (!request.getOperationId().isEmpty()
+                            && saved.putIfAbsent(request.getOperationId(), result) == null) {
+                        if (request.getMethod().equals("shared/profile/reward")) {
+                            var error =
+                                    Error.newBuilder()
+                                            .setCode(Error.Code.CODE_UNAVAILABLE)
+                                            .setMessage("storage is busy");
+                            response.onNext(CallResponse.newBuilder().setError(error).build());
+                            response.onCompleted();
+                        } else response.onError(Status.UNAVAILABLE.asRuntimeException());
+                        return;
+                    }
+                    response.onNext(result);
+                    response.onCompleted();
+                }
             }
         }
 
         @Override
-        public void watchGroup(BackendWatchGroup request, StreamObserver<BackendUpdate> response) {
-            if (request.getQueriesCount() == 1) {
-                watchRequests.add(request);
-                ((ServerCallStreamObserver<BackendUpdate>) response)
-                        .setOnCancelHandler(watchCancelled::countDown);
-                response.onNext(
-                        BackendUpdate.newBuilder()
-                                .setRevision(1)
-                                .addResultsJson(
-                                        ByteString.copyFromUtf8(
-                                                request.getQueries(0)
-                                                                .getFunction()
-                                                                .equals("shared/null")
-                                                        ? "null"
-                                                        : "3"))
-                                .addErrors("")
-                                .build());
-                return;
-            }
-            int attempt = watches.incrementAndGet();
-            watch = response;
-            response.onNext(
-                    BackendUpdate.newBuilder()
-                            .setRevision(attempt)
-                            .addResultsJson(ByteString.copyFromUtf8(Integer.toString(attempt)))
-                            .addResultsJson(ByteString.copyFromUtf8(attempt == 1 ? "" : "3"))
-                            .addErrors("")
-                            .addErrors(attempt == 1 ? "missing document" : "")
-                            .build());
+        public void subscribe(SubscribeRequest request, StreamObserver<Update> response) {
+            var observer = (ServerCallStreamObserver<Update>) response;
+            var cancelled = new CountDownLatch(1);
+            observer.setOnCancelHandler(cancelled::countDown);
+            watches.add(new Watch(request, observer, cancelled));
+        }
+
+        private static CallResponse result(String json) {
+            return CallResponse.newBuilder()
+                    .setPosition(at(1))
+                    .setResult(ByteString.copyFromUtf8(json))
+                    .build();
         }
     }
 }

@@ -154,10 +154,12 @@ activating that UUID elsewhere in the JVM. Managed proxy moves prepare a new TCP
 confirm withdrawal, drive both client configuration acknowledgments, and activate the destination on the existing public
 connection.
 
-The `scope.getBackend()` client (`scope.backend` in Kotlin) is bound to the process deployment, session and registered
-app ID. Function arguments do not choose that identity. Control's `CHUNK_BACKEND_FILE` passes the private connection to
-app JVMs as `CHUNK_BACKEND_ENDPOINT` and `CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and
-`CHUNK_DEPLOYMENT` and checks that exact deployment with `CheckDeployment` before reporting ready. Missing
+The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at `CHUNK_CONTROL_ENDPOINT`
+with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player. Core derives the caller
+app code sees, including the registered app ID, so function arguments do not choose that identity. Control's
+`CHUNK_BACKEND_FILE` passes the backend's private connection to app JVMs as `CHUNK_BACKEND_ENDPOINT` and
+`CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT` and checks that exact
+deployment with the backend's `CheckDeployment` before reporting ready. Missing
 configuration, an unavailable backend, or a missing deployment fails startup. Use `scope.operationId(player, action)`
 for a mutation that should happen once per player delivery. It returns a typed `OperationId`; retry an uncertain result
 with the same ID and arguments. Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client whose

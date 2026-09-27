@@ -1,13 +1,15 @@
 package dev.chunkzero.backend
 
-import chunk.v1.BackendGrpc
-import chunk.v1.BackendOuterClass.BackendMutation
-import chunk.v1.BackendOuterClass.BackendQuery
-import chunk.v1.BackendOuterClass.BackendResult
-import chunk.v1.BackendOuterClass.BackendUpdate
-import chunk.v1.BackendOuterClass.BackendWatchGroup
+import chunk.sync.v1.CoreGrpc
+import chunk.sync.v1.CoreOuterClass.CallRequest
+import chunk.sync.v1.CoreOuterClass.CallResponse
+import chunk.sync.v1.CoreOuterClass.Caller
+import chunk.sync.v1.CoreOuterClass.Entry
+import chunk.sync.v1.CoreOuterClass.Error
+import chunk.sync.v1.CoreOuterClass.Position
+import chunk.sync.v1.CoreOuterClass.SubscribeRequest
+import chunk.sync.v1.CoreOuterClass.Update
 import com.google.protobuf.ByteString
-import dev.chunkzero.backend.api.BackendJson
 import dev.chunkzero.backend.api.PlayerId
 import dev.chunkzero.backend.api.SessionId
 import dev.chunkzero.backend.client.BackendSession
@@ -54,7 +56,7 @@ class GeneratedCoroutineBackendTest {
                         "{}",
                         fixture.calls
                             .single()
-                            .argumentsJson
+                            .arguments
                             .toStringUtf8(),
                     )
                     val operation = OperationId("stable-reward")
@@ -75,9 +77,14 @@ class GeneratedCoroutineBackendTest {
                     assertEquals(1, fixture.saved.size)
                     assertEquals(fixture.calls[1], fixture.calls[2])
                     assertEquals(operation.value(), fixture.calls[1].operationId)
-                    val caller = BackendJson.mapper().readTree(fixture.calls[1].callerJson.toStringUtf8())
-                    assertEquals("duels", caller.get("app").asString())
-                    assertEquals("trusted", caller.get("player").asString())
+                    assertEquals(
+                        Caller
+                            .newBuilder()
+                            .setSession("s1")
+                            .setPlayer("trusted")
+                            .build(),
+                        fixture.calls[1].caller,
+                    )
 
                     val pending = launch { playerBackend.shared.hang(null) }
                     fixture.hanging.await()
@@ -106,15 +113,12 @@ class GeneratedCoroutineBackendTest {
                         assertTrue(initial.stale())
                         assertTrue(initial.snapshot().isEmpty)
                         val watch = fixture.watches.receive()
-                        assertEquals("shared/profile/total", watch.request.getQueries(0).function)
+                        assertEquals("queries", watch.request.topic)
                         assertEquals(
-                            "{}",
-                            watch.request
-                                .getQueries(0)
-                                .argumentsJson
-                                .toStringUtf8(),
+                            """{"0":{"function":"shared/profile/total","arguments":{}}}""",
+                            watch.request.arguments.toStringUtf8(),
                         )
-                        watch.response.onNext(update(7, "3"))
+                        watch.response.onNext(update(7, value("3")).setSnapshot(true).build())
                         val fresh = states.receive()
                         assertFalse(fresh.stale())
                         assertTrue(fresh.error().isEmpty)
@@ -127,15 +131,22 @@ class GeneratedCoroutineBackendTest {
                                 .result()
                                 .valueOrThrow(),
                         )
-                        watch.response.onNext(update(8, "", "missing document"))
+                        watch.response.onNext(update(8, failure("missing document")).build())
                         val failed = states.receive()
                         assertFalse(failed.stale())
                         assertEquals(8L, failed.snapshot().orElseThrow().revision())
                         val failure =
                             assertInstanceOf(QueryResult.Failure::class.java, failed.snapshot().orElseThrow().result())
                         assertEquals("missing document", failure.message())
-                        watch.response.onError(
-                            Status.PERMISSION_DENIED.withDescription("watch forbidden").asRuntimeException(),
+                        watch.response.onNext(
+                            Update
+                                .newBuilder()
+                                .setError(
+                                    Error
+                                        .newBuilder()
+                                        .setCode(Error.Code.CODE_DENIED)
+                                        .setMessage("watch forbidden"),
+                                ).build(),
                         )
                         val stopped = states.receive()
                         assertTrue(stopped.stale())
@@ -161,27 +172,29 @@ class GeneratedCoroutineBackendTest {
 
     private fun update(
         revision: Long,
-        result: String,
-        error: String = "",
-    ): BackendUpdate =
-        BackendUpdate
+        entry: Entry.Builder,
+    ): Update.Builder =
+        Update
             .newBuilder()
-            .setRevision(revision)
-            .addResultsJson(ByteString.copyFromUtf8(result))
-            .addErrors(error)
-            .build()
+            .setPosition(Position.newBuilder().setEpoch(1).setRevision(revision))
+            .addUpserts(entry.setKey("0"))
+
+    private fun value(json: String): Entry.Builder = Entry.newBuilder().setValue(ByteString.copyFromUtf8(json))
+
+    private fun failure(message: String): Entry.Builder =
+        Entry.newBuilder().setError(Error.newBuilder().setCode(Error.Code.CODE_APPLICATION).setMessage(message))
 
     private class Watch(
-        val request: BackendWatchGroup,
-        val response: ServerCallStreamObserver<BackendUpdate>,
+        val request: SubscribeRequest,
+        val response: ServerCallStreamObserver<Update>,
         val cancelled: CompletableDeferred<Unit>,
     )
 
     private class Fixture :
-        BackendGrpc.BackendImplBase(),
+        CoreGrpc.CoreImplBase(),
         AutoCloseable {
-        val calls = CopyOnWriteArrayList<BackendMutation>()
-        val saved = ConcurrentHashMap<String, BackendResult>()
+        val calls = CopyOnWriteArrayList<CallRequest>()
+        val saved = ConcurrentHashMap<String, CallResponse>()
         val hanging = CompletableDeferred<Unit>()
         val callCancelled = CompletableDeferred<Unit>()
         val watches = Channel<Watch>(Channel.UNLIMITED)
@@ -196,10 +209,9 @@ class GeneratedCoroutineBackendTest {
         private val channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
         private val backend =
             CoroutineBackend(
-                BackendSession(
+                BackendSession.overCore(
                     channel,
                     "test-credential-with-at-least-32-bytes",
-                    "local",
                     "immutable-build",
                     SessionIdentity(SessionId("s1"), "duels", Optional.of(PlayerId("trusted"))),
                     scheduler,
@@ -209,36 +221,13 @@ class GeneratedCoroutineBackendTest {
             )
         val client = CoroutineBackendClient(backend)
 
-        override fun query(
-            request: BackendQuery,
-            response: StreamObserver<BackendResult>,
-        ) {
-            respond(
-                BackendMutation
-                    .newBuilder()
-                    .setFunction(
-                        request.function,
-                    ).setArgumentsJson(request.argumentsJson)
-                    .setCallerJson(request.callerJson)
-                    .build(),
-                response,
-            )
-        }
-
-        override fun mutate(
-            request: BackendMutation,
-            response: StreamObserver<BackendResult>,
-        ) {
-            respond(request, response)
-        }
-
-        private fun respond(
-            request: BackendMutation,
-            response: StreamObserver<BackendResult>,
+        override fun call(
+            request: CallRequest,
+            response: StreamObserver<CallResponse>,
         ) {
             calls.add(request)
-            if (request.function == "shared/hang") {
-                (response as ServerCallStreamObserver<BackendResult>).setOnCancelHandler {
+            if (request.method == "shared/hang") {
+                (response as ServerCallStreamObserver<CallResponse>).setOnCancelHandler {
                     callCancelled.complete(
                         Unit,
                     )
@@ -247,10 +236,10 @@ class GeneratedCoroutineBackendTest {
                 return
             }
             val result =
-                BackendResult
+                CallResponse
                     .newBuilder()
-                    .setRevision(1)
-                    .setResultJson(
+                    .setPosition(Position.newBuilder().setEpoch(1).setRevision(1))
+                    .setResult(
                         ByteString.copyFromUtf8(
                             if (request.operationId.isEmpty()) "3" else """{"ok":true,"session":"s1"}""",
                         ),
@@ -263,11 +252,11 @@ class GeneratedCoroutineBackendTest {
             }
         }
 
-        override fun watchGroup(
-            request: BackendWatchGroup,
-            response: StreamObserver<BackendUpdate>,
+        override fun subscribe(
+            request: SubscribeRequest,
+            response: StreamObserver<Update>,
         ) {
-            val observer = response as ServerCallStreamObserver<BackendUpdate>
+            val observer = response as ServerCallStreamObserver<Update>
             val cancelled = CompletableDeferred<Unit>()
             observer.setOnCancelHandler { cancelled.complete(Unit) }
             watches.trySend(Watch(request, observer, cancelled)).getOrThrow()

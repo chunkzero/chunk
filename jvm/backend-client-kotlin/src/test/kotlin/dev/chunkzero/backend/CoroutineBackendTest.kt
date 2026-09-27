@@ -35,10 +35,9 @@ class CoroutineBackendTest {
             val owner = SupervisorJob()
             val backend =
                 CoroutineBackend(
-                    BackendSession(
+                    BackendSession.overCore(
                         channel,
                         "test-credential-with-at-least-32-bytes",
-                        "local",
                         "build",
                         SessionIdentity(SessionId("game"), "duels", Optional.empty()),
                         scheduler,
