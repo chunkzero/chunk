@@ -261,6 +261,7 @@ impl Actor {
                     .collect()
             })),
             Command::PrepareAction { reply } => reply.finish(self.actions.prepare()),
+            Command::ActionIdentity { id, reply } => reply.finish(self.actions.identity(&id)),
             Command::StartAction { purpose, id, call, retain, reply } => {
                 self.start_action(id, call, purpose, retain, reply);
             }

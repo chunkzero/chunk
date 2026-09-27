@@ -39,18 +39,55 @@ async fn slow(mut client: CoreClient<Channel>, credential: String, operation: St
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_prepared_action_runs_once_and_its_retry_returns_the_outcome_after_its_deployment_retires() {
+async fn prepared_effects_run_once_and_retries_return_their_outcomes_after_the_deployment_retires_until_evicted() {
     let mut fixture = Fixture::start().await;
-    let cli = fixture.cli.clone();
+    let (cli, gateway) = (fixture.cli.clone(), fixture.gateway.clone());
     let operation = fixture.prepare(&cli).await;
     let first = fixture.call(&cli, &operation, "bump", "2").await;
     assert_eq!(first.outcome, Some(Outcome::Result(b"2".to_vec())));
     assert_eq!(fixture.call(&cli, &operation, "bump", "2").await, first);
     assert_eq!(fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"2".to_vec())));
+    let hook = fixture.prepare(&gateway).await;
+    let admitted = fixture.call(&gateway, &hook, LOGIN, &login()).await;
+    assert!(matches!(admitted.outcome, Some(Outcome::Result(_))), "{admitted:?}");
 
+    fixture.backend.deploy(Deployment { id: "filler".into(), ..deployment() }).await.unwrap();
     assert!(fixture.backend.release(DeploymentId::new("test").unwrap()).await.unwrap());
     assert_eq!(fixture.call(&cli, &operation, "bump", "2").await, first);
+    assert_eq!(fixture.call(&gateway, &hook, LOGIN, &login()).await, admitted);
     assert_eq!(code(&fixture.call(&cli, &operation, "bump", "3").await), Code::OperationMismatch);
+
+    // Newer outcomes past the retention budget evict both.
+    let fill = Call {
+        deployment: DeploymentId::new("filler").unwrap(),
+        function: "fill".into(),
+        arguments: serde_json::json!("x".repeat(1_000_000)).into(),
+        caller: serde_json::json!({"kind": "cli"}).into(),
+    };
+    for _ in 0..35 {
+        let id = fixture.backend.allocate_action_id().await.unwrap();
+        fixture.backend.start_action(id, fill.clone()).await.unwrap().outcome().await.unwrap();
+    }
+    assert_eq!(code(&fixture.call(&cli, &operation, "bump", "2").await), Code::OutcomeUnknown);
+    assert_eq!(code(&fixture.call(&gateway, &hook, LOGIN, &login()).await), Code::OutcomeUnknown);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_core_without_the_deployment_reports_earlier_effects_unknown() {
+    let mut fixture = Fixture::start().await;
+    let (cli, gateway) = (fixture.cli.clone(), fixture.gateway.clone());
+    let operation = fixture.prepare(&cli).await;
+    assert_eq!(fixture.call(&cli, &operation, "bump", "1").await.outcome, Some(Outcome::Result(b"1".to_vec())));
+    let hook = fixture.prepare(&gateway).await;
+    assert!(matches!(fixture.call(&gateway, &hook, LOGIN, &login()).await.outcome, Some(Outcome::Result(_))));
+    fixture.stop().await;
+
+    let mut fixture = Fixture::start().await;
+    assert!(fixture.backend.release(DeploymentId::new("test").unwrap()).await.unwrap());
+    let (cli, gateway) = (fixture.cli.clone(), fixture.gateway.clone());
+    assert_eq!(code(&fixture.call(&cli, &operation, "bump", "1").await), Code::OutcomeUnknown);
+    assert_eq!(code(&fixture.call(&gateway, &hook, LOGIN, &login()).await), Code::OutcomeUnknown);
     fixture.stop().await;
 }
 

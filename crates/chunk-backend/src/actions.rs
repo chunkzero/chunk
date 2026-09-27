@@ -36,6 +36,17 @@ impl std::str::FromStr for ActionId {
     }
 }
 
+/// What an identity from [`crate::Backend::allocate_action_id`] names, resolved without consulting any deployment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionIdentity {
+    /// Prepared, and nothing started under it yet.
+    Unused,
+    /// An action running or retained under it.
+    Action,
+    /// A hook running or retained under it.
+    Hook,
+}
+
 #[derive(Clone, Debug)]
 pub enum ActionStatus {
     Running,

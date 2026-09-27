@@ -238,7 +238,12 @@ async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retain
         Ok(ActionStatus::Finished(Ok(value))) if &*value == "42"
     ));
 
-    // Outcomes past the 64 MiB budget evict the oldest first and never block new work.
+    // Outcomes past the 64 MiB budget evict the oldest first and never block new work, running actions or unused
+    // preparations.
+    let unused = backend.allocate_action_id().await.unwrap();
+    let running = backend.allocate_action_id().await.unwrap();
+    let held = call("old", "flow", "held", json!(-1));
+    let mut action = backend.start_action(running.clone(), held.clone()).await.unwrap();
     let large = || call("old", "large", "alice", json!("x".repeat(1_000_000)));
     let mut newest = None;
     for _ in 0..35 {
@@ -247,6 +252,16 @@ async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retain
         assert_eq!(action.outcome().await.unwrap().len(), 1_000_002);
         newest = Some(id);
     }
+    let mut joined = backend.start_action(running, held).await.unwrap();
+    assert!(matches!(joined.status(), ActionStatus::Running));
+    backend.mutate("release-held".into(), call("old", "publicIncrement", "release-held", json!(null))).await.unwrap();
+    assert_eq!(&*action.outcome().await.unwrap(), "2");
+    assert_eq!(&*joined.outcome().await.unwrap(), "2");
+    let mut later = backend.start_action(unused, call("old", "complete", "alice", json!(null))).await.unwrap();
+    assert_eq!(&*later.outcome().await.unwrap(), "42");
+
+    // After the deployment's release, an evicted outcome stays unknown and a retained one replays.
+    assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
     assert!(matches!(
         backend.start_action(first, call("old", "complete", "alice", json!(null))).await,
         Err(Error::ActionOutcomeUnknown)

@@ -13,7 +13,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 
 use super::Actor;
 use crate::{
-    ActionHandle, ActionId, ActionStatus, Error, Result,
+    ActionHandle, ActionId, ActionIdentity, ActionStatus, Error, Result,
     actions::{Host, Scope},
     limits::{ACTION_BYTES, Limit, RETAINED_BYTES},
     service::{Call, Event, Request, Update},
@@ -29,6 +29,7 @@ struct Record {
     command: Option<Arc<crate::commands::CommandBinding>>,
     call: Call,
     fingerprint: [u8; 32],
+    hook: bool,
     writable: bool,
     status: watch::Sender<ActionStatus>,
     scope: Weak<Scope>,
@@ -149,11 +150,31 @@ impl Actions {
         true
     }
 
-    /// Admits a record of `bytes` under `id`, which must be prepared unless it's `trusted`, consuming its preparation.
-    fn admit(&mut self, id: &ActionId, trusted: bool, bytes: usize) -> Result<()> {
-        if !trusted && (id.incarnation != self.incarnation || !self.prepared.contains_key(&id.sequence)) {
+    /// Resolves an untrusted `id` without consulting any deployment: its record while its action runs or its outcome is
+    /// retained, or `None` while it's prepared and unused. An identity from another incarnation, never issued, or whose
+    /// outcome is gone is unknown.
+    fn resolve(&self, id: &ActionId) -> Result<Option<&Record>> {
+        if id.incarnation != self.incarnation {
             return Err(Error::ActionOutcomeUnknown);
         }
+        if let Some(record) = self.records.get(id) {
+            return Ok(Some(record));
+        }
+        if self.prepared.contains_key(&id.sequence) { Ok(None) } else { Err(Error::ActionOutcomeUnknown) }
+    }
+
+    pub fn identity(&mut self, id: &ActionId) -> Result<ActionIdentity> {
+        self.expire();
+        Ok(match self.resolve(id)? {
+            None => ActionIdentity::Unused,
+            Some(record) if record.hook => ActionIdentity::Hook,
+            Some(_) => ActionIdentity::Action,
+        })
+    }
+
+    /// Admits a record of `bytes` under `id`, which [`Self::resolve`] found prepared unless it's `trusted`, consuming
+    /// its preparation.
+    fn admit(&mut self, id: &ActionId, trusted: bool, bytes: usize) -> Result<()> {
         if !self.capacity() {
             return Err(Limit::ActionMemory.exceeded());
         }
@@ -219,9 +240,12 @@ impl Actor {
     ) -> Result<ActionHandle> {
         let hook = matches!(purpose, crate::commands::Purpose::Hook);
         self.actions.expire();
-        // A retained outcome replays before the deployment is checked, since it outlives the deployment's release.
+        // The identity resolves before the deployment is checked: a retained outcome outlives the deployment's release,
+        // and an identity whose outcome is gone stays unknown.
         let fingerprint = fingerprint(&purpose, &call)?;
-        if let Some(record) = self.actions.records.get(&id) {
+        let record =
+            if durable_identity.is_some() { self.actions.records.get(&id) } else { self.actions.resolve(&id)? };
+        if let Some(record) = record {
             if record.fingerprint != fingerprint {
                 return Err(Error::OperationMismatch);
             }
@@ -302,6 +326,7 @@ impl Actor {
                 writable,
                 call,
                 fingerprint,
+                hook,
                 status,
                 scope: Arc::downgrade(&scope),
                 cancellation,

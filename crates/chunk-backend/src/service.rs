@@ -157,6 +157,10 @@ pub(crate) enum Command {
     PrepareAction {
         reply: Request<ActionId>,
     },
+    ActionIdentity {
+        id: ActionId,
+        reply: Request<crate::ActionIdentity>,
+    },
     StartAction {
         purpose: crate::commands::Purpose,
         id: ActionId,
@@ -220,6 +224,7 @@ impl Command {
             Self::WakeHandoff { reply } => reply.finish(Err(error)),
             Self::JobControl { reply, .. } => reply.finish(Err(error)),
             Self::PrepareAction { reply } => reply.finish(Err(error)),
+            Self::ActionIdentity { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
@@ -560,6 +565,15 @@ impl Backend {
             reply,
         })
         .await
+    }
+
+    /// Resolves an identity from [`Self::allocate_action_id`] without consulting any deployment, so a retry can route
+    /// to the action or hook it started even after the deployment's release.
+    /// # Errors
+    /// Returns unknown for an identity from another incarnation, one never issued, or one whose outcome is gone.
+    pub async fn action_identity(&self, id: ActionId) -> Result<crate::ActionIdentity> {
+        let bytes = id.incarnation.len();
+        self.submit_sized(bytes, |reply| Command::ActionIdentity { id, reply }).await
     }
 
     /// Look up retained status using the original caller authority.

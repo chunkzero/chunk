@@ -6,7 +6,7 @@ use super::{
     errors,
     streams::Nudges,
 };
-use chunk_backend::{ActionId, Backend, Call, Update};
+use chunk_backend::{ActionId, ActionIdentity, Backend, Call, Update};
 use chunk_contract::FunctionKind;
 use chunk_proto::sync::v1::{Error, error::Code};
 use chunk_store::Revision;
@@ -56,7 +56,11 @@ impl App {
     /// action or hook under the prepared `operation`, which a retry repeats to get its outcome back. A committed
     /// mutation nudges the streams `principal` opened.
     pub async fn call(&self, principal: &Principal, operation: String, call: Call) -> Result<Update, Error> {
-        let result = match self.kind(&call).await? {
+        let kind = match operation.strip_prefix(PREPARED) {
+            Some(id) => self.prepared_kind(id, &call).await?,
+            None => self.kind(&call).await?,
+        };
+        let result = match kind {
             Kind::Function(FunctionKind::Query) => self.backend.query(call).await,
             Kind::Function(FunctionKind::Mutation) if operation.is_empty() => {
                 return Err(errors::invalid("a mutation requires an operation ID"));
@@ -84,8 +88,7 @@ impl App {
         let Some(id) = operation.strip_prefix(PREPARED) else {
             return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
         };
-        let unknown = || errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID");
-        let id: ActionId = id.parse().map_err(|_| unknown())?;
+        let id = prepared_id(id)?;
         let backend = self.backend.clone();
         let run = tokio::spawn(async move {
             let mut handle =
@@ -95,6 +98,17 @@ impl App {
         let outcome = run.await.map_err(|_| errors::error(Code::OutcomeUnknown, "the effectful call's task failed"))?;
         let json = outcome.map_err(|failure| errors::backend(&failure))?;
         Ok(Update { revision: Revision(0), json })
+    }
+
+    /// The kind of a call under prepared operation ID `id`, which resolves before the deployment: an action or hook it
+    /// started keeps its kind after its deployment's release, and only an unused ID routes by the deployment.
+    async fn prepared_kind(&self, id: &str, call: &Call) -> Result<Kind, Error> {
+        let identity = self.backend.action_identity(prepared_id(id)?).await;
+        match identity.map_err(|failure| errors::backend(&failure))? {
+            ActionIdentity::Unused => self.kind(call).await,
+            ActionIdentity::Action => Ok(Kind::Function(FunctionKind::Action)),
+            ActionIdentity::Hook => Ok(Kind::Hook),
+        }
     }
 
     async fn kind(&self, call: &Call) -> Result<Kind, Error> {
@@ -121,4 +135,8 @@ impl App {
     fn cached(&self, deployment: &str) -> Option<Arc<BTreeMap<String, Kind>>> {
         self.functions.lock().ok()?.get(deployment).cloned()
     }
+}
+
+fn prepared_id(id: &str) -> Result<ActionId, Error> {
+    id.parse().map_err(|_| errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID"))
 }
