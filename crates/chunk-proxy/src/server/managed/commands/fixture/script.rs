@@ -94,6 +94,14 @@ impl Service {
                     // The start outlives a dropped call, as core's does.
                     tokio::spawn(self.clone().start(run, input)).await.unwrap()?;
                 }
+                if self.reopening.load(Ordering::SeqCst) {
+                    self.reopened.notified().await;
+                    let reopen = self.reopen.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        reopen.notify_one();
+                    });
+                }
                 Ok(CommandStarted {}.encode_to_vec())
             }
             "chunk:effect" => {

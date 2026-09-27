@@ -178,6 +178,10 @@ impl core_server::Core for Service {
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         super::auth(&request, "gateway")?;
         if let Some(operation) = request.get_ref().topic.strip_prefix("command/") {
+            if self.reopening.load(Ordering::SeqCst) {
+                self.reopened.notify_one();
+                self.reopen.notified().await;
+            }
             return Ok(Response::new(self.follow(operation, &request.get_ref().arguments)));
         }
         assert_eq!(request.get_ref().topic, "gateway/proxy");

@@ -39,6 +39,11 @@ pub(super) struct Service {
     pub admit: Arc<tokio::sync::Notify>,
     /// Starts that waited for admission.
     pub queued: Arc<AtomicUsize>,
+    /// A start's response waits until a command topic is subscribed again, and that subscription opens only shortly after
+    /// the response.
+    pub reopening: Arc<AtomicBool>,
+    reopened: Arc<tokio::sync::Notify>,
+    reopen: Arc<tokio::sync::Notify>,
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
@@ -129,6 +134,9 @@ impl Fixture {
             admission: Arc::default(),
             admit: Arc::default(),
             queued: Arc::default(),
+            reopening: Arc::default(),
+            reopened: Arc::default(),
+            reopen: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
             published: Arc::new(watch::Sender::new(1)),

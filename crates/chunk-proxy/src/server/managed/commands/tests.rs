@@ -365,6 +365,25 @@ async fn a_command_follows_its_topic_again_from_a_new_gateway_stream_while_its_e
 }
 
 #[tokio::test]
+async fn a_command_started_while_its_topic_reopens_from_a_new_gateway_stream_keeps_running() {
+    let (mut fixture, mut client, mut public) = arrived().await;
+    fixture.service.admission.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("echo")).unwrap();
+    wait_count(&fixture.service.queued, 1).await;
+    fixture.service.reopening.store(true, Ordering::SeqCst);
+    fixture.service.drop_stream();
+    fixture.sync().await;
+    // Once admitted, core stops the topic on the superseded stream and answers the start while the topic reopens.
+    fixture.service.admit.notify_one();
+    output(&mut fixture.commands, &mut public).await;
+    assert_eq!(VarInt::decode(&mut client.read_frame(16384).await.unwrap().as_ref()).unwrap().0, SystemMessage::ID);
+    wait_count(&fixture.service.replies, 1).await;
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    assert!(!run.cancelled());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_commands_unwritten_effect_is_dropped_once_it_finished() {
     let (mut fixture, mut client, mut public) = arrived().await;
     fixture.service.outstanding.store(true, Ordering::SeqCst);

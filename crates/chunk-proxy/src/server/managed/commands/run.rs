@@ -19,28 +19,28 @@ pub(super) async fn execute(
 ) -> io::Result<()> {
     let mut topic = tasks.platform.reserve_command().await?;
     let operation = topic.operation().to_owned();
-    let start = tasks.platform.start_command(&operation, &origin.player, &arguments);
     let (pending, effects) = watch::channel(BTreeMap::new());
-    let delivery = deliver(tasks, origin, follow, &operation, effects);
-    tokio::pin!(start, delivery);
-    let mut starting = true;
-    loop {
-        let update = tokio::select! {
-            update = topic.next() => update?,
-            result = &mut delivery => return result.map(|never| match never {}),
-            result = &mut start, if starting => {
-                result?;
-                starting = false;
-                continue;
+    // Once started, the start stays pending, so its completion never interrupts the topic following the command again
+    // from a new gateway stream.
+    let start = async {
+        tasks.platform.start_command(&operation, &origin.player, &arguments).await?;
+        std::future::pending().await
+    };
+    let outcome = async {
+        loop {
+            match topic.next().await? {
+                CommandUpdate::Effects(effects) => _ = pending.send_replace(effects),
+                CommandUpdate::Outcome(CommandOutcome { outcome: Some(command_outcome::Outcome::ResultJson(_)) }) => {
+                    return Ok(());
+                }
+                CommandUpdate::Outcome(_) => return Err(invalid_data("command failed or outcome unknown")),
             }
-        };
-        match update {
-            CommandUpdate::Effects(effects) => _ = pending.send_replace(effects),
-            CommandUpdate::Outcome(CommandOutcome { outcome: Some(command_outcome::Outcome::ResultJson(_)) }) => {
-                return Ok(());
-            }
-            CommandUpdate::Outcome(_) => return Err(invalid_data("command failed or outcome unknown")),
         }
+    };
+    tokio::select! {
+        result = outcome => result,
+        result = start => result,
+        result = deliver(tasks, origin, follow, &operation, effects) => result.map(|never| match never {}),
     }
 }
 
