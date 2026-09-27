@@ -31,7 +31,9 @@
 // and a position of the current epoch within retained history, not ahead of the current position; then it starts
 // with the changes after that position, possibly none. Either way the first update reflects the current position.
 // Once a client applies an update, its view equals the topic's state at that update's position, so a slow subscriber
-// gets the latest value of each key, never an intermediate one, and positions never decrease. Core may send a fresh
+// gets the latest value of each key, never an intermediate one, and positions never decrease. A topic whose values
+// include state outside the log, such as `nodes`' health, may change them in updates at an unchanged position; its
+// view then equals the topic's state when the update was sent. Core may send a fresh
 // snapshot at any time. An update with `continued` is followed by more at the same position: apply the sequence
 // together, and discard it if the stream breaks. To resume, subscribe with `after` set to the stream and the last
 // applied position.
@@ -51,7 +53,8 @@
 //
 // Auth. Every request carries `authorization: Bearer <credential>` metadata. Core derives the credential's class
 // (gateway, jvm, exec or cli) and identity from it, and checks each method, topic, deployment and caller against
-// them; request fields are never authority.
+// them; request fields are never authority. `cli` is the operator class: the `chunk` CLI presents control's
+// credential, and only it may use the operator surface in operator.proto.
 //
 // Limits. Operation IDs are at most 256 bytes; methods, topics, deployments, keys, stream IDs and caller fields at
 // most 512 bytes. `arguments` is at most 1 MiB unless its method declares more: `chunk:commit` carries a mutation's

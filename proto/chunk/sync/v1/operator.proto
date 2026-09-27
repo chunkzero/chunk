@@ -1,0 +1,123 @@
+// The operator surface: what an environment's operator reads from core and asks of it. The operator is the `chunk`
+// CLI, presenting control's credential, whose class is `cli`; every other credential gets DENIED.
+//
+// Topics take no arguments, deployment or caller, and aren't fenced. Each subscription starts from a snapshot, whatever
+// its `after`, and then follows control's commits. An update's position is control's latest commit it reflects.
+// - `nodes`: each host's lifecycle and health. Each entry's key is a host ID and its value a Node. Health isn't in the
+//   log, so an update may change it at an unchanged position, as may a drain whose deadline passed.
+// - `players`: each player with a current claim. Each entry's key is the player's UUID and its value an OperatorPlayer.
+//
+// Methods are transactional and take a client-chosen operation ID of at most 128 bytes, not a `prep:` one, and no
+// deployment, caller or stream. A retry returns the first outcome, and one with other arguments fails with
+// OPERATION_MISMATCH. A result's position is control's state after the call, which the topics reach.
+// - `chunk:move_player` takes MovePlayerArguments and returns MovePlayerResult. It queues a move for the gateway
+//   holding the player's claim, which carries it out by claiming the destination under the move's operation ID. An
+//   operation ID that already names a claim fails with OPERATION_MISMATCH.
+// - `chunk:drain` takes DrainArguments and returns DrainResult. It retires a host: the host takes no new players,
+//   core moves its players away, and stops it once it is empty or its deadline passed. Follow its progress on `nodes`.
+syntax = "proto3";
+
+package chunk.sync.v1;
+
+import "chunk/sync/v1/gateway.proto";
+import "chunk/sync/v1/jvm.proto";
+
+// A host and the JVM it runs.
+message Node {
+  // The deployment whose release the host runs.
+  string deployment = 1;
+  // The app the host's JVM runs.
+  string app = 2;
+  // The machine profile the host runs on.
+  string machine_profile = 3;
+  NodePhase phase = 4;
+  // The health the JVM last pushed. Unset before its first report.
+  JvmHealth health = 5;
+  // Unix time in milliseconds of the last health sample; zero before the first.
+  uint64 observed_at_ms = 6;
+  // Health checks failed in a row. Core retires the host after 3.
+  uint32 consecutive_failures = 7;
+  // While DRAINING: Unix time in milliseconds when core stops the host, whichever players remain.
+  uint64 drain_deadline_ms = 8;
+  // While DRAINING or STOPPING: the host's open claims.
+  uint32 remaining_claims = 9;
+}
+
+// Where a host is in its lifecycle.
+enum NodePhase {
+  NODE_PHASE_UNSPECIFIED = 0;
+  // The host is launching, and its JVM hasn't been checked yet.
+  NODE_PHASE_STARTING = 1;
+  // The JVM is ready and ticking.
+  NODE_PHASE_ONLINE = 2;
+  // The JVM's last health check failed.
+  NODE_PHASE_UNHEALTHY = 3;
+  // Core lost track of the host's JVM, which still owns its players.
+  NODE_PHASE_UNREACHABLE = 4;
+  // The host is retired and its players are moving away until its drain deadline.
+  NODE_PHASE_DRAINING = 5;
+  // Core is stopping the host.
+  NODE_PHASE_STOPPING = 6;
+  // The host stopped.
+  NODE_PHASE_STOPPED = 7;
+}
+
+// A player with a current claim.
+message OperatorPlayer {
+  // The player's name. Their profile's properties aren't included.
+  string username = 1;
+  // The session the player's current claim targets.
+  SessionDemand demand = 2;
+  // The host serving the claim, and the app it runs. Empty until a session is placed.
+  string host = 3;
+  string app = 4;
+  ClaimPhase phase = 5;
+  // A move of the player is queued or in progress.
+  bool moving = 6;
+  // Unix time in milliseconds when the current claim was made.
+  uint64 since_ms = 7;
+  // Why the player's latest move failed, unless it hasn't.
+  MoveFailure last_move_failure = 8;
+}
+
+// A move that didn't happen.
+message MoveFailure {
+  // Where the player was moving.
+  SessionDemand destination = 1;
+  // Why preparing the move failed.
+  string reason = 2;
+  // Unix time in milliseconds.
+  uint64 failed_at_ms = 3;
+}
+
+// Arguments of `chunk:move_player`.
+message MovePlayerArguments {
+  // The player's UUID. They must have arrived in their session, with no move pending.
+  string player = 1;
+  // The session to move them to, which their current claim's release must offer.
+  SessionDemand destination = 2;
+}
+
+// The result of `chunk:move_player`: the move is queued, and follows on `players`.
+message MovePlayerResult {}
+
+// Arguments of `chunk:drain`.
+message DrainArguments {
+  oneof target {
+    // A host ID.
+    string host = 1;
+    // A player's UUID: drain the host serving their current claim, which must not be retired already.
+    string player = 2;
+  }
+  // How long players may take to move away before core stops the host: at most 120 seconds, and at least 10 for a
+  // player's host.
+  uint32 timeout_seconds = 3;
+}
+
+// The result of `chunk:drain`.
+message DrainResult {
+  // The host being drained.
+  string host = 1;
+  // Unix time in milliseconds when core stops the host, whichever players remain.
+  uint64 deadline_ms = 2;
+}
