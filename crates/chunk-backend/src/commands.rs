@@ -3,10 +3,11 @@ use std::sync::Arc;
 use chunk_contract::Schema;
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
-use tokio::sync::mpsc;
+use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
-    ActionHandle, ActionId, Backend, Call, Error, Result,
+    ActionHandle, ActionId, ActionStatus, Backend, Call, Error, Result,
     service::{Command, Request},
 };
 
@@ -35,6 +36,14 @@ impl Purpose {
     pub fn command(self) -> Option<Arc<CommandBinding>> {
         if let Self::Command(binding) = self { Some(binding) } else { None }
     }
+    /// The digest of who started a command, which only they may resolve it by.
+    pub fn owner(&self) -> Option<[u8; 32]> {
+        if let Self::Command(binding) = self { binding.owner } else { None }
+    }
+    /// Bytes the command's binding retains while it runs.
+    pub fn bytes(&self) -> usize {
+        if let Self::Command(binding) = self { binding.bytes() } else { 0 }
+    }
 }
 
 /// Bytes a command scope retains, charged at admission.
@@ -61,6 +70,32 @@ pub(crate) struct CommandBinding {
     pub scope: CommandScope,
     pub input: String,
     pub effects: mpsc::Sender<PlatformEffect>,
+    /// The digest of the credential that started the command, if [`Backend::start_command`] did.
+    pub owner: Option<[u8; 32]>,
+}
+
+impl CommandBinding {
+    pub fn bytes(&self) -> usize {
+        scope_bytes(&self.scope) + self.input.len()
+    }
+}
+
+/// What an identity from [`Backend::allocate_action_id`] names to a command's owner, resolved without consulting any
+/// deployment.
+#[derive(Clone, Debug)]
+pub enum CommandIdentity {
+    /// Prepared, and nothing started under it yet.
+    Unused,
+    /// A command the owner started, running or with its outcome retained.
+    Started(ActionStatus),
+    /// A command another owner started.
+    Foreign,
+    /// An action or hook.
+    Other,
+}
+
+pub(crate) fn owner_digest(owner: &str) -> [u8; 32] {
+    Sha256::digest(owner.as_bytes()).into()
 }
 
 pub(crate) struct PlatformEffect {
@@ -152,6 +187,14 @@ impl CommandEffect {
         self.finish(Some(receipt.to_string().as_bytes()));
     }
 
+    /// Finishes an effect that runs on after its receipt of acceptance, returning the admission it holds, which the
+    /// performer keeps until the effect's work ends.
+    pub fn accept_running(self) -> OwnedSemaphorePermit {
+        let receipt = serde_json::json!({"state": "accepted", "operationId": self.operation_id()});
+        let result = effect_result(&self.invocation, &self.effect, Some(receipt.to_string().as_bytes()));
+        self.effect.reply.finish_holding(result)
+    }
+
     /// Finishes the effect with its `result` JSON, or `None` if it failed.
     pub fn finish(self, result: Option<&[u8]>) {
         let result = effect_result(&self.invocation, &self.effect, result);
@@ -198,16 +241,25 @@ impl Backend {
         self.submit_sized(bytes, |reply| Command::Suggest { id, request, reply }).await
     }
 
+    /// Resolves `id` for `owner` without consulting any deployment.
+    /// # Errors
+    /// Reports an identity this backend didn't allocate, or whose outcome is gone, as unknown.
+    pub async fn command_identity(&self, id: ActionId, owner: &str) -> Result<CommandIdentity> {
+        let owner = owner_digest(owner);
+        self.submit_sized(id.incarnation.len(), |reply| Command::OwnedIdentity { id, owner, reply }).await
+    }
+
     /// Starts `command` with `input` for `scope` in `deployment` under an identity from
-    /// [`Self::allocate_action_id`], through the same admission as [`Self::start_action`], and retains its outcome.
-    /// `caller` identifies who asked, so only a retry repeating the command, input and caller joins it; a retry's
-    /// effects stay with the first start.
+    /// [`Self::allocate_action_id`], through the same admission as [`Self::start_action`], and retains its outcome for
+    /// `owner`, whom [`Self::command_identity`] resolves it for. `caller` is the handler's `ctx.caller`.
     /// # Errors
     /// Rejects identities this backend didn't allocate, mismatched requests, commands the scope may not run, invalid
     /// input and exhausted capacity.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_command(
         &self,
         id: ActionId,
+        owner: &str,
         deployment: DeploymentId,
         scope: CommandScope,
         command: String,
@@ -219,7 +271,8 @@ impl Backend {
         let call =
             Call { deployment, function: command, arguments: serde_json::json!({"input": input}).into(), caller };
         let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len();
-        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects }));
+        let owner = Some(owner_digest(owner));
+        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner }));
         let handle =
             self.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: true, reply }).await?;
         Ok((handle, CommandEffects { receiver, invocation }))

@@ -230,7 +230,12 @@ async fn owner_run(
     let (effects, mut requests) = mpsc::channel::<PlatformEffect>(8);
     let call = prepared.call();
     let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
-    let purpose = Purpose::Command(Arc::new(CommandBinding { scope: prepared.scope, input: prepared.input, effects }));
+    let purpose = Purpose::Command(Arc::new(CommandBinding {
+        scope: prepared.scope,
+        input: prepared.input,
+        effects,
+        owner: None,
+    }));
     let invocation = id.to_string();
     let acceptance =
         backend.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: false, reply });

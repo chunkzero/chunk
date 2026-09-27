@@ -34,7 +34,7 @@ pub fn release() -> chunk_control::Release {
     .unwrap()
 }
 
-/// Declares `status`, which the fake JVM answers with 7.
+/// Declares `status`, which the fake JVM answers with 7, or with `limit` 0 holds queued until it's cancelled.
 pub fn session_methods() -> serde_json::Value {
     serde_json::json!({"version": 1, "methods": [{
         "app": "bridge", "session": "default", "name": "status",
@@ -78,6 +78,8 @@ struct State {
     deliveries: BTreeMap<String, DeliveryInventory>,
     ticks: u64,
     reports: Option<mpsc::UnboundedSender<ProcessReport>>,
+    /// Session methods run, held queued, and cancelled.
+    methods: (usize, usize, usize),
 }
 
 #[derive(Clone)]
@@ -99,6 +101,11 @@ impl Runtime {
             .add_service(SessionMethodsServer::new(runtime.clone()))
             .serve_with_incoming(incoming);
         (runtime, tokio::spawn(async { server.await.unwrap() }))
+    }
+
+    /// How many session methods ran, were held queued, and were cancelled.
+    pub fn methods(&self) -> (usize, usize, usize) {
+        self.state.lock().unwrap().methods
     }
 
     pub fn host(&self) -> Option<String> {
@@ -251,8 +258,16 @@ impl NodeControl for Runtime {
 #[tonic::async_trait]
 impl SessionMethods for Runtime {
     async fn call(&self, request: Request<SessionMethodRequest>) -> Result<Response<SessionMethodResult>, Status> {
+        let request = request.into_inner();
+        if request.arguments_json.contains("\"limit\":0") {
+            self.state.lock().unwrap().methods.1 += 1;
+            let phase = SessionMethodPhase::Accepted.into();
+            let operation_id = request.operation_id;
+            return Ok(Response::new(SessionMethodResult { operation_id, phase, ..SessionMethodResult::default() }));
+        }
+        self.state.lock().unwrap().methods.0 += 1;
         Ok(Response::new(SessionMethodResult {
-            operation_id: request.into_inner().operation_id,
+            operation_id: request.operation_id,
             phase: SessionMethodPhase::Completed.into(),
             result_json: "7".into(),
             error: None,
@@ -260,6 +275,7 @@ impl SessionMethods for Runtime {
     }
 
     async fn cancel(&self, request: Request<SessionMethodRequest>) -> Result<Response<SessionMethodResult>, Status> {
+        self.state.lock().unwrap().methods.2 += 1;
         Ok(Response::new(SessionMethodResult {
             operation_id: request.into_inner().operation_id,
             phase: SessionMethodPhase::Cancelled.into(),

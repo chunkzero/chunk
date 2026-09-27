@@ -50,7 +50,9 @@ impl Topic {
                 };
                 Ok(Self::Queries(queries::Queries::new(keys, group, context)))
             }
-            topic if topic.starts_with("command/") => command::open(service, principal, request).map(Self::Command),
+            topic if topic.starts_with("command/") => {
+                command::open(service, principal, request).await.map(Self::Command)
+            }
             topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
             topic if topic.starts_with("jvm/") => jvm::open(service, principal, request).map(Self::Jvm),
             _ => Err(errors::invalid("unknown topic")),

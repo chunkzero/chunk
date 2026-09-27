@@ -263,6 +263,7 @@ impl Actor {
             })),
             Command::PrepareAction { reply } => reply.finish(self.actions.prepare()),
             Command::ActionIdentity { id, reply } => reply.finish(self.actions.identity(&id)),
+            Command::OwnedIdentity { id, owner, reply } => reply.finish(self.actions.command_identity(&id, &owner)),
             Command::StartAction { purpose, id, call, retain, reply } => {
                 self.start_action(id, call, purpose, retain, reply);
             }

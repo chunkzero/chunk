@@ -48,7 +48,7 @@ pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_contr
             app: app::App::new(backend),
             streams: streams::StreamKey::new(),
             fences: streams::Fences::default(),
-            runs: runs::Runs::default(),
+            runs: Arc::default(),
             stop,
             operations,
         };
@@ -64,7 +64,7 @@ pub(crate) struct SyncService {
     app: app::App,
     streams: streams::StreamKey,
     fences: streams::Fences,
-    runs: runs::Runs,
+    runs: Arc<runs::Runs>,
     /// The store's epoch, fixed while the backend runs.
     epoch: u64,
     /// Ends open streams when control's transport shuts down.

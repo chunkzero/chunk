@@ -2,20 +2,34 @@
 
 use super::*;
 use chunk_proto::sync::v1::{
-    CommandArguments, CommandEffect, CommandResult, CommandSubscription, CommandsResult, EffectArguments, EffectResult,
-    GatewayClaim, PrepareResult, SuggestArguments, SuggestResult, command_effect,
+    CommandArguments, CommandEffect, CommandOutcome, CommandStarted, CommandSubscription, CommandsResult,
+    EffectArguments, EffectResult, GatewayClaim, PrepareResult, SuggestArguments, SuggestResult, WithdrawResult,
+    command_effect, command_outcome,
 };
 
-/// Core with the player arrived through gateway `proxy`, the gateway's topic stream and its ID, and the fake JVM.
-async fn arrived() -> (Fixture, Streaming<Update>, String, JoinHandle<()>) {
+/// Core with the player arrived through gateway `proxy`, whose topic stream it holds, and the fake JVM.
+struct Arrived {
+    fixture: Fixture,
+    updates: Streaming<Update>,
+    gateway: Gateway,
+    jvm: runtime::Runtime,
+    server: JoinHandle<()>,
+}
+
+/// A gateway's credential and its current `gateway/<id>` stream.
+#[derive(Clone)]
+struct Gateway {
+    client: CoreClient<Channel>,
+    credential: String,
+    stream: String,
+}
+
+async fn arrived() -> Arrived {
     use chunk_proto::v1::ClaimPhase;
     let (jvm, server) = runtime::Runtime::start();
-    let mut fixture = Fixture::with_host(Arc::new(jvm)).await;
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
     fixture.control.activate_release(runtime::release()).unwrap();
-    let subscription = SubscribeRequest { topic: "gateway/proxy".into(), ..SubscribeRequest::default() };
-    let gateway = fixture.gateway.clone();
-    let mut updates = fixture.client.subscribe(authorized(subscription, &gateway)).await.unwrap().into_inner();
-    let stream = next(&mut updates).await.stream;
+    let (updates, gateway) = Gateway::follow_own(&fixture, fixture.gateway.clone(), "proxy").await;
     fixture.control.claim(runtime::login()).await.unwrap();
     let arrived = |fixture: &Fixture| {
         let players = fixture.control.players().unwrap().players;
@@ -24,11 +38,69 @@ async fn arrived() -> (Fixture, Streaming<Update>, String, JoinHandle<()>) {
     while !arrived(&fixture) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (fixture, updates, stream, server)
+    Arrived { fixture, updates, gateway, jvm, server }
 }
 
-/// Calls command method `method` as `credential` on gateway stream `stream`, naming the player unless it's
-/// `chunk:effect`.
+impl Arrived {
+    /// Another gateway, and its `gateway/<id>` stream.
+    async fn other(&self) -> (Gateway, Streaming<Update>) {
+        let (updates, other) = Gateway::follow_own(&self.fixture, self.fixture.gateways.mint("other"), "other").await;
+        (other, updates)
+    }
+
+    async fn stop(self) {
+        drop(self.updates);
+        self.fixture.stop().await;
+        self.server.abort();
+    }
+}
+
+impl Gateway {
+    /// Follows `gateway/<id>` as `credential`.
+    async fn follow_own(fixture: &Fixture, credential: String, id: &str) -> (Streaming<Update>, Self) {
+        let mut client = fixture.client.clone();
+        let subscription = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+        let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
+        let stream = next(&mut updates).await.stream;
+        (updates, Self { client, credential, stream })
+    }
+
+    async fn call(&self, operation: &str, method: &str, arguments: &impl Message) -> CallResponse {
+        call(self.client.clone(), &self.credential, &self.stream, operation, method, arguments).await
+    }
+
+    async fn prepare(&self) -> String {
+        let message = CallRequest { method: "chunk:prepare".into(), ..CallRequest::default() };
+        let response = self.client.clone().call(authorized(message, &self.credential)).await.unwrap();
+        decoded::<PrepareResult>(&response.into_inner()).operation_id
+    }
+
+    /// Starts `say` with `input` under prepared `operation`.
+    async fn say(&self, operation: &str, input: &str) -> CallResponse {
+        let arguments = CommandArguments { command_id: SAY.into(), input: input.into() };
+        self.call(operation, "chunk:command", &arguments).await
+    }
+
+    /// Follows the command under `operation`.
+    async fn follow(&self, operation: &str) -> Streaming<Update> {
+        let topic = SubscribeRequest {
+            topic: format!("command/{operation}"),
+            arguments: CommandSubscription { stream: self.stream.clone() }.encode_to_vec(),
+            ..SubscribeRequest::default()
+        };
+        self.client.clone().subscribe(authorized(topic, &self.credential)).await.unwrap().into_inner()
+    }
+
+    /// Starts `say` with `input`, then follows it to its outcome.
+    async fn run(&self, input: &str) -> CommandOutcome {
+        let operation = self.prepare().await;
+        decoded::<CommandStarted>(&self.say(&operation, input).await);
+        outcome(&mut self.follow(&operation).await).await
+    }
+}
+
+/// Calls platform method `method` as `credential` on gateway stream `stream`, naming the player for the methods that
+/// take one.
 async fn call(
     mut client: CoreClient<Channel>,
     credential: &str,
@@ -42,29 +114,36 @@ async fn call(
         operation_id: operation.into(),
         method: method.into(),
         arguments: arguments.encode_to_vec(),
-        caller: (method != "chunk:effect").then_some(player),
+        caller: (!matches!(method, "chunk:effect" | "chunk:withdraw")).then_some(player),
         stream: stream.into(),
         ..CallRequest::default()
     };
     client.call(authorized(message, credential)).await.unwrap().into_inner()
 }
 
-/// Runs `say` with `input` under prepared `operation`.
-async fn say(
-    client: CoreClient<Channel>,
-    credential: String,
-    stream: String,
-    operation: String,
-    input: &str,
-) -> CallResponse {
-    let arguments = CommandArguments { command_id: SAY.into(), input: input.into() };
-    call(client, &credential, &stream, &operation, "chunk:command", &arguments).await
+/// Reads a command's topic to its outcome, which must end it.
+async fn outcome(effects: &mut Streaming<Update>) -> CommandOutcome {
+    loop {
+        let update = next(effects).await;
+        assert!(update.error.is_none(), "the topic failed: {update:?}");
+        if let Some(Entry { state: Some(State::Value(value)), .. }) =
+            update.upserts.iter().find(|entry| entry.key == "outcome")
+        {
+            assert!(effects.message().await.unwrap().is_none());
+            return CommandOutcome::decode(value.as_slice()).unwrap();
+        }
+    }
 }
 
-async fn prepare(fixture: &Fixture) -> String {
-    let message = CallRequest { method: "chunk:prepare".into(), ..CallRequest::default() };
-    let response = fixture.client.clone().call(authorized(message, &fixture.gateway)).await.unwrap().into_inner();
-    decoded::<PrepareResult>(&response).operation_id
+fn returned(outcome: &CommandOutcome) -> &[u8] {
+    match &outcome.outcome {
+        Some(command_outcome::Outcome::ResultJson(json)) => json,
+        outcome => panic!("expected a result, got {outcome:?}"),
+    }
+}
+
+fn failed(outcome: &CommandOutcome) -> bool {
+    matches!(outcome.outcome, Some(command_outcome::Outcome::Error(_)))
 }
 
 fn decoded<T: Message + Default>(response: &CallResponse) -> T {
@@ -74,48 +153,39 @@ fn decoded<T: Message + Default>(response: &CallResponse) -> T {
     }
 }
 
+fn failure(update: &Update) -> Option<Code> {
+    update.error.as_ref().map(chunk_proto::sync::v1::Error::code)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_reads_the_commands_and_suggestions_its_arrived_player_sees() {
-    let (mut fixture, updates, stream, server) = arrived().await;
-    let (client, gateway) = (fixture.client.clone(), fixture.gateway.clone());
-    let catalog = call(client.clone(), &gateway, &stream, "", "chunk:commands", &()).await;
-    let CommandsResult { commands_json, allowed } = decoded(&catalog);
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let CommandsResult { commands_json, allowed } = decoded(&gateway.call("", "chunk:commands", &()).await);
     let commands: serde_json::Value = serde_json::from_slice(&commands_json).unwrap();
     assert_eq!((commands[SAY]["name"].as_str(), allowed.as_slice()), (Some("say"), [SAY.to_owned()].as_slice()));
     let arguments =
         SuggestArguments { command_id: SAY.into(), query: "choices".into(), input: "say o".into(), cursor: 5 };
-    let suggested = call(client.clone(), &gateway, &stream, "", "chunk:suggest", &arguments).await;
+    let suggested = gateway.call("", "chunk:suggest", &arguments).await;
     assert_eq!(decoded::<SuggestResult>(&suggested).values, ["one", "two"]);
 
-    let cli = fixture.cli.clone();
-    assert_eq!(code(&call(client.clone(), &cli, &stream, "", "chunk:commands", &()).await), Code::Denied);
-    let other = fixture.gateways.mint("other");
-    let subscription = SubscribeRequest { topic: "gateway/other".into(), ..SubscribeRequest::default() };
-    let mut foreign = fixture.client.subscribe(authorized(subscription, &other)).await.unwrap().into_inner();
-    let foreign_stream = next(&mut foreign).await.stream;
-    let refused = call(client, &other, &foreign_stream, "", "chunk:commands", &()).await;
-    assert_eq!(code(&refused), Code::Denied);
-    drop((updates, foreign));
-    fixture.stop().await;
-    server.abort();
+    let cli = Gateway { credential: arrived.fixture.cli.clone(), ..gateway.clone() };
+    assert_eq!(code(&cli.call("", "chunk:commands", &()).await), Code::Denied);
+    let (other, foreign) = arrived.other().await;
+    assert_eq!(code(&other.call("", "chunk:commands", &()).await), Code::Denied);
+    drop(foreign);
+    arrived.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it() {
-    let (mut fixture, updates, stream, server) = arrived().await;
-    let (client, gateway) = (fixture.client.clone(), fixture.gateway.clone());
-    let operation = prepare(&fixture).await;
-    let topic = |stream: &str| SubscribeRequest {
-        topic: format!("command/{operation}"),
-        arguments: CommandSubscription { stream: stream.into() }.encode_to_vec(),
-        ..SubscribeRequest::default()
-    };
-    let mut effects = fixture.client.subscribe(authorized(topic(&stream), &gateway)).await.unwrap().into_inner();
-    let first = next(&mut effects).await;
-    assert!(first.snapshot && first.upserts.is_empty() && !first.stream.is_empty());
-
-    let running = tokio::spawn(say(client.clone(), gateway.clone(), stream.clone(), operation.clone(), "say hello"));
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say hello").await);
+    let mut effects = gateway.follow(&operation).await;
     let mut pending = next(&mut effects).await;
+    assert!(pending.snapshot && !pending.stream.is_empty());
     while pending.upserts.is_empty() {
         pending = next(&mut effects).await;
     }
@@ -126,42 +196,94 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
     assert_eq!(effect, Some(command_effect::Effect::Message("hello".into())));
     let ack = EffectArguments { operation_id: operation.clone(), sequence: key.parse().unwrap(), failed: false };
 
-    // Only the gateway that started the command follows it and acknowledges its effects.
-    let other = fixture.gateways.mint("other");
-    let subscription = SubscribeRequest { topic: "gateway/other".into(), ..SubscribeRequest::default() };
-    let mut foreign = fixture.client.subscribe(authorized(subscription, &other)).await.unwrap().into_inner();
-    let foreign_stream = next(&mut foreign).await.stream;
-    let mut denied = fixture.client.subscribe(authorized(topic(&foreign_stream), &other)).await.unwrap().into_inner();
-    assert_eq!(next(&mut denied).await.error.map(|error| error.code()), Some(Code::Denied));
-    let foreign_ack = call(client.clone(), &other, &foreign_stream, "", "chunk:effect", &ack).await;
-    assert_eq!(code(&foreign_ack), Code::Denied);
+    // Only the gateway that started the command follows it, acknowledges its effects and retries it.
+    let (other, foreign) = arrived.other().await;
+    assert_eq!(failure(&next(&mut other.follow(&operation).await).await), Some(Code::Denied));
+    assert_eq!(code(&other.call("", "chunk:effect", &ack).await), Code::Denied);
+    assert_eq!(code(&other.say(&operation, "say hello").await), Code::Denied);
 
-    let acknowledged = call(client.clone(), &gateway, &stream, "", "chunk:effect", &ack).await;
+    let acknowledged = gateway.call("", "chunk:effect", &ack).await;
     assert!(!decoded::<EffectResult>(&acknowledged).unknown);
-    let finished = running.await.unwrap();
-    assert_eq!(decoded::<CommandResult>(&finished).result_json, b"null");
+    assert_eq!(returned(&outcome(&mut effects).await), b"null");
+    assert!(decoded::<EffectResult>(&gateway.call("", "chunk:effect", &ack).await).unknown);
 
-    let mut last = next(&mut effects).await;
-    while last.error.is_none() {
-        last = next(&mut effects).await;
+    // Once it finished, a retry reports it started, and following it again reports its retained outcome.
+    decoded::<CommandStarted>(&gateway.say(&operation, "say hello").await);
+    assert_eq!(returned(&outcome(&mut gateway.follow(&operation).await).await), b"null");
+    drop(foreign);
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_command_leaves_nothing_to_follow() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    let arguments = CommandArguments { command_id: "scopes/commands/missing".into(), input: "missing".into() };
+    let rejected = gateway.call(&operation, "chunk:command", &arguments).await;
+    assert!(matches!(rejected.outcome, Some(Outcome::Error(_))));
+    assert_eq!(failure(&next(&mut gateway.follow(&operation).await).await), Some(Code::Invalid));
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_is_cancelled_once_its_topic_closes() {
+    let mut arrived = arrived().await;
+    let gateway = arrived.gateway.clone();
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say write").await);
+    let mut effects = gateway.follow(&operation).await;
+    next(&mut effects).await;
+    drop(effects);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let cli = arrived.fixture.cli.clone();
+    assert_eq!(arrived.fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"0".to_vec())));
+    assert!(failed(&outcome(&mut gateway.follow(&operation).await).await));
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_commands_queued_session_call_never_runs() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say queued").await);
+    let effects = gateway.follow(&operation).await;
+    while arrived.jvm.methods().1 == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(last.error.map(|error| error.code()), Some(Code::Stopped));
-    let repeated = call(client.clone(), &gateway, &stream, "", "chunk:effect", &ack).await;
-    assert!(decoded::<EffectResult>(&repeated).unknown);
-    assert_eq!(say(client, gateway, stream, operation.clone(), "say hello").await, finished);
-    drop((updates, foreign));
-    fixture.stop().await;
-    server.abort();
+    drop(effects);
+    while arrived.jvm.methods().2 == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(arrived.jvm.methods().0, 0);
+    assert!(failed(&outcome(&mut gateway.follow(&operation).await).await));
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_the_players_claim_moved_on_reports_the_command_it_started() {
+    let arrived = arrived().await;
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    let mut effects = gateway.follow(&operation).await;
+    let withdrawn = gateway.call("login", "chunk:withdraw", &()).await;
+    assert!(!decoded::<WithdrawResult>(&withdrawn).unknown);
+    assert_eq!(code(&gateway.say(&gateway.prepare().await, "say wait").await), Code::Denied);
+
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    assert_eq!(returned(&outcome(&mut effects).await), b"null");
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    arrived.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn core_queues_a_commands_move_which_the_gateway_sees_on_its_own_topic() {
-    let (fixture, mut updates, stream, server) = arrived().await;
-    let operation = prepare(&fixture).await;
-    let entered = say(fixture.client.clone(), fixture.gateway.clone(), stream, operation, "say enter").await;
-    assert_eq!(decoded::<CommandResult>(&entered).result_json, b"null");
+    let mut arrived = arrived().await;
+    assert_eq!(returned(&arrived.gateway.run("say enter").await), b"null");
     loop {
-        let update = next(&mut updates).await;
+        let update = next(&mut arrived.updates).await;
         let destination = update.upserts.iter().find_map(|entry| match &entry.state {
             Some(State::Value(value)) if entry.key == "login" => {
                 GatewayClaim::decode(value.as_slice()).unwrap().pending_move.and_then(|moved| moved.destination)
@@ -173,41 +295,28 @@ async fn core_queues_a_commands_move_which_the_gateway_sees_on_its_own_topic() {
             break;
         }
     }
-    drop(updates);
-    fixture.stop().await;
-    server.abort();
+    arrived.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn core_calls_a_commands_session_method_itself() {
-    let (fixture, updates, stream, server) = arrived().await;
-    let operation = prepare(&fixture).await;
-    let called = say(fixture.client.clone(), fixture.gateway.clone(), stream, operation, "say status").await;
-    assert_eq!(decoded::<CommandResult>(&called).result_json, b"null");
-    drop(updates);
-    fixture.stop().await;
-    server.abort();
+    let arrived = arrived().await;
+    assert_eq!(returned(&arrived.gateway.run("say status").await), b"null");
+    assert_eq!(arrived.jvm.methods().0, 1);
+    arrived.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_burst_of_commands_beyond_sixteen_all_run() {
-    let (fixture, updates, stream, server) = arrived().await;
-    let mut operations = Vec::new();
-    for _ in 0..24 {
-        operations.push(prepare(&fixture).await);
-    }
-    let runs: Vec<_> = operations
-        .into_iter()
-        .map(|operation| {
-            let (client, gateway, stream) = (fixture.client.clone(), fixture.gateway.clone(), stream.clone());
-            tokio::spawn(async move { say(client, gateway, stream, operation, "say wait").await })
+    let arrived = arrived().await;
+    let runs: Vec<_> = (0..24)
+        .map(|_| {
+            let gateway = arrived.gateway.clone();
+            tokio::spawn(async move { returned(&gateway.run("say wait").await).to_vec() })
         })
         .collect();
     for run in runs {
-        let response = run.await.unwrap();
-        assert_eq!(decoded::<CommandResult>(&response).result_json, b"null");
+        assert_eq!(run.await.unwrap(), b"null");
     }
-    drop(updates);
-    fixture.stop().await;
-    server.abort();
+    arrived.stop().await;
 }

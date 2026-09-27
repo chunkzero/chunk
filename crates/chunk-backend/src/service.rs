@@ -97,7 +97,7 @@ pub(crate) struct Request<T> {
     pub cancellation: Cancellation,
     pub queued: crate::timing::Timer,
     reply: oneshot::Sender<Result<T>>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     /// Request memory held by a reply retained until its revision is durable.
     retained: Option<OwnedSemaphorePermit>,
 }
@@ -108,7 +108,7 @@ impl<T> Request<T> {
         reply: oneshot::Sender<Result<T>>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        Self { cancellation, queued: crate::timing::Timer::start(), reply, _permit: permit, retained: None }
+        Self { cancellation, queued: crate::timing::Timer::start(), reply, permit, retained: None }
     }
 
     pub fn retain(&mut self, permit: OwnedSemaphorePermit) {
@@ -117,6 +117,12 @@ impl<T> Request<T> {
 
     pub fn finish(self, result: Result<T>) {
         let _ = self.reply.send(result);
+    }
+
+    /// Replies with `result`, returning the request's admission for the caller to hold while its work runs on.
+    pub fn finish_holding(self, result: Result<T>) -> OwnedSemaphorePermit {
+        let _ = self.reply.send(result);
+        self.permit
     }
 }
 
@@ -164,6 +170,11 @@ pub(crate) enum Command {
     ActionIdentity {
         id: ActionId,
         reply: Request<crate::ActionIdentity>,
+    },
+    OwnedIdentity {
+        id: ActionId,
+        owner: [u8; 32],
+        reply: Request<crate::CommandIdentity>,
     },
     StartAction {
         purpose: crate::commands::Purpose,
@@ -229,6 +240,7 @@ impl Command {
             Self::JobControl { reply, .. } => reply.finish(Err(error)),
             Self::PrepareAction { reply } => reply.finish(Err(error)),
             Self::ActionIdentity { reply, .. } => reply.finish(Err(error)),
+            Self::OwnedIdentity { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
@@ -371,9 +383,10 @@ impl Backend {
         Self::start(environment, store, effects, readers, crate::limits::ACTION_BYTES)
     }
 
-    /// Starts with a live-action budget of exactly `action_bytes`.
-    #[cfg(test)]
-    pub(crate) fn with_action_bytes(
+    /// Starts with a live-action budget of exactly `action_bytes`, rather than one sized from the machine's memory.
+    /// # Errors
+    /// Reports what [`Self::with_action_effects`] does.
+    pub fn with_action_bytes(
         environment: String,
         store: Box<dyn Storage>,
         effects: ActionEffects,

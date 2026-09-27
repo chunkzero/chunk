@@ -37,6 +37,11 @@ export async function say(ctx, {arguments: {text}}) {
     if (status !== 7) throw new Error(`unexpected status ${status}`);
   } else if (text === 'wait') {
     await ctx.sleep(300);
+  } else if (text === 'write') {
+    await ctx.sleep(300);
+    await ctx.runMutation('add', 1);
+  } else if (text === 'queued') {
+    await ctx.platform({kind: 'session_call', method, arguments: {limit: 0}});
   } else {
     await ctx.platform({kind: 'message', text});
   }
@@ -159,7 +164,10 @@ impl Fixture {
     /// Starts core over the store in `directory`, which a stopped core may have left.
     async fn open(directory: tempfile::TempDir, host: Arc<dyn chunk_control::Host>) -> Self {
         let store = chunk_store::SqliteStore::open(directory.path().join("environment.sqlite"), "test").unwrap();
-        let backend = Backend::new("test".into(), Box::new(store)).unwrap();
+        // Admits 24 live actions of the default heap, whatever the machine's memory.
+        let budget = 24 * chunk_js::Limits::default().heap_bytes;
+        let effects = chunk_backend::ActionEffects::new("test".into()).unwrap();
+        let backend = Backend::with_action_bytes("test".into(), Box::new(store), effects, budget).unwrap();
         backend.deploy(deployment()).await.unwrap();
         let (ready, started) = oneshot::channel();
         let stop = CancellationToken::new();
