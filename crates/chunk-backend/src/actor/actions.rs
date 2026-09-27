@@ -267,14 +267,34 @@ impl Actor {
         }
     }
 
-    /// Starts queued actions as live ones finish.
+    /// Drops cancelled queued starts and resolves those that no longer need a new worker, such as duplicates of an
+    /// action an earlier queued start launched or starts for a released deployment, then starts the rest in order as
+    /// live actions finish. Replies go out once every start is resolved, so all callers joining an action hold its scope
+    /// before any can drop it.
     pub(super) fn dispatch_actions(&mut self) {
-        while self.failure.is_none()
-            && !self.actions.waiting.is_empty()
-            && self.actions.capacity()
-            && let Some(Waiting { id, call, purpose, retain, reply, .. }) = self.actions.waiting.pop_front()
-        {
-            self.start_action(id, call, purpose, retain, reply);
+        if self.failure.is_some() || self.actions.waiting.is_empty() {
+            return;
+        }
+        self.actions.expire();
+        let mut full = false;
+        let mut replies = Vec::new();
+        for waiting in std::mem::take(&mut self.actions.waiting) {
+            if waiting.reply.cancellation.is_cancelled() {
+                replies.push((waiting.reply, Err(Error::Cancelled)));
+            } else if matches!(self.actions.resolve(&waiting.id), Ok(None))
+                && self.check_deployment(&waiting.call.deployment).is_ok()
+                && (full || !self.actions.capacity())
+            {
+                full = true;
+                self.actions.waiting.push_back(waiting);
+            } else {
+                let Waiting { id, call, purpose, retain, reply, .. } = waiting;
+                let result = self.launch_action(id, call, None, purpose, retain, &reply.cancellation);
+                replies.push((reply, result));
+            }
+        }
+        for (reply, result) in replies {
+            reply.finish(result);
         }
     }
 

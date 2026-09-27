@@ -1,6 +1,7 @@
 //! Admission limits. New work is refused once queued work of its kind waits too long
 //! or a memory budget runs out, and each refusal names its limit.
 use std::{
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
@@ -53,26 +54,74 @@ impl Limit {
 }
 
 /// The live-action budget: [`ACTION_SHARE`] of the machine's memory, or of the process's cgroup limit when lower, and
-/// [`ACTION_BYTES`] when neither can be read.
+/// [`ACTION_BYTES`] when the machine's memory can't be read.
 pub(crate) fn action_bytes() -> usize {
     machine_memory().map_or(ACTION_BYTES, |bytes| (bytes / ACTION_SHARE).max(ACTION_BYTES))
 }
 
 fn machine_memory() -> Option<usize> {
-    let read = |path: &str| std::fs::read_to_string(path).ok();
-    let meminfo = read("/proc/meminfo")?;
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    let meminfo = read(Path::new("/proc/meminfo"))?;
     let total = meminfo.lines().find_map(|line| line.strip_prefix("MemTotal:"))?.trim().strip_suffix(" kB")?;
     let total = total.parse::<usize>().ok()?.checked_mul(1024)?;
-    // cgroup v2 names the process's group; v1 mounts its memory controller separately. An unlimited v2 group reads `max`.
-    let v2 = read("/proc/self/cgroup").and_then(|groups| {
-        Some(format!("/sys/fs/cgroup{}/memory.max", groups.lines().find_map(|line| line.strip_prefix("0::"))?))
-    });
-    let limit = [v2, Some("/sys/fs/cgroup/memory/memory.limit_in_bytes".into())]
-        .into_iter()
-        .flatten()
-        .filter_map(|path| read(&path)?.trim().parse::<usize>().ok())
-        .min();
+    let limit = read(Path::new("/proc/self/mountinfo"))
+        .zip(read(Path::new("/proc/self/cgroup")))
+        .and_then(|(mountinfo, groups)| cgroup_limit(&mountinfo, &groups, read));
     Some(limit.map_or(total, |limit| limit.min(total)))
+}
+
+/// The lowest memory limit on the process's cgroup or any ancestor up to its controller's mount, given
+/// `/proc/self/mountinfo`, `/proc/self/cgroup` and a reader for the mounted files. Both the cgroup v2 hierarchy and the
+/// v1 memory controller count; an unlimited, unreadable or zero limit counts as none.
+pub(crate) fn cgroup_limit(mountinfo: &str, groups: &str, read: impl Fn(&Path) -> Option<String>) -> Option<usize> {
+    let membership = |controller: Option<&str>| {
+        groups.lines().find_map(|line| {
+            let mut fields = line.splitn(3, ':');
+            let (_, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+            let member = match controller {
+                None => controllers.is_empty(),
+                Some(controller) => controllers.split(',').any(|name| name == controller),
+            };
+            member.then_some(path)
+        })
+    };
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            // `id parent device root mount-point options [optional...] - type source super-options`
+            let (mount, filesystem) = line.split_once(" - ")?;
+            let mut mount = mount.split(' ').skip(3);
+            let (root, point) = (mount.next()?, mount.next()?);
+            let mut filesystem = filesystem.split(' ');
+            let (kind, options) = (filesystem.next()?, filesystem.nth(1)?);
+            let (file, path) = match kind {
+                "cgroup2" => ("memory.max", membership(None)?),
+                "cgroup" if options.split(',').any(|option| option == "memory") => {
+                    ("memory.limit_in_bytes", membership(Some("memory"))?)
+                }
+                _ => return None,
+            };
+            // The mount exposes the hierarchy below `root`; the process's group must lie within it.
+            let relative = if root == "/" { path } else { path.strip_prefix(root)? };
+            if !(relative.is_empty() || relative.starts_with('/')) {
+                return None;
+            }
+            let limit = |directory: &Path| {
+                let bytes = read(&directory.join(file))?.trim().parse::<u64>().ok().filter(|&bytes| bytes > 0)?;
+                usize::try_from(bytes).ok()
+            };
+            let mut directory = PathBuf::from(point);
+            let mut lowest = limit(&directory);
+            for component in relative.split('/').filter(|component| !component.is_empty()) {
+                if component == ".." {
+                    return None;
+                }
+                directory.push(component);
+                lowest = lowest.into_iter().chain(limit(&directory)).min();
+            }
+            lowest
+        })
+        .min()
 }
 
 /// Wait for the engine thread, shared by request admission and the engine.

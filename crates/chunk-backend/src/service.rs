@@ -382,6 +382,12 @@ impl Backend {
         Self::start(environment, store, effects, default_readers(), action_bytes)
     }
 
+    /// The request memory budget admission charges.
+    #[cfg(test)]
+    pub(crate) fn request_memory(&self) -> Arc<Semaphore> {
+        self.0.memory.clone()
+    }
+
     fn start(
         environment: String,
         store: Box<dyn Storage>,
@@ -474,9 +480,8 @@ impl Backend {
         let permit = self.0.memory.clone().try_acquire_many_owned(cost).map_err(|_| Limit::RequestMemory.exceeded())?;
         self.0.queue.enter()?;
         let cancellation = Cancellation::default();
-        let _cancel = CancelOnDrop(cancellation.clone());
         let (reply, response) = oneshot::channel();
-        let request = Request::new(cancellation, reply, permit);
+        let request = Request::new(cancellation.clone(), reply, permit);
         let event = Event::Request { command: Box::new(make(request)), admitted: std::time::Instant::now() };
         self.0.events.try_send(event).map_err(|error| {
             self.0.queue.leave();
@@ -485,7 +490,10 @@ impl Backend {
                 queue::error::TrySendError::Closed(_) => Error::Closed,
             }
         })?;
-        response.await.map_err(|_| Error::Closed)?
+        let mut cancel = CancelOnDrop { cancellation, events: Some(&self.0.events) };
+        let result = response.await;
+        cancel.events = None;
+        result.map_err(|_| Error::Closed)?
     }
 
     /// # Errors
@@ -692,10 +700,20 @@ impl Backend {
     }
 }
 
-struct CancelOnDrop(Cancellation);
-impl Drop for CancelOnDrop {
+/// Cancels a request once its caller stops waiting. A caller that leaves before the reply also wakes the actor, so work
+/// queued for it, such as an action start waiting for capacity, releases its admission.
+struct CancelOnDrop<'a> {
+    cancellation: Cancellation,
+    events: Option<&'a queue::Sender<Event>>,
+}
+
+impl Drop for CancelOnDrop<'_> {
     fn drop(&mut self) {
-        self.0.cancel();
+        self.cancellation.cancel();
+        if let Some(events) = self.events {
+            // A full queue already guarantees the actor will wake.
+            let _ = events.try_send(Event::Wake);
+        }
     }
 }
 

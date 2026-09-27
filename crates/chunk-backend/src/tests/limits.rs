@@ -104,3 +104,40 @@ async fn forget_job_admission_charges_retained_ids_and_callers() {
     super::pending(forgotten.as_mut()).await;
     assert_request_charge(&memory, bytes);
 }
+
+#[test]
+fn cgroup_limits_take_the_strictest_group_up_to_the_controller_mount() {
+    const GIB: usize = 1024 * 1024 * 1024;
+    let limit = |mountinfo: &str, groups: &str, files: &[(&str, &str)]| {
+        crate::limits::cgroup_limit(mountinfo, groups, |path| {
+            files.iter().find(|(file, _)| std::path::Path::new(file) == path).map(|(_, text)| (*text).to_owned())
+        })
+    };
+    let v2 = "30 23 0:26 / /sys/fs/cgroup rw,nosuid shared:4 - cgroup2 cgroup2 rw,nsdelegate\n";
+    let parent = ("/sys/fs/cgroup/parent/memory.max", "2147483648\n");
+    assert_eq!(
+        limit(v2, "0::/parent/leaf\n", &[parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "4294967296\n")]),
+        Some(2 * GIB)
+    );
+    assert_eq!(
+        limit(v2, "0::/parent/leaf\n", &[parent, ("/sys/fs/cgroup/parent/leaf/memory.max", "max\n")]),
+        Some(2 * GIB)
+    );
+    // A v1 memory controller mounted from inside the hierarchy, beside other controllers.
+    let v1 = "34 25 0:29 / /sys/fs/cgroup/cpu rw shared:14 - cgroup cgroup rw,cpu,cpuacct\n\
+              35 25 0:30 /pods /mnt/memory rw,nosuid shared:15 - cgroup cgroup rw,memory\n";
+    let groups = "5:cpu,cpuacct:/elsewhere\n4:memory:/pods/pod\n1:name=systemd:/pods/pod\n";
+    assert_eq!(
+        limit(
+            v1,
+            groups,
+            &[
+                ("/sys/fs/cgroup/cpu/memory.limit_in_bytes", "1"),
+                ("/mnt/memory/memory.limit_in_bytes", "9223372036854771712"),
+                ("/mnt/memory/pod/memory.limit_in_bytes", "1073741824"),
+            ]
+        ),
+        Some(GIB)
+    );
+    assert_eq!(limit(v2, "0::/parent/leaf\n", &[]), None);
+}
