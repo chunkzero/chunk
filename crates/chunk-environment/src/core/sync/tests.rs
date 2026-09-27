@@ -350,6 +350,37 @@ async fn a_stream_whose_client_stopped_reading_releases_its_subscription_and_end
     fixture.stop().await;
 }
 
+#[tokio::test]
+async fn core_stops_within_its_grace_while_a_client_never_reads() {
+    let mut fixture = Fixture::start().await;
+    let cli = fixture.cli.clone();
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"big": {"function": "big"}}"#.to_vec(),
+        deployment: "test".into(),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = fixture.client.subscribe(authorized(subscription, &cli)).await.unwrap().into_inner();
+    for count in 0..16 {
+        fixture.call(&cli, &format!("add-{count}"), "add", "1").await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    tokio::time::pause();
+    let stopping = tokio::time::Instant::now();
+    fixture.stop().await;
+    assert!(stopping.elapsed() < chunk_service::GRACE + Duration::from_secs(1));
+    tokio::time::resume();
+    // The connection was closed rather than drained, so the stream breaks off without its final update.
+    let ended = loop {
+        match updates.message().await {
+            Ok(Some(_)) => {}
+            ended => break ended,
+        }
+    };
+    assert!(ended.is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     use chunk_proto::v1::{ActivateClaim, MovePlayerRequest};

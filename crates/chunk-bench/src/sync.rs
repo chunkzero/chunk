@@ -275,14 +275,18 @@ impl Streams {
 }
 
 /// Opens `subscribers` `queries` streams on the leaderboard with the gateway credential, `streams_per_connection` to
-/// a connection, and waits for each snapshot. The last `slow_readers` streams wait before each read.
+/// a connection, and waits for each snapshot. The last `slow_readers` streams wait before each read, on connections
+/// no prompt stream shares.
 pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<Streams>> {
     let total = config.subscribers();
     let prompt = total - config.slow_readers;
-    let streams = Arc::new(Streams::new(total, prompt, total.div_ceil(config.streams_per_connection))?);
+    let per_connection = config.streams_per_connection;
+    let connections = prompt.div_ceil(per_connection) + config.slow_readers.div_ceil(per_connection);
+    let streams = Arc::new(Streams::new(total, prompt, connections)?);
     let mut rpc = connect(&connection.endpoint).await?;
     for index in 0..total {
-        if index > 0 && index % config.streams_per_connection == 0 {
+        let offset = if index < prompt { index } else { index - prompt };
+        if index > 0 && offset % per_connection == 0 {
             rpc = connect(&connection.endpoint).await?;
         }
         let subscription = SubscribeRequest {

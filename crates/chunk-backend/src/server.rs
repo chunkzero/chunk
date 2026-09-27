@@ -82,10 +82,11 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         let workers = service.workers();
         let shutdown = service.shutdown();
         let record = chunk_service::Record::publish(&connection_path, &connection)?;
+        let connections = chunk_service::Connections::default();
         let incoming = TcpListenerStream::new(listener).map(|stream| {
             let stream = stream?;
             stream.set_nodelay(true)?;
-            Ok::<_, io::Error>(stream)
+            Ok::<_, io::Error>(connections.track(stream))
         });
         let server = tonic::transport::Server::builder()
             .add_service(service.into_server())
@@ -100,10 +101,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             () = stopped(&stop, replicator.as_ref()) => {
                 shutdown.cancel();
                 command_shutdown.cancel();
-                match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
-                    Ok(result) => result.map_err(io::Error::other),
-                    Err(_) => Err(io::Error::other("backend transport shutdown timed out")),
-                }
+                connections.drain("backend", &mut server).await.map_err(io::Error::other)
             }
         };
         shutdown.cancel();

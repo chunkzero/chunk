@@ -1,5 +1,8 @@
 //! Small process adapters shared by standalone service binaries.
 
+mod connections;
+
+pub use connections::{Closable, Connections, GRACE};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs,
