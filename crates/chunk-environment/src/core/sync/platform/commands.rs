@@ -12,7 +12,9 @@ use super::{
     },
     decode,
 };
-use chunk_backend::{ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity, CommandRequest};
+use chunk_backend::{
+    ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity, CommandRequest, RequestCharge,
+};
 use chunk_contract::DomainManifest;
 use chunk_control::{ArrivedClaim, Control};
 use chunk_js::{DeploymentId, Json};
@@ -82,6 +84,7 @@ pub(super) async fn call(
                 return Err(errors::invalid("chunk:effect takes no caller or operation ID"));
             }
             let EffectArguments { operation_id, sequence, failed } = decode(&request.arguments)?;
+            app::prepared(&operation_id)?;
             let run = service.runs.get(&operation_id);
             let acknowledged = match run {
                 Some(run) => run.acknowledge(credential, sequence, failed)?,
@@ -104,14 +107,17 @@ async fn start(
     let id = app::prepared(&request.operation_id)?;
     let CommandArguments { command_id, input } = decode(&request.arguments)?;
     let player = player(&request)?.to_owned();
-    let fingerprint = CommandRequest::new(&command_id, &input, &player);
     let operation = request.operation_id.clone();
     drop(request);
+    // The payload is charged for as long as it's held, before anything waits.
+    let charge = service.app.backend().charge_request(operation.len() + command_id.len() + input.len() + player.len());
+    let charge = charge.map_err(|failure| errors::backend(&failure))?;
+    let fingerprint = CommandRequest::new(&command_id, &input, &player);
     let (run, new) = service.runs.begin(&operation, credential, fingerprint, service.stop.child_token());
     run.permits(credential, Some(fingerprint))?;
     if !new {
         // A duplicate waits holding only the run, and a rejected start leaves the ID for the gateway to retry.
-        drop((command_id, input, player));
+        drop((command_id, input, player, charge));
         if !run.started().await? {
             return Err(errors::error(Code::Unavailable, "retry the command"));
         }
@@ -129,7 +135,7 @@ async fn start(
         fingerprint,
     };
     // The start outlives a dropped call, so a retry finds the command it admitted.
-    let started = tokio::spawn(starting.start(id, command_id, input)).await;
+    let started = tokio::spawn(starting.start(id, charge, command_id, input)).await;
     started.map_err(|_| errors::error(Code::OutcomeUnknown, "the command's task failed"))??;
     Ok(CommandStarted {})
 }
@@ -161,8 +167,8 @@ enum Admitted {
 impl Starting {
     /// Resolves `id` before anything else, starting the command under it if it's unused, then drives it until it
     /// finishes.
-    async fn start(self, id: ActionId, command: String, input: String) -> Result<(), Error> {
-        let admitted = self.admit(id, command, input).await;
+    async fn start(self, id: ActionId, charge: RequestCharge, command: String, input: String) -> Result<(), Error> {
+        let admitted = self.admit(id, charge, command, input).await;
         let Self { control, runs, run, operation, gateway, player, .. } = self;
         match admitted {
             Ok(Admitted::Started { origin, follow, handle, effects }) => {
@@ -172,12 +178,12 @@ impl Starting {
                 tokio::spawn(async move {
                     let result = performer.drive(handle, effects).await;
                     run.finish(outcome(result));
-                    runs.remove(&operation, &run);
+                    runs.settle(&operation, &run);
                 });
             }
             Ok(Admitted::Retained(outcome)) => {
                 run.finish(outcome);
-                runs.remove(&operation, &run);
+                runs.settle(&operation, &run);
             }
             Err(error) => {
                 runs.remove(&operation, &run);
@@ -188,10 +194,17 @@ impl Starting {
         Ok(())
     }
 
-    async fn admit(&self, id: ActionId, command: String, input: String) -> Result<Admitted, Error> {
+    /// Admits the command unless it's cancelled first, as when core stops, so a cancelled command never starts.
+    async fn admit(
+        &self,
+        id: ActionId,
+        charge: RequestCharge,
+        command: String,
+        input: String,
+    ) -> Result<Admitted, Error> {
         let failed = |failure: chunk_backend::Error| errors::backend(&failure);
-        let identity = self.backend.command_identity(id.clone(), &self.credential, Some(self.fingerprint)).await;
-        match identity.map_err(failed)? {
+        let identity = self.backend.command_identity(id.clone(), &self.credential, Some(self.fingerprint));
+        match self.unless_cancelled(identity).await?.map_err(failed)? {
             CommandIdentity::Unused => {}
             CommandIdentity::Started(ActionStatus::Finished(result)) => return Ok(Admitted::Retained(outcome(result))),
             CommandIdentity::Started(ActionStatus::Running) => {
@@ -202,16 +215,36 @@ impl Starting {
                 return Err(errors::error(Code::OperationMismatch, "the operation ID ran another request"));
             }
         }
-        let Origin { claim, deployment, scope, manifest } =
-            origin(&self.control, &self.backend, &self.gateway, &self.player).await?;
+        let origin = origin(&self.control, &self.backend, &self.gateway, &self.player);
+        let Origin { claim, deployment, scope, manifest } = self.unless_cancelled(origin).await??;
         let follow = manifest.commands.get(&command).is_some_and(|command| command.follow_player);
         let (credential, caller) = (&self.credential, caller(&self.player));
-        let started = self
-            .backend
-            .start_command(id, credential, self.fingerprint, deployment, scope, command, input, caller)
-            .await;
-        let (handle, effects) = started.map_err(failed)?;
+        let started = self.backend.start_command(
+            id,
+            charge,
+            credential,
+            self.fingerprint,
+            deployment,
+            scope,
+            command,
+            input,
+            caller,
+        );
+        let (handle, effects) = self.unless_cancelled(started).await?.map_err(failed)?;
+        if self.run.token().is_cancelled() {
+            handle.cancel();
+        }
         Ok(Admitted::Started { origin: Box::new(claim), follow, handle, effects })
+    }
+
+    /// Waits for `work`, which is dropped once the command is cancelled first.
+    async fn unless_cancelled<T>(&self, work: impl Future<Output = T>) -> Result<T, Error> {
+        let cancel = self.run.token();
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(errors::error(Code::Unavailable, "core is stopping")),
+            output = work => Ok(output),
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
-    ActionHandle, ActionId, ActionStatus, Backend, Call, Error, Result,
+    ActionHandle, ActionId, ActionStatus, Backend, Call, Error, RequestCharge, Result,
     service::{Command, Request},
 };
 
@@ -297,7 +297,8 @@ impl Backend {
     /// Starts `command` with `input` for `scope` in `deployment` under an identity from
     /// [`Self::allocate_action_id`], through the same admission as [`Self::start_action`], and retains its outcome for
     /// `owner`, whom [`Self::command_identity`] resolves it for as long as they repeat `request`. The handler, its
-    /// permission queries and its transactions see `caller`.
+    /// permission queries and its transactions see `caller`. The request takes over `charge`, which its caller took
+    /// for the payload it held, and grows it to cover the request.
     /// # Errors
     /// Rejects identities this backend didn't allocate, mismatched requests, commands the scope may not run, invalid
     /// input and exhausted capacity.
@@ -305,6 +306,7 @@ impl Backend {
     pub async fn start_command(
         &self,
         id: ActionId,
+        charge: RequestCharge,
         owner: &str,
         request: CommandRequest,
         deployment: DeploymentId,
@@ -320,8 +322,10 @@ impl Backend {
         let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len() + caller.as_str().len();
         let owner = Some(Owner { credential: owner_digest(owner), request });
         let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner, caller: Some(caller) }));
-        let handle =
-            self.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: true, reply }).await?;
+        let permit = self.cover(charge, bytes)?;
+        let handle = self
+            .submit_charged(permit, |reply| Command::StartAction { id, call, purpose, retain: true, reply })
+            .await?;
         Ok((handle, CommandEffects { receiver, invocation }))
     }
 }

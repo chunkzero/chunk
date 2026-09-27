@@ -346,6 +346,10 @@ impl Drop for Owner {
 #[derive(Clone)]
 pub struct Backend(Arc<Owner>);
 
+/// Request memory [`Backend::charge_request`] charged for a payload its caller holds until it hands the payload to a
+/// request, such as [`Backend::start_command`], which takes the charge over.
+pub struct RequestCharge(OwnedSemaphorePermit);
+
 impl Backend {
     /// Holds ingress without an actor so tests can inspect admission before dequeue.
     #[cfg(test)]
@@ -489,11 +493,49 @@ impl Backend {
 
     /// Admits a request carrying `bytes` of input until it replies.
     pub(crate) async fn submit_sized<T>(&self, bytes: usize, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {
+        let RequestCharge(permit) = self.charge_request(bytes)?;
+        self.submit_charged(permit, make).await
+    }
+
+    /// Charges `bytes` of payload its caller holds against request admission, until the charge drops or a request
+    /// takes it over.
+    /// # Errors
+    /// Reports exhausted request memory.
+    pub fn charge_request(&self, bytes: usize) -> Result<RequestCharge> {
+        let cost = u32::try_from(REQUEST_OVERHEAD + bytes).map_err(|_| Limit::RequestMemory.exceeded())?;
+        let permit = self.0.memory.clone().try_acquire_many_owned(cost).map_err(|_| Limit::RequestMemory.exceeded())?;
+        Ok(RequestCharge(permit))
+    }
+
+    /// Bytes of request memory held by charges and by requests until they reply.
+    #[must_use]
+    pub fn request_bytes(&self) -> usize {
+        REQUEST_BYTES - self.0.memory.available_permits()
+    }
+
+    /// `charge`, grown to admit a request carrying `bytes` of input.
+    pub(crate) fn cover(&self, RequestCharge(mut permit): RequestCharge, bytes: usize) -> Result<OwnedSemaphorePermit> {
+        if !Arc::ptr_eq(permit.semaphore(), &self.0.memory) {
+            return Err(Error::Invalid("the charge belongs to another backend"));
+        }
+        let more = (REQUEST_OVERHEAD + bytes).saturating_sub(permit.num_permits());
+        if more > 0 {
+            let more = u32::try_from(more).map_err(|_| Limit::RequestMemory.exceeded())?;
+            let more = self.0.memory.clone().try_acquire_many_owned(more);
+            permit.merge(more.map_err(|_| Limit::RequestMemory.exceeded())?);
+        }
+        Ok(permit)
+    }
+
+    /// Submits a request whose admission `permit` holds until it replies.
+    pub(crate) async fn submit_charged<T>(
+        &self,
+        permit: OwnedSemaphorePermit,
+        make: impl FnOnce(Request<T>) -> Command,
+    ) -> Result<T> {
         if self.0.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        let cost = u32::try_from(REQUEST_OVERHEAD + bytes).map_err(|_| Limit::RequestMemory.exceeded())?;
-        let permit = self.0.memory.clone().try_acquire_many_owned(cost).map_err(|_| Limit::RequestMemory.exceeded())?;
         self.0.queue.enter()?;
         let cancellation = Cancellation::default();
         let (reply, response) = oneshot::channel();

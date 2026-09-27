@@ -7,6 +7,8 @@ use chunk_proto::sync::v1::{
     command_effect, command_outcome,
 };
 
+mod admission;
+
 /// Core with the player arrived through gateway `proxy`, whose topic stream it holds, and the fake JVM.
 struct Arrived {
     fixture: Fixture,
@@ -321,41 +323,6 @@ async fn a_newer_subscription_supersedes_the_one_following_a_command() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_starts_beyond_four_waiting_for_admission_get_unavailable() {
-    let arrived = arrived().await;
-    let gateway = &arrived.gateway;
-    // These hold all 24 live actions for a second, so the next start waits for admission.
-    let holds: Vec<_> = (0..24)
-        .map(|_| {
-            let gateway = gateway.clone();
-            tokio::spawn(
-                async move { decoded::<CommandStarted>(&gateway.say(&gateway.prepare().await, "say hold").await) },
-            )
-        })
-        .collect();
-    for hold in holds {
-        hold.await.unwrap();
-    }
-    let operation = gateway.prepare().await;
-    let starts: Vec<_> = (0..6)
-        .map(|_| {
-            let (gateway, operation) = (gateway.clone(), operation.clone());
-            tokio::spawn(async move { gateway.say(&operation, "say wait").await })
-        })
-        .collect();
-    let mut unavailable = 0;
-    for start in starts {
-        let response = start.await.unwrap();
-        if !matches!(response.outcome, Some(Outcome::Result(_))) {
-            assert_eq!(code(&response), Code::Unavailable);
-            unavailable += 1;
-        }
-    }
-    assert_eq!(unavailable, 1);
-    arrived.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_command_that_returned_runs_until_its_session_call_settles_and_closing_its_topic_cancels_the_call() {
     let arrived = arrived().await;
     let gateway = &arrived.gateway;
@@ -439,16 +406,17 @@ async fn core_calls_a_commands_session_method_itself() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_burst_of_commands_beyond_sixteen_all_run() {
+async fn another_spelling_of_a_live_commands_operation_id_is_invalid() {
     let arrived = arrived().await;
-    let runs: Vec<_> = (0..24)
-        .map(|_| {
-            let gateway = arrived.gateway.clone();
-            tokio::spawn(async move { returned(&gateway.run("say wait").await).to_vec() })
-        })
-        .collect();
-    for run in runs {
-        assert_eq!(run.await.unwrap(), b"null");
-    }
+    let gateway = &arrived.gateway;
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    let (prefix, sequence) = operation.rsplit_once(':').unwrap();
+    let alias = format!("{prefix}:0{sequence}");
+    assert_eq!(code(&gateway.say(&alias, "say wait").await), Code::Invalid);
+    assert_eq!(failure(&next(&mut gateway.follow(&alias).await).await), Some(Code::Invalid));
+    let ack = EffectArguments { operation_id: alias, sequence: 1, failed: false };
+    assert_eq!(code(&gateway.call("", "chunk:effect", &ack).await), Code::Invalid);
+    assert_eq!(returned(&outcome(&mut gateway.follow(&operation).await).await), b"null");
     arrived.stop().await;
 }

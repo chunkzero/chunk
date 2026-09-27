@@ -144,6 +144,12 @@ pub(super) fn prepared(operation: &str) -> Result<ActionId, Error> {
     prepared_id(id)
 }
 
+/// The action identity `id` spells, which must be the one spelling `chunk:prepare` issues for it.
 fn prepared_id(id: &str) -> Result<ActionId, Error> {
-    id.parse().map_err(|_| errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID"))
+    let parsed: ActionId =
+        id.parse().map_err(|_| errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID"))?;
+    if parsed.to_string() != id {
+        return Err(errors::invalid("the operation ID isn't spelled as chunk:prepare issued it"));
+    }
+    Ok(parsed)
 }

@@ -188,6 +188,21 @@ impl Sender {
             pending.error.get_or_insert(error);
         });
     }
+
+    /// Ends the stream once the client took what it has yet to take.
+    pub fn finish(&self) {
+        self.slot.update(|pending| pending.ended = true);
+    }
+
+    /// Ends the stream with `error` if the client has room for it, or else at once, releasing everything the client
+    /// has yet to take.
+    pub fn end(self, error: Error) {
+        self.slot.update(|pending| {
+            pending.changes = None;
+            pending.error.get_or_insert(error);
+            pending.abandoned = true;
+        });
+    }
 }
 
 impl Drop for Sender {
@@ -209,6 +224,8 @@ struct Pending {
     error: Option<Error>,
     /// The sender dropped; the writer ends once it sent the rest.
     ended: bool,
+    /// The writer ends without waiting for the client to have room.
+    abandoned: bool,
 }
 
 impl Slot {
@@ -265,13 +282,26 @@ impl Changes {
     }
 }
 
-/// Hands the slot's changes to `client` as it takes them, split to fit in messages, and ends after the slot's error.
-/// Changes that only advance the position wait out [`ADVANCE_INTERVAL`] since the previous send.
+/// Hands the slot's changes to `client` as it takes them, split to fit in messages, and ends after the slot's error,
+/// or once the stream is abandoned while the client has no room. Changes that only advance the position wait out
+/// [`ADVANCE_INTERVAL`] since the previous send.
 async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, closed: CancellationToken) {
     let _closed = closed.drop_guard();
     let mut parts = VecDeque::new();
     let mut advance_at = Instant::now();
-    while let Ok(permit) = client.reserve().await {
+    loop {
+        let permit = tokio::select! {
+            permit = client.reserve() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return,
+            },
+            () = slot.wake.notified() => {
+                if slot.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).abandoned {
+                    return;
+                }
+                continue;
+            }
+        };
         let (part, last) = loop {
             let held;
             {
@@ -374,6 +404,25 @@ mod tests {
         let values: Vec<_> = update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
         assert_eq!(values, [("a", Some(State::Value(b"2".to_vec())))]);
         assert_eq!(update.removed, ["b"]);
+    }
+
+    #[tokio::test]
+    async fn ending_a_stalled_stream_releases_what_its_client_has_yet_to_take() {
+        let (sender, mut stream) = channel();
+        sender.send(upsert("a", "1", 1));
+        while stream.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sender.send(upsert("b", "1", 2));
+        sender.end(errors::invalid("replaced"));
+        let released = async {
+            while !stream.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), released).await.expect("the writer ended without a reader");
+        assert_eq!(stream.recv().await.unwrap().unwrap().upserts[0].key, "a");
+        assert!(stream.recv().await.is_none());
     }
 
     #[tokio::test(start_paused = true)]

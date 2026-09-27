@@ -21,6 +21,7 @@ const SOURCE: &str = r"
 export function get(ctx) { return ctx.db.get('counters', 'count')?.value ?? 0; }
 export function add(ctx, by) { const value = get(ctx) + by; ctx.db.put('counters', 'count', {value}); return value; }
 export function touch(ctx) { ctx.db.put('counters', 'other', {value: 1}); return 1; }
+export function spin(ctx) { for (;;) {} }
 export function boom(ctx) { throw 'x'.repeat(17 * 1024 * 1024); }
 export function big(ctx) { return 'x'.repeat(900 * 1024) + get(ctx); }
 export async function bump(ctx, by) { return await ctx.runMutation('add', by); }
@@ -75,6 +76,7 @@ fn deployment() -> Deployment {
         ("get", function(FunctionKind::Query, Schema::Null)),
         ("add", function(FunctionKind::Mutation, Schema::Integer)),
         ("touch", function(FunctionKind::Mutation, Schema::Null)),
+        ("spin", function(FunctionKind::Mutation, Schema::Null)),
         ("boom", function(FunctionKind::Query, Schema::Null)),
         ("big", Function { result: Schema::String, ..function(FunctionKind::Query, Schema::Null) }),
         ("bump", function(FunctionKind::Action, Schema::Integer)),

@@ -1,7 +1,7 @@
 //! The `command/<op>` topic: the packet effects the command started under prepared operation ID `<op>` waits for its
 //! gateway to render, sent as snapshots, then its outcome. Only the gateway credential that started the command may
-//! follow it, on its current gateway stream, through one subscription at a time, and the command is cancelled once
-//! nothing follows it.
+//! follow it, on its current gateway stream, through one subscription at a time, running or finished, and the command
+//! is cancelled once nothing follows it.
 
 use super::{
     super::{
@@ -57,7 +57,7 @@ pub(super) async fn open(
         Some(run) => run,
         None => retained(service, id, &principal.credential).await?,
     };
-    let (pending, subscription) = run.follow();
+    let (pending, subscription) = service.runs.follow(operation, run, &principal.credential, &superseded)?;
     Ok(Command {
         pending,
         subscription,
@@ -81,21 +81,27 @@ async fn retained(service: &SyncService, id: chunk_backend::ActionId, credential
 
 impl Command {
     /// Sends a snapshot of the pending effects whenever they change, then the command's outcome, until the client
-    /// leaves, core stops, the credential lapses, or the gateway stream it names or the subscription itself is
-    /// superseded.
+    /// took it or leaves, core stops, the credential lapses, or the gateway stream it names or the subscription itself
+    /// is superseded. A superseded subscription releases what its client has yet to take at once.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
-        let Self { mut pending, mut subscription, stream, superseded, grant } = self;
-        let mut first = Some(stream);
+        let Self { mut pending, subscription, stream, superseded, grant } = self;
+        let (mut first, mut finished) = (Some(stream), false);
         loop {
-            let (update, finished) = {
+            let update = {
                 let current = pending.borrow_and_update();
                 if subscription.replaced(&current) {
-                    return sender.fail(errors::error(Code::Stopped, "a newer subscription follows the command"));
+                    return sender.end(errors::error(Code::Stopped, "a newer subscription follows the command"));
                 }
-                current.snapshot()
+                (!finished).then(|| current.snapshot())
             };
-            if !send(&grant, &sender, Update { stream: first.take().unwrap_or_default(), ..update }) || finished {
-                return;
+            if let Some((update, last)) = update {
+                if !send(&grant, &sender, Update { stream: first.take().unwrap_or_default(), ..update }) {
+                    return;
+                }
+                if last {
+                    finished = true;
+                    sender.finish();
+                }
             }
             tokio::select! {
                 () = stop.cancelled() => return sender.fail(errors::error(Code::Unavailable, "core is stopping")),
