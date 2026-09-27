@@ -11,6 +11,7 @@ pub mod jvm;
 mod moves;
 mod nodes;
 mod operations;
+pub mod operator;
 mod placement;
 mod players;
 mod process;
@@ -68,6 +69,15 @@ pub const ROSTER_WAITING: &str = "roster awaiting members";
 
 /// Control's reply to an operation ID first used for a different claim request.
 pub const OPERATION_CHANGED: &str = "claim operation changed";
+
+/// Control's reply to a drain's operation ID first used for another drain.
+pub const DRAIN_CHANGED: &str = "drain changed";
+
+/// Control's reply to a move's operation ID first used for another move.
+pub const MOVE_CHANGED: &str = "move operation changed";
+
+/// Control's reply to a move whose operation ID already names a claim.
+pub const MOVE_NAMES_CLAIM: &str = "move operation already names a claim";
 
 /// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]
@@ -194,6 +204,8 @@ pub struct Control {
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
+    /// Counts health passes, so `nodes` streams see health that isn't in the log.
+    observed: tokio::sync::watch::Sender<u64>,
     recovery: recovery::Recovery,
     links: sync::Links,
     jvms: jvm::Jvms,
@@ -223,6 +235,7 @@ impl Control {
             config,
             host,
             observations: Mutex::default(),
+            observed: tokio::sync::watch::Sender::new(0),
             links: sync::Links::default(),
             jvms: jvm::Jvms::default(),
             authority,

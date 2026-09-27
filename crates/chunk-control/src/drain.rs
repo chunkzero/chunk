@@ -18,7 +18,7 @@ pub(crate) fn retire_host(
     host: impl FnOnce(&State) -> Result<String>,
 ) -> Result<()> {
     if let Some(drain) = state.drains.get(&operation) {
-        return if drain.request == request { Ok(()) } else { Err(Error::Invalid("drain changed")) };
+        return if drain.request == request { Ok(()) } else { Err(Error::Invalid(crate::DRAIN_CHANGED)) };
     }
     if state.drains.len() >= 256 {
         return Err(Error::Capacity);
@@ -51,18 +51,7 @@ impl Control {
                 request.encode_to_vec(),
                 request.timeout_seconds,
                 false,
-                |state| {
-                    let owner = state
-                        .players
-                        .get(&request.player_id)
-                        .and_then(|p| p.current.as_ref())
-                        .ok_or(Error::Invalid("player has no current runtime"))?;
-                    let host = &state.sessions[&state.claims[owner].session].host;
-                    if state.hosts[host].retired {
-                        return Err(Error::Invalid("runtime already retired"));
-                    }
-                    Ok(host.clone())
-                },
+                |state| player_host(state, &request.player_id),
             )
         })?;
         let state = self.state()?;
@@ -129,6 +118,20 @@ impl Control {
         self.wake_capacity();
         Ok(())
     }
+}
+
+/// The host serving `player`'s current claim, which must not be retired already.
+pub(crate) fn player_host(state: &State, player: &str) -> Result<String> {
+    let owner = state
+        .players
+        .get(player)
+        .and_then(|p| p.current.as_ref())
+        .ok_or(Error::Invalid("player has no current runtime"))?;
+    let host = &state.sessions[&state.claims[owner].session].host;
+    if state.hosts[host].retired {
+        return Err(Error::Invalid("runtime already retired"));
+    }
+    Ok(host.clone())
 }
 
 fn open_claims<'a>(state: &'a State, host: &'a str) -> impl Iterator<Item = &'a Claim> {

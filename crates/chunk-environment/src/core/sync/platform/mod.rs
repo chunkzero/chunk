@@ -3,6 +3,7 @@
 mod claims;
 mod commands;
 mod jvm;
+mod operator;
 
 use super::{
     SyncService, app,
@@ -33,6 +34,9 @@ pub(super) async fn call(
     }
     if let Some(method) = jvm::Method::parse(method) {
         return jvm::call(service, principal, method, request).await;
+    }
+    if let Some(method) = operator::Method::parse(method) {
+        return operator::call(service, principal, method, request).await;
     }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {

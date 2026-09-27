@@ -65,7 +65,12 @@ pub(super) fn control(failure: &chunk_control::Error) -> Error {
 pub(super) fn operation(failure: &chunk_control::Error) -> Error {
     use chunk_control::Error as Control;
     let code = match failure {
-        Control::Invalid(chunk_control::OPERATION_CHANGED) => Code::OperationMismatch,
+        Control::Invalid(
+            chunk_control::OPERATION_CHANGED
+            | chunk_control::DRAIN_CHANGED
+            | chunk_control::MOVE_CHANGED
+            | chunk_control::MOVE_NAMES_CLAIM,
+        ) => Code::OperationMismatch,
         Control::Invalid(_) => Code::Invalid,
         Control::Capacity | Control::Busy => Code::Overloaded,
         Control::Stopped => Code::Stopped,

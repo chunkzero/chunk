@@ -82,12 +82,12 @@ pub(crate) fn queue(state: &mut State, request: MovePlayerRequest) -> Result<Cla
                 previous.source.as_ref() != Some(expected) || previous.connection_id != request.expected_connection_id
             })
         {
-            return Err(Error::Invalid("move operation changed"));
+            return Err(Error::Invalid(crate::MOVE_CHANGED));
         }
         return Ok(previous);
     }
     if state.claims.contains_key(&request.operation_id) {
-        return Err(Error::Invalid("move operation already names a claim"));
+        return Err(Error::Invalid(crate::MOVE_NAMES_CLAIM));
     }
     let owner = state.players.get(&request.player_id).ok_or(Error::Invalid("unknown player"))?;
     let source = owner.current.as_ref().ok_or(Error::Invalid("player has no current delivery"))?;

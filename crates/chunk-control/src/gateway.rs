@@ -159,7 +159,7 @@ pub(crate) fn position(generation: Generation) -> Option<sync::Position> {
     (generation.revision != 0).then_some(sync::Position { epoch: generation.epoch, revision: generation.revision })
 }
 
-fn phase(phase: Phase) -> sync::ClaimPhase {
+pub(crate) fn phase(phase: Phase) -> sync::ClaimPhase {
     match phase {
         Phase::Reserved => sync::ClaimPhase::Reserved,
         Phase::Activating => sync::ClaimPhase::Activating,

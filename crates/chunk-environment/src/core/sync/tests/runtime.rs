@@ -2,7 +2,7 @@
 
 use super::{Fixture, jvm::Launches, jvm_effects::SyncJvm};
 use chunk_proto::{
-    sync::v1::JvmDeliveryPhase,
+    sync::v1::{JvmDeliveryPhase, JvmHealth},
     v1::{ClaimPhase, ClaimRequest, Identity, SessionDemand},
 };
 use std::{
@@ -62,6 +62,11 @@ pub struct Running {
 impl Running {
     pub fn abort(&self) {
         self.task.abort();
+    }
+
+    /// Reports `health` from the JVM, which must have connected.
+    pub async fn health(&self, health: JvmHealth) {
+        self.jvm.get().expect("a connected JVM").health(health).await;
     }
 
     /// How many methods the JVM completed, held until cancelled, and cancelled.

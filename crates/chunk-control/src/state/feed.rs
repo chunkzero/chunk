@@ -20,7 +20,8 @@ use crate::{Error, Result};
 /// Changes retained for resuming subscribers; older positions must reload current state.
 const RETAINED: usize = 4096;
 
-/// A claim whose state as its gateway watches it a commit may have changed. Read the state for its value.
+/// A claim whose state as its gateway or the operator watches it a commit may have changed. Read the state for its
+/// value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Change {
     pub position: Generation,
@@ -28,22 +29,24 @@ pub(crate) struct Change {
     pub gateway: String,
     /// The claim's operation ID.
     pub claim: String,
+    /// The player the claim is for.
+    pub player: String,
 }
 
-/// The claims that written `keys` may change, with their gateways: each written claim, and the source of each written
-/// move and move destination, since those decide whether the source has a pending move.
+/// The claims that written `keys` may change, as `(gateway, claim, player)`: each written claim, and the source of each
+/// written move and move destination, since those decide whether the source has a pending move.
 pub(super) fn touched<'a>(
     previous: &State,
     next: &State,
     keys: impl Iterator<Item = &'a DocumentKey>,
-) -> BTreeSet<(String, String)> {
+) -> BTreeSet<(String, String, String)> {
     let claim = |id: &str| next.claims.get(id).or_else(|| previous.claims.get(id));
     let mut touched = BTreeSet::new();
     for key in keys {
         let request = match key.table.as_str() {
             CLAIMS => {
                 let Some(written) = claim(&key.id) else { continue };
-                touched.insert((written.proxy.clone(), key.id.clone()));
+                touched.insert((written.proxy.clone(), key.id.clone(), written.player.clone()));
                 &written.request
             }
             MOVES => match next.moves.get(&key.id).or_else(|| previous.moves.get(&key.id)) {
@@ -56,7 +59,7 @@ pub(super) fn touched<'a>(
         if let Some(source) = source
             && let Some(held) = claim(&source.operation_id)
         {
-            touched.insert((held.proxy.clone(), source.operation_id));
+            touched.insert((held.proxy.clone(), source.operation_id, held.player.clone()));
         }
     }
     touched
@@ -83,12 +86,13 @@ impl Feed {
     }
 
     /// Publishes a committed state with the claims its commit touched, then announces its position.
-    pub(super) fn record(&self, state: State, touched: BTreeSet<(String, String)>) -> Result<()> {
+    pub(super) fn record(&self, state: State, touched: BTreeSet<(String, String, String)>) -> Result<()> {
         let position = state.position();
         {
             let mut published = self.write()?;
             published.state = Arc::new(state);
-            let changes = touched.into_iter().map(|(gateway, claim)| Change { position, gateway, claim });
+            let changes =
+                touched.into_iter().map(|(gateway, claim, player)| Change { position, gateway, claim, player });
             published.changes.extend(changes);
             while published.changes.len() > RETAINED {
                 if let Some(evicted) = published.changes.pop_front() {
