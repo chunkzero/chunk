@@ -3,7 +3,7 @@
 use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
 use prost::Message;
 
-use crate::{Control, Error, Result};
+use crate::{Control, Error, Result, state::Phase};
 
 /// A session a JVM's host runs, as app code sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,9 +29,10 @@ impl Control {
         self.host.authenticate(credential)
     }
 
-    /// `session`, which `host` must run. A named `player` must have arrived on it through their current claim.
+    /// `session`, which `host` must run. A named `player` must be delivered to it through their current claim, from
+    /// the JVM holding their connection until it reports the delivery closed.
     /// # Errors
-    /// Rejects a session `host` does not run and a player not on it as invalid, and a finished session as stopped.
+    /// Rejects a session `host` does not run and a player not held on it as invalid, and a finished session as stopped.
     pub fn session_scope(&self, host: &str, session: &str, player: Option<&str>) -> Result<SessionScope> {
         let state = self.state()?;
         let running = state.sessions.get(session).filter(|running| running.host == host);
@@ -42,8 +43,9 @@ impl Control {
         if let Some(player) = player {
             let claim = state.players.get(player).and_then(|owner| owner.current.as_ref());
             let claim = claim.and_then(|operation| state.claims.get(operation));
-            if !claim.is_some_and(|claim| claim.session == session && claim.phase == crate::state::Phase::Arrived) {
-                return Err(Error::Invalid("player has not arrived on this session"));
+            let held = |phase| matches!(phase, Phase::Attached | Phase::Arrived | Phase::Withdrawing);
+            if !claim.is_some_and(|claim| claim.session == session && held(claim.phase)) {
+                return Err(Error::Invalid("player is not delivered to this session"));
             }
         }
         let owner = state.hosts.get(host).ok_or(Error::Invalid("unknown host"))?;
