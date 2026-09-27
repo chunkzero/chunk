@@ -2,7 +2,10 @@
 //! `chunk:activate`, `chunk:withdraw`, `chunk:abandon_move` and `chunk:depart`. The call's operation ID names the
 //! claim, which must be the calling gateway's.
 
-use super::{super::SyncService, decode, errors};
+use super::{
+    super::{SyncService, app},
+    decode, errors,
+};
 use chunk_control::{ALREADY_OWNED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim};
 use chunk_proto::{
     sync::v1::{
@@ -67,6 +70,9 @@ async fn claim(
     operation: &str,
     arguments: ClaimArguments,
 ) -> Result<ClaimResult, Error> {
+    if arguments.login.is_some() {
+        app::reject_operator(operation)?;
+    }
     let request = match (arguments.login, held(service, gateway, operation)?) {
         (Some(_), Some(stored)) if stored.request.source.is_some() => {
             return Err(errors::error(Code::OperationMismatch, "the operation ID names a move"));

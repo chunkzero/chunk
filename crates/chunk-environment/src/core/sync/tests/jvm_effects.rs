@@ -7,8 +7,8 @@ use super::{
 };
 use chunk_proto::{
     sync::v1::{
-        JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmMethodCall, JvmMethodPhase, JvmMethodResult, JvmReport,
-        JvmSession, JvmSessionPhase, JvmSessionStatus,
+        JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase, JvmMethodResult,
+        JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus,
     },
     v1::{ActivateClaim, Assignment, ClaimPhase, PlayerStatus},
 };
@@ -193,6 +193,13 @@ impl SyncJvm {
             (held.stream.clone(), status)
         };
         let report = JvmReport { deliveries: vec![status], ..JvmReport::default() };
+        assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
+    }
+
+    /// Reports `health` on the JVM's stream.
+    pub(super) async fn health(&self, health: JvmHealth) {
+        let stream = self.held.lock().unwrap().stream.clone();
+        let report = JvmReport { health: Some(health), ..JvmReport::default() };
         assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
     }
 

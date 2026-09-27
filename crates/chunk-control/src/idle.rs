@@ -7,7 +7,7 @@ use crate::{
     Control, Error, Result,
     drain::retire_host,
     releases::Launches,
-    state::{Capacity, Phase, State},
+    state::{Capacity, OperatorMethod, Phase, State},
 };
 
 /// Long enough for callers to retry an operation after its release, short enough to bound history.
@@ -15,8 +15,8 @@ const RELEASED_RETENTION_MS: u64 = 300_000;
 
 impl Control {
     /// Drains hosts that have had no unfinished session or open claim for their release's idle timeout, and forgets
-    /// finished sessions, released hosts, its own drains, old released claims and releases other than the current
-    /// one once nothing references them and every launch is attributed to its host.
+    /// finished sessions, released hosts, its own drains, old released claims, the operator's forgotten moves and
+    /// releases other than the current one once nothing references them and every launch is attributed to its host.
     pub(crate) fn retire_idle_hosts(&self) -> Result<()> {
         let now = crate::now_ms();
         let launches = self.launches()?;
@@ -66,6 +66,12 @@ impl Control {
                 && source(&intent.request).is_none_or(|source| !state.claims.contains_key(&source.operation_id))
         });
         remove(&mut state.moves, moves);
+        let calls = select(&state.operator_calls, |operation, call| {
+            call.method == OperatorMethod::MovePlayer
+                && !state.moves.contains_key(operation)
+                && !state.claims.contains_key(operation)
+        });
+        remove(&mut state.operator_calls, calls);
         let rosters =
             select(&state.rosters, |_, roster| roster.members.iter().all(|member| !state.claims.contains_key(member)));
         remove(&mut state.rosters, rosters);

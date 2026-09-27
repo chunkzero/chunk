@@ -64,7 +64,7 @@ pub(super) async fn call(
             if !request.arguments.is_empty() {
                 return Err(errors::invalid("chunk:commands takes no arguments"));
             }
-            app::reject_prepared(&request.operation_id)?;
+            app::reject_reserved(&request.operation_id)?;
             let player = player(&request)?;
             let Origin { deployment, scope, .. } = origin(control, backend, gateway, player).await?;
             let catalog = backend.command_catalog(deployment, scope, Some(caller(player))).await;
@@ -73,7 +73,7 @@ pub(super) async fn call(
         }
         Method::Suggest => {
             let SuggestArguments { command_id, query, input, cursor } = decode(&request.arguments)?;
-            app::reject_prepared(&request.operation_id)?;
+            app::reject_reserved(&request.operation_id)?;
             let player = player(&request)?.to_owned();
             drop(request);
             let Origin { deployment, scope, .. } = origin(control, backend, gateway, &player).await?;

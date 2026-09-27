@@ -3,6 +3,7 @@
 mod claims;
 mod commands;
 mod jvm;
+mod operator;
 
 use super::{
     SyncService, app,
@@ -34,6 +35,9 @@ pub(super) async fn call(
     if let Some(method) = jvm::Method::parse(method) {
         return jvm::call(service, principal, method, request).await;
     }
+    if let Some(method) = operator::Method::parse(method) {
+        return operator::call(service, principal, method, request).await;
+    }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {
         return Err(errors::denied("only a gateway manages claims"));
@@ -44,6 +48,7 @@ pub(super) async fn call(
     if request.operation_id.is_empty() {
         return Err(errors::invalid("a claim method requires an operation ID"));
     }
+    // A move's destination claim takes the move's ID, which may be the operator's; a login's must not.
     app::reject_prepared(&request.operation_id)?;
     service.fences.check(&request.stream, &principal.credential)?;
     let result = claims::call(service, id, method, request).await?;

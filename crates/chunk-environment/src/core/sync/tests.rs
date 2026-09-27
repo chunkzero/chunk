@@ -5,6 +5,7 @@ mod hooks;
 mod jvm;
 mod jvm_effects;
 mod jvm_methods;
+mod operator;
 mod runtime;
 
 use super::*;

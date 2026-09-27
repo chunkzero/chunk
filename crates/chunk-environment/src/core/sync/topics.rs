@@ -3,6 +3,7 @@
 mod command;
 mod gateway;
 mod jvm;
+mod operator;
 mod queries;
 
 use super::{SyncService, auth::Principal, caller::Grant, errors, streams::Sender};
@@ -16,6 +17,7 @@ pub(super) enum Topic {
     Command(command::Command),
     Gateway(gateway::Gateway),
     Jvm(jvm::Jvm),
+    Operator(operator::Operator),
 }
 
 /// What every stream carries besides its topic's state.
@@ -55,6 +57,7 @@ impl Topic {
             }
             topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
             topic if topic.starts_with("jvm/") => jvm::open(service, principal, request).map(Self::Jvm),
+            "nodes" | "players" => operator::open(service, &principal, request).map(Self::Operator),
             _ => Err(errors::invalid("unknown topic")),
         }
     }
@@ -65,6 +68,7 @@ impl Topic {
             Self::Command(command) => command.run(sender, stop).await,
             Self::Gateway(gateway) => gateway.run(sender, stop).await,
             Self::Jvm(jvm) => jvm.run(sender, stop).await,
+            Self::Operator(operator) => operator.run(sender, stop).await,
         }
     }
 }

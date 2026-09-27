@@ -18,12 +18,29 @@ use std::{
 /// Begins every operation ID `chunk:prepare` issues, which only actions and hooks accept.
 pub(super) const PREPARED: &str = "prep:";
 
+/// Begins every operation ID of the operator's methods, which no other call may choose.
+pub(super) const OPERATOR: &str = "operator:";
+
 /// Rejects an operation ID `chunk:prepare` issued, for a write that isn't an action or hook.
 pub(super) fn reject_prepared(operation: &str) -> Result<(), Error> {
     if operation.starts_with(PREPARED) {
         return Err(errors::invalid("operation IDs from chunk:prepare are only for actions and hooks"));
     }
     Ok(())
+}
+
+/// Rejects an operation ID reserved for the operator's methods, for a call that chose it.
+pub(super) fn reject_operator(operation: &str) -> Result<(), Error> {
+    if operation.starts_with(OPERATOR) {
+        return Err(errors::invalid("operation IDs beginning with operator: are only for the operator's methods"));
+    }
+    Ok(())
+}
+
+/// Rejects a reserved operation ID, for a call that is neither an action or hook nor the operator's.
+pub(super) fn reject_reserved(operation: &str) -> Result<(), Error> {
+    reject_prepared(operation)?;
+    reject_operator(operation)
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +73,7 @@ impl App {
     /// action or hook under the prepared `operation`, which a retry repeats to get its outcome back. A committed
     /// mutation nudges the streams `principal` opened.
     pub async fn call(&self, principal: &Principal, operation: String, call: Call) -> Result<Update, Error> {
+        reject_operator(&operation)?;
         let kind = match operation.strip_prefix(PREPARED) {
             Some(id) => self.prepared_kind(id, &call).await?,
             None => self.kind(&call).await?,

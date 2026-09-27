@@ -1,4 +1,8 @@
-use crate::{Control, Error, Result, drain::retire_host, state::Capacity};
+use crate::{
+    Control, Error, Result,
+    drain::retire_host,
+    state::{Capacity, State},
+};
 use chunk_proto::v1::{NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest};
 use prost::Message;
 use std::collections::BTreeSet;
@@ -15,47 +19,44 @@ impl Control {
     /// Reports unavailable durable state.
     pub fn nodes(&self) -> Result<NodeList> {
         let state = self.state()?;
-        let observations = self.observations.lock().map_err(|_| Error::Unresolved("health observations poisoned"))?;
-        Ok(NodeList {
-            nodes: state
-                .hosts
-                .iter()
-                .map(|(id, host)| {
-                    let observation = observations.get(id);
-                    let phase = if host.capacity == Capacity::Released {
-                        NodePhase::Stopped
-                    } else if self.host.unresolved(id) {
-                        NodePhase::Unreachable
-                    } else if host.retired {
-                        if state
-                            .drains
-                            .values()
-                            .filter(|d| d.host == *id)
-                            .map(|d| d.deadline_ms)
-                            .min()
-                            .is_some_and(|deadline| deadline > crate::now_ms())
-                        {
-                            NodePhase::Draining
-                        } else {
-                            NodePhase::Stopping
-                        }
-                    } else {
-                        observation.map_or(NodePhase::Starting, |o| o.phase)
-                    };
-                    NodeStatus {
-                        host_id: id.clone(),
-                        deployment: host.release.clone(),
-                        app_id: host.app.clone(),
-                        machine_profile: host.profile.clone(),
-                        phase: phase.into(),
-                        health: observation.and_then(|o| o.health.clone()),
-                        observed_at_ms: observation.map_or(0, |o| o.at),
-                        consecutive_failures: observation.map_or(0, |o| o.failures),
-                    }
-                })
-                .collect(),
-        })
+        Ok(NodeList { nodes: self.statuses(&state)? })
     }
+
+    /// Each host's lifecycle in `state`, with its last observed metrics.
+    pub(crate) fn statuses(&self, state: &State) -> Result<Vec<NodeStatus>> {
+        let observations = self.observations.lock().map_err(|_| Error::Unresolved("health observations poisoned"))?;
+        Ok(state
+            .hosts
+            .iter()
+            .map(|(id, host)| {
+                let observation = observations.get(id);
+                let phase = if host.capacity == Capacity::Released {
+                    NodePhase::Stopped
+                } else if self.host.unresolved(id) {
+                    NodePhase::Unreachable
+                } else if host.retired {
+                    if drain_deadline(state, id).is_some_and(|deadline| deadline > crate::now_ms()) {
+                        NodePhase::Draining
+                    } else {
+                        NodePhase::Stopping
+                    }
+                } else {
+                    observation.map_or(NodePhase::Starting, |o| o.phase)
+                };
+                NodeStatus {
+                    host_id: id.clone(),
+                    deployment: host.release.clone(),
+                    app_id: host.app.clone(),
+                    machine_profile: host.profile.clone(),
+                    phase: phase.into(),
+                    health: observation.and_then(|o| o.health.clone()),
+                    observed_at_ms: observation.map_or(0, |o| o.at),
+                    consecutive_failures: observation.map_or(0, |o| o.failures),
+                }
+            })
+            .collect())
+    }
+
     /// Retires capacity immediately and queues evacuation with a bounded shutdown deadline.
     /// # Errors
     /// Rejects changed operations, unknown nodes, or invalid deadlines.
@@ -89,8 +90,15 @@ impl Control {
             .collect())
     }
     /// Records each running JVM's health from what it last pushed in its reports, and retires a host after three
-    /// unhealthy passes in a row, or once its JVM reports it is draining.
+    /// unhealthy passes in a row, or once its JVM reports it is draining. Announces the pass even when a retirement
+    /// fails, since its observations changed.
     pub(crate) fn poll_health(&self) -> Result<()> {
+        let polled = self.observe_health();
+        self.observed.send_modify(|passes| *passes += 1);
+        polled
+    }
+
+    fn observe_health(&self) -> Result<()> {
         let state = self.state()?;
         for id in state.hosts.keys().filter(|id| !state.released(id)) {
             if self.host.connection(id).is_none() {
@@ -126,4 +134,14 @@ impl Control {
         }
         Ok(())
     }
+
+    /// Follows health passes, which change observations without committing.
+    pub(crate) fn observed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.observed.subscribe()
+    }
+}
+
+/// The earliest deadline of `host`'s drains, when core stops it.
+pub(crate) fn drain_deadline(state: &State, host: &str) -> Option<u64> {
+    state.drains.values().filter(|drain| drain.host == host).map(|drain| drain.deadline_ms).min()
 }
