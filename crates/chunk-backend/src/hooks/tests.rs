@@ -24,7 +24,7 @@ fn deployment() -> Deployment {
         source:r"
 export function read(ctx) { return ctx.db.get('counts','value')?.value ?? 0; }
 export function increment(ctx) { const value=read(ctx)+1; ctx.db.put('counts','value',{value}); return value; }
-export async function login(ctx) { return {allow:(await ctx.runQuery('read',null))===0}; }
+export async function login(ctx) { const gateway=ctx.caller.kind==='gateway'&&Object.keys(ctx.caller).length===1; return {allow:gateway&&(await ctx.runQuery('read',null))===0}; }
 export async function ping(ctx) { await ctx.runMutation('increment',null); return {motd:'invalid',online:0,max:10}; }
 export async function wait(ctx) { await ctx.runMutation('increment',null); await ctx.sleep(10000); await ctx.runMutation('increment',null); return null; }
 ".into(),
@@ -88,7 +88,10 @@ async fn only_platform_authority_can_invoke_named_hooks_and_ping_is_read_only() 
         &message.caller_json,
     )
     .unwrap();
-    assert!(matches!(backend.start_action(backend.allocate_action_id().unwrap(), call).await, Err(Error::Unknown)));
+    assert!(matches!(
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call).await,
+        Err(Error::Unknown)
+    ));
     let mut arbitrary = invocation("login");
     arbitrary.hook = "increment".into();
     assert!(service.invoke(request(arbitrary, PLATFORM, "hooks")).await.is_err());

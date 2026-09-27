@@ -162,3 +162,20 @@ message DepartResult {
   // The player's membership ended with this claim, and they hold no newer claim.
   bool departed = 1;
 }
+
+// Hooks. A gateway runs the domain hooks of a deployment's manifest as effectful calls: `chunk:prepare`, then a Call
+// whose method is the hook's ID, whose deployment is the manifest's, and whose arguments are the hook's event as JSON.
+// Only a gateway may call a hook. App code receives the caller `{"kind":"gateway"}`, with `"player"` when the call
+// names one, which it may only while it holds that player's claim; the event's arguments identify the player either
+// way. A call under an ID core didn't prepare gets OUTCOME_UNKNOWN, and a retry returns the hook's outcome until core
+// retires it.
+// - `chunk:manifest` takes no arguments or caller and returns ManifestResult. Its deployment names the one to read, or
+//   is empty for the current release's.
+
+// The result of `chunk:manifest`.
+message ManifestResult {
+  // The deployment the manifest belongs to, which the gateway's hook calls name.
+  string deployment = 1;
+  // The deployment's domain manifest as JSON, with its scopes, apps, hooks and commands. Empty when it declares none.
+  bytes manifest_json = 2;
+}

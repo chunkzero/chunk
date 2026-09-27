@@ -108,7 +108,7 @@ impl backend_commands_server::BackendCommands for CommandService {
             reply,
         }))
         .await?;
-        let id = self.backend.allocate_action_id().map_err(|error| status(&error))?;
+        let id = self.backend.allocate_action_id().await.map_err(|error| status(&error))?;
         let invocation_id = id.to_string();
         let follow_player = prepared.follow_player;
         let mut entries = self.entries.lock().await;
@@ -240,7 +240,8 @@ async fn owner_run(
     let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
     let purpose = Purpose::Command(Arc::new(CommandBinding { scope: prepared.scope, input: prepared.input, effects }));
     let invocation = id.to_string();
-    let acceptance = backend.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, reply });
+    let acceptance =
+        backend.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: false, reply });
     let accepted = tokio::select! {
         ()=output.closed()=>Err(Error::Cancelled),
         ()=shutdown.cancelled()=>Err(Error::Cancelled),
@@ -286,7 +287,8 @@ async fn owner_run(
                     }
                 }
                 request=requests.recv()=>{
-                    let Some(effect)=request else {break unknown();};
+                    // The effect channel closes once the action finishes and its record goes.
+                    let Some(effect)=request else {break finished(action.outcome().await);};
                     if effect.reply.cancellation.is_cancelled() {effect.reply.finish(Err(Error::Cancelled));continue;}
                     let sequence=effect.sequence;
                     let frame=wire::CommandEffect {sequence,operation_id:format!("action/{invocation}/platform/{sequence}"),request_json:effect.request.as_str().as_bytes().to_vec()};

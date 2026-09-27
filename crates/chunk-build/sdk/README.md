@@ -100,7 +100,7 @@ const adminQuery = playerQuery.withContext(({ player }) => {
 ```
 
 Player identity comes from the authenticated invocation's `caller`, supplied by session ownership independently of
-function arguments. The session caller above includes an optional player handle; proxy and other service callers have
+function arguments. The session caller above includes an optional player handle; hook and other service callers have
 different shapes. Player-required providers reject calls without that context. Ordinary builders and providers that do
 not require a player remain usable for those calls.
 
@@ -230,12 +230,15 @@ need distinct explicit integer `order` values. `server.ping` returns `ServerStat
 `player.connect`, `player.disconnect`, `domain.enter`, and `domain.leave`; only connect/enter/leave accept
 `{ followPlayer: true }`.
 
-Contexts expose `eventId`, `domain`, trusted `caller`, and typed `runQuery` calls. Player events also expose `player`
-and `runMutation`. Login receives a nullable `destination` because root admission precedes routing; before-move receives
-`sourceDomain` and `destination`. Ping receives `host`; disconnect receives `reason`. Native local proxies resolve these
-handlers from the candidate deployment's immutable manifest. Initial admission runs root login once, root routing, then
-remaining ancestor login hooks. Moves rerun candidate ancestor login and before-move hooks before source withdrawal. A
-denied, failed, canceled, or expired decision cannot authorize delivery. Each admission attempt has a five-second bound.
+Contexts expose `eventId`, `domain`, trusted `caller`, and typed `runQuery` calls. The caller is the gateway running the
+hook, `{ kind: "gateway", player? }`; it names the player only while the gateway holds their claim, so login and routing
+(before the claim) and disconnect (after its release) receive none. Player events also expose `player`, which identifies
+the player either way, and `runMutation`. Login receives a nullable `destination` because root admission precedes
+routing; before-move receives `sourceDomain` and `destination`. Ping receives `host`; disconnect receives `reason`.
+Native local proxies resolve these handlers from the candidate deployment's immutable manifest. Initial admission runs
+root login once, root routing, then remaining ancestor login hooks. Moves rerun candidate ancestor login and before-move
+hooks before source withdrawal. A denied, failed, canceled, or expired decision cannot authorize delivery. Each
+admission attempt has a five-second bound.
 
 A hook can await `runQuery` to load profile/rank data before returning its decision. Every invocation receives fresh
 trusted context; loaded values are local to that handler. Subsequent hooks and the JVM callback receive no implicit
@@ -244,10 +247,10 @@ cached context. Queries/mutations can use the existing `.withContext` provider a
 After confirmed arrival, connect notifications run once and enter notifications run ancestor-first. Successful moves
 emit only changed scopes: leave deepest-first, then enter ancestor-first. Each transition runs its handlers sequentially
 within one five-second notification budget. Default background work cancels at session cutover; `followPlayer` retains
-its originating deployment, domain, and caller generations until connection loss. Notifications are ephemeral, bounded
-to five seconds, and may fail without undoing admission. Persistent writes should deduplicate using `eventId` and
-handler identity when needed. Logical disconnect follows affirmative control ownership reconciliation; an old connection
-cannot disconnect a newer membership. Disconnect cleanup has a separate bounded scope and no live socket capability.
+its originating deployment, domain, and claim generation until connection loss. Notifications are ephemeral, bounded to
+five seconds, and may fail without undoing admission. Persistent writes should deduplicate using `eventId` and handler
+identity when needed. Logical disconnect follows affirmative control ownership reconciliation; an old connection cannot
+disconnect a newer membership. Disconnect cleanup has a separate bounded scope and no live socket capability.
 
 The source stays active while admission and destination preparation run. Once the client acknowledges the configuration
 boundary, an ownership change or failed cutover can require disconnecting the client.

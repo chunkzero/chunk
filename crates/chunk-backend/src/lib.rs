@@ -17,7 +17,7 @@ mod system;
 mod timing;
 mod transport;
 
-pub use actions::{ActionHandle, ActionId, ActionStatus};
+pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
 pub use chunk_js::{DeploymentId, HttpMethod};
 pub use commands::CommandService;
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};

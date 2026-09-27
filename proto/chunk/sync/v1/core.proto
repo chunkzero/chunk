@@ -8,7 +8,8 @@
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
 //
-// Operations. Methods that write require an operation ID; reads ignore it. A duplicate of a running operation waits
+// Operations. Methods that write require an operation ID; reads ignore it, except a reserved `prep:` ID (see
+// PrepareResult). A duplicate of a running operation waits
 // for its outcome instead of running again. A retry must repeat the first request, and one whose method, arguments
 // or caller differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
 // - Transactional methods (mutations, `chunk:commit`) take effect only by committing. Core records a committed
@@ -88,6 +89,7 @@ message CallRequest {
 
 message CallResponse {
   // The commit a write created, or the state a read observed. Unset on error and for methods that touch no state.
+  // Unset for actions and hooks too, whose effects may span any number of commits.
   Position position = 1;
   oneof outcome {
     bytes result = 2;
@@ -161,4 +163,18 @@ message Error {
   }
   Code code = 1;
   string message = 2;
+}
+
+// The result of `chunk:prepare`, which issues the operation ID of one effectful call: an app action, or for a gateway,
+// a hook. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call issues one
+// ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued before it
+// restarted or restored, gets OUTCOME_UNKNOWN, as does one whose outcome core retired. Core retains an outcome for up
+// to 24 hours, or less under memory pressure (oldest completed first), and an unused ID for 24 hours. `chunk:prepare`
+// gets OVERLOADED only while running calls and unused IDs fill the retention budget.
+// Issued IDs begin with `prep:`, which is reserved: actions and hooks require such an ID. Any other call under a
+// `prep:` ID first resolves it: one this core never issued or no longer holds gets OUTCOME_UNKNOWN, one that ran an
+// action or hook gets OPERATION_MISMATCH, and an unused one is INVALID.
+message PrepareResult {
+  // The issued operation ID.
+  string operation_id = 1;
 }

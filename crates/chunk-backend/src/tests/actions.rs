@@ -88,7 +88,7 @@ async fn sleeping_actions_yield_to_transactions_and_retain_caller_deployment_and
     backend.deploy(deployment("old", 1)).await.unwrap();
     let mut alice = backend.subscribe(call("old", "read", "alice", json!(null))).await.unwrap();
     alice.next().await.unwrap();
-    let id = backend.allocate_action_id().unwrap();
+    let id = backend.allocate_action_id().await.unwrap();
     let request = call("old", "flow", "alice", json!(-1));
     let mut action = backend.start_action(id.clone(), request.clone()).await.unwrap();
     let update = tokio::time::timeout(Duration::from_secs(5), alice.next()).await.unwrap().unwrap();
@@ -137,7 +137,7 @@ async fn cancellation_expires_sleep_and_cpu_scopes_without_undoing_committed_wor
         updates.next().await.unwrap();
         let arguments = if function == "flow" { json!(30_000) } else { json!(null) };
         let mut action = backend
-            .start_action(backend.allocate_action_id().unwrap(), call("old", function, function, arguments))
+            .start_action(backend.allocate_action_id().await.unwrap(), call("old", function, function, arguments))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), updates.next()).await.unwrap().unwrap();
@@ -146,7 +146,7 @@ async fn cancellation_expires_sleep_and_cpu_scopes_without_undoing_committed_wor
         assert_eq!(&*backend.query(call("old", "read", function, json!(null))).await.unwrap().json, "1");
     }
     let mut exhausted = backend
-        .start_action(backend.allocate_action_id().unwrap(), call("old", "tooMany", "alice", json!(null)))
+        .start_action(backend.allocate_action_id().await.unwrap(), call("old", "tooMany", "alice", json!(null)))
         .await
         .unwrap();
     assert!(exhausted.outcome().await.unwrap_err().to_string().contains("capacity"));
@@ -159,7 +159,7 @@ async fn backend_loss_keeps_partial_mutations_but_action_identity_cannot_restart
     first.deploy(deployment("old", 1)).await.unwrap();
     let mut updates = first.subscribe(call("old", "read", "alice", json!(null))).await.unwrap();
     updates.next().await.unwrap();
-    let id = first.allocate_action_id().unwrap();
+    let id = first.allocate_action_id().await.unwrap();
     let request = call("old", "flow", "alice", json!(30_000));
     let mut action = first.start_action(id.clone(), request.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), updates.next()).await.unwrap().unwrap();
@@ -176,11 +176,22 @@ async fn backend_loss_keeps_partial_mutations_but_action_identity_cannot_restart
 }
 
 #[tokio::test]
-async fn action_capacity_and_status_retirement_never_restart_evicted_invocations() {
+async fn action_capacity_bounds_live_actions_while_finished_outcomes_stay_retained_within_budget() {
     let directory = tempfile::tempdir().unwrap();
     let backend = backend(&directory);
     let mut version = deployment("old", 1);
     version.source.push_str("\nexport function complete() { return 42; }");
+    version.source.push_str("\nexport function large(ctx, text) { return text; }");
+    version.functions.insert(
+        "large".into(),
+        Function {
+            kind: FunctionKind::Action,
+            visibility: Visibility::Public,
+            export: "large".into(),
+            arguments: Schema::String,
+            result: Schema::String,
+        },
+    );
     version.functions.insert(
         "complete".into(),
         Function {
@@ -197,7 +208,7 @@ async fn action_capacity_and_status_retirement_never_restart_evicted_invocations
         actions.push(
             backend
                 .start_action(
-                    backend.allocate_action_id().unwrap(),
+                    backend.allocate_action_id().await.unwrap(),
                     call("old", "flow", &player.to_string(), json!(30_000)),
                 )
                 .await
@@ -206,7 +217,7 @@ async fn action_capacity_and_status_retirement_never_restart_evicted_invocations
     }
     assert!(matches!(
         backend
-            .start_action(backend.allocate_action_id().unwrap(), call("old", "flow", "overflow", json!(30_000)))
+            .start_action(backend.allocate_action_id().await.unwrap(), call("old", "flow", "overflow", json!(30_000)))
             .await,
         Err(Error::Overloaded(Limit::ActionMemory))
     ));
@@ -214,18 +225,48 @@ async fn action_capacity_and_status_retirement_never_restart_evicted_invocations
         action.cancel();
         assert!(action.outcome().await.is_err());
     }
-    let first = backend.allocate_action_id().unwrap();
+    let first = backend.allocate_action_id().await.unwrap();
     for index in 0..33 {
-        let id = if index == 0 { first.clone() } else { backend.allocate_action_id().unwrap() };
+        let id = if index == 0 { first.clone() } else { backend.allocate_action_id().await.unwrap() };
         let mut action = backend.start_action(id, call("old", "complete", "alice", json!(null))).await.unwrap();
         assert_eq!(&*action.outcome().await.unwrap(), "42");
     }
+    let mut replay = backend.start_action(first.clone(), call("old", "complete", "alice", json!(null))).await.unwrap();
+    assert_eq!(&*replay.outcome().await.unwrap(), "42");
     assert!(matches!(
-        backend.start_action(first.clone(), call("old", "complete", "alice", json!(null))).await,
+        backend.action_status(first.clone(), json!({"player":"alice"}).into()).await,
+        Ok(ActionStatus::Finished(Ok(value))) if &*value == "42"
+    ));
+
+    // Outcomes past the 64 MiB budget evict the oldest first and never block new work, running actions or unused
+    // preparations.
+    let unused = backend.allocate_action_id().await.unwrap();
+    let running = backend.allocate_action_id().await.unwrap();
+    let held = call("old", "flow", "held", json!(-1));
+    let mut action = backend.start_action(running.clone(), held.clone()).await.unwrap();
+    let large = || call("old", "large", "alice", json!("x".repeat(1_000_000)));
+    let mut newest = None;
+    for _ in 0..35 {
+        let id = backend.allocate_action_id().await.unwrap();
+        let mut action = backend.start_action(id.clone(), large()).await.unwrap();
+        assert_eq!(action.outcome().await.unwrap().len(), 1_000_002);
+        newest = Some(id);
+    }
+    let mut joined = backend.start_action(running, held).await.unwrap();
+    assert!(matches!(joined.status(), ActionStatus::Running));
+    backend.mutate("release-held".into(), call("old", "publicIncrement", "release-held", json!(null))).await.unwrap();
+    assert_eq!(&*action.outcome().await.unwrap(), "2");
+    assert_eq!(&*joined.outcome().await.unwrap(), "2");
+    let mut later = backend.start_action(unused, call("old", "complete", "alice", json!(null))).await.unwrap();
+    assert_eq!(&*later.outcome().await.unwrap(), "42");
+
+    // After the deployment's release, an evicted outcome stays unknown and a retained one replays.
+    assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
+    assert!(matches!(
+        backend.start_action(first, call("old", "complete", "alice", json!(null))).await,
         Err(Error::ActionOutcomeUnknown)
     ));
-    assert!(matches!(
-        backend.action_status(first, json!({"player":"alice"}).into()).await,
-        Err(Error::ActionOutcomeUnknown)
-    ));
+    let mut replay = backend.start_action(newest.unwrap(), large()).await.unwrap();
+    assert_eq!(replay.outcome().await.unwrap().len(), 1_000_002);
+    backend.allocate_action_id().await.unwrap();
 }

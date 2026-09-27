@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     rc::Rc,
     sync::{Arc, Weak},
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chunk_contract::{Deployment, Function, FunctionKind, validate_wire_value};
@@ -13,30 +13,45 @@ use tokio::sync::{Semaphore, mpsc, watch};
 
 use super::Actor;
 use crate::{
-    ActionHandle, ActionId, ActionStatus, Error, Result,
+    ActionHandle, ActionId, ActionIdentity, ActionStatus, Error, Result,
     actions::{Host, Scope},
-    limits::{ACTION_BYTES, Limit},
+    limits::{ACTION_BYTES, Limit, RETAINED_BYTES},
     service::{Call, Event, Request, Update},
 };
 
-const MAX_RECORDS: usize = 32;
+/// How long a finished action's outcome stays retained at most, and a prepared identity nothing started stays valid.
+const RETENTION: Duration = Duration::from_hours(24);
+/// Retained bytes each record or prepared identity charges beyond its call and result.
+const ENTRY_BYTES: usize = 256;
 
 struct Record {
     operation_prefix: String,
     command: Option<Arc<crate::commands::CommandBinding>>,
     call: Call,
     fingerprint: [u8; 32],
+    hook: bool,
     writable: bool,
     status: watch::Sender<ActionStatus>,
     scope: Weak<Scope>,
     cancellation: Cancellation,
     worker: Option<JoinHandle<()>>,
+    /// Bytes this record retains.
+    bytes: usize,
+    /// Whether the record outlives its action, so a retry by ID finds the outcome.
+    retain: bool,
 }
 
 pub(super) struct Actions {
     incarnation: String,
-    retired: u64,
+    next: u64,
+    /// Identities `prepare` issued that nothing started yet, by sequence, with when each expires.
+    prepared: BTreeMap<u64, Instant>,
     records: BTreeMap<ActionId, Record>,
+    /// Retained finished records, oldest first, with when each expires.
+    finished: VecDeque<(Instant, ActionId)>,
+    /// Bytes prepared identities and records retain. Finished records are evicted, oldest first, to keep it within
+    /// [`RETAINED_BYTES`]; prepared identities and live records alone may not exceed it.
+    retained: usize,
     events: mpsc::Sender<Event>,
     slots: Arc<Semaphore>,
     external_slots: Arc<Semaphore>,
@@ -47,8 +62,11 @@ impl Actions {
     pub fn new(events: mpsc::Sender<Event>, incarnation: String, effects: crate::ActionEffects) -> Self {
         Self {
             incarnation,
-            retired: 0,
+            next: 1,
+            prepared: BTreeMap::new(),
             records: BTreeMap::new(),
+            finished: VecDeque::new(),
+            retained: 0,
             events,
             slots: Arc::new(Semaphore::new(32)),
             external_slots: Arc::new(Semaphore::new(8)),
@@ -87,30 +105,100 @@ impl Actions {
         ActionId { incarnation: format!("{}:job:{}", self.incarnation, job.id), sequence: u64::from(job.attempt) }
     }
 
-    fn admit(&mut self, id: &ActionId, trusted: bool) -> Result<()> {
-        if !trusted && (id.incarnation != self.incarnation || id.sequence <= self.retired) {
-            return Err(Error::ActionOutcomeUnknown);
+    /// Issues the identity of one action, valid until it starts or [`RETENTION`] passes.
+    pub fn prepare(&mut self) -> Result<ActionId> {
+        self.expire();
+        let sequence = self.next;
+        let next = sequence.checked_add(1).ok_or(Error::Invalid("action identity exhausted"))?;
+        self.make_room(ENTRY_BYTES)?;
+        self.next = next;
+        self.retained += ENTRY_BYTES;
+        self.prepared.insert(sequence, Instant::now() + RETENTION);
+        Ok(ActionId { incarnation: self.incarnation.clone(), sequence })
+    }
+
+    /// Forgets prepared identities and finished records older than [`RETENTION`].
+    fn expire(&mut self) {
+        let now = Instant::now();
+        while let Some(entry) = self.prepared.first_entry()
+            && *entry.get() <= now
+        {
+            entry.remove();
+            self.retained -= ENTRY_BYTES;
         }
-        if !self.capacity() {
-            return Err(Limit::ActionMemory.exceeded());
+        while self.finished.front().is_some_and(|(expiry, _)| *expiry <= now) {
+            self.evict_oldest();
         }
-        if self.records.len() >= MAX_RECORDS {
-            let retired = self
-                .records
-                .iter()
-                .find(|(_, record)| record.worker.is_none())
-                .map(|(id, _)| id.clone())
-                .ok_or(Error::Busy)?;
-            if retired.incarnation == self.incarnation {
-                self.retired = self.retired.max(retired.sequence);
+    }
+
+    /// Evicts the oldest finished records until `bytes` more fit the budget, which fails once prepared identities and
+    /// live records alone leave no room.
+    fn make_room(&mut self, bytes: usize) -> Result<()> {
+        while self.retained + bytes > RETAINED_BYTES {
+            if !self.evict_oldest() {
+                return Err(Limit::Retention.exceeded());
             }
-            self.records.remove(&retired);
-        }
-        if !trusted && id.sequence <= self.retired {
-            return Err(Error::ActionOutcomeUnknown);
         }
         Ok(())
     }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some((_, id)) = self.finished.pop_front() else { return false };
+        if let Some(record) = self.records.remove(&id) {
+            self.retained -= record.bytes;
+        }
+        true
+    }
+
+    /// Resolves an untrusted `id` without consulting any deployment: its record while its action runs or its outcome is
+    /// retained, or `None` while it's prepared and unused. An identity from another incarnation, never issued, or whose
+    /// outcome is gone is unknown.
+    fn resolve(&self, id: &ActionId) -> Result<Option<&Record>> {
+        if id.incarnation != self.incarnation {
+            return Err(Error::ActionOutcomeUnknown);
+        }
+        if let Some(record) = self.records.get(id) {
+            return Ok(Some(record));
+        }
+        if self.prepared.contains_key(&id.sequence) { Ok(None) } else { Err(Error::ActionOutcomeUnknown) }
+    }
+
+    pub fn identity(&mut self, id: &ActionId) -> Result<ActionIdentity> {
+        self.expire();
+        Ok(match self.resolve(id)? {
+            None => ActionIdentity::Unused,
+            Some(record) if record.hook => ActionIdentity::Hook,
+            Some(_) => ActionIdentity::Action,
+        })
+    }
+
+    /// Admits a record of `bytes` under `id`, which [`Self::resolve`] found prepared unless it's `trusted`, consuming
+    /// its preparation.
+    fn admit(&mut self, id: &ActionId, trusted: bool, bytes: usize) -> Result<()> {
+        if !self.capacity() {
+            return Err(Limit::ActionMemory.exceeded());
+        }
+        let released = if trusted { 0 } else { ENTRY_BYTES };
+        self.make_room(bytes - released)?;
+        if !trusted {
+            self.prepared.remove(&id.sequence);
+        }
+        self.retained = self.retained - released + bytes;
+        Ok(())
+    }
+}
+
+/// Identifies a request as sent, so only a retry repeating it replays its outcome.
+fn fingerprint(purpose: &crate::commands::Purpose, call: &Call) -> Result<[u8; 32]> {
+    let request = (
+        "action-v1",
+        purpose.name(),
+        call.deployment.as_str(),
+        &call.function,
+        call.arguments.as_str(),
+        call.caller.as_str(),
+    );
+    Ok(Sha256::digest(serde_json::to_vec(&request)?).into())
 }
 
 impl Drop for Actions {
@@ -130,13 +218,14 @@ impl Actor {
         id: ActionId,
         call: Call,
         purpose: crate::commands::Purpose,
+        retain: bool,
         reply: Request<ActionHandle>,
     ) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        let result = self.launch_action(id, call, None, purpose, &reply.cancellation);
+        let result = self.launch_action(id, call, None, purpose, retain, &reply.cancellation);
         reply.finish(result);
     }
 
@@ -146,32 +235,31 @@ impl Actor {
         mut call: Call,
         durable_identity: Option<String>,
         purpose: crate::commands::Purpose,
+        retain: bool,
         request_cancellation: &Cancellation,
     ) -> Result<ActionHandle> {
         let hook = matches!(purpose, crate::commands::Purpose::Hook);
-        let (deployment, function, writable) =
-            self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
-        let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
-            "action-v1",
-            purpose.name(),
-            call.deployment.as_str(),
-            &call.function,
-            call.arguments.as_str(),
-            call.caller.as_str(),
-        ))?)
-        .into();
-        if let Some(record) = self.actions.records.get(&id) {
+        self.actions.expire();
+        // The identity resolves before the deployment is checked: a retained outcome outlives the deployment's release,
+        // and an identity whose outcome is gone stays unknown.
+        let fingerprint = fingerprint(&purpose, &call)?;
+        let record =
+            if durable_identity.is_some() { self.actions.records.get(&id) } else { self.actions.resolve(&id)? };
+        if let Some(record) = record {
             if record.fingerprint != fingerprint {
                 return Err(Error::OperationMismatch);
             }
             let scope = record.scope.upgrade().unwrap_or_else(|| Arc::new(Scope(record.cancellation.clone())));
             return Ok(ActionHandle { id, status: record.status.subscribe(), scope });
         }
-        self.actions.admit(&id, durable_identity.is_some())?;
+        let (deployment, function, writable) =
+            self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
+        let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
+        let bytes = ENTRY_BYTES + id.incarnation.len() + operation_prefix.len() + call.bytes();
+        self.actions.admit(&id, durable_identity.is_some(), bytes)?;
         let seed = durable_identity.as_ref().map_or(id.sequence, |identity| {
             u64::from_be_bytes(Sha256::digest(identity.as_bytes())[..8].try_into().expect("digest prefix"))
         });
-        let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
         let invocation_identity = durable_identity.unwrap_or_else(|| id.to_string());
         let cancellation = Cancellation::default();
         let scope = Arc::new(Scope(cancellation.clone()));
@@ -228,7 +316,8 @@ impl Actor {
                 });
                 worker_cancellation.cancel();
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });
-            })?;
+            })
+            .inspect_err(|_| self.actions.retained -= bytes)?;
         self.actions.records.insert(
             id.clone(),
             Record {
@@ -237,10 +326,13 @@ impl Actor {
                 writable,
                 call,
                 fingerprint,
+                hook,
                 status,
                 scope: Arc::downgrade(&scope),
                 cancellation,
                 worker: Some(worker),
+                bytes,
+                retain,
             },
         );
         Ok(ActionHandle { id, status: receiver, scope })
@@ -275,13 +367,23 @@ impl Actor {
     }
 
     pub(super) fn finish_action(&mut self, id: &ActionId, result: Result<Arc<str>>) {
-        if let Some(record) = self.actions.records.get_mut(id) {
-            record.cancellation.cancel();
-            record.status.send_replace(ActionStatus::Finished(result));
-            if let Some(worker) = record.worker.take() {
-                let _ = worker.join();
-            }
+        let Some(record) = self.actions.records.get_mut(id) else { return };
+        record.cancellation.cancel();
+        let bytes = result.as_ref().map_or_else(|error| error.to_string().len(), |json| json.len());
+        record.status.send_replace(ActionStatus::Finished(result));
+        let Some(worker) = record.worker.take() else { return };
+        let _ = worker.join();
+        if !record.retain {
+            let bytes = record.bytes;
+            self.actions.records.remove(id);
+            self.actions.retained -= bytes;
+            return;
         }
+        record.bytes += bytes;
+        self.actions.retained += bytes;
+        self.actions.finished.push_back((Instant::now() + RETENTION, id.clone()));
+        // Over budget, older outcomes give way; prepared identities and live records alone always fit.
+        let _ = self.actions.make_room(0);
     }
 
     pub(super) fn action_platform(&mut self, id: &ActionId, sequence: u32, request: &Json, reply: Request<Arc<str>>) {

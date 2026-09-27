@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -154,10 +154,19 @@ pub(crate) enum Command {
         command: chunk_store::JobCommand,
         reply: Request<chunk_store::Jobs>,
     },
+    PrepareAction {
+        reply: Request<ActionId>,
+    },
+    ActionIdentity {
+        id: ActionId,
+        reply: Request<crate::ActionIdentity>,
+    },
     StartAction {
         purpose: crate::commands::Purpose,
         id: ActionId,
         call: Call,
+        /// Whether the outcome stays retained after the action finishes, for retries by ID.
+        retain: bool,
         reply: Request<ActionHandle>,
     },
     ActionStatus {
@@ -214,6 +223,8 @@ impl Command {
             Self::JobStatus { reply, .. } => reply.finish(Err(error)),
             Self::WakeHandoff { reply } => reply.finish(Err(error)),
             Self::JobControl { reply, .. } => reply.finish(Err(error)),
+            Self::PrepareAction { reply } => reply.finish(Err(error)),
+            Self::ActionIdentity { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
             Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
@@ -283,8 +294,6 @@ pub(crate) enum Event {
 
 struct Owner {
     environment: String,
-    incarnation: String,
-    action_sequence: AtomicU64,
     events: queue::Sender<Event>,
     memory: Arc<Semaphore>,
     queue: Arc<EngineQueue>,
@@ -326,8 +335,6 @@ impl Backend {
         let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
         let backend = Self(Arc::new(Owner {
             environment: "test".into(),
-            incarnation: "test-incarnation".into(),
-            action_sequence: AtomicU64::new(1),
             events,
             memory: memory.clone(),
             queue: Arc::default(),
@@ -376,10 +383,9 @@ impl Backend {
         let stop = stopped.clone();
         let outgoing = events.clone();
         let incarnation = uuid::Uuid::new_v4().to_string();
-        let action_incarnation = incarnation.clone();
         let (ready, initialized) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
-            match Actor::new(store, outgoing, action_incarnation, effects, readers, dequeued, retained) {
+            match Actor::new(store, outgoing, incarnation, effects, readers, dequeued, retained) {
                 Ok(actor) => {
                     if ready.send(Ok(actor.lane())).is_ok() {
                         actor.run(incoming, &stop);
@@ -399,8 +405,6 @@ impl Backend {
         };
         Ok(Self(Arc::new(Owner {
             environment,
-            incarnation,
-            action_sequence: AtomicU64::new(1),
             events,
             memory,
             queue: engine_queue,
@@ -495,16 +499,12 @@ impl Backend {
         self.submit(|reply| Command::CheckDeployment { id, reply }).await
     }
 
-    /// Allocate once per business invocation and reuse the ID after a lost reply.
+    /// Prepares the identity of one action or hook, valid until it starts or 24 hours pass. Allocate once per
+    /// business invocation and reuse the ID after a lost reply.
     /// # Errors
-    /// Reports exhausted invocation identities.
-    pub fn allocate_action_id(&self) -> Result<ActionId> {
-        let sequence = self
-            .0
-            .action_sequence
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1))
-            .map_err(|_| Error::Invalid("action identity exhausted"))?;
-        Ok(ActionId { incarnation: self.0.incarnation.clone(), sequence })
+    /// Reports a full retention budget, exhausted invocation identities or unavailable service.
+    pub async fn allocate_action_id(&self) -> Result<ActionId> {
+        self.submit(|reply| Command::PrepareAction { reply }).await
     }
 
     /// Acceptance retains the deployment and starts at most one action for this
@@ -515,14 +515,12 @@ impl Backend {
     /// exhausted capacity. Dropping an acceptance future cancels its scope.
     pub async fn start_action(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
         call.validate()?;
-        if id.incarnation != self.0.incarnation {
-            return Err(Error::ActionOutcomeUnknown);
-        }
         let bytes = id.incarnation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::StartAction {
             purpose: crate::commands::Purpose::Function,
             id,
             call,
+            retain: true,
             reply,
         })
         .await
@@ -542,19 +540,40 @@ impl Backend {
         self.submit(|reply| Command::Functions { id, reply }).await
     }
 
+    /// Runs a hook for a caller that never retries it by ID, so its outcome isn't retained once it finishes.
     pub(crate) async fn invoke_hook(&self, call: Call) -> Result<Arc<str>> {
+        self.launch_hook(self.allocate_action_id().await?, call, false).await?.outcome().await
+    }
+
+    /// Starts the hook `call` names under an identity from [`Self::allocate_action_id`], as
+    /// [`Self::start_action`] starts an action.
+    /// # Errors
+    /// Rejects identities this backend didn't allocate, mismatched requests, unknown hooks, untrusted hook context or
+    /// exhausted capacity. Dropping an acceptance future cancels its scope.
+    pub async fn start_hook(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
+        self.launch_hook(id, call, true).await
+    }
+
+    async fn launch_hook(&self, id: ActionId, call: Call, retain: bool) -> Result<ActionHandle> {
         call.validate_limit(512)?;
-        let id = self.allocate_action_id()?;
         let bytes = id.incarnation.len() + call.bytes();
-        let mut handle = self
-            .submit_sized(bytes, |reply| Command::StartAction {
-                purpose: crate::commands::Purpose::Hook,
-                id,
-                call,
-                reply,
-            })
-            .await?;
-        handle.outcome().await
+        self.submit_sized(bytes, |reply| Command::StartAction {
+            purpose: crate::commands::Purpose::Hook,
+            id,
+            call,
+            retain,
+            reply,
+        })
+        .await
+    }
+
+    /// Resolves an identity from [`Self::allocate_action_id`] without consulting any deployment, so a retry can route
+    /// to the action or hook it started even after the deployment's release.
+    /// # Errors
+    /// Returns unknown for an identity from another incarnation, one never issued, or one whose outcome is gone.
+    pub async fn action_identity(&self, id: ActionId) -> Result<crate::ActionIdentity> {
+        let bytes = id.incarnation.len();
+        self.submit_sized(bytes, |reply| Command::ActionIdentity { id, reply }).await
     }
 
     /// Look up retained status using the original caller authority.

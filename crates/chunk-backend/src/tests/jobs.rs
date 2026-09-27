@@ -249,7 +249,7 @@ async fn exhausted_action_capacity_leaves_due_jobs_pending_until_a_worker_is_ava
     for _ in 0..8 {
         actions.push(
             backend
-                .start_action(backend.allocate_action_id().unwrap(), call("old", "wait", "blocker", json!(null)))
+                .start_action(backend.allocate_action_id().await.unwrap(), call("old", "wait", "blocker", json!(null)))
                 .await
                 .unwrap(),
         );

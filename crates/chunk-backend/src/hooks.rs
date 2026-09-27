@@ -56,7 +56,8 @@ impl backend_hooks_server::BackendHooks for HookService {
     async fn invoke(&self, request: Request<InvokeHook>) -> std::result::Result<Response<HookResult>, Status> {
         let deployment = self.platform.binding(&request)?;
         let message = request.into_inner();
-        let call = Service::decode(deployment, message.hook, &message.arguments_json, &message.caller_json)?;
+        // The platform credential is a gateway's authority, and it names no player.
+        let call = Service::decode(deployment, message.hook, &message.arguments_json, br#"{"kind":"gateway"}"#)?;
         let result = tokio::time::timeout(HOOK_TIMEOUT, self.backend.invoke_hook(call))
             .await
             .map_err(|_| Status::deadline_exceeded("hook deadline"))?
@@ -70,12 +71,11 @@ pub(crate) fn resolve(deployment: &Deployment, call: &Call) -> Result<(Function,
     let hook = manifest.hooks.get(&call.function).ok_or(Error::Unknown)?;
     let arguments: Value = serde_json::from_str(call.arguments.as_str())?;
     let caller: Value = serde_json::from_str(call.caller.as_str())?;
-    if arguments["domain"].as_str() != Some(&hook.domain)
-        || !identifier(&arguments["eventId"])
-        || caller["kind"] != "proxy"
-        || !identifier(&caller["proxyId"])
-    {
+    if arguments["domain"].as_str() != Some(&hook.domain) || !identifier(&arguments["eventId"]) || !gateway(&caller) {
         return Err(Error::Invalid("invalid trusted hook context"));
+    }
+    if caller.get("player").is_some() && caller["player"] != arguments["player"]["uuid"] {
+        return Err(Error::Invalid("the hook's caller names another player"));
     }
     if hook.event == HookEvent::ServerPing {
         if arguments.get("player").is_some() || !identifier(&arguments["host"]) {
@@ -128,6 +128,15 @@ pub(crate) fn resolve(deployment: &Deployment, call: &Call) -> Result<(Function,
         },
         hook.event != HookEvent::ServerPing,
     ))
+}
+
+/// A gateway's caller: `{"kind":"gateway"}`, with the `player` it holds a claim for.
+fn gateway(caller: &Value) -> bool {
+    caller.as_object().is_some_and(|fields| {
+        caller["kind"] == "gateway"
+            && fields.keys().all(|key| key == "kind" || key == "player")
+            && (!fields.contains_key("player") || identifier(&caller["player"]))
+    })
 }
 
 fn identifier(value: &Value) -> bool {

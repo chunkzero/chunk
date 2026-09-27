@@ -43,7 +43,7 @@ export { unset } from "./documents.ts";
 export type { Document, Reader, Writer, Selection } from "./documents.ts";
 
 export { createHook } from "./hooks.ts";
-export type { HookContexts, HookResults, HookEvent, HookOptions, HookDefinition } from "./hooks.ts";
+export type { HookCaller, HookContexts, HookResults, HookEvent, HookOptions, HookDefinition } from "./hooks.ts";
 
 export { command, commandRoute, commandArg } from "./commands.ts";
 export type {

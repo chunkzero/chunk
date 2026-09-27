@@ -26,7 +26,7 @@ test("named hooks have immutable metadata distinct from function and helper expo
 test("the compiler adapter preserves trusted capabilities and validates decision results", async () => {
   const calls = [];
   const raw = {
-    caller: { player: "trusted" },
+    caller: { kind: "gateway", player: "trusted" },
     runQuery: async (path, args) => {
       calls.push([path, args]);
       return true;
@@ -41,7 +41,7 @@ test("the compiler adapter preserves trusted capabilities and validates decision
     caller: "spoofed",
   };
   const hook = createHook("player.login", async (ctx) => {
-    assert.deepEqual(ctx.caller, { player: "trusted" });
+    assert.deepEqual(ctx.caller, { kind: "gateway", player: "trusted" });
     assert.equal(Object.isFrozen(ctx.player), true);
     const allow = await ctx.runQuery({ path: "shared/allowed" }, {});
     return { allow };
