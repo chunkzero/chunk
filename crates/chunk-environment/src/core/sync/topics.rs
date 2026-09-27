@@ -1,6 +1,7 @@
 //! Subscription topics, by name.
 
 mod gateway;
+mod jvm;
 mod queries;
 
 use super::{SyncService, auth::Principal, caller::Grant, errors, streams::Sender};
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) enum Topic {
     Queries(queries::Queries),
     Gateway(gateway::Gateway),
+    Jvm(jvm::Jvm),
 }
 
 /// What every stream carries besides its topic's state.
@@ -47,6 +49,7 @@ impl Topic {
                 Ok(Self::Queries(queries::Queries::new(keys, group, context)))
             }
             topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
+            topic if topic.starts_with("jvm/") => jvm::open(service, principal, request).map(Self::Jvm),
             _ => Err(errors::invalid("unknown topic")),
         }
     }
@@ -55,6 +58,7 @@ impl Topic {
         match self {
             Self::Queries(queries) => queries.run(sender, stop).await,
             Self::Gateway(gateway) => gateway.run(sender, stop).await,
+            Self::Jvm(jvm) => jvm.run(sender, stop).await,
         }
     }
 }

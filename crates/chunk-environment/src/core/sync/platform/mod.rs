@@ -1,6 +1,7 @@
 //! Platform methods, named `chunk:<name>`, whose arguments and results are protobuf messages.
 
 mod claims;
+mod jvm;
 
 use super::{
     SyncService, app,
@@ -24,6 +25,9 @@ pub(super) async fn call(
         "prepare" => return Ok((None, prepare(service, request).await?.encode_to_vec())),
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
         _ => {}
+    }
+    if let Some(method) = jvm::Method::parse(method) {
+        return jvm::call(service, principal, method, request).await;
     }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {

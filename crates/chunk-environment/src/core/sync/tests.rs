@@ -1,5 +1,6 @@
 mod claims;
 mod effects;
+mod jvm;
 mod runtime;
 
 use super::*;
@@ -93,7 +94,7 @@ impl chunk_control::Host for Host {
 }
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     backend: Backend,
     stop: CancellationToken,
     task: JoinHandle<io::Result<()>>,
@@ -113,7 +114,11 @@ impl Fixture {
     }
 
     async fn with_host(host: Arc<dyn chunk_control::Host>) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        Self::open(tempfile::tempdir().unwrap(), host).await
+    }
+
+    /// Starts core over the store in `directory`, which a stopped core may have left.
+    async fn open(directory: tempfile::TempDir, host: Arc<dyn chunk_control::Host>) -> Self {
         let store = chunk_store::SqliteStore::open(directory.path().join("environment.sqlite"), "test").unwrap();
         let backend = Backend::new("test".into(), Box::new(store)).unwrap();
         backend.deploy(deployment()).await.unwrap();
@@ -136,7 +141,7 @@ impl Fixture {
         let endpoint = started.connection.endpoint;
         let client = CoreClient::connect(endpoint.clone()).await.unwrap();
         Self {
-            _directory: directory,
+            directory,
             backend,
             stop,
             task,
@@ -185,10 +190,31 @@ impl Fixture {
     }
 
     async fn stop(self) {
+        self.close().await;
+    }
+
+    /// Stops core and starts it again over the same store with `host`, as after a restart.
+    async fn restart(self, host: Arc<dyn chunk_control::Host>) -> Self {
+        let control = self.control.clone();
+        let directory = self.close().await;
+        // Streams still ending hold control, and with it the store the restart reopens.
+        let ended = async {
+            while Arc::strong_count(&control) > 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), ended).await.expect("core's streams ended");
+        tokio::task::spawn_blocking(move || drop(control)).await.unwrap();
+        Self::open(directory, host).await
+    }
+
+    /// Stops core, returning the directory of its store.
+    async fn close(self) -> tempfile::TempDir {
         self.stop.cancel();
         self.task.await.unwrap().unwrap();
         let backend = self.backend;
         tokio::task::spawn_blocking(move || drop(backend)).await.unwrap();
+        self.directory
     }
 }
 

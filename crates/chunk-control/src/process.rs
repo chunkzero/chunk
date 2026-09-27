@@ -373,6 +373,20 @@ impl Host for ProcessHost {
         }
         found
     }
+    fn unadopted(&self, credential: &str) -> Option<String> {
+        let presented = digest(credential);
+        let mut found = None;
+        // Every awaiting launch is compared, so timing reveals no match position.
+        for id in self.unowned().ok()? {
+            if self
+                .launch_record(&id)
+                .is_some_and(|record| chunk_service::same_secret(&presented, &record.token_sha256))
+            {
+                found = Some(id);
+            }
+        }
+        found
+    }
     fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
         validate_endpoints(&registration)?;
         let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
@@ -557,8 +571,9 @@ fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// Asks the JVM to stop over its control endpoint. One registered over sync has none; its topic's `stop` entry asks it.
 async fn stop_gracefully(process: &Process) {
-    if let Some(connection) = process.connection() {
+    if let Some(connection) = process.connection().filter(|connection| !connection.endpoint.is_empty()) {
         let graceful = async {
             NodeControlClient::new(channel(&connection).await?)
                 .stop_process(auth(&connection, connection.identity.clone(), 2)?)
@@ -569,8 +584,10 @@ async fn stop_gracefully(process: &Process) {
     }
 }
 
+/// Requires loopback endpoints. A JVM registered over the sync protocol serves no control endpoint.
 fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
-    for endpoint in [&registration.control_endpoint, &registration.player_endpoint] {
+    let control = Some(&registration.control_endpoint).filter(|endpoint| !endpoint.is_empty());
+    for endpoint in control.into_iter().chain([&registration.player_endpoint]) {
         let address: std::net::SocketAddr = endpoint
             .strip_prefix("http://")
             .unwrap_or(endpoint)
@@ -580,7 +597,7 @@ fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
             return Err(Error::Invalid("process requires loopback"));
         }
     }
-    if !registration.control_endpoint.starts_with("http://") {
+    if control.is_some_and(|endpoint| !endpoint.starts_with("http://")) {
         return Err(Error::Invalid("control endpoint scheme"));
     }
     Ok(())

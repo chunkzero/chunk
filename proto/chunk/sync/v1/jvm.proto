@@ -1,0 +1,111 @@
+// Payloads of the `jvm/<host>` topic: what core wants the JVM running host `<host>` to do. Only that JVM's credential
+// may subscribe, with no arguments, deployment or caller, and the topic is fenced. It is snapshot-only: every update
+// is a snapshot, `after` is ignored, and core sends no position-only updates. A key missing from a snapshot is one the
+// JVM forgets.
+// - `session/<id>`: a JvmSession the JVM runs, or ends once `finish` is set.
+// - `stop`: a JvmStop, present once core wants the JVM to exit.
+syntax = "proto3";
+
+package chunk.sync.v1;
+
+// A session core wants the JVM to run.
+message JvmSession {
+  // The session type, as `<app>/<session>`.
+  string session_type = 1;
+  // The players the session admits at once.
+  uint32 capacity = 2;
+  // The session's creation configuration as a JSON object; empty means `{}`. It never changes.
+  bytes configuration_json = 3;
+  // End the session: admit no more players, and report it ENDED once it has.
+  bool finish = 4;
+}
+
+// Core wants the JVM to stop its sessions and exit. Core kills a JVM that is still running shortly after.
+message JvmStop {}
+
+// Methods a JVM calls with its own credential; core takes the JVM's host from that credential. Each carries no
+// deployment or caller, and takes no operation ID.
+// - `chunk:register` takes JvmRegistration and returns JvmRegistered. The JVM calls it before subscribing, so it names
+//   no stream. The first registration is frozen: repeating it returns the same result, and one that differs fails
+//   with INVALID. A JVM that outlived a core restart re-attaches through it, and until then its credential may call
+//   nothing else.
+// - `chunk:report` takes JvmReport and returns nothing. It names the JVM's current `jvm/<host>` stream in
+//   `CallRequest.stream`, and fails with STOPPED once that stream is superseded. It is idempotent, since each report
+//   carries the latest state of everything it lists.
+
+// Arguments of `chunk:register`: who the JVM is, as its launch environment told it.
+message JvmRegistration {
+  // The process ID and generation the JVM was launched with.
+  string process_id = 1;
+  uint64 generation = 2;
+  // The app the JVM runs.
+  string app = 3;
+  // The machine profile the JVM runs on.
+  string profile = 4;
+  // The SHA-256 digest of the app's artifact, in lowercase hex.
+  string artifact_digest = 5;
+  // The deployment the JVM runs. An inactive or unknown one fails with CONTRACT.
+  string deployment = 6;
+  // The loopback address players connect to.
+  string player_endpoint = 7;
+  // The Minecraft protocol version the JVM speaks.
+  int32 protocol = 8;
+}
+
+// The result of `chunk:register`.
+message JvmRegistered {
+  // The host the JVM runs; its topic is `jvm/<host>`.
+  string host = 1;
+}
+
+// Arguments of `chunk:report`: the JVM's actual state.
+message JvmReport {
+  // The report lists every session the JVM holds. The first complete report on a stream attaches the JVM, and core
+  // reconciles it once; a stream's reports before it fail with INVALID. Later reports may list only what changed.
+  bool complete = 1;
+  repeated JvmSessionStatus sessions = 2;
+  // The JVM's latest health. Core marks a JVM unhealthy once it has reported none for 10 seconds.
+  JvmHealth health = 3;
+}
+
+// A session the JVM holds.
+message JvmSessionStatus {
+  // The session's ID, as in its `session/<id>` key.
+  string id = 1;
+  string session_type = 2;
+  uint32 capacity = 3;
+  JvmSessionPhase phase = 4;
+  // Players with a slot reserved but not yet attached.
+  uint32 prepared = 5;
+  // Players attached to the session.
+  uint32 attached = 6;
+}
+
+// Where a session is in its lifecycle.
+enum JvmSessionPhase {
+  JVM_SESSION_PHASE_UNSPECIFIED = 0;
+  JVM_SESSION_PHASE_STARTING = 1;
+  JVM_SESSION_PHASE_READY = 2;
+  JVM_SESSION_PHASE_ENDING = 3;
+  JVM_SESSION_PHASE_ENDED = 4;
+  JVM_SESSION_PHASE_FAILED = 5;
+}
+
+// A sample of the JVM's health.
+message JvmHealth {
+  // The JVM admits players.
+  bool ready = 1;
+  // The JVM is shutting down; core retires its host.
+  bool draining = 2;
+  // Server ticks since the JVM started, and how long ago the last one ended.
+  uint64 tick_count = 3;
+  uint64 last_tick_age_millis = 4;
+  uint64 heap_used_bytes = 5;
+  uint64 heap_max_bytes = 6;
+  uint64 gc_count = 7;
+  uint64 gc_time_millis = 8;
+  // The JVM's share of the machine's CPU, from 0 to 1.
+  double process_cpu_load = 9;
+  uint32 sessions = 10;
+  uint32 players = 11;
+}

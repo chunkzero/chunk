@@ -223,7 +223,7 @@ fn apply(state: &mut State, host: &str, identity: &ProcessIdentity, report: &Pro
     Ok(())
 }
 
-fn desired(state: &State, host: &str, identity: &ProcessIdentity) -> Result<Desired> {
+pub(crate) fn desired(state: &State, host: &str, identity: &ProcessIdentity) -> Result<Desired> {
     let mut desired = BTreeMap::new();
     for (id, session) in state.sessions.iter().filter(|(_, session)| session.host == host && !session.finished) {
         let command = SessionCommand {

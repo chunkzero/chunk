@@ -8,6 +8,7 @@ mod drain;
 pub mod gateway;
 mod host;
 mod idle;
+pub mod jvm;
 mod moves;
 mod nodes;
 mod placement;
@@ -194,6 +195,7 @@ pub struct Control {
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     recovery: recovery::Recovery,
     links: sync::Links,
+    jvms: jvm::Jvms,
     /// Wakes the capacity executor.
     capacity: tokio::sync::Notify,
 }
@@ -221,6 +223,7 @@ impl Control {
             host,
             observations: Mutex::default(),
             links: sync::Links::default(),
+            jvms: jvm::Jvms::default(),
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),

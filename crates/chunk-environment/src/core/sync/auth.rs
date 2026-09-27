@@ -9,10 +9,12 @@ use std::{
 };
 use tonic::{Request, Status};
 
+/// `Unadopted` is a JVM launched before core restarted, which may only call `chunk:register` until it re-attaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Class {
     Gateway { id: String },
     Jvm { host: String },
+    Unadopted { host: String },
     Cli,
 }
 
@@ -52,8 +54,10 @@ impl Credentials {
             Some(Class::Gateway { id })
         } else if cli {
             Some(Class::Cli)
+        } else if let Some(host) = self.control.authenticate(credential) {
+            Some(Class::Jvm { host })
         } else {
-            self.control.authenticate(credential).map(|host| Class::Jvm { host })
+            self.control.unadopted(credential).map(|host| Class::Unadopted { host })
         }
     }
 }

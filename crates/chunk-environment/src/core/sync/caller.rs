@@ -75,6 +75,7 @@ pub(super) fn derive(
             }
             value
         }
+        Class::Unadopted { .. } => return Err(errors::denied("the JVM must register again first")),
         Class::Cli => {
             if !session.is_empty() || !player.is_empty() {
                 return Err(errors::denied("the CLI names no caller"));

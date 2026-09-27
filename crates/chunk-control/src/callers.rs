@@ -29,6 +29,12 @@ impl Control {
         self.host.authenticate(credential)
     }
 
+    /// The host whose JVM, launched before control restarted, holds `credential` and has yet to re-register.
+    #[must_use]
+    pub fn unadopted(&self, credential: &str) -> Option<String> {
+        self.host.unadopted(credential)
+    }
+
     /// `session`, which `host` must run. A named `player` must be delivered to it through their current claim, in any
     /// phase from its reservation until the delivery closes or the claim is released.
     /// # Errors

@@ -104,6 +104,8 @@ impl Control {
             };
             let control = self.clone();
             let id = id.clone();
+            // A JVM registered over sync pushes its health in reports, and one sample may stand for several passes.
+            let (pushed, sample) = (self.jvms.pushes_health(&id), self.jvms.health(&id));
             tasks.spawn(async move {
                 let probe = async {
                     let health = NodeControlClient::new(channel(&connection).await?)
@@ -115,21 +117,27 @@ impl Control {
                     }
                     Ok(health)
                 };
-                let health = tokio::time::timeout(Duration::from_secs(3), probe).await.ok().and_then(Result::ok);
+                let health = if pushed {
+                    sample
+                } else {
+                    tokio::time::timeout(Duration::from_secs(3), probe).await.ok().and_then(Result::ok)
+                };
                 let terminate = {
                     let mut observations =
                         control.observations.lock().map_err(|_| Error::Unresolved("health observations poisoned"))?;
                     let previous = observations.get(&id);
                     let phase = match &health {
+                        None if pushed => NodePhase::Unhealthy,
                         None => NodePhase::Unreachable,
                         Some(h) if h.draining => NodePhase::Draining,
                         Some(h)
                             if !h.ready
                                 || h.tick_count == 0
                                 || h.last_tick_age_millis > 5000
-                                || previous
-                                    .and_then(|o| o.health.as_ref())
-                                    .is_some_and(|p| h.tick_count <= p.tick_count) =>
+                                || (!pushed
+                                    && previous
+                                        .and_then(|o| o.health.as_ref())
+                                        .is_some_and(|p| h.tick_count <= p.tick_count)) =>
                         {
                             NodePhase::Unhealthy
                         }

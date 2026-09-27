@@ -31,6 +31,7 @@ impl Control {
             .lock()
             .map_err(|_| Error::Unresolved("health observations poisoned"))?
             .retain(|id, _| retained.contains(id));
+        self.jvms.retain(|id| retained.contains(id) || self.host.connection(id).is_some());
         Ok(())
     }
 
