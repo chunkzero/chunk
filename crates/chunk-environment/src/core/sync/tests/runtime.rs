@@ -6,9 +6,10 @@ use chunk_control::{Progress, RuntimeConnection};
 use chunk_proto::v1::{
     ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeliveryInventory, DeliveryPhase, DeploymentRef,
     Identity, PlayerDelivery, PlayerPreparation, PlayerWithdrawal, ProcessHealth, ProcessIdentity, ProcessReport,
-    SessionDemand, SessionInventory, SessionPhase,
+    SessionDemand, SessionInventory, SessionMethodPhase, SessionMethodRequest, SessionMethodResult, SessionPhase,
     gameplay_server::{Gameplay, GameplayServer},
     node_control_server::{NodeControl, NodeControlServer},
+    session_methods_server::{SessionMethods, SessionMethodsServer},
     supervisor_client::SupervisorClient,
 };
 use std::{
@@ -28,9 +29,21 @@ pub fn release() -> chunk_control::Release {
         "deployment": {"environment": "test", "deployment": "test"}, "artifact_digest": "digest",
         "profiles": {"small": {"memory_mib": 512, "max_sessions": 2}},
         "session_types": {"bridge/default": {"app": "bridge", "machine_profile": "small", "capacity": 8}},
-        "max_processes": 1, "idle_node_timeout_seconds": 0
+        "max_processes": 1, "idle_node_timeout_seconds": 0, "session_methods": session_methods()
     }))
     .unwrap()
+}
+
+/// Declares `status`, which the fake JVM answers with 7, or with `limit` 0 holds queued until it's cancelled. Its
+/// optional `pad` only adds size.
+pub fn session_methods() -> serde_json::Value {
+    serde_json::json!({"version": 1, "methods": [{
+        "app": "bridge", "session": "default", "name": "status",
+        "arguments": {"type": "object", "fields": {
+            "limit": {"schema": {"type": "integer"}}, "pad": {"schema": {"type": "string"}, "optional": true}
+        }},
+        "result": {"type": "integer"}
+    }]})
 }
 
 pub fn demand(key: &str) -> SessionDemand {
@@ -68,6 +81,8 @@ struct State {
     deliveries: BTreeMap<String, DeliveryInventory>,
     ticks: u64,
     reports: Option<mpsc::UnboundedSender<ProcessReport>>,
+    /// Session methods run, held queued, and cancelled.
+    methods: (usize, usize, usize),
 }
 
 #[derive(Clone)]
@@ -86,8 +101,14 @@ impl Runtime {
         let server = tonic::transport::Server::builder()
             .add_service(GameplayServer::new(runtime.clone()))
             .add_service(NodeControlServer::new(runtime.clone()))
+            .add_service(SessionMethodsServer::new(runtime.clone()))
             .serve_with_incoming(incoming);
         (runtime, tokio::spawn(async { server.await.unwrap() }))
+    }
+
+    /// How many session methods ran, were held queued, and were cancelled.
+    pub fn methods(&self) -> (usize, usize, usize) {
+        self.state.lock().unwrap().methods
     }
 
     pub fn host(&self) -> Option<String> {
@@ -234,5 +255,34 @@ impl NodeControl for Runtime {
 
     async fn stop_process(&self, request: Request<ProcessIdentity>) -> Result<Response<ProcessIdentity>, Status> {
         Ok(Response::new(request.into_inner()))
+    }
+}
+
+#[tonic::async_trait]
+impl SessionMethods for Runtime {
+    async fn call(&self, request: Request<SessionMethodRequest>) -> Result<Response<SessionMethodResult>, Status> {
+        let request = request.into_inner();
+        if request.arguments_json.contains("\"limit\":0") {
+            self.state.lock().unwrap().methods.1 += 1;
+            let phase = SessionMethodPhase::Accepted.into();
+            let operation_id = request.operation_id;
+            return Ok(Response::new(SessionMethodResult { operation_id, phase, ..SessionMethodResult::default() }));
+        }
+        self.state.lock().unwrap().methods.0 += 1;
+        Ok(Response::new(SessionMethodResult {
+            operation_id: request.operation_id,
+            phase: SessionMethodPhase::Completed.into(),
+            result_json: "7".into(),
+            error: None,
+        }))
+    }
+
+    async fn cancel(&self, request: Request<SessionMethodRequest>) -> Result<Response<SessionMethodResult>, Status> {
+        self.state.lock().unwrap().methods.2 += 1;
+        Ok(Response::new(SessionMethodResult {
+            operation_id: request.into_inner().operation_id,
+            phase: SessionMethodPhase::Cancelled.into(),
+            ..SessionMethodResult::default()
+        }))
     }
 }

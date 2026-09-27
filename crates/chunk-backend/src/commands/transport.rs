@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use super::{CommandBinding, PlatformEffect, Prepared, Purpose, scope_bytes};
+use super::{CommandBinding, PlatformEffect, Prepared, Purpose, effect_operation, effect_result, scope_bytes};
 use crate::{ActionId, Backend, Error, Result, Service, service::Command, transport::status};
 
 #[derive(Clone, Default)]
@@ -73,9 +73,7 @@ impl backend_commands_server::BackendCommands for CommandService {
         request: Request<wire::CommandScope>,
     ) -> std::result::Result<Response<wire::CommandCatalog>, Status> {
         let id = self.platform.binding(&request)?;
-        let scope = request.into_inner();
-        let bytes = scope_bytes(&scope);
-        let catalog = bounded(self.backend.submit_sized(bytes, |reply| Command::Catalog { id, scope, reply })).await?;
+        let catalog = bounded(self.backend.command_catalog(id, request.into_inner(), None)).await?;
         Ok(Response::new(catalog))
     }
     async fn suggest(
@@ -83,13 +81,8 @@ impl backend_commands_server::BackendCommands for CommandService {
         request: Request<wire::CommandSuggestionRequest>,
     ) -> std::result::Result<Response<wire::CommandSuggestionResult>, Status> {
         let id = self.platform.binding(&request)?;
-        let request = request.into_inner();
-        let bytes = request.scope.as_ref().map_or(0, scope_bytes)
-            + request.command_id.len()
-            + request.query.len()
-            + request.input.len();
-        let suggestions =
-            bounded(self.backend.submit_sized(bytes, |reply| Command::Suggest { id, request, reply })).await?;
+        let charge = self.backend.charge_request(0).map_err(|error| status(&error))?;
+        let suggestions = bounded(self.backend.command_suggestions(id, charge, request.into_inner(), None)).await?;
         Ok(Response::new(suggestions))
     }
     async fn prepare(
@@ -238,7 +231,13 @@ async fn owner_run(
     let (effects, mut requests) = mpsc::channel::<PlatformEffect>(8);
     let call = prepared.call();
     let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
-    let purpose = Purpose::Command(Arc::new(CommandBinding { scope: prepared.scope, input: prepared.input, effects }));
+    let purpose = Purpose::Command(Arc::new(CommandBinding {
+        scope: prepared.scope,
+        input: prepared.input,
+        effects,
+        owner: None,
+        caller: None,
+    }));
     let invocation = id.to_string();
     let acceptance =
         backend.submit_sized(bytes, |reply| Command::StartAction { id, call, purpose, retain: false, reply });
@@ -279,7 +278,7 @@ async fn owner_run(
                     match message {
                         Ok(Some(wire::CommandClientFrame {frame:Some(command_client_frame::Frame::Reply(reply))}))=>{
                             let Some(effect)=pending.remove(&reply.sequence) else {break unknown();};
-                            let result=effect_reply(&invocation,&effect,&reply);
+                            let result=effect_result(&invocation,&effect,reply.error.is_empty().then_some(reply.result_json.as_slice()));
                             effect.reply.finish(result);
                         }
                         // Cancel and any unexpected frame abort the run; the owner reports the outcome as unknown.
@@ -291,7 +290,7 @@ async fn owner_run(
                     let Some(effect)=request else {break finished(action.outcome().await);};
                     if effect.reply.cancellation.is_cancelled() {effect.reply.finish(Err(Error::Cancelled));continue;}
                     let sequence=effect.sequence;
-                    let frame=wire::CommandEffect {sequence,operation_id:format!("action/{invocation}/platform/{sequence}"),request_json:effect.request.as_str().as_bytes().to_vec()};
+                    let frame=wire::CommandEffect {sequence,operation_id:effect_operation(&invocation,sequence),request_json:effect.request.as_str().as_bytes().to_vec()};
                     if pending.len()>=8 || pending.contains_key(&sequence) || !send(&output,command_server_frame::Frame::Effect(frame)) {effect.reply.finish(Err(Error::Cancelled));break unknown();}
                     pending.insert(sequence,effect);
                 }
@@ -310,24 +309,6 @@ async fn owner_run(
     }
     progress.send_replace(Progress { accepted: true, finished: Some(result.clone()) });
     send(&output, command_server_frame::Frame::Finished(result));
-}
-
-fn effect_reply(invocation: &str, effect: &PlatformEffect, reply: &wire::CommandEffectReply) -> Result<Arc<str>> {
-    if !reply.error.is_empty() {
-        return Err(Error::Invalid("command effect failed; earlier effects may have completed"));
-    }
-    if reply.result_json.len() > 64 * 1024 {
-        return Err(Error::Invalid("command effect result limit"));
-    }
-    let mut value = serde_json::from_slice(&reply.result_json)?;
-    effect.result.normalize_api(&mut value);
-    chunk_contract::validate_wire_value(&value).map_err(Error::Invalid)?;
-    if !effect.result.accepts(&value)
-        || (effect.receipt && value["operationId"] != format!("action/{invocation}/platform/{}", effect.sequence))
-    {
-        return Err(Error::Contract);
-    }
-    Ok(serde_json::to_string(&value)?.into())
 }
 
 async fn observe(

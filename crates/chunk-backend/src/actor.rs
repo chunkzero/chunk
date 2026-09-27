@@ -233,12 +233,12 @@ impl Actor {
 
     fn request(&mut self, command: Command) {
         match command {
-            Command::Catalog { id, scope, reply } => {
-                let result = self.command_catalog(&id, &scope, &reply.cancellation);
+            Command::Catalog { id, scope, caller, reply } => {
+                let result = self.command_catalog(&id, &scope, caller.as_ref(), &reply.cancellation);
                 reply.finish(result);
             }
-            Command::Suggest { id, request, reply } => {
-                let result = self.command_suggest(&id, request, &reply.cancellation);
+            Command::Suggest { id, request, caller, reply } => {
+                let result = self.command_suggest(&id, request, caller.as_ref(), &reply.cancellation);
                 reply.finish(result);
             }
             Command::Prepare { id, scope, command, input, reply } => {
@@ -263,6 +263,9 @@ impl Actor {
             })),
             Command::PrepareAction { reply } => reply.finish(self.actions.prepare()),
             Command::ActionIdentity { id, reply } => reply.finish(self.actions.identity(&id)),
+            Command::OwnedIdentity { id, owner, request, reply } => {
+                reply.finish(self.actions.command_identity(&id, &owner, request));
+            }
             Command::StartAction { purpose, id, call, retain, reply } => {
                 self.start_action(id, call, purpose, retain, reply);
             }

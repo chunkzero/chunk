@@ -1,5 +1,6 @@
 //! Subscription topics, by name.
 
+mod command;
 mod gateway;
 mod jvm;
 mod queries;
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) enum Topic {
     Queries(queries::Queries),
+    Command(command::Command),
     Gateway(gateway::Gateway),
     Jvm(jvm::Jvm),
 }
@@ -48,6 +50,9 @@ impl Topic {
                 };
                 Ok(Self::Queries(queries::Queries::new(keys, group, context)))
             }
+            topic if topic.starts_with("command/") => {
+                command::open(service, principal, request).await.map(Self::Command)
+            }
             topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
             topic if topic.starts_with("jvm/") => jvm::open(service, principal, request).map(Self::Jvm),
             _ => Err(errors::invalid("unknown topic")),
@@ -57,6 +62,7 @@ impl Topic {
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         match self {
             Self::Queries(queries) => queries.run(sender, stop).await,
+            Self::Command(command) => command.run(sender, stop).await,
             Self::Gateway(gateway) => gateway.run(sender, stop).await,
             Self::Jvm(jvm) => jvm.run(sender, stop).await,
         }

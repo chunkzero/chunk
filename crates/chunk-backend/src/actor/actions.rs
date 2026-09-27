@@ -13,7 +13,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 
 use super::Actor;
 use crate::{
-    ActionHandle, ActionId, ActionIdentity, ActionStatus, Error, Result,
+    ActionHandle, ActionId, ActionIdentity, ActionStatus, CommandIdentity, CommandRequest, Error, Result,
     actions::{Host, Scope},
     limits::{Limit, QUEUE_WAIT, RETAINED_BYTES},
     service::{Call, Event, Request, Update},
@@ -26,7 +26,10 @@ const ENTRY_BYTES: usize = 256;
 
 struct Record {
     operation_prefix: String,
+    /// A running command's binding, dropped once it finishes.
     command: Option<Arc<crate::commands::CommandBinding>>,
+    /// Who started a command, and what they asked for.
+    owner: Option<crate::commands::Owner>,
     call: Call,
     fingerprint: [u8; 32],
     hook: bool,
@@ -206,6 +209,25 @@ impl Actions {
         })
     }
 
+    pub fn command_identity(
+        &mut self,
+        id: &ActionId,
+        owner: &[u8; 32],
+        request: Option<CommandRequest>,
+    ) -> Result<CommandIdentity> {
+        self.expire();
+        Ok(match self.resolve(id)? {
+            None => CommandIdentity::Unused,
+            Some(record) => match &record.owner {
+                Some(started) if started.credential != *owner => CommandIdentity::Foreign,
+                Some(started) if request.is_none_or(|request| request == started.request) => {
+                    CommandIdentity::Started(record.status.borrow().clone())
+                }
+                _ => CommandIdentity::Other,
+            },
+        })
+    }
+
     /// Admits a record of `bytes` under `id`, which [`Self::resolve`] found prepared unless it's `trusted`, consuming
     /// its preparation.
     fn admit(&mut self, id: &ActionId, trusted: bool, bytes: usize) -> Result<()> {
@@ -227,6 +249,7 @@ fn fingerprint(purpose: &crate::commands::Purpose, call: &Call) -> Result<[u8; 3
     let request = (
         "action-v1",
         purpose.name(),
+        purpose.owner().map(|owner| (owner.credential, owner.request.digest())),
         call.deployment.as_str(),
         &call.function,
         call.arguments.as_str(),
@@ -324,7 +347,7 @@ impl Actor {
         let (deployment, function, writable) =
             self.action_contract(&mut call, &purpose, durable_identity.is_some(), request_cancellation)?;
         let operation_prefix = durable_identity.clone().unwrap_or_else(|| format!("action/{id}"));
-        let bytes = ENTRY_BYTES + id.incarnation.len() + operation_prefix.len() + call.bytes();
+        let bytes = ENTRY_BYTES + id.incarnation.len() + operation_prefix.len() + call.bytes() + purpose.bytes();
         self.actions.admit(&id, durable_identity.is_some(), bytes)?;
         let seed = durable_identity.as_ref().map_or(id.sequence, |identity| {
             u64::from_be_bytes(Sha256::digest(identity.as_bytes())[..8].try_into().expect("digest prefix"))
@@ -391,6 +414,7 @@ impl Actor {
             id.clone(),
             Record {
                 operation_prefix,
+                owner: purpose.owner(),
                 command: purpose.command(),
                 writable,
                 call,
@@ -442,6 +466,10 @@ impl Actor {
         record.status.send_replace(ActionStatus::Finished(result));
         let Some(worker) = record.worker.take() else { return };
         let _ = worker.join();
+        if let Some(binding) = record.command.take() {
+            record.bytes -= binding.bytes();
+            self.actions.retained -= binding.bytes();
+        }
         if !record.retain {
             let bytes = record.bytes;
             self.actions.records.remove(id);
@@ -465,7 +493,8 @@ impl Actor {
             let call = record.call.clone();
             let deployment =
                 self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Unknown)?.clone();
-            self.command_permission(&deployment, &binding.scope, &call.function, &reply.cancellation)?;
+            let caller = binding.caller.as_ref();
+            self.command_permission(&deployment, &binding.scope, &call.function, caller, &reply.cancellation)?;
             let (request, result, receipt) = crate::commands::effects::validate(&deployment, &binding.scope, request)?;
             Ok((binding.effects.clone(), request, result, receipt))
         })();
@@ -510,8 +539,9 @@ impl Actor {
                 reply.finish(Err(Error::Unknown));
                 return;
             };
+            let caller = binding.caller.as_ref();
             if let Err(error) =
-                self.command_permission(&deployment, &binding.scope, &original.function, &reply.cancellation)
+                self.command_permission(&deployment, &binding.scope, &original.function, caller, &reply.cancellation)
             {
                 reply.finish(Err(error));
                 return;

@@ -6,6 +6,7 @@ mod auth;
 mod caller;
 mod errors;
 mod platform;
+mod runs;
 mod streams;
 mod topics;
 
@@ -13,13 +14,12 @@ use chunk_backend::{Backend, Call, Update as Outcome};
 use chunk_control::Control;
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::sync::v1::{
-    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, Update, call_response,
+    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, call_response,
     core_server::{Core, CoreServer},
 };
 use chunk_store::Revision;
 use prost::Message;
 use std::sync::Arc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
@@ -47,6 +47,7 @@ pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_contr
             app: app::App::new(backend),
             streams: streams::StreamKey::new(),
             fences: streams::Fences::default(),
+            runs: Arc::default(),
             stop,
             operations,
         };
@@ -62,6 +63,7 @@ pub(crate) struct SyncService {
     app: app::App,
     streams: streams::StreamKey,
     fences: streams::Fences,
+    runs: Arc<runs::Runs>,
     /// The store's epoch, fixed while the backend runs.
     epoch: u64,
     /// Ends open streams when control's transport shuts down.
@@ -98,8 +100,8 @@ impl SyncService {
         if matches!(principal.class, auth::Class::Unadopted { .. }) && request.method != "chunk:register" {
             return Err(errors::denied("the JVM must register again first"));
         }
-        if let Some(method) = request.method.strip_prefix("chunk:") {
-            return platform::call(self, principal, method, &request).await;
+        if let Some(method) = request.method.strip_prefix("chunk:").map(str::to_owned) {
+            return platform::call(self, principal, &method, request).await;
         }
         let outcome = self.call_app(principal, request).await?;
         Ok((position(self.epoch, outcome.revision), outcome.json.as_bytes().to_vec()))
@@ -160,7 +162,7 @@ impl Core for SyncService {
         Ok(Response::new(response))
     }
 
-    type SubscribeStream = ReceiverStream<Result<Update, Status>>;
+    type SubscribeStream = streams::Stream;
 
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let principal = self.credentials.authenticate(&request)?;
@@ -170,7 +172,7 @@ impl Core for SyncService {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),
         }
-        Ok(Response::new(ReceiverStream::new(stream)))
+        Ok(Response::new(stream))
     }
 }
 

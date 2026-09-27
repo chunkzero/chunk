@@ -3,7 +3,7 @@
 //
 // Names. Methods and topics are strings. A method is an app function path from the deployment's contract, or a
 // platform method named `chunk:<name>`; function paths never contain `:`. Planned topic families, not normative:
-// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<id>`, `nodes`, `players`.
+// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<op>`, `method/<op>`, `nodes`, `players`.
 //
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
@@ -170,14 +170,14 @@ message Error {
 }
 
 // The result of `chunk:prepare`, which issues the operation ID of one effectful call: an app action, or for a gateway,
-// a hook. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call issues one
-// ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued before it
-// restarted or restored, gets OUTCOME_UNKNOWN, as does one whose outcome core retired. Core retains an outcome for up
-// to 24 hours, or less under memory pressure (oldest completed first), and an unused ID for 24 hours. `chunk:prepare`
-// gets OVERLOADED only while running calls and unused IDs fill the retention budget.
-// Issued IDs begin with `prep:`, which is reserved: actions and hooks require such an ID. Any other call under a
-// `prep:` ID first resolves it: one this core never issued or no longer holds gets OUTCOME_UNKNOWN, one that ran an
-// action or hook gets OPERATION_MISMATCH, and an unused one is INVALID.
+// a hook or command. Any credential may call it, with no operation ID, arguments, deployment or caller, and each call
+// issues one ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued
+// before it restarted or restored, gets OUTCOME_UNKNOWN, as does one whose outcome core retired. Core retains an
+// outcome for up to 24 hours, or less under memory pressure (oldest completed first), and an unused ID for 24 hours.
+// `chunk:prepare` gets OVERLOADED only while running calls and unused IDs fill the retention budget.
+// Issued IDs begin with `prep:`, which is reserved: actions, hooks and commands require such an ID. Any other call
+// under a `prep:` ID first resolves it: one this core never issued or no longer holds gets OUTCOME_UNKNOWN, one that
+// ran an action, hook or command gets OPERATION_MISMATCH, and an unused one is INVALID.
 message PrepareResult {
   // The issued operation ID.
   string operation_id = 1;

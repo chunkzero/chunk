@@ -86,10 +86,7 @@ impl App {
     /// outlives a dropped call, so a retry finds its outcome. A hook runs within its call, whose drop cancels it, and a
     /// retry then finds it cancelled.
     async fn effect(&self, hook: bool, operation: &str, call: Call) -> Result<Update, Error> {
-        let Some(id) = operation.strip_prefix(PREPARED) else {
-            return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
-        };
-        let id = prepared_id(id)?;
+        let id = prepared(operation)?;
         let outcome = if hook {
             let mut handle = self.backend.start_hook(id, call).await.map_err(|failure| errors::backend(&failure))?;
             handle.outcome().await
@@ -139,6 +136,20 @@ impl App {
     }
 }
 
+/// The action identity prepared `operation` names.
+pub(super) fn prepared(operation: &str) -> Result<ActionId, Error> {
+    let Some(id) = operation.strip_prefix(PREPARED) else {
+        return Err(errors::invalid("an effectful call requires an operation ID from chunk:prepare"));
+    };
+    prepared_id(id)
+}
+
+/// The action identity `id` spells, which must be the one spelling `chunk:prepare` issues for it.
 fn prepared_id(id: &str) -> Result<ActionId, Error> {
-    id.parse().map_err(|_| errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID"))
+    let parsed: ActionId =
+        id.parse().map_err(|_| errors::error(Code::OutcomeUnknown, "core didn't prepare this operation ID"))?;
+    if parsed.to_string() != id {
+        return Err(errors::invalid("the operation ID isn't spelled as chunk:prepare issued it"));
+    }
+    Ok(parsed)
 }
