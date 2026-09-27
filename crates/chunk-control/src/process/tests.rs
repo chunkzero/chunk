@@ -115,7 +115,8 @@ async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unc
 async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_record() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    // The JVM closes its stdin, as app code calling `System.in.close()` does.
+    // The JVM closes its stdin, as app code calling `System.in.close()` does, logs its PID, and ignores requests to
+    // stop.
     std::fs::write(&java, "#!/bin/sh\nexec 0<&-\necho $$\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
@@ -127,9 +128,10 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     crashed.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let process = crashed.launch(&id, &release, "bridge", "local").unwrap().unwrap();
+    // Registered over sync, the JVM serves no control endpoint.
     let registration = ProcessRegistration {
         identity: Some(process.identity.clone()),
-        control_endpoint: "http://127.0.0.1:1".into(),
+        control_endpoint: String::new(),
         player_endpoint: "127.0.0.1:2".into(),
     };
     crashed.register(&format!("Bearer {}", process.token), registration.clone()).unwrap();
@@ -139,6 +141,9 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     let host = host(directory.path(), java);
     assert!(host.unresolved(&id));
     assert_eq!(host.unowned().unwrap(), BTreeSet::from([id.clone()]));
+    // Until re-attached, only the launch record knows the JVM's credential.
+    assert_eq!((host.authenticate(&process.token), host.unadopted(&process.token)), (None, Some(id.clone())));
+    assert!(host.unadopted("another-credential").is_none());
     assert!(host.adopt("another-credential", registration.clone()).is_err());
     let mut changed = registration.clone();
     changed.identity.as_mut().unwrap().process_id = "another-process".into();
@@ -147,19 +152,41 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     host.adopt(&process.token, registration.clone()).unwrap();
     assert!(!host.unresolved(&id));
     assert!(host.unowned().unwrap().is_empty());
+    assert_eq!((host.authenticate(&process.token), host.unadopted(&process.token)), (Some(id.clone()), None));
     assert_eq!(host.connection(&id).unwrap().token, process.token);
     assert!(host.adopt(&process.token, registration).is_err());
     assert!(!host.stopped(&id));
-    // The JVM exits without a Child in this host; its launch marker's lock confirms the termination.
-    let log = host.path(&id, "jvm.log").unwrap();
-    let pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&log).ok().and_then(|log| log.trim().parse::<u32>().ok()) {
-            break pid;
-        }
-        sleep(Duration::from_millis(10)).await;
+    // Without evidence that its PID still names the JVM, the JVM is never killed, and the release stays unresolved.
+    // On Linux the recorded PID's process started at another time; elsewhere no PID was recorded.
+    let record = host.path(&id, "pid").unwrap();
+    #[cfg(target_os = "linux")]
+    let spawned = {
+        let spawned = std::fs::read(&record).unwrap();
+        let mut reused: serde_json::Value = serde_json::from_slice(&spawned).unwrap();
+        reused["started"] = (reused["started"].as_u64().unwrap() + 1).into();
+        std::fs::write(&record, serde_json::to_vec(&reused).unwrap()).unwrap();
+        spawned
     };
-    assert!(std::process::Command::new("kill").arg(pid.to_string()).status().unwrap().success());
-    assert!(host.release(&id).await.unwrap());
+    #[cfg(not(target_os = "linux"))]
+    assert!(!record.exists());
+    assert!(!host.release(&id).await.unwrap());
+    assert!(!host.stopped(&id));
+    #[cfg(target_os = "linux")]
+    {
+        // The JVM ignores its stop, so the host kills it after the grace; only its launch marker's lock confirms the
+        // exit.
+        std::fs::write(&record, &spawned).unwrap();
+        let releasing = Instant::now();
+        assert!(host.release(&id).await.unwrap());
+        assert!(releasing.elapsed() >= EXIT_GRACE);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Once the JVM exits, its launch marker's lock confirms it.
+        let log = std::fs::read_to_string(host.path(&id, "jvm.log").unwrap()).unwrap();
+        assert!(std::process::Command::new("kill").arg(log.trim()).status().unwrap().success());
+        assert!(host.release(&id).await.unwrap());
+    }
     assert!(host.stopped(&id));
 }
 
@@ -274,4 +301,25 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
     std::fs::create_dir_all(directory.path().join("nodes")).unwrap();
     std::fs::write(host.path(&id, "launch").unwrap(), b"").unwrap();
     assert!(host.adopt("credential", registration).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_jvm_whose_pid_cannot_be_recorded_never_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let (java, started) = (directory.path().join("java"), directory.path().join("started"));
+    std::fs::write(&java, format!("#!/bin/sh\ntouch {}\nexec sleep 60\n", started.display())).unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut artifact = crate::tests::test_app();
+    let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
+    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
+    let host = host(directory.path(), java);
+    host.configure("http://127.0.0.1:1".into()).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::create_dir_all(host.path(&id, "pid").unwrap()).unwrap();
+    assert!(matches!(host.ensure(&id, &release(artifact), "bridge", "local").await, Ok(Progress::Failed(_))));
+    assert!(host.stopped(&id));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!started.exists());
 }

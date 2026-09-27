@@ -155,7 +155,7 @@ impl Delta {
     }
 }
 
-fn position(generation: Generation) -> Option<sync::Position> {
+pub(crate) fn position(generation: Generation) -> Option<sync::Position> {
     (generation.revision != 0).then_some(sync::Position { epoch: generation.epoch, revision: generation.revision })
 }
 

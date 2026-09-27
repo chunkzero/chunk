@@ -44,6 +44,8 @@ struct FakeRuntime {
     available: AtomicBool,
     lost_reply: AtomicBool,
     lost_withdrawal: AtomicBool,
+    /// Holds each withdrawal unanswered while set.
+    stalled_withdrawal: AtomicBool,
     stopped: AtomicBool,
     withdrawals: AtomicUsize,
     ticks: AtomicUsize,
@@ -252,6 +254,9 @@ impl Gameplay for RuntimeService {
         request: Request<PlayerWithdrawal>,
     ) -> std::result::Result<Response<PlayerWithdrawal>, Status> {
         self.check(&request)?;
+        while self.stalled_withdrawal.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let withdrawal = request.into_inner();
         let mut bindings = self.bindings.lock().unwrap();
         // Like the JVM: an operation it never prepared is not found, and another generation is refused.
@@ -277,6 +282,8 @@ struct FakeHost {
     terminated: Mutex<BTreeSet<String>>,
     /// Cannot confirm that a released runtime exited.
     unconfirmed: AtomicBool,
+    /// Keeps each JVM starting, so claims wait for it.
+    starting: AtomicBool,
     /// Lost its process handles, as a host restarted with control does, until the JVM re-attaches.
     forgotten: AtomicBool,
     /// Runs once when a forgotten host is asked for its connection, after answering none.
@@ -326,7 +333,7 @@ impl Host for FakeHost {
         if self.stopped(id) {
             return Ok(Progress::Failed("JVM exited".into()));
         }
-        if self.forgotten.load(Ordering::Acquire) {
+        if self.forgotten.load(Ordering::Acquire) || self.starting.load(Ordering::Acquire) {
             return Ok(Progress::Pending);
         }
         Ok(Progress::Ready(Box::new(RuntimeConnection {
@@ -430,6 +437,7 @@ impl Fixture {
             available: AtomicBool::new(true),
             lost_reply: AtomicBool::new(false),
             lost_withdrawal: AtomicBool::new(false),
+            stalled_withdrawal: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             withdrawals: AtomicUsize::new(0),
             ticks: AtomicUsize::new(0),
@@ -456,6 +464,7 @@ impl Fixture {
             ids: Mutex::default(),
             terminated: Mutex::default(),
             unconfirmed: AtomicBool::new(false),
+            starting: AtomicBool::new(false),
             forgotten: AtomicBool::new(false),
             missed: Mutex::default(),
             adopted: Mutex::default(),

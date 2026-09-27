@@ -1,6 +1,7 @@
 //! Platform methods, named `chunk:<name>`, whose arguments and results are protobuf messages.
 
 mod claims;
+mod jvm;
 
 use super::{
     SyncService, app,
@@ -25,6 +26,9 @@ pub(super) async fn call(
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
         _ => {}
     }
+    if let Some(method) = jvm::Method::parse(method) {
+        return jvm::call(service, principal, method, request).await;
+    }
     let method = claims::Method::parse(method).ok_or_else(|| errors::invalid("unknown method"))?;
     let Class::Gateway { id } = &principal.class else {
         return Err(errors::denied("only a gateway manages claims"));
@@ -40,16 +44,6 @@ pub(super) async fn call(
     let result = claims::call(service, id, method, request).await?;
     let generation = *service.control.subscribe().borrow();
     Ok((position(generation.epoch, Revision(generation.revision)), result))
-}
-
-/// Runs `operation` on control's tracker, so a dropped call doesn't abandon it midway and control awaits it before
-/// stopping.
-async fn run<T: Send + 'static>(
-    service: &SyncService,
-    operation: impl Future<Output = chunk_control::Result<T>> + Send + 'static,
-) -> chunk_control::Result<T> {
-    let outcome = service.operations.spawn(operation).await;
-    outcome.unwrap_or(Err(chunk_control::Error::Unresolved("the control operation's task failed")))
 }
 
 /// Issues the operation ID of one effectful call.

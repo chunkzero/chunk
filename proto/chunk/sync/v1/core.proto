@@ -8,10 +8,10 @@
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
 //
-// Operations. Methods that write require an operation ID; reads ignore it, except a reserved `prep:` ID (see
-// PrepareResult). A duplicate of a running operation waits
-// for its outcome instead of running again. A retry must repeat the first request, and one whose method, arguments
-// or caller differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
+// Operations. Methods that write require an operation ID; reads, and idempotent `chunk:register` and `chunk:report`,
+// ignore it, except a reserved `prep:` ID (see PrepareResult). A duplicate of a running operation waits for its
+// outcome instead of running again. A retry must repeat the first request, and one whose method, arguments or caller
+// differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
 // - Transactional methods (mutations, `chunk:commit`) take effect only by committing. Core records a committed
 //   outcome with the commit, and a retry returns it until retention expires (24 hours by default). A failure
 //   committed nothing, so its retry runs again, as does a retry after expiry or after a restore lost the commit.
@@ -38,7 +38,8 @@
 // Topic rules. A topic that delivers work gives each item a key it never reuses and keeps the item until the client
 // acknowledges it with a Call, so coalescing never drops pending work. A topic with one attached client, such as
 // `jvm/<host>`, fences it: a newer stream supersedes older ones, which end with STOPPED, and calls reporting on the
-// topic name their stream and fail with STOPPED once it's superseded.
+// topic name their stream and fail with STOPPED once it's superseded. `chunk:register`, which a JVM calls before it
+// subscribes, is the exception and names no stream.
 //
 // Errors. Protocol errors are values: `CallResponse.error`, `Entry.error` for a query that failed while its
 // subscription continues, and `Update.error` on a stream's final update. A non-OK gRPC status means core may not

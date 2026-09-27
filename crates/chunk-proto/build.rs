@@ -3,7 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let files = ["common", "gameplay", "supervision", "control", "backend", "session_methods", "hooks", "commands"]
         .map(|name| format!("{root}/chunk/v1/{name}.proto"))
         .into_iter()
-        .chain(["core", "gateway"].map(|name| format!("{root}/chunk/sync/v1/{name}.proto")))
+        .chain(["core", "gateway", "jvm"].map(|name| format!("{root}/chunk/sync/v1/{name}.proto")))
         .collect::<Vec<_>>();
     println!("cargo:rerun-if-changed={root}");
     let mut prost = tonic_prost_build::Config::new();

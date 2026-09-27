@@ -1,16 +1,16 @@
 //! Embeddable control server with explicit host ownership.
-use crate::{Control, ControlConnection, Host, Service};
+use crate::{Control, ControlConnection, Host, Operations, Service};
 use chunk_proto::v1::local_control_server::LocalControlServer;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 
 /// Builds services served beside control's own on its listener, from control, its credential, a token cancelled when
-/// the transport begins shutting down, which must end their open streams, and the tracker of accepted operations,
-/// which control awaits before it stops hosts.
+/// the transport begins shutting down, after hosts have stopped, which must end their open streams, and control's
+/// accepted operations, which it awaits before it stops hosts.
 pub type Services =
-    Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, TaskTracker) -> tonic::service::Routes + Send>;
+    Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, Operations) -> tonic::service::Routes + Send>;
 
 pub struct Config {
     /// Holds the credential and the host's local files; durable state lives in the environment's store.
@@ -55,13 +55,17 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     .await
     .map_err(io::Error::other)??;
     let service = Service::new(control.clone(), token.clone()).map_err(io::Error::other)?;
-    let operations = service.operations();
     let executor = CancellationToken::new();
     let capacity = tokio::spawn({
         let (control, executor) = (control.clone(), executor.clone());
         async move { control.run_capacity(&executor).await }
     });
-    let result = async {
+    // Ends the transport and the services' open streams once hosts have stopped, so a JVM following its topic over sync
+    // is still sent `stop`.
+    let transport = CancellationToken::new();
+    // Cancelled once control stops reconciling, so hosts can stop.
+    let closing = CancellationToken::new();
+    let serve = Box::pin(async {
         let connection = ControlConnection { endpoint: format!("http://{address}"), token };
         if path.exists() {
             let old: ControlConnection = chunk_service::read(&path)?;
@@ -71,13 +75,13 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
         let routes = services.map_or_else(tonic::service::Routes::default, |services| {
-            services(&control, &connection.token, stop.clone(), operations.clone())
+            services(&control, &connection.token, transport.clone(), service.operations())
         });
         let _ = ready.send(Ready { connection, control: control.clone() });
         let shutdown = {
-            let (stop, service) = (stop.clone(), service.clone());
+            let (transport, service) = (transport.clone(), service.clone());
             async move {
-                stop.cancelled().await;
+                transport.cancelled().await;
                 service.close_watches();
             }
         };
@@ -97,19 +101,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             )
             .serve_with_incoming_shutdown(incoming, shutdown);
         tokio::pin!(server);
-        let reconcile = async {
-            let mut timer = tokio::time::interval(Duration::from_secs(2));
-            loop {
-                tokio::select! { () = stop.cancelled() => break Ok(()), _ = timer.tick() => {} }
-                if control.store_stopped() {
-                    tracing::error!("environment store stopped; stopping control");
-                    break Err(io::Error::other("environment store stopped"));
-                }
-                if let Err(error) = control.reconcile_all().await {
-                    tracing::warn!(%error, "control reconciliation unavailable");
-                }
-            }
-        };
+        let reconcile = reconcile(&control, &stop);
         tokio::pin!(reconcile);
         let health = monitor_health(&control, &stop);
         tokio::pin!(health);
@@ -123,19 +115,64 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             reconciled = &mut reconcile => reconciled,
         };
         stop.cancel();
+        closing.cancel();
+        tokio::select! {
+            exited = &mut server => return result.and(exited.map_err(io::Error::other)),
+            () = transport.cancelled() => {}
+        }
         result.and(connections.drain("control", server).await.map_err(io::Error::other))
-    }
-    .await;
+    });
+    let serving = async {
+        let result = serve.await;
+        closing.cancel();
+        result
+    };
+    let stopping = stop_hosts(&control, &service, capacity, &executor, &closing, &transport);
+    let (result, stopped) = tokio::join!(serving, stopping);
     // Every exit closes open watches, so none keeps this authority's scope after `run` returns.
     service.close_watches();
+    result.and(stopped).and(control.close().map_err(io::Error::other))
+}
+
+/// Once `closing` is cancelled, stops admitting operations, awaits accepted ones, stops the capacity executor and
+/// then every host, and only then cancels `transport`.
+async fn stop_hosts(
+    control: &Control,
+    service: &Service,
+    capacity: tokio::task::JoinHandle<()>,
+    executor: &CancellationToken,
+    closing: &CancellationToken,
+    transport: &CancellationToken,
+) -> io::Result<()> {
+    closing.cancelled().await;
+    service.close_watches();
     service.close_methods();
+    // Otherwise new operations, over either transport, could keep the tracker from ever emptying.
+    control.stop_admitting();
+    let operations = service.operations();
     operations.close();
     operations.wait().await;
     // Accepted operations may wait on capacity, so the executor stops after them and before hosts stop.
     executor.cancel();
     let executed = capacity.await.map_err(io::Error::other);
-    let stopped = control.shutdown().await.and(control.close()).map_err(io::Error::other);
-    result.and(executed).and(stopped)
+    let stopped = control.shutdown().await.map_err(io::Error::other);
+    transport.cancel();
+    executed.and(stopped)
+}
+
+/// Reconciles control every 2 seconds until `stop` is cancelled, or fails once the environment store has stopped.
+async fn reconcile(control: &Arc<Control>, stop: &CancellationToken) -> io::Result<()> {
+    let mut timer = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! { () = stop.cancelled() => return Ok(()), _ = timer.tick() => {} }
+        if control.store_stopped() {
+            tracing::error!("environment store stopped; stopping control");
+            return Err(io::Error::other("environment store stopped"));
+        }
+        if let Err(error) = control.reconcile_all().await {
+            tracing::warn!(%error, "control reconciliation unavailable");
+        }
+    }
 }
 
 pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationToken) {

@@ -113,7 +113,7 @@ impl ProcessHost {
                 Ok(Some(process))
             }
             Err(error) => {
-                // No child was spawned, and the launch lock excludes another attempt for this ID.
+                // No JVM started, and the launch lock excludes another attempt for this ID.
                 processes.failed.insert(id.into());
                 if let Err(persist) = self.record_exit(id, b"launch failed") {
                     tracing::error!(%persist, host = id, "cannot persist failed JVM launch");
@@ -156,6 +156,7 @@ impl ProcessHost {
         std::fs::create_dir_all(&self.config.directory)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
+        let pid_path = self.path(id, "pid")?;
         let process = Arc::new(Process {
             identity: ProcessIdentity {
                 deployment: Some(deployment.clone()),
@@ -177,10 +178,13 @@ impl ProcessHost {
         // re-attach after a restart. The JVM inherits the marker's lock, and control's handle closes once the spawn
         // returns, so only the JVM holds the lock.
         let marker = self.record_launch(id, &LaunchRecord::of(&process.identity, &process.token, endpoint))?;
+        let (gate, mut open) = io::pipe()?;
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
-            let mut command = Command::new(&distribution.java);
+            let mut command = Command::new("/bin/sh");
             command
+                .args(["-c", GATE, "sh"])
+                .arg(&distribution.java)
                 .arg(format!("-Xmx{}m", size.memory_mib))
                 .arg("-jar")
                 .arg(&jar)
@@ -196,14 +200,26 @@ impl ProcessHost {
                 .env("CHUNK_APP_ID", app)
                 .env("CHUNK_BACKEND_ENDPOINT", &backend.endpoint)
                 .env("CHUNK_BACKEND_TOKEN", &backend.token)
-                .stdin(Stdio::null())
+                .stdin(Stdio::from(gate))
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))
                 .kill_on_drop(true);
             inherit_lock(&mut command, marker)?;
             command.spawn()
         })();
-        let child = child?;
+        let mut child = child?;
+        // After control restarts, the JVM's recorded PID is the only way to kill it, so the JVM starts only once its PID
+        // is recorded. Exec keeps the gate's PID and start time.
+        let recorded = child
+            .id()
+            .ok_or(Error::Unresolved("the JVM exited before it started"))
+            .and_then(|pid| pid::record(&pid_path, pid))
+            .and_then(|()| Ok(open.write_all(b"\n")?));
+        if let Err(error) = recorded {
+            let _ = child.start_kill();
+            return Err(error);
+        }
+        drop(open);
         let owned = process.clone();
         tokio::spawn(async move {
             match own_child(child, &owned).await {
@@ -282,6 +298,17 @@ impl ProcessHost {
         }
         if let Err(error) = self.record_exit(id, b"exited while unowned") {
             tracing::error!(%error, host = id, "cannot persist confirmed JVM exit");
+        }
+        true
+    }
+    /// Whether `id`'s JVM is confirmed stopped within `wait`.
+    async fn exits(&self, id: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while !self.stopped(id) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(25)).await;
         }
         true
     }
@@ -373,6 +400,20 @@ impl Host for ProcessHost {
         }
         found
     }
+    fn unadopted(&self, credential: &str) -> Option<String> {
+        let presented = digest(credential);
+        let mut found = None;
+        // Every awaiting launch is compared, so timing reveals no match position.
+        for id in self.unowned().ok()? {
+            if self
+                .launch_record(&id)
+                .is_some_and(|record| chunk_service::same_secret(&presented, &record.token_sha256))
+            {
+                found = Some(id);
+            }
+        }
+        found
+    }
     fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
         validate_endpoints(&registration)?;
         let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
@@ -425,18 +466,19 @@ impl Host for ProcessHost {
             }
         };
         process.stop.cancel();
-        // A re-attached JVM has no Child to stop it, so only its launch marker can confirm it exited.
+        // A re-attached JVM has no Child, so it is killed by its recorded PID after the same grace an owned one gets,
+        // and only its launch marker can confirm it exited.
         if process.adopted {
             stop_gracefully(&process).await;
-        }
-        let deadline = Instant::now() + Duration::from_secs(12);
-        while !self.stopped(id) {
-            if Instant::now() >= deadline {
+            if !self.exits(id, EXIT_GRACE).await
+                && let Err(error) = pid::kill(&self.path(id, "pid")?)
+                && !self.stopped(id)
+            {
+                tracing::warn!(%error, host = id, "cannot kill an adopted JVM; its release stays unresolved");
                 return Ok(false);
             }
-            sleep(Duration::from_millis(25)).await;
         }
-        Ok(true)
+        Ok(self.exits(id, Duration::from_secs(12)).await)
     }
     fn unresolved(&self, id: &str) -> bool {
         // A marker that cannot be looked up may exist.
@@ -480,7 +522,7 @@ impl Host for ProcessHost {
         stopped.extend(self.recorded("exit")?);
         let mut result = Ok(());
         'hosts: for id in stopped.difference(retained) {
-            for extension in ["launch", "launch.staged", "jvm.log", "exit"] {
+            for extension in ["launch", "launch.staged", "jvm.log", "pid", "exit"] {
                 match std::fs::remove_file(self.path(id, extension)?) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -502,7 +544,7 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         () = process.stop.cancelled() => {}
     }
     stop_gracefully(process).await;
-    if let Ok(result) = tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+    if let Ok(result) = tokio::time::timeout(EXIT_GRACE, child.wait()).await {
         result?;
     } else {
         child.kill().await?;
@@ -553,24 +595,37 @@ fn inherit_lock(_command: &mut Command, _lock: File) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "JVM launches require Unix"))
 }
 
+/// Runs its arguments once control writes a line to its stdin, and nothing if control closes stdin first, as when it
+/// crashes. The JVM then reads stdin at its end.
+const GATE: &str = r#"read -r _ && exec "$@""#;
+
 fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// How long a JVM asked to stop may take to acknowledge it before control stops it without its help.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// How long a JVM asked to stop may take to exit before control kills it.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Asks the JVM to stop over its control endpoint. One registered over sync has none; its topic's `stop` entry asks it.
 async fn stop_gracefully(process: &Process) {
-    if let Some(connection) = process.connection() {
+    if let Some(connection) = process.connection().filter(|connection| !connection.endpoint.is_empty()) {
         let graceful = async {
             NodeControlClient::new(channel(&connection).await?)
                 .stop_process(auth(&connection, connection.identity.clone(), 2)?)
                 .await?;
             Ok::<_, Error>(())
         };
-        let _ = tokio::time::timeout(Duration::from_secs(3), graceful).await;
+        let _ = tokio::time::timeout(STOP_GRACE, graceful).await;
     }
 }
 
+/// Requires loopback endpoints. A JVM registered over the sync protocol serves no control endpoint.
 fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
-    for endpoint in [&registration.control_endpoint, &registration.player_endpoint] {
+    let control = Some(&registration.control_endpoint).filter(|endpoint| !endpoint.is_empty());
+    for endpoint in control.into_iter().chain([&registration.player_endpoint]) {
         let address: std::net::SocketAddr = endpoint
             .strip_prefix("http://")
             .unwrap_or(endpoint)
@@ -580,13 +635,14 @@ fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
             return Err(Error::Invalid("process requires loopback"));
         }
     }
-    if !registration.control_endpoint.starts_with("http://") {
+    if control.is_some_and(|endpoint| !endpoint.starts_with("http://")) {
         return Err(Error::Invalid("control endpoint scheme"));
     }
     Ok(())
 }
 
 mod classpath;
+mod pid;
 
 #[cfg(all(test, unix))]
 mod tests;

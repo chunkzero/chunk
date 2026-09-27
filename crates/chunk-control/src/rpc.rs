@@ -17,7 +17,7 @@ mod watch;
 pub struct Service {
     control: Arc<Control>,
     token: String,
-    operations: tokio_util::task::TaskTracker,
+    operations: crate::Operations,
     methods: Arc<methods::Methods>,
     watches: CancellationToken,
 }
@@ -32,7 +32,7 @@ impl Service {
         Ok(Self {
             control,
             token,
-            operations: tokio_util::task::TaskTracker::new(),
+            operations: crate::Operations::default(),
             methods: Arc::default(),
             watches: CancellationToken::new(),
         })
@@ -47,7 +47,7 @@ impl Service {
         self.watches.cancel();
     }
 
-    pub(crate) fn operations(&self) -> tokio_util::task::TaskTracker {
+    pub(crate) fn operations(&self) -> crate::Operations {
         self.operations.clone()
     }
 
@@ -92,7 +92,7 @@ impl LocalControl for Service {
     ) -> Result<Response<chunk_proto::v1::SessionMethodResult>, Status> {
         self.authorize(&request)?;
         self.methods
-            .start(&self.control, &self.operations, &request.get_ref().operation_id)
+            .start(&self.control, &self.operations.tracker, &request.get_ref().operation_id)
             .map(Response::new)
             .map_err(status)
     }
@@ -171,9 +171,8 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         let control = self.control.clone();
         self.operations
-            .spawn(async move { control.abandon_move(request.into_inner()).await })
+            .admit(async move { control.abandon_move(request.into_inner()).await })
             .await
-            .map_err(|_| Status::internal("move abandonment task failed"))?
             .map(Response::new)
             .map_err(status)
     }
@@ -183,9 +182,8 @@ impl LocalControl for Service {
         let control = self.control.clone();
         // A canceled RPC does not abandon an already durably reserved operation.
         self.operations
-            .spawn(async move { control.claim(request.into_inner()).await })
+            .admit(async move { control.claim(request.into_inner()).await })
             .await
-            .map_err(|_| Status::internal("claim task failed"))?
             .map(Response::new)
             .map_err(status)
     }
@@ -194,9 +192,8 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         let control = self.control.clone();
         self.operations
-            .spawn(async move { control.activate(request.into_inner()).await })
+            .admit(async move { control.activate(request.into_inner()).await })
             .await
-            .map_err(|_| Status::internal("activation task failed"))?
             .map(Response::new)
             .map_err(status)
     }
@@ -208,9 +205,8 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         let control = self.control.clone();
         self.operations
-            .spawn(async move { control.reconcile_departure(request.into_inner()).await })
+            .admit(async move { control.reconcile_departure(request.into_inner()).await })
             .await
-            .map_err(|_| Status::internal("departure task failed"))?
             .map(Response::new)
             .map_err(status)
     }
@@ -219,9 +215,8 @@ impl LocalControl for Service {
         self.authorize(&request)?;
         let control = self.control.clone();
         self.operations
-            .spawn(async move { control.cancel(request.into_inner()).await })
+            .admit(async move { control.cancel(request.into_inner()).await })
             .await
-            .map_err(|_| Status::internal("cancellation task failed"))?
             .map(Response::new)
             .map_err(status)
     }

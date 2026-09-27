@@ -79,6 +79,11 @@ pub trait Host: Send + Sync {
     fn authenticate(&self, _credential: &str) -> Option<String> {
         None
     }
+    /// The host whose launch from before control restarted, awaiting re-attachment, was given `credential`, compared
+    /// in constant time.
+    fn unadopted(&self, _credential: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct ProcessHostConfig {

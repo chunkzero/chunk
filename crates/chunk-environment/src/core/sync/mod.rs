@@ -20,7 +20,7 @@ use chunk_store::Revision;
 use prost::Message;
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 /// Every message's size limit.
@@ -66,8 +66,7 @@ pub(crate) struct SyncService {
     epoch: u64,
     /// Ends open streams when control's transport shuts down.
     stop: CancellationToken,
-    /// Runs control operations a dropped call must not abandon, which control awaits before it stops.
-    operations: TaskTracker,
+    operations: chunk_control::Operations,
 }
 
 impl SyncService {
@@ -95,6 +94,9 @@ impl SyncService {
         }
         if request.arguments.len() > ARGUMENT_BYTES {
             return Err(errors::invalid("arguments exceed 1 MiB"));
+        }
+        if matches!(principal.class, auth::Class::Unadopted { .. }) && request.method != "chunk:register" {
+            return Err(errors::denied("the JVM must register again first"));
         }
         if let Some(method) = request.method.strip_prefix("chunk:") {
             return platform::call(self, principal, method, &request).await;

@@ -30,6 +30,9 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 [target.'cfg(unix)'.dependencies]
 command-fds = { version = "0.3", features = ["tokio"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["process", "std"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
