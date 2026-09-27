@@ -156,6 +156,7 @@ impl ProcessHost {
         std::fs::create_dir_all(&self.config.directory)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
+        let pid_path = self.path(id, "pid")?;
         let process = Arc::new(Process {
             identity: ProcessIdentity {
                 deployment: Some(deployment.clone()),
@@ -204,6 +205,12 @@ impl ProcessHost {
             command.spawn()
         })();
         let child = child?;
+        // After control restarts, the JVM's recorded PID is the only way to kill it.
+        if let Some(pid) = child.id()
+            && let Err(error) = pid::record(&pid_path, pid)
+        {
+            tracing::error!(%error, host = id, "cannot record the JVM's PID");
+        }
         let owned = process.clone();
         tokio::spawn(async move {
             match own_child(child, &owned).await {
@@ -282,6 +289,17 @@ impl ProcessHost {
         }
         if let Err(error) = self.record_exit(id, b"exited while unowned") {
             tracing::error!(%error, host = id, "cannot persist confirmed JVM exit");
+        }
+        true
+    }
+    /// Whether `id`'s JVM is confirmed stopped within `wait`.
+    async fn exits(&self, id: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while !self.stopped(id) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(25)).await;
         }
         true
     }
@@ -439,23 +457,19 @@ impl Host for ProcessHost {
             }
         };
         process.stop.cancel();
-        // A re-attached JVM has no Child to stop it, so only its launch marker can confirm it exited.
+        // A re-attached JVM has no Child, so it is killed by its recorded PID after the same grace an owned one gets,
+        // and only its launch marker can confirm it exited.
         if process.adopted {
             stop_gracefully(&process).await;
-        }
-        let deadline = Instant::now() + Duration::from_secs(12);
-        while !self.stopped(id) {
-            if Instant::now() >= deadline {
-                // An adopted JVM attached over sync has neither a stop endpoint nor a child to kill.
-                if process.adopted && process.connection().is_some_and(|connection| connection.endpoint.is_empty()) {
-                    tracing::warn!(host = id, "an adopted JVM did not confirm its exit; treating its host as released");
-                    return Ok(true);
-                }
+            if !self.exits(id, EXIT_GRACE).await
+                && let Err(error) = pid::kill(&self.path(id, "pid")?).await
+                && !self.stopped(id)
+            {
+                tracing::warn!(%error, host = id, "cannot kill an adopted JVM; its release stays unresolved");
                 return Ok(false);
             }
-            sleep(Duration::from_millis(25)).await;
         }
-        Ok(true)
+        Ok(self.exits(id, Duration::from_secs(12)).await)
     }
     fn unresolved(&self, id: &str) -> bool {
         // A marker that cannot be looked up may exist.
@@ -499,7 +513,7 @@ impl Host for ProcessHost {
         stopped.extend(self.recorded("exit")?);
         let mut result = Ok(());
         'hosts: for id in stopped.difference(retained) {
-            for extension in ["launch", "launch.staged", "jvm.log", "exit"] {
+            for extension in ["launch", "launch.staged", "jvm.log", "pid", "exit"] {
                 match std::fs::remove_file(self.path(id, extension)?) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -521,7 +535,7 @@ async fn own_child(mut child: Child, process: &Process) -> io::Result<()> {
         () = process.stop.cancelled() => {}
     }
     stop_gracefully(process).await;
-    if let Ok(result) = tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+    if let Ok(result) = tokio::time::timeout(EXIT_GRACE, child.wait()).await {
         result?;
     } else {
         child.kill().await?;
@@ -579,6 +593,9 @@ fn digest(token: &str) -> String {
 /// How long a JVM asked to stop may take to acknowledge it before control stops it without its help.
 pub(crate) const STOP_GRACE: Duration = Duration::from_secs(3);
 
+/// How long a JVM asked to stop may take to exit before control kills it.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+
 /// Asks the JVM to stop over its control endpoint. One registered over sync has none; its topic's `stop` entry asks it.
 async fn stop_gracefully(process: &Process) {
     if let Some(connection) = process.connection().filter(|connection| !connection.endpoint.is_empty()) {
@@ -612,6 +629,7 @@ fn validate_endpoints(registration: &ProcessRegistration) -> Result<()> {
 }
 
 mod classpath;
+mod pid;
 
 #[cfg(all(test, unix))]
 mod tests;

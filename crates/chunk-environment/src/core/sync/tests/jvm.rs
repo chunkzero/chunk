@@ -298,20 +298,34 @@ async fn a_superseded_streams_reports_change_nothing_and_pushed_health_expires()
     assert!(stopped(&next(&mut older).await));
     let ready = complete(&id, JvmSessionPhase::Ready, Some(health(200, false)));
     assert_eq!(fixture.report(&current.stream, &ready).await.outcome, ACCEPTED);
+    let sampled = tokio::time::Instant::now();
     // The superseded stream's report neither ends the session, nor drains the host, nor detaches the current link.
     let stale = complete(&id, JvmSessionPhase::Ended, Some(health(300, true)));
     assert_eq!(code(&fixture.report(&superseded.stream, &stale).await), Code::Stopped);
-    let reported = tokio::time::Instant::now();
     assert_eq!(fixture.report(&current.stream, &JvmReport::default()).await.outcome, ACCEPTED);
+    let mut latest = fixture.follow_jvm(JVM, &host).await;
+    let replacement = next(&mut latest).await;
+    let attach = complete(&id, JvmSessionPhase::Ready, None);
+    assert_eq!(fixture.report(&replacement.stream, &attach).await.outcome, ACCEPTED);
 
     tokio::time::pause();
     let sample = |node: &NodeStatus| node.health.as_ref().is_some_and(|health| health.tick_count == 200);
     fixture.node(&host, |node| node.phase() == NodePhase::Online && sample(node)).await;
-    // Without a report for 10 seconds, the JVM counts as unhealthy.
-    fixture.node(&host, |node| node.phase() == NodePhase::Unhealthy).await;
-    assert!(reported.elapsed() >= Duration::from_secs(10));
+    // Reports without health don't renew the sample: without one for 10 seconds, the JVM counts as unhealthy.
+    let unhealthy = fixture.node(&host, |node| node.phase() == NodePhase::Unhealthy);
+    let reporting = async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(fixture.report(&replacement.stream, &JvmReport::default()).await.outcome, ACCEPTED);
+        }
+    };
+    tokio::select! {
+        () = unhealthy => {}
+        () = reporting => {}
+    }
+    assert!(sampled.elapsed() >= Duration::from_secs(10));
     tokio::time::resume();
-    drop((older, newer));
+    drop((older, newer, latest));
     fixture.stop().await;
 }
 

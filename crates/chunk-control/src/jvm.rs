@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Control, Error, Generation, Result, state::Capacity, sync::Links};
 
-/// How long a JVM's last report stands for its health.
+/// How long a JVM's last health sample stands for its health.
 const HEALTH: Duration = Duration::from_secs(10);
 
 /// JVMs registered over the sync protocol, by host. Kept in memory: a JVM registers again after control restarts.
@@ -36,9 +36,8 @@ struct Jvm {
     registration: sync::JvmRegistration,
     /// The host's current topic stream, the only one whose reports count.
     stream: Option<Stream>,
-    health: Option<ProcessHealth>,
-    /// When the JVM last registered or reported.
-    reported: Instant,
+    /// The health the JVM last reported, and when.
+    health: Option<(Instant, ProcessHealth)>,
     /// Whether control asked the JVM to stop.
     stopping: watch::Sender<bool>,
 }
@@ -70,10 +69,11 @@ impl Jvms {
         self.0.lock().is_ok_and(|jvms| jvms.contains_key(host))
     }
 
-    /// The health `host`'s JVM last pushed, unless it has not reported for 10 seconds.
+    /// The health `host`'s JVM last pushed, unless it has pushed none for 10 seconds.
     pub fn health(&self, host: &str) -> Option<ProcessHealth> {
         let jvms = self.0.lock().ok()?;
-        jvms.get(host).filter(|jvm| jvm.reported.elapsed() <= HEALTH)?.health.clone()
+        let (sampled, health) = jvms.get(host)?.health.as_ref()?;
+        (sampled.elapsed() <= HEALTH).then(|| health.clone())
     }
 
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -117,7 +117,7 @@ impl Control {
             btree_map::Entry::Occupied(_) => Ok(()),
             btree_map::Entry::Vacant(entry) => {
                 let stopping = watch::Sender::new(false);
-                entry.insert(Jvm { registration, stream: None, health: None, reported: Instant::now(), stopping });
+                entry.insert(Jvm { registration, stream: None, health: None, stopping });
                 Ok(())
             }
         }
@@ -150,9 +150,8 @@ impl Control {
                 }
                 None => return Err(Error::Invalid("a stream's first report must be complete")),
             };
-            jvm.reported = Instant::now();
-            if health.is_some() {
-                jvm.health = health;
+            if let Some(health) = health {
+                jvm.health = Some((Instant::now(), health));
             }
             Ok(attached)
         });
