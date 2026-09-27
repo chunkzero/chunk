@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -31,11 +32,13 @@ public final class BackendSession implements AutoCloseable {
     final SessionIdentity identity;
     final ScheduledExecutorService scheduler;
     final Set<GroupSubscription> watches = ConcurrentHashMap.newKeySet();
+    final Dispatcher dispatcher = new Dispatcher();
     final AtomicBoolean closed = new AtomicBoolean();
+    // Counted down once the closer has closed everything the session owns.
+    private final CountDownLatch swept = new CountDownLatch(1);
     private final Set<CompletableFuture<?>> calls = ConcurrentHashMap.newKeySet();
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
     private final Duration deadline;
-    private final Runnable onClose;
 
     /** A session on the {@code chunk.v1.Backend} service, which sends its own caller identity. */
     public BackendSession(
@@ -50,16 +53,14 @@ public final class BackendSession implements AutoCloseable {
                 new LegacyTransport(channel, credential, environment, deployment),
                 identity,
                 scheduler,
-                deadline,
-                () -> {});
+                deadline);
     }
 
     private BackendSession(
             Transport transport,
             SessionIdentity identity,
             ScheduledExecutorService scheduler,
-            Duration deadline,
-            Runnable onClose) {
+            Duration deadline) {
         if (deadline.isNegative()
                 || deadline.isZero()
                 || deadline.compareTo(Duration.ofMinutes(5)) > 0)
@@ -68,7 +69,6 @@ public final class BackendSession implements AutoCloseable {
         this.identity = Objects.requireNonNull(identity);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.deadline = deadline;
-        this.onClose = onClose;
     }
 
     /**
@@ -84,11 +84,7 @@ public final class BackendSession implements AutoCloseable {
             ScheduledExecutorService scheduler,
             Duration deadline) {
         return new BackendSession(
-                new CoreTransport(channel, credential, deployment),
-                identity,
-                scheduler,
-                deadline,
-                () -> {});
+                new CoreTransport(channel, credential, deployment), identity, scheduler, deadline);
     }
 
     public BackendSession forPlayer(PlayerId player) {
@@ -98,8 +94,8 @@ public final class BackendSession implements AutoCloseable {
                         new SessionIdentity(
                                 identity.session(), identity.app(), Optional.of(player)),
                         scheduler,
-                        deadline,
-                        () -> children.removeIf(scope -> scope.closed.get()));
+                        deadline);
+        children.removeIf(BackendSession::finished);
         children.add(child);
         if (closed.get()) child.close();
         return child;
@@ -212,12 +208,35 @@ public final class BackendSession implements AutoCloseable {
         };
     }
 
+    /**
+     * Closes the session's calls, watches and player children, and returns once none of their
+     * callbacks runs, including when another thread started closing it. A callback closing its own
+     * session doesn't wait for itself. Waiting continues through interrupts, which it restores.
+     */
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) return;
-        children.forEach(BackendSession::close);
-        calls.forEach(call -> call.cancel(false));
-        watches.forEach(GroupSubscription::close);
-        onClose.run();
+        if (closed.compareAndSet(false, true)) {
+            children.forEach(BackendSession::close);
+            calls.forEach(call -> call.cancel(false));
+            watches.forEach(GroupSubscription::close);
+            dispatcher.stop();
+            swept.countDown();
+        }
+        if (dispatcher.isCurrent()) return;
+        boolean interrupted = false;
+        while (true) {
+            try {
+                swept.await();
+                break;
+            } catch (InterruptedException error) {
+                interrupted = true;
+            }
+        }
+        dispatcher.join();
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private boolean finished() {
+        return swept.getCount() == 0 && dispatcher.finished();
     }
 }

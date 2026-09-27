@@ -34,6 +34,7 @@ import tools.jackson.core.type.TypeReference;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -44,6 +45,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
@@ -342,7 +344,7 @@ class BackendSessionTest {
                         .build();
         var release = new CountDownLatch(1);
         var blocked = new CountDownLatch(1);
-        var interrupted = new CountDownLatch(1);
+        var cleaned = new CountDownLatch(1);
         var slowStates = new LinkedBlockingQueue<GroupState>();
         try (var shared =
                 BackendSession.overCore(
@@ -362,7 +364,8 @@ class BackendSessionTest {
                                 try {
                                     (last ? blocked : release).await();
                                 } catch (InterruptedException error) {
-                                    interrupted.countDown();
+                                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                                    cleaned.countDown();
                                 }
                             });
             assertNotNull(slow);
@@ -385,8 +388,10 @@ class BackendSessionTest {
                                                                         .setMessage(large)))
                                         .build());
 
+            // A session's callbacks share one thread, so the fast watch runs in another session.
+            var other = shared.forPlayer(new PlayerId("fast"));
             var fastStates = new LinkedBlockingQueue<GroupState>();
-            try (var fast = shared.watchGroup(List.of(shared.bind(READ, 2L)), fastStates::add)) {
+            try (var fast = other.watchGroup(List.of(other.bind(READ, 2L)), fastStates::add)) {
                 assertNotNull(fast);
                 assertTrue(fastStates.poll(2, TimeUnit.SECONDS).stale());
                 var fastWatch = fixture.watches.poll(2, TimeUnit.SECONDS);
@@ -405,11 +410,15 @@ class BackendSessionTest {
             }
             assertEquals(4, revision);
 
-            // Closing interrupts an observer blocked in its callback and waits for it to return.
+            // Closing interrupts an observer blocked in its callback and waits for its cleanup,
+            // even
+            // when the closer is interrupted, whose interrupt it then restores.
             slowWatch.response().onNext(snapshot(5, value("0", "5")));
             assertEquals(5L, value(slowStates.poll(2, TimeUnit.SECONDS), 5));
+            Thread.currentThread().interrupt();
             slow.close();
-            assertEquals(0, interrupted.getCount());
+            assertTrue(Thread.interrupted());
+            assertEquals(0, cleaned.getCount());
         } finally {
             direct.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
         }
@@ -457,8 +466,62 @@ class BackendSessionTest {
             closed.set(true);
             starter.join();
         }
+
+        // A watch closed while its session closes: both wait for the callback's cleanup.
+        var scope = session.forPlayer(new PlayerId("cleanup"));
+        var entered = new CountDownLatch(1);
+        var cleaned = new AtomicBoolean();
+        var watch =
+                scope.watchGroup(
+                        List.of(scope.bind(READ, 1L)),
+                        state -> {
+                            if (state.stale()) return;
+                            entered.countDown();
+                            try {
+                                new CountDownLatch(1).await();
+                            } catch (InterruptedException error) {
+                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                                cleaned.set(true);
+                            }
+                        });
+        watchFor("cleanup").response().onNext(snapshot(1, value("0", "1")));
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        var watchClosed = new CompletableFuture<Boolean>();
+        Thread.startVirtualThread(
+                () -> {
+                    close(watch);
+                    watchClosed.complete(cleaned.get());
+                });
+        Thread.sleep(20);
+        scope.close();
+        assertTrue(cleaned.get());
+        assertTrue(watchClosed.get(2, TimeUnit.SECONDS));
+
+        // A callback closing its own watch doesn't wait for itself.
+        var own = new AtomicReference<AutoCloseable>();
+        var fresh = new AtomicInteger();
+        own.set(
+                session.watchGroup(
+                        List.of(session.bind(READ, 2L)),
+                        state -> {
+                            if (state.stale()) return;
+                            fresh.incrementAndGet();
+                            close(own.get());
+                        }));
+        var ownWatch = watchFor("trusted");
+        ownWatch.response().onNext(snapshot(1, value("0", "1")));
+        assertTrue(ownWatch.cancelled().await(2, TimeUnit.SECONDS));
         Thread.sleep(50);
         assertEquals(0, late.get());
+        assertEquals(1, fresh.get());
+    }
+
+    private static void close(AutoCloseable closeable) {
+        try {
+            closeable.close();
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private Watch watchFor(String player) throws InterruptedException {
