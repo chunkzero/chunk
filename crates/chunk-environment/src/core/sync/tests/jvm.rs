@@ -4,7 +4,7 @@ use super::*;
 use chunk_control::{Progress, RuntimeConnection};
 use chunk_proto::{
     sync::v1::{JvmHealth, JvmRegistered, JvmRegistration, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus},
-    v1::{NodePhase, ProcessIdentity, ProcessRegistration},
+    v1::{NodePhase, NodeStatus, ProcessIdentity, ProcessRegistration},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -129,23 +129,17 @@ fn session(id: &str, phase: JvmSessionPhase) -> JvmSessionStatus {
 }
 
 impl Fixture {
-    async fn jvm_call(
-        &mut self,
-        credential: &str,
-        method: &str,
-        stream: &str,
-        arguments: &impl Message,
-    ) -> CallResponse {
+    async fn jvm_call(&self, credential: &str, method: &str, stream: &str, arguments: &impl Message) -> CallResponse {
         let message = CallRequest {
             method: method.into(),
             arguments: arguments.encode_to_vec(),
             stream: stream.into(),
             ..CallRequest::default()
         };
-        self.client.call(authorized(message, credential)).await.unwrap().into_inner()
+        self.client.clone().call(authorized(message, credential)).await.unwrap().into_inner()
     }
 
-    async fn register(&mut self) -> JvmRegistered {
+    async fn register(&self) -> JvmRegistered {
         let response = self.jvm_call(JVM, "chunk:register", "", &registration()).await;
         match response.outcome {
             Some(Outcome::Result(result)) => JvmRegistered::decode(result.as_slice()).unwrap(),
@@ -153,11 +147,31 @@ impl Fixture {
         }
     }
 
-    async fn follow_jvm(&mut self, credential: &str, host: &str) -> Streaming<Update> {
+    async fn report(&self, stream: &str, report: &JvmReport) -> CallResponse {
+        self.jvm_call(JVM, "chunk:report", stream, report).await
+    }
+
+    async fn follow_jvm(&self, credential: &str, host: &str) -> Streaming<Update> {
         let subscription = SubscribeRequest { topic: format!("jvm/{host}"), ..SubscribeRequest::default() };
-        self.client.subscribe(authorized(subscription, credential)).await.unwrap().into_inner()
+        self.client.clone().subscribe(authorized(subscription, credential)).await.unwrap().into_inner()
+    }
+
+    /// Waits for control's health pass to leave `host`'s node `matching`.
+    async fn node(&self, host: &str, matching: impl Fn(&NodeStatus) -> bool) {
+        let found = async {
+            loop {
+                let nodes = self.control.nodes().unwrap().nodes;
+                if nodes.iter().any(|node| node.host_id == host && matching(node)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), found).await.expect("the node's phase");
     }
 }
+
+const ACCEPTED: Option<Outcome> = Some(Outcome::Result(Vec::new()));
 
 /// The sessions a snapshot asks for, by ID.
 fn sessions(update: &Update) -> BTreeMap<String, JvmSession> {
@@ -169,6 +183,18 @@ fn sessions(update: &Update) -> BTreeMap<String, JvmSession> {
         _ => None,
     });
     sessions.collect()
+}
+
+fn stopped(update: &Update) -> bool {
+    update.error.as_ref().is_some_and(|error| error.code() == Code::Stopped)
+}
+
+fn complete(id: &str, phase: JvmSessionPhase, health: Option<JvmHealth>) -> JvmReport {
+    JvmReport { complete: true, sessions: vec![session(id, phase)], health }
+}
+
+fn health(tick_count: u64, draining: bool) -> JvmHealth {
+    JvmHealth { ready: true, draining, tick_count, ..JvmHealth::default() }
 }
 
 /// Reserves a session for the fake player on the fake JVM's host, returning the host once it launched. The claim
@@ -188,71 +214,145 @@ async fn place(fixture: &Fixture, jvm: &Launches) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_jvm_registers_follows_its_sessions_and_reports_them() {
     let jvm = Launches::default();
-    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
     let host = place(&fixture, &jvm).await;
     assert_eq!(fixture.register().await.host, host);
+    let changed = JvmRegistration { protocol: 777, ..registration() };
+    assert_eq!(code(&fixture.jvm_call(JVM, "chunk:register", "", &changed).await), Code::Invalid);
+    let unknown = JvmRegistration { deployment: "missing".into(), ..registration() };
+    assert_eq!(code(&fixture.jvm_call(JVM, "chunk:register", "", &unknown).await), Code::Contract);
 
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     let first = next(&mut updates).await;
-    let (id, wanted) = sessions(&first).pop_first().expect("a session");
-    assert_eq!((wanted.session_type.as_str(), wanted.capacity, wanted.finish), ("bridge/default", 8, false));
+    let mut wanted = sessions(&first);
+    let (id, asked) = wanted.first_key_value().map(|(id, asked)| (id.clone(), asked.clone())).expect("a session");
+    assert_eq!((asked.session_type.as_str(), asked.capacity, asked.finish), ("bridge/default", 8, false));
 
-    let health = JvmHealth { ready: true, tick_count: 100, ..JvmHealth::default() };
-    let report =
-        JvmReport { complete: true, sessions: vec![session(&id, JvmSessionPhase::Ready)], health: Some(health) };
-    let reported = fixture.jvm_call(JVM, "chunk:report", &first.stream, &report).await;
-    assert_eq!(reported.outcome, Some(Outcome::Result(Vec::new())));
-    // Control's next health pass reads the pushed sample.
-    let online = async {
-        loop {
-            let nodes = fixture.control.nodes().unwrap().nodes;
-            if let Some(node) = nodes.iter().find(|node| node.host_id == host && node.phase() == NodePhase::Online) {
-                return node.health.clone().unwrap();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    assert_eq!(tokio::time::timeout(Duration::from_secs(15), online).await.unwrap().tick_count, 100);
-
+    let ready = complete(&id, JvmSessionPhase::Ready, Some(health(100, false)));
+    assert_eq!(fixture.report(&first.stream, &ready).await.outcome, ACCEPTED);
     let ended = JvmReport { sessions: vec![session(&id, JvmSessionPhase::Ended)], ..JvmReport::default() };
-    fixture.jvm_call(JVM, "chunk:report", &first.stream, &ended).await;
-    while !sessions(&next(&mut updates).await).get(&id).is_some_and(|wanted| wanted.finish) {}
+    assert_eq!(fixture.report(&first.stream, &ended).await.outcome, ACCEPTED);
+    // Commits that leave the JVM's entries as they were send it nothing.
+    loop {
+        let update = sessions(&next(&mut updates).await);
+        assert_ne!(update, wanted);
+        if update.get(&id).is_some_and(|wanted| wanted.finish) {
+            break;
+        }
+        wanted = update;
+    }
     drop(updates);
     fixture.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_superseded_jvm_stream_and_its_reports_are_stopped() {
-    let mut fixture = Fixture::with_host(Arc::new(Launches::of("host-1", false))).await;
+async fn concurrent_jvm_streams_resolve_to_one_current_stream() {
+    let fixture = Fixture::with_host(Arc::new(Launches::of("host-1", false))).await;
     fixture.register().await;
-    let mut older = fixture.follow_jvm(JVM, "host-1").await;
-    let superseded = next(&mut older).await;
-    let mut newer = fixture.follow_jvm(JVM, "host-1").await;
-    let current = next(&mut newer).await;
+    let attach = JvmReport { complete: true, ..JvmReport::default() };
+    let (mut one, mut two) = tokio::join!(fixture.follow_jvm(JVM, "host-1"), fixture.follow_jvm(JVM, "host-1"));
+    // Both streams have opened once each has sent something; a superseded one may send only its end.
+    let firsts = [next(&mut one).await, next(&mut two).await];
+    let mut current = Vec::new();
+    for (updates, mut last) in [&mut one, &mut two].into_iter().zip(firsts) {
+        if last.error.is_none() {
+            let reported = fixture.report(&last.stream, &attach).await;
+            if reported.outcome == ACCEPTED {
+                current.push(updates);
+                continue;
+            }
+            assert_eq!(code(&reported), Code::Stopped);
+            last = next(updates).await;
+        }
+        assert!(stopped(&last));
+    }
+    assert_eq!(current.len(), 1);
 
-    assert_eq!(next(&mut older).await.error.map(|error| error.code()), Some(Code::Stopped));
-    let report = JvmReport { complete: true, ..JvmReport::default() };
-    let stale = fixture.jvm_call(JVM, "chunk:report", &superseded.stream, &report).await;
-    assert_eq!(code(&stale), Code::Stopped);
-    let partial = fixture.jvm_call(JVM, "chunk:report", &current.stream, &JvmReport::default()).await;
-    assert_eq!(code(&partial), Code::Invalid);
-    let attached = fixture.jvm_call(JVM, "chunk:report", &current.stream, &report).await;
-    assert_eq!(attached.outcome, Some(Outcome::Result(Vec::new())));
+    let mut newer = fixture.follow_jvm(JVM, "host-1").await;
+    let stream = next(&mut newer).await.stream;
+    assert!(stopped(&next(current.pop().unwrap()).await));
+    assert_eq!(code(&fixture.report(&stream, &JvmReport::default()).await), Code::Invalid);
+    // Racing complete reports attach the stream once, so later reports still find its link.
+    let (a, b) = tokio::join!(fixture.report(&stream, &attach), fixture.report(&stream, &attach));
+    assert_eq!((a.outcome, b.outcome), (ACCEPTED, ACCEPTED));
+    assert_eq!(fixture.report(&stream, &JvmReport::default()).await.outcome, ACCEPTED);
+    drop((one, two, newer));
+    fixture.stop().await;
+}
+
+/// Runs on one thread so the health pass's clock can be paused.
+#[tokio::test]
+async fn a_superseded_streams_reports_change_nothing_and_pushed_health_expires() {
+    let jvm = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let host = place(&fixture, &jvm).await;
+    fixture.register().await;
+    let mut older = fixture.follow_jvm(JVM, &host).await;
+    let superseded = next(&mut older).await;
+    let (id, _) = sessions(&superseded).pop_first().expect("a session");
+    let ready = complete(&id, JvmSessionPhase::Ready, Some(health(100, false)));
+    assert_eq!(fixture.report(&superseded.stream, &ready).await.outcome, ACCEPTED);
+
+    let mut newer = fixture.follow_jvm(JVM, &host).await;
+    let current = next(&mut newer).await;
+    assert!(stopped(&next(&mut older).await));
+    let ready = complete(&id, JvmSessionPhase::Ready, Some(health(200, false)));
+    assert_eq!(fixture.report(&current.stream, &ready).await.outcome, ACCEPTED);
+    // The superseded stream's report neither ends the session, nor drains the host, nor detaches the current link.
+    let stale = complete(&id, JvmSessionPhase::Ended, Some(health(300, true)));
+    assert_eq!(code(&fixture.report(&superseded.stream, &stale).await), Code::Stopped);
+    let reported = tokio::time::Instant::now();
+    assert_eq!(fixture.report(&current.stream, &JvmReport::default()).await.outcome, ACCEPTED);
+
+    tokio::time::pause();
+    let sample = |node: &NodeStatus| node.health.as_ref().is_some_and(|health| health.tick_count == 200);
+    fixture.node(&host, |node| node.phase() == NodePhase::Online && sample(node)).await;
+    // Without a report for 10 seconds, the JVM counts as unhealthy.
+    fixture.node(&host, |node| node.phase() == NodePhase::Unhealthy).await;
+    assert!(reported.elapsed() >= Duration::from_secs(10));
+    tokio::time::resume();
     drop((older, newer));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_asks_a_sync_jvm_to_stop_before_revoking_it() {
+    let jvm = Launches::default();
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let host = place(&fixture, &jvm).await;
+    fixture.register().await;
+    let mut updates = fixture.follow_jvm(JVM, &host).await;
+    let first = next(&mut updates).await;
+    let (id, _) = sessions(&first).pop_first().expect("a session");
+    let ready = complete(&id, JvmSessionPhase::Ready, None);
+    assert_eq!(fixture.report(&first.stream, &ready).await.outcome, ACCEPTED);
+
+    let control = fixture.control.clone();
+    let shutdown = tokio::spawn(async move { control.shutdown().await });
+    while !next(&mut updates).await.upserts.iter().any(|entry| entry.key == "stop") {}
+    // The stopping JVM keeps its credential until it closes its stream.
+    let ending = JvmReport { sessions: vec![session(&id, JvmSessionPhase::Ending)], ..JvmReport::default() };
+    assert_eq!(fixture.report(&first.stream, &ending).await.outcome, ACCEPTED);
+    drop(updates);
+    tokio::time::timeout(Duration::from_secs(10), shutdown).await.unwrap().unwrap().unwrap();
+    // The stopped JVM's credential no longer opens its topic.
+    let subscription = SubscribeRequest { topic: format!("jvm/{host}"), ..SubscribeRequest::default() };
+    let again = fixture.client.clone().subscribe(authorized(subscription, JVM)).await;
+    assert_eq!(again.err().map(|status| status.code()), Some(tonic::Code::Unauthenticated));
     fixture.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_jvm_that_outlived_core_re_attaches_by_registering() {
     let jvm = Launches::default();
-    let mut fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
+    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
     let host = place(&fixture, &jvm).await;
     fixture.register().await;
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     let (id, _) = sessions(&next(&mut updates).await).pop_first().expect("a session");
     drop(updates);
 
-    let mut fixture = fixture.restart(Arc::new(Launches::of(&host, true))).await;
+    let fixture = fixture.restart(Arc::new(Launches::of(&host, true))).await;
     let mut unadopted = fixture.follow_jvm(JVM, &host).await;
     assert_eq!(next(&mut unadopted).await.error.map(|error| error.code()), Some(Code::Denied));
     let report = JvmReport { complete: true, ..JvmReport::default() };
@@ -262,16 +362,15 @@ async fn a_jvm_that_outlived_core_re_attaches_by_registering() {
     let mut updates = fixture.follow_jvm(JVM, &host).await;
     let first = next(&mut updates).await;
     assert!(sessions(&first).contains_key(&id));
-    let report = JvmReport { complete: true, sessions: vec![session(&id, JvmSessionPhase::Ready)], health: None };
-    let attached = fixture.jvm_call(JVM, "chunk:report", &first.stream, &report).await;
-    assert_eq!(attached.outcome, Some(Outcome::Result(Vec::new())));
+    let report = complete(&id, JvmSessionPhase::Ready, None);
+    assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
     drop(updates);
     fixture.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_the_hosts_own_jvm_follows_its_topic_and_calls_its_methods() {
-    let mut fixture = Fixture::start().await;
+    let fixture = Fixture::start().await;
     let (cli, gateway) = (fixture.cli.clone(), fixture.gateway.clone());
     for (credential, host) in [(cli.as_str(), "host-1"), (gateway.as_str(), "host-1"), (JVM, "host-2")] {
         let mut updates = fixture.follow_jvm(credential, host).await;

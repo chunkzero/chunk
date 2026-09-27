@@ -60,7 +60,6 @@ pub(super) async fn call(
             Ok((None, JvmRegistered { host }.encode_to_vec()))
         }
         Method::Report => {
-            service.fences.check(&request.stream, &principal.credential)?;
             let report: JvmReport = decode(&request.arguments)?;
             let (control, credential, stream) =
                 (service.control.clone(), principal.credential.clone(), request.stream.clone());

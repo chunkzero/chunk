@@ -72,14 +72,7 @@ impl Control {
     /// # Errors
     /// Rejects an unregistered, replaced or stopped process.
     pub(crate) async fn attach(&self, host: &str, token: &str, report: ProcessReport) -> Result<u64> {
-        let attached = self.update(|state| {
-            let runtime = self.registered(state, host, report.identity.as_ref())?;
-            if runtime.token != token {
-                return Err(Error::Invalid("invalid process credential"));
-            }
-            apply(state, host, &runtime.identity, &report)?;
-            Ok((self.links.attach(host, runtime.identity.clone(), &report)?, runtime))
-        });
+        let attached = self.update(|state| self.attach_in(state, host, token, &report));
         self.links.applied();
         let (stream, runtime) = attached?;
         self.fence_deliveries(&runtime, &report).await?;
@@ -92,17 +85,37 @@ impl Control {
     /// # Errors
     /// Rejects reports from a replaced stream or process; stale deliveries within a report are ignored.
     pub(crate) async fn report(&self, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
-        let applied = self.update(|state| {
-            let runtime = self.registered(state, host, report.identity.as_ref())?;
-            apply(state, host, &runtime.identity, report)?;
-            self.links.merge(host, stream, report)
-        });
+        let applied = self.update(|state| self.merge_in(state, host, stream, report));
         self.links.applied();
         applied?;
         if !self.recovery.open()? {
             self.resolve_recovery().await?;
         }
         Ok(())
+    }
+
+    /// Within a commit, accepts the JVM running `host` if `token` is its credential, applies its complete `report`
+    /// and replaces the host's link with a new stream. Returns the stream's ID and the JVM's process.
+    pub(crate) fn attach_in(
+        &self,
+        state: &mut State,
+        host: &str,
+        token: &str,
+        report: &ProcessReport,
+    ) -> Result<(u64, RuntimeConnection)> {
+        let runtime = self.registered(state, host, report.identity.as_ref())?;
+        if runtime.token != token {
+            return Err(Error::Invalid("invalid process credential"));
+        }
+        apply(state, host, &runtime.identity, report)?;
+        Ok((self.links.attach(host, runtime.identity.clone(), report)?, runtime))
+    }
+
+    /// Within a commit, applies a later `report` from `stream`, which must still be `host`'s link.
+    pub(crate) fn merge_in(&self, state: &mut State, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
+        let runtime = self.registered(state, host, report.identity.as_ref())?;
+        apply(state, host, &runtime.identity, report)?;
+        self.links.merge(host, stream, report)
     }
 
     /// The process currently registered for `host`, if `identity` names it.

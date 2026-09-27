@@ -446,6 +446,11 @@ impl Host for ProcessHost {
         let deadline = Instant::now() + Duration::from_secs(12);
         while !self.stopped(id) {
             if Instant::now() >= deadline {
+                // An adopted JVM attached over sync has neither a stop endpoint nor a child to kill.
+                if process.adopted && process.connection().is_some_and(|connection| connection.endpoint.is_empty()) {
+                    tracing::warn!(host = id, "an adopted JVM did not confirm its exit; treating its host as released");
+                    return Ok(true);
+                }
                 return Ok(false);
             }
             sleep(Duration::from_millis(25)).await;
@@ -571,6 +576,9 @@ fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// How long a JVM asked to stop may take to acknowledge it before control stops it without its help.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(3);
+
 /// Asks the JVM to stop over its control endpoint. One registered over sync has none; its topic's `stop` entry asks it.
 async fn stop_gracefully(process: &Process) {
     if let Some(connection) = process.connection().filter(|connection| !connection.endpoint.is_empty()) {
@@ -580,7 +588,7 @@ async fn stop_gracefully(process: &Process) {
                 .await?;
             Ok::<_, Error>(())
         };
-        let _ = tokio::time::timeout(Duration::from_secs(3), graceful).await;
+        let _ = tokio::time::timeout(STOP_GRACE, graceful).await;
     }
 }
 

@@ -1,10 +1,14 @@
 //! JVMs attached over the sync protocol. The `jvm/<host>` topic carries the sessions control wants the JVM to run,
 //! keyed `session/<id>` with `chunk.sync.v1.JvmSession` values, and a `stop` entry once its host is releasing. The
 //! JVM's registration and reports go through the same registration, attach and report path as the supervisor's.
+//!
+//! Each host's entry, under one lock, is the only authority for which of its topic streams is current: opening a stream
+//! ends the previous one, and reports check their stream and apply their effects inside that lock.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map},
     sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 use chunk_proto::{
@@ -15,23 +19,45 @@ use chunk_proto::{
     },
 };
 use prost::Message;
+use tokio::{sync::watch, time::Instant};
+use tokio_util::sync::CancellationToken;
 
-use crate::{Control, Error, Generation, Result, state::Capacity};
+use crate::{Control, Error, Generation, Result, state::Capacity, sync::Links};
 
 /// How long a JVM's last report stands for its health.
-const HEALTH_MS: u64 = 10_000;
+const HEALTH: Duration = Duration::from_secs(10);
 
 /// JVMs registered over the sync protocol, by host. Kept in memory: a JVM registers again after control restarts.
+/// Reports take this lock inside a commit, so nothing may commit while holding it.
 #[derive(Default)]
 pub(crate) struct Jvms(Mutex<BTreeMap<String, Jvm>>);
 
 struct Jvm {
     registration: sync::JvmRegistration,
-    /// The host's current topic stream, with the link its first complete report attached.
-    stream: Option<(String, Option<u64>)>,
+    /// The host's current topic stream, the only one whose reports count.
+    stream: Option<Stream>,
     health: Option<ProcessHealth>,
-    /// When the JVM last reported or registered, in Unix milliseconds.
-    reported_ms: u64,
+    /// When the JVM last registered or reported.
+    reported: Instant,
+    /// Whether control asked the JVM to stop.
+    stopping: watch::Sender<bool>,
+}
+
+struct Stream {
+    id: String,
+    /// The link the stream's first complete report attached.
+    link: Option<u64>,
+    /// Cancelled once the stream stops being the host's current one.
+    ended: CancellationToken,
+}
+
+impl Stream {
+    fn end(self, links: &Links, host: &str) {
+        self.ended.cancel();
+        if let Some(link) = self.link {
+            links.detach(host, link);
+        }
+    }
 }
 
 impl Jvms {
@@ -47,8 +73,7 @@ impl Jvms {
     /// The health `host`'s JVM last pushed, unless it has not reported for 10 seconds.
     pub fn health(&self, host: &str) -> Option<ProcessHealth> {
         let jvms = self.0.lock().ok()?;
-        let jvm = jvms.get(host).filter(|jvm| crate::now_ms().saturating_sub(jvm.reported_ms) <= HEALTH_MS)?;
-        jvm.health.clone()
+        jvms.get(host).filter(|jvm| jvm.reported.elapsed() <= HEALTH)?.health.clone()
     }
 
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -64,9 +89,9 @@ impl Control {
     /// # Errors
     /// Rejects a changed registration, or one the host or the log does not match.
     pub fn register_jvm(&self, host: &str, credential: &str, registration: sync::JvmRegistration) -> Result<()> {
-        let mut jvms = self.jvms.lock()?;
-        if jvms.get(host).is_some_and(|jvm| jvm.registration != registration) {
-            return Err(Error::Invalid("registration changed"));
+        let changed = || Err(Error::Invalid("registration changed"));
+        if self.jvms.lock()?.get(host).is_some_and(|jvm| jvm.registration != registration) {
+            return changed();
         }
         let identity = ProcessIdentity {
             deployment: Some(DeploymentRef {
@@ -85,79 +110,134 @@ impl Control {
             control_endpoint: String::new(),
             player_endpoint: registration.player_endpoint.clone(),
         };
+        // Registering may commit, so it runs outside the JVMs' lock.
         self.register(&format!("Bearer {credential}"), process)?;
-        let reported_ms = crate::now_ms();
-        jvms.entry(host.into()).or_insert(Jvm { registration, stream: None, health: None, reported_ms });
-        Ok(())
+        match self.jvms.lock()?.entry(host.into()) {
+            btree_map::Entry::Occupied(jvm) if jvm.get().registration != registration => changed(),
+            btree_map::Entry::Occupied(_) => Ok(()),
+            btree_map::Entry::Vacant(entry) => {
+                let stopping = watch::Sender::new(false);
+                entry.insert(Jvm { registration, stream: None, health: None, reported: Instant::now(), stopping });
+                Ok(())
+            }
+        }
     }
 
     /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`, through the supervisor's
-    /// attach and report path. The stream's first complete report attaches the JVM.
+    /// attach and report path. The commit checks that `stream` is current and applies the report's sessions, link and
+    /// health under the JVMs' lock, so a superseded stream changes nothing and each stream attaches once, with its
+    /// first complete report.
     /// # Errors
     /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one.
     pub async fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
-        let link = {
-            let jvms = self.jvms.lock()?;
-            match jvms.get(host).and_then(|jvm| jvm.stream.as_ref()) {
-                Some((current, link)) if current == stream => *link,
-                _ => return Err(Error::Stopped),
-            }
-        };
         let runtime = self.host.connection(host).ok_or(Error::Invalid("unregistered or replaced process"))?;
-        let identity = runtime.identity;
         let sessions = report.sessions.into_iter().map(inventory).collect();
-        let inventory = ProcessReport { identity: Some(identity.clone()), sessions, deliveries: Vec::new() };
-        match link {
-            Some(link) => self.report(host, link, &inventory).await?,
-            None if report.complete => {
-                let link = self.attach(host, credential, inventory).await?;
-                let mut jvms = self.jvms.lock()?;
-                let current = jvms.get_mut(host).and_then(|jvm| jvm.stream.as_mut());
-                let Some((_, attached)) = current.filter(|(current, _)| current == stream) else {
-                    self.links.detach(host, link);
-                    return Err(Error::Stopped);
-                };
-                *attached = Some(link);
+        let inventory = ProcessReport { identity: Some(runtime.identity.clone()), sessions, deliveries: Vec::new() };
+        let health = report.health.map(|health| process_health(runtime.identity, health));
+        let attached = self.update(|state| {
+            let mut jvms = self.jvms.lock()?;
+            let jvm = jvms.get_mut(host).ok_or(Error::Stopped)?;
+            let current = jvm.stream.as_mut().filter(|current| current.id == stream).ok_or(Error::Stopped)?;
+            let attached = match current.link {
+                Some(link) => {
+                    self.merge_in(state, host, link, &inventory)?;
+                    None
+                }
+                None if report.complete => {
+                    let (link, runtime) = self.attach_in(state, host, credential, &inventory)?;
+                    current.link = Some(link);
+                    Some(runtime)
+                }
+                None => return Err(Error::Invalid("a stream's first report must be complete")),
+            };
+            jvm.reported = Instant::now();
+            if health.is_some() {
+                jvm.health = health;
             }
-            None => return Err(Error::Invalid("a stream's first report must be complete")),
+            Ok(attached)
+        });
+        self.links.applied();
+        if let Some(runtime) = attached? {
+            self.fence_deliveries(&runtime, &inventory).await?;
         }
-        if let Some(jvm) = self.jvms.lock()?.get_mut(host) {
-            jvm.reported_ms = crate::now_ms();
-            if let Some(health) = report.health {
-                jvm.health = Some(process_health(identity, health));
-            }
+        self.resolve_recovery().await
+    }
+
+    /// Stops `host`'s runtime through its host. A JVM registered over sync is first asked to stop on its topic, and
+    /// keeps its credential until its stream closes or the grace a stop request has passes; then its stream ends.
+    pub(crate) async fn release_host(&self, host: &str) -> Result<bool> {
+        let stream = self.jvms.lock()?.get(host).map(|jvm| {
+            jvm.stopping.send_replace(true);
+            jvm.stream.as_ref().map(|stream| stream.ended.clone())
+        });
+        if let Some(Some(ended)) = stream {
+            let _ = tokio::time::timeout(crate::process::STOP_GRACE, ended.cancelled()).await;
         }
-        Ok(())
+        let released = self.host.release(host).await;
+        if let Some(Some(stream)) = self.jvms.lock()?.get_mut(host).map(|jvm| jvm.stream.take()) {
+            stream.end(&self.links, host);
+        }
+        released
     }
 }
 
 /// One stream of a JVM's topic. Every update is a snapshot, sent only when it differs from the previous one. Dropping
-/// the stream detaches the link its reports attached.
+/// the stream ends it, detaching the link its reports attached.
 pub struct Topic {
     control: Arc<Control>,
     host: String,
     stream: String,
+    ended: CancellationToken,
+    positions: watch::Receiver<Generation>,
+    stopping: watch::Receiver<bool>,
     /// The entries last sent, with encoded values.
     sent: BTreeMap<String, Vec<u8>>,
 }
 
 impl Topic {
-    /// Opens `host`'s topic as `stream`, which supersedes the host's earlier stream, and returns its first snapshot.
+    /// Opens `host`'s topic as `stream`, which becomes the host's current stream and ends the earlier one, and returns
+    /// its first snapshot.
     /// # Errors
     /// Rejects a host whose JVM has not registered over sync, and reports unreadable control state.
     pub fn open(control: &Arc<Control>, host: &str, stream: &str) -> Result<(Self, sync::Update)> {
-        {
+        let positions = control.subscribe();
+        let ended = CancellationToken::new();
+        let stopping = {
             let mut jvms = control.jvms.lock()?;
             let jvm = jvms.get_mut(host).ok_or(Error::Invalid("the JVM has not registered over sync"))?;
-            if let Some((_, Some(link))) = jvm.stream.replace((stream.into(), None)) {
-                control.links.detach(host, link);
+            let current = Stream { id: stream.into(), link: None, ended: ended.clone() };
+            if let Some(previous) = jvm.stream.replace(current) {
+                previous.end(&control.links, host);
             }
-        }
-        let mut topic =
-            Self { control: control.clone(), host: host.into(), stream: stream.into(), sent: BTreeMap::new() };
+            jvm.stopping.subscribe()
+        };
+        let mut topic = Self {
+            control: control.clone(),
+            host: host.into(),
+            stream: stream.into(),
+            ended,
+            positions,
+            stopping,
+            sent: BTreeMap::new(),
+        };
         let (position, entries) = topic.entries()?;
         let update = topic.snapshot(position, entries);
         Ok((topic, update))
+    }
+
+    /// Cancelled once the stream stops being current: a newer stream superseded it, or its JVM was stopped.
+    #[must_use]
+    pub fn ended(&self) -> CancellationToken {
+        self.ended.clone()
+    }
+
+    /// Waits for a commit or for control to ask the JVM to stop, or forever once control is gone.
+    pub async fn changed(&mut self) {
+        tokio::select! {
+            Ok(()) = self.positions.changed() => {}
+            Ok(()) = self.stopping.changed() => {}
+            else => std::future::pending().await,
+        }
     }
 
     /// A snapshot if control wants something else of the JVM than the previous update said, or else `None`.
@@ -193,7 +273,8 @@ impl Topic {
             };
             entries.insert(format!("session/{id}"), session.encode_to_vec());
         }
-        if state.hosts.get(&self.host).is_some_and(|host| host.capacity == Capacity::Releasing) {
+        let releasing = state.hosts.get(&self.host).is_some_and(|host| host.capacity == Capacity::Releasing);
+        if releasing || *self.stopping.borrow() {
             entries.insert("stop".into(), sync::JvmStop {}.encode_to_vec());
         }
         Ok((state.position(), entries))
@@ -220,13 +301,11 @@ impl Drop for Topic {
         let Ok(mut jvms) = self.control.jvms.lock() else {
             return;
         };
-        let Some(jvm) = jvms.get_mut(&self.host) else {
-            return;
-        };
-        if jvm.stream.as_ref().is_some_and(|(stream, _)| *stream == self.stream)
-            && let Some((_, Some(link))) = jvm.stream.take()
+        if let Some(jvm) = jvms.get_mut(&self.host)
+            && jvm.stream.as_ref().is_some_and(|current| current.id == self.stream)
+            && let Some(current) = jvm.stream.take()
         {
-            self.control.links.detach(&self.host, link);
+            current.end(&self.control.links, &self.host);
         }
     }
 }

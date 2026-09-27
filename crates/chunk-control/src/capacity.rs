@@ -70,7 +70,7 @@ impl Control {
             Capacity::Ready if self.host.stopped(id) => self.update(|state| released(state, id, Capacity::Ready)),
             // Retired capacity that never became ready is released without starting it.
             from @ (Capacity::Releasing | Capacity::Requested) if from == Capacity::Releasing || host.retired => {
-                if !self.host.release(id).await? {
+                if !self.release_host(id).await? {
                     return Ok(());
                 }
                 self.update(|state| released(state, id, from))
