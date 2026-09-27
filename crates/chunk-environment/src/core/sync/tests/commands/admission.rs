@@ -115,6 +115,33 @@ async fn core_stopping_while_a_command_waits_for_admission_never_starts_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_subscription_while_its_command_waits_for_admission_never_starts_it() {
+    let arrived = arrived().await;
+    let (gateway, backend) = (arrived.gateway.clone(), arrived.fixture.backend.clone());
+    let holds = hold(&backend).await;
+    let operation = gateway.prepare().await;
+    let topic = gateway.follow(&operation).await;
+    let start = tokio::spawn({
+        let (gateway, operation) = (gateway.clone(), operation.clone());
+        async move { gateway.say(&operation, "say write").await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(topic);
+    assert_eq!(code(&start.await.unwrap()), Code::Stopped);
+
+    for mut hold in holds {
+        hold.outcome().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let id = operation.strip_prefix("prep:").unwrap().parse().unwrap();
+    let identity = backend.command_identity(id, &arrived.fixture.gateway, None).await.unwrap();
+    assert!(matches!(identity, CommandIdentity::Unused), "the command started: {identity:?}");
+    assert_eq!(&*backend.query(cli_call("get", serde_json::Value::Null)).await.unwrap().json, "0");
+    assert_eq!(code(&gateway.say(&operation, "say write").await), Code::Stopped);
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_command_start_is_charged_for_its_payload_before_it_waits_for_the_backend() {
     let arrived = arrived().await;
     let (gateway, backend) = (arrived.gateway.clone(), arrived.fixture.backend.clone());
@@ -144,7 +171,11 @@ async fn a_subscription_from_a_superseded_gateway_stream_never_displaces_the_cur
     tokio::time::sleep(Duration::from_millis(100)).await;
     let superseded = tokio::spawn({
         let operation = operation.clone();
-        async move { next(&mut stale.follow(&operation).await).await }
+        async move {
+            let mut topic = stale.follow(&operation).await;
+            assert!(next(&mut topic).await.upserts.is_empty()); // The reservation holds.
+            next(&mut topic).await
+        }
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let (_updates, current) = Gateway::follow_own(&arrived.fixture, arrived.gateway.credential.clone(), "proxy").await;

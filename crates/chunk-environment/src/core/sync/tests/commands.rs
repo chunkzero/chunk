@@ -233,14 +233,33 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rejected_command_leaves_nothing_to_follow() {
+async fn a_subscription_waits_through_a_rejected_start_for_one_that_starts() {
     let arrived = arrived().await;
     let gateway = &arrived.gateway;
     let operation = gateway.prepare().await;
+    let mut topic = gateway.follow(&operation).await;
     let arguments = CommandArguments { command_id: "scopes/commands/missing".into(), input: "missing".into() };
     let rejected = gateway.call(&operation, "chunk:command", &arguments).await;
     assert!(matches!(rejected.outcome, Some(Outcome::Error(_))));
-    assert_eq!(failure(&next(&mut gateway.follow(&operation).await).await), Some(Code::Invalid));
+    decoded::<CommandStarted>(&gateway.say(&operation, "say wait").await);
+    assert_eq!(returned(&outcome(&mut topic).await), b"null");
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_after_its_subscription_closed_is_refused() {
+    let mut arrived = arrived().await;
+    let gateway = arrived.gateway.clone();
+    let operation = gateway.prepare().await;
+    let mut topic = gateway.follow(&operation).await;
+    let reserved = next(&mut topic).await;
+    assert!(reserved.snapshot && reserved.upserts.is_empty() && !reserved.stream.is_empty());
+    drop(topic);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(code(&gateway.say(&operation, "say write").await), Code::Stopped);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let cli = arrived.fixture.cli.clone();
+    assert_eq!(arrived.fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"0".to_vec())));
     arrived.stop().await;
 }
 

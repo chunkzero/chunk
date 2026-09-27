@@ -9,7 +9,7 @@ mod effects;
 use super::{
     super::{
         SyncService, app, errors,
-        runs::{Run, Runs, outcome},
+        runs::{Run, Runs, closed_before_start, outcome},
     },
     decode,
 };
@@ -115,7 +115,7 @@ async fn start(
     let operation = request.operation_id.clone();
     drop(request);
     let fingerprint = CommandRequest::new(&command_id, &input, &player);
-    let (run, new) = service.runs.begin(&operation, credential, fingerprint, service.stop.child_token());
+    let (run, new) = service.runs.begin(&operation, credential, fingerprint, service.stop.child_token())?;
     run.permits(credential, Some(fingerprint))?;
     if !new {
         // A duplicate waits holding only the run, and a rejected start leaves the ID for the gateway to retry.
@@ -196,8 +196,7 @@ impl Starting {
                 runs.settle(&operation, &run);
             }
             Err(error) => {
-                runs.remove(&operation, &run);
-                run.reject();
+                runs.reject(&operation, &run);
                 return Err(error);
             }
         }
@@ -248,12 +247,17 @@ impl Starting {
         Ok(Admitted::Started { origin: Box::new(claim), follow, handle, effects })
     }
 
-    /// Waits for `work`, which is dropped once the command is cancelled first.
+    /// Waits for `work`, which is dropped once the command is cancelled first: by its subscription closing, or core
+    /// stopping.
     async fn unless_cancelled<T>(&self, work: impl Future<Output = T>) -> Result<T, Error> {
         let cancel = self.run.token();
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Err(errors::error(Code::Unavailable, "core is stopping")),
+            () = cancel.cancelled() => Err(if self.run.closed() {
+                closed_before_start()
+            } else {
+                errors::error(Code::Unavailable, "core is stopping")
+            }),
             output = work => Ok(output),
         }
     }
