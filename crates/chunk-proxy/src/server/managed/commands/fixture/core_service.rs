@@ -83,7 +83,9 @@ impl Service {
                 self.publish();
                 WithdrawResult::default().encode_to_vec()
             }
-            "chunk:commands" | "chunk:suggest" | "chunk:command" | "chunk:effect" => return Ok(self.command(call)),
+            "chunk:commands" | "chunk:suggest" | "chunk:command" | "chunk:effect" => {
+                return Ok(self.command(call).await);
+            }
             _ => return Ok(Err(sync::Error { code: Code::Invalid.into(), message: "unused".into() })),
         }))
     }

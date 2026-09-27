@@ -108,6 +108,17 @@ async fn output(commands: &mut Commands, public: &mut Transport<DuplexStream>) {
     let event = tokio::time::timeout(Duration::from_secs(3), commands.receive()).await.unwrap();
     commands.publish(event, public).await.unwrap();
 }
+/// A fixture whose player arrived and read their command tree, with their end and the proxy's of their connection.
+async fn arrived() -> (Fixture, Transport<DuplexStream>, Transport<DuplexStream>) {
+    let mut fixture = Fixture::new().await;
+    let (client, public) = tokio::io::duplex(16384);
+    let (mut client, mut public) = (Transport::new(client), Transport::new(public));
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
+    fixture.commands.arrived();
+    output(&mut fixture.commands, &mut public).await;
+    client.read_frame(16384).await.unwrap();
+    (fixture, client, public)
+}
 async fn wait_count(count: &std::sync::atomic::AtomicUsize, expected: usize) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while count.load(Ordering::SeqCst) < expected {
@@ -242,14 +253,7 @@ async fn failed_permission_refresh_keeps_last_catalog() {
 
 #[tokio::test]
 async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_new_claim() {
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     fixture.commands.input(&unsigned("slow")).unwrap();
     fixture.commands.input(&unsigned("follow")).unwrap();
     wait_count(&fixture.service.waiting, 2).await;
@@ -323,14 +327,7 @@ async fn a_call_on_a_superseded_stream_runs_again_on_its_replacement_under_the_s
 #[tokio::test]
 async fn query_suggestions_use_owned_range_and_current_permission() {
     use chunk_protocol::{commands::CommandSuggestions, versions::v26_2::CommandSuggestionsRequest};
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     let request = encode_packet(&CommandSuggestionsRequest {
         transaction_id: VarInt(19),
         text: McString::new("/travel al").unwrap(),
@@ -350,14 +347,7 @@ async fn query_suggestions_use_owned_range_and_current_permission() {
 
 #[tokio::test]
 async fn a_command_follows_its_topic_again_from_a_new_gateway_stream_while_its_effect_waits_to_be_written() {
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     fixture.commands.input(&unsigned("slow")).unwrap();
     wait_count(&fixture.service.waiting, 1).await;
     fixture.service.release.notify_one();
@@ -376,14 +366,7 @@ async fn a_command_follows_its_topic_again_from_a_new_gateway_stream_while_its_e
 
 #[tokio::test]
 async fn a_commands_unwritten_effect_is_dropped_once_it_finished() {
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     fixture.service.outstanding.store(true, Ordering::SeqCst);
     fixture.commands.input(&unsigned("slow")).unwrap();
     wait_count(&fixture.service.waiting, 1).await;
@@ -397,6 +380,27 @@ async fn a_commands_unwritten_effect_is_dropped_once_it_finished() {
     fixture.commands.publish(effect, &mut public).await.unwrap();
     assert!(tokio::time::timeout(Duration::from_millis(100), client.read_frame(16384)).await.is_err());
     assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_player_leaving_while_their_command_waits_for_admission_cancels_it() {
+    let (fixture, _client, _public) = arrived().await;
+    fixture.service.admission.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("echo")).unwrap();
+    wait_count(&fixture.service.queued, 1).await;
+    fixture.commands.tasks.connection.cancel();
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !run.cancelled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.service.admit.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!run.started());
     fixture.close().await;
 }
 

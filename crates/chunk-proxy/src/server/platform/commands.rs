@@ -13,11 +13,13 @@ use tonic::Streaming;
 
 use super::{
     Platform, RPC_TIMEOUT, invalid_data,
-    sync::{Connection, Failure},
+    sync::{Connection, Failure, failure},
 };
 
 /// How long core may take to admit a command, which queues while the backend is busy.
 const START_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a start core may not have taken waits before it's sent again.
+const START_RETRY: Duration = Duration::from_millis(250);
 
 impl Platform {
     /// The commands `player`'s session declares, and the IDs of those they may run.
@@ -35,16 +37,37 @@ impl Platform {
         Ok(result.values)
     }
 
-    /// Starts the command `arguments` names for `player`, returning its topic. Dropping the topic cancels the command.
+    /// Follows the topic of a command yet to start, under a new operation ID core reserved for it. Dropping the topic
+    /// cancels the command, before or after it started.
+    pub(in crate::server) async fn reserve_command(&self) -> io::Result<CommandTopic> {
+        let operation = self.prepare().await?;
+        let mut topic = CommandTopic::open(self.sync.clone(), operation, None).await?;
+        // Core's first snapshot confirms the reservation.
+        topic.next().await?;
+        Ok(topic)
+    }
+
+    /// Starts the command `arguments` names for `player` under `operation`, which a topic reserved, sending the start
+    /// again whenever core may not have taken it.
     pub(in crate::server) async fn start_command(
         &self,
+        operation: &str,
         player: &str,
         arguments: &CommandArguments,
-    ) -> io::Result<CommandTopic> {
-        let operation = self.prepare().await?;
-        let _: CommandStarted =
-            self.player_call("command", operation.clone(), player, arguments, START_TIMEOUT).await?;
-        CommandTopic::open(self.sync.clone(), operation, None).await
+    ) -> io::Result<()> {
+        loop {
+            let started: io::Result<CommandStarted> =
+                self.player_call("command", operation.to_owned(), player, arguments, START_TIMEOUT).await;
+            let Err(error) = started else { return Ok(()) };
+            let retry = match failure(&error) {
+                Some(failure) => matches!(failure.code(), Code::Unavailable | Code::Overloaded),
+                None => error.kind() != io::ErrorKind::InvalidData,
+            };
+            if !retry {
+                return Err(error);
+            }
+            tokio::time::sleep(START_RETRY).await;
+        }
     }
 
     /// Acknowledges effect `sequence` of the command under `operation`, once rendered or `failed`.

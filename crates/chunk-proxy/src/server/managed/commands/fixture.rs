@@ -34,6 +34,11 @@ pub(super) struct Service {
     pub release: Arc<tokio::sync::Notify>,
     /// Commands finish at the next `release` once their effect is pending, without waiting for its acknowledgment.
     pub outstanding: Arc<AtomicBool>,
+    /// Starts wait for `admit` before they're admitted.
+    pub admission: Arc<AtomicBool>,
+    pub admit: Arc<tokio::sync::Notify>,
+    /// Starts that waited for admission.
+    pub queued: Arc<AtomicUsize>,
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
@@ -121,6 +126,9 @@ impl Fixture {
             replies: Arc::default(),
             release: Arc::default(),
             outstanding: Arc::default(),
+            admission: Arc::default(),
+            admit: Arc::default(),
+            queued: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
             published: Arc::new(watch::Sender::new(1)),
