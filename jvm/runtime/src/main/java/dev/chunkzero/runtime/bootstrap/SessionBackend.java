@@ -1,24 +1,14 @@
 package dev.chunkzero.runtime.bootstrap;
 
-import chunk.v1.BackendGrpc;
-import chunk.v1.Common.DeploymentRef;
-
-import com.google.protobuf.Empty;
-
 import dev.chunkzero.backend.api.SessionId;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.SessionIdentity;
+import dev.chunkzero.runtime.control.CoreChannel;
 
 import io.grpc.ManagedChannel;
-import io.grpc.Metadata;
-import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
-import io.grpc.stub.MetadataUtils;
 
 import org.jetbrains.annotations.ApiStatus;
 
-import java.net.InetAddress;
-import java.net.URI;
-import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.Executors;
@@ -60,59 +50,10 @@ public final class SessionBackend implements AutoCloseable {
         }
     }
 
-    public static SessionBackend fromEnvironment(
-            DeploymentRef deployment, RuntimeEnvironment environment) throws UnknownHostException {
-        checkDeployment(deployment, environment);
+    public static SessionBackend fromEnvironment(RuntimeEnvironment environment) {
         return new SessionBackend(
-                channel(environment.controlEndpoint()),
+                CoreChannel.open(environment.coreEndpoint()),
                 environment.processToken(),
-                deployment.getDeployment());
-    }
-
-    /**
-     * Fails fast when the backend doesn't serve the deployment. Core has no check a JVM may call
-     * yet, so this asks the {@code chunk.v1.Backend} service.
-     */
-    private static void checkDeployment(DeploymentRef deployment, RuntimeEnvironment environment)
-            throws UnknownHostException {
-        var credential = environment.backendToken();
-        if (credential == null)
-            throw new IllegalArgumentException("CHUNK_BACKEND_TOKEN is required");
-        var channel = channel(environment.backendEndpoint());
-        try {
-            var metadata = new Metadata();
-            metadata.put(
-                    Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-                    "Bearer " + credential);
-            metadata.put(
-                    Metadata.Key.of("x-chunk-environment", Metadata.ASCII_STRING_MARSHALLER),
-                    deployment.getEnvironment());
-            metadata.put(
-                    Metadata.Key.of("x-chunk-deployment", Metadata.ASCII_STRING_MARSHALLER),
-                    deployment.getDeployment());
-            BackendGrpc.newBlockingStub(channel)
-                    .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata))
-                    .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .checkDeployment(Empty.getDefaultInstance());
-        } finally {
-            channel.shutdownNow();
-        }
-    }
-
-    private static ManagedChannel channel(String endpoint) throws UnknownHostException {
-        var uri = URI.create(endpoint);
-        if (!"http".equals(uri.getScheme())
-                || uri.getHost() == null
-                || uri.getRawQuery() != null
-                || uri.getFragment() != null
-                || uri.getUserInfo() != null
-                || (uri.getPath() != null && !uri.getPath().isEmpty() && !uri.getPath().equals("/"))
-                || uri.getPort() < 1
-                || uri.getPort() > 65535
-                || !InetAddress.getByName(uri.getHost()).isLoopbackAddress()) {
-            throw new IllegalArgumentException(
-                    "Backend and control endpoints must be loopback HTTP addresses");
-        }
-        return NettyChannelBuilder.forAddress(uri.getHost(), uri.getPort()).usePlaintext().build();
+                environment.deployment());
     }
 }

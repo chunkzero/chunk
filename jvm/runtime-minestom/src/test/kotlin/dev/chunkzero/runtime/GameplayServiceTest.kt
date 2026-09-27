@@ -11,14 +11,11 @@ import chunk.v1.GameplayOuterClass.PlayerDelivery
 import chunk.v1.GameplayOuterClass.PlayerSetup
 import com.google.protobuf.ByteString
 import dev.chunkzero.runtime.bootstrap.FlatSession
-import dev.chunkzero.runtime.control.ProcessAuthentication
 import dev.chunkzero.runtime.minestom.internal.GameplayService
-import io.grpc.Metadata
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
-import io.grpc.stub.MetadataUtils
 import net.kyori.adventure.text.Component
 import net.minestom.server.MinecraftConstants
 import net.minestom.server.ServerProcess
@@ -97,27 +94,13 @@ class GameplayServiceTest {
         val server =
             NettyServerBuilder
                 .forAddress(InetSocketAddress("127.0.0.1", 0))
-                .intercept(ProcessAuthentication("test-token-with-at-least-32-characters"))
                 .addService(service)
                 .build()
                 .start()
         val channel = NettyChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
         try {
             val request = ConfigurationRequest.newBuilder().setDeployment(deployment).build()
-            val unauthenticated = GameplayGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS)
-            assertEquals(
-                Status.Code.UNAUTHENTICATED,
-                assertThrows(StatusRuntimeException::class.java) {
-                    unauthenticated.configuration(request)
-                }.status.code,
-            )
-            val headers = Metadata()
-            headers.put(
-                Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-                "Bearer test-token-with-at-least-32-characters",
-            )
-            val interceptor = MetadataUtils.newAttachHeadersInterceptor(headers)
-            val stub = unauthenticated.withInterceptors(interceptor)
+            val stub = GameplayGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS)
             val configuration = stub.configuration(request)
             assertEquals(MinecraftConstants.PROTOCOL_VERSION, configuration.protocol)
             assertEquals(7, configuration.processGeneration)

@@ -1,73 +1,43 @@
 package dev.chunkzero.runtime;
 
-import chunk.v1.Common.DeploymentRef;
-import chunk.v1.NodeControlGrpc;
-import chunk.v1.Supervision.ProcessIdentity;
-import chunk.v1.Supervision.ProcessRegistration;
+import chunk.sync.v1.Jvm.JvmRegistration;
 
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.bootstrap.SessionBackend;
-import dev.chunkzero.runtime.control.ProcessAuthentication;
+import dev.chunkzero.runtime.control.CoreLink;
 import dev.chunkzero.runtime.control.ProcessState;
-import dev.chunkzero.runtime.control.Registration;
-
-import io.grpc.BindableService;
-import io.grpc.Server;
-import io.grpc.Status;
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
-import io.grpc.stub.StreamObserver;
 
 import org.jetbrains.annotations.Nullable;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Connects one immutable app process to platform control. */
+/** Connects one immutable app process to core. */
 public final class ChunkProcess implements AutoCloseable {
     private final RuntimeEnvironment environment;
-    private final ProcessIdentity identity;
     private final SessionBackend backend;
     private final AtomicLong ticks = new AtomicLong();
     private final ProcessHealth health = new ProcessHealth(ticks);
     private final CompletableFuture<Void> shutdown = new CompletableFuture<>();
-    private @Nullable Server control;
-    private volatile @Nullable Registration registration;
+    private volatile @Nullable CoreLink link;
     private @Nullable ProcessState state;
     private String playerEndpoint = "";
+    private int protocol;
     private boolean closed;
 
-    ChunkProcess(RuntimeEnvironment environment) throws IOException {
+    ChunkProcess(RuntimeEnvironment environment) {
         this.environment = environment;
         if (!environment.appId().matches("[A-Za-z_][A-Za-z0-9_]{0,127}")
                 || environment.processGeneration() < 1)
             throw new IllegalArgumentException("Invalid app or process identity");
-        var deployment =
-                DeploymentRef.newBuilder()
-                        .setEnvironment(environment.environment())
-                        .setDeployment(environment.deployment())
-                        .build();
-        identity =
-                ProcessIdentity.newBuilder()
-                        .setDeployment(deployment)
-                        .setAppId(environment.appId())
-                        .setRuntimeId(environment.runtimeId())
-                        .setProcessId(environment.processId())
-                        .setGeneration(environment.processGeneration())
-                        .setMachineProfile(environment.machineProfile())
-                        .setArtifactDigest(environment.artifactDigest())
-                        .build();
         if (environment.processToken().length() < 32)
             throw new IllegalArgumentException("Invalid process credential");
-        backend = SessionBackend.fromEnvironment(deployment, environment);
+        backend = SessionBackend.fromEnvironment(environment);
     }
 
-    public static ChunkProcess connect() throws IOException {
+    public static ChunkProcess connect() {
         return new ChunkProcess(RuntimeEnvironment.load());
     }
 
@@ -83,8 +53,8 @@ public final class ChunkProcess implements AutoCloseable {
         }
     }
 
-    ProcessIdentity identity() {
-        return identity;
+    String app() {
+        return environment.appId();
     }
 
     BackendSession backend(String session) {
@@ -95,10 +65,10 @@ public final class ChunkProcess implements AutoCloseable {
         health.tick(sessions, players);
     }
 
-    /** Reports session and delivery changes to control. */
+    /** Reports session and delivery changes to core. */
     void flush() {
-        var current = registration;
-        if (current != null) current.flush();
+        var current = link;
+        if (current != null) current.wake();
     }
 
     /** Stops accepting new work and notifies the app's shutdown handler. */
@@ -111,80 +81,53 @@ public final class ChunkProcess implements AutoCloseable {
         return health.acceptsWork();
     }
 
-    /** Engine adapters bind their services and state once, before application readiness. */
-    synchronized void bind(
-            List<BindableService> services, String playerEndpoint, ProcessState state)
-            throws IOException {
-        if (closed || control != null)
+    /** Engine adapters bind their player endpoint and state once, before application readiness. */
+    synchronized void bind(String playerEndpoint, int protocol, ProcessState state) {
+        if (closed || this.state != null)
             throw new IllegalStateException("Process already bound or closed");
         this.playerEndpoint = playerEndpoint;
+        this.protocol = protocol;
         this.state = state;
-        var builder =
-                NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
-                        .maxConcurrentCallsPerConnection(128)
-                        .maxInboundMessageSize(65_536)
-                        .intercept(new ProcessAuthentication(environment.processToken()))
-                        .addService(
-                                new NodeControlGrpc.NodeControlImplBase() {
-                                    @Override
-                                    public void health(
-                                            ProcessIdentity request,
-                                            StreamObserver<chunk.v1.Supervision.ProcessHealth>
-                                                    response) {
-                                        if (!request.equals(identity)) {
-                                            response.onError(
-                                                    Status.FAILED_PRECONDITION
-                                                            .asRuntimeException());
-                                            return;
-                                        }
-                                        response.onNext(health.snapshot(identity));
-                                        response.onCompleted();
-                                    }
-
-                                    @Override
-                                    public void stopProcess(
-                                            ProcessIdentity request,
-                                            StreamObserver<ProcessIdentity> response) {
-                                        if (!request.equals(identity)) {
-                                            response.onError(
-                                                    Status.FAILED_PRECONDITION
-                                                            .asRuntimeException());
-                                            return;
-                                        }
-                                        requestShutdown();
-                                        response.onNext(identity);
-                                        response.onCompleted();
-                                    }
-                                });
-        services.forEach(builder::addService);
-        control = builder.build();
-        try {
-            control.start();
-        } catch (IOException | RuntimeException error) {
-            close();
-            throw error;
-        }
     }
 
-    /** Marks application initialization complete and waits for control to accept this launch. */
-    public synchronized void ready() {
-        if (closed || control == null || state == null)
-            throw new IllegalStateException("Engine must be started");
-        if (registration != null) return;
-        health.ready(true);
-        try {
-            registration =
-                    new Registration(
-                            environment.controlEndpoint(),
+    /**
+     * Marks application initialization complete, and waits for core to accept this launch.
+     *
+     * @throws IllegalStateException if core refuses the launch
+     */
+    public void ready() {
+        CoreLink started;
+        synchronized (this) {
+            if (closed || state == null) throw new IllegalStateException("Engine must be started");
+            if (link != null) return;
+            health.ready(true);
+            started =
+                    new CoreLink(
+                            environment.coreEndpoint(),
                             environment.processToken(),
-                            ProcessRegistration.newBuilder()
-                                    .setIdentity(identity)
-                                    .setControlEndpoint("http://127.0.0.1:" + control.getPort())
+                            JvmRegistration.newBuilder()
+                                    .setProcessId(environment.processId())
+                                    .setGeneration(environment.processGeneration())
+                                    .setApp(environment.appId())
+                                    .setProfile(environment.machineProfile())
+                                    .setArtifactDigest(environment.artifactDigest())
+                                    .setDeployment(environment.deployment())
                                     .setPlayerEndpoint(playerEndpoint)
+                                    .setProtocol(protocol)
                                     .build(),
-                            state);
+                            state,
+                            health::snapshot,
+                            this::requestShutdown);
+            link = started;
+        }
+        try {
+            started.start();
         } catch (RuntimeException error) {
-            health.ready(false);
+            synchronized (this) {
+                health.ready(false);
+                if (link == started) link = null;
+            }
+            started.close();
             throw error;
         }
     }
@@ -195,15 +138,8 @@ public final class ChunkProcess implements AutoCloseable {
         closed = true;
         health.drain();
         shutdown.complete(null);
-        if (registration != null) registration.close();
-        if (control != null) {
-            control.shutdownNow();
-            try {
-                control.awaitTermination(3, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        var current = link;
+        if (current != null) current.close();
         backend.close();
     }
 }

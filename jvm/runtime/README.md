@@ -41,20 +41,23 @@ and artifact hashes; control uses it to select the app and profile, verify the J
 with the chosen capacity. The JVM enforces those commands without loading a deployment manifest. Changing deployment
 requirements creates a new release while preserving the executable bytes.
 
-The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_ENVIRONMENT`, `CHUNK_DEPLOYMENT`, `CHUNK_CONTROL_ENDPOINT`,
-`CHUNK_INSTANCE_ID`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST`,
-`CHUNK_APP_ID`, `CHUNK_BACKEND_ENDPOINT` and `CHUNK_BACKEND_TOKEN`. `ChunkProcess.connect()` verifies the exact backend
-deployment before returning. There is no deployment fallback or standalone unbound fixture mode.
+The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_DEPLOYMENT`, `CHUNK_CONTROL_ENDPOINT`, `CHUNK_PROCESS_ID`,
+`CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST` and `CHUNK_APP_ID`. There is no deployment
+fallback or standalone unbound fixture mode.
 
-`ready()` registers the frozen process only after application initialization. Control polls the authenticated
-`NodeControl` health RPC every five seconds. JVM RPC threads report engine progress recorded by the tick thread, heap
-use, GC counters, CPU load and session/player counts. Three failed or stale-progress polls request termination; a
-reachable RPC thread alone does not establish engine health. Missing measurements retain their observation timestamp.
+`ready()` registers the frozen process with core's `chunk:register` only after application initialization, retrying
+while core is unavailable. Core checks that the deployment is active, and a refused registration fails `ready()`. The
+JVM then follows its `jvm/<host>` topic for the sessions to run and whether to stop, and reports with `chunk:report` on
+a channel of its own: everything it holds on each new stream, then what changed, with its health at least every three
+seconds. Core counts a JVM unhealthy once it has reported no health for ten seconds. Health carries engine progress
+recorded by the tick thread, heap use, GC counters, CPU load and session/player counts, so a responsive link alone does
+not establish engine health. A broken or superseded stream registers and subscribes again.
 
 `shutdownRequested()` provides a completion stage; `awaitShutdown()` is the blocking main-thread equivalent.
-`requestShutdown()` lets the app stop accepting work and notify its shutdown handler. The app closes engine resources
-when shutdown is requested. The host allows a bounded graceful shutdown, then kills the owned process if necessary and
-waits for exit. Player ownership is released only after withdrawal or confirmed process exit.
+`requestShutdown()` lets the app stop accepting work and notify its shutdown handler; core's `stop` entry requests it
+too. The app closes engine resources when shutdown is requested. The host allows a bounded graceful shutdown, then kills
+the owned process if necessary and waits for exit. Player ownership is released only after withdrawal or confirmed
+process exit.
 
 The proxy connects directly to Minestom's loopback Minecraft listener. Single-use `chunk:delivery` capabilities
 authorize native login. There is no per-server Rust process or intermediate TCP relay. Minestom owns configuration,
@@ -157,17 +160,15 @@ connection.
 The `scope.getBackend()` client (`scope.backend` in Kotlin) calls core over the sync protocol at
 `CHUNK_CONTROL_ENDPOINT` with `CHUNK_PROCESS_TOKEN`, naming the process deployment, its session and optionally a player.
 Core derives the caller app code sees, including the registered app ID, so function arguments do not choose that
-identity. Control's `CHUNK_BACKEND_FILE` passes the backend's private connection to app JVMs as `CHUNK_BACKEND_ENDPOINT`
-and `CHUNK_BACKEND_TOKEN`. The JVM requires explicit `CHUNK_ENVIRONMENT` and `CHUNK_DEPLOYMENT` and checks that exact
-deployment with the backend's `CheckDeployment` before reporting ready. Missing configuration, an unavailable backend,
-or a missing deployment fails startup. Use `scope.operationId(player, action)` for a mutation that should happen once
-per player delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and arguments. Use
-`scope.coroutines.backend(scope.backend, player)` for a player-bound client whose calls and watches close on departure.
-Session clients close on disposal. The [local example](../../examples/local/README.md) demonstrates persistent coins,
-visits and subscription updates, including stale state during backend disconnection. Sessions own their instances, event
-handlers and scoped resources. Session hooks run through the process tick executor. Withdrawal waits for pending joins
-and initialization, removes the player and runs its leave hook before releasing the ownership fence. Arrival is reported
-after spawn and teleport acknowledgment.
+identity. The JVM requires an explicit `CHUNK_DEPLOYMENT`, which core checks when the JVM registers. Missing
+configuration or an inactive deployment fails startup. Use `scope.operationId(player, action)` for a mutation that
+should happen once per player delivery. It returns a typed `OperationId`; retry an uncertain result with the same ID and
+arguments. Use `scope.coroutines.backend(scope.backend, player)` for a player-bound client whose calls and watches close
+on departure. Session clients close on disposal. The [local example](../../examples/local/README.md) demonstrates
+persistent coins, visits and subscription updates, including stale state during backend disconnection. Sessions own
+their instances, event handlers and scoped resources. Session hooks run through the process tick executor. Withdrawal
+waits for pending joins and initialization, removes the player and runs its leave hook before releasing the ownership
+fence. Arrival is reported after spawn and teleport acknowledgment.
 
 Kotlin applications depend on `jvm:runtime-minestom-kotlin`, import `dev.chunkzero.runtime.coroutines`, and can extend
 `CoroutineSession` and implement suspend `create`, `join`, `leave`, and `finish` hooks. `scope.coroutines` is a

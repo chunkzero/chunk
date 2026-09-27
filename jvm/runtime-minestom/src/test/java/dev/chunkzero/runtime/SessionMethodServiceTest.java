@@ -15,15 +15,12 @@ import chunk.v1.Supervision.SessionCommand;
 import dev.chunkzero.backend.api.BackendValues;
 import dev.chunkzero.backend.api.JsonType;
 import dev.chunkzero.backend.api.SessionMethodRef;
-import dev.chunkzero.runtime.control.ProcessAuthentication;
 import dev.chunkzero.runtime.minestom.internal.SessionMethodService;
 
-import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
-import io.grpc.stub.MetadataUtils;
 
 import net.minestom.server.ServerProcess;
 
@@ -41,8 +38,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 class SessionMethodServiceTest {
-    private static final String TOKEN = "test-process-token-with-at-least-32-characters";
-
     @Test
     void authenticatedCallsAreFencedQueuedDeduplicatedAndRetired() throws Exception {
         var process = ServerProcess.create();
@@ -103,7 +98,6 @@ class SessionMethodServiceTest {
                         clock::get);
         var server =
                 NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
-                        .intercept(new ProcessAuthentication(TOKEN))
                         .addService(service)
                         .build()
                         .start();
@@ -112,16 +106,7 @@ class SessionMethodServiceTest {
                         .usePlaintext()
                         .build();
         try {
-            var headers = new Metadata();
-            headers.put(
-                    Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-                    "Bearer " + TOKEN);
-            var unauthenticated =
-                    SessionMethodsGrpc.newBlockingStub(channel)
-                            .withDeadlineAfter(3, TimeUnit.SECONDS);
-            var client =
-                    SessionMethodsGrpc.newBlockingStub(channel)
-                            .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers));
+            var client = SessionMethodsGrpc.newBlockingStub(channel);
             var request =
                     SessionMethodRequest.newBuilder()
                             .setIdentity(identity)
@@ -136,11 +121,6 @@ class SessionMethodServiceTest {
                             .setIssuedAtMs(clock.get())
                             .setDeadlineMs(clock.get() + 30_000)
                             .build();
-            assertEquals(
-                    Status.Code.UNAUTHENTICATED,
-                    assertThrows(StatusRuntimeException.class, () -> unauthenticated.call(request))
-                            .getStatus()
-                            .getCode());
             assertEquals(
                     Status.Code.PERMISSION_DENIED,
                     assertThrows(
