@@ -1,26 +1,26 @@
 package dev.chunkzero.runtime.minestom.internal;
 
+import chunk.sync.v1.CoreOuterClass.Position;
+
 import java.util.HashMap;
 import java.util.Map;
 
-/** Retains fencing after disconnect; a player stream is never replayed. */
+/**
+ * Admits each player under one delivery at a time, each newer than the last. It retains fencing
+ * after disconnect, so a player's stale delivery is never replayed.
+ */
 final class DeliveryFence {
-    private record Owner(long generation, boolean active) {}
+    private record Owner(Position generation, boolean active) {}
 
     private final Map<String, Owner> owners = new HashMap<>();
 
-    synchronized void claim(String player, long generation) {
-        if (player.chars()
-                        .allMatch(
-                                character ->
-                                        Character.isWhitespace(character)
-                                                || Character.isSpaceChar(character))
-                || generation <= 0) {
+    synchronized void claim(String player, Position generation) {
+        if (player.isBlank() || generation.getEpoch() < 1 || generation.getRevision() < 1) {
             throw new IllegalArgumentException(
-                    "Player identity and a positive delivery generation are required");
+                    "Player identity and a delivery generation are required");
         }
         var previous = owners.get(player);
-        if (previous != null && generation <= previous.generation()) {
+        if (previous != null && !before(previous.generation(), generation)) {
             throw new IllegalArgumentException("Stale delivery generation");
         }
         if (previous != null && previous.active())
@@ -31,9 +31,15 @@ final class DeliveryFence {
         owners.put(player, new Owner(generation, true));
     }
 
-    synchronized void release(String player, long generation) {
+    synchronized void release(String player, Position generation) {
         var owner = owners.get(player);
-        if (owner != null && owner.generation() == generation)
+        if (owner != null && owner.generation().equals(generation))
             owners.put(player, new Owner(generation, false));
+    }
+
+    private static boolean before(Position first, Position second) {
+        return first.getEpoch() < second.getEpoch()
+                || (first.getEpoch() == second.getEpoch()
+                        && first.getRevision() < second.getRevision());
     }
 }

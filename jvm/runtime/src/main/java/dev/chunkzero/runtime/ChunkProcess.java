@@ -1,5 +1,6 @@
 package dev.chunkzero.runtime;
 
+import chunk.sync.v1.Jvm.JvmMethodResult;
 import chunk.sync.v1.Jvm.JvmRegistration;
 
 import dev.chunkzero.backend.client.BackendSession;
@@ -69,6 +70,12 @@ public final class ChunkProcess implements AutoCloseable {
     void flush() {
         var current = link;
         if (current != null) current.wake();
+    }
+
+    /** Sends a session method's result to core. */
+    void methodResult(String operation, JvmMethodResult result) {
+        var current = link;
+        if (current != null) current.methodResult(operation, result);
     }
 
     /** Stops accepting new work and notifies the app's shutdown handler. */

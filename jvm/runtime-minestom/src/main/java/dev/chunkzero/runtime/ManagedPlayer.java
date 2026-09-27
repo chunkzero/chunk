@@ -1,6 +1,6 @@
 package dev.chunkzero.runtime;
 
-import chunk.v1.GameplayOuterClass.PlayerDelivery;
+import chunk.sync.v1.Jvm.JvmDelivery;
 
 import net.minestom.server.entity.Player;
 import net.minestom.server.network.player.GameProfile;
@@ -14,19 +14,19 @@ import java.util.concurrent.CompletableFuture;
 
 @ApiStatus.Internal
 public final class ManagedPlayer extends Player {
-    private @Nullable PlayerDelivery binding;
+    private @Nullable JvmDelivery binding;
     private @Nullable CompletableFuture<Void> initialization;
 
     ManagedPlayer(PlayerConnection connection, GameProfile profile) {
         super(connection, profile);
     }
 
-    PlayerDelivery getBinding() {
+    JvmDelivery getBinding() {
         if (binding == null) throw new IllegalStateException("Player delivery has not been bound");
         return binding;
     }
 
-    public void setBinding(PlayerDelivery binding) {
+    public void setBinding(JvmDelivery binding) {
         this.binding = Objects.requireNonNull(binding);
     }
 

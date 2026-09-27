@@ -4,7 +4,10 @@ import chunk.v1.Supervision.SessionInventory;
 
 import dev.chunkzero.runtime.minestom.internal.AppRegistry;
 import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
+import dev.chunkzero.runtime.minestom.internal.GameplayService;
 import dev.chunkzero.runtime.minestom.internal.ProcessService;
+import dev.chunkzero.runtime.minestom.internal.SessionMethodRegistry;
+import dev.chunkzero.runtime.minestom.internal.SessionMethodService;
 
 import net.minestom.server.MinecraftConstants;
 import net.minestom.server.ServerProcess;
@@ -24,6 +27,8 @@ public final class ChunkMinestom implements AutoCloseable {
     private final TickExecutor ticks = new TickExecutor();
     private final SessionManager sessions;
     private final ComponentRegistry components;
+    private final GameplayService gameplay;
+    private final SessionMethodService methods;
     private final ProcessService service;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread shutdownHook;
@@ -45,7 +50,18 @@ public final class ChunkMinestom implements AutoCloseable {
                         components);
         server.setCompressionThreshold(0);
         server.connectionManager().setPlayerProvider(ManagedPlayer::new);
-        service = new ProcessService(sessions, chunk::isReady);
+        gameplay = new GameplayService(sessions, System::nanoTime, chunk::isReady);
+        methods =
+                new SessionMethodService(
+                        sessions,
+                        SessionMethodRegistry.load(
+                                chunk.app(),
+                                factories.keySet(),
+                                Thread.currentThread().getContextClassLoader()),
+                        gameplay::arrived,
+                        chunk::methodResult,
+                        System::currentTimeMillis);
+        service = new ProcessService(sessions, chunk::isReady, gameplay, methods);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
@@ -69,6 +85,7 @@ public final class ChunkMinestom implements AutoCloseable {
                             .buildTask(
                                     () -> {
                                         ticks.flush();
+                                        gameplay.flush();
                                         chunk.flush();
                                         var inventory = sessions.inventory();
                                         chunk.progress(
@@ -101,6 +118,8 @@ public final class ChunkMinestom implements AutoCloseable {
                         () -> {
                             if (task != null) task.cancel();
                         },
+                        methods::close,
+                        gameplay::close,
                         components::close,
                         this::removeShutdownHook);
         for (var action : cleanup) {
