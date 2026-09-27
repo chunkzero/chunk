@@ -14,25 +14,25 @@ use std::{
 /// A host running one JVM, which registers over sync with credential `JVM`: the first host control ensures, or a
 /// given one. A survivor was launched before core restarted and awaits re-attachment.
 #[derive(Clone, Default)]
-struct Launches(Arc<Mutex<Launch>>);
+pub(super) struct Launches(pub(super) Arc<Mutex<Launch>>);
 
 #[derive(Default)]
-struct Launch {
+pub(super) struct Launch {
     host: Option<String>,
     registration: Option<ProcessRegistration>,
     survivor: bool,
-    released: bool,
+    pub(super) released: bool,
     /// Releases that fail before one stops the JVM.
-    refusals: usize,
+    pub(super) refusals: usize,
 }
 
 impl Launches {
-    fn of(host: &str, survivor: bool) -> Self {
+    pub(super) fn of(host: &str, survivor: bool) -> Self {
         let launch = Launch { host: Some(host.into()), survivor, ..Launch::default() };
         Self(Arc::new(Mutex::new(launch)))
     }
 
-    fn host(&self) -> Option<String> {
+    pub(super) fn host(&self) -> Option<String> {
         self.0.lock().unwrap().host.clone()
     }
 
@@ -125,7 +125,7 @@ fn registration() -> JvmRegistration {
     }
 }
 
-fn session(id: &str, phase: JvmSessionPhase) -> JvmSessionStatus {
+pub(super) fn session(id: &str, phase: JvmSessionPhase) -> JvmSessionStatus {
     JvmSessionStatus {
         id: id.into(),
         session_type: "bridge/default".into(),
@@ -146,7 +146,7 @@ impl Fixture {
         self.client.clone().call(authorized(message, credential)).await.unwrap().into_inner()
     }
 
-    async fn register(&self) -> JvmRegistered {
+    pub(super) async fn register(&self) -> JvmRegistered {
         let response = self.jvm_call(JVM, "chunk:register", "", &registration()).await;
         match response.outcome {
             Some(Outcome::Result(result)) => JvmRegistered::decode(result.as_slice()).unwrap(),
@@ -154,11 +154,11 @@ impl Fixture {
         }
     }
 
-    async fn report(&self, stream: &str, report: &JvmReport) -> CallResponse {
+    pub(super) async fn report(&self, stream: &str, report: &JvmReport) -> CallResponse {
         self.jvm_call(JVM, "chunk:report", stream, report).await
     }
 
-    async fn follow_jvm(&self, credential: &str, host: &str) -> Streaming<Update> {
+    pub(super) async fn follow_jvm(&self, credential: &str, host: &str) -> Streaming<Update> {
         let subscription = SubscribeRequest { topic: format!("jvm/{host}"), ..SubscribeRequest::default() };
         self.client.clone().subscribe(authorized(subscription, credential)).await.unwrap().into_inner()
     }
@@ -178,10 +178,10 @@ impl Fixture {
     }
 }
 
-const ACCEPTED: Option<Outcome> = Some(Outcome::Result(Vec::new()));
+pub(super) const ACCEPTED: Option<Outcome> = Some(Outcome::Result(Vec::new()));
 
 /// The sessions a snapshot asks for, by ID.
-fn sessions(update: &Update) -> BTreeMap<String, JvmSession> {
+pub(super) fn sessions(update: &Update) -> BTreeMap<String, JvmSession> {
     assert!(update.snapshot && update.error.is_none());
     let sessions = update.upserts.iter().filter_map(|entry| match &entry.state {
         Some(State::Value(value)) => {
@@ -197,7 +197,7 @@ fn stopped(update: &Update) -> bool {
 }
 
 fn complete(id: &str, phase: JvmSessionPhase, health: Option<JvmHealth>) -> JvmReport {
-    JvmReport { complete: true, sessions: vec![session(id, phase)], health }
+    JvmReport { complete: true, sessions: vec![session(id, phase)], health, ..JvmReport::default() }
 }
 
 fn health(tick_count: u64, draining: bool) -> JvmHealth {
@@ -205,11 +205,14 @@ fn health(tick_count: u64, draining: bool) -> JvmHealth {
 }
 
 /// Reserves a session for the fake player on the fake JVM's host, returning the host once it launched. The claim
-/// itself fails, since the JVM serves no legacy gameplay endpoint.
+/// itself gives up after a second, since these tests' JVM never prepares the player.
 async fn place(fixture: &Fixture, jvm: &Launches) -> String {
     fixture.control.activate_release(runtime::release()).unwrap();
     let control = fixture.control.clone();
-    drop(tokio::spawn(async move { control.claim(runtime::login()).await }));
+    drop(tokio::spawn(tokio::time::timeout(
+        Duration::from_secs(1),
+        async move { control.claim(runtime::login()).await },
+    )));
     loop {
         if let Some(host) = jvm.host() {
             return host;
@@ -442,41 +445,6 @@ async fn a_jvm_whose_deployment_a_restore_lost_is_stopped_instead_of_awaited() {
     // Recovery doesn't wait for the stopped JVM, so claims aren't refused as busy.
     let claim = fixture.control.claim(runtime::login()).await;
     assert!(!matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
-    fixture.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_survivor_serving_a_player_whose_claim_a_restore_lost_is_stopped_before_admission_reopens() {
-    let jvm = Launches::default();
-    let fixture = Fixture::with_host(Arc::new(jvm.clone())).await;
-    let host = place(&fixture, &jvm).await;
-    fixture.register().await;
-    let mut updates = fixture.follow_jvm(JVM, &host).await;
-    let (id, _) = sessions(&next(&mut updates).await).pop_first().expect("a session");
-    drop(updates);
-
-    // Core restarts over a log that kept the host and its session but not the claim of the player the JVM serves.
-    let survivor = Launches::of(&host, true);
-    let fixture = fixture.restart(Arc::new(survivor.clone())).await;
-    fixture.register().await;
-    let mut updates = fixture.follow_jvm(JVM, &host).await;
-    let first = next(&mut updates).await;
-    let serving = JvmSessionStatus { attached: 1, ..session(&id, JvmSessionPhase::Ready) };
-    let report = JvmReport { complete: true, sessions: vec![serving], health: None };
-    assert_eq!(fixture.report(&first.stream, &report).await.outcome, ACCEPTED);
-    // Without the player's delivery control cannot fence it, so it stops the JVM and admits nothing until it has.
-    let claim = fixture.control.claim(runtime::login()).await;
-    assert!(matches!(claim, Err(chunk_control::Error::Busy)), "{claim:?}");
-    assert!(!survivor.0.lock().unwrap().released);
-    while !next(&mut updates).await.upserts.iter().any(|entry| entry.key == "stop") {}
-    drop(updates);
-    let reopened = async {
-        while matches!(fixture.control.claim(runtime::login()).await, Err(chunk_control::Error::Busy)) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), reopened).await.expect("admission reopened");
-    assert!(survivor.0.lock().unwrap().released);
     fixture.stop().await;
 }
 

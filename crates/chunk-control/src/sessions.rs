@@ -70,7 +70,7 @@ impl Control {
             return Ok(());
         };
         // Unfenced deliveries are retried on the next pass.
-        self.fence_deliveries(&runtime, &report).await?;
+        self.fence_deliveries(host, &runtime, &report).await?;
         let now = crate::now_ms();
         self.update(|state| {
             self.reapply(state, host, &runtime.identity)?;

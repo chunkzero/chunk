@@ -22,7 +22,7 @@ use crate::{
     client::{auth, channel},
     drain::retire_host,
     placement::runs_host,
-    state::{Capacity, Claim, Generation, HostState, Phase, SessionState},
+    state::{Capacity, Claim, Generation, HostState, Phase, SessionState, State},
 };
 
 /// How often admission warns that it still waits for surviving JVMs. JVMs repeat registration every second.
@@ -143,13 +143,9 @@ impl Control {
         let Some(inventory) = self.links.report(id, &runtime.identity) else {
             return Ok(false);
         };
-        if self.jvms.unfenceable(id, &inventory) {
-            self.stop_recovered(id, &runtime.identity, "its surviving players cannot be fenced")?;
-            return Ok(false);
-        }
         self.retire_unknown_operations(id, &runtime.identity)?;
         self.retire_unknown_sessions(id, &runtime.identity)?;
-        if !self.fence_deliveries(&runtime, &inventory).await? {
+        if !self.fence_deliveries(id, &runtime, &inventory).await? {
             return Ok(false);
         }
         if orphan {
@@ -258,26 +254,21 @@ impl Control {
         Ok(identity)
     }
 
-    /// Records a released tombstone for each delivery whose operation the log does not know, such as deliveries
-    /// prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
-    /// player again under an operation ID the JVM already holds.
+    /// Retires the operations of `id`'s surviving deliveries the log does not own, as [`retire_unowned`] does.
     fn retire_unknown_operations(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
-        self.update(|state| {
-            let Some(inventory) = self.links.report(id, identity) else {
-                return Ok(());
-            };
-            for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
-                state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
-            }
-            Ok(())
+        self.update(|state| match self.links.report(id, identity) {
+            Some(inventory) => retire_unowned(state, id, &inventory),
+            None => Ok(()),
         })
     }
 
-    /// Withdraws open deliveries that no open claim in the log owns with the same generations, using the generation
+    /// Withdraws open deliveries on `host` that no open claim on it owns with the same generations, using the generation
     /// the JVM holds. `inventory` must be reported before state is read, so every delivery control prepared already
-    /// has its claim. Reports whether every such delivery is now withdrawn.
+    /// has its claim. Reports whether every such delivery is now withdrawn. A JVM registered over sync closes them
+    /// itself, since its topic leaves them out, so for it this only checks that it reported them closed.
     pub(crate) async fn fence_deliveries(
         &self,
+        host: &str,
         runtime: &RuntimeConnection,
         inventory: &ProcessReport,
     ) -> Result<bool> {
@@ -288,12 +279,11 @@ impl Control {
             let Some(delivery) = &binding.delivery else {
                 continue;
             };
-            let owned = state.claims.get(&delivery.operation_id).is_some_and(|claim| {
-                claim.phase != Phase::Released
-                    && claim.generation.wire() == delivery.owner_generation
-                    && claim.membership.wire() == delivery.membership_generation
-            });
-            if owned {
+            if crate::jvm::owned(&state, host, delivery) {
+                continue;
+            }
+            if runtime.over_sync() {
+                fenced = false;
                 continue;
             }
             let client = match &mut gameplay {
@@ -322,7 +312,31 @@ fn orphan(identity: &ProcessIdentity) -> HostState {
     }
 }
 
-/// A released claim standing for `delivery`'s operation. Its empty request matches no retry.
+/// Records a released tombstone for each delivery surviving on `host` whose operation the log does not know, such as
+/// deliveries prepared by commits a restore lost. A retry of that operation is then rejected instead of reserving the
+/// player again under an operation ID the JVM already holds. A reservation on `host` whose assignment a restore lost
+/// is released as such a tombstone too, whatever phase its delivery reached: control can't adopt a delivery it never
+/// recorded the capability of, so it fences it before admission reopens.
+pub(crate) fn retire_unowned(state: &mut State, host: &str, inventory: &ProcessReport) -> Result<()> {
+    for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
+        let operation = &delivery.operation_id;
+        if crate::jvm::owned(state, host, delivery)
+            && state.claims.get(operation).is_some_and(|claim| claim.assignment.is_none())
+        {
+            crate::delivery::release(state, operation)?;
+            state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?.request.clear();
+        }
+        retire_unknown(state, delivery);
+    }
+    Ok(())
+}
+
+/// Records a released claim standing for `delivery`'s operation unless the log knows it. Its empty request matches no
+/// retry.
+pub(crate) fn retire_unknown(state: &mut State, delivery: &PlayerDelivery) {
+    state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
+}
+
 fn tombstone(delivery: &PlayerDelivery) -> Claim {
     let now = crate::now_ms();
     Claim {

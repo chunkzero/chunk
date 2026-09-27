@@ -1,4 +1,5 @@
-//! The `jvm/<host>` topic: the sessions control wants one JVM to run, and whether it should stop, sent as snapshots.
+//! The `jvm/<host>` topic: the sessions, deliveries and session methods control wants one JVM to run, and whether it
+//! should stop, sent as snapshots.
 //! Only that JVM's credential may subscribe. Control decides which of the JVM's streams is current, and a newer
 //! stream ends older ones.
 

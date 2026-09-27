@@ -3,10 +3,17 @@
 // is a snapshot, `after` is ignored, and core sends no position-only updates. A key missing from a snapshot is one the
 // JVM forgets.
 // - `session/<id>`: a JvmSession the JVM runs, or ends once `finish` is set.
+// - `delivery/<op>`: a JvmDelivery, a player core placed in one of those sessions under claim `<op>`. The JVM closes a
+//   delivery it holds open once its key is gone, as if withdrawn, and forgets it once it is closed and its key gone.
+// - `method/<op>`: a JvmMethodCall, a session method to run once as operation `<op>`. It is a work entry: it stays
+//   until `chunk:method_result` records the method's result. Once it is gone, the JVM forgets it.
 // - `stop`: a JvmStop, present once core wants the JVM to exit.
 syntax = "proto3";
 
 package chunk.sync.v1;
+
+import "chunk/sync/v1/core.proto";
+import "chunk/sync/v1/gateway.proto";
 
 // A session core wants the JVM to run.
 message JvmSession {
@@ -23,6 +30,48 @@ message JvmSession {
 // Core wants the JVM to stop its sessions and exit. Core kills a JVM that is still running shortly after.
 message JvmStop {}
 
+// A player core wants the JVM to admit. A delivery moves through the phases of JvmDeliveryPhase, and only forward. The
+// JVM prepares it once its session is ready and reports it PREPARED with a capability it mints. The gateway then
+// connects the player, presenting that capability in PlayerSetup, and the JVM reports the delivery ATTACHED, then
+// ARRIVED. A delivery the JVM can't prepare, whose player leaves, or that is withdrawn ends CLOSED. Only `withdraw`
+// ever changes.
+message JvmDelivery {
+  // The session the player joins, as in its `session/<id>` key.
+  string session = 1;
+  // The commit that created the player's claim. Core ignores a report of the delivery with another generation.
+  Position generation = 2;
+  // Who the player authenticated as.
+  PlayerIdentity player = 3;
+  // Core wants the delivery closed: the JVM refuses or disconnects the player and reports it CLOSED, at once if it
+  // never prepared it. Core removes the key once it's CLOSED.
+  bool withdraw = 4;
+}
+
+// The payload of the `chunk:delivery` login plugin response, with which a gateway presents a player to the JVM.
+message PlayerSetup {
+  // The claim's operation ID, as in its `delivery/<op>` key.
+  string operation_id = 1;
+  // The capability of the claim's assignment, which the JVM minted for that delivery.
+  bytes capability = 2;
+}
+
+// A session method core wants the JVM to run for a player once. Only `cancel` ever changes.
+message JvmMethodCall {
+  // The session the method runs in, as in its `session/<id>` key.
+  string session = 1;
+  // The method's name, as the session type declares it.
+  string method = 2;
+  // The method's arguments as JSON, which match its declaration, in at most 48 KiB.
+  bytes arguments_json = 3;
+  // The operation ID of the delivery, as in its `delivery/<op>` key, of the player the method runs for. The JVM runs
+  // it only while that player is arrived in the session.
+  string delivery = 4;
+  // Unix time in milliseconds after which the JVM no longer starts the method.
+  uint64 deadline_ms = 5;
+  // Core no longer wants the method run. A method that hasn't started never does.
+  bool cancel = 6;
+}
+
 // Methods a JVM calls with its own credential; core takes the JVM's host from that credential. Each carries no
 // deployment or caller, and takes no operation ID.
 // - `chunk:register` takes JvmRegistration and returns JvmRegistered. The JVM calls it before subscribing, so it names
@@ -32,6 +81,9 @@ message JvmStop {}
 // - `chunk:report` takes JvmReport and returns nothing. It names the JVM's current `jvm/<host>` stream in
 //   `CallRequest.stream`, and fails with STOPPED once that stream is superseded. It is idempotent, since each report
 //   carries the latest state of everything it lists.
+// - `chunk:method_result` takes JvmMethodResult and returns nothing. Its operation ID is the method's, as in its
+//   `method/<op>` key, and it names the JVM's current stream like `chunk:report`. Core records the first result for
+//   each method and then removes its key. A repeat, or a result for a key core no longer sends, changes nothing.
 
 // Arguments of `chunk:register`: who the JVM is, as its launch environment told it.
 message JvmRegistration {
@@ -60,12 +112,14 @@ message JvmRegistered {
 
 // Arguments of `chunk:report`: the JVM's actual state.
 message JvmReport {
-  // The report lists every session the JVM holds. The first complete report on a stream attaches the JVM, and core
-  // reconciles it once; a stream's reports before it fail with INVALID. Later reports may list only what changed.
+  // The report lists every session and delivery the JVM holds. The first complete report on a stream attaches the
+  // JVM, and core reconciles it once; a stream's reports before it fail with INVALID. Later reports may list only what
+  // changed.
   bool complete = 1;
   repeated JvmSessionStatus sessions = 2;
   // The JVM's latest health. Core marks a JVM unhealthy once it has reported none for 10 seconds.
   JvmHealth health = 3;
+  repeated JvmDeliveryStatus deliveries = 4;
 }
 
 // A session the JVM holds.
@@ -89,6 +143,50 @@ enum JvmSessionPhase {
   JVM_SESSION_PHASE_ENDING = 3;
   JVM_SESSION_PHASE_ENDED = 4;
   JVM_SESSION_PHASE_FAILED = 5;
+}
+
+// A delivery the JVM holds, including a closed one whose key is still in the topic or that it closed since its last
+// report.
+message JvmDeliveryStatus {
+  // The claim's operation ID, as in its `delivery/<op>` key.
+  string operation_id = 1;
+  // The delivery's generation, as in its JvmDelivery.
+  Position generation = 2;
+  JvmDeliveryPhase phase = 3;
+  // The 32 random bytes the JVM minted to admit the player, set while PREPARED.
+  bytes capability = 4;
+}
+
+// Where a delivery is in its lifecycle.
+enum JvmDeliveryPhase {
+  JVM_DELIVERY_PHASE_UNSPECIFIED = 0;
+  // The JVM holds a slot and expects the player with the capability.
+  JVM_DELIVERY_PHASE_PREPARED = 1;
+  // The JVM holds the player's connection.
+  JVM_DELIVERY_PHASE_ATTACHED = 2;
+  // The player is in the session.
+  JVM_DELIVERY_PHASE_ARRIVED = 3;
+  // The JVM is disconnecting the player.
+  JVM_DELIVERY_PHASE_WITHDRAWING = 4;
+  // The JVM holds neither the player nor a slot for them.
+  JVM_DELIVERY_PHASE_CLOSED = 5;
+}
+
+// Arguments of `chunk:method_result`: how a session method ended.
+message JvmMethodResult {
+  JvmMethodPhase phase = 1;
+  // What the method returned as JSON, which matches its declaration, in at most 48 KiB. Set only when COMPLETED.
+  bytes result_json = 2;
+}
+
+// How a session method ended.
+enum JvmMethodPhase {
+  JVM_METHOD_PHASE_UNSPECIFIED = 0;
+  JVM_METHOD_PHASE_COMPLETED = 1;
+  // The method never ran and never will: `cancel` or its deadline came first, or its player wasn't arrived.
+  JVM_METHOD_PHASE_CANCELLED = 2;
+  // The method threw or returned an invalid result. It may have changed state.
+  JVM_METHOD_PHASE_FAILED = 3;
 }
 
 // A sample of the JVM's health.

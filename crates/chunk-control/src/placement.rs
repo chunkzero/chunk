@@ -2,7 +2,7 @@ mod select;
 
 use chunk_proto::v1::{
     Assignment, ClaimPhase, ClaimRequest, ConfigurationRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery,
-    PlayerRef, SessionRef, gameplay_client::GameplayClient,
+    PlayerPreparation, PlayerRef, SessionRef, gameplay_client::GameplayClient,
 };
 use prost::Message;
 use std::time::Duration;
@@ -47,16 +47,32 @@ impl Control {
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
-        let channel = channel(&runtime).await?;
-        let config = configuration(deployment, &runtime, channel.clone()).await?;
+        // A JVM registered over sync is reached through its topic instead of its gameplay endpoint.
+        let channel = if runtime.over_sync() { None } else { Some(channel(&runtime).await?) };
+        let config = match &channel {
+            Some(channel) => configuration(deployment, &runtime, channel.clone()).await?,
+            None => self.jvm_configuration(deployment, &runtime)?,
+        };
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
             return Ok(assignment);
         }
-        // Control's desired state already asks the JVM for this session.
+        // Control's desired state already asks the JVM for this session, and its topic for this delivery.
         self.session_ready(&session.host, &runtime, &claim.session).await?;
-        let assignment = prepare_assignment(deployment, &runtime, channel, config, claim, &request).await?;
+        let mut delivery = delivery(deployment, &runtime, &config, claim, &request);
+        let preparation = match channel {
+            Some(channel) => prepare(&runtime, channel, &delivery).await?,
+            None => self.prepared_over_sync(&runtime, &request.operation_id, claim.generation).await?,
+        };
+        delivery.identity = None;
+        let assignment = Assignment {
+            claim: Some(claim.identity(&request.operation_id)),
+            phase: ClaimPhase::Reserved as i32,
+            delivery: Some(delivery),
+            configuration: Some(config),
+            preparation: Some(preparation),
+        };
         self.update(|state| {
             // A host released while preparing never gets a new prepared claim, which only its release would end.
             if state.released(&session.host) {
@@ -124,16 +140,15 @@ pub(crate) fn runs_host(state: &State, runtime: &RuntimeConnection, host: &HostS
         && release.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
 }
 
-async fn prepare_assignment(
+/// The delivery `runtime` prepares for `claim`.
+fn delivery(
     deployment: &DeploymentRef,
     runtime: &RuntimeConnection,
-    channel: Channel,
-    config: ConfigurationResponse,
+    config: &ConfigurationResponse,
     claim: &Claim,
     request: &ClaimRequest,
-) -> Result<Assignment> {
-    let mut gameplay = GameplayClient::new(channel);
-    let mut delivery = PlayerDelivery {
+) -> PlayerDelivery {
+    PlayerDelivery {
         deployment: Some(deployment.clone()),
         process_generation: runtime.identity.generation,
         operation_id: request.operation_id.clone(),
@@ -147,22 +162,24 @@ async fn prepare_assignment(
         identity: request.identity.clone(),
         protocol: config.protocol,
         runtime_id: runtime.identity.runtime_id.clone(),
-    };
-    let preparation = gameplay.prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
-    if preparation.operation_id != request.operation_id
+    }
+}
+
+/// Asks `runtime`'s gameplay endpoint to prepare `delivery`.
+async fn prepare(
+    runtime: &RuntimeConnection,
+    channel: Channel,
+    delivery: &PlayerDelivery,
+) -> Result<PlayerPreparation> {
+    let preparation =
+        GameplayClient::new(channel).prepare_player(auth(runtime, delivery.clone(), 3)?).await?.into_inner();
+    if preparation.operation_id != delivery.operation_id
         || preparation.capability.len() != 32
         || preparation.endpoint != runtime.player_endpoint
     {
         return Err(Error::Invalid("invalid preparation"));
     }
-    delivery.identity = None;
-    Ok(Assignment {
-        claim: Some(claim.identity(&request.operation_id)),
-        phase: ClaimPhase::Reserved as i32,
-        delivery: Some(delivery),
-        configuration: Some(config),
-        preparation: Some(preparation),
-    })
+    Ok(preparation)
 }
 
 async fn configuration(

@@ -5,8 +5,10 @@ use tokio::sync::watch;
 
 use crate::{Error, Result};
 
-/// The actual state each attached JVM last reported, kept in memory: a JVM reports it again whenever it reconnects.
-/// Attaching and merging happen inside the commit that applies the report, so links change in commit order.
+/// The actual state each JVM last reported, kept in memory: a JVM reports it again whenever it reconnects. A link
+/// outlives its stream, so a JVM's inventory stands while it reconnects, until a newer stream's complete report
+/// replaces it. Attaching and merging happen inside the commit that applies the report, so links change in commit
+/// order.
 #[derive(Default)]
 pub(crate) struct Links {
     hosts: Mutex<BTreeMap<String, Link>>,
@@ -17,7 +19,8 @@ pub(crate) struct Links {
 
 struct Link {
     identity: ProcessIdentity,
-    stream: u64,
+    /// The stream whose reports merge into the link, while one is attached.
+    stream: Option<u64>,
     sessions: BTreeMap<String, SessionInventory>,
     deliveries: BTreeMap<String, DeliveryInventory>,
 }
@@ -45,7 +48,7 @@ impl Links {
     /// Replaces `host`'s link with a stream whose first report is `report`, returning the stream's ID.
     pub fn attach(&self, host: &str, identity: ProcessIdentity, report: &ProcessReport) -> Result<u64> {
         let stream = self.streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let mut link = Link { identity, stream, sessions: BTreeMap::new(), deliveries: BTreeMap::new() };
+        let mut link = Link { identity, stream: Some(stream), sessions: BTreeMap::new(), deliveries: BTreeMap::new() };
         link.merge(report);
         self.lock()?.insert(host.into(), link);
         Ok(stream)
@@ -56,17 +59,25 @@ impl Links {
         let mut links = self.lock()?;
         let link = links
             .get_mut(host)
-            .filter(|link| link.stream == stream && report.identity.as_ref() == Some(&link.identity))
+            .filter(|link| link.stream == Some(stream) && report.identity.as_ref() == Some(&link.identity))
             .ok_or(Error::Invalid("stale process report"))?;
         link.merge(report);
         Ok(())
     }
 
+    /// Ends `stream`'s authority over `host`'s link, keeping what it reported.
     pub fn detach(&self, host: &str, stream: u64) {
         if let Ok(mut links) = self.lock()
-            && links.get(host).is_some_and(|link| link.stream == stream)
+            && let Some(link) = links.get_mut(host).filter(|link| link.stream == Some(stream))
         {
-            links.remove(host);
+            link.stream = None;
+        }
+    }
+
+    /// Drops the links of hosts `keep` rejects.
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        if let Ok(mut links) = self.lock() {
+            links.retain(|host, _| keep(host));
         }
     }
 
@@ -81,6 +92,17 @@ impl Links {
         }
     }
 
+    /// Drops `host`'s reported deliveries of `operations`.
+    pub fn forget_deliveries(&self, host: &str, operations: &[String]) {
+        if let Ok(mut links) = self.lock()
+            && let Some(link) = links.get_mut(host)
+        {
+            for operation in operations {
+                link.deliveries.remove(operation);
+            }
+        }
+    }
+
     /// Wakes waiters after a report was applied.
     pub fn applied(&self) {
         self.reports.send_modify(|count| *count += 1);
@@ -90,7 +112,7 @@ impl Links {
         self.reports.subscribe()
     }
 
-    /// Everything `identity` reported on `host`'s current stream.
+    /// Everything `identity` last reported on `host`.
     pub fn report(&self, host: &str, identity: &ProcessIdentity) -> Option<ProcessReport> {
         let links = self.hosts.lock().ok()?;
         let link = links.get(host).filter(|link| link.identity == *identity)?;

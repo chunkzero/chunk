@@ -168,7 +168,11 @@ async fn follow(control: Arc<Control>, host: Arc<FakeHost>, stop: CancellationTo
             }
             let (stream, sent, reported) = streams.get_mut(&id).unwrap();
             match control.desired(&id, sent) {
-                Ok(Some(desired)) => runtime.apply(desired),
+                Ok(Some(desired)) => {
+                    let created = desired.create.iter().filter_map(|command| command.session.as_ref());
+                    host.sessions.lock().unwrap().extend(created.map(|session| (session.id.clone(), id.clone())));
+                    runtime.apply(desired);
+                }
                 Ok(None) => {}
                 Err(_) => {
                     streams.remove(&id);
@@ -292,6 +296,8 @@ struct FakeHost {
     adopted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The release each host runs, where it differs from the runtime's.
     deployments: Mutex<BTreeMap<String, DeploymentRef>>,
+    /// The host each session control asked for runs on.
+    sessions: Mutex<BTreeMap<String, String>>,
 }
 
 impl FakeHost {
@@ -304,9 +310,16 @@ impl FakeHost {
         }
     }
 
-    /// Everything host `id`'s JVM holds, as it reports it to control.
+    /// Everything host `id`'s JVM holds, as it reports it to control: the runtime's deliveries into no other host's
+    /// sessions.
     fn report(&self, id: &str) -> ProcessReport {
-        ProcessReport { identity: Some(self.identity(id)), ..self.runtime.report() }
+        let mut report = ProcessReport { identity: Some(self.identity(id)), ..self.runtime.report() };
+        let sessions = self.sessions.lock().unwrap();
+        report.deliveries.retain(|binding| {
+            let session = binding.delivery.as_ref().and_then(|delivery| delivery.session.as_ref());
+            session.and_then(|session| sessions.get(&session.id)).is_none_or(|host| host == id)
+        });
+        report
     }
 }
 #[tonic::async_trait]
@@ -469,6 +482,7 @@ impl Fixture {
             missed: Mutex::default(),
             adopted: Mutex::default(),
             deployments: Mutex::default(),
+            sessions: Mutex::default(),
         });
         let release = release();
         let follower = Mutex::default();

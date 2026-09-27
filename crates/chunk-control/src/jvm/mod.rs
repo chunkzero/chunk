@@ -1,28 +1,38 @@
 //! JVMs attached over the sync protocol. The `jvm/<host>` topic carries the sessions control wants the JVM to run,
-//! keyed `session/<id>` with `chunk.sync.v1.JvmSession` values, and a `stop` entry once its host is releasing. The
+//! keyed `session/<id>` with `chunk.sync.v1.JvmSession` values; each open claim's delivery, keyed `delivery/<op>`; each
+//! session method the JVM has yet to answer, keyed `method/<op>`; and a `stop` entry once its host is releasing. The
 //! JVM's registration and reports go through the same registration, attach and report path as the supervisor's.
 //!
 //! Each host's entry, under one lock, is the only authority for which of its topic streams is current: opening a stream
-//! ends the previous one, and reports check their stream and apply their effects inside that lock.
+//! ends the previous one, and reports check their stream and apply their effects inside that lock. What the JVM
+//! reported outlives its streams, in its link.
+
+mod effects;
+mod topic;
+
+pub use topic::Topic;
 
 use std::{
-    collections::{BTreeMap, btree_map},
-    sync::{Arc, Mutex, MutexGuard},
+    collections::{BTreeMap, BTreeSet, btree_map},
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 
 use chunk_proto::{
     sync::v1 as sync,
     v1::{
-        DeploymentRef, ProcessHealth, ProcessIdentity, ProcessRegistration, ProcessReport, SessionInventory,
-        SessionPhase, SessionRef,
+        DeliveryInventory, DeliveryPhase, DeploymentRef, PlayerDelivery, PlayerRef, ProcessHealth, ProcessIdentity,
+        ProcessRegistration, ProcessReport, SessionInventory, SessionPhase, SessionRef,
     },
 };
-use prost::Message;
 use tokio::{sync::watch, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Control, Error, Generation, Result, state::Capacity, sync::Links};
+use crate::{
+    Control, Error, Generation, Result,
+    state::{Phase, State},
+    sync::Links,
+};
 
 /// How long a JVM's last health sample stands for its health.
 const HEALTH: Duration = Duration::from_secs(10);
@@ -38,8 +48,40 @@ struct Jvm {
     stream: Option<Stream>,
     /// The health the JVM last reported, and when.
     health: Option<(Instant, ProcessHealth)>,
+    /// What control wants of the JVM beyond its log.
+    work: watch::Sender<Work>,
+    /// What the JVM last reported of each open claim's delivery at the claim's generation, by operation ID.
+    deliveries: BTreeMap<String, Reported>,
+}
+
+/// A delivery's phase at `generation`, as its JVM reported it, with the capability it minted while prepared.
+struct Reported {
+    generation: u64,
+    phase: DeliveryPhase,
+    capability: Vec<u8>,
+}
+
+/// The part of a JVM's topic that control keeps in memory.
+#[derive(Default)]
+pub(crate) struct Work {
     /// Whether control asked the JVM to stop.
-    stopping: watch::Sender<bool>,
+    stopping: bool,
+    /// Session methods by operation ID, within the JVM's method budget. The topic carries those still awaiting their
+    /// result.
+    methods: BTreeMap<String, Method>,
+    /// The sequences of the methods whose results' retention ended, so a retry of one is unknown instead of asking
+    /// the JVM again.
+    retired: BTreeSet<u64>,
+    /// Every sequence at or below this was retired too, once `retired` overflowed.
+    retired_below: u64,
+}
+
+struct Method {
+    sequence: u64,
+    /// The call, without its arguments once answered.
+    call: sync::JvmMethodCall,
+    /// The result the JVM sent, and when.
+    result: Option<(Instant, sync::JvmMethodResult)>,
 }
 
 struct Stream {
@@ -76,11 +118,17 @@ impl Jvms {
         (sampled.elapsed() <= HEALTH).then(|| health.clone())
     }
 
-    /// Whether `inventory`, reported on `host`, may hold players control cannot fence. A JVM registered over sync
-    /// reports no deliveries, so its empty delivery inventory is truthful only while its sessions hold no players.
-    pub fn unfenceable(&self, host: &str, inventory: &ProcessReport) -> bool {
-        self.pushes_health(host)
-            && inventory.sessions.iter().any(|session| session.prepared > 0 || session.attached > 0)
+    /// The Minecraft protocol `host`'s JVM registered with.
+    pub fn protocol(&self, host: &str) -> Option<i32> {
+        Some(self.0.lock().ok()?.get(host)?.registration.protocol)
+    }
+
+    /// The phase `host`'s JVM last reported for `operation`'s delivery at `generation`, with the capability it minted
+    /// while prepared.
+    pub fn delivery(&self, host: &str, operation: &str, generation: Generation) -> Option<(DeliveryPhase, Vec<u8>)> {
+        let jvms = self.0.lock().ok()?;
+        let reported = jvms.get(host)?.deliveries.get(operation)?;
+        (reported.generation == generation.wire()).then(|| (reported.phase, reported.capability.clone()))
     }
 
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -106,8 +154,13 @@ impl Control {
             btree_map::Entry::Occupied(jvm) if jvm.get().registration != registration => changed(),
             btree_map::Entry::Occupied(_) => Ok(()),
             btree_map::Entry::Vacant(entry) => {
-                let stopping = watch::Sender::new(false);
-                entry.insert(Jvm { registration, stream: None, health: None, stopping });
+                entry.insert(Jvm {
+                    registration,
+                    stream: None,
+                    health: None,
+                    work: watch::Sender::default(),
+                    deliveries: BTreeMap::new(),
+                });
                 Ok(())
             }
         }
@@ -146,12 +199,23 @@ impl Control {
     }
 
     /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`, through the supervisor's
-    /// attach and report path. The commit checks that `stream` is current and applies the report's sessions, link and
-    /// health under the JVMs' lock, so a superseded stream changes nothing and each stream attaches once, with its
-    /// first complete report. A report abandoned after that commit leaves its recovery to later reports and claims.
+    /// attach and report path. The commit checks that `stream` is current and applies the report's sessions,
+    /// deliveries, link and health under the JVMs' lock, so a superseded stream changes nothing and each stream
+    /// attaches once, with its first complete report. A report abandoned after that commit leaves its recovery to later
+    /// reports and claims.
     /// # Errors
-    /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one.
+    /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one and
+    /// malformed deliveries.
     pub async fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
+        let prepared = |status: &sync::JvmDeliveryStatus| status.phase() == sync::JvmDeliveryPhase::Prepared;
+        if report.deliveries.iter().any(|status| {
+            status.operation_id.is_empty()
+                || generation(status).is_none()
+                || status.phase() == sync::JvmDeliveryPhase::Unspecified
+                || (prepared(status) && status.capability.len() != 32)
+        }) {
+            return Err(Error::Invalid("invalid delivery status"));
+        }
         let runtime = self.host.connection(host).ok_or(Error::Invalid("unregistered or replaced process"))?;
         let sessions = report.sessions.into_iter().map(inventory).collect();
         let mut inventory =
@@ -161,22 +225,60 @@ impl Control {
             let mut jvms = self.jvms.lock()?;
             let jvm = jvms.get_mut(host).ok_or(Error::Stopped)?;
             let current = jvm.stream.as_mut().filter(|current| current.id == stream).ok_or(Error::Stopped)?;
+            let deliveries = report.deliveries.iter().map(|status| delivery(state, &runtime.identity, status));
+            inventory.deliveries = deliveries.collect();
             let attached = match current.link {
                 Some(link) => {
                     self.merge_in(state, host, link, &inventory)?;
                     None
                 }
                 None if report.complete => {
-                    // The report holds no deliveries, so attaching keeps those the host's link already holds.
-                    if let Some(retained) = self.links.report(host, &runtime.identity) {
-                        inventory.deliveries = retained.deliveries;
-                    }
                     let (link, runtime) = self.attach_in(state, host, credential, &inventory)?;
                     current.link = Some(link);
                     Some(runtime)
                 }
                 None => return Err(Error::Invalid("a stream's first report must be complete")),
             };
+            if report.complete {
+                jvm.deliveries.clear();
+            }
+            // Only a delivery at the generation of an open claim on this host counts, so a stale one or another host's
+            // neither supplies nor removes the current one's capability.
+            for (status, binding) in report.deliveries.iter().zip(&inventory.deliveries) {
+                if let Some(delivery) = binding.delivery.as_ref().filter(|delivery| owned(state, host, delivery)) {
+                    let reported = Reported {
+                        generation: delivery.owner_generation,
+                        phase: binding.phase(),
+                        capability: status.capability.clone(),
+                    };
+                    jvm.deliveries.insert(status.operation_id.clone(), reported);
+                }
+            }
+            jvm.deliveries.retain(|operation, reported| {
+                state.claims.get(operation).is_some_and(|claim| {
+                    claim.phase != Phase::Released && claim.generation.wire() == reported.generation
+                })
+            });
+            jvm.work.send_if_modified(|work| {
+                work.prune();
+                false
+            });
+            // A closed delivery no open claim owns needs nothing more, once a recovering host's operation the log
+            // lost has its tombstone.
+            let recovering = self.recovery.pending()?.iter().any(|pending| pending == host);
+            let mut done = Vec::new();
+            for binding in &inventory.deliveries {
+                let Some(delivery) = binding.delivery.as_ref().filter(|delivery| !owned(state, host, delivery)) else {
+                    continue;
+                };
+                if binding.phase == DeliveryPhase::Closed as i32 {
+                    if recovering {
+                        crate::recovery::retire_unknown(state, delivery);
+                    }
+                    done.push(delivery.operation_id.clone());
+                }
+            }
+            self.links.forget_deliveries(host, &done);
             if let Some(health) = health {
                 jvm.health = Some((Instant::now(), health));
             }
@@ -184,7 +286,7 @@ impl Control {
         });
         self.links.applied();
         if let Some(runtime) = attached? {
-            self.fence_deliveries(&runtime, &inventory).await?;
+            self.fence_deliveries(host, &runtime, &inventory).await?;
         }
         self.resolve_recovery().await
     }
@@ -193,147 +295,70 @@ impl Control {
     /// keeps its credential until its stream closes or the grace a stop request has passes; then its stream ends.
     pub(crate) async fn release_host(&self, host: &str) -> Result<bool> {
         let stream = self.jvms.lock()?.get(host).map(|jvm| {
-            jvm.stopping.send_replace(true);
+            jvm.work.send_if_modified(|work| !std::mem::replace(&mut work.stopping, true));
             jvm.stream.as_ref().map(|stream| stream.ended.clone())
         });
         if let Some(Some(ended)) = stream {
             let _ = tokio::time::timeout(crate::process::STOP_GRACE, ended.cancelled()).await;
         }
         let released = self.host.release(host).await;
-        if let Some(Some(stream)) = self.jvms.lock()?.get_mut(host).map(|jvm| jvm.stream.take()) {
-            stream.end(&self.links, host);
+        if let Some(jvm) = self.jvms.lock()?.get_mut(host) {
+            if let Some(stream) = jvm.stream.take() {
+                stream.end(&self.links, host);
+            }
+            // Only a JVM its host confirmed stopped runs no more methods; one that may still run keeps their history.
+            if matches!(released, Ok(true)) {
+                jvm.work.send_if_modified(Work::forget_methods);
+            }
         }
         released
     }
 }
 
-/// One stream of a JVM's topic. Every update is a snapshot, sent only when it differs from the previous one. Dropping
-/// the stream ends it, detaching the link its reports attached.
-pub struct Topic {
-    control: Arc<Control>,
-    host: String,
-    stream: String,
-    ended: CancellationToken,
-    positions: watch::Receiver<Generation>,
-    stopping: watch::Receiver<bool>,
-    /// The entries last sent, with encoded values.
-    sent: BTreeMap<String, Vec<u8>>,
+/// Whether an open claim on one of `host`'s sessions owns `delivery`, which `host` reported, with the same
+/// generations.
+pub(crate) fn owned(state: &State, host: &str, delivery: &PlayerDelivery) -> bool {
+    state.claims.get(&delivery.operation_id).is_some_and(|claim| {
+        claim.phase != Phase::Released
+            && claim.generation.wire() == delivery.owner_generation
+            && claim.membership.wire() == delivery.membership_generation
+            && state.sessions.get(&claim.session).is_some_and(|session| session.host == host)
+    })
 }
 
-impl Topic {
-    /// Opens `host`'s topic as `stream`, which becomes the host's current stream and ends the earlier one, and returns
-    /// its first snapshot.
-    /// # Errors
-    /// Rejects a host whose JVM has not registered over sync, and reports unreadable control state.
-    pub fn open(control: &Arc<Control>, host: &str, stream: &str) -> Result<(Self, sync::Update)> {
-        let positions = control.subscribe();
-        let ended = CancellationToken::new();
-        let stopping = {
-            let mut jvms = control.jvms.lock()?;
-            let jvm = jvms.get_mut(host).ok_or(Error::Invalid("the JVM has not registered over sync"))?;
-            let current = Stream { id: stream.into(), link: None, ended: ended.clone() };
-            if let Some(previous) = jvm.stream.replace(current) {
-                previous.end(&control.links, host);
-            }
-            jvm.stopping.subscribe()
-        };
-        let mut topic = Self {
-            control: control.clone(),
-            host: host.into(),
-            stream: stream.into(),
-            ended,
-            positions,
-            stopping,
-            sent: BTreeMap::new(),
-        };
-        let (position, entries) = topic.entries()?;
-        let update = topic.snapshot(position, entries);
-        Ok((topic, update))
+/// The delivery `status` reports, as a supervisor's inventory states it. A JVM on sync names only a delivery's
+/// operation and generation; the rest is its claim's, when the log has one.
+fn delivery(state: &State, identity: &ProcessIdentity, status: &sync::JvmDeliveryStatus) -> DeliveryInventory {
+    let mut delivery = PlayerDelivery {
+        operation_id: status.operation_id.clone(),
+        owner_generation: generation(status).map_or(0, Generation::wire),
+        ..PlayerDelivery::default()
+    };
+    if let Some(claim) = state.claims.get(&status.operation_id) {
+        delivery.deployment.clone_from(&identity.deployment);
+        delivery.runtime_id.clone_from(&identity.runtime_id);
+        delivery.process_generation = identity.generation;
+        delivery.session = Some(SessionRef { id: claim.session.clone() });
+        delivery.session_generation = 1;
+        delivery.membership_generation = claim.membership.wire();
+        delivery.proxy_id.clone_from(&claim.proxy);
+        delivery.player = Some(PlayerRef { id: claim.player.clone() });
     }
-
-    /// Cancelled once the stream stops being current: a newer stream superseded it, or its JVM was stopped.
-    #[must_use]
-    pub fn ended(&self) -> CancellationToken {
-        self.ended.clone()
-    }
-
-    /// Waits for a commit or for control to ask the JVM to stop, or forever once control is gone.
-    pub async fn changed(&mut self) {
-        tokio::select! {
-            Ok(()) = self.positions.changed() => {}
-            Ok(()) = self.stopping.changed() => {}
-            else => std::future::pending().await,
-        }
-    }
-
-    /// A snapshot if control wants something else of the JVM than the previous update said, or else `None`.
-    /// # Errors
-    /// Reports a replaced process and unreadable control state.
-    pub fn update(&mut self) -> Result<Option<sync::Update>> {
-        let (position, entries) = self.entries()?;
-        if entries == self.sent {
-            return Ok(None);
-        }
-        let forgotten: Vec<String> = self
-            .sent
-            .keys()
-            .filter(|key| !entries.contains_key(*key))
-            .filter_map(|key| key.strip_prefix("session/"))
-            .map(Into::into)
-            .collect();
-        self.control.links.forget(&self.host, &forgotten);
-        Ok(Some(self.snapshot(position, entries)))
-    }
-
-    fn entries(&self) -> Result<(Generation, BTreeMap<String, Vec<u8>>)> {
-        let state = self.control.state()?;
-        let runtime = self.control.host.connection(&self.host);
-        let runtime = runtime.ok_or(Error::Invalid("unregistered or replaced process"))?;
-        let mut entries = BTreeMap::new();
-        for (id, (finish, command)) in crate::sync::desired(&state, &self.host, &runtime.identity)? {
-            let session = sync::JvmSession {
-                session_type: command.session_type,
-                capacity: command.capacity,
-                configuration_json: command.configuration_json,
-                finish,
-            };
-            entries.insert(format!("session/{id}"), session.encode_to_vec());
-        }
-        let releasing = state.hosts.get(&self.host).is_some_and(|host| host.capacity == Capacity::Releasing);
-        if releasing || *self.stopping.borrow() {
-            entries.insert("stop".into(), sync::JvmStop {}.encode_to_vec());
-        }
-        Ok((state.position(), entries))
-    }
-
-    fn snapshot(&mut self, position: Generation, entries: BTreeMap<String, Vec<u8>>) -> sync::Update {
-        let upserts = entries.iter().map(|(key, value)| sync::Entry {
-            key: key.clone(),
-            state: Some(sync::entry::State::Value(value.clone())),
-        });
-        let update = sync::Update {
-            position: crate::gateway::position(position),
-            snapshot: true,
-            upserts: upserts.collect(),
-            ..sync::Update::default()
-        };
-        self.sent = entries;
-        update
-    }
+    let phase = match status.phase() {
+        sync::JvmDeliveryPhase::Unspecified => DeliveryPhase::Unspecified,
+        sync::JvmDeliveryPhase::Prepared => DeliveryPhase::Prepared,
+        sync::JvmDeliveryPhase::Attached => DeliveryPhase::Attached,
+        sync::JvmDeliveryPhase::Arrived => DeliveryPhase::Arrived,
+        sync::JvmDeliveryPhase::Withdrawing => DeliveryPhase::Withdrawing,
+        sync::JvmDeliveryPhase::Closed => DeliveryPhase::Closed,
+    };
+    DeliveryInventory { delivery: Some(delivery), phase: phase.into() }
 }
 
-impl Drop for Topic {
-    fn drop(&mut self) {
-        let Ok(mut jvms) = self.control.jvms.lock() else {
-            return;
-        };
-        if let Some(jvm) = jvms.get_mut(&self.host)
-            && jvm.stream.as_ref().is_some_and(|current| current.id == self.stream)
-            && let Some(current) = jvm.stream.take()
-        {
-            current.end(&self.control.links, &self.host);
-        }
-    }
+/// The generation `status` reports, unless it is out of range.
+fn generation(status: &sync::JvmDeliveryStatus) -> Option<Generation> {
+    let position = status.generation.as_ref()?;
+    Generation::new(position.epoch, position.revision).ok()
 }
 
 fn inventory(status: sync::JvmSessionStatus) -> SessionInventory {

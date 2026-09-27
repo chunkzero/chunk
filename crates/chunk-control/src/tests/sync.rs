@@ -130,3 +130,26 @@ async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
     assert!(scope("another-player").is_err());
     fixture.close().await;
 }
+
+#[test]
+fn a_jvms_inventory_outlives_its_stream_until_a_newer_stream_reports() {
+    let links = crate::sync::Links::default();
+    let identity = ProcessIdentity { runtime_id: "host".into(), ..ProcessIdentity::default() };
+    let report = |operation: &str| ProcessReport {
+        identity: Some(identity.clone()),
+        sessions: Vec::new(),
+        deliveries: vec![DeliveryInventory {
+            delivery: Some(PlayerDelivery { operation_id: operation.into(), ..PlayerDelivery::default() }),
+            phase: DeliveryPhase::Arrived.into(),
+        }],
+    };
+    let first = links.attach("host", identity.clone(), &report("kept")).unwrap();
+    links.detach("host", first);
+    // A reconnecting JVM's deliveries stand, but its ended stream no longer reports.
+    assert!(links.delivery("host", &identity, "kept").is_some());
+    assert!(links.merge("host", first, &report("late")).is_err());
+    let second = links.attach("host", identity.clone(), &report("current")).unwrap();
+    assert!(links.delivery("host", &identity, "kept").is_none());
+    links.merge("host", second, &report("later")).unwrap();
+    assert!(links.delivery("host", &identity, "later").is_some());
+}

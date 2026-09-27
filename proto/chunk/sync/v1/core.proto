@@ -3,7 +3,7 @@
 //
 // Names. Methods and topics are strings. A method is an app function path from the deployment's contract, or a
 // platform method named `chunk:<name>`; function paths never contain `:`. Planned topic families, not normative:
-// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<id>`, `method/<op>`, `nodes`, `players`.
+// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<id>`, `nodes`, `players`.
 //
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
@@ -37,7 +37,9 @@
 // applied position.
 //
 // Topic rules. A topic that delivers work gives each item a key it never reuses and keeps the item until the client
-// acknowledges it with a Call, so coalescing never drops pending work. A topic with one attached client, such as
+// acknowledges it with a Call, so coalescing never drops pending work. `jvm/<host>` delivers each player placed on the
+// JVM as a `delivery/<op>` entry, which the JVM's reports close, and each session method as a `method/<op>` entry,
+// which `chunk:method_result` acknowledges. A topic with one attached client, such as
 // `jvm/<host>`, fences it: a newer stream supersedes older ones, which end with STOPPED, and calls reporting on the
 // topic name their stream and fail with STOPPED once it's superseded. `chunk:register`, which a JVM calls before it
 // subscribes, is the exception and names no stream.
