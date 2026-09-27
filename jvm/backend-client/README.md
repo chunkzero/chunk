@@ -36,7 +36,8 @@ heterogeneous group, bind references with `session.bind`, then use `watchGroup` 
 original bound query object. Per-query errors are values. Transport interruption retains the last snapshot with
 `stale=true`; transient failures resume after the last applied position, or start from a fresh complete group. Observers
 are serialized and never run on gRPC threads; a slow observer receives only the latest state. Scope closure prevents
-later callbacks. Nontransient failures remain stale with an error until closed.
+later callbacks: it interrupts a blocked observer and waits for a callback in progress. Nontransient failures remain
+stale with an error until closed.
 
 The public runtime classpath contains Java libraries only. The protobuf module uses the Java convention plugin because
 it generates Java sources exclusively. Focused check: `./gradlew :jvm:backend-client:test`.

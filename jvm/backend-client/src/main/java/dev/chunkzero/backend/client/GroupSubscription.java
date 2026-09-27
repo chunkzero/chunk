@@ -16,19 +16,23 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 /**
  * Keeps a group's view current from the transport's updates. A broken stream resumes after the last
  * applied position; one that ended STOPPED starts over from a snapshot. Observer callbacks are
  * serialized and never run on the transport's threads, and a slow observer skips to the latest
- * state.
+ * state. Closing interrupts the delivery thread and waits for a callback in progress, so none runs
+ * once close returns.
  */
 final class GroupSubscription implements AutoCloseable {
     private final BackendSession owner;
     private final List<BoundQuery<?>> queries;
     private final List<Transport.Invocation> requests;
     private final Consumer<GroupState> observer;
+    // Held while the observer runs; a callback starts only if the subscription is still open.
+    private final ReentrantLock callback = new ReentrantLock();
     private boolean closed;
     private long generation;
     private Context.CancellableContext stream;
@@ -43,7 +47,7 @@ final class GroupSubscription implements AutoCloseable {
     private boolean stale = true;
     // The latest state the observer has yet to see.
     private GroupState pending;
-    private boolean delivering;
+    private Thread worker;
 
     GroupSubscription(
             BackendSession owner, List<BoundQuery<?>> queries, Consumer<GroupState> observer) {
@@ -55,13 +59,21 @@ final class GroupSubscription implements AutoCloseable {
 
     /** Delivers the initial stale state on the caller's thread, then connects. */
     void start() {
-        observe(new GroupState(true, Optional.empty(), Optional.empty()));
+        callback.lock();
+        try {
+            synchronized (this) {
+                if (closed) return;
+            }
+            observe(new GroupState(true, Optional.empty(), Optional.empty()));
+        } finally {
+            callback.unlock();
+        }
         connect();
     }
 
     private synchronized void connect() {
         if (closed || owner.closed.get()) {
-            close();
+            shut();
             return;
         }
         long attempt = ++generation;
@@ -210,30 +222,33 @@ final class GroupSubscription implements AutoCloseable {
         try {
             retry = owner.scheduler.schedule(this::connect, 500, TimeUnit.MILLISECONDS);
         } catch (RuntimeException error) {
-            close();
+            shut();
         }
     }
 
     /** Hands {@code state} to the observer's thread, replacing any state it has yet to see. */
     private void publish(GroupState state) {
         pending = state;
-        if (delivering) return;
-        delivering = true;
-        Thread.startVirtualThread(this::deliver);
+        if (worker == null) worker = Thread.startVirtualThread(this::deliver);
     }
 
     private void deliver() {
         while (true) {
-            GroupState state;
-            synchronized (this) {
-                state = pending;
-                pending = null;
-                if (state == null || closed) {
-                    delivering = false;
-                    return;
+            callback.lock();
+            try {
+                GroupState state;
+                synchronized (this) {
+                    state = pending;
+                    pending = null;
+                    if (state == null || closed) {
+                        worker = null;
+                        return;
+                    }
                 }
+                observe(state);
+            } finally {
+                callback.unlock();
             }
-            observe(state);
         }
     }
 
@@ -247,7 +262,19 @@ final class GroupSubscription implements AutoCloseable {
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
+        shut();
+        if (callback.isHeldByCurrentThread()) return;
+        try {
+            callback.lockInterruptibly();
+            callback.unlock();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Stops the stream and later callbacks, and interrupts the observer's thread. */
+    private synchronized void shut() {
         if (closed) return;
         closed = true;
         ++generation;
@@ -255,6 +282,7 @@ final class GroupSubscription implements AutoCloseable {
         if (retry != null) retry.cancel(false);
         if (stream != null) stream.cancel(null);
         stream = null;
+        if (worker != null && worker != Thread.currentThread()) worker.interrupt();
         owner.watches.remove(this);
     }
 }

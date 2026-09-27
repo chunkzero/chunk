@@ -42,6 +42,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 
 class BackendSessionTest {
     private static final String CREDENTIAL = "test-credential-with-at-least-32-bytes";
@@ -337,27 +341,30 @@ class BackendSessionTest {
                         .directExecutor()
                         .build();
         var release = new CountDownLatch(1);
+        var blocked = new CountDownLatch(1);
+        var interrupted = new CountDownLatch(1);
         var slowStates = new LinkedBlockingQueue<GroupState>();
         try (var shared =
-                        BackendSession.overCore(
-                                direct,
-                                CREDENTIAL,
-                                "immutable-build",
-                                new SessionIdentity(new SessionId("s1"), "duels", Optional.empty()),
-                                scheduler,
-                                Duration.ofSeconds(5));
-                var slow =
-                        shared.watchGroup(
-                                List.of(shared.bind(READ, 1L)),
-                                state -> {
-                                    slowStates.add(state);
-                                    if (state.stale()) return;
-                                    try {
-                                        release.await();
-                                    } catch (InterruptedException error) {
-                                        Thread.currentThread().interrupt();
-                                    }
-                                })) {
+                BackendSession.overCore(
+                        direct,
+                        CREDENTIAL,
+                        "immutable-build",
+                        new SessionIdentity(new SessionId("s1"), "duels", Optional.empty()),
+                        scheduler,
+                        Duration.ofSeconds(5))) {
+            var slow =
+                    shared.watchGroup(
+                            List.of(shared.bind(READ, 1L)),
+                            state -> {
+                                slowStates.add(state);
+                                if (state.stale()) return;
+                                boolean last = state.snapshot().orElseThrow().revision() == 5;
+                                try {
+                                    (last ? blocked : release).await();
+                                } catch (InterruptedException error) {
+                                    interrupted.countDown();
+                                }
+                            });
             assertNotNull(slow);
             var slowWatch = fixture.watches.poll(2, TimeUnit.SECONDS);
             assertNotNull(slowWatch);
@@ -397,8 +404,68 @@ class BackendSessionTest {
                     revision = state.snapshot().orElseThrow().revision();
             }
             assertEquals(4, revision);
+
+            // Closing interrupts an observer blocked in its callback and waits for it to return.
+            slowWatch.response().onNext(snapshot(5, value("0", "5")));
+            assertEquals(5L, value(slowStates.poll(2, TimeUnit.SECONDS), 5));
+            slow.close();
+            assertEquals(0, interrupted.getCount());
         } finally {
             direct.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void noCallbackRunsOnceCloseReturns() throws Exception {
+        var late = new AtomicInteger();
+        for (int round = 0; round < 20; round++) {
+            var closed = new AtomicBoolean();
+            Consumer<GroupState> observer =
+                    state -> {
+                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(200));
+                        if (closed.get()) late.incrementAndGet();
+                    };
+
+            // Queued delivery racing close.
+            var queued = session.forPlayer(new PlayerId("queued-" + round));
+            queued.watchGroup(List.of(queued.bind(READ, 1L)), observer);
+            var watch = watchFor("queued-" + round);
+            var sender =
+                    Thread.startVirtualThread(
+                            () -> {
+                                for (int revision = 1; revision <= 20; revision++) {
+                                    try {
+                                        watch.response()
+                                                .onNext(snapshot(revision, value("0", "1")));
+                                    } catch (RuntimeException cancelled) {
+                                        return;
+                                    }
+                                }
+                            });
+            LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(round * 50L));
+            queued.close();
+            closed.set(true);
+            sender.join();
+
+            // Initial delivery racing close.
+            closed.set(false);
+            var initial = session.forPlayer(new PlayerId("initial-" + round));
+            var starter =
+                    Thread.startVirtualThread(
+                            () -> initial.watchGroup(List.of(initial.bind(READ, 1L)), observer));
+            initial.close();
+            closed.set(true);
+            starter.join();
+        }
+        Thread.sleep(50);
+        assertEquals(0, late.get());
+    }
+
+    private Watch watchFor(String player) throws InterruptedException {
+        while (true) {
+            var watch = fixture.watches.poll(2, TimeUnit.SECONDS);
+            assertNotNull(watch);
+            if (watch.request().getCaller().getPlayer().equals(player)) return watch;
         }
     }
 
