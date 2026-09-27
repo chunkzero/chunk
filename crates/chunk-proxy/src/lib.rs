@@ -76,7 +76,8 @@ impl std::fmt::Debug for GameplayTarget {
     }
 }
 
-/// Core's endpoint and this gateway's identity in it, with the backend connection hooks and commands still use.
+/// Core's endpoint and this gateway's identity in it, with the backend connection commands still use. Hooks run in
+/// `backend.deployment`.
 #[derive(Clone)]
 pub struct PlatformTarget {
     /// Core's endpoint, which serves the sync protocol.

@@ -1,10 +1,11 @@
-//! A fake of core's sync service: the `gateway/proxy` topic holding one claim, and the `chunk:*` claim methods.
+//! A fake of core's sync service: the `gateway/proxy` topic holding one claim, the `chunk:*` claim methods, and the
+//! deployment's root routing hook.
 
 use super::Service;
 use chunk_proto::sync::v1::{
     self as sync, ActivateResult, CallRequest, CallResponse, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal,
-    ClaimResult, GatewayClaim, SubscribeRequest, Update, WithdrawResult, call_response, claim_result, core_server,
-    error::Code,
+    ClaimResult, GatewayClaim, ManifestResult, PrepareResult, SubscribeRequest, Update, WithdrawResult, call_response,
+    claim_result, core_server, error::Code,
 };
 use prost::Message;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -81,6 +82,33 @@ impl Service {
         }))
     }
 
+    /// Runs a call that names no stream: the manifest, or its routing hook under a prepared operation ID.
+    async fn unfenced(&self, call: &CallRequest) -> Result<Vec<u8>, sync::Error> {
+        match call.method.as_str() {
+            "chunk:manifest" => Ok(ManifestResult {
+                deployment: call.deployment.clone(),
+                manifest_json: serde_json::to_vec(&serde_json::json!({
+                    "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}},
+                    "hooks":{"shared/domains/hooks/route":{"domain":"","event":"player.route","export":"route"}}
+                }))
+                .unwrap(),
+            }
+            .encode_to_vec()),
+            "chunk:prepare" => Ok(PrepareResult { operation_id: "prep:route".into() }.encode_to_vec()),
+            "shared/domains/hooks/route" => {
+                assert_eq!(call.operation_id, "prep:route");
+                let unroutable = self.logins.lock().unwrap().unroutable.take();
+                if let Some(unroutable) = unroutable {
+                    let _ = unroutable.await;
+                    return Err(sync::Error { code: Code::Unavailable.into(), message: "routing failed".into() });
+                }
+                let route = serde_json::json!({"key":"lobby","session_type":"lobby/default","machine_profile":"local"});
+                Ok(serde_json::to_vec(&route).unwrap())
+            }
+            _ => Err(sync::Error { code: Code::Invalid.into(), message: "unused".into() }),
+        }
+    }
+
     async fn claim_move(&self, operation: &str) -> Result<Vec<u8>, sync::Error> {
         let (error, stall) = {
             let mut movement = self.movement.lock().unwrap();
@@ -108,6 +136,13 @@ impl core_server::Core for Service {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         super::auth(&request, "gateway")?;
         let call = request.into_inner();
+        if call.stream.is_empty() {
+            let outcome = match self.unfenced(&call).await {
+                Ok(result) => call_response::Outcome::Result(result),
+                Err(error) => call_response::Outcome::Error(error),
+            };
+            return Ok(Response::new(CallResponse { position: None, outcome: Some(outcome) }));
+        }
         if call.stream == *self.stream.lock().unwrap() && self.supersede.load(Ordering::SeqCst) {
             self.superseded.notify_one();
             while call.stream == *self.stream.lock().unwrap() {

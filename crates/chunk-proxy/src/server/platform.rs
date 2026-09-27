@@ -1,16 +1,14 @@
 use std::{io, sync::Arc, time::Duration};
 
+use chunk_contract::DomainManifest;
 use chunk_proto::{
-    sync::v1::Position,
-    v1::{
-        BackendQuery, SessionDemand, backend_client::BackendClient, backend_commands_client::BackendCommandsClient,
-        local_control_client::LocalControlClient,
-    },
+    sync::v1::{CallRequest, Caller, Position, PrepareResult},
+    v1::{SessionDemand, backend_commands_client::BackendCommandsClient, local_control_client::LocalControlClient},
 };
 use prost::Message;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 use tonic::{
     Request,
     transport::{Channel, Endpoint},
@@ -36,10 +34,10 @@ pub(super) struct Platform {
     /// Control's local service, which command effects still move players and call session methods through.
     pub control: LocalControlClient<Channel>,
     pub commands: BackendCommandsClient<Channel>,
-    backend: BackendClient<Channel>,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
-    native: native::Native,
+    /// The domain manifest of the target's deployment, read once.
+    manifest: Arc<OnceCell<Option<Arc<DomainManifest>>>>,
     sync: Arc<sync::Connection>,
 }
 
@@ -64,8 +62,7 @@ impl Platform {
             control: LocalControlClient::new(channel(&target.core)?).max_decoding_message_size(8 * 1024 * 1024),
             commands: BackendCommandsClient::new(channel(&target.backend.endpoint)?)
                 .max_decoding_message_size(1024 * 1024),
-            backend: BackendClient::new(channel(&target.backend.endpoint)?),
-            native: native::Native::new(&target.backend.endpoint)?,
+            manifest: Arc::default(),
             cleanup,
             proxy_id: sync.gateway().to_owned(),
             hooks: Arc::new(Semaphore::new(64)),
@@ -105,41 +102,61 @@ impl Platform {
         Ok(request)
     }
 
-    async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: Value) -> io::Result<T> {
+    /// Calls app function or hook `method` of the target's deployment with JSON `arguments` under `operation`, which
+    /// is empty for a query. The caller names `player` while this gateway holds their claim.
+    async fn call_app(
+        &self,
+        operation: String,
+        method: &str,
+        arguments: &Value,
+        player: Option<&str>,
+    ) -> io::Result<Value> {
+        let message = CallRequest {
+            operation_id: operation,
+            method: method.to_owned(),
+            arguments: serde_json::to_vec(arguments).map_err(invalid_data)?,
+            deployment: self.target.backend.deployment.clone(),
+            caller: player.map(|player| Caller { player: player.to_owned(), ..Caller::default() }),
+            ..CallRequest::default()
+        };
+        serde_json::from_slice(&self.sync.unfenced(message).await?).map_err(invalid_data)
+    }
+
+    /// An operation ID for one effectful call.
+    async fn prepare(&self) -> io::Result<String> {
+        let message = CallRequest { method: "chunk:prepare".into(), ..CallRequest::default() };
+        let result = self.sync.unfenced(message).await?;
+        Ok(PrepareResult::decode(result.as_slice()).map_err(invalid_data)?.operation_id)
+    }
+
+    /// Queries the app's legacy `shared/proxy/<phase>` hook.
+    async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: &Value, player: Option<&str>) -> io::Result<T> {
         let hooks = if phase == "status" { &self.status_hooks } else { &self.hooks };
         let _permit = hooks.try_acquire().map_err(|_| io::Error::other("backend hook capacity exhausted"))?;
-        let invocation = self.backend_request(
-            BackendQuery {
-                function: format!("shared/proxy/{phase}"),
-                arguments_json: serde_json::to_vec(&arguments).map_err(invalid_data)?,
-                caller_json: serde_json::to_vec(&json!({"kind": "proxy", "phase": phase, "proxyId": self.proxy_id}))
-                    .map_err(invalid_data)?,
-            },
-            &self.target.backend.token,
-        )?;
-        let result = self.backend.clone().query(invocation).await.map_err(io::Error::other)?.into_inner();
-        serde_json::from_slice(&result.result_json).map_err(invalid_data)
+        let result = self.call_app(String::new(), &format!("shared/proxy/{phase}"), arguments, player).await?;
+        serde_json::from_value(result).map_err(invalid_data)
     }
 
     async fn legacy_route(&self, uuid: &str, username: &str) -> io::Result<SessionDemand> {
         let arguments = json!({"uuid": uuid, "username": username});
-        self.admit(arguments.clone()).await?;
-        let route: Route = self.hook("route", arguments).await?;
+        self.admit(&arguments, None).await?;
+        let route: Route = self.hook("route", &arguments, None).await?;
         Ok(SessionDemand { key: route.key, session_type: route.session_type, machine_profile: route.machine_profile })
     }
 
-    async fn admit(&self, arguments: Value) -> io::Result<()> {
-        self.hook::<Admission>("admit", arguments.clone()).await?.check()
+    async fn admit(&self, arguments: &Value, player: Option<&str>) -> io::Result<()> {
+        self.hook::<Admission>("admit", arguments, player).await?.check()
     }
 
     async fn legacy_approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
         let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing move identity"))?;
         let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing move demand"))?;
-        self.admit(json!({"uuid": identity.uuid, "username": identity.username})).await?;
-        let route: Route = self.hook("move", json!({
+        let player = Some(identity.uuid.as_str());
+        self.admit(&json!({"uuid": identity.uuid, "username": identity.username}), player).await?;
+        let route: Route = self.hook("move", &json!({
             "uuid": identity.uuid, "username": identity.username,
             "destination": {"key": demand.key, "session_type": demand.session_type, "machine_profile": demand.machine_profile}
-        })).await?;
+        }), player).await?;
         if route.key != demand.key
             || route.session_type != demand.session_type
             || route.machine_profile != demand.machine_profile
@@ -152,7 +169,7 @@ impl Platform {
     pub async fn status(&self, host: &str) -> io::Result<Vec<u8>> {
         let result = match self.manifest().await {
             Ok(Some(manifest)) => self.native_status(&manifest, host).await,
-            Ok(None) => self.hook("status", json!({"host": host})).await,
+            Ok(None) => self.hook("status", &json!({"host": host}), None).await,
             Err(error) => Err(error),
         };
         let status: Status = result.unwrap_or_else(|error| {
