@@ -1,11 +1,13 @@
 //! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
-//! nudges after a credential's own writes.
+//! nudges after a credential's own writes. An update sent with a charge holds it until the client took the next, or
+//! the stream is gone.
 //!
 //! A stream sends position-only updates at most every [`ADVANCE_INTERVAL`], so a slow client's advances coalesce
 //! sooner. Rust clients multiplexing many independently-consumed streams on one connection should still raise h2's
 //! `data_frame_budget` or lower their stream window, since a stalled stream's small frames can exceed the budget.
 
 use super::{MESSAGE_BYTES, errors};
+use chunk_backend::RequestCharge;
 use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State, error::Code};
 use chunk_service::same_secret;
 use chunk_store::Revision;
@@ -14,7 +16,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Write,
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll, ready},
     time::Duration,
 };
 use tokio::{
@@ -148,7 +152,28 @@ impl Nudges {
     }
 }
 
-pub(super) type Stream = mpsc::Receiver<Result<Update, Status>>;
+/// A stream's consuming side, which holds the charge of the update the client took last.
+pub(crate) struct Stream {
+    parts: mpsc::Receiver<Part>,
+    taken: Option<RequestCharge>,
+}
+
+/// An update handed to the client, and the charge for what it holds.
+struct Part {
+    update: Update,
+    charge: Option<RequestCharge>,
+}
+
+impl tokio_stream::Stream for Stream {
+    type Item = Result<Update, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let part = ready!(self.parts.poll_recv(context));
+        let (update, charge) = part.map(|part| (part.update, part.charge)).unzip();
+        self.taken = charge.flatten();
+        Poll::Ready(update.map(Ok))
+    }
+}
 
 /// A stream's producing side, which never waits for the client: each update merges into the one the client has yet
 /// to take, and a writer task hands that over as the client reads.
@@ -158,11 +183,11 @@ pub(super) struct Sender {
 }
 
 pub(super) fn channel() -> (Sender, Stream) {
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, parts) = mpsc::channel(1);
     let slot = Arc::<Slot>::default();
     let closed = CancellationToken::new();
     drop(tokio::spawn(write(slot.clone(), sender, closed.clone())));
-    (Sender { slot, closed }, receiver)
+    (Sender { slot, closed }, Stream { parts, taken: None })
 }
 
 impl Sender {
@@ -176,6 +201,18 @@ impl Sender {
         self.slot.update(|pending| {
             if pending.error.is_none() {
                 pending.changes.get_or_insert_default().merge(update);
+            }
+        });
+    }
+
+    /// Replaces what the client has yet to take with snapshot `update`, which holds `charge` until the client took it
+    /// or it's dropped.
+    pub fn send_snapshot(&self, update: Update, charge: RequestCharge) {
+        self.slot.update(|pending| {
+            if pending.error.is_none() {
+                let changes = pending.changes.get_or_insert_default();
+                changes.merge(Update { snapshot: true, ..update });
+                changes.charge = Some(charge);
             }
         });
     }
@@ -243,6 +280,8 @@ struct Changes {
     stream: String,
     upserts: BTreeMap<String, Entry>,
     removed: BTreeSet<String>,
+    /// Charged for the snapshot the changes hold.
+    charge: Option<RequestCharge>,
 }
 
 impl Changes {
@@ -284,10 +323,10 @@ impl Changes {
 
 /// Hands the slot's changes to `client` as it takes them, split to fit in messages, and ends after the slot's error,
 /// or once the stream is abandoned while the client has no room. Changes that only advance the position wait out
-/// [`ADVANCE_INTERVAL`] since the previous send.
-async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, closed: CancellationToken) {
+/// [`ADVANCE_INTERVAL`] since the previous send. The changes' charge goes with their last part.
+async fn write(slot: Arc<Slot>, client: mpsc::Sender<Part>, closed: CancellationToken) {
     let _closed = closed.drop_guard();
-    let mut parts = VecDeque::new();
+    let (mut parts, mut charge) = (VecDeque::new(), None);
     let mut advance_at = Instant::now();
     loop {
         let permit = tokio::select! {
@@ -311,8 +350,9 @@ async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, cl
                 }
                 let paced = !pending.ended && Instant::now() < advance_at;
                 if parts.is_empty()
-                    && let Some(changes) = pending.changes.take_if(|changes| !(paced && changes.only_advances()))
+                    && let Some(mut changes) = pending.changes.take_if(|changes| !(paced && changes.only_advances()))
                 {
+                    charge = changes.charge.take();
                     parts = split(changes.into_update()).into();
                 }
                 if let Some(part) = parts.pop_front() {
@@ -329,7 +369,8 @@ async fn write(slot: Arc<Slot>, client: mpsc::Sender<Result<Update, Status>>, cl
                 () = client.closed() => return,
             }
         };
-        permit.send(Ok(part));
+        let charge = if parts.is_empty() { charge.take() } else { None };
+        permit.send(Part { update: part, charge });
         advance_at = Instant::now() + ADVANCE_INTERVAL;
         if last {
             return;
@@ -410,19 +451,19 @@ mod tests {
     async fn ending_a_stalled_stream_releases_what_its_client_has_yet_to_take() {
         let (sender, mut stream) = channel();
         sender.send(upsert("a", "1", 1));
-        while stream.is_empty() {
+        while stream.parts.is_empty() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         sender.send(upsert("b", "1", 2));
         sender.end(errors::invalid("replaced"));
         let released = async {
-            while !stream.is_closed() {
+            while !stream.parts.is_closed() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         };
         tokio::time::timeout(Duration::from_secs(1), released).await.expect("the writer ended without a reader");
-        assert_eq!(stream.recv().await.unwrap().unwrap().upserts[0].key, "a");
-        assert!(stream.recv().await.is_none());
+        assert_eq!(stream.parts.recv().await.unwrap().update.upserts[0].key, "a");
+        assert!(stream.parts.recv().await.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -432,18 +473,18 @@ mod tests {
         for revision in 1..=500 {
             sender.send(Update { position: Some(Position { epoch: 1, revision }), ..Update::default() });
             tokio::time::sleep(Duration::from_millis(1)).await;
-            while stream.try_recv().is_ok() {
+            while stream.parts.try_recv().is_ok() {
                 received += 1;
             }
         }
         assert!((10..=11).contains(&received), "{received} advances in 500 ms");
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let held = stream.recv().await.unwrap().unwrap();
+        let held = stream.parts.recv().await.unwrap().update;
         assert_eq!(held.position, Some(Position { epoch: 1, revision: 500 }));
 
         let sent = Instant::now();
         sender.send(upsert("a", "1", 501));
-        let update = stream.recv().await.unwrap().unwrap();
+        let update = stream.parts.recv().await.unwrap().update;
         assert_eq!(Instant::now(), sent);
         assert_eq!((update.upserts.len(), update.position), (1, Some(Position { epoch: 1, revision: 501 })));
     }

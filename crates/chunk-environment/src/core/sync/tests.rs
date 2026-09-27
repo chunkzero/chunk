@@ -10,7 +10,7 @@ mod runtime;
 use super::*;
 use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_proto::sync::v1::{
-    Cursor, Entry, call_response::Outcome, core_client::CoreClient, entry::State, error::Code,
+    Cursor, Entry, Update, call_response::Outcome, core_client::CoreClient, entry::State, error::Code,
 };
 use std::{io, time::Duration};
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -26,6 +26,7 @@ export function boom(ctx) { throw 'x'.repeat(17 * 1024 * 1024); }
 export function big(ctx) { return 'x'.repeat(900 * 1024) + get(ctx); }
 export async function bump(ctx, by) { return await ctx.runMutation('add', by); }
 export async function slow(ctx, by) { await ctx.runMutation('add', by); await ctx.sleep(1000); return await ctx.runMutation('add', by); }
+export async function nap(ctx, by) { await ctx.sleep(1000); return by; }
 export function fill(ctx, text) { return text; }
 export function login(ctx) { return {allow: true, reason: JSON.stringify(ctx.caller)}; }
 export function choices(ctx) { return ['one', 'two']; }
@@ -52,6 +53,16 @@ export async function say(ctx, {arguments: {text}}) {
     await ctx.runMutation('add', 1);
   } else if (text === 'queued') {
     await ctx.platform({kind: 'session_call', method, arguments: {limit: 0}});
+  } else if (text === 'sent') {
+    const sent = await ctx.platform({kind: 'session_send', method, arguments: {limit: 0, pad: 'x'.repeat(32 * 1024)}});
+    if (sent.state !== 'accepted') throw new Error(`unexpected receipt ${JSON.stringify(sent)}`);
+  } else if (text === 'big') {
+    await ctx.sleep(300);
+    throw new Error('x'.repeat(64 * 1024));
+  } else if (text === 'pending') {
+    const line = '€'.repeat(4096);
+    for (let effect = 0; effect < 6; effect++) ctx.platform({kind: 'message', text: line}).catch(() => {});
+    await ctx.sleep(5000);
   } else {
     await ctx.platform({kind: 'message', text});
   }
@@ -81,6 +92,7 @@ fn deployment() -> Deployment {
         ("big", Function { result: Schema::String, ..function(FunctionKind::Query, Schema::Null) }),
         ("bump", function(FunctionKind::Action, Schema::Integer)),
         ("slow", function(FunctionKind::Action, Schema::Integer)),
+        ("nap", function(FunctionKind::Action, Schema::Integer)),
         ("fill", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
         (
             "choices",

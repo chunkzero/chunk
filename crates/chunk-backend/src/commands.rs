@@ -263,12 +263,14 @@ impl Backend {
     }
 
     /// The values the suggestion query `request` names offers for its input. The query and the command's permission
-    /// query see `caller`, or without one, a caller derived from the request's scope.
+    /// query see `caller`, or without one, a caller derived from the request's scope. The request takes over `charge`,
+    /// which its caller took for the payload it held, and grows it to cover the request.
     /// # Errors
-    /// Rejects an invalid scope or input, a query the command doesn't declare, and a failed query.
+    /// Rejects an invalid scope or input, a query the command doesn't declare, a failed query and exhausted capacity.
     pub async fn command_suggestions(
         &self,
         id: DeploymentId,
+        charge: RequestCharge,
         request: CommandSuggestionRequest,
         caller: Option<Json>,
     ) -> Result<CommandSuggestionResult> {
@@ -277,7 +279,8 @@ impl Backend {
             + request.query.len()
             + request.input.len()
             + caller.as_ref().map_or(0, |caller| caller.as_str().len());
-        self.submit_sized(bytes, |reply| Command::Suggest { id, request, caller, reply }).await
+        let permit = self.cover(charge, bytes)?;
+        self.submit_charged(permit, |reply| Command::Suggest { id, request, caller, reply }).await
     }
 
     /// Resolves `id` for `owner` without consulting any deployment, checking that the command `owner` started there

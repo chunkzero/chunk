@@ -1,9 +1,10 @@
 //! Commands gateways started, by operation ID, while they start and run and while a subscription follows them once
 //! finished: the gateway credential each belongs to and the request it started, the packet effects it holds until that
-//! gateway acknowledges them, the one subscription following it, and its outcome.
+//! gateway acknowledges them, the one subscription following it, and its outcome. Held effects and outcomes are charged
+//! against the backend's request memory until they drop.
 
 use super::errors;
-use chunk_backend::CommandRequest;
+use chunk_backend::{Backend, CommandRequest, RequestCharge};
 use chunk_proto::sync::v1::{
     CommandEffect, CommandOutcome, Entry, Error, Update, command_outcome, entry::State, error::Code,
 };
@@ -28,13 +29,21 @@ const WAITERS: usize = 4;
 /// its last, before it's cancelled. Any other end of its subscription cancels it at once.
 const GRACE: Duration = Duration::from_secs(5);
 
-/// A command's outcome as its topic's final entry holds it.
-pub(super) fn outcome(result: chunk_backend::Result<Arc<str>>) -> CommandOutcome {
+/// A command's outcome as its topic's final entry holds it, charged for as long as core holds it.
+pub(super) struct Outcome {
+    value: CommandOutcome,
+    _charge: RequestCharge,
+}
+
+/// The outcome `result` names, or why `backend` has no room for core to hold it.
+pub(super) fn outcome(backend: &Backend, result: chunk_backend::Result<Arc<str>>) -> Result<Outcome, Error> {
     let outcome = match result {
         Ok(json) => command_outcome::Outcome::ResultJson(json.as_bytes().to_vec()),
         Err(failure) => command_outcome::Outcome::Error(errors::backend(&failure)),
     };
-    CommandOutcome { outcome: Some(outcome) }
+    let value = CommandOutcome { outcome: Some(outcome) };
+    let charge = backend.charge_request(value.encoded_len()).map_err(|failure| errors::backend(&failure))?;
+    Ok(Outcome { value, _charge: charge })
 }
 
 #[derive(Default)]
@@ -139,7 +148,8 @@ enum Phase {
     Starting,
     Rejected,
     Running,
-    Finished(CommandOutcome),
+    /// Finished, with its outcome, or why core couldn't hold it.
+    Finished(Result<Outcome, Error>),
 }
 
 pub(super) struct Pending {
@@ -155,6 +165,7 @@ pub(super) struct Pending {
 struct Held {
     value: CommandEffect,
     effect: chunk_backend::CommandEffect,
+    _charge: RequestCharge,
 }
 
 impl Run {
@@ -170,8 +181,8 @@ impl Run {
     }
 
     /// A command of `owner` that finished with `outcome` and whose run is gone, for a subscription to report.
-    pub fn finished(owner: &str, outcome: CommandOutcome) -> Arc<Self> {
-        Arc::new(Self::new(owner, None, Phase::Finished(outcome), CancellationToken::new()))
+    pub fn finished(owner: &str, outcome: Outcome) -> Arc<Self> {
+        Arc::new(Self::new(owner, None, Phase::Finished(Ok(outcome)), CancellationToken::new()))
     }
 
     /// Checks that `credential` started the command, and for `request`, if given.
@@ -231,9 +242,9 @@ impl Run {
         self.cancel.clone()
     }
 
-    /// Holds `effect` for the gateway to render as `value`, or fails it once the command was cancelled, finished or
-    /// has as many pending as it may.
-    pub fn publish(&self, effect: chunk_backend::CommandEffect, value: CommandEffect) {
+    /// Holds `effect` for the gateway to render as `value`, charged by `charge`, or fails it once the command was
+    /// cancelled, finished or has as many pending as it may.
+    pub fn publish(&self, effect: chunk_backend::CommandEffect, value: CommandEffect, charge: RequestCharge) {
         let mut effect = Some(effect);
         self.state.send_if_modified(|pending| {
             pending.effects.retain(|_, held| !held.effect.is_cancelled());
@@ -244,7 +255,7 @@ impl Run {
                 return false;
             }
             let Some(effect) = effect.take() else { return false };
-            pending.effects.insert(effect.sequence(), Held { value, effect });
+            pending.effects.insert(effect.sequence(), Held { value, effect, _charge: charge });
             true
         });
         if let Some(effect) = effect {
@@ -269,7 +280,7 @@ impl Run {
     }
 
     /// Marks the command finished with `outcome`, failing the effects still pending.
-    pub fn finish(&self, outcome: CommandOutcome) {
+    pub fn finish(&self, outcome: Result<Outcome, Error>) {
         let mut effects = BTreeMap::new();
         self.state.send_modify(|pending| {
             pending.phase = Phase::Finished(outcome);
@@ -353,15 +364,17 @@ impl Drop for Subscription {
 
 impl Pending {
     /// The pending effects as a snapshot, or once the command finished, its outcome, which the second value marks.
-    pub fn snapshot(&self) -> (Update, bool) {
+    /// Fails if core couldn't hold the outcome.
+    pub fn snapshot(&self) -> Result<(Update, bool), Error> {
         let entry = |key: String, value: Vec<u8>| Entry { key, state: Some(State::Value(value)) };
         let (upserts, finished) = if let Phase::Finished(outcome) = &self.phase {
-            (vec![entry("outcome".into(), outcome.encode_to_vec())], true)
+            let outcome = outcome.as_ref().map_err(Clone::clone)?;
+            (vec![entry("outcome".into(), outcome.value.encode_to_vec())], true)
         } else {
             let effects = self.effects.iter();
             (effects.map(|(sequence, held)| entry(sequence.to_string(), held.value.encode_to_vec())).collect(), false)
         };
-        (Update { snapshot: true, upserts, ..Update::default() }, finished)
+        Ok((Update { snapshot: true, upserts, ..Update::default() }, finished))
     }
 }
 

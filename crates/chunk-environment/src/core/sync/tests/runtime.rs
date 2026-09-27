@@ -34,11 +34,14 @@ pub fn release() -> chunk_control::Release {
     .unwrap()
 }
 
-/// Declares `status`, which the fake JVM answers with 7, or with `limit` 0 holds queued until it's cancelled.
+/// Declares `status`, which the fake JVM answers with 7, or with `limit` 0 holds queued until it's cancelled. Its
+/// optional `pad` only adds size.
 pub fn session_methods() -> serde_json::Value {
     serde_json::json!({"version": 1, "methods": [{
         "app": "bridge", "session": "default", "name": "status",
-        "arguments": {"type": "object", "fields": {"limit": {"schema": {"type": "integer"}}}},
+        "arguments": {"type": "object", "fields": {
+            "limit": {"schema": {"type": "integer"}}, "pad": {"schema": {"type": "string"}, "optional": true}
+        }},
         "result": {"type": "integer"}
     }]})
 }

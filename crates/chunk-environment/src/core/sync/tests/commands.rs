@@ -342,6 +342,28 @@ async fn a_command_that_returned_runs_until_its_session_call_settles_and_closing
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_whose_session_send_was_accepted_holds_its_charge_until_the_send_settles() {
+    let arrived = arrived().await;
+    let (gateway, backend) = (&arrived.gateway, arrived.fixture.backend.clone());
+    let idle = backend.request_bytes();
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say sent").await);
+    let mut effects = gateway.follow(&operation).await;
+    next(&mut effects).await;
+    until(|| arrived.jvm.methods().1 > 0).await;
+    // The handler returns once the send is accepted; the queued send keeps the command, its topic and its charge.
+    let quiet = tokio::time::timeout(Duration::from_millis(600), effects.message()).await;
+    assert!(quiet.is_err(), "the command finished while its session send was queued");
+    assert!(backend.request_bytes() >= idle + 32 * 1024, "the queued send's charge was released");
+    drop(effects);
+    until(|| arrived.jvm.methods().2 > 0).await;
+    assert_eq!(arrived.jvm.methods().0, 0);
+    assert_eq!(returned(&outcome(&mut gateway.follow(&operation).await).await), b"null");
+    until(|| backend.request_bytes() < idle + 32 * 1024).await;
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn core_stopping_cancels_a_sleeping_command_before_it_writes() {
     let arrived = arrived().await;
     let gateway = &arrived.gateway;

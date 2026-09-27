@@ -14,13 +14,12 @@ use chunk_backend::{Backend, Call, Update as Outcome};
 use chunk_control::Control;
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::sync::v1::{
-    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, Update, call_response,
+    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, call_response,
     core_server::{Core, CoreServer},
 };
 use chunk_store::Revision;
 use prost::Message;
 use std::sync::Arc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
@@ -163,7 +162,7 @@ impl Core for SyncService {
         Ok(Response::new(response))
     }
 
-    type SubscribeStream = ReceiverStream<Result<Update, Status>>;
+    type SubscribeStream = streams::Stream;
 
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let principal = self.credentials.authenticate(&request)?;
@@ -173,7 +172,7 @@ impl Core for SyncService {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),
         }
-        Ok(Response::new(ReceiverStream::new(stream)))
+        Ok(Response::new(stream))
     }
 }
 

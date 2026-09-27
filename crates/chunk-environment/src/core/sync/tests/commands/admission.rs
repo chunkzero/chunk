@@ -2,16 +2,32 @@
 
 use super::*;
 use chunk_backend::{ActionHandle, Backend, Call, CommandIdentity};
+use tonic::transport::Endpoint;
 
-/// Holds all 24 live actions for a second, or until the returned handles drop, so a command started meanwhile waits
-/// for admission.
+/// The backend's request memory.
+const REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// What a `say big` outcome holds at least: its error, cut at 64 KiB.
+const BIG: usize = 64 * 1024;
+
+/// Holds all 24 live actions for a second without writing, so a command started meanwhile waits for admission and
+/// none of their commits is pending when it's admitted.
 async fn hold(backend: &Backend) -> Vec<ActionHandle> {
     let mut holds = Vec::new();
     for _ in 0..24 {
         let id = backend.allocate_action_id().await.unwrap();
-        holds.push(backend.start_action(id, cli_call("slow", serde_json::json!(0))).await.unwrap());
+        holds.push(backend.start_action(id, cli_call("nap", serde_json::json!(0))).await.unwrap());
     }
     holds
+}
+
+/// Holds the backend with a mutation that spins until its execution limit, for a second.
+async fn busy(backend: &Backend) -> JoinHandle<chunk_backend::Result<chunk_backend::Update>> {
+    let spin = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.mutate("spin".into(), cli_call("spin", serde_json::Value::Null)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    spin
 }
 
 fn cli_call(function: &str, arguments: serde_json::Value) -> Call {
@@ -103,12 +119,7 @@ async fn a_command_start_is_charged_for_its_payload_before_it_waits_for_the_back
     let arrived = arrived().await;
     let (gateway, backend) = (arrived.gateway.clone(), arrived.fixture.backend.clone());
     let operation = gateway.prepare().await;
-    // The mutation spins until its execution limit, which holds the backend for a second.
-    let spin = tokio::spawn({
-        let backend = backend.clone();
-        async move { backend.mutate("spin".into(), cli_call("spin", serde_json::Value::Null)).await }
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let spin = busy(&backend).await;
     let idle = backend.request_bytes();
     let input = format!("say {}", "x".repeat(512 * 1024));
     let start = tokio::spawn(async move { gateway.say(&operation, &input).await });
@@ -148,4 +159,74 @@ async fn a_subscription_from_a_superseded_gateway_stream_never_displaces_the_cur
     assert_eq!(failure(&superseded.await.unwrap()), Some(Code::Stopped));
     assert_eq!(returned(&outcome(&mut following.await.unwrap()).await), b"null");
     arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_suggestion_is_charged_for_its_input_before_it_waits_for_the_backend() {
+    let arrived = arrived().await;
+    let (gateway, backend) = (arrived.gateway.clone(), arrived.fixture.backend.clone());
+    let spin = busy(&backend).await;
+    let idle = backend.request_bytes();
+    let input = format!("say {}", "x".repeat(512 * 1024));
+    let arguments = SuggestArguments { command_id: SAY.into(), query: "choices".into(), input, cursor: 5 };
+    let suggest = tokio::spawn(async move { gateway.call("", "chunk:suggest", &arguments).await });
+    until(|| backend.request_bytes() >= idle + 512 * 1024).await;
+    assert!(!spin.is_finished(), "the suggestion was charged only once the backend was free");
+    suggest.await.unwrap();
+    assert!(spin.await.unwrap().is_err());
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_command_subscriptions_stay_charged_until_their_streams_drop() {
+    let arrived = arrived().await;
+    let (gateway, backend) = (&arrived.gateway, arrived.fixture.backend.clone());
+    let stalled = stalled(&arrived).await;
+    let idle = backend.request_bytes();
+    let finished = start(gateway, "say big").await;
+    assert!(failed(&outcome(&mut gateway.follow(&finished).await).await));
+
+    // Commands that finish while followed hold their outcomes, and their topics a copy, until their streams drop.
+    let mut streams = Vec::new();
+    for _ in 0..2 {
+        streams.push(stalled.follow(&start(gateway, "say big").await).await);
+    }
+    until(|| backend.request_bytes() >= idle + 4 * BIG).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(backend.request_bytes() >= idle + 4 * BIG, "outcomes were released while their streams stalled");
+    // Leaves room for eight more outcomes.
+    let filler = backend.charge_request(REQUEST_BYTES - backend.request_bytes() - 1024 - 8 * BIG).unwrap();
+    // Once all its effects are pending, each subscription replaces the one before, whose effects its client has yet to
+    // take.
+    let pending = start(gateway, "say pending").await;
+    let mut all = gateway.follow(&pending).await;
+    while next(&mut all).await.upserts.len() < 6 {}
+    streams.push(stalled.follow(&pending).await);
+    assert_eq!(failure(&next(&mut all).await), Some(Code::Stopped));
+    while backend.request_bytes() + 2 * BIG <= REQUEST_BYTES {
+        let held = backend.request_bytes();
+        streams.push(stalled.follow(&pending).await);
+        until(|| backend.request_bytes() >= held + BIG).await;
+    }
+    // Following a finished command needs room for its outcome twice.
+    let mut rejected = gateway.follow(&finished).await;
+    assert_eq!(failure(&next(&mut rejected).await), Some(Code::Overloaded));
+
+    drop((streams, filler));
+    until(|| backend.request_bytes() < idle + BIG).await;
+    arrived.stop().await;
+}
+
+/// The arrived gateway on a client that never reads, whose streams have no room.
+async fn stalled(arrived: &Arrived) -> Gateway {
+    let endpoint = Endpoint::from_shared(arrived.fixture.endpoint.clone()).unwrap();
+    let channel = endpoint.initial_stream_window_size(Some(0)).connect().await.unwrap();
+    Gateway { client: CoreClient::new(channel), ..arrived.gateway.clone() }
+}
+
+/// Starts `input`, returning its operation ID.
+async fn start(gateway: &Gateway, input: &str) -> String {
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, input).await);
+    operation
 }

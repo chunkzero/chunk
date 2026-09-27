@@ -1,7 +1,8 @@
 //! A gateway's commands: `chunk:commands`, `chunk:suggest`, `chunk:command` and `chunk:effect`. Core derives a new
 //! command's scope from its player's arrived claim, and the command runs through the backend's action admission, then
 //! on until it finishes or nothing follows its `command/<op>` topic. Permission and suggestion queries, and the
-//! command's handler, see the gateway caller of its player.
+//! command's handler, see the gateway caller of its player. Each call's request is charged against the backend's
+//! request memory before it waits for anything, until what it holds drops or the backend takes the charge over.
 
 mod effects;
 
@@ -20,8 +21,8 @@ use chunk_control::{ArrivedClaim, Control};
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::{
     sync::v1::{
-        CallRequest, CommandArguments, CommandOutcome, CommandStarted, CommandsResult, EffectArguments, EffectResult,
-        Error, SuggestArguments, SuggestResult, error::Code,
+        CallRequest, CommandArguments, CommandStarted, CommandsResult, EffectArguments, EffectResult, Error,
+        SuggestArguments, SuggestResult, error::Code,
     },
     v1::{CommandScope, CommandSuggestionRequest},
 };
@@ -57,6 +58,7 @@ pub(super) async fn call(
     request: CallRequest,
 ) -> Result<Vec<u8>, Error> {
     let (control, backend) = (&service.control, service.app.backend());
+    let charge = backend.charge_request(request.encoded_len()).map_err(|failure| errors::backend(&failure))?;
     let result = match method {
         Method::Commands => {
             if !request.arguments.is_empty() {
@@ -72,13 +74,14 @@ pub(super) async fn call(
         Method::Suggest => {
             let SuggestArguments { command_id, query, input, cursor } = decode(&request.arguments)?;
             app::reject_prepared(&request.operation_id)?;
-            let player = player(&request)?;
-            let Origin { deployment, scope, .. } = origin(control, backend, gateway, player).await?;
+            let player = player(&request)?.to_owned();
+            drop(request);
+            let Origin { deployment, scope, .. } = origin(control, backend, gateway, &player).await?;
             let suggestion = CommandSuggestionRequest { scope: Some(scope), command_id, query, input, cursor };
-            let suggestions = backend.command_suggestions(deployment, suggestion, Some(caller(player))).await;
+            let suggestions = backend.command_suggestions(deployment, charge, suggestion, Some(caller(&player))).await;
             SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))?.values }.encode_to_vec()
         }
-        Method::Command => start(service, gateway, credential, request).await?.encode_to_vec(),
+        Method::Command => start(service, gateway, credential, request, charge).await?.encode_to_vec(),
         Method::Effect => {
             if request.caller.is_some() || !request.operation_id.is_empty() {
                 return Err(errors::invalid("chunk:effect takes no caller or operation ID"));
@@ -97,21 +100,20 @@ pub(super) async fn call(
 }
 
 /// Starts the command `request` names under its prepared operation ID for `credential`, or finds the one started
-/// there for the same request, and returns once the backend admitted it.
+/// there for the same request, and returns once the backend admitted it. `charge` covers what the request holds until
+/// the backend takes it over.
 async fn start(
     service: &SyncService,
     gateway: &str,
     credential: &str,
     request: CallRequest,
+    charge: RequestCharge,
 ) -> Result<CommandStarted, Error> {
     let id = app::prepared(&request.operation_id)?;
     let CommandArguments { command_id, input } = decode(&request.arguments)?;
     let player = player(&request)?.to_owned();
     let operation = request.operation_id.clone();
     drop(request);
-    // The payload is charged for as long as it's held, before anything waits.
-    let charge = service.app.backend().charge_request(operation.len() + command_id.len() + input.len() + player.len());
-    let charge = charge.map_err(|failure| errors::backend(&failure))?;
     let fingerprint = CommandRequest::new(&command_id, &input, &player);
     let (run, new) = service.runs.begin(&operation, credential, fingerprint, service.stop.child_token());
     run.permits(credential, Some(fingerprint))?;
@@ -161,7 +163,7 @@ enum Admitted {
         effects: CommandEffects,
     },
     /// The command already ran, and the backend retains its outcome.
-    Retained(CommandOutcome),
+    Retained(chunk_backend::Result<Arc<str>>),
 }
 
 impl Starting {
@@ -169,20 +171,28 @@ impl Starting {
     /// finishes.
     async fn start(self, id: ActionId, charge: RequestCharge, command: String, input: String) -> Result<(), Error> {
         let admitted = self.admit(id, charge, command, input).await;
-        let Self { control, runs, run, operation, gateway, player, .. } = self;
+        let Self { control, backend, runs, run, operation, gateway, player, .. } = self;
         match admitted {
             Ok(Admitted::Started { origin, follow, handle, effects }) => {
                 run.start();
                 let origin = *origin;
-                let performer = effects::Performer { control, gateway, player, origin, follow, run: run.clone() };
+                let performer = effects::Performer {
+                    control,
+                    backend: backend.clone(),
+                    gateway,
+                    player,
+                    origin,
+                    follow,
+                    run: run.clone(),
+                };
                 tokio::spawn(async move {
                     let result = performer.drive(handle, effects).await;
-                    run.finish(outcome(result));
+                    run.finish(outcome(&backend, result));
                     runs.settle(&operation, &run);
                 });
             }
-            Ok(Admitted::Retained(outcome)) => {
-                run.finish(outcome);
+            Ok(Admitted::Retained(result)) => {
+                run.finish(outcome(&backend, result));
                 runs.settle(&operation, &run);
             }
             Err(error) => {
@@ -206,7 +216,7 @@ impl Starting {
         let identity = self.backend.command_identity(id.clone(), &self.credential, Some(self.fingerprint));
         match self.unless_cancelled(identity).await?.map_err(failed)? {
             CommandIdentity::Unused => {}
-            CommandIdentity::Started(ActionStatus::Finished(result)) => return Ok(Admitted::Retained(outcome(result))),
+            CommandIdentity::Started(ActionStatus::Finished(result)) => return Ok(Admitted::Retained(result)),
             CommandIdentity::Started(ActionStatus::Running) => {
                 return Err(errors::error(Code::Unavailable, "retry the command"));
             }
@@ -218,6 +228,7 @@ impl Starting {
         let origin = origin(&self.control, &self.backend, &self.gateway, &self.player);
         let Origin { claim, deployment, scope, manifest } = self.unless_cancelled(origin).await??;
         let follow = manifest.commands.get(&command).is_some_and(|command| command.follow_player);
+        drop(manifest);
         let (credential, caller) = (&self.credential, caller(&self.player));
         let started = self.backend.start_command(
             id,

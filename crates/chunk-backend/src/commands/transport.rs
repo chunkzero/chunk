@@ -81,7 +81,8 @@ impl backend_commands_server::BackendCommands for CommandService {
         request: Request<wire::CommandSuggestionRequest>,
     ) -> std::result::Result<Response<wire::CommandSuggestionResult>, Status> {
         let id = self.platform.binding(&request)?;
-        let suggestions = bounded(self.backend.command_suggestions(id, request.into_inner(), None)).await?;
+        let charge = self.backend.charge_request(0).map_err(|error| status(&error))?;
+        let suggestions = bounded(self.backend.command_suggestions(id, charge, request.into_inner(), None)).await?;
         Ok(Response::new(suggestions))
     }
     async fn prepare(
