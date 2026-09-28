@@ -8,6 +8,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use bytes::Bytes;
 use chunk_contract::{Deployment, DomainManifest, FunctionKind, validate_wire_value};
 #[cfg(test)]
 use chunk_js::Limits;
@@ -79,7 +80,8 @@ pub struct Update {
 #[derive(Debug, Clone)]
 pub struct GroupUpdate {
     pub revision: Revision,
-    pub results: Vec<Result<Arc<str>>>,
+    /// Each query's JSON result, shared with every other group subscribed to the same query.
+    pub results: Vec<Result<Bytes>>,
     /// Changes whenever `results` do.
     pub version: u64,
 }
@@ -842,6 +844,8 @@ impl Subscription {
     /// Reports execution, storage failure or shutdown.
     pub async fn next(&mut self) -> Result<Update> {
         let mut group = self.0.next().await?;
-        Ok(Update { revision: group.revision, json: group.results.remove(0)? })
+        let json = group.results.remove(0)?;
+        let json = std::str::from_utf8(&json).map_err(|_| Error::Invalid("query result encoding"))?;
+        Ok(Update { revision: group.revision, json: json.into() })
     }
 }

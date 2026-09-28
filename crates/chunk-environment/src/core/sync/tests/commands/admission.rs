@@ -220,7 +220,7 @@ async fn command_messages_stay_charged_while_http2_holds_them_for_a_stalled_clie
 async fn stalled_subscriptions_stay_charged(window: u32) {
     let arrived = arrived().await;
     let (gateway, backend) = (&arrived.gateway, arrived.fixture.backend.clone());
-    let send = backend.send_budget().clone();
+    let send = backend.send_budget().streams();
     let stalled = stalled(&arrived, window).await;
     let (idle, sending) = (backend.request_bytes(), send.bytes());
     let finished = start(gateway, "say big").await;

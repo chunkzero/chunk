@@ -82,7 +82,7 @@ impl FakeRuntime {
             .upserts
             .iter()
             .filter_map(|entry| match &entry.state {
-                Some(sync::entry::State::Value(value)) => Some((entry.key.as_str(), value.as_slice())),
+                Some(sync::entry::State::Value(value)) => Some((entry.key.as_str(), &value[..])),
                 _ => None,
             })
             .collect();

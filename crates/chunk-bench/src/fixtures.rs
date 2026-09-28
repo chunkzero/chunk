@@ -173,7 +173,7 @@ impl Jvm {
         for entry in &update.upserts {
             let Some(sync::entry::State::Value(value)) = &entry.state else { continue };
             if let Some(id) = entry.key.strip_prefix("session/") {
-                let wanted = JvmSession::decode(value.as_slice())?;
+                let wanted = JvmSession::decode(&value[..])?;
                 let phase = if wanted.finish || stop { JvmSessionPhase::Ended } else { JvmSessionPhase::Ready };
                 if self.sessions.get(id).is_none_or(|session| session.phase() != phase) {
                     let status = JvmSessionStatus {
@@ -187,7 +187,7 @@ impl Jvm {
                     report.sessions.push(status);
                 }
             } else if let Some(operation) = entry.key.strip_prefix("delivery/") {
-                let wanted = JvmDelivery::decode(value.as_slice())?;
+                let wanted = JvmDelivery::decode(&value[..])?;
                 listed.insert(operation);
                 let held = self.deliveries.get(operation).map(|delivery| delivery.status.phase());
                 let phase = match held {
@@ -234,7 +234,7 @@ impl Jvm {
         let mut activating = BTreeSet::new();
         for entry in players.upserts {
             if let Some(State::Value(value)) = entry.state
-                && OperatorPlayer::decode(value.as_slice())?.phase() == ClaimPhase::Activating
+                && OperatorPlayer::decode(&value[..])?.phase() == ClaimPhase::Activating
             {
                 activating.insert(entry.key);
             }

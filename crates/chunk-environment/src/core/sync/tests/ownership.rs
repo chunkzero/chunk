@@ -86,7 +86,7 @@ fn phase(control: &Control, operation: &str) -> Option<ClaimPhase> {
     let (_, snapshot) = chunk_control::gateway::Topic::open(control, "proxy", None).unwrap();
     let entry = snapshot.upserts.into_iter().find(|entry| entry.key == operation)?;
     let Some(State::Value(value)) = entry.state else { panic!("a claim without a value") };
-    Some(GatewayClaim::decode(value.as_slice()).unwrap().phase())
+    Some(GatewayClaim::decode(&value[..]).unwrap().phase())
 }
 
 async fn reach(control: &Control, operation: &str, wanted: ClaimPhase) {

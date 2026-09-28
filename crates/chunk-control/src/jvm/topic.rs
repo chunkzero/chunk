@@ -115,7 +115,7 @@ impl Topic {
     fn snapshot(&mut self, position: Generation, entries: BTreeMap<String, Vec<u8>>) -> sync::Update {
         let upserts = entries.iter().map(|(key, value)| sync::Entry {
             key: key.clone(),
-            state: Some(sync::entry::State::Value(value.clone())),
+            state: Some(sync::entry::State::Value(value.clone().into())),
         });
         let update = sync::Update {
             position: crate::gateway::position(position),

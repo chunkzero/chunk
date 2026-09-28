@@ -29,9 +29,7 @@ fn players(control: &Arc<Control>) -> Vec<(String, wire::OperatorPlayer)> {
     let entries = snapshot.upserts.into_iter();
     entries
         .map(|entry| match entry.state {
-            Some(wire::entry::State::Value(value)) => {
-                (entry.key, wire::OperatorPlayer::decode(value.as_slice()).unwrap())
-            }
+            Some(wire::entry::State::Value(value)) => (entry.key, wire::OperatorPlayer::decode(&value[..]).unwrap()),
             _ => panic!("a snapshot holds values"),
         })
         .collect()

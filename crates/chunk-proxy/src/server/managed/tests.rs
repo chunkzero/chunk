@@ -68,7 +68,7 @@ impl FakeCore {
         let claims = self.claims.lock().unwrap();
         let upserts = claims.iter().map(|(operation, claim)| sync::Entry {
             key: operation.clone(),
-            state: Some(sync::entry::State::Value(claim.encode_to_vec())),
+            state: Some(sync::entry::State::Value(claim.encode_to_vec().into())),
         });
         let upserts = upserts.collect();
         Update { position: Some(position), snapshot: true, upserts, stream: "stream".into(), ..Update::default() }

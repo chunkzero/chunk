@@ -37,7 +37,7 @@ impl Deployment {
         let upserts = state.current.iter().map(|deployment| sync::Entry {
             key: "current".into(),
             state: Some(sync::entry::State::Value(
-                sync::GatewayDeployment { deployment: deployment.clone() }.encode_to_vec(),
+                sync::GatewayDeployment { deployment: deployment.clone() }.encode_to_vec().into(),
             )),
         });
         sync::Update {

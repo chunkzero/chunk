@@ -147,7 +147,7 @@ impl Delta {
                     }),
                 }),
             };
-            sync::Entry { key: operation, state: Some(sync::entry::State::Value(value.encode_to_vec())) }
+            sync::Entry { key: operation, state: Some(sync::entry::State::Value(value.encode_to_vec().into())) }
         });
         sync::Update {
             position: position(self.position),

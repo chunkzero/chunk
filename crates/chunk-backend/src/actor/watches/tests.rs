@@ -79,7 +79,7 @@ async fn removing_a_queued_batch_tail_does_not_strand_the_next_rerun() {
     let initial = watches.next_job(|| view(0)).unwrap();
     watches.complete(&initial, Ok("0".into()), reads());
     let mut group = first.await.unwrap().unwrap();
-    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), b"0");
     let second = subscribe_arguments(&mut watches, json!({"other": true}));
     let tail = watches.next_job(|| view(0)).unwrap();
     watches.complete(&tail, Ok("0".into()), reads());
@@ -97,7 +97,7 @@ async fn removing_a_queued_batch_tail_does_not_strand_the_next_rerun() {
     let _attached = subscribe(&mut watches);
     watches.complete(&running, Ok("1".into()), reads());
     let update = group.next().await.unwrap();
-    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), "1"));
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), &b"1"[..]));
     let mut next = Box::pin(group.next());
     crate::tests::pending(next.as_mut()).await;
 
@@ -112,7 +112,7 @@ async fn removing_a_queued_batch_tail_does_not_strand_the_next_rerun() {
         std::task::Poll::Pending => panic!("revision 2 rerun completed without publishing its update"),
     })
     .await;
-    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), "2"));
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), &b"2"[..]));
 }
 
 #[tokio::test]
@@ -122,7 +122,7 @@ async fn committed_reruns_get_a_turn_under_continuous_subscription_churn() {
     let initial = watches.next_job(|| view(0)).unwrap();
     watches.complete(&initial, Ok("0".into()), reads());
     let mut group = receiver.await.unwrap().unwrap();
-    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), b"0");
     let mut next = Box::pin(group.next());
     crate::tests::pending(next.as_mut()).await;
 
@@ -147,7 +147,7 @@ async fn committed_reruns_get_a_turn_under_continuous_subscription_churn() {
                 std::task::Poll::Pending => panic!("committed rerun completed without publishing its update"),
             })
             .await;
-            assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), "1"));
+            assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(1), &b"1"[..]));
             return;
         }
         crate::tests::pending(next.as_mut()).await;
@@ -176,7 +176,7 @@ async fn overlapping_commit(bytes: usize) {
     let job = watches.next_job(|| view(2)).expect("the query runs again at the commit");
     watches.complete(&job, Ok("1".into()), reads());
     let update = group.next().await.unwrap();
-    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), "1"));
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), &b"1"[..]));
     assert!(watches.next_job(|| view(2)).is_none());
 }
 
@@ -197,7 +197,7 @@ async fn subscriptions_that_outgrow_the_budget_after_admission_are_closed() {
         let job = watches.next_job(|| view(1)).unwrap();
         watches.complete(&job, Ok("0".into()), reads());
         let mut group = receiver.await.unwrap().unwrap();
-        assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+        assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), b"0");
         watches.changed(Revision(2), change(), 64);
         let job = watches.next_job(|| view(2)).unwrap();
         watches.complete(&job, result, grown);
@@ -214,7 +214,7 @@ async fn withheld_results_publish_once_their_revision_is_durable() {
     let initial = watches.next_job(|| view(0)).unwrap();
     watches.complete(&initial, Ok("0".into()), reads());
     let mut group = receiver.await.unwrap().unwrap();
-    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), "0");
+    assert_eq!(group.next().await.unwrap().results[0].as_deref().unwrap(), b"0");
 
     // Ack 1 carries the shared write's snapshot 2; its rerun beats ack 2.
     watches.changed(Revision(1), change(), 64);
@@ -241,7 +241,7 @@ async fn withheld_results_publish_once_their_revision_is_durable() {
         std::task::Poll::Pending => panic!("result evaluated at revision 2 remained unpublished after ack 2"),
     })
     .await;
-    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), "1"));
+    assert_eq!((update.revision, update.results[0].as_deref().unwrap()), (Revision(2), &b"1"[..]));
 }
 
 #[test]

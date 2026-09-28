@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use chunk_proto::sync::v1::{
     CallRequest, Caller, CommandArguments, CommandEffect, CommandOutcome, CommandStarted, CommandSubscription,
     CommandsResult, EffectArguments, EffectResult, SubscribeRequest, SuggestArguments, SuggestResult, Update,
@@ -112,7 +113,7 @@ pub(in crate::server) struct CommandTopic {
     operation: String,
     stream: String,
     updates: Streaming<Update>,
-    entries: BTreeMap<String, Vec<u8>>,
+    entries: BTreeMap<String, Bytes>,
 }
 
 impl CommandTopic {
@@ -156,7 +157,8 @@ impl CommandTopic {
                 let Some(State::Value(value)) = entry.state else {
                     return Err(invalid_data("command entry without a value"));
                 };
-                self.entries.insert(entry.key, value);
+                // Decoded values borrow tonic's receive buffer; a copy lets it go.
+                self.entries.insert(entry.key, Bytes::copy_from_slice(&value));
             }
             if !update.continued {
                 return self.snapshot();
@@ -166,13 +168,10 @@ impl CommandTopic {
 
     fn snapshot(&self) -> io::Result<CommandUpdate> {
         if let Some(outcome) = self.entries.get("outcome") {
-            return Ok(CommandUpdate::Outcome(CommandOutcome::decode(outcome.as_slice()).map_err(invalid_data)?));
+            return Ok(CommandUpdate::Outcome(CommandOutcome::decode(&outcome[..]).map_err(invalid_data)?));
         }
         let effects = self.entries.iter().map(|(sequence, effect)| {
-            Ok((
-                sequence.parse().map_err(invalid_data)?,
-                CommandEffect::decode(effect.as_slice()).map_err(invalid_data)?,
-            ))
+            Ok((sequence.parse().map_err(invalid_data)?, CommandEffect::decode(&effect[..]).map_err(invalid_data)?))
         });
         effects.collect::<io::Result<_>>().map(CommandUpdate::Effects)
     }

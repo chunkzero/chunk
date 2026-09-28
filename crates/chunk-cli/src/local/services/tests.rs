@@ -40,7 +40,7 @@ async fn serve(subscribed: &mut mpsc::UnboundedReceiver<(String, Updates)>, host
         senders.insert(topic, sender);
     }
     let (nodes, players) = (senders.remove("nodes").unwrap(), senders.remove("players").unwrap());
-    let node = Entry { key: host.into(), state: Some(State::Value(Node::default().encode_to_vec())) };
+    let node = Entry { key: host.into(), state: Some(State::Value(Node::default().encode_to_vec().into())) };
     nodes.send(Ok(Update { snapshot: true, upserts: vec![node], ..Update::default() })).await.unwrap();
     players.send(Ok(Update { snapshot: true, ..Update::default() })).await.unwrap();
     (nodes, players)

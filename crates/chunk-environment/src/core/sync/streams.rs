@@ -1,9 +1,12 @@
 //! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
-//! nudges after a credential's own writes. Each message is charged its encoded bytes against the send budget before
-//! the client takes it, and the charge moves through the stream's [`Ledger`] into the response frame that carries it.
-//! While the budget has no room, changes keep coalescing, newer ones merging into the refused message, and the charge
+//! nudges after a credential's own writes. Entry values are shared, so streams of the same results hold each value once
+//! until they encode it. Each message is charged its encoded bytes against the send budget's [stream share] before the
+//! client takes it, and the charge moves through the stream's [`Ledger`] into the response frame that carries it.
+//! While the share has no room, changes keep coalescing, newer ones merging into the refused message, and the charge
 //! is retried every [`RETRY`]; a stream still refused after [`DEADLINE`] ends with OVERLOADED. A stream's final
 //! update overdraws the budget rather than wait, so each stream holds at most one such message beyond it.
+//!
+//! [stream share]: SendBudget::streams
 //!
 //! A stream sends position-only updates at most every [`ADVANCE_INTERVAL`], so a slow client's advances coalesce
 //! sooner. Rust clients multiplexing many independently-consumed streams on one connection should still raise h2's

@@ -94,7 +94,7 @@ impl View {
             let Some(State::Value(value)) = entry.state else {
                 return Err(io::Error::other("gateway claim entry without a value"));
             };
-            self.claims.insert(entry.key, GatewayClaim::decode(value.as_slice()).map_err(io::Error::other)?);
+            self.claims.insert(entry.key, GatewayClaim::decode(value).map_err(io::Error::other)?);
         }
         self.position = update.position;
         Ok(())

@@ -182,7 +182,7 @@ pub(super) fn sessions(update: &Update) -> BTreeMap<String, JvmSession> {
     assert!(update.snapshot && update.error.is_none());
     let sessions = update.upserts.iter().filter_map(|entry| match &entry.state {
         Some(State::Value(value)) => {
-            Some((entry.key.strip_prefix("session/")?.to_owned(), JvmSession::decode(value.as_slice()).unwrap()))
+            Some((entry.key.strip_prefix("session/")?.to_owned(), JvmSession::decode(&value[..]).unwrap()))
         }
         _ => None,
     });

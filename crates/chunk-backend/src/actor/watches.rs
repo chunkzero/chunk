@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use bytes::Bytes;
 use chunk_js::DeploymentId;
 use chunk_store::Revision;
 use tokio::sync::watch;
@@ -57,7 +58,7 @@ struct Query {
     /// Evaluation input; its caller belongs to one of the subscribers.
     call: Call,
     reads: Dependencies,
-    result: Option<Result<Arc<str>>>,
+    result: Option<Result<Bytes>>,
     /// Unique per stored result, so groups can tell what changed.
     version: u64,
     /// Snapshot revision the stored result ran against.
@@ -396,7 +397,7 @@ impl Watches {
         }
     }
 
-    pub fn complete(&mut self, job: &Job, result: Result<Arc<str>>, reads: Dependencies) {
+    pub fn complete(&mut self, job: &Job, result: Result<Bytes>, reads: Dependencies) {
         let (id, generation) = (job.id, job.generation);
         let Some(batch) = self.batch.as_mut().filter(|batch| batch.generation == generation) else {
             return;
@@ -409,7 +410,7 @@ impl Watches {
         self.finish();
     }
 
-    fn store(&mut self, id: QueryId, evaluated: Revision, result: Result<Arc<str>>, reads: Dependencies) {
+    fn store(&mut self, id: QueryId, evaluated: Revision, result: Result<Bytes>, reads: Dependencies) {
         let missed = self
             .recent
             .iter()
@@ -639,7 +640,7 @@ fn reject(group: Group, error: &Error) {
     }
 }
 
-fn result_bytes(result: Option<&Result<Arc<str>>>) -> usize {
+fn result_bytes(result: Option<&Result<Bytes>>) -> usize {
     match result {
         Some(Ok(json)) => json.len(),
         Some(Err(error)) => error.to_string().len(),
@@ -672,7 +673,7 @@ fn reads_bytes(reads: &Dependencies) -> usize {
     points + ranges + indexes
 }
 
-fn same(a: &Result<Arc<str>>, b: &Result<Arc<str>>) -> bool {
+fn same(a: &Result<Bytes>, b: &Result<Bytes>) -> bool {
     match (a, b) {
         (Ok(a), Ok(b)) => a == b,
         (Err(a), Err(b)) => a.to_string() == b.to_string(),

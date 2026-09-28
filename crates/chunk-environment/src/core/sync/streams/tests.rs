@@ -4,7 +4,7 @@ use chunk_proto::sync::v1::entry::State;
 fn upsert(key: &str, value: &str, revision: u64) -> Update {
     Update {
         position: Some(Position { epoch: 1, revision }),
-        upserts: vec![Entry { key: key.into(), state: Some(State::Value(value.as_bytes().to_vec())) }],
+        upserts: vec![Entry { key: key.into(), state: Some(State::Value(value.as_bytes().to_vec().into())) }],
         ..Update::default()
     }
 }
@@ -24,7 +24,7 @@ fn merged_changes_keep_every_key_at_its_latest_value() {
     let update = changes.into_update();
     assert_eq!(update.position, Some(Position { epoch: 1, revision: 5 }));
     let values: Vec<_> = update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
-    assert_eq!(values, [("a", Some(State::Value(b"2".to_vec())))]);
+    assert_eq!(values, [("a", Some(State::Value(b"2".as_slice().into())))]);
     assert_eq!(update.removed, ["b"]);
 }
 
@@ -89,7 +89,7 @@ async fn changes_the_budget_has_no_room_for_keep_coalescing_and_are_retried() {
     assert!(freed.elapsed() <= RETRY);
     assert_eq!(part.charge.as_ref().map(SendCharge::bytes), Some(part.update.encoded_len() + PREFIX_BYTES));
     let values: Vec<_> = part.update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
-    let value = |value: &str| Some(State::Value(value.as_bytes().to_vec()));
+    let value = |value: &str| Some(State::Value(value.as_bytes().to_vec().into()));
     assert_eq!(values, [("a", value("1")), ("b", value("2")), ("c", value("1"))]);
     assert_eq!(part.update.position, Some(Position { epoch: 1, revision: 4 }));
     drop(part);
@@ -127,7 +127,7 @@ async fn a_value_the_budget_has_no_room_for_gives_way_to_a_newer_one_that_fits()
     let part = stream.parts.recv().await.unwrap();
     assert!(refused.elapsed() < DEADLINE);
     let values: Vec<_> = part.update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
-    assert_eq!(values, [("a", Some(State::Value(b"1".to_vec())))]);
+    assert_eq!(values, [("a", Some(State::Value(b"1".as_slice().into())))]);
     assert_eq!(part.update.position, Some(Position { epoch: 1, revision: 2 }));
     drop(part);
     assert_eq!(budget.bytes(), 0);

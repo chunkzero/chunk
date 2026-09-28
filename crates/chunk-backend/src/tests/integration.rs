@@ -81,13 +81,13 @@ async fn a_lost_mutation_reply_is_recovered_by_its_operation_after_restart() {
     let queries = || vec![call("get", Value::Null), call("strict", Value::Null)];
     let mut group = backend.subscribe_group(queries()).await.unwrap();
     let initial = group.next().await.unwrap();
-    assert_eq!(&*initial.results[0].clone().unwrap(), "0");
+    assert_eq!(initial.results[0].as_ref().unwrap(), "0");
     assert!(initial.results[1].is_err());
     // Discard the successful reply: the caller recovers it by operation after restart.
     let revision = backend.mutate("lost-reply".into(), call("increment", Value::Null)).await.unwrap().revision;
     let update = group.next().await.unwrap();
     assert_eq!(update.revision, revision);
-    let results: Vec<_> = update.results.into_iter().map(|result| result.unwrap().to_string()).collect();
+    let results: Vec<_> = update.results.into_iter().map(|result| result.unwrap()).collect();
     assert_eq!(results, ["1", "1"]);
     drop(group);
     drop(backend);
@@ -104,7 +104,7 @@ async fn a_lost_mutation_reply_is_recovered_by_its_operation_after_restart() {
     assert!(mismatched(&backend.mutate("lost-reply".into(), mismatch).await.unwrap_err()));
     let fresh = backend.subscribe_group(queries()).await.unwrap().next().await.unwrap();
     assert_eq!(fresh.revision, revision);
-    let results: Vec<_> = fresh.results.into_iter().map(|result| result.unwrap().to_string()).collect();
+    let results: Vec<_> = fresh.results.into_iter().map(|result| result.unwrap()).collect();
     assert_eq!(results, ["1", "1"]);
 }
 

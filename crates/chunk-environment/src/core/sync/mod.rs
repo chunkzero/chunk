@@ -198,7 +198,7 @@ impl Core for SyncService {
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let principal = self.credentials.authenticate(&request)?;
         let request = request.into_inner();
-        let (sender, stream) = streams::channel(self.app.backend().send_budget().clone());
+        let (sender, stream) = streams::channel(self.app.backend().send_budget().streams());
         match self.open(principal, &request).await {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),

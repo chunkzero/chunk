@@ -375,7 +375,7 @@ impl Pending {
     /// The pending effects as a snapshot, or once the command finished, its outcome, which the second value marks.
     /// Fails if core couldn't hold the outcome.
     pub fn snapshot(&self) -> Result<(Update, bool), Error> {
-        let entry = |key: String, value: Vec<u8>| Entry { key, state: Some(State::Value(value)) };
+        let entry = |key: String, value: Vec<u8>| Entry { key, state: Some(State::Value(value.into())) };
         let (upserts, finished) = if let Phase::Finished(outcome) = &self.phase {
             let outcome = outcome.as_ref().map_err(Clone::clone)?;
             (vec![entry("outcome".into(), outcome.value.encode_to_vec())], true)

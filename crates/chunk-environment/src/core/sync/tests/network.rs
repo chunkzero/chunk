@@ -59,7 +59,7 @@ async fn every_gateway_follows_the_deployment_topic_until_its_own_credential_is_
     }
     let current = |deployment: &str| {
         let value = GatewayDeployment { deployment: deployment.into() }.encode_to_vec();
-        [Entry { key: "current".into(), state: Some(State::Value(value)) }]
+        [Entry { key: "current".into(), state: Some(State::Value(value.into())) }]
     };
     fixture.control.activate_release(runtime::release()).unwrap();
     for updates in &mut streams {

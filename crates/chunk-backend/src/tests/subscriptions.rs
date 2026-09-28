@@ -34,7 +34,7 @@ async fn put(backend: &Backend, key: &str, coins: i64) {
 
 async fn results(group: &mut GroupSubscription) -> Vec<Value> {
     let update = group.next().await.unwrap();
-    update.results.into_iter().map(|result| serde_json::from_str(&result.unwrap()).unwrap()).collect()
+    update.results.into_iter().map(|result| serde_json::from_slice(&result.unwrap()).unwrap()).collect()
 }
 
 #[tokio::test]

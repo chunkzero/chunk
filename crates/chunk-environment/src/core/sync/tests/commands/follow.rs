@@ -9,9 +9,7 @@ async fn pending_move(updates: &mut Streaming<Update>) -> String {
     loop {
         let update = next(updates).await;
         let pending = update.upserts.iter().find_map(|entry| match &entry.state {
-            Some(State::Value(value)) if entry.key == "login" => {
-                GatewayClaim::decode(value.as_slice()).unwrap().pending_move
-            }
+            Some(State::Value(value)) if entry.key == "login" => GatewayClaim::decode(&value[..]).unwrap().pending_move,
             _ => None,
         });
         if let Some(pending) = pending {
@@ -50,7 +48,7 @@ async fn a_follow_player_commands_move_cuts_the_player_over_and_its_later_effect
             break (key, value);
         }
     };
-    let effect = CommandEffect::decode(value.as_slice()).unwrap().effect;
+    let effect = CommandEffect::decode(&value[..]).unwrap().effect;
     assert_eq!(effect, Some(command_effect::Effect::Message("followed".into())));
     let ack = EffectArguments { operation_id: operation, sequence: key.parse().unwrap(), failed: false };
     assert!(!decoded::<EffectResult>(&gateway.call("", "chunk:effect", &ack).await).unknown);

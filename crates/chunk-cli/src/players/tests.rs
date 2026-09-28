@@ -26,7 +26,7 @@ impl core_server::Core for Expired {
     async fn subscribe(&self, _: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let node = Node { phase: self.0.into(), ..Node::default() };
-        let entry = Entry { key: "host".into(), state: Some(State::Value(node.encode_to_vec())) };
+        let entry = Entry { key: "host".into(), state: Some(State::Value(node.encode_to_vec().into())) };
         let snapshot = Update { snapshot: true, upserts: vec![entry], ..Update::default() };
         Ok(Response::new(Box::pin(tokio_stream::once(Ok(snapshot)).chain(tokio_stream::pending()))))
     }

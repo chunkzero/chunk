@@ -88,7 +88,7 @@ fn apply(claims: &mut Claims, update: Update) -> Result<()> {
     }
     for entry in update.upserts {
         let Some(State::Value(value)) = entry.state else { bail!("gateway claim entry without a value") };
-        claims.insert(entry.key, GatewayClaim::decode(value.as_slice())?.phase());
+        claims.insert(entry.key, GatewayClaim::decode(&value[..])?.phase());
     }
     Ok(())
 }

@@ -4,11 +4,12 @@ use super::{
     super::{NAME_BYTES, errors, position, streams::Sender},
     Context, changed, send,
 };
+use bytes::Bytes;
 use chunk_backend::{Backend, Call, GroupSubscription, GroupUpdate};
 use chunk_proto::sync::v1::{Entry, Error, Update, entry::State, error::Code};
 use chunk_store::Revision;
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -83,7 +84,7 @@ impl Queries {
         let Self { keys, mut group, context: Context { id, grant, mut nudges, epoch } } = self;
         let mut progress = group.progress();
         let mut changes = grant.changes();
-        let mut sent: Vec<Option<Result<Arc<str>, Error>>> = vec![None; keys.len()];
+        let mut sent: Vec<Option<Result<Bytes, Error>>> = vec![None; keys.len()];
         let mut revision = Revision(0);
         // The version of the results sent, once the snapshot is.
         let mut version = None;
@@ -121,9 +122,9 @@ impl Queries {
                     let mut upserts = Vec::new();
                     for ((key, last), result) in keys.iter().zip(&mut sent).zip(update.results) {
                         let result = result.map_err(|failure| errors::backend(&failure));
-                        if last.as_ref() != Some(&result) {
+                        if !same(last.as_ref(), &result) {
                             let state = match &result {
-                                Ok(json) => State::Value(json.as_bytes().to_vec()),
+                                Ok(json) => State::Value(json.clone()),
                                 Err(error) => State::Error(error.clone()),
                             };
                             upserts.push(Entry { key: key.clone(), state: Some(state) });
@@ -162,5 +163,15 @@ impl Queries {
                 pending = None;
             }
         }
+    }
+}
+
+/// Whether `result` is the one last sent, without comparing a value with itself byte by byte.
+fn same(last: Option<&Result<Bytes, Error>>, result: &Result<Bytes, Error>) -> bool {
+    match (last, result) {
+        (Some(Ok(last)), Ok(result)) => {
+            (last.as_ptr() == result.as_ptr() && last.len() == result.len()) || last == result
+        }
+        (last, result) => last == Some(result),
     }
 }
