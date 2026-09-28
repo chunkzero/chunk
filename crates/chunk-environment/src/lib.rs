@@ -5,7 +5,7 @@ mod gateway;
 mod managed;
 mod services;
 
-pub use self::core::{Core, CoreConfig};
+pub use self::core::{Core, CoreConfig, ReleaseArchive};
 pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
 pub use managed::ManagementConfig;
 pub use services::{Service, Services};

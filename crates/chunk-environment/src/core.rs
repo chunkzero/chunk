@@ -1,4 +1,8 @@
+mod archives;
 mod sync;
+
+pub(crate) use archives::Archives;
+pub use archives::ReleaseArchive;
 
 use crate::{PlatformTarget, Running};
 use chunk_contract::ControlConnection;
@@ -55,6 +59,8 @@ pub struct Core {
     gateway: Option<GatewayCredential>,
     /// Derives gateway machines' credentials.
     issuer: Option<sync::Issuer>,
+    /// The archives of the releases loaded from management.
+    archives: Arc<Archives>,
 }
 
 impl Core {
@@ -243,6 +249,16 @@ impl Core {
     /// Reports a stopped control.
     pub fn control(&self) -> io::Result<Arc<chunk_control::Control>> {
         Ok(self.authority()?.control.clone())
+    }
+
+    /// The archive release `id` was loaded from, kept only for releases downloaded from management.
+    #[must_use]
+    pub fn release_archive(&self, id: &str) -> Option<ReleaseArchive> {
+        self.archives.get(id)
+    }
+
+    pub(crate) fn archives(&self) -> &Arc<Archives> {
+        &self.archives
     }
 
     /// Where the network listener serves, if `core_bind` configured one.

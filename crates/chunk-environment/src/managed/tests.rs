@@ -323,6 +323,10 @@ impl Harness {
         self.directory.path().join("state")
     }
 
+    fn archive(&self, release_id: &str) -> std::path::PathBuf {
+        self.state().join("archives").join(format!("{release_id}.tar.gz"))
+    }
+
     fn core(&self) -> CoreConfig {
         let state = self.state();
         CoreConfig {
@@ -409,6 +413,8 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     let (first, _) = harness.expect(1, "dep_a", DeploymentState::InProgress).await;
     let (second, _) = harness.expect(1, "dep_a", DeploymentState::Active).await;
     assert!(first < second);
+    let kept = fs::read(harness.archive(&harness.release.0)).unwrap();
+    assert_eq!(Sha256::digest(&kept), Sha256::digest(&harness.release.1));
 
     // dep_b activates, but its report fails until dep_c has superseded it.
     *harness.management.refused.lock().unwrap() = Some("dep_b".into());
@@ -433,7 +439,7 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     harness.expect(4, "dep_b", DeploymentState::Active).await;
     harness.released("dep_a").await;
     assert!(harness.serves("dep_b").await);
-    assert!(!harness.state().join("releases/rejected").exists());
+    assert!(!harness.state().join("releases/rejected").exists() && !harness.archive("rejected").exists());
     assert!(!running.is_finished());
 
     stop.cancel();
@@ -482,6 +488,11 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     fs::create_dir_all(&abandoned).unwrap();
     let unused = harness.state().join("releases/unused");
     fs::create_dir_all(&unused).unwrap();
+    let (abandoned_archive, unused_archive) = (harness.archive(".abandoned"), harness.archive("unused"));
+    fs::write(&abandoned_archive, b"partial").unwrap();
+    fs::write(&unused_archive, b"unused").unwrap();
+    let installed = harness.state().join("releases").join(&harness.release.0);
+    fs::write(installed.join("source.mjs"), "tampered").unwrap();
     harness.deploy("dep_c", harness.valid());
     let (stop, running) = harness.start();
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
@@ -490,7 +501,8 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     harness.released("dep_abandoned_0").await;
     assert!(harness.serves("dep_c").await);
     assert!(!abandoned.exists() && !unused.exists());
-    assert!(harness.state().join("releases").join(&harness.release.0).exists());
+    assert!(!abandoned_archive.exists() && !unused_archive.exists());
+    assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
 
     // dep_d activates, but the core stops before management accepts it, and dep_e supersedes it meanwhile.
     *harness.management.refused.lock().unwrap() = Some("dep_d".into());
