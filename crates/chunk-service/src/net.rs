@@ -1,10 +1,14 @@
 //! Address policy for traffic between chunk processes.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
+
+/// AWS's and GCP's IPv6 instance metadata services, which sit inside `fc00::/7`.
+const METADATA: [Ipv6Addr; 2] =
+    [Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254), Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254)];
 
 /// Whether `address` is loopback or in `10/8`, `172.16/12`, `192.168/16`, `100.64/10` or `fc00::/7`.
 /// IPv4-mapped IPv6 addresses classify like their IPv4 address. Link-local addresses (`169.254/16`,
-/// `fe80::/10`) are not private.
+/// `fe80::/10`) and cloud metadata addresses (`fd00:ec2::254`, `fd20:ce::254`) are not private.
 #[must_use]
 pub fn private(address: IpAddr) -> bool {
     match address.to_canonical() {
@@ -12,7 +16,7 @@ pub fn private(address: IpAddr) -> bool {
             let [a, b, ..] = address.octets();
             address.is_loopback() || address.is_private() || (a == 100 && b & 0xc0 == 64)
         }
-        IpAddr::V6(address) => address.is_loopback() || address.is_unique_local(),
+        IpAddr::V6(address) => address.is_loopback() || (address.is_unique_local() && !METADATA.contains(&address)),
     }
 }
 
@@ -48,6 +52,9 @@ mod tests {
             ("fdaa::1", true),
             ("fdff:ffff::1", true),
             ("fe80::1", false),
+            ("fd00:ec2::254", false),
+            ("fd20:ce::254", false),
+            ("fd00:ec2::253", true),
             ("::", false),
             ("ff02::1", false),
             ("2001:db8::1", false),

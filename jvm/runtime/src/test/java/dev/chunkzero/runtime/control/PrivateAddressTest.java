@@ -32,6 +32,9 @@ class PrivateAddressTest {
                         Map.entry("fc00::1", true),
                         Map.entry("fdaa::1", true),
                         Map.entry("fe80::1", false),
+                        Map.entry("fd00:ec2::254", false),
+                        Map.entry("fd20:ce::254", false),
+                        Map.entry("fd00:ec2::253", true),
                         Map.entry("::", false),
                         Map.entry("ff02::1", false),
                         Map.entry("2001:db8::1", false));

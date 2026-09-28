@@ -3,14 +3,19 @@ package dev.chunkzero.runtime.control;
 import org.jetbrains.annotations.ApiStatus;
 
 import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.List;
 
 /**
  * Whether an address is loopback or in 10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7.
  * IPv4-mapped IPv6 addresses classify like their IPv4 address. Link-local addresses (169.254/16,
- * fe80::/10) are not private.
+ * fe80::/10) and cloud metadata addresses (fd00:ec2::254, fd20:ce::254) are not private.
  */
 @ApiStatus.Internal
 public final class PrivateAddress {
+    /** AWS's and GCP's IPv6 instance metadata services, which sit inside fc00::/7. */
+    private static final List<InetAddress> METADATA = List.of(literal("fd00:ec2::254"), literal("fd20:ce::254"));
+
     private PrivateAddress() {}
 
     public static boolean contains(InetAddress address) {
@@ -21,7 +26,7 @@ public final class PrivateAddress {
         if (bytes.length == 4) {
             return ipv4(bytes[0] & 0xff, bytes[1] & 0xff);
         }
-        return address.isLoopbackAddress() || (bytes[0] & 0xfe) == 0xfc;
+        return address.isLoopbackAddress() || ((bytes[0] & 0xfe) == 0xfc && !METADATA.contains(address));
     }
 
     private static boolean ipv4(int a, int b) {
@@ -39,5 +44,13 @@ public final class PrivateAddress {
             }
         }
         return bytes[10] == (byte) 0xff && bytes[11] == (byte) 0xff;
+    }
+
+    private static InetAddress literal(String address) {
+        try {
+            return InetAddress.getByName(address);
+        } catch (UnknownHostException error) {
+            throw new AssertionError(error);
+        }
     }
 }
