@@ -5,13 +5,10 @@ use super::{
     runtime::with_jvm,
     *,
 };
-use chunk_proto::{
-    sync::v1::{
-        ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DrainArguments, DrainResult, GatewayClaim, JvmHealth,
-        MovePlayerArguments, MovePlayerResult, Node, NodePhase, OperatorPlayer, SessionDemand, WithdrawResult,
-        claim_result, drain_arguments::Target,
-    },
-    v1::{AbandonMoveRequest, ActivateClaim, ClaimPhase as ControlPhase},
+use chunk_proto::sync::v1::{
+    ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DrainArguments, DrainResult, GatewayClaim, JvmHealth,
+    MovePlayerArguments, MovePlayerResult, Node, NodePhase, OperatorPlayer, SessionDemand, WithdrawResult,
+    claim_result, drain_arguments::Target,
 };
 
 impl Fixture {
@@ -40,11 +37,12 @@ impl Fixture {
     async fn arrive(&self) -> String {
         let control = self.control.clone();
         let assignment = control.claim(runtime::login()).await.unwrap();
-        control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+        control.activate(assignment.claim.unwrap()).await.unwrap();
         loop {
-            let players = control.players().unwrap().players;
-            if let Some(player) = players.iter().find(|player| player.phase() == ControlPhase::Arrived) {
-                return player.host_id.clone();
+            if let Some(player) =
+                runtime::players(&control).into_iter().find(|player| player.phase() == ClaimPhase::Arrived)
+            {
+                return player.host;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -172,7 +170,7 @@ async fn players_follow_claims_and_moves_under_operation_ids_bound_to_the_move()
     let destination = control.stored_claim("operator:move").unwrap().expect("the queued move").request;
     let assignment = control.claim(destination).await.unwrap();
     control.cancel(runtime::login()).await.unwrap();
-    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     let in_arena = |player: &OperatorPlayer| {
         player.phase() == ClaimPhase::Arrived && player.demand.as_ref().is_some_and(|demand| demand.key == "arena")
     };
@@ -183,7 +181,7 @@ async fn players_follow_claims_and_moves_under_operation_ids_bound_to_the_move()
     assert_eq!(result::<MovePlayerResult>(&back), MovePlayerResult {});
     let queued = control.stored_claim("operator:back").unwrap().expect("the queued move").request;
     let reason = "the lobby refused the player";
-    control.abandon_move(AbandonMoveRequest { claim: Some(queued), reason: reason.into() }).await.unwrap();
+    control.abandon_move(queued, reason.into()).await.unwrap();
     let failed = |player: &OperatorPlayer| player.last_move_failure.is_some();
     let (latest, player) = until(&mut players, runtime::PLAYER, failed).await;
     let failure = player.last_move_failure.clone().expect("the failed move");

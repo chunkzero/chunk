@@ -146,7 +146,7 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     assert!(tombstone.phase == Phase::Released);
     assert_eq!(tombstone.generation, Generation::from_wire(outdated.delivery_generation));
     assert!(control.claim(lost.clone()).await.is_err());
-    assert!(control.activate(ActivateClaim { claim: Some(outdated.clone()) }).await.is_err());
+    assert!(control.activate(outdated.clone()).await.is_err());
     assert!(!control.state().unwrap().players.contains_key(&lost_player));
 
     // A fresh login reuses the lost claim's revision under the new epoch; the pair tells them apart.
@@ -154,7 +154,7 @@ async fn generations_from_a_lost_tail_stay_fenced_after_a_restore_reuses_their_r
     let (lost_revision, current) = (outdated.delivery_generation & REVISION_MASK, control.state().unwrap().revision);
     assert!(restored < lost_revision && lost_revision <= current);
     assert!(fresh.delivery_generation > outdated.delivery_generation);
-    control.activate(ActivateClaim { claim: Some(fresh) }).await.unwrap();
+    control.activate(fresh).await.unwrap();
     assert_eq!(control.inspect(&kept).unwrap().claim, kept_assignment.claim);
 
     let (changes, _) = control.authority.feed().after(position).unwrap();

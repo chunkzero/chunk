@@ -14,17 +14,15 @@ use super::{
     decode,
 };
 use chunk_backend::{
-    ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity, CommandRequest, RequestCharge,
+    ActionHandle, ActionId, ActionStatus, Backend, CommandEffects, CommandIdentity, CommandRequest, CommandScope,
+    CommandSuggestionRequest, RequestCharge,
 };
 use chunk_contract::DomainManifest;
 use chunk_control::{ArrivedClaim, Control};
 use chunk_js::{DeploymentId, Json};
-use chunk_proto::{
-    sync::v1::{
-        CallRequest, CommandArguments, CommandStarted, CommandsResult, EffectArguments, EffectResult, Error,
-        SuggestArguments, SuggestResult, error::Code,
-    },
-    v1::{CommandScope, CommandSuggestionRequest},
+use chunk_proto::sync::v1::{
+    CallRequest, CommandArguments, CommandStarted, CommandsResult, EffectArguments, EffectResult, Error,
+    SuggestArguments, SuggestResult, error::Code,
 };
 use prost::Message;
 use std::sync::Arc;
@@ -77,9 +75,9 @@ pub(super) async fn call(
             let player = player(&request)?.to_owned();
             drop(request);
             let Origin { deployment, scope, .. } = origin(control, backend, gateway, &player).await?;
-            let suggestion = CommandSuggestionRequest { scope: Some(scope), command_id, query, input, cursor };
+            let suggestion = CommandSuggestionRequest { scope, command_id, query, input, cursor };
             let suggestions = backend.command_suggestions(deployment, charge, suggestion, caller(&player)).await;
-            SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))?.values }.encode_to_vec()
+            SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))? }.encode_to_vec()
         }
         Method::Command => start(service, gateway, credential, request, charge).await?.encode_to_vec(),
         Method::Effect => {

@@ -4,7 +4,6 @@ use chunk_contract::{
     Contracts, Deployment, DomainManifest, Function, FunctionKind, RuntimeProfile, Schema, Visibility,
 };
 use chunk_js::{DeploymentId, Json};
-use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest};
 use chunk_store::SqliteStore;
 use serde_json::json;
 
@@ -86,14 +85,14 @@ impl Fixture {
     async fn suggest(&self, query: &str, input: &str) -> crate::Result<Vec<String>> {
         let cursor = u32::try_from(input.len()).unwrap();
         let request = CommandSuggestionRequest {
-            scope: Some(scope()),
+            scope: scope(),
             command_id: COMMAND.into(),
             query: query.into(),
             input: input.into(),
             cursor,
         };
         let charge = self.backend.charge_request(0).unwrap();
-        Ok(self.backend.command_suggestions(id(), charge, request, caller()).await?.values)
+        self.backend.command_suggestions(id(), charge, request, caller()).await
     }
     /// Starts the command with `input` for `alice`, as core's sync path does.
     async fn start(&self, input: &str) -> crate::Result<(ActionHandle, CommandEffects)> {
@@ -273,7 +272,7 @@ async fn command_catalog_admission_charges_retained_scope_and_caller() {
 async fn command_suggestion_admission_charges_retained_scope_input_and_caller() {
     let (backend, _incoming, memory) = Backend::held_ingress();
     let request = CommandSuggestionRequest {
-        scope: Some(scope()),
+        scope: scope(),
         command_id: COMMAND.into(),
         query: "choices".into(),
         input: "notify o".into(),

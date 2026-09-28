@@ -7,10 +7,10 @@ use super::{
 };
 use chunk_proto::{
     sync::v1::{
-        JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase, JvmMethodResult,
-        JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus,
+        ClaimPhase, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase,
+        JvmMethodResult, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus, OperatorPlayer,
     },
-    v1::{ActivateClaim, Assignment, ClaimPhase, PlayerStatus},
+    v1::Assignment,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -314,7 +314,7 @@ async fn place(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) 
 /// Places the fake player and lets them arrive.
 pub(super) async fn arrive(fixture: &Fixture, launches: &Launches) -> (SyncJvm, Assignment) {
     let (jvm, assignment) = place(fixture, launches).await;
-    fixture.control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
+    fixture.control.activate(assignment.claim.clone().unwrap()).await.unwrap();
     jvm.player("login", JvmDeliveryPhase::Arrived).await;
     phase(fixture, Some(ClaimPhase::Arrived)).await;
     (jvm, assignment)
@@ -324,8 +324,7 @@ pub(super) async fn arrive(fixture: &Fixture, launches: &Launches) -> (SyncJvm, 
 pub(super) async fn phase(fixture: &Fixture, phase: Option<ClaimPhase>) {
     let reached = async {
         loop {
-            let players = fixture.control.players().unwrap().players;
-            if players.first().map(PlayerStatus::phase) == phase {
+            if runtime::players(&fixture.control).first().map(OperatorPlayer::phase) == phase {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -343,7 +342,7 @@ async fn a_delivery_is_prepared_on_the_topic_and_released_once_its_jvm_closes_it
     assert_eq!((preparation.capability, preparation.endpoint.as_str()), (CAPABILITY.to_vec(), "127.0.0.1:1"));
     assert_eq!(assignment.configuration.unwrap().protocol, 776);
 
-    fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    fixture.control.activate(assignment.claim.unwrap()).await.unwrap();
     jvm.player("login", JvmDeliveryPhase::Arrived).await;
     phase(&fixture, Some(ClaimPhase::Arrived)).await;
     // The player leaves: the JVM closes the delivery, which releases the claim and leaves the topic.

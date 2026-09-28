@@ -18,7 +18,10 @@ mod timing;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
 pub use chunk_js::{DeploymentId, HttpMethod};
-pub use commands::{CommandEffect, CommandEffects, CommandIdentity, CommandRequest};
+pub use commands::{
+    CommandCatalog, CommandEffect, CommandEffects, CommandIdentity, CommandRequest, CommandScope,
+    CommandSuggestionRequest,
+};
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
 pub use limits::Limit;
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Progress, RequestCharge, Subscription, Update};

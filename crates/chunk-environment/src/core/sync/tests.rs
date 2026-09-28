@@ -517,15 +517,15 @@ async fn core_stops_within_its_grace_while_a_client_never_reads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
-    use chunk_proto::v1::{ActivateClaim, ClaimPhase, MovePlayerRequest, PlayerList};
+    use chunk_control::MoveRequest;
+    use chunk_proto::sync::v1::ClaimPhase;
     let (mut fixture, jvm) = runtime::with_jvm().await;
     let control = fixture.control.clone();
     let assignment = control.claim(runtime::login()).await.unwrap();
     let session = assignment.delivery.and_then(|delivery| delivery.session).unwrap().id;
-    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     // The JVM reports the arrival on its own stream.
-    let arrived = |list: PlayerList| list.players.iter().any(|player| player.phase() == ClaimPhase::Arrived);
-    while !arrived(control.players().unwrap()) {
+    while !runtime::players(&control).iter().any(|player| player.phase() == ClaimPhase::Arrived) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -539,17 +539,17 @@ async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     let mut updates = fixture.client.subscribe(authorized(subscription, JVM)).await.unwrap().into_inner();
     assert!(next(&mut updates).await.snapshot);
 
-    let request = MovePlayerRequest {
+    let request = MoveRequest {
         operation_id: "move".into(),
         player_id: runtime::PLAYER.into(),
-        demand: Some(runtime::demand("arena")),
-        ..MovePlayerRequest::default()
+        demand: runtime::demand("arena"),
+        source: None,
     };
     let moved = control.claim(control.move_player(request).unwrap()).await.unwrap();
     // Control's change feed ends the stream at once, not at its next idle advance.
     let prompt = tokio::time::Instant::now() + Duration::from_millis(500);
     control.cancel(runtime::login()).await.unwrap();
-    control.activate(ActivateClaim { claim: moved.claim }).await.unwrap();
+    control.activate(moved.claim.unwrap()).await.unwrap();
     let update = tokio::time::timeout_at(prompt, updates.message()).await.expect("a prompt end");
     let update = update.unwrap().expect("an update");
     assert_eq!(update.error.map(|error| error.code()), Some(Code::Denied));

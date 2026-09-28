@@ -1,10 +1,12 @@
 //! The fake release, the fake player tests place on it, and a core whose JVM runs them.
 
 use super::{Fixture, jvm::Launches, jvm_effects::SyncJvm};
+use chunk_control::{Control, operator::Players};
 use chunk_proto::{
-    sync::v1::{JvmDeliveryPhase, JvmHealth},
-    v1::{ClaimPhase, ClaimRequest, Identity, SessionDemand},
+    sync::v1::{ClaimPhase, JvmDeliveryPhase, JvmHealth, OperatorPlayer, entry::State},
+    v1::{ClaimRequest, Identity, SessionDemand},
 };
+use prost::Message;
 use std::{
     sync::{Arc, OnceLock},
     time::Duration,
@@ -51,6 +53,16 @@ pub fn login() -> ClaimRequest {
         source: None,
         deployment: String::new(),
     }
+}
+
+/// The operator's `players` view of `control`: each player with a current claim.
+pub fn players(control: &Arc<Control>) -> Vec<OperatorPlayer> {
+    let (_, snapshot) = Players::open(control).unwrap();
+    let values = snapshot.upserts.into_iter().map(|entry| match entry.state {
+        Some(State::Value(value)) => OperatorPlayer::decode(value.as_slice()).unwrap(),
+        _ => panic!("a snapshot holds values"),
+    });
+    values.collect()
 }
 
 /// A fake JVM a test runs, until aborted.
@@ -104,8 +116,7 @@ pub async fn with_jvm() -> (Fixture, Running) {
         let jvm = SyncJvm::connect(client, &host).await;
         let _ = running.set(jvm.clone());
         loop {
-            let players = control.players().unwrap().players;
-            if players.iter().any(|player| player.phase() == ClaimPhase::Activating) {
+            if players(&control).iter().any(|player| player.phase() == ClaimPhase::Activating) {
                 for operation in jvm.prepared() {
                     jvm.player(&operation, JvmDeliveryPhase::Arrived).await;
                 }

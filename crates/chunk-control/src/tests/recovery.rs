@@ -37,7 +37,7 @@ async fn restored_reservations_are_neither_prepared_nor_activated_until_survivor
     // The lost tail may have canceled either claim and admitted its player on a JVM that has not re-attached.
     let control = fixture.control().await;
     assert!(matches!(control.claim(reserved.clone()).await, Err(Error::Busy)));
-    assert!(matches!(control.activate(ActivateClaim { claim: prepared.claim }).await, Err(Error::Busy)));
+    assert!(matches!(control.activate(prepared.claim.unwrap()).await, Err(Error::Busy)));
     assert!(!fixture.runtime.bindings.lock().unwrap().contains_key("reserved"));
     fixture.close().await;
 }
@@ -49,7 +49,7 @@ async fn a_surviving_jvm_reattaches_with_its_logged_credential_and_keeps_owned_c
     let arrived = request("arrived", &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(arrived.clone()).await.unwrap();
     fixture.arrive(&control, "arrived").await;
-    control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
+    control.activate(assignment.claim.clone().unwrap()).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["arrived"].session].host.clone();
     drop(control);

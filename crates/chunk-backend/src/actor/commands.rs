@@ -5,12 +5,11 @@ use std::{
 
 use chunk_contract::{CommandSuggestions, Deployment, Function, FunctionKind, Schema, Visibility, visible_commands};
 use chunk_js::{Cancellation, DeploymentId, Json, Mode};
-use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
 use chunk_store::Revision;
 use serde_json::{Value, json};
 
 use super::Actor;
-use crate::{Call, Error, Result, commands::CommandBinding};
+use crate::{Call, CommandCatalog, CommandScope, CommandSuggestionRequest, Error, Result, commands::CommandBinding};
 
 /// A catalog stays valid while the deployment, scope and committed view it was
 /// computed against are unchanged; permission queries are pure over those.
@@ -151,11 +150,11 @@ impl Actor {
         request: CommandSuggestionRequest,
         caller: &Json,
         cancellation: &Cancellation,
-    ) -> Result<CommandSuggestionResult> {
-        let scope = request.scope.ok_or(Error::Invalid("missing command scope"))?;
+    ) -> Result<Vec<String>> {
+        let scope = &request.scope;
         let deployment = self.command_deployment(id)?;
-        self.command_permission(&deployment, &scope, &request.command_id, caller, cancellation)?;
-        let descriptor = selected(&deployment, &scope, &request.command_id)?;
+        self.command_permission(&deployment, scope, &request.command_id, caller, cancellation)?;
+        let descriptor = selected(&deployment, scope, &request.command_id)?;
         if request.input.len() > 3 * (chunk_contract::MAX_COMMAND_INPUT + 1)
             || request.input.strip_prefix('/').unwrap_or(&request.input).encode_utf16().count()
                 > chunk_contract::MAX_COMMAND_INPUT
@@ -186,7 +185,7 @@ impl Actor {
         {
             return Err(Error::Invalid("suggestion result limit"));
         }
-        Ok(CommandSuggestionResult { values })
+        Ok(values)
     }
 }
 

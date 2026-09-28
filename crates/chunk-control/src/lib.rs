@@ -14,7 +14,6 @@ mod nodes;
 mod operations;
 pub mod operator;
 mod placement;
-mod players;
 mod process;
 mod reconcile;
 mod recovery;
@@ -42,6 +41,7 @@ pub use host::{
     Distribution, Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection,
 };
 pub use machines::MachineKind;
+pub use moves::{MoveRequest, MoveSource};
 pub use operations::Operations;
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};

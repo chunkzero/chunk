@@ -167,7 +167,7 @@ async fn failed_creation_frees_its_capacity_and_finish_requires_current_claim() 
     let identity = control.claim(claim.clone()).await.unwrap().claim.unwrap();
     assert!(control.finish_destination(&identity).is_err());
     fixture.arrive(&control, "arrived").await;
-    control.activate(ActivateClaim { claim: Some(identity.clone()) }).await.unwrap();
+    control.activate(identity.clone()).await.unwrap();
     let mut stale = identity.clone();
     stale.delivery_generation += 1;
     assert!(control.finish_destination(&stale).is_err());

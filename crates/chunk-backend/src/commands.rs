@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use chunk_contract::Schema;
 use chunk_js::{DeploymentId, Json};
-use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
@@ -42,6 +41,43 @@ impl Purpose {
     pub fn bytes(&self) -> usize {
         if let Self::Command(binding) = self { binding.bytes() } else { 0 }
     }
+}
+
+/// A player's command context, which core builds from the player's arrived claim. The backend checks the app and
+/// domain binding itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandScope {
+    pub proxy_id: String,
+    pub player_uuid: String,
+    pub username: String,
+    pub session_id: String,
+    pub app: String,
+    pub session_type: String,
+    pub domain: String,
+    pub scope_id: String,
+    pub connection_id: String,
+    pub claim_operation_id: String,
+    pub membership_generation: u64,
+    pub delivery_generation: u64,
+}
+
+/// The commands a scope sees, and which of them its permission queries allow.
+#[derive(Clone, Debug)]
+pub struct CommandCatalog {
+    /// Each visible command by its inherited descriptor ID, including hidden owned roots, as JSON.
+    pub commands_json: Vec<u8>,
+    pub allowed_ids: Vec<String>,
+}
+
+/// A suggestion query of a command, run for its input up to `cursor`.
+#[derive(Clone, Debug)]
+pub struct CommandSuggestionRequest {
+    pub scope: CommandScope,
+    pub command_id: String,
+    /// Must name a suggestion query the command declares.
+    pub query: String,
+    pub input: String,
+    pub cursor: u32,
 }
 
 /// Bytes a command scope retains, charged at admission.
@@ -245,8 +281,8 @@ impl Backend {
         charge: RequestCharge,
         request: CommandSuggestionRequest,
         caller: Json,
-    ) -> Result<CommandSuggestionResult> {
-        let bytes = request.scope.as_ref().map_or(0, scope_bytes)
+    ) -> Result<Vec<String>> {
+        let bytes = scope_bytes(&request.scope)
             + request.command_id.len()
             + request.query.len()
             + request.input.len()

@@ -7,10 +7,7 @@ use super::{
     jvm_effects::{SyncJvm, arrive, phase},
     *,
 };
-use chunk_proto::{
-    sync::v1::{ClaimRefusal, ClaimResult, JvmDeliveryPhase, WithdrawResult, claim_result},
-    v1::ClaimPhase,
-};
+use chunk_proto::sync::v1::{ClaimPhase, ClaimRefusal, ClaimResult, JvmDeliveryPhase, WithdrawResult, claim_result};
 
 /// Gateway `proxy`'s calls on its current stream, each through a client of its own.
 #[derive(Clone)]

@@ -41,12 +41,11 @@ async fn connected() -> Arrived {
 impl Arrived {
     /// Claims and activates the player's login, then waits until they arrived.
     pub(super) async fn arrive(&self) {
-        use chunk_proto::v1::{ActivateClaim, ClaimPhase};
+        use chunk_proto::sync::v1::ClaimPhase;
         let assignment = self.fixture.control.claim(runtime::login()).await.unwrap();
-        self.fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+        self.fixture.control.activate(assignment.claim.unwrap()).await.unwrap();
         let arrived = |fixture: &Fixture| {
-            let players = fixture.control.players().unwrap().players;
-            players.iter().any(|player| player.phase() == ClaimPhase::Arrived)
+            runtime::players(&fixture.control).iter().any(|player| player.phase() == ClaimPhase::Arrived)
         };
         while !arrived(&self.fixture) {
             tokio::time::sleep(Duration::from_millis(10)).await;

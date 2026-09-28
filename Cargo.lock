@@ -474,7 +474,6 @@ dependencies = [
  "chunk-build",
  "chunk-contract",
  "chunk-js",
- "chunk-proto",
  "chunk-service",
  "chunk-store",
  "reqwest",

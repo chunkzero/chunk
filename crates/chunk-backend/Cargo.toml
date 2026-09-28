@@ -17,7 +17,6 @@ uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 chunk-service = { path = "../chunk-service" }
 chunk-contract = { path = "../chunk-contract" }
-chunk-proto = { path = "../chunk-proto" }
 chunk-js = { path = "../chunk-js" }
 chunk-store = { path = "../chunk-store" }
 serde = { version = "1", features = ["derive"] }

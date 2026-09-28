@@ -1,6 +1,6 @@
 use chunk_proto::{
     sync::v1::{JvmDeliveryPhase, JvmDeliveryStatus},
-    v1::{ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest},
+    v1::{Assignment, ClaimIdentity, ClaimPhase, ClaimRequest},
 };
 use prost::Message;
 use std::collections::BTreeSet;
@@ -11,22 +11,21 @@ use crate::{
 };
 
 impl Control {
-    /// Records admission intent; native Minecraft login attaches the prepared delivery.
+    /// Records admission intent for the claim `identity` names; native Minecraft login attaches the prepared delivery.
     /// # Errors
     /// Rejects stale identity and retains authority after ambiguous runtime replies. Reports `Busy` until recovery
     /// has fenced surviving JVMs.
-    pub async fn activate(&self, request: ActivateClaim) -> Result<Assignment> {
-        let identity = request.claim.as_ref().ok_or(Error::Invalid("missing claim identity"))?;
+    pub async fn activate(&self, identity: ClaimIdentity) -> Result<Assignment> {
         self.admit()?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
-            crate::moves::authorize_destination(state, identity)?;
+            crate::moves::authorize_destination(state, &identity)?;
             let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
                 return Err(Error::Invalid("destination draining"));
             }
-            if claim.identity(&identity.operation_id) != *identity
+            if claim.identity(&identity.operation_id) != identity
                 || claim.assignment.is_none()
                 || state.players.get(&claim.player).and_then(|p| p.current.as_ref()) != Some(&identity.operation_id)
                 || matches!(claim.phase, Phase::Withdrawing | Phase::Released)
@@ -117,15 +116,14 @@ impl Control {
         Ok(identity)
     }
 
-    /// Withdraws the captured connection and confirms its logical membership has ended.
+    /// Withdraws the captured connection, returning whether its player's logical membership ended with it.
     /// # Errors
     /// An unresolved withdrawal never authorizes a disconnect notification.
-    pub async fn reconcile_departure(&self, request: ClaimRequest) -> Result<chunk_proto::v1::DepartureStatus> {
+    pub async fn reconcile_departure(&self, request: ClaimRequest) -> Result<bool> {
         let player = request.identity.as_ref().ok_or(Error::Invalid("missing player identity"))?.uuid.clone();
         let identity = self.cancel(request).await?;
         // A player row exists only while it owns a claim, whether in this membership or a newer one.
-        let departed = identity.membership_generation != 0 && !self.state()?.players.contains_key(&player);
-        Ok(chunk_proto::v1::DepartureStatus { claim: Some(identity), departed })
+        Ok(identity.membership_generation != 0 && !self.state()?.players.contains_key(&player))
     }
 
     /// The claim's current assignment. Releasing its host's capacity released it.

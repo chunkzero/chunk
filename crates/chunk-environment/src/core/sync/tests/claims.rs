@@ -1,12 +1,10 @@
 //! A gateway's claim lifecycle over `chunk:*` calls.
 
 use super::{runtime::with_jvm, *};
-use chunk_proto::{
-    sync::v1::{
-        AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim,
-        GatewayLogin, PlayerIdentity, SessionDemand, WithdrawResult, claim_result,
-    },
-    v1::MovePlayerRequest,
+use chunk_control::MoveRequest;
+use chunk_proto::sync::v1::{
+    AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim,
+    GatewayLogin, PlayerIdentity, SessionDemand, WithdrawResult, claim_result,
 };
 
 impl Fixture {
@@ -57,12 +55,12 @@ pub(super) fn login(connection: &str) -> ClaimArguments {
 }
 
 /// A move of the player to an `arena` session, queued under `operation`.
-fn arena(operation: &str) -> MovePlayerRequest {
-    MovePlayerRequest {
+fn arena(operation: &str) -> MoveRequest {
+    MoveRequest {
         operation_id: operation.into(),
         player_id: runtime::PLAYER.into(),
-        demand: Some(runtime::demand("arena")),
-        ..MovePlayerRequest::default()
+        demand: runtime::demand("arena"),
+        ..MoveRequest::default()
     }
 }
 

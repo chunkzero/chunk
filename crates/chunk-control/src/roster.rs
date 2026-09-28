@@ -9,11 +9,11 @@
 
 use std::collections::BTreeSet;
 
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest, MovePlayerRequest, SessionDemand};
+use chunk_proto::v1::{ClaimIdentity, ClaimRequest, SessionDemand};
 use prost::Message;
 
 use crate::{
-    Control, Error, Result,
+    Control, Error, MoveRequest, MoveSource, Result,
     placement::{insert_claim, owner, reserved, select_room},
     state::{MoveFailure, Phase, Roster, State},
 };
@@ -56,12 +56,14 @@ impl Control {
             .members
             .iter()
             .map(|member| {
-                let command = MovePlayerRequest {
+                let command = MoveRequest {
                     operation_id: member.operation_id.clone(),
                     player_id: member.player_id.clone(),
-                    demand: Some(request.demand.clone()),
-                    expected_source: Some(member.expected_source.clone()),
-                    expected_connection_id: member.expected_connection_id.clone(),
+                    demand: request.demand.clone(),
+                    source: Some(MoveSource {
+                        claim: member.expected_source.clone(),
+                        connection_id: member.expected_connection_id.clone(),
+                    }),
                 };
                 crate::moves::validate(&command)?;
                 Ok(command)
