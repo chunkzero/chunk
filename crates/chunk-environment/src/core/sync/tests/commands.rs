@@ -8,6 +8,7 @@ use chunk_proto::sync::v1::{
 };
 
 mod admission;
+mod follow;
 
 /// Core with the player arrived through gateway `proxy`, whose topic stream it holds, and the fake JVM.
 pub(super) struct Arrived {
@@ -191,7 +192,10 @@ async fn a_gateway_reads_the_commands_and_suggestions_its_arrived_player_sees() 
     // `say`'s permission query allows only the player's gateway caller.
     let CommandsResult { commands_json, allowed } = decoded(&gateway.call("", "chunk:commands", &()).await);
     let commands: serde_json::Value = serde_json::from_slice(&commands_json).unwrap();
-    assert_eq!((commands[SAY]["name"].as_str(), allowed.as_slice()), (Some("say"), [SAY.to_owned()].as_slice()));
+    assert_eq!(
+        (commands[SAY]["name"].as_str(), allowed.as_slice()),
+        (Some("say"), [FOLLOW.to_owned(), SAY.to_owned()].as_slice())
+    );
     let arguments =
         SuggestArguments { command_id: SAY.into(), query: "choices".into(), input: "say o".into(), cursor: 5 };
     let suggested = gateway.call("", "chunk:suggest", &arguments).await;
