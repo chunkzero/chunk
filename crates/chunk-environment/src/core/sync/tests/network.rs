@@ -40,26 +40,42 @@ async fn a_gateway_machine_authenticates_over_the_network_until_revoked() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_deployment_topic_follows_the_current_release_for_gateways_until_revoked() {
+async fn every_gateway_follows_the_deployment_topic_until_its_own_credential_is_revoked() {
     let fixture = Fixture::start().await;
-    fixture.control.add_machine("remote", MachineKind::Gateway).unwrap();
-    let credential = Issuer::new("test", None, &fixture.cli).machine(MachineKind::Gateway, "remote");
+    let issuer = Issuer::new("test", None, &fixture.cli);
     let mut client = CoreClient::connect(fixture.network.clone()).await.unwrap();
     let subscription = SubscribeRequest { topic: "deployment".into(), ..SubscribeRequest::default() };
     let mut denied = fixture.client.clone().subscribe(authorized(subscription.clone(), &fixture.cli)).await.unwrap();
     assert_eq!(next(denied.get_mut()).await.error.unwrap().code(), Code::Denied);
 
-    let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
-    let first = next(&mut updates).await;
-    assert!(first.snapshot && first.upserts.is_empty() && !first.stream.is_empty());
+    let mut streams = Vec::new();
+    for id in ["revoked", "kept"] {
+        fixture.control.add_machine(id, MachineKind::Gateway).unwrap();
+        let credential = issuer.machine(MachineKind::Gateway, id);
+        let mut updates = client.subscribe(authorized(subscription.clone(), &credential)).await.unwrap().into_inner();
+        let first = next(&mut updates).await;
+        assert!(first.snapshot && first.upserts.is_empty() && !first.stream.is_empty());
+        streams.push(updates);
+    }
+    let current = |deployment: &str| {
+        let value = GatewayDeployment { deployment: deployment.into() }.encode_to_vec();
+        [Entry { key: "current".into(), state: Some(State::Value(value)) }]
+    };
     fixture.control.activate_release(runtime::release()).unwrap();
-    let current = next(&mut updates).await;
-    let value = GatewayDeployment { deployment: "test".into() }.encode_to_vec();
-    assert!(current.snapshot && current.position.is_some());
-    assert_eq!(current.upserts, [Entry { key: "current".into(), state: Some(State::Value(value)) }]);
+    for updates in &mut streams {
+        let update = next(updates).await;
+        assert!(update.snapshot && update.position.is_some() && update.error.is_none());
+        assert_eq!(update.upserts, current("test"));
+    }
 
-    fixture.control.revoke_machine("remote", MachineKind::Gateway).unwrap();
-    assert_eq!(next(&mut updates).await.error.unwrap().code(), Code::Stopped);
+    fixture.control.revoke_machine("revoked", MachineKind::Gateway).unwrap();
+    assert_eq!(next(&mut streams[0]).await.error.unwrap().code(), Code::Stopped);
+    let mut release = runtime::release();
+    release.deployment.deployment = "next".into();
+    fixture.control.activate_release(release).unwrap();
+    let update = next(&mut streams[1]).await;
+    assert!(update.snapshot && update.error.is_none());
+    assert_eq!(update.upserts, current("next"));
     fixture.stop().await;
 }
 
