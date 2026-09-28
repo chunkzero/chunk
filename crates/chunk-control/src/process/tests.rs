@@ -205,7 +205,6 @@ fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
     let host = ProcessHost::new(ProcessHostConfig {
         directory: directory.join("nodes"),
         backend: chunk_contract::BackendConnection {
-            platform_token: None,
             environment: "test".into(),
             deployment: "build".into(),
             endpoint: "http://127.0.0.1:1".into(),

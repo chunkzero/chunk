@@ -19,9 +19,8 @@ mod transport;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
 pub use chunk_js::{DeploymentId, HttpMethod};
-pub use commands::{CommandEffect, CommandEffects, CommandIdentity, CommandRequest, CommandService};
+pub use commands::{CommandEffect, CommandEffects, CommandIdentity, CommandRequest};
 pub use effects::{ActionEffects, ActionGrants, HttpBinding};
-pub use hooks::HookService;
 pub use limits::Limit;
 pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Progress, RequestCharge, Subscription, Update};
 pub use system::{ScopeLock, System};

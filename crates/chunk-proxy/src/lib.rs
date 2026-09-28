@@ -26,7 +26,7 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Limits for login and configuration, and the server-list response.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Backend hooks and durable session placement for managed gameplay.
+    /// Core's hooks, commands and durable session placement for managed gameplay.
     pub platform: Option<PlatformTarget>,
     pub motd: String,
     pub max_connections: NonZeroUsize,

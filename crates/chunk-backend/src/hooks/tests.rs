@@ -1,13 +1,12 @@
+use std::sync::Arc;
+
 use chunk_contract::{Contracts, DomainManifest, RuntimeProfile};
 use chunk_js::DeploymentId;
-use chunk_proto::v1::backend_hooks_server::BackendHooks;
 use chunk_store::SqliteStore;
 use serde_json::json;
 
 use super::*;
-
-const APPLICATION: &str = "application-credential-is-not-platform";
-const PLATFORM: &str = "platform-credential-never-given-to-jvm";
+use crate::{ActionHandle, Backend};
 
 fn deployment() -> Deployment {
     let domains: DomainManifest = serde_json::from_value(json!({
@@ -34,79 +33,59 @@ export async function wait(ctx) { await ctx.runMutation('increment',null); await
     }
 }
 
-fn invocation(hook: &str) -> InvokeHook {
+/// A gateway's call of `hook`, which names no player.
+fn call(hook: &str) -> Call {
     let arguments = if hook == "ping" {
         json!({"domain":"","eventId":"ping","host":"localhost"})
     } else {
         json!({"domain":"","eventId":"login","destination":null,"player":{"uuid":"alice","username":"Alice"}})
     };
-    InvokeHook {
-        hook: format!("shared/domains/hooks/{hook}"),
-        arguments_json: serde_json::to_vec(&arguments).unwrap(),
-        caller_json: serde_json::to_vec(&json!({"kind":"proxy","proxyId":"proxy"})).unwrap(),
+    Call {
+        deployment: DeploymentId::new("hooks").unwrap(),
+        function: format!("shared/domains/hooks/{hook}"),
+        arguments: arguments.into(),
+        caller: json!({"kind":"gateway"}).into(),
     }
 }
 
-fn request<T>(message: T, token: &str, deployment: &str) -> Request<T> {
-    let mut request = Request::new(message);
-    for (name, value) in [
-        ("authorization", format!("Bearer {token}")),
-        ("x-chunk-environment", "test".into()),
-        ("x-chunk-deployment", deployment.into()),
-    ] {
-        request.metadata_mut().insert(name, value.parse().unwrap());
-    }
-    request
+async fn start(backend: &Backend, call: Call) -> Result<ActionHandle> {
+    backend.start_hook(backend.allocate_action_id().await?, call).await
+}
+
+async fn run(backend: &Backend, call: Call) -> Result<Arc<str>> {
+    start(backend, call).await?.outcome().await
+}
+
+async fn backend(directory: &tempfile::TempDir, deployment: Deployment) -> Backend {
+    let store = SqliteStore::open(directory.path().join("hooks.db"), "test").unwrap();
+    let backend = Backend::new("test".into(), Box::new(store)).unwrap();
+    backend.deploy(deployment).await.unwrap();
+    backend
 }
 
 #[tokio::test]
-async fn only_platform_authority_can_invoke_named_hooks_and_ping_is_read_only() {
+async fn only_declared_hooks_run_as_hooks_and_ping_is_read_only() {
     let directory = tempfile::tempdir().unwrap();
-    let backend =
-        Backend::new("test".into(), Box::new(SqliteStore::open(directory.path().join("hooks.db"), "test").unwrap()))
-            .unwrap();
-    backend.deploy(deployment()).await.unwrap();
-    let service = HookService::new(backend.clone(), APPLICATION, PLATFORM).unwrap();
-    assert!(!service.manifest(request((), APPLICATION, "hooks")).await.unwrap().into_inner().manifest_json.is_empty());
-    assert_eq!(
-        service.invoke(request(invocation("login"), APPLICATION, "hooks")).await.unwrap_err().code(),
-        tonic::Code::Unauthenticated
-    );
-    assert_eq!(
-        service.invoke(request(invocation("login"), PLATFORM, "missing")).await.unwrap_err().code(),
-        tonic::Code::NotFound
-    );
-    let first = service.invoke(request(invocation("login"), PLATFORM, "hooks")).await.unwrap().into_inner();
-    assert_eq!(serde_json::from_slice::<Value>(&first.result_json).unwrap(), json!({"allow":true}));
-    let error = service.invoke(request(invocation("ping"), PLATFORM, "hooks")).await.unwrap_err();
-    assert!(error.message().contains("read-only"), "{error}");
-    let message = invocation("login");
-    let call = Service::decode(
-        DeploymentId::new("hooks").unwrap(),
-        message.hook,
-        &message.arguments_json,
-        &message.caller_json,
-    )
-    .unwrap();
+    let backend = backend(&directory, deployment()).await;
+    let first = run(&backend, call("login")).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&first).unwrap(), json!({"allow":true}));
+    let error = run(&backend, call("ping")).await.unwrap_err();
+    assert!(error.to_string().contains("read-only"), "{error}");
     assert!(matches!(
-        backend.start_action(backend.allocate_action_id().await.unwrap(), call).await,
+        backend.start_action(backend.allocate_action_id().await.unwrap(), call("login")).await,
         Err(Error::Unknown)
     ));
-    let mut arbitrary = invocation("login");
-    arbitrary.hook = "increment".into();
-    assert!(service.invoke(request(arbitrary, PLATFORM, "hooks")).await.is_err());
+    let mut arbitrary = call("login");
+    arbitrary.function = "increment".into();
+    assert!(start(&backend, arbitrary).await.is_err());
 }
 
 #[tokio::test]
 async fn canceled_and_expired_hooks_cannot_resume_and_later_admission_reads_fresh_state() {
     let directory = tempfile::tempdir().unwrap();
-    let backend =
-        Backend::new("test".into(), Box::new(SqliteStore::open(directory.path().join("hooks.db"), "test").unwrap()))
-            .unwrap();
     let mut deployment = deployment();
     deployment.functions.get_mut("read").unwrap().visibility = Visibility::Public;
-    backend.deploy(deployment).await.unwrap();
-    let service = HookService::new(backend.clone(), APPLICATION, PLATFORM).unwrap();
+    let backend = backend(&directory, deployment).await;
     let read = Call {
         deployment: DeploymentId::new("hooks").unwrap(),
         function: "read".into(),
@@ -115,16 +94,12 @@ async fn canceled_and_expired_hooks_cannot_resume_and_later_admission_reads_fres
     };
     let mut updates = backend.subscribe(read.clone()).await.unwrap();
     updates.next().await.unwrap();
-    let work = tokio::spawn({
-        let service = service.clone();
-        async move { service.invoke(request(invocation("wait"), PLATFORM, "hooks")).await }
-    });
+    let waiting = start(&backend, call("wait")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), updates.next()).await.unwrap().unwrap();
-    work.abort();
-    let _ = work.await;
-    let second = service.invoke(request(invocation("login"), PLATFORM, "hooks")).await.unwrap().into_inner();
-    assert_eq!(serde_json::from_slice::<Value>(&second.result_json).unwrap(), json!({"allow":false}));
-    let error = service.invoke(request(invocation("wait"), PLATFORM, "hooks")).await.unwrap_err();
-    assert!(matches!(error.code(), tonic::Code::DeadlineExceeded | tonic::Code::Cancelled), "{error}");
+    drop(waiting);
+    let second = run(&backend, call("login")).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&second).unwrap(), json!({"allow":false}));
+    let expired = tokio::time::timeout(HOOK_TIMEOUT * 2, run(&backend, call("wait"))).await.unwrap();
+    assert!(expired.is_err());
     assert_eq!(&*backend.query(read).await.unwrap().json, "2");
 }

@@ -234,15 +234,11 @@ impl Actor {
     fn request(&mut self, command: Command) {
         match command {
             Command::Catalog { id, scope, caller, reply } => {
-                let result = self.command_catalog(&id, &scope, caller.as_ref(), &reply.cancellation);
+                let result = self.command_catalog(&id, &scope, &caller, &reply.cancellation);
                 reply.finish(result);
             }
             Command::Suggest { id, request, caller, reply } => {
-                let result = self.command_suggest(&id, request, caller.as_ref(), &reply.cancellation);
-                reply.finish(result);
-            }
-            Command::Prepare { id, scope, command, input, reply } => {
-                let result = self.prepare_command(id, scope, command, input, &reply.cancellation);
+                let result = self.command_suggest(&id, request, &caller, &reply.cancellation);
                 reply.finish(result);
             }
             Command::DomainManifest { id, reply } => reply.finish(self.check_deployment(&id).and_then(|()| {
@@ -266,8 +262,8 @@ impl Actor {
             Command::OwnedIdentity { id, owner, request, reply } => {
                 reply.finish(self.actions.command_identity(&id, &owner, request));
             }
-            Command::StartAction { purpose, id, call, retain, reply } => {
-                self.start_action(id, call, purpose, retain, reply);
+            Command::StartAction { purpose, id, call, reply } => {
+                self.start_action(id, call, purpose, reply);
             }
             Command::JobStatus { id, caller, reply } => reply.finish(self.scheduled.get(&id, &caller)),
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),

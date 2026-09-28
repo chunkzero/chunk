@@ -206,7 +206,6 @@ impl Actor {
                     },
                     Some(job.invocation_id()),
                     crate::commands::Purpose::Function,
-                    true,
                     &chunk_js::Cancellation::default(),
                 )
             });

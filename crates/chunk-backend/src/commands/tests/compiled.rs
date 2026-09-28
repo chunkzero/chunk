@@ -33,55 +33,27 @@ async fn compile_command() -> Deployment {
 
 #[tokio::test]
 async fn compiled_sdk_command_runs_typed_mutation_player_effect_and_session_call() {
-    let mut fixture = Fixture::with_deployment(compile_command().await).await;
-    let prepared = fixture.prepare("notify hello world").await;
-    let (sender, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
-    for (expected, result) in [
-        (json!({"kind":"message","text":"Alice: hello world (#1)"}), None),
-        (
-            json!({"kind":"session_call","method":{"app":"lobby","session":"main","name":"population"},"arguments":{"expected":1}}),
-            Some(json!({"ready":true,"total":1})),
-        ),
-    ] {
-        let command_server_frame::Frame::Effect(effect) = frame(&mut output).await else {
-            panic!("compiled command effect")
-        };
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&effect.request_json).unwrap(), expected);
-        let result = result.unwrap_or_else(|| json!({"state":"accepted","operationId":effect.operation_id}));
-        sender
-            .send(wire::CommandClientFrame {
-                frame: Some(command_client_frame::Frame::Reply(wire::CommandEffectReply {
-                    sequence: effect.sequence,
-                    result_json: serde_json::to_vec(&result).unwrap(),
-                    error: String::new(),
-                })),
-            })
-            .await
-            .unwrap();
-    }
-    let command_server_frame::Frame::Finished(result) = frame(&mut output).await else {
-        panic!("compiled command completion")
+    let fixture = Fixture::with_deployment(compile_command().await).await;
+    let (mut action, mut effects) = fixture.start("notify hello world").await.unwrap();
+    let message = effect(&mut effects).await;
+    assert_eq!(request(&message), json!({"kind":"message","text":"Alice: hello world (#1)"}));
+    message.accept();
+    let call = effect(&mut effects).await;
+    assert_eq!(
+        request(&call),
+        json!({"kind":"session_call","method":{"app":"lobby","session":"main","name":"population"},"arguments":{"expected":1}})
+    );
+    call.finish(Some(&serde_json::to_vec(&json!({"ready":true,"total":1})).unwrap()));
+    assert_eq!(&*outcome(&mut action).await.unwrap(), "null");
+    let read = Call {
+        deployment: id(),
+        function: "shared/state/read".into(),
+        arguments: json!({}).into(),
+        caller: json!(null).into(),
     };
-    assert_eq!(result.state, i32::from(wire::CommandCompletionState::Succeeded), "{}", result.error);
-    assert_eq!(result.result_json, b"null");
-    let stored = fixture
-        .backend
-        .query(Call {
-            deployment: DeploymentId::new("commands").unwrap(),
-            function: "shared/state/read".into(),
-            arguments: json!({}).into(),
-            caller: json!(null).into(),
-        })
-        .await
-        .unwrap();
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&stored.json).unwrap();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&fixture.backend.query(read).await.unwrap().json).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["text"], "hello world");
-    let caller: serde_json::Value = serde_json::from_str(rows[0]["caller"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        caller,
-        json!({"kind":"command","proxyId":"proxy","player":"alice","username":"Alice","session":"session-one","app":"lobby","sessionType":"lobby/main","domain":"","scopeId":"scope-one","connectionId":"connection-one","claimOperationId":"claim-one","membershipGeneration":"1","deliveryGeneration":"1"})
-    );
-    fixture.close().await;
+    let recorded: serde_json::Value = serde_json::from_str(rows[0]["caller"].as_str().unwrap()).unwrap();
+    assert_eq!(recorded, json!({"kind":"gateway","player":"alice"}));
 }

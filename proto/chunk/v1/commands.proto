@@ -2,16 +2,8 @@ syntax = "proto3";
 
 package chunk.v1;
 
-// Held only by platform processes; application credentials cannot invoke these RPCs.
-service BackendCommands {
-  rpc Catalog(CommandScope) returns (CommandCatalog);
-  rpc Suggest(CommandSuggestionRequest) returns (CommandSuggestionResult);
-  rpc Prepare(PrepareCommand) returns (PreparedCommand);
-  rpc Run(stream CommandClientFrame) returns (stream CommandServerFrame);
-}
-
-// The authenticated proxy asserts these fields from its active assignment.
-// The backend derives caller JSON and checks the app/domain binding itself.
+// A player's command context, which core builds from the player's arrived claim.
+// The backend checks the app/domain binding itself.
 message CommandScope {
   string proxy_id = 1;
   string player_uuid = 2;
@@ -44,72 +36,4 @@ message CommandSuggestionRequest {
 
 message CommandSuggestionResult {
   repeated string values = 1;
-}
-
-message PrepareCommand {
-  CommandScope scope = 1;
-  string command_id = 2;
-  // Unsigned command body without its leading slash; parsed again by the backend.
-  string input = 3;
-}
-
-message PreparedCommand {
-  // Allocate before execution. Reuse on uncertain Run acceptance; never create a new ID to retry a handler.
-  string invocation_id = 1;
-  bool follow_player = 2;
-}
-
-message CommandStart {
-  string invocation_id = 1;
-}
-
-message CommandEffectReply {
-  uint32 sequence = 1;
-  bytes result_json = 2;
-  // Generic failure. An error does not assert that an earlier effect had no consequences.
-  string error = 3;
-}
-
-message CommandCancel {}
-
-message CommandClientFrame {
-  oneof frame {
-    CommandStart start = 1;
-    CommandEffectReply reply = 2;
-    CommandCancel cancel = 3;
-  }
-}
-
-message CommandAccepted {
-  string invocation_id = 1;
-  // Duplicate Run calls observe status only. Already emitted effects are never replayed.
-  bool status_only = 2;
-}
-
-message CommandEffect {
-  uint32 sequence = 1;
-  string operation_id = 2;
-  // Bounded typed command effect; target authority stays in the originally prepared scope.
-  bytes request_json = 3;
-}
-
-enum CommandCompletionState {
-  COMMAND_COMPLETION_STATE_UNSPECIFIED = 0;
-  COMMAND_COMPLETION_STATE_SUCCEEDED = 1;
-  COMMAND_COMPLETION_STATE_FAILED = 2;
-  COMMAND_COMPLETION_STATE_UNKNOWN = 3;
-}
-
-message CommandFinished {
-  CommandCompletionState state = 1;
-  bytes result_json = 2;
-  string error = 3;
-}
-
-message CommandServerFrame {
-  oneof frame {
-    CommandAccepted accepted = 1;
-    CommandEffect effect = 2;
-    CommandFinished finished = 3;
-  }
 }

@@ -11,7 +11,6 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
             deployment: "build".into(),
             endpoint: "http://127.0.0.1:1".into(),
             token: "unused".into(),
-            platform_token: None,
         },
     };
     let distribution = crate::Distribution { directory: fixture.directory.path().into(), java: "unused-java".into() };

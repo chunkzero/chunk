@@ -40,8 +40,6 @@ struct Record {
     worker: Option<JoinHandle<()>>,
     /// Bytes this record retains.
     bytes: usize,
-    /// Whether the record outlives its action, so a retry by ID finds the outcome.
-    retain: bool,
 }
 
 /// A start waiting for a live action to finish.
@@ -49,7 +47,6 @@ struct Waiting {
     id: ActionId,
     call: Call,
     purpose: crate::commands::Purpose,
-    retain: bool,
     reply: Request<ActionHandle>,
     since: Instant,
 }
@@ -275,16 +272,15 @@ impl Actor {
         id: ActionId,
         call: Call,
         purpose: crate::commands::Purpose,
-        retain: bool,
         reply: Request<ActionHandle>,
     ) {
         if reply.cancellation.is_cancelled() {
             reply.finish(Err(Error::Cancelled));
             return;
         }
-        match self.launch_action(id.clone(), call.clone(), None, purpose.clone(), retain, &reply.cancellation) {
+        match self.launch_action(id.clone(), call.clone(), None, purpose.clone(), &reply.cancellation) {
             Err(Error::Overloaded(Limit::ActionMemory)) => {
-                self.actions.wait(Waiting { id, call, purpose, retain, reply, since: Instant::now() });
+                self.actions.wait(Waiting { id, call, purpose, reply, since: Instant::now() });
             }
             result => reply.finish(result),
         }
@@ -311,8 +307,8 @@ impl Actor {
                 full = true;
                 self.actions.waiting.push_back(waiting);
             } else {
-                let Waiting { id, call, purpose, retain, reply, .. } = waiting;
-                let result = self.launch_action(id, call, None, purpose, retain, &reply.cancellation);
+                let Waiting { id, call, purpose, reply, .. } = waiting;
+                let result = self.launch_action(id, call, None, purpose, &reply.cancellation);
                 replies.push((reply, result));
             }
         }
@@ -327,7 +323,6 @@ impl Actor {
         mut call: Call,
         durable_identity: Option<String>,
         purpose: crate::commands::Purpose,
-        retain: bool,
         request_cancellation: &Cancellation,
     ) -> Result<ActionHandle> {
         let hook = matches!(purpose, crate::commands::Purpose::Hook);
@@ -425,7 +420,6 @@ impl Actor {
                 cancellation,
                 worker: Some(worker),
                 bytes,
-                retain,
             },
         );
         Ok(ActionHandle { id, status: receiver, scope })
@@ -470,12 +464,6 @@ impl Actor {
             record.bytes -= binding.bytes();
             self.actions.retained -= binding.bytes();
         }
-        if !record.retain {
-            let bytes = record.bytes;
-            self.actions.records.remove(id);
-            self.actions.retained -= bytes;
-            return;
-        }
         record.bytes += bytes;
         self.actions.retained += bytes;
         self.actions.finished.push_back((Instant::now() + RETENTION, id.clone()));
@@ -493,8 +481,7 @@ impl Actor {
             let call = record.call.clone();
             let deployment =
                 self.versions.get(&call.deployment).and_then(Option::as_ref).ok_or(Error::Unknown)?.clone();
-            let caller = binding.caller.as_ref();
-            self.command_permission(&deployment, &binding.scope, &call.function, caller, &reply.cancellation)?;
+            self.command_permission(&deployment, &binding.scope, &call.function, &binding.caller, &reply.cancellation)?;
             let (request, result, receipt) = crate::commands::effects::validate(&deployment, &binding.scope, request)?;
             Ok((binding.effects.clone(), request, result, receipt))
         })();
@@ -539,10 +526,13 @@ impl Actor {
                 reply.finish(Err(Error::Unknown));
                 return;
             };
-            let caller = binding.caller.as_ref();
-            if let Err(error) =
-                self.command_permission(&deployment, &binding.scope, &original.function, caller, &reply.cancellation)
-            {
+            if let Err(error) = self.command_permission(
+                &deployment,
+                &binding.scope,
+                &original.function,
+                &binding.caller,
+                &reply.cancellation,
+            ) {
                 reply.finish(Err(error));
                 return;
             }

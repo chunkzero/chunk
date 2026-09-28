@@ -255,8 +255,8 @@ disconnect a newer membership. Disconnect cleanup has a separate bounded scope a
 The source stays active while admission and destination preparation run. Once the client acknowledges the configuration
 boundary, an ownership change or failed cutover can require disconnecting the client.
 
-Ping has read-only transaction authority and never provisions gameplay. Native hooks require the platform credential,
-which is separate from the application credential delivered to JVM processes. Missing authority or native hook failures
+Ping has read-only transaction authority and never provisions gameplay. Native hooks run only for a gateway's
+credential, which is separate from the credentials delivered to JVM processes. Missing authority or native hook failures
 fail closed. Fixed `shared/proxy/*` handlers remain supported for releases without a domain manifest. Commands expose
 the typed player effects and captured session calls described below.
 
@@ -302,7 +302,7 @@ recheck permission against fresh backend state; a visible client command tree do
 Handlers receive authenticated `caller`, readonly player identity and the action capabilities (`runQuery`,
 `runMutation`, `http`, `secret`, `sleep`, `invocationId`). They execute outside the packet pump and transaction worker,
 within the bounded action runtime. HTTP and secrets still require explicit deployment grants. Commands remain outside
-ordinary generated function clients and require the proxy's separate platform credential.
+ordinary generated function clients and run only for a gateway's credential.
 
 `ctx.player.message(text)`, `actionBar(text)` and `title(title, subtitle?)` send plain text to the captured connection.
 Titles use 10/70/20 ticks and clear an omitted subtitle. Effects are rejected during configuration. Text and routing

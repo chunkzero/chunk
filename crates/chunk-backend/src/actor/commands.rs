@@ -3,25 +3,20 @@ use std::{
     sync::Arc,
 };
 
-use chunk_contract::{
-    CommandSuggestions, Deployment, Function, FunctionKind, Schema, Visibility, validate_wire_value, visible_commands,
-};
+use chunk_contract::{CommandSuggestions, Deployment, Function, FunctionKind, Schema, Visibility, visible_commands};
 use chunk_js::{Cancellation, DeploymentId, Json, Mode};
 use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest, CommandSuggestionResult};
 use chunk_store::Revision;
 use serde_json::{Value, json};
 
 use super::Actor;
-use crate::{
-    Call, Error, Result,
-    commands::{CommandBinding, Prepared},
-};
+use crate::{Call, Error, Result, commands::CommandBinding};
 
 /// A catalog stays valid while the deployment, scope and committed view it was
 /// computed against are unchanged; permission queries are pure over those.
 pub(super) struct CachedCatalog {
     scope: CommandScope,
-    caller: Option<Json>,
+    caller: Json,
     revision: Revision,
     deployment: Arc<Deployment>,
     catalog: CommandCatalog,
@@ -54,33 +49,31 @@ impl Actor {
         Ok(serde_json::from_str(&execution.value)?)
     }
 
-    /// Checks that `scope` may run `command`, returning the caller its permission query saw: `caller`, or without one,
-    /// the caller derived from `scope`.
+    /// Checks that `scope` may run `command`, with its permission query seeing `caller`.
     pub(super) fn command_permission(
         &mut self,
         deployment: &Deployment,
         scope: &CommandScope,
         command: &str,
-        caller: Option<&Json>,
+        caller: &Json,
         cancellation: &Cancellation,
-    ) -> Result<Json> {
-        let derived = scope_caller(deployment, scope)?;
-        let caller = caller.cloned().unwrap_or(derived);
+    ) -> Result<()> {
+        check_scope(deployment, scope)?;
         let descriptor = selected(deployment, scope, command)?;
         if let Some(query) = &descriptor.permission {
             let id = DeploymentId::new(&deployment.id)?;
-            if self.command_query(&id, &caller, query.clone(), json!({}), cancellation)? != Value::Bool(true) {
+            if self.command_query(&id, caller, query.clone(), json!({}), cancellation)? != Value::Bool(true) {
                 return Err(Error::Unknown);
             }
         }
-        Ok(caller)
+        Ok(())
     }
 
     pub(super) fn command_catalog(
         &mut self,
         id: &DeploymentId,
         scope: &CommandScope,
-        caller: Option<&Json>,
+        caller: &Json,
         cancellation: &Cancellation,
     ) -> Result<CommandCatalog> {
         let deployment = self.command_deployment(id)?;
@@ -89,11 +82,11 @@ impl Actor {
             && cached.revision == self.view.revision
             && Arc::ptr_eq(&cached.deployment, &deployment)
             && cached.scope == *scope
-            && cached.caller.as_ref().map(Json::as_str) == caller.map(Json::as_str)
+            && cached.caller.as_str() == caller.as_str()
         {
             return Ok(cached.catalog.clone());
         }
-        scope_caller(&deployment, scope)?;
+        check_scope(&deployment, scope)?;
         let manifest = deployment.contracts.domains.as_ref().ok_or(Error::Unknown)?;
         let ids: BTreeSet<_> = visible_commands(&manifest.commands, &scope.domain, &[])
             .map_err(Error::Invalid)?
@@ -105,7 +98,7 @@ impl Actor {
         for id in ids {
             commands.insert(id, &manifest.commands[id]);
             match self.command_permission(&deployment, scope, id, caller, cancellation) {
-                Ok(_) => allowed_ids.push(id.into()),
+                Ok(()) => allowed_ids.push(id.into()),
                 Err(Error::Unknown) => {}
                 Err(error) => return Err(error),
             }
@@ -122,28 +115,13 @@ impl Actor {
             key,
             CachedCatalog {
                 scope: scope.clone(),
-                caller: caller.cloned(),
+                caller: caller.clone(),
                 revision: self.view.revision,
                 deployment,
                 catalog: catalog.clone(),
             },
         );
         Ok(catalog)
-    }
-
-    pub(super) fn prepare_command(
-        &mut self,
-        id: DeploymentId,
-        scope: CommandScope,
-        command: String,
-        input: String,
-        cancellation: &Cancellation,
-    ) -> Result<Prepared> {
-        let deployment = self.command_deployment(&id)?;
-        self.command_permission(&deployment, &scope, &command, None, cancellation)?;
-        let descriptor = selected(&deployment, &scope, &command)?;
-        descriptor.parse(&input).map_err(Error::Invalid)?;
-        Ok(Prepared { deployment: id, scope, command, input, follow_player: descriptor.follow_player })
     }
 
     pub(super) fn resolve_command(
@@ -153,8 +131,8 @@ impl Actor {
         binding: &CommandBinding,
         cancellation: &Cancellation,
     ) -> Result<Function> {
-        let caller = binding.caller.as_ref();
-        call.caller = self.command_permission(deployment, &binding.scope, &call.function, caller, cancellation)?;
+        self.command_permission(deployment, &binding.scope, &call.function, &binding.caller, cancellation)?;
+        call.caller = binding.caller.clone();
         let descriptor = selected(deployment, &binding.scope, &call.function)?;
         let parsed = descriptor.parse(&binding.input).map_err(Error::Invalid)?;
         call.arguments=json!({"route":parsed.route,"arguments":parsed.arguments,"player":{"uuid":binding.scope.player_uuid,"username":binding.scope.username}}).into();
@@ -171,12 +149,12 @@ impl Actor {
         &mut self,
         id: &DeploymentId,
         request: CommandSuggestionRequest,
-        caller: Option<&Json>,
+        caller: &Json,
         cancellation: &Cancellation,
     ) -> Result<CommandSuggestionResult> {
         let scope = request.scope.ok_or(Error::Invalid("missing command scope"))?;
         let deployment = self.command_deployment(id)?;
-        let caller = self.command_permission(&deployment, &scope, &request.command_id, caller, cancellation)?;
+        self.command_permission(&deployment, &scope, &request.command_id, caller, cancellation)?;
         let descriptor = selected(&deployment, &scope, &request.command_id)?;
         if request.input.len() > 3 * (chunk_contract::MAX_COMMAND_INPUT + 1)
             || request.input.strip_prefix('/').unwrap_or(&request.input).encode_utf16().count()
@@ -192,7 +170,7 @@ impl Actor {
         }
         let result = self.command_query(
             id,
-            &caller,
+            caller,
             request.query,
             json!({"input":request.input,"cursor":request.cursor}),
             cancellation,
@@ -225,7 +203,8 @@ fn selected<'a>(deployment: &'a Deployment, scope: &CommandScope, id: &str) -> R
     Ok(command)
 }
 
-fn scope_caller(deployment: &Deployment, scope: &CommandScope) -> Result<Json> {
+/// Checks that `scope` names its player, session and claim, and an app of `deployment` in its domain.
+fn check_scope(deployment: &Deployment, scope: &CommandScope) -> Result<()> {
     let identifier = |value: &str| !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control);
     for value in [
         &scope.proxy_id,
@@ -257,7 +236,5 @@ fn scope_caller(deployment: &Deployment, scope: &CommandScope) -> Result<Json> {
     {
         return Err(Error::Invalid("command app domain binding"));
     }
-    let value = json!({"kind":"command","proxyId":scope.proxy_id,"player":scope.player_uuid,"username":scope.username,"session":scope.session_id,"app":scope.app,"sessionType":scope.session_type,"domain":scope.domain,"scopeId":scope.scope_id,"connectionId":scope.connection_id,"claimOperationId":scope.claim_operation_id,"membershipGeneration":scope.membership_generation.to_string(),"deliveryGeneration":scope.delivery_generation.to_string()});
-    validate_wire_value(&value).map_err(Error::Invalid)?;
-    Ok(value.into())
+    Ok(())
 }
