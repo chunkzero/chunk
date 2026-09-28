@@ -116,6 +116,35 @@ impl OperatorMethod {
     pub const NAMES: [&str; 2] = ["move_player", "drain"];
 }
 
+/// A machine core minted a credential for, whose credential holds until it's revoked.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Machine {
+    pub kind: MachineKind,
+    pub created_at_ms: u64,
+    pub revoked: bool,
+}
+
+/// What a machine credential authenticates as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineKind {
+    Gateway,
+    Jvm,
+}
+
+impl MachineKind {
+    pub(crate) const NAMES: [&str; 2] = ["gateway", "jvm"];
+
+    /// The kind's name in machine credentials and rows.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::Jvm => "jvm",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MoveIntent {
     #[serde(with = "bytes")]
@@ -327,6 +356,7 @@ impl Stamp for SessionState {}
 impl Stamp for PlayerState {}
 impl Stamp for Drain {}
 impl Stamp for OperatorCall {}
+impl Stamp for Machine {}
 impl Stamp for Roster {}
 impl Stamp for ReleaseState {}
 

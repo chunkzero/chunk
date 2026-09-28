@@ -12,12 +12,12 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{Config, Error, Release, Result};
-pub use entities::Generation;
 use entities::Stamp;
 pub(crate) use entities::{
-    Capacity, Claim, Drain, HostState, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase, PlayerState,
-    ReleaseState, Roster, SessionState,
+    Capacity, Claim, Drain, HostState, Machine, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase,
+    PlayerState, ReleaseState, Roster, SessionState,
 };
+pub use entities::{Generation, MachineKind};
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
@@ -37,6 +37,8 @@ pub(crate) struct State {
     /// What each of the operator's operation IDs is bound to.
     pub operator_calls: BTreeMap<String, OperatorCall>,
     pub rosters: BTreeMap<String, Roster>,
+    /// Machines core minted credentials for, by ID.
+    pub machines: BTreeMap<String, Machine>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
     /// The revision of the last commit this state includes. App commits share the log, so later revisions may
