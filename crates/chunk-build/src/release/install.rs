@@ -8,35 +8,34 @@ use crate::publication;
 pub enum Installed {
     Missing,
     Verified(Box<VerifiedRelease>),
-    /// The install failed verification for this reason, and was removed.
-    Removed(io::Error),
+    /// The install fails verification as the release for this reason.
+    Invalid(io::Error),
 }
 
-/// Checks the install of release `id` at `directory`, removing it unless it still verifies as that release.
+/// Checks the install of release `id` at `directory`, leaving it as it is.
 /// # Errors
-/// Reports an install that cannot be inspected or removed.
+/// Reports an install that cannot be inspected.
 pub fn installed_release(directory: &Path, id: &str) -> io::Result<Installed> {
     let metadata = match fs::symlink_metadata(directory) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Installed::Missing),
         Err(error) => return Err(error),
     };
-    let verified =
-        if metadata.is_dir() { verify(directory, id) } else { Err(io::Error::other("the install is not a directory")) };
-    match verified {
-        Ok(release) => Ok(Installed::Verified(Box::new(release))),
-        Err(reason) => {
-            if metadata.is_dir() { fs::remove_dir_all(directory) } else { fs::remove_file(directory) }?;
-            Ok(Installed::Removed(reason))
-        }
+    if !metadata.is_dir() {
+        return Ok(Installed::Invalid(io::Error::other("the install is not a directory")));
     }
+    Ok(match verify(directory, id) {
+        Ok(release) => Installed::Verified(Box::new(release)),
+        Err(reason) => Installed::Invalid(reason),
+    })
 }
 
-/// Unpacks `archive`, checked against `expected`, verifies that it holds release `id`, and moves it to the new
-/// directory `directory`. Nothing is created at `directory` unless the release verifies.
+/// Unpacks `archive`, checked against `expected`, and verifies that it holds release `id`. Only then is it moved to
+/// `directory`, unless an install there already verifies as that release, which is kept; an invalid install there is
+/// replaced.
 /// # Errors
-/// Rejects everything [`unpack_release`] and [`verify_release`] reject, a release other than `id` and an existing
-/// `directory`.
+/// Rejects everything [`unpack_release`] and [`verify_release`] reject and a release other than `id`, leaving
+/// `directory` as it is.
 pub fn install_release(
     archive: &Path,
     expected: &ArchiveDigest,
@@ -49,6 +48,11 @@ pub fn install_release(
     let unpacked = staging.path().join("release");
     unpack_release(archive, expected, &unpacked, &UnpackLimits::default())?;
     let release = verify(&unpacked, id)?;
+    match installed_release(directory, id)? {
+        Installed::Verified(existing) => return Ok(*existing),
+        Installed::Invalid(_) => fs::rename(directory, staging.path().join("replaced"))?,
+        Installed::Missing => {}
+    }
     publication::rename_directory(&unpacked, directory)?;
     Ok(release)
 }

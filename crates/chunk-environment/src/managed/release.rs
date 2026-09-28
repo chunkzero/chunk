@@ -3,9 +3,11 @@
 use crate::core::{Archives, ReleaseArchive};
 use chunk_build::{ArchiveDigest, Installed, VerifiedRelease};
 use chunk_management::{Client, v1};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -23,7 +25,8 @@ const MIN_BYTES_PER_SECOND: u64 = 256 * 1024;
 const MAX_PROCESSES: u16 = 32;
 
 /// Where loaded releases live: each unpacked at `releases/<id>`, beside the archive it was installed from at
-/// `archives/<id>.tar.gz`, which core's archive lookup names.
+/// `archives/<id>.tar.gz` and the digest that archive was verified against at `archives/<id>.json`. Core's archive
+/// lookup names the kept archives.
 pub(super) struct Store {
     releases: PathBuf,
     archives: PathBuf,
@@ -35,6 +38,13 @@ impl Store {
     pub(super) fn new(state: &Path, kept: Arc<Archives>) -> Self {
         Self { releases: state.join("releases"), archives: state.join("archives"), claims: Claims::default(), kept }
     }
+}
+
+/// The digest a kept archive was verified against.
+#[derive(Serialize, Deserialize)]
+struct Checked {
+    sha256: String,
+    size: u64,
 }
 
 /// A verified release, unpacked under the state directory, which reclamation leaves alone until it is dropped.
@@ -77,8 +87,10 @@ impl Drop for Staged {
     }
 }
 
-/// Installs the release `artifact` names at `releases/<release_id>` and keeps its verified archive, reusing an earlier
-/// install whose archive is still intact. Returns `None` once `cancel` stops it before its download finishes.
+/// Installs the release `artifact` names at `releases/<release_id>` and keeps its verified archive. An earlier install
+/// is reused while it verifies, or installed again from its kept archive; a missing or differing archive is downloaded
+/// again, leaving the install as it is until the new archive verifies. Returns `None` once `cancel` stops it before its
+/// download finishes.
 pub(super) async fn load(
     client: &Client,
     store: &Store,
@@ -86,8 +98,7 @@ pub(super) async fn load(
     cancel: &CancellationToken,
 ) -> io::Result<Option<Loaded>> {
     let id = artifact.release_id.clone();
-    let plain = !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    if !plain {
+    if !plain(&id) {
         return Err(io::Error::other("the release ID is not a plain name"));
     }
     fs::create_dir_all(&store.releases)?;
@@ -98,14 +109,11 @@ pub(super) async fn load(
     };
     // Each blocking worker holds the claim until it finishes, even once this future is dropped.
     let directory = store.releases.join(&id);
-    let kept = ReleaseArchive {
-        path: store.archives.join(format!("{id}.tar.gz")),
-        sha256: artifact.sha256.clone(),
-        size: artifact.size_bytes,
-    };
-    let digest = ArchiveDigest { sha256: kept.sha256.clone(), size: kept.size };
-    let (existing, archive, expected, release) = (directory.clone(), kept.path.clone(), digest.clone(), id.clone());
-    let (reused, claim) = blocking(move || Ok((reusable(&existing, &archive, &expected, &release)?, claim))).await?;
+    let digest = ArchiveDigest { sha256: artifact.sha256.clone(), size: artifact.size_bytes };
+    let (existing, archives, kept) = (directory.clone(), store.archives.clone(), store.kept.clone());
+    let (expected, release) = (digest.clone(), id.clone());
+    let (reused, claim) =
+        blocking(move || Ok((reusable(&existing, &archives, &expected, &release, &kept)?, claim))).await?;
     let (release, claim) = if let Some(release) = reused {
         (release, claim)
     } else {
@@ -114,39 +122,107 @@ pub(super) async fn load(
             downloaded = download(client, artifact, &staged.0) => downloaded?,
             () = cancel.cancelled() => return Ok(None),
         }
-        let (destination, archive) = (directory.clone(), kept.path.clone());
+        let (destination, archives, expected) = (directory.clone(), store.archives.clone(), digest.clone());
         blocking(move || {
-            let release = chunk_build::install_release(&staged.0, &digest, &id, &destination)?;
-            fs::rename(&staged.0, &archive)?;
+            let release = chunk_build::install_release(&staged.0, &expected, &id, &destination)?;
+            fs::rename(&staged.0, archive_path(&archives, &id))?;
+            record(&archives, &id, &expected)?;
             Ok((release, claim))
         })
         .await?
     };
-    store.kept.insert(artifact.release_id.clone(), kept);
+    let path = archive_path(&store.archives, &artifact.release_id);
+    store.kept.insert(artifact.release_id.clone(), ReleaseArchive { path, sha256: digest.sha256, size: digest.size });
     Ok(Some(Loaded { directory, release, _claim: claim }))
 }
 
-/// The earlier install of release `id` at `directory`, installed again from its kept `archive` unless it still
-/// verifies. Without an intact archive, both are removed. The caller's claim means no other load uses them.
-fn reusable(directory: &Path, archive: &Path, digest: &ArchiveDigest, id: &str) -> io::Result<Option<VerifiedRelease>> {
-    let intact = match fs::File::open(archive) {
-        Ok(file) => digest.matches(file)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-    if !intact {
-        remove_path(archive)?;
-        remove_path(directory)?;
+/// The install of release `id` at `directory`, installed again from its archive kept in `archives` unless it still
+/// verifies. When that archive is missing or differs from `digest`, `kept` forgets it and it is removed, while the
+/// install stays as it is. The caller's claim means no other load uses them.
+fn reusable(
+    directory: &Path,
+    archives: &Path,
+    digest: &ArchiveDigest,
+    id: &str,
+    kept: &Archives,
+) -> io::Result<Option<VerifiedRelease>> {
+    let archive = archive_path(archives, id);
+    if !intact(&archive, digest)? {
+        kept.remove(id);
+        remove_path(&archive)?;
+        remove_path(&record_path(archives, id))?;
         return Ok(None);
     }
+    record(archives, id, digest)?;
     match chunk_build::installed_release(directory, id)? {
         Installed::Verified(release) => return Ok(Some(*release)),
-        Installed::Removed(error) => {
+        Installed::Invalid(error) => {
             tracing::warn!(%error, release = id, "unpacked release fails verification; installing it again");
         }
         Installed::Missing => {}
     }
-    chunk_build::install_release(archive, digest, id, directory).map(Some)
+    chunk_build::install_release(&archive, digest, id, directory).map(Some)
+}
+
+/// Restores core's lookup of the archives kept for the `retained` releases, each only while its file still matches the
+/// digest recorded when it was verified.
+pub(super) async fn restore(store: &Store, retained: BTreeSet<String>) -> io::Result<()> {
+    let (archives, kept) = (store.archives.clone(), store.kept.clone());
+    blocking(move || {
+        for id in retained.into_iter().filter(|id| plain(id)) {
+            match restorable(&archives, &id) {
+                Ok(Some(archive)) => kept.insert(id, archive),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, release = id, "kept release archive not restored"),
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+fn restorable(archives: &Path, id: &str) -> io::Result<Option<ReleaseArchive>> {
+    let checked: Checked = match fs::read(record_path(archives, id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let digest = ArchiveDigest { sha256: checked.sha256, size: checked.size };
+    let path = archive_path(archives, id);
+    if !intact(&path, &digest)? {
+        return Err(io::Error::other("the archive differs from the digest it was verified against"));
+    }
+    Ok(Some(ReleaseArchive { path, sha256: digest.sha256, size: digest.size }))
+}
+
+fn intact(archive: &Path, digest: &ArchiveDigest) -> io::Result<bool> {
+    match fs::File::open(archive) {
+        Ok(file) => digest.matches(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Durably records `digest` as the one release `id`'s kept archive was verified against.
+fn record(archives: &Path, id: &str, digest: &ArchiveDigest) -> io::Result<()> {
+    let checked = Checked { sha256: digest.sha256.clone(), size: digest.size };
+    let staged = Staged(archives.join(format!(".{}.json", uuid::Uuid::new_v4())));
+    let mut file = fs::File::create(&staged.0)?;
+    file.write_all(&serde_json::to_vec(&checked).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    fs::rename(&staged.0, record_path(archives, id))
+}
+
+fn archive_path(archives: &Path, id: &str) -> PathBuf {
+    archives.join(format!("{id}.tar.gz"))
+}
+
+fn record_path(archives: &Path, id: &str) -> PathBuf {
+    archives.join(format!("{id}.json"))
+}
+
+fn plain(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Removes the downloads and installs a previous run left unfinished: every entry named with a dot.
@@ -156,7 +232,7 @@ pub(super) async fn sweep(store: &Store) -> io::Result<()> {
     remove(unfinished.into_iter().filter(|path| hidden(path)).collect()).await
 }
 
-/// Renames aside the installs and archives of the releases neither in `used` nor claimed, returning their new paths.
+/// Renames aside the installs, archives and digest records of the releases neither in `used` nor claimed, returning their new paths.
 /// Core's archive lookup forgets them first.
 pub(super) fn set_aside(store: &Store, mut used: BTreeSet<String>) -> Vec<PathBuf> {
     used.extend(store.claims.used());
@@ -165,7 +241,8 @@ pub(super) fn set_aside(store: &Store, mut used: BTreeSet<String>) -> Vec<PathBu
     paths.extend(entries(&store.archives).unwrap_or_default());
     let unused = paths.into_iter().filter(|path| {
         let name = path.file_name().and_then(|name| name.to_str());
-        !hidden(path) && name.is_some_and(|name| !used.contains(name.strip_suffix(".tar.gz").unwrap_or(name)))
+        let release = name.map(|name| name.strip_suffix(".tar.gz").or(name.strip_suffix(".json")).unwrap_or(name));
+        !hidden(path) && release.is_some_and(|release| !used.contains(release))
     });
     unused
         .filter_map(|path| {

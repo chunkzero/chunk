@@ -251,7 +251,8 @@ impl Core {
         Ok(self.authority()?.control.clone())
     }
 
-    /// The archive release `id` was loaded from, kept only for releases downloaded from management.
+    /// The archive release `id` was loaded from, kept only for releases downloaded from management. Readers must check
+    /// its bytes against its digest as they read.
     #[must_use]
     pub fn release_archive(&self, id: &str) -> Option<ReleaseArchive> {
         self.archives.get(id)

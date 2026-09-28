@@ -32,7 +32,7 @@ fn unpacked_releases_verify_and_reject_tampering() {
 }
 
 #[test]
-fn installs_are_reused_while_they_verify_and_removed_once_tampered() {
+fn installs_keep_what_verifies_and_replace_tampered_installs() {
     let fixture = Fixture::new();
     let release = fixture.publish().unwrap();
     let archive = release.archive.clone().unwrap();
@@ -45,12 +45,17 @@ fn installs_are_reused_while_they_verify_and_removed_once_tampered() {
 
     install_release(&archive, &digest(&archive), &release.id, &directory).unwrap();
     assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));
-    assert!(install_release(&archive, &digest(&archive), &release.id, &directory).is_err());
-    fs::write(directory.join("apps/lobby/assets/map.txt"), b"tampered").unwrap();
-    let Installed::Removed(error) = installed_release(&directory, &release.id).unwrap() else { panic!() };
+    let asset = directory.join("apps/lobby/assets/map.txt");
+    fs::write(&asset, b"tampered").unwrap();
+    let Installed::Invalid(error) = installed_release(&directory, &release.id).unwrap() else { panic!() };
     assert!(error.to_string().contains("differ from its ID"), "{error}");
-    assert!(!directory.exists());
+    let mut corrupt = digest(&archive);
+    corrupt.size -= 1;
+    assert!(install_release(&archive, &corrupt, &release.id, &directory).is_err());
+    assert_eq!(fs::read(&asset).unwrap(), b"tampered");
+
     assert_eq!(install_release(&archive, &digest(&archive), &release.id, &directory).unwrap().id, release.id);
+    assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));
     assert_eq!(fs::read_dir(&releases).unwrap().count(), 1);
 }
 
