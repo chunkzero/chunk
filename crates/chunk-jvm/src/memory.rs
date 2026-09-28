@@ -115,5 +115,7 @@ mod tests {
         fs::write(service.join("memory.max"), "max\n").unwrap();
         fs::write(mount.join("a\\x2db.slice/memory.max"), format!("{GIB}\n")).unwrap();
         assert_eq!(visible_mib(&proc), Some(1024));
+        fs::write(bind.join("memory.max"), format!("{}\n", GIB / 2)).unwrap();
+        assert_eq!(visible_mib(&proc), Some(512));
     }
 }
