@@ -12,8 +12,6 @@ use crate::{
 };
 
 pub(crate) mod effects;
-mod transport;
-pub use transport::CommandService;
 
 /// Platform effects a command may have pending at once.
 const PENDING_EFFECTS: usize = 8;
@@ -38,7 +36,7 @@ impl Purpose {
     }
     /// Who started a command, which only they may resolve it by, and what they asked for.
     pub fn owner(&self) -> Option<Owner> {
-        if let Self::Command(binding) = self { binding.owner } else { None }
+        if let Self::Command(binding) = self { Some(binding.owner) } else { None }
     }
     /// Bytes the command's binding retains while it runs.
     pub fn bytes(&self) -> usize {
@@ -70,15 +68,14 @@ pub(crate) struct CommandBinding {
     pub scope: CommandScope,
     pub input: String,
     pub effects: mpsc::Sender<PlatformEffect>,
-    /// Who started the command, if [`Backend::start_command`] did.
-    pub owner: Option<Owner>,
-    /// The caller the command's handler and permission queries see, rather than one derived from its scope.
-    pub caller: Option<Json>,
+    pub owner: Owner,
+    /// The caller the command's handler and permission queries see.
+    pub caller: Json,
 }
 
 impl CommandBinding {
     pub fn bytes(&self) -> usize {
-        scope_bytes(&self.scope) + self.input.len() + self.caller.as_ref().map_or(0, |caller| caller.as_str().len())
+        scope_bytes(&self.scope) + self.input.len() + self.caller.as_str().len()
     }
 }
 
@@ -136,34 +133,14 @@ pub(crate) struct PlatformEffect {
     pub reply: Request<Arc<str>>,
 }
 
-#[derive(Clone)]
-pub(crate) struct Prepared {
-    pub deployment: DeploymentId,
-    pub scope: CommandScope,
-    pub command: String,
-    pub input: String,
-    pub follow_player: bool,
-}
-
-impl Prepared {
-    pub fn call(&self) -> Call {
-        Call {
-            deployment: self.deployment.clone(),
-            function: self.command.clone(),
-            arguments: serde_json::Value::Null.into(),
-            caller: serde_json::Value::Null.into(),
-        }
-    }
-}
-
 /// The operation ID effect `sequence` of command invocation `invocation` names in its receipt.
-pub(crate) fn effect_operation(invocation: &str, sequence: u32) -> String {
+fn effect_operation(invocation: &str, sequence: u32) -> String {
     format!("action/{invocation}/platform/{sequence}")
 }
 
 /// Checks the `result` JSON an effect's performer returned, `None` if the effect failed, against what the command
 /// expects of it.
-pub(crate) fn effect_result(invocation: &str, effect: &PlatformEffect, result: Option<&[u8]>) -> Result<Arc<str>> {
+fn effect_result(invocation: &str, effect: &PlatformEffect, result: Option<&[u8]>) -> Result<Arc<str>> {
     let result = result.ok_or(Error::Invalid("command effect failed; earlier effects may have completed"))?;
     if result.len() > 64 * 1024 {
         return Err(Error::Invalid("command effect result limit"));
@@ -249,22 +226,17 @@ impl CommandEffects {
 
 impl Backend {
     /// The commands `scope` sees in deployment `id`, and which of them its permission queries allow. The queries see
-    /// `caller`, or without one, a caller derived from `scope`.
+    /// `caller`.
     /// # Errors
     /// Rejects an invalid scope, an unknown deployment and failed permission queries.
-    pub async fn command_catalog(
-        &self,
-        id: DeploymentId,
-        scope: CommandScope,
-        caller: Option<Json>,
-    ) -> Result<CommandCatalog> {
-        let bytes = scope_bytes(&scope) + caller.as_ref().map_or(0, |caller| caller.as_str().len());
+    pub async fn command_catalog(&self, id: DeploymentId, scope: CommandScope, caller: Json) -> Result<CommandCatalog> {
+        let bytes = scope_bytes(&scope) + caller.as_str().len();
         self.submit_sized(bytes, |reply| Command::Catalog { id, scope, caller, reply }).await
     }
 
     /// The values the suggestion query `request` names offers for its input. The query and the command's permission
-    /// query see `caller`, or without one, a caller derived from the request's scope. The request takes over `charge`,
-    /// which its caller took for the payload it held, and grows it to cover the request.
+    /// query see `caller`. The request takes over `charge`, which its caller took for the payload it held, and grows it
+    /// to cover the request.
     /// # Errors
     /// Rejects an invalid scope or input, a query the command doesn't declare, a failed query and exhausted capacity.
     pub async fn command_suggestions(
@@ -272,13 +244,13 @@ impl Backend {
         id: DeploymentId,
         charge: RequestCharge,
         request: CommandSuggestionRequest,
-        caller: Option<Json>,
+        caller: Json,
     ) -> Result<CommandSuggestionResult> {
         let bytes = request.scope.as_ref().map_or(0, scope_bytes)
             + request.command_id.len()
             + request.query.len()
             + request.input.len()
-            + caller.as_ref().map_or(0, |caller| caller.as_str().len());
+            + caller.as_str().len();
         let permit = self.cover(charge, bytes)?;
         self.submit_charged(permit, |reply| Command::Suggest { id, request, caller, reply }).await
     }
@@ -323,12 +295,10 @@ impl Backend {
         let arguments = serde_json::json!({"input": input}).into();
         let call = Call { deployment, function: command, arguments, caller: caller.clone() };
         let bytes = id.incarnation.len() + call.bytes() + scope_bytes(&scope) + input.len() + caller.as_str().len();
-        let owner = Some(Owner { credential: owner_digest(owner), request });
-        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner, caller: Some(caller) }));
+        let owner = Owner { credential: owner_digest(owner), request };
+        let purpose = Purpose::Command(Arc::new(CommandBinding { scope, input, effects, owner, caller }));
         let permit = self.cover(charge, bytes)?;
-        let handle = self
-            .submit_charged(permit, |reply| Command::StartAction { id, call, purpose, retain: true, reply })
-            .await?;
+        let handle = self.submit_charged(permit, |reply| Command::StartAction { id, call, purpose, reply }).await?;
         Ok((handle, CommandEffects { receiver, invocation }))
     }
 }

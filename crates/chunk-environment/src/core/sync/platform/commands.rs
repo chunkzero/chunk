@@ -67,7 +67,7 @@ pub(super) async fn call(
             app::reject_reserved(&request.operation_id)?;
             let player = player(&request)?;
             let Origin { deployment, scope, .. } = origin(control, backend, gateway, player).await?;
-            let catalog = backend.command_catalog(deployment, scope, Some(caller(player))).await;
+            let catalog = backend.command_catalog(deployment, scope, caller(player)).await;
             let catalog = catalog.map_err(|failure| errors::backend(&failure))?;
             CommandsResult { commands_json: catalog.commands_json, allowed: catalog.allowed_ids }.encode_to_vec()
         }
@@ -78,7 +78,7 @@ pub(super) async fn call(
             drop(request);
             let Origin { deployment, scope, .. } = origin(control, backend, gateway, &player).await?;
             let suggestion = CommandSuggestionRequest { scope: Some(scope), command_id, query, input, cursor };
-            let suggestions = backend.command_suggestions(deployment, charge, suggestion, Some(caller(&player))).await;
+            let suggestions = backend.command_suggestions(deployment, charge, suggestion, caller(&player)).await;
             SuggestResult { values: suggestions.map_err(|failure| errors::backend(&failure))?.values }.encode_to_vec()
         }
         Method::Command => start(service, gateway, credential, request, charge).await?.encode_to_vec(),

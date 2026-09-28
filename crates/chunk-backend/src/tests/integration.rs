@@ -360,3 +360,37 @@ async fn optional_null_arguments_recover_the_same_mutation_after_restart() {
     assert_eq!(server.client.query(authorized(query("get"))).await.unwrap().into_inner().result_json, b"1");
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn restart_replaces_a_crashed_older_record_it_owns_and_refuses_a_foreign_one() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let token = chunk_service::secret(&state.join("token")).unwrap();
+    let path = directory.path().join("connection.json");
+    let start = || {
+        let (ready, started) = oneshot::channel();
+        let stop = CancellationToken::new();
+        let config = crate::server::Config {
+            bundle: None,
+            environment: "local".into(),
+            state: state.clone(),
+            connection: path.clone(),
+            bind: "127.0.0.1:0".parse().unwrap(),
+        };
+        (tokio::spawn(crate::server::run(config, ready, stop.clone())), started, stop)
+    };
+    for (owner, starts) in [("foreign", false), (token.as_str(), true)] {
+        let record = json!({"endpoint":"http://127.0.0.1:1","token":owner,"platform_token":"retired","environment":"local","deployment":""});
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let (task, started, stop) = start();
+        if starts {
+            tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap();
+            stop.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+        assert_eq!(result.is_ok(), starts);
+    }
+}

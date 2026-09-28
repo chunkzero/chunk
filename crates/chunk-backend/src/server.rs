@@ -1,5 +1,5 @@
 //! Embeddable backend transport and storage lifecycle.
-use crate::{Backend, CommandService, HookService, Service};
+use crate::{Backend, Service};
 use chunk_contract::{BackendConnection, Deployment};
 use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
@@ -33,7 +33,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let connection_path = config.connection.clone();
-    let (backend, bundle, token, platform_token, replicator) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+    let (backend, bundle, token, replicator) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
         let bundle: Option<Deployment> = config.bundle.as_deref().map(chunk_service::read).transpose()?;
         let database = config.state.join("environment.sqlite");
@@ -41,7 +41,6 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             chunk_service::private_file(&database)?;
         }
         let token = chunk_service::secret(&config.state.join("token"))?;
-        let platform_token = chunk_service::secret(&config.state.join("platform-token"))?;
         let (store, replicator) = match chunk_store::Replication::from_env().map_err(io::Error::other)? {
             Some(replication) => {
                 let (store, replicator) =
@@ -52,7 +51,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             None => (chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?, None),
         };
         let backend = Backend::new(config.environment, Box::new(store)).map_err(io::Error::other)?;
-        Ok((backend, bundle, token, platform_token, replicator))
+        Ok((backend, bundle, token, replicator))
     })
     .await
     .map_err(io::Error::other)??;
@@ -64,20 +63,20 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         let connection = BackendConnection {
             endpoint: format!("http://{address}"),
             token: token.clone(),
-            platform_token: Some(platform_token.clone()),
             environment: backend.environment().into(),
             deployment,
         };
         if connection_path.exists() {
-            let old: BackendConnection = chunk_service::read(&connection_path)?;
+            // A record left by a crashed backend of another version may carry fields this one dropped.
+            #[derive(serde::Deserialize)]
+            struct Owner {
+                token: String,
+            }
+            let old: Owner = chunk_service::read(&connection_path)?;
             if old.token != token {
                 return Err(io::Error::other("connection file belongs to another backend"));
             }
         }
-        let commands = CommandService::new(backend.clone(), &token, &platform_token).map_err(io::Error::other)?;
-        let command_workers = commands.workers();
-        let command_shutdown = commands.shutdown();
-        let hooks = HookService::new(backend.clone(), &token, &platform_token).map_err(io::Error::other)?;
         let service = Service::new(backend.clone(), &token).map_err(io::Error::other)?;
         let workers = service.workers();
         let shutdown = service.shutdown();
@@ -90,8 +89,6 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         });
         let server = tonic::transport::Server::builder()
             .add_service(service.into_server())
-            .add_service(hooks.into_server())
-            .add_service(commands.into_server())
             .serve_with_incoming_shutdown(incoming, stop.clone().cancelled_owned());
         let _ = ready.send(Ready { connection, backend: backend.clone() });
         tracing::info!(%address, "backend ready");
@@ -100,14 +97,10 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             result = &mut server => result.map_err(io::Error::other),
             () = stopped(&stop, replicator.as_ref()) => {
                 shutdown.cancel();
-                command_shutdown.cancel();
                 connections.drain("backend", &mut server).await.map_err(io::Error::other)
             }
         };
         shutdown.cancel();
-        command_shutdown.cancel();
-        command_workers.close();
-        command_workers.wait().await;
         workers.close();
         workers.wait().await;
         drop(record);

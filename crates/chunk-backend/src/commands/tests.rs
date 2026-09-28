@@ -3,28 +3,20 @@ use std::{collections::BTreeMap, time::Duration};
 use chunk_contract::{
     Contracts, Deployment, DomainManifest, Function, FunctionKind, RuntimeProfile, Schema, Visibility,
 };
-use chunk_js::DeploymentId;
-use chunk_proto::v1::{
-    self as wire, backend_commands_client::BackendCommandsClient, backend_commands_server::BackendCommands,
-    command_client_frame, command_server_frame,
-};
+use chunk_js::{DeploymentId, Json};
+use chunk_proto::v1::{CommandCatalog, CommandScope, CommandSuggestionRequest};
 use chunk_store::SqliteStore;
 use serde_json::json;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tokio_util::sync::CancellationToken;
-use tonic::Request;
 
 use super::*;
-use crate::{Backend, Call, Error};
+use crate::{ActionHandle, Backend, Call, Error};
 
 mod compiled;
 
-const APPLICATION: &str = "application-credential-is-not-platform";
-const PLATFORM: &str = "platform-command-credential-is-distinct";
 const COMMAND: &str = "scopes/commands/notify";
-fn scope() -> wire::CommandScope {
-    wire::CommandScope {
+const GATEWAY: &str = "gateway-credential";
+fn scope() -> CommandScope {
+    CommandScope {
         proxy_id: "proxy".into(),
         player_uuid: "alice".into(),
         username: "Alice".into(),
@@ -39,16 +31,11 @@ fn scope() -> wire::CommandScope {
         delivery_generation: 1,
     }
 }
-fn request<T>(message: T, credential: &str) -> Request<T> {
-    let mut request = Request::new(message);
-    for (name, value) in [
-        ("authorization", format!("Bearer {credential}")),
-        ("x-chunk-environment", "test".into()),
-        ("x-chunk-deployment", "commands".into()),
-    ] {
-        request.metadata_mut().insert(name, value.parse().unwrap());
-    }
-    request
+fn caller() -> Json {
+    json!({"kind":"gateway","player":"alice"}).into()
+}
+fn id() -> DeploymentId {
+    DeploymentId::new("commands").unwrap()
 }
 fn deployment() -> Deployment {
     let domains:DomainManifest=serde_json::from_value(json!({"version":1,"scopes":{"":{"parent":null},"private":{"parent":""}},"apps":{"lobby":""},"hooks":{},"commands":{
@@ -63,7 +50,7 @@ fn deployment() -> Deployment {
     Deployment {contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:"commands".into(),contracts:Contracts{domains:Some(domains),session_methods:Some(serde_json::from_value(json!({"version":1,"methods":[{"app":"lobby","session":"main","name":"status","arguments":{"type":"object","fields":{"limit":{"schema":{"type":"integer"}}}},"result":{"type":"integer"}}]})).unwrap()),..Default::default()},
         tables:serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"integer"}}}}})).unwrap(),
         source:r"
-export function permit(ctx) { return ctx.caller.kind === 'command' && ctx.caller.player === 'alice' && ctx.caller.claimOperationId === 'claim-one' && (ctx.db.get('state','denied')?.value ?? 0)===0; }
+export function permit(ctx) { return ctx.caller.kind === 'gateway' && ctx.caller.player === 'alice' && (ctx.db.get('state','denied')?.value ?? 0)===0; }
 export function choices() {return ['one','two'];}
 export function read(ctx) {return ctx.db.get('state','count')?.value ?? 0;}
 export function count(ctx) {const value=read(ctx)+1;ctx.db.put('state','count',{value});return value;}
@@ -78,10 +65,6 @@ export async function ambient(ctx) {await ctx.platform({kind:'message',text:'for
 struct Fixture {
     _directory: tempfile::TempDir,
     backend: Backend,
-    service: CommandService,
-    client: BackendCommandsClient<tonic::transport::Channel>,
-    stop: CancellationToken,
-    server: tokio::task::JoinHandle<()>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -95,230 +78,89 @@ impl Fixture {
         )
         .unwrap();
         backend.deploy(deployment).await.unwrap();
-        Self::with_backend(directory, backend).await
+        Self { _directory: directory, backend }
     }
-    async fn with_backend(directory: tempfile::TempDir, backend: Backend) -> Self {
-        let service = CommandService::new(backend.clone(), APPLICATION, PLATFORM).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let stop = CancellationToken::new();
-        let server = tokio::spawn({
-            let service = service.clone();
-            let stop = stop.clone();
-            async move {
-                tonic::transport::Server::builder()
-                    .add_service(service.into_server())
-                    .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stop.cancelled_owned())
-                    .await
-                    .unwrap();
-            }
-        });
-        let client = BackendCommandsClient::connect(endpoint).await.unwrap();
-        Self { _directory: directory, backend, service, client, stop, server }
+    async fn catalog(&self, scope: CommandScope) -> crate::Result<CommandCatalog> {
+        self.backend.command_catalog(id(), scope, caller()).await
     }
-    async fn prepare(&mut self, input: &str) -> wire::PreparedCommand {
-        self.client
-            .prepare(request(
-                wire::PrepareCommand { scope: Some(scope()), command_id: COMMAND.into(), input: input.into() },
-                PLATFORM,
-            ))
-            .await
-            .unwrap()
-            .into_inner()
+    async fn suggest(&self, query: &str, input: &str) -> crate::Result<Vec<String>> {
+        let cursor = u32::try_from(input.len()).unwrap();
+        let request = CommandSuggestionRequest {
+            scope: Some(scope()),
+            command_id: COMMAND.into(),
+            query: query.into(),
+            input: input.into(),
+            cursor,
+        };
+        let charge = self.backend.charge_request(0).unwrap();
+        Ok(self.backend.command_suggestions(id(), charge, request, caller()).await?.values)
     }
-    async fn run(
-        &mut self,
-        id: &str,
-    ) -> (mpsc::Sender<wire::CommandClientFrame>, tonic::Streaming<wire::CommandServerFrame>) {
-        let (sender, receiver) = mpsc::channel(8);
-        sender
-            .send(wire::CommandClientFrame {
-                frame: Some(command_client_frame::Frame::Start(wire::CommandStart { invocation_id: id.into() })),
-            })
-            .await
-            .unwrap();
-        let stream = self.client.run(request(ReceiverStream::new(receiver), PLATFORM)).await.unwrap().into_inner();
-        (sender, stream)
+    /// Starts the command with `input` for `alice`, as core's sync path does.
+    async fn start(&self, input: &str) -> crate::Result<(ActionHandle, CommandEffects)> {
+        let action = self.backend.allocate_action_id().await.unwrap();
+        let charge = self.backend.charge_request(0).unwrap();
+        let request = CommandRequest::new(COMMAND, input, "alice");
+        let (command, input, caller) = (COMMAND.into(), input.into(), caller());
+        self.backend.start_command(action, charge, GATEWAY, request, id(), scope(), command, input, caller).await
     }
     async fn count(&self) -> i64 {
-        serde_json::from_str(
-            &self
-                .backend
-                .query(Call {
-                    deployment: DeploymentId::new("commands").unwrap(),
-                    function: "read".into(),
-                    arguments: json!({}).into(),
-                    caller: json!(null).into(),
-                })
-                .await
-                .unwrap()
-                .json,
-        )
-        .unwrap()
+        let read =
+            Call { deployment: id(), function: "read".into(), arguments: json!({}).into(), caller: json!(null).into() };
+        serde_json::from_str(&self.backend.query(read).await.unwrap().json).unwrap()
     }
-    async fn revoke(&self, value: i64) {
-        self.backend
-            .mutate(
-                format!("permission-{value}"),
-                Call {
-                    deployment: DeploymentId::new("commands").unwrap(),
-                    function: "revoke".into(),
-                    arguments: json!(value).into(),
-                    caller: json!(null).into(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    async fn close(&self) {
-        self.service.shutdown().cancel();
-        self.service.workers().close();
-        tokio::time::timeout(Duration::from_secs(2), self.service.workers().wait()).await.unwrap();
-        self.stop.cancel();
+    async fn revoke(&self, operation: &str, value: i64) {
+        let call = Call {
+            deployment: id(),
+            function: "revoke".into(),
+            arguments: json!(value).into(),
+            caller: json!(null).into(),
+        };
+        self.backend.mutate(operation.into(), call).await.unwrap();
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.service.shutdown().cancel();
-        self.stop.cancel();
-        self.server.abort();
-    }
+async fn effect(effects: &mut CommandEffects) -> CommandEffect {
+    tokio::time::timeout(Duration::from_secs(3), effects.recv()).await.unwrap().expect("an effect")
 }
-async fn frame(stream: &mut tonic::Streaming<wire::CommandServerFrame>) -> command_server_frame::Frame {
-    tokio::time::timeout(Duration::from_secs(3), stream.message()).await.unwrap().unwrap().unwrap().frame.unwrap()
+async fn outcome(action: &mut ActionHandle) -> crate::Result<Arc<str>> {
+    tokio::time::timeout(Duration::from_secs(3), action.outcome()).await.unwrap()
 }
-fn completion(frame: command_server_frame::Frame) -> wire::CommandCompletionState {
-    let command_server_frame::Frame::Finished(value) = frame else { panic!("expected completion") };
-    wire::CommandCompletionState::try_from(value.state).unwrap()
+fn request(effect: &CommandEffect) -> serde_json::Value {
+    serde_json::from_str(effect.request().as_str()).unwrap()
 }
 
 #[tokio::test]
-async fn command_authority_scope_queries_and_fixed_descriptor_are_checked() {
-    let mut fixture = Fixture::new().await;
-    assert_eq!(
-        fixture.service.catalog(request(scope(), APPLICATION)).await.unwrap_err().code(),
-        tonic::Code::Unauthenticated
-    );
-    let catalog = fixture.service.catalog(request(scope(), PLATFORM)).await.unwrap().into_inner();
-    assert_eq!(catalog.allowed_ids, [COMMAND]);
+async fn catalog_suggestions_and_starts_check_the_scope_permission_and_declared_queries() {
+    let fixture = Fixture::new().await;
+    assert_eq!(fixture.catalog(scope()).await.unwrap().allowed_ids, [COMMAND]);
     let mut wrong = scope();
     wrong.domain = "private".into();
-    assert!(fixture.service.catalog(request(wrong, PLATFORM)).await.is_err());
+    assert!(fixture.catalog(wrong).await.is_err());
     let mut unknown_app = scope();
     unknown_app.app = "missing".into();
     unknown_app.session_type = "missing/main".into();
-    assert!(fixture.service.catalog(request(unknown_app, PLATFORM)).await.is_err());
+    assert!(fixture.catalog(unknown_app).await.is_err());
     let mut large_generation = scope();
     large_generation.membership_generation = u64::MAX;
     large_generation.delivery_generation = u64::MAX;
-    assert_eq!(
-        fixture.service.catalog(request(large_generation, PLATFORM)).await.unwrap().into_inner().allowed_ids,
-        [COMMAND]
-    );
-    let suggestions = fixture
-        .service
-        .suggest(request(
-            wire::CommandSuggestionRequest {
-                scope: Some(scope()),
-                command_id: COMMAND.into(),
-                query: "choices".into(),
-                input: "notify o".into(),
-                cursor: 8,
-            },
-            PLATFORM,
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(suggestions.values, ["one", "two"]);
-    assert!(
-        fixture
-            .service
-            .suggest(request(
-                wire::CommandSuggestionRequest {
-                    scope: Some(scope()),
-                    command_id: COMMAND.into(),
-                    query: "read".into(),
-                    input: String::new(),
-                    cursor: 0
-                },
-                PLATFORM
-            ))
-            .await
-            .is_err()
-    );
-    assert!(
-        fixture
-            .client
-            .prepare(request(
-                wire::PrepareCommand { scope: Some(scope()), command_id: COMMAND.into(), input: "private".into() },
-                PLATFORM
-            ))
-            .await
-            .is_err()
-    );
-    fixture.revoke(1).await;
-    let hidden = fixture.service.catalog(request(scope(), PLATFORM)).await.unwrap().into_inner();
+    assert_eq!(fixture.catalog(large_generation).await.unwrap().allowed_ids, [COMMAND]);
+    assert_eq!(fixture.suggest("choices", "notify o").await.unwrap(), ["one", "two"]);
+    assert!(fixture.suggest("read", "").await.is_err());
+    // The input can't name another command than the one started.
+    assert!(fixture.start("private").await.is_err());
+    fixture.revoke("permission-1", 1).await;
+    let hidden = fixture.catalog(scope()).await.unwrap();
     assert!(hidden.allowed_ids.is_empty());
     assert!(serde_json::from_slice::<serde_json::Value>(&hidden.commands_json).unwrap().get(COMMAND).is_some());
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn duplicate_command_streams_observe_without_reexecuting_or_replaying_effects() {
-    let mut fixture = Fixture::new().await;
-    let prepared = fixture.prepare("n hello").await;
-    assert!(prepared.follow_player);
-    let (owner, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(
-        frame(&mut output).await,
-        command_server_frame::Frame::Accepted(wire::CommandAccepted { status_only: false, .. })
-    ));
-    let command_server_frame::Frame::Effect(effect) = frame(&mut output).await else { panic!("effect") };
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&effect.request_json).unwrap(),
-        json!({"kind":"message","text":"hello"})
-    );
-    assert_eq!(effect.operation_id, format!("action/{}/platform/{}", prepared.invocation_id, effect.sequence));
-    assert!(matches!(fixture.backend.release(DeploymentId::new("commands").unwrap()).await, Err(Error::Busy)));
-    let (_observer, mut replay) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(
-        frame(&mut replay).await,
-        command_server_frame::Frame::Accepted(wire::CommandAccepted { status_only: true, .. })
-    ));
-    owner
-        .send(wire::CommandClientFrame {
-            frame: Some(command_client_frame::Frame::Reply(wire::CommandEffectReply {
-                sequence: effect.sequence,
-                result_json: serde_json::to_vec(&json!({"state":"accepted","operationId":effect.operation_id}))
-                    .unwrap(),
-                error: String::new(),
-            })),
-        })
-        .await
-        .unwrap();
-    assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Succeeded);
-    assert_eq!(completion(frame(&mut replay).await), wire::CommandCompletionState::Succeeded);
-    assert_eq!(fixture.count().await, 1);
-    let (_observer, mut replay) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut replay).await, command_server_frame::Frame::Accepted(_)));
-    assert_eq!(completion(frame(&mut replay).await), wire::CommandCompletionState::Succeeded);
-    assert_eq!(fixture.count().await, 1);
-    fixture.close().await;
 }
 
 #[tokio::test]
 async fn permission_is_fresh_at_dispatch_and_before_later_effects() {
-    let mut fixture = Fixture::new().await;
-    let prepared = fixture.prepare("notify hello").await;
-    fixture.revoke(1).await;
-    let (_sender, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Failed);
+    let fixture = Fixture::new().await;
+    fixture.revoke("permission-1", 1).await;
+    assert!(matches!(fixture.start("notify hello").await, Err(Error::Unknown)));
     assert_eq!(fixture.count().await, 0);
-    fixture.revoke(0).await;
-    let prepared = fixture.prepare("notify wait").await;
-    let (_sender, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
+    fixture.revoke("permission-0", 0).await;
+    let (mut action, _effects) = fixture.start("notify wait").await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while fixture.count().await == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -326,44 +168,9 @@ async fn permission_is_fresh_at_dispatch_and_before_later_effects() {
     })
     .await
     .unwrap();
-    // Use a distinct operation identity for a new revocation.
-    fixture
-        .backend
-        .mutate(
-            "revoked-again".into(),
-            Call {
-                deployment: DeploymentId::new("commands").unwrap(),
-                function: "revoke".into(),
-                arguments: json!(1).into(),
-                caller: json!(null).into(),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Failed);
+    fixture.revoke("permission-1-again", 1).await;
+    assert!(outcome(&mut action).await.is_err());
     assert_eq!(fixture.count().await, 1);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn owner_disconnect_and_shutdown_cancel_unanswered_effects_with_unknown_outcomes() {
-    let mut fixture = Fixture::new().await;
-    let prepared = fixture.prepare("notify hello").await;
-    let (owner, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Effect(_)));
-    drop(owner);
-    assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Unknown);
-    let (_observer, mut replay) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut replay).await, command_server_frame::Frame::Accepted(_)));
-    assert_eq!(completion(frame(&mut replay).await), wire::CommandCompletionState::Unknown);
-    let prepared = fixture.prepare("notify shutdown").await;
-    let (_owner, mut output) = fixture.run(&prepared.invocation_id).await;
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
-    assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Effect(_)));
-    fixture.close().await;
-    assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Unknown);
-    assert_eq!(fixture.count().await, 2);
 }
 
 #[tokio::test]
@@ -383,37 +190,22 @@ async fn regular_actions_do_not_inherit_platform_capabilities() {
         .await
         .unwrap();
     assert!(action.outcome().await.unwrap_err().to_string().contains("platform capability unavailable"));
-    fixture.close().await;
 }
 
 #[tokio::test]
 async fn session_calls_validate_declared_reply_contract_before_resuming_handler() {
-    let mut fixture = Fixture::new().await;
-    for (value, expected) in
-        [(json!(7), wire::CommandCompletionState::Succeeded), (json!("7"), wire::CommandCompletionState::Failed)]
-    {
-        let prepared = fixture.prepare("notify session").await;
-        let (sender, mut output) = fixture.run(&prepared.invocation_id).await;
-        assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
-        let command_server_frame::Frame::Effect(effect) = frame(&mut output).await else { panic!("session call") };
+    let fixture = Fixture::new().await;
+    for (value, succeeds) in [(json!(7), true), (json!("7"), false)] {
+        let (mut action, mut effects) = fixture.start("notify session").await.unwrap();
+        let call = effect(&mut effects).await;
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&effect.request_json).unwrap(),
+            request(&call),
             json!({"kind":"session_call","method":{"app":"lobby","session":"main","name":"status"},"arguments":{"limit":1}})
         );
-        sender
-            .send(wire::CommandClientFrame {
-                frame: Some(command_client_frame::Frame::Reply(wire::CommandEffectReply {
-                    sequence: effect.sequence,
-                    result_json: serde_json::to_vec(&value).unwrap(),
-                    error: String::new(),
-                })),
-            })
-            .await
-            .unwrap();
-        assert_eq!(completion(frame(&mut output).await), expected);
+        call.finish(Some(&serde_json::to_vec(&value).unwrap()));
+        assert_eq!(outcome(&mut action).await.is_ok(), succeeds);
     }
     assert_eq!(fixture.count().await, 2);
-    fixture.close().await;
 }
 
 #[tokio::test]
@@ -425,36 +217,23 @@ async fn larger_action_budgets_hold_more_platform_effects_in_flight() {
     let effects = crate::ActionEffects::new("test".into()).unwrap();
     let backend = Backend::with_action_bytes("test".into(), Box::new(store), effects, budget).unwrap();
     backend.deploy(deployment()).await.unwrap();
-    let mut fixture = Fixture::with_backend(directory, backend).await;
+    let fixture = Fixture { _directory: directory, backend };
     let mut runs = Vec::new();
     for _ in 0..5 {
-        let prepared = fixture.prepare("notify fanout").await;
-        let (owner, mut output) = fixture.run(&prepared.invocation_id).await;
-        assert!(matches!(frame(&mut output).await, command_server_frame::Frame::Accepted(_)));
-        let mut effects = Vec::new();
+        let (action, mut effects) = fixture.start("notify fanout").await.unwrap();
+        let mut pending = Vec::new();
         for _ in 0..8 {
-            let command_server_frame::Frame::Effect(effect) = frame(&mut output).await else {
-                panic!("effect refused")
-            };
-            effects.push(effect);
+            pending.push(effect(&mut effects).await);
         }
-        runs.push((owner, output, effects));
+        runs.push((action, effects, pending));
     }
     // Forty effects are unanswered at once, past the 32 the smallest budget admits.
-    for (owner, mut output, effects) in runs {
-        for effect in effects {
-            let result = json!({"state":"accepted","operationId":effect.operation_id});
-            let reply = wire::CommandEffectReply {
-                sequence: effect.sequence,
-                result_json: serde_json::to_vec(&result).unwrap(),
-                error: String::new(),
-            };
-            let frame = wire::CommandClientFrame { frame: Some(command_client_frame::Frame::Reply(reply)) };
-            owner.send(frame).await.unwrap();
+    for (mut action, _effects, pending) in runs {
+        for effect in pending {
+            effect.accept();
         }
-        assert_eq!(completion(frame(&mut output).await), wire::CommandCompletionState::Succeeded);
+        assert!(outcome(&mut action).await.is_ok());
     }
-    fixture.close().await;
 }
 
 #[test]
@@ -479,101 +258,67 @@ fn platform_requests_reject_foreign_targets_undeclared_methods_and_oversized_val
     assert!(effects::validate(&deployment, &scope(), &bad.into()).is_err());
 }
 
-fn scope_bytes(scope: &wire::CommandScope) -> usize {
-    [
-        &scope.proxy_id,
-        &scope.player_uuid,
-        &scope.username,
-        &scope.session_id,
-        &scope.app,
-        &scope.session_type,
-        &scope.domain,
-        &scope.scope_id,
-        &scope.connection_id,
-        &scope.claim_operation_id,
-    ]
-    .iter()
-    .map(|value| value.len())
-    .sum()
-}
-
-fn assert_ingress_charge(memory: &tokio::sync::Semaphore, payload: usize) {
-    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
-    let required = crate::limits::REQUEST_OVERHEAD + payload;
-    assert!(charged >= required, "retained command charged {charged} bytes, but needs at least {required} bytes");
-}
-
 #[tokio::test]
-async fn command_catalog_admission_charges_retained_scope() {
+async fn command_catalog_admission_charges_retained_scope_and_caller() {
     let (backend, _incoming, memory) = Backend::held_ingress();
-    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
-    let scope = scope();
-    let bytes = scope_bytes(&scope);
-    let mut catalog = Box::pin(service.catalog(request(scope, PLATFORM)));
+    let bytes = scope_bytes(&scope()) + caller().as_str().len();
+    let mut catalog = Box::pin(backend.command_catalog(id(), scope(), caller()));
     crate::tests::pending(catalog.as_mut()).await;
-    assert_ingress_charge(&memory, bytes);
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + bytes;
+    assert!(charged >= required, "retained catalog charged {charged} bytes, but needs at least {required} bytes");
 }
 
 #[tokio::test]
-async fn command_suggestion_admission_charges_retained_scope_and_input() {
+async fn command_suggestion_admission_charges_retained_scope_input_and_caller() {
     let (backend, _incoming, memory) = Backend::held_ingress();
-    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
-    let scope = scope();
-    let suggestion = wire::CommandSuggestionRequest {
-        scope: Some(scope.clone()),
+    let request = CommandSuggestionRequest {
+        scope: Some(scope()),
         command_id: COMMAND.into(),
         query: "choices".into(),
         input: "notify o".into(),
         cursor: 8,
     };
-    let bytes = scope_bytes(&scope) + suggestion.command_id.len() + suggestion.query.len() + suggestion.input.len();
-    let mut suggestions = Box::pin(service.suggest(request(suggestion, PLATFORM)));
+    let bytes = scope_bytes(&scope())
+        + request.command_id.len()
+        + request.query.len()
+        + request.input.len()
+        + caller().as_str().len();
+    let charge = backend.charge_request(0).unwrap();
+    let mut suggestions = Box::pin(backend.command_suggestions(id(), charge, request, caller()));
     crate::tests::pending(suggestions.as_mut()).await;
-    assert_ingress_charge(&memory, bytes);
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + bytes;
+    assert!(charged >= required, "retained suggestion charged {charged} bytes, but needs at least {required} bytes");
 }
 
 #[tokio::test]
-async fn command_preparation_admission_charges_retained_scope_and_input() {
+async fn command_start_admission_charges_retained_call_scope_input_and_caller() {
     let (backend, _incoming, memory) = Backend::held_ingress();
-    let service = CommandService::new(backend, APPLICATION, PLATFORM).unwrap();
-    let scope = scope();
-    let preparation =
-        wire::PrepareCommand { scope: Some(scope.clone()), command_id: COMMAND.into(), input: "notify hello".into() };
-    let bytes = scope_bytes(&scope) + preparation.command_id.len() + preparation.input.len();
-    let mut prepared = Box::pin(service.prepare(request(preparation, PLATFORM)));
-    crate::tests::pending(prepared.as_mut()).await;
-    assert_ingress_charge(&memory, bytes);
-}
-
-#[tokio::test]
-async fn command_start_admission_charges_retained_scope_and_input() {
-    use crate::service::{Command, Event};
-
-    let (backend, mut incoming, memory) = Backend::held_ingress();
-    let mut fixture = Fixture::with_backend(tempfile::tempdir().unwrap(), backend).await;
-    let scope = scope();
+    let action = crate::ActionId { incarnation: "test-incarnation".into(), sequence: 1 };
     let input = "notify hello";
-    let mut preparation = Box::pin(fixture.service.prepare(request(
-        wire::PrepareCommand { scope: Some(scope.clone()), command_id: COMMAND.into(), input: input.into() },
-        PLATFORM,
-    )));
-    crate::tests::pending(preparation.as_mut()).await;
-    let Event::Request { command, .. } = incoming.try_recv().unwrap() else { panic!("expected preparation") };
-    let Command::Prepare { id, scope, command, input, reply } = *command else { panic!("expected preparation") };
-    let prepared = Prepared { deployment: id, scope, command, input, follow_player: false };
-    let bytes = prepared.call().bytes() + scope_bytes(&prepared.scope) + prepared.input.len();
-    reply.finish(Ok(prepared));
-    crate::tests::pending(preparation.as_mut()).await;
-    let Event::Request { command, .. } = incoming.try_recv().unwrap() else { panic!("expected an action identity") };
-    let Command::PrepareAction { reply } = *command else { panic!("expected an action identity") };
-    reply.finish(Ok(crate::ActionId { incarnation: "test-incarnation".into(), sequence: 1 }));
-    let invocation = preparation.await.unwrap().into_inner().invocation_id;
-    let (_sender, _output) = fixture.run(&invocation).await;
-    let event = tokio::time::timeout(Duration::from_secs(2), incoming.recv()).await.unwrap().unwrap();
-    assert!(
-        matches!(&event, Event::Request { command, .. } if matches!(command.as_ref(), Command::StartAction { .. }))
-    );
-    // Close the transport worker before asserting; the retained event still owns its permit.
-    fixture.close().await;
-    assert_ingress_charge(&memory, bytes);
+    let call = Call {
+        deployment: id(),
+        function: COMMAND.into(),
+        arguments: json!({"input": input}).into(),
+        caller: caller(),
+    };
+    let bytes = action.incarnation.len() + call.bytes() + scope_bytes(&scope()) + input.len() + caller().as_str().len();
+    let request = CommandRequest::new(COMMAND, input, "alice");
+    let charge = backend.charge_request(0).unwrap();
+    let mut started = Box::pin(backend.start_command(
+        action,
+        charge,
+        GATEWAY,
+        request,
+        id(),
+        scope(),
+        COMMAND.into(),
+        input.into(),
+        caller(),
+    ));
+    crate::tests::pending(started.as_mut()).await;
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + bytes;
+    assert!(charged >= required, "retained command charged {charged} bytes, but needs at least {required} bytes");
 }
