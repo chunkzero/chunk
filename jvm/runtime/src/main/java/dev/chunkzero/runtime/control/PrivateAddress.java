@@ -14,7 +14,8 @@ import java.util.List;
 @ApiStatus.Internal
 public final class PrivateAddress {
     /** AWS's and GCP's IPv6 instance metadata services, which sit inside fc00::/7. */
-    private static final List<InetAddress> METADATA = List.of(literal("fd00:ec2::254"), literal("fd20:ce::254"));
+    private static final List<InetAddress> METADATA =
+            List.of(literal("fd00:ec2::254"), literal("fd20:ce::254"));
 
     private PrivateAddress() {}
 
@@ -26,7 +27,8 @@ public final class PrivateAddress {
         if (bytes.length == 4) {
             return ipv4(bytes[0] & 0xff, bytes[1] & 0xff);
         }
-        return address.isLoopbackAddress() || ((bytes[0] & 0xfe) == 0xfc && !METADATA.contains(address));
+        return address.isLoopbackAddress()
+                || ((bytes[0] & 0xfe) == 0xfc && !METADATA.contains(address));
     }
 
     private static boolean ipv4(int a, int b) {

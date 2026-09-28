@@ -18,8 +18,8 @@ public final class CoreChannel {
     private CoreChannel() {}
 
     /**
-     * A new channel to {@code endpoint}, which must be an HTTP address whose host is a private IP literal. Hostnames
-     * are refused without being resolved.
+     * A new channel to {@code endpoint}, which must be an HTTP address whose host is a private IP
+     * literal. Hostnames are refused without being resolved.
      */
     public static ManagedChannel open(String endpoint) {
         var uri = URI.create(endpoint);
@@ -33,7 +33,8 @@ public final class CoreChannel {
                 || uri.getPort() < 1
                 || uri.getPort() > 65535
                 || !PrivateAddress.contains(address)) {
-            throw new IllegalArgumentException("The core endpoint must be a private IP HTTP address");
+            throw new IllegalArgumentException(
+                    "The core endpoint must be a private IP HTTP address");
         }
         return NettyChannelBuilder.forAddress(new InetSocketAddress(address, uri.getPort()))
                 .overrideAuthority(uri.getRawAuthority())
@@ -44,7 +45,10 @@ public final class CoreChannel {
                 .build();
     }
 
-    /** The address {@code host} spells as an IPv4 or bracketed IPv6 literal, or null for anything else. */
+    /**
+     * The address {@code host} spells as an IPv4 or bracketed IPv6 literal, or null for anything
+     * else.
+     */
     private static InetAddress literal(String host) {
         if (host == null) {
             return null;

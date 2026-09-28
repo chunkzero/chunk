@@ -43,14 +43,20 @@ class PrivateAddressTest {
             var address = InetAddress.getByName(entry.getKey());
             assertEquals(entry.getValue(), PrivateAddress.contains(address), entry.getKey());
             if (address.getAddress().length == 4) {
-                assertEquals(entry.getValue(), PrivateAddress.contains(mapped(address)), "mapped " + entry.getKey());
+                assertEquals(
+                        entry.getValue(),
+                        PrivateAddress.contains(mapped(address)),
+                        "mapped " + entry.getKey());
             }
         }
     }
 
     @Test
     void coreChannelAcceptsPrivateEndpointsOnly() throws Exception {
-        for (var endpoint : new String[] {"http://127.0.0.1:7070", "http://10.0.0.2:7070", "http://[fd00::1]:7070"}) {
+        for (var endpoint :
+                new String[] {
+                    "http://127.0.0.1:7070", "http://10.0.0.2:7070", "http://[fd00::1]:7070"
+                }) {
             var channel = CoreChannel.open(endpoint);
             try {
                 assertEquals(endpoint.substring("http://".length()), channel.authority());
@@ -67,7 +73,8 @@ class PrivateAddressTest {
                     "http://core.internal:7070",
                     "http://10.0.0.2.nip.io:7070"
                 }) {
-            assertThrows(IllegalArgumentException.class, () -> CoreChannel.open(endpoint), endpoint);
+            assertThrows(
+                    IllegalArgumentException.class, () -> CoreChannel.open(endpoint), endpoint);
         }
     }
 
@@ -87,7 +94,10 @@ class PrivateAddressTest {
         }
     }
 
-    /** The IPv4-mapped IPv6 form of {@code address}, which {@link InetAddress#getByName} would unwrap. */
+    /**
+     * The IPv4-mapped IPv6 form of {@code address}, which {@link InetAddress#getByName} would
+     * unwrap.
+     */
     private static InetAddress mapped(InetAddress address) throws Exception {
         var bytes = new byte[16];
         bytes[10] = (byte) 0xff;
