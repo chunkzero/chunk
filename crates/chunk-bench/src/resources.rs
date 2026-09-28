@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio_util::sync::CancellationToken;
 
-use crate::metrics::count;
+use crate::{metrics::count, target::Target};
 
 pub fn metadata(root: &Path) -> Result<Value> {
     let mut system = System::new();
@@ -59,7 +59,7 @@ impl Sampler {
         );
     }
 
-    fn sample(&mut self) -> Result<Value> {
+    async fn sample(&mut self, target: &mut Target) -> Result<Value> {
         self.refresh();
         let elapsed = self.start.elapsed().as_secs_f64();
         let mut sample = json!({"elapsed_seconds": elapsed});
@@ -70,10 +70,14 @@ impl Sampler {
             sample[name] = json!({"rss_bytes": process.memory(), "cpu_ms": cpu_ms,
                 "average_cpu_cores": count(cpu_ms) / 1000.0 / elapsed});
         }
+        if let Some(bytes) = target.send().await?.get("bytes") {
+            sample["target"]["send_charged_bytes"] = bytes.clone();
+        }
         Ok(sample)
     }
 
-    pub async fn run(mut self, stop: CancellationToken) -> Result<Vec<Value>> {
+    /// Samples each second until `stop`, asking `target` for core's charged send bytes.
+    pub async fn run(mut self, stop: CancellationToken, target: &mut Target) -> Result<Vec<Value>> {
         let mut samples = Vec::new();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -81,10 +85,10 @@ impl Sampler {
         loop {
             tokio::select! {
                 () = stop.cancelled() => {
-                    samples.push(self.sample()?);
+                    samples.push(self.sample(target).await?);
                     break;
                 }
-                _ = interval.tick() => samples.push(self.sample()?),
+                _ = interval.tick() => samples.push(self.sample(target).await?),
             }
         }
         Ok(samples)

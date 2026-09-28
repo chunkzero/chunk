@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use chunk_proto::sync::v1::{
     CallRequest, Entry, Position, SubscribeRequest, Update, call_response::Outcome, core_client::CoreClient,
-    entry::State,
+    entry::State, error::Code,
 };
 use hdrhistogram::Histogram;
 use prost::Message;
@@ -29,7 +29,6 @@ use crate::{
 pub const DEPLOYMENT: &str = "bench";
 /// How long after the last write's reply prompt readers may take to observe it before it counts as unobserved.
 const DRAIN: Duration = Duration::from_secs(2);
-const QUERY: &str = r#"{"top": {"function": "shared/leaderboard/top", "arguments": {}}}"#;
 
 /// Core's sync endpoint and the credentials it accepts from outside a JVM.
 #[derive(Clone, Serialize, Deserialize)]
@@ -163,6 +162,8 @@ pub struct Streams {
     entry_errors: AtomicU64,
     bytes: AtomicU64,
     ended: AtomicU64,
+    /// Streams core ended with OVERLOADED, also counted in `ended`.
+    overloaded: AtomicU64,
     last_end: Mutex<Option<String>>,
 }
 
@@ -185,6 +186,7 @@ impl Streams {
             entry_errors: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             ended: AtomicU64::new(0),
+            overloaded: AtomicU64::new(0),
             last_end: Mutex::new(None),
         })
     }
@@ -192,6 +194,9 @@ impl Streams {
     fn receive(&self, stream: usize, update: &Update) {
         let now = Instant::now();
         if let Some(error) = &update.error {
+            if error.code() == Code::Overloaded {
+                self.overloaded.fetch_add(1, Ordering::Relaxed);
+            }
             return self.end(format!("{:?}: {}", error.code(), error.message));
         }
         self.updates.fetch_add(1, Ordering::Relaxed);
@@ -277,6 +282,7 @@ impl Streams {
             "update_mib_per_second": rate(&self.bytes) / 1_048_576.0,
             "entry_errors": self.entry_errors.load(Ordering::Relaxed),
             "streams_ended": self.ended.load(Ordering::Relaxed),
+            "streams_overloaded": self.overloaded.load(Ordering::Relaxed),
             "last_stream_end": *self.last_end.lock().expect("stream end"),
             "reply_to_observed_us": metrics::distribution(&positions.lag),
             "unobserved_pairs": positions.unobserved(),
@@ -294,6 +300,7 @@ pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<S
     let per_connection = config.streams_per_connection;
     let connections = prompt.div_ceil(per_connection) + config.slow_readers.div_ceil(per_connection);
     let streams = Arc::new(Streams::new(total, prompt, connections)?);
+    let query = json!({"top": {"function": "shared/leaderboard/top", "arguments": {"pad": config.result_padding}}});
     let mut rpc = connect(&connection.endpoint).await?;
     for index in 0..total {
         let offset = if index < prompt { index } else { index - prompt };
@@ -302,7 +309,7 @@ pub async fn subscribe(connection: &Connection, config: &Config) -> Result<Arc<S
         }
         let subscription = SubscribeRequest {
             topic: "queries".into(),
-            arguments: QUERY.into(),
+            arguments: query.to_string().into_bytes(),
             deployment: DEPLOYMENT.into(),
             ..SubscribeRequest::default()
         };
@@ -385,5 +392,16 @@ mod tests {
         let (summary, lag) = streams.freeze();
         assert_eq!(lag.len(), 1);
         assert_eq!(summary["unobserved_pairs"], 1);
+    }
+
+    #[test]
+    fn overloaded_stream_ends_are_counted_apart_from_other_ends() {
+        let streams = Streams::new(2, 2, 1).unwrap();
+        for code in [Code::Overloaded, Code::Unavailable] {
+            let error = chunk_proto::sync::v1::Error { code: code.into(), ..Default::default() };
+            streams.receive(0, &Update { error: Some(error), ..Update::default() });
+        }
+        let (summary, _) = streams.freeze();
+        assert_eq!((summary["streams_ended"].as_u64(), summary["streams_overloaded"].as_u64()), (Some(2), Some(1)));
     }
 }

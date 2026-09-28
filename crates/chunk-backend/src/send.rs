@@ -56,6 +56,12 @@ impl SendBudget {
         self.0.held.load(Ordering::Acquire)
     }
 
+    /// The budget's size.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.0.total
+    }
+
     /// Bytes left to charge.
     #[must_use]
     pub fn available(&self) -> usize {

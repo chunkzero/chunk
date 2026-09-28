@@ -86,13 +86,16 @@ only advance their position: at most once a second while idle, or promptly after
 writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
 record, changing every stream's result in any arrival order. The last `--slow-readers` streams wait `--slow-read-ms`
 before each read, on their own connections (still `--streams-per-connection` each), so no prompt stream shares a
-connection with them. Setup fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an
+connection with them. `--result-padding` adds that many bytes to the leaderboard result, so related writes press on
+core's send budget. Setup fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an
 ended stream. The `fanout` summary reports stream updates, position-only updates, changed entries and encoded update
-bytes per second (excluding gRPC and HTTP/2 framing), query errors, streams that ended, and `reply_to_observed_us`: from
-a measured write's reply reaching the generator until each prompt stream observes its position, once per write and
-stream (slow readers excluded). After the last write, the runner waits up to two seconds for those observations; pairs
-still missing are `unobserved_pairs`. The fan-out summary and resource sampling then stop at the same instant.
-`measured-observed.hdr` holds the lag histogram, and `target_cpu_cores` is core's CPU time over wall time. No control
+bytes per second (excluding gRPC and HTTP/2 framing), query errors, streams that ended, those core ended with OVERLOADED
+(`streams_overloaded`), and `reply_to_observed_us`: from a measured write's reply reaching the generator until each
+prompt stream observes its position, once per write and stream (slow readers excluded). After the last write, the runner
+waits up to two seconds for those observations; pairs still missing are `unobserved_pairs`. The fan-out summary and
+resource sampling then stop at the same instant. `measured-observed.hdr` holds the lag histogram, and `target_cpu_cores`
+is core's CPU time over wall time. Each resource sample also holds core's charged send bytes (`send_charged_bytes`), and
+the summary reports their peak across samples beside peak RSS and the send budget (`send_budget_bytes`). No control
 state changes during the run, but core still checks each stream's grant before every update, so position-only fan-out
 includes that check.
 

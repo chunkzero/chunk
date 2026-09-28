@@ -192,7 +192,7 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
         streams.reset()?;
     }
     let monitor_stop = CancellationToken::new();
-    let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone());
+    let monitor = resources::Sampler::new(target.pid()?)?.run(monitor_stop.clone(), target);
     let workload = async {
         let result = load::run(
             config.clone(),
@@ -218,12 +218,16 @@ async fn measure(config: Arc<Config>, output: PathBuf, target: &mut target::Targ
         .transpose()?;
     stats.write(&output, "measured")?;
     let samples = samples?;
+    let peak = |key: &str| samples.iter().filter_map(|sample| sample["target"][key].as_u64()).max();
     let target_cpu_ms = samples.last().and_then(|sample| sample["target"]["cpu_ms"].as_u64()).unwrap_or_default();
     let result = json!({
         "measurement": stats.summary(config.seconds, bytes),
         "response": wire,
         "target_cpu_cores": samples.last().map(|sample| sample["target"]["average_cpu_cores"].clone()),
         "target_cpu_us_per_completed": metrics::count(target_cpu_ms * 1000) / metrics::count(stats.completed.max(1)),
+        "peak_target_rss_bytes": peak("rss_bytes"),
+        "peak_send_charged_bytes": peak("send_charged_bytes"),
+        "send_budget_bytes": target.send().await?.get("total"),
         "phases_us": target.report().await?,
         "fanout": fanout,
     });

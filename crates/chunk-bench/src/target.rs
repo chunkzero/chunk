@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -87,6 +87,11 @@ impl Target {
         self.command("reset").await.map(drop)
     }
 
+    /// Core's charged send bytes and send budget as `bytes` and `total`, or null for workloads without core.
+    pub async fn send(&mut self) -> Result<Value> {
+        self.command("send").await
+    }
+
     /// Target phase timings recorded since the last reset; empty for workloads without them.
     pub async fn report(&mut self) -> Result<Value> {
         self.command("report").await
@@ -108,6 +113,7 @@ pub async fn serve(init: Init) -> Result<()> {
     init.config.validate()?;
     let stop = CancellationToken::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut send = None;
     let ready = if init.config.scenario == Scenario::ProxyRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let ready = Ready { endpoint: listener.local_addr()?.to_string(), sync: None };
@@ -118,6 +124,7 @@ pub async fn serve(init: Init) -> Result<()> {
     } else {
         let core = core(&init).await?;
         let connection = connection(&core)?;
+        send = core.backend().map(|backend| backend.send_budget().clone());
         let token = stop.clone();
         tasks.spawn(async move {
             token.cancelled().await;
@@ -135,6 +142,10 @@ pub async fn serve(init: Init) -> Result<()> {
                     println!("null");
                 }
                 Some("report") => println!("{}", backend::report_phases(&init.output)?),
+                Some("send") => {
+                    let budget = send.as_ref().map(|budget| json!({"bytes": budget.bytes(), "total": budget.total()}));
+                    println!("{}", Value::from(budget));
+                }
                 _ => break,
             },
             result = tasks.join_next() => {
