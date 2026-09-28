@@ -471,6 +471,7 @@ dependencies = [
 name = "chunk-backend"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chunk-build",
  "chunk-contract",
  "chunk-js",

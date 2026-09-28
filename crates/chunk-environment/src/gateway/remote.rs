@@ -157,7 +157,7 @@ fn deployment(update: &Update) -> io::Result<Option<String>> {
     }
     let current = update.upserts.iter().find(|entry| entry.key == "current").and_then(|entry| entry.state.as_ref());
     let Some(State::Value(value)) = current else { return Ok(None) };
-    let deployment = GatewayDeployment::decode(value.as_slice()).map_err(io::Error::other)?.deployment;
+    let deployment = GatewayDeployment::decode(&value[..]).map_err(io::Error::other)?.deployment;
     Ok(Some(deployment).filter(|deployment| !deployment.is_empty()))
 }
 

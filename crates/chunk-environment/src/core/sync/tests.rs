@@ -414,7 +414,7 @@ async fn query_streams_follow_mutations_and_advance_past_unrelated_ones() {
         ..SubscribeRequest::default()
     };
     let mut updates = fixture.client.subscribe(authorized(subscription, &cli)).await.unwrap().into_inner();
-    let entry = |value: &str| Entry { key: "count".into(), state: Some(State::Value(value.into())) };
+    let entry = |value: &'static str| Entry { key: "count".into(), state: Some(State::Value(value.into())) };
     let snapshot = next(&mut updates).await;
     assert!(snapshot.snapshot && !snapshot.stream.is_empty());
     assert_eq!(snapshot.upserts, [entry("0")]);

@@ -7,9 +7,14 @@ use std::sync::{
 
 use crate::{Result, limits::Limit};
 
-/// A byte budget [`SendCharge`]s draw from. Clones share it.
+/// A byte budget [`SendCharge`]s draw from. Clones share it, and so does its [`streams`](Self::streams) view, whose
+/// charges stop short of the room kept for call results.
 #[derive(Clone)]
-pub struct SendBudget(Arc<Budget>);
+pub struct SendBudget {
+    budget: Arc<Budget>,
+    /// The bytes held beyond which this view's charges fail.
+    limit: usize,
+}
 
 struct Budget {
     held: AtomicUsize,
@@ -25,10 +30,17 @@ pub struct SendCharge {
 impl SendBudget {
     #[must_use]
     pub fn new(bytes: usize) -> Self {
-        Self(Arc::new(Budget { held: AtomicUsize::new(0), total: bytes }))
+        Self { budget: Arc::new(Budget { held: AtomicUsize::new(0), total: bytes }), limit: bytes }
     }
 
-    /// Charges `bytes`, failing at once when the budget has no room for them.
+    /// The view stream messages charge through. It leaves [`reserve`] bytes of the budget to call results, so streams
+    /// that fill their share still leave room to admit calls.
+    #[must_use]
+    pub fn streams(&self) -> Self {
+        Self { budget: self.budget.clone(), limit: self.total() - reserve(self.total()) }
+    }
+
+    /// Charges `bytes`, failing at once when this view has no room for them.
     /// # Errors
     /// Reports exhausted send memory.
     pub fn charge(&self, bytes: usize) -> Result<SendCharge> {
@@ -39,11 +51,11 @@ impl SendBudget {
     /// Charges `bytes` even beyond the budget's room, which then refuses other charges until enough are released.
     #[must_use]
     pub fn overdraw(&self, bytes: usize) -> SendCharge {
-        self.0.held.fetch_add(bytes, Ordering::AcqRel);
+        self.budget.held.fetch_add(bytes, Ordering::AcqRel);
         SendCharge { budget: self.clone(), bytes }
     }
 
-    /// Checks the budget has `bytes` left, without charging them.
+    /// Checks this view has `bytes` left, without charging them.
     /// # Errors
     /// Reports exhausted send memory.
     pub fn check(&self, bytes: usize) -> Result<()> {
@@ -53,24 +65,24 @@ impl SendBudget {
     /// Bytes held by charges, which overdrawn ones may take past the budget.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.0.held.load(Ordering::Acquire)
+        self.budget.held.load(Ordering::Acquire)
     }
 
-    /// The budget's size.
+    /// The whole budget's size, whichever the view.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.0.total
+        self.budget.total
     }
 
-    /// Bytes left to charge.
+    /// Bytes left for this view to charge.
     #[must_use]
     pub fn available(&self) -> usize {
-        self.0.total.saturating_sub(self.bytes())
+        self.limit.saturating_sub(self.bytes())
     }
 
     fn hold(&self, bytes: usize) -> Result<()> {
-        let held = self.0.held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
-            held.checked_add(bytes).filter(|&held| held <= self.0.total)
+        let held = self.budget.held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+            held.checked_add(bytes).filter(|&held| held <= self.limit)
         });
         held.map(drop).map_err(|_| Limit::SendMemory.exceeded())
     }
@@ -90,7 +102,7 @@ impl SendCharge {
 
     /// Takes `other`'s bytes over.
     pub fn merge(&mut self, mut other: Self) {
-        debug_assert!(Arc::ptr_eq(&self.budget.0, &other.budget.0), "charges of different budgets");
+        debug_assert!(Arc::ptr_eq(&self.budget.budget, &other.budget.budget), "charges of different budgets");
         self.bytes += std::mem::take(&mut other.bytes);
     }
 
@@ -101,7 +113,7 @@ impl SendCharge {
         if bytes > self.bytes {
             self.budget.hold(bytes - self.bytes)?;
         } else {
-            self.budget.0.held.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+            self.budget.budget.held.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
         }
         self.bytes = bytes;
         Ok(())
@@ -110,8 +122,13 @@ impl SendCharge {
 
 impl Drop for SendCharge {
     fn drop(&mut self) {
-        self.budget.0.held.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget.budget.held.fetch_sub(self.bytes, Ordering::AcqRel);
     }
+}
+
+/// Call results keep an eighth of the budget, at least 16 MiB but at most a quarter, so streams keep most of it.
+fn reserve(total: usize) -> usize {
+    (total / 8).max(16 * 1024 * 1024).min(total / 4)
 }
 
 #[cfg(test)]

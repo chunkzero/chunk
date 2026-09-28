@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
+use bytes::Bytes;
 use chunk_contract::Function;
 use chunk_js::Mode;
 
@@ -118,11 +119,11 @@ impl Actor {
         self.answer(evaluated.read, evaluated.result, evaluated.reads);
     }
 
-    fn answer(&mut self, read: Read, result: Result<Arc<str>>, reads: Dependencies) {
+    fn answer(&mut self, read: Read, result: Result<String>, reads: Dependencies) {
         let Read { ticket, call, function, view, .. } = read;
         let (reply, epoch, overlay) = match ticket {
             Ticket::Watch(job) => {
-                self.watches.complete(&job, result, reads);
+                self.watches.complete(&job, result.map(Bytes::from), reads);
                 return;
             }
             Ticket::Query { reply, epoch, overlay } => (reply, epoch, overlay),
@@ -137,7 +138,7 @@ impl Actor {
             return;
         }
         let json = match result {
-            Ok(json) => json,
+            Ok(json) => json.into(),
             Err(error) => {
                 reply.finish(Err(error));
                 return;

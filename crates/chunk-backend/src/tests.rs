@@ -776,8 +776,8 @@ async fn activation_installs_schema_and_release_is_durable_after_references_drai
     let second = backend.mutate("second".into(), call("new", "increment")).await.unwrap();
     let update = group.next().await.unwrap();
     assert_eq!(update.revision, second.revision);
-    assert_eq!(&*update.results[0].as_ref().unwrap().clone(), "2");
-    assert_eq!(&*update.results[1].as_ref().unwrap().clone(), "2");
+    assert_eq!(update.results[0].as_ref().unwrap(), "2");
+    assert_eq!(update.results[1].as_ref().unwrap(), "2");
     let mut bad = next.clone();
     bad.id = "bad".into();
     bad.tables.get_mut("counters").unwrap().fields.get_mut("value").unwrap().schema = chunk_contract::Schema::String;

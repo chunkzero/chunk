@@ -69,8 +69,9 @@ pub(super) async fn arrival(updates: &mut Streaming<Update>, key: &str) -> (Upda
     loop {
         let update = next(updates).await;
         let arrived = update.upserts.iter().find_map(|entry| match &entry.state {
-            Some(State::Value(value)) if entry.key == key => Some(GatewayClaim::decode(value.as_slice()).unwrap())
-                .filter(|claim| claim.phase() == ClaimPhase::Arrived),
+            Some(State::Value(value)) if entry.key == key => {
+                Some(GatewayClaim::decode(&value[..]).unwrap()).filter(|claim| claim.phase() == ClaimPhase::Arrived)
+            }
             _ => None,
         });
         if let Some(claim) = arrived {

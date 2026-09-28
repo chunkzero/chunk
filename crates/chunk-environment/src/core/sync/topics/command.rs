@@ -122,7 +122,7 @@ impl Command {
                     return sender.fail(error);
                 }
                 let update = Update { stream: first.take().unwrap_or_default(), ..update };
-                let charge = backend.send_budget().charge(update.encoded_len()).ok();
+                let charge = backend.send_budget().streams().charge(update.encoded_len()).ok();
                 sender.send_snapshot(update, charge);
                 if last {
                     finished = true;

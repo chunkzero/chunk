@@ -51,7 +51,7 @@ impl Fixture {
 
 fn value<T: Message + Default>(update: &Update, key: &str) -> Option<T> {
     update.upserts.iter().find_map(|entry| match &entry.state {
-        Some(State::Value(value)) if entry.key == key => Some(T::decode(value.as_slice()).unwrap()),
+        Some(State::Value(value)) if entry.key == key => Some(T::decode(&value[..]).unwrap()),
         _ => None,
     })
 }

@@ -236,7 +236,7 @@ enum Ended {
 }
 
 fn snapshot(pending: &Pending) -> (Update, bool) {
-    let entry = |key: String, value: Vec<u8>| sync::Entry { key, state: Some(sync::entry::State::Value(value)) };
+    let entry = |key: String, value: Vec<u8>| sync::Entry { key, state: Some(sync::entry::State::Value(value.into())) };
     let upserts = if let Some(outcome) = &pending.outcome {
         vec![entry("outcome".into(), outcome.encode_to_vec())]
     } else {

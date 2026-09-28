@@ -64,7 +64,7 @@ pub fn login() -> ClaimRequest {
 pub fn players(control: &Arc<Control>) -> Vec<OperatorPlayer> {
     let (_, snapshot) = Players::open(control).unwrap();
     let values = snapshot.upserts.into_iter().map(|entry| match entry.state {
-        Some(State::Value(value)) => OperatorPlayer::decode(value.as_slice()).unwrap(),
+        Some(State::Value(value)) => OperatorPlayer::decode(&value[..]).unwrap(),
         _ => panic!("a snapshot holds values"),
     });
     values.collect()

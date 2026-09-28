@@ -37,7 +37,8 @@ impl Service {
             pending_move: self.movement.lock().unwrap().pending.clone(),
             ..GatewayClaim::default()
         };
-        let entry = sync::Entry { key: held.operation, state: Some(sync::entry::State::Value(claim.encode_to_vec())) };
+        let entry =
+            sync::Entry { key: held.operation, state: Some(sync::entry::State::Value(claim.encode_to_vec().into())) };
         Update { position: Some(self.position()), snapshot: true, upserts: vec![entry], stream, ..Update::default() }
     }
 

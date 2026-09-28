@@ -102,7 +102,7 @@ impl SyncJvm {
                 let Some(State::Value(value)) = &entry.state else { continue };
                 keys.insert(entry.key.clone());
                 if let Some(id) = entry.key.strip_prefix("session/") {
-                    let wanted = JvmSession::decode(value.as_slice()).unwrap();
+                    let wanted = JvmSession::decode(&value[..]).unwrap();
                     let phase = if wanted.finish { JvmSessionPhase::Ended } else { JvmSessionPhase::Ready };
                     let status = JvmSessionStatus {
                         session_type: wanted.session_type,
@@ -113,7 +113,7 @@ impl SyncJvm {
                         report.sessions.push(status);
                     }
                 } else if let Some(operation) = entry.key.strip_prefix("delivery/") {
-                    let wanted = JvmDelivery::decode(value.as_slice()).unwrap();
+                    let wanted = JvmDelivery::decode(&value[..]).unwrap();
                     let current = held.deliveries.get(operation).map(JvmDeliveryStatus::phase);
                     let phase = match current {
                         _ if wanted.withdraw && !held.stalled => JvmDeliveryPhase::Closed,
@@ -126,7 +126,7 @@ impl SyncJvm {
                         report.deliveries.push(status);
                     }
                 } else if let Some(operation) = entry.key.strip_prefix("method/") {
-                    let call = JvmMethodCall::decode(value.as_slice()).unwrap();
+                    let call = JvmMethodCall::decode(&value[..]).unwrap();
                     if !call.cancel && held.runnable.insert(operation.into()) && holds(&call) {
                         held.counts.1 += 1;
                     }
@@ -271,7 +271,7 @@ fn delivery(operation: &str, generation: Option<Position>, phase: JvmDeliveryPha
 fn delivery_generation(update: &Update, operation: &str) -> Option<Position> {
     let entry = update.upserts.iter().find(|entry| entry.key == format!("delivery/{operation}"))?;
     let Some(State::Value(value)) = &entry.state else { return None };
-    JvmDelivery::decode(value.as_slice()).unwrap().generation
+    JvmDelivery::decode(&value[..]).unwrap().generation
 }
 
 /// The fake release, whose sessions declare methods `score`, `hold` and `stuck`, each taking an optional `text`.

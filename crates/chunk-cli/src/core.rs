@@ -159,7 +159,7 @@ impl<T: Message + Default> View<T> {
             for entry in update.upserts {
                 match entry.state {
                     Some(State::Value(value)) => {
-                        self.entries.insert(entry.key, T::decode(value.as_slice()).map_err(io::Error::other)?);
+                        self.entries.insert(entry.key, T::decode(&value[..]).map_err(io::Error::other)?);
                     }
                     _ => {
                         self.entries.remove(&entry.key);
@@ -180,7 +180,10 @@ mod tests {
     fn update(snapshot: bool, continued: bool, hosts: &[&str], removed: &[&str]) -> Update {
         let upserts = hosts
             .iter()
-            .map(|host| Entry { key: (*host).into(), state: Some(State::Value(Node::default().encode_to_vec())) })
+            .map(|host| Entry {
+                key: (*host).into(),
+                state: Some(State::Value(Node::default().encode_to_vec().into())),
+            })
             .collect();
         let removed = removed.iter().map(|&host| host.into()).collect();
         Update { snapshot, continued, upserts, removed, ..Update::default() }

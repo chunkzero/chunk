@@ -148,7 +148,7 @@ async fn outcome(effects: &mut Streaming<Update>) -> CommandOutcome {
             update.upserts.iter().find(|entry| entry.key == "outcome")
         {
             assert!(effects.message().await.unwrap().is_none());
-            return CommandOutcome::decode(value.as_slice()).unwrap();
+            return CommandOutcome::decode(&value[..]).unwrap();
         }
     }
 }
@@ -224,7 +224,7 @@ async fn a_commands_message_waits_on_its_topic_until_the_gateway_acknowledges_it
     let [Entry { key, state: Some(State::Value(value)) }] = pending.upserts.as_slice() else {
         panic!("expected one pending effect, got {pending:?}");
     };
-    let effect = CommandEffect::decode(value.as_slice()).unwrap().effect;
+    let effect = CommandEffect::decode(&value[..]).unwrap().effect;
     assert_eq!(effect, Some(command_effect::Effect::Message("hello".into())));
     let ack = EffectArguments { operation_id: operation.clone(), sequence: key.parse().unwrap(), failed: false };
 
@@ -440,7 +440,7 @@ async fn core_queues_a_commands_move_which_the_gateway_sees_on_its_own_topic() {
         let update = next(&mut arrived.updates).await;
         let destination = update.upserts.iter().find_map(|entry| match &entry.state {
             Some(State::Value(value)) if entry.key == "login" => {
-                GatewayClaim::decode(value.as_slice()).unwrap().pending_move.and_then(|moved| moved.destination)
+                GatewayClaim::decode(&value[..]).unwrap().pending_move.and_then(|moved| moved.destination)
             }
             _ => None,
         });

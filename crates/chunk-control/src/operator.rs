@@ -102,7 +102,7 @@ fn demand(demand: SessionDemand) -> sync::SessionDemand {
 }
 
 fn entry(key: String, value: &impl Message) -> sync::Entry {
-    sync::Entry { key, state: Some(sync::entry::State::Value(value.encode_to_vec())) }
+    sync::Entry { key, state: Some(sync::entry::State::Value(value.encode_to_vec().into())) }
 }
 
 /// Waits for `receiver` to change, or forever once its sender is gone.

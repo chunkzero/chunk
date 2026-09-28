@@ -1,6 +1,7 @@
 //! Outgoing messages, charged against the send budget until HTTP/2 frees them.
 
 use super::{commands::until, *};
+use tokio_stream::StreamExt;
 use tonic::{codegen::http::uri::PathAndQuery, transport::Endpoint};
 
 /// What a message of the `big` query's result holds at least.
@@ -112,6 +113,83 @@ async fn calls_are_refused_before_they_run_once_the_send_budget_is_nearly_full_b
     assert_eq!(result(&count(&mut fixture).await), b"1", "the admitted mutation's commit is missing");
     assert!(spin.await.unwrap().is_err());
     fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streams_of_the_same_query_share_its_value_until_they_encode_it() {
+    let fixture = Fixture::start().await;
+    let service = service(&fixture);
+    let operator = service.credentials.issuer.operator().to_owned();
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"big": {"function": "big"}}"#.to_vec(),
+        deployment: "test".into(),
+        ..SubscribeRequest::default()
+    };
+    let mut streams = Vec::new();
+    let mut values = Vec::new();
+    for _ in 0..4 {
+        let mut stream = service.subscribe(authorized(subscription.clone(), &operator)).await.unwrap().into_inner();
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap().unwrap();
+        let Some(State::Value(value)) = snapshot.upserts.into_iter().next().and_then(|entry| entry.state) else {
+            panic!("a value");
+        };
+        assert!(value.len() >= BIG);
+        values.push(value);
+        streams.push(stream);
+    }
+    assert!(values.iter().all(|value| value.as_ptr() == values[0].as_ptr()), "streams copied the value");
+    drop(streams);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn calls_are_admitted_while_streams_hold_their_whole_share_of_the_send_budget() {
+    let mut fixture = Fixture::start().await;
+    let cli = fixture.cli.clone();
+    let streams = fixture.backend.send_budget().streams();
+    let filler = streams.charge(streams.available()).unwrap();
+    let subscription = SubscribeRequest {
+        topic: "queries".into(),
+        arguments: br#"{"count": {"function": "get"}}"#.to_vec(),
+        deployment: "test".into(),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = fixture.client.subscribe(authorized(subscription, &cli)).await.unwrap().into_inner();
+    for count in 1..=3 {
+        let added = fixture.call(&cli, &format!("add-{count}"), "add", "1").await;
+        assert_eq!(result(&added), count.to_string().as_bytes());
+    }
+
+    // The snapshot takes in the writes while it waits for room, until the stream's deadline ends it.
+    let ended = next(&mut updates).await;
+    assert!(ended.upserts.is_empty(), "the stream sent data beyond its share");
+    assert_eq!(ended.error.map(|error| error.code()), Some(Code::Overloaded));
+    drop((updates, filler));
+    fixture.stop().await;
+}
+
+/// A service over `fixture`'s core, whose streams yield their updates before they're encoded.
+fn service(fixture: &Fixture) -> SyncService {
+    let issuer = Issuer::new("test", None, &fixture.cli);
+    SyncService {
+        credentials: Arc::new(auth::Credentials {
+            gateways: fixture.gateways.clone(),
+            cli: fixture.cli.clone(),
+            issuer,
+            control: fixture.control.clone(),
+        }),
+        control: fixture.control.clone(),
+        app: app::App::new(fixture.backend.clone()),
+        streams: streams::StreamKey::new(),
+        fences: streams::Fences::default(),
+        runs: Arc::default(),
+        archives: platform::ArchiveReads::new(fixture.archives.clone()),
+        epoch: fixture.backend.system().epoch().0,
+        private_address: None,
+        stop: CancellationToken::new(),
+        operations: chunk_control::Operations::default(),
+    }
 }
 
 fn result(response: &CallResponse) -> &[u8] {

@@ -93,7 +93,7 @@ async fn each_update_carries_the_state_at_its_position_while_commits_race() {
             assert!(position >= last, "positions never decrease");
             for entry in &update.upserts {
                 let Some(State::Value(value)) = &entry.state else { panic!("a value") };
-                let generation = GatewayClaim::decode(value.as_slice()).unwrap().generation.unwrap();
+                let generation = GatewayClaim::decode(&value[..]).unwrap().generation.unwrap();
                 assert!(generation.revision <= position.revision, "a value from after the update's position");
             }
             (last, received) = (position, received + update.upserts.len());

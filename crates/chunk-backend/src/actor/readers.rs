@@ -46,7 +46,7 @@ pub(crate) struct Read {
 pub(crate) struct Evaluated {
     pub worker: usize,
     pub read: Read,
-    pub result: Result<Arc<str>>,
+    pub result: Result<String>,
     pub reads: Dependencies,
 }
 
@@ -174,7 +174,7 @@ fn work(index: usize, incoming: &mpsc::Receiver<Work>, events: &tokio::sync::mps
     }
 }
 
-fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) -> (Result<Arc<str>>, Dependencies) {
+fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) -> (Result<String>, Dependencies) {
     let deployment = &read.call.deployment;
     if !loaded.contains(deployment) {
         if let Err(error) = engine.register(deployment.clone(), read.source.code.clone(), read.source.limits) {
@@ -189,5 +189,5 @@ fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) ->
         Ticket::Query { .. } => Phase::Query,
         Ticket::Watch(_) => Phase::Reevaluate,
     });
-    (result.map(|execution| execution.value.into()), reads)
+    (result.map(|execution| execution.value), reads)
 }
