@@ -4,6 +4,9 @@ mod claims;
 mod commands;
 mod jvm;
 mod operator;
+mod runner;
+
+pub(super) use runner::ArchiveReads;
 
 use super::{
     SyncService, app,
@@ -34,6 +37,9 @@ pub(super) async fn call(
     }
     if let Some(method) = jvm::Method::parse(method) {
         return jvm::call(service, principal, method, request).await;
+    }
+    if let Some(method) = runner::Method::parse(method) {
+        return runner::call(service, principal, method, request).await;
     }
     if let Some(method) = operator::Method::parse(method) {
         return operator::call(service, principal, method, request).await;

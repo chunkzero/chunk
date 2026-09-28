@@ -201,6 +201,7 @@ impl Core {
             services: Some(sync::services(
                 backend,
                 self.gateways.clone(),
+                self.archives.clone(),
                 config.environment.clone(),
                 config.environment_token.clone(),
                 config.private_address,

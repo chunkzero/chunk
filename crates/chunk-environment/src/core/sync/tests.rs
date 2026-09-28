@@ -8,6 +8,7 @@ mod jvm_methods;
 mod network;
 mod operator;
 mod ownership;
+mod runner;
 mod runtime;
 mod sends;
 mod shutdown;
@@ -206,6 +207,8 @@ struct Fixture {
     /// The credential of gateway `proxy`, which holds the fake JVM's claims.
     gateway: String,
     gateways: Arc<Gateways>,
+    /// The release archives core keeps.
+    archives: Arc<super::super::Archives>,
 }
 
 impl Fixture {
@@ -229,6 +232,7 @@ impl Fixture {
         let stop = CancellationToken::new();
         let gateways = Arc::new(Gateways::default());
         let gateway = gateways.mint("proxy");
+        let archives = Arc::new(super::super::Archives::default());
         let config = chunk_control::server::Config {
             state: directory.path().join("control"),
             system: backend.system(),
@@ -238,7 +242,14 @@ impl Fixture {
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
-            services: Some(services(backend.clone(), gateways.clone(), "test".into(), None, Some(PRIVATE))),
+            services: Some(services(
+                backend.clone(),
+                gateways.clone(),
+                archives.clone(),
+                "test".into(),
+                None,
+                Some(PRIVATE),
+            )),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
@@ -257,6 +268,7 @@ impl Fixture {
             cli: started.connection.token,
             gateway,
             gateways,
+            archives,
         }
     }
 

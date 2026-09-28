@@ -8,6 +8,7 @@ pub mod gateway;
 mod host;
 mod idle;
 pub mod jvm;
+mod launches;
 mod machines;
 mod moves;
 mod nodes;
@@ -40,6 +41,7 @@ use tokio::sync::Mutex as AsyncMutex;
 pub use host::{
     Distribution, Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection,
 };
+pub use launches::Launch;
 pub use machines::MachineKind;
 pub use moves::{MoveRequest, MoveSource};
 pub use operations::Operations;

@@ -59,7 +59,8 @@ impl Credentials {
     }
 
     /// The class `credential` currently grants from `peer`. Control's credential holds only from a loopback peer, a
-    /// gateway machine's until it's revoked, and a JVM's until its process stops.
+    /// machine's until it's revoked, and a JVM process's until it stops. A machine credential's row is checked before
+    /// its MAC.
     fn class(&self, credential: &str, peer: Option<SocketAddr>) -> Option<Class> {
         let gateway = self.gateways.gateway(credential);
         let loopback = peer.is_some_and(|peer| peer.ip().to_canonical().is_loopback());
@@ -68,13 +69,26 @@ impl Credentials {
             Some(Class::Gateway { id })
         } else if cli {
             Some(Class::Cli)
-        } else if let Some((MachineKind::Gateway, id)) = self.issuer.verify(credential) {
-            self.control.machine(id, MachineKind::Gateway).then(|| Class::Gateway { id: id.to_owned() })
         } else if let Some(host) = self.control.authenticate(credential) {
             Some(Class::Jvm { host })
+        } else if let Some(host) = self.control.unadopted(credential) {
+            Some(Class::Unadopted { host })
         } else {
-            self.control.unadopted(credential).map(|host| Class::Unadopted { host })
+            let (_, kind, id) = Issuer::names(credential)?;
+            if !self.control.machine(id, kind) || self.issuer.verify(credential).is_none() {
+                return None;
+            }
+            Some(match kind {
+                MachineKind::Gateway => Class::Gateway { id: id.to_owned() },
+                MachineKind::Jvm => Class::Jvm { host: id.to_owned() },
+            })
         }
+    }
+
+    /// Whether `principal` is a JVM machine presenting the machine credential core minted for its host.
+    pub fn jvm_machine(&self, principal: &Principal) -> bool {
+        let Class::Jvm { host } = &principal.class else { return false };
+        self.issuer.verify(&principal.credential) == Some((MachineKind::Jvm, host.as_str()))
     }
 }
 
@@ -132,12 +146,18 @@ impl Issuer {
 
     /// The machine `credential` names, if this issuer minted it.
     fn verify<'a>(&self, credential: &'a str) -> Option<(MachineKind, &'a str)> {
+        let (environment, kind, id) = Self::names(credential)?;
+        let minted = environment == self.environment && same_secret(credential, &self.machine(kind, id));
+        minted.then_some((kind, id))
+    }
+
+    /// The environment, kind and ID a machine credential's scope names, unverified.
+    fn names(credential: &str) -> Option<(&str, MachineKind, &str)> {
         let (scope, _) = credential.rsplit_once('/')?;
         let mut parts = scope.strip_prefix("machine/v1/")?.rsplitn(3, '/');
         let (id, kind, environment) = (parts.next()?, parts.next()?, parts.next()?);
         let kind = [MachineKind::Gateway, MachineKind::Jvm].into_iter().find(|known| known.name() == kind)?;
-        let minted = environment == self.environment && same_secret(credential, &self.machine(kind, id));
-        minted.then_some((kind, id))
+        Some((environment, kind, id))
     }
 }
 

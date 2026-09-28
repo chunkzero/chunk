@@ -19,8 +19,9 @@ const DRAINS: &str = "chunk_drains";
 const ROSTERS: &str = "chunk_rosters";
 const OPERATOR_CALLS: &str = "chunk_operator_calls";
 const MACHINES: &str = "chunk_machines";
-const TABLES: [&str; 11] =
-    [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS, OPERATOR_CALLS, MACHINES];
+const LAUNCHES: &str = "chunk_launches";
+const TABLES: [&str; 12] =
+    [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS, OPERATOR_CALLS, MACHINES, LAUNCHES];
 
 /// Control state as system tables in the environment's store, which one control authority owns exclusively.
 pub(super) struct Store {
@@ -93,6 +94,7 @@ impl Store {
             operator_calls: scan(&snapshot, OPERATOR_CALLS, budget)?,
             rosters: scan(&snapshot, ROSTERS, budget)?,
             machines: scan(&snapshot, MACHINES, budget)?,
+            launches: scan(&snapshot, LAUNCHES, budget)?,
             epoch: self.system.epoch().0,
             revision: snapshot.revision.0,
         };
@@ -131,6 +133,7 @@ impl Store {
         diff(ROSTERS, &previous.rosters, &next.rosters, &mut writes)?;
         diff(OPERATOR_CALLS, &previous.operator_calls, &next.operator_calls, &mut writes)?;
         diff(MACHINES, &previous.machines, &next.machines, &mut writes)?;
+        diff(LAUNCHES, &previous.launches, &next.launches, &mut writes)?;
         Ok(writes)
     }
 }
@@ -248,6 +251,10 @@ fn schema() -> DatabaseSchema {
         OPERATOR_CALLS: {"method": {"type": "enum", "values": OperatorMethod::NAMES}, "digest": string},
         MACHINES: {
             "kind": {"type": "enum", "values": MachineKind::NAMES}, "created_at_ms": integer, "revoked": boolean,
+        },
+        LAUNCHES: {
+            "deployment": string, "release": string, "app": string, "profile": string, "process_id": string,
+            "generation": integer, "boot?": string,
         },
     });
     let tables = tables.as_object().into_iter().flatten().map(|(table, fields)| {
