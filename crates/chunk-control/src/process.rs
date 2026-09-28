@@ -138,9 +138,8 @@ impl ProcessHost {
         let artifact = release.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
         // Placement already bound the profile to the app's session or one of its declared destinations.
         let size = release.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
-        let backend = &self.config.backend;
-        if backend.environment != deployment.environment {
-            return Err(Error::Invalid("gameplay backend scope mismatch"));
+        if self.config.environment != deployment.environment {
+            return Err(Error::Invalid("release belongs to another environment"));
         }
         let root = distribution.directory.canonicalize()?;
         let jar = distribution.directory.join(&artifact.jar).canonicalize()?;

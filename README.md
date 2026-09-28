@@ -188,9 +188,8 @@ Core is the backend, which runs backend functions in its process, and the contro
 proxy's player listener. It reads environment variables and has no CLI argument parser. It requires
 `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), `CHUNK_STATE`, and either `CHUNK_BUNDLE` or `CHUNK_MANAGEMENT_URL` with
 `CHUNK_ENVIRONMENT_TOKEN`, under which it serves the releases the management service deploys. It accepts
-`CHUNK_BACKEND_BIND` (default `127.0.0.1:25568`), `CHUNK_CONTROL_BIND` (default `127.0.0.1:25567`), and the gateway's
-`CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. It writes the backend and control
-connection records to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`. See the
+`CHUNK_CONTROL_BIND` (default `127.0.0.1:25567`), and the gateway's `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MOTD`
+and `CHUNK_MAX_CONNECTIONS`. It writes control's connection record to `$CHUNK_STATE/control.json`. See the
 [control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and [runtime](jvm/runtime/README.md)
 docs for the other service environments.
 

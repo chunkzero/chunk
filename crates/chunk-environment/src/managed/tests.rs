@@ -1,10 +1,10 @@
 use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig};
 use bytes::Bytes;
-use chunk_contract::BackendConnection;
+use chunk_contract::ControlConnection;
 use chunk_management::v1::{
     AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, ReleaseArtifact, ReportStatusRequest,
 };
-use chunk_proto::v1::backend_client::BackendClient;
+use chunk_proto::sync::v1::{CallRequest, call_response::Outcome, core_client::CoreClient, error::Code};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
 use prost::Message;
@@ -258,14 +258,24 @@ fn artifact(management: &Management, url: &str, release_id: &str, bytes: Vec<u8>
     ReleaseArtifact { release_id: release_id.into(), url: format!("{url}{path}"), sha256, size_bytes }
 }
 
+/// Whether the backend holds `deployment`: a CLI call to the `status` query every test release declares fails its
+/// contract only once the deployment isn't resident.
 async fn serves(record: &Path, deployment: &str) -> bool {
-    let backend: BackendConnection = chunk_service::read(record).unwrap();
-    let mut request = tonic::Request::new(());
-    let metadata = request.metadata_mut();
-    metadata.insert("authorization", format!("Bearer {}", backend.token).parse().unwrap());
-    metadata.insert("x-chunk-environment", "env_test".parse().unwrap());
-    metadata.insert("x-chunk-deployment", deployment.parse().unwrap());
-    BackendClient::connect(backend.endpoint).await.unwrap().check_deployment(request).await.is_ok()
+    let control: ControlConnection = chunk_service::read(record).unwrap();
+    let call = CallRequest {
+        method: "status".into(),
+        arguments: b"null".to_vec(),
+        deployment: deployment.into(),
+        ..CallRequest::default()
+    };
+    let mut request = tonic::Request::new(call);
+    request.metadata_mut().insert("authorization", format!("Bearer {}", control.token).parse().unwrap());
+    let response = CoreClient::connect(control.endpoint).await.unwrap().call(request).await.unwrap().into_inner();
+    match response.outcome {
+        Some(Outcome::Result(_)) => true,
+        Some(Outcome::Error(error)) if error.code() == Code::Contract => false,
+        outcome => panic!("{deployment}: {outcome:?}"),
+    }
 }
 
 /// A fake management service with one published release, and the state directory of the core it deploys.
@@ -318,10 +328,8 @@ impl Harness {
         CoreConfig {
             bundle: None,
             environment: "env_test".into(),
-            backend_record: state.join("backend.json"),
             control_record: state.join("control.json"),
             state,
-            backend_bind: "127.0.0.1:0".parse().unwrap(),
             control_bind: "127.0.0.1:0".parse().unwrap(),
             core_bind: None,
             private_address: None,
@@ -332,16 +340,23 @@ impl Harness {
 
     /// Leaves `count` backend versions resident that control never ran, as a run that crashed after each commit would.
     async fn abandon(&self, count: usize) {
-        let core = crate::Core::start(self.core(), |_| {}).await.unwrap();
+        let core = crate::Core::start(self.core(), || {}).await.unwrap();
+        let status = chunk_contract::Function {
+            kind: chunk_contract::FunctionKind::Query,
+            visibility: chunk_contract::Visibility::Public,
+            export: "status".into(),
+            arguments: chunk_contract::Schema::Null,
+            result: chunk_contract::Schema::Integer,
+        };
         for index in 0..count {
             let bundle = chunk_contract::Deployment {
                 contracts: chunk_contract::Contracts::default(),
                 contract_version: 2,
                 runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
                 id: format!("dep_abandoned_{index}"),
-                source: "export const value=1;".into(),
+                source: "export function status() { return 1; }".into(),
                 tables: BTreeMap::new(),
-                functions: BTreeMap::new(),
+                functions: BTreeMap::from([("status".into(), status.clone())]),
             };
             core.deploy(bundle).await.unwrap();
         }
@@ -373,7 +388,7 @@ impl Harness {
     }
 
     async fn serves(&self, deployment: &str) -> bool {
-        serves(&self.state().join("backend.json"), deployment).await
+        serves(&self.state().join("control.json"), deployment).await
     }
 
     /// Waits until the backend no longer holds `deployment`.

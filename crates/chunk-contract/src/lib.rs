@@ -29,7 +29,7 @@ pub use session_configurations::{
 };
 pub use session_methods::{SessionMethodDeclaration, SessionMethods};
 
-pub use connections::{BackendConnection, ControlConnection};
+pub use connections::ControlConnection;
 
 pub use deployment::{
     CONTRACT_VERSION, Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Visibility, validate_wire_value,

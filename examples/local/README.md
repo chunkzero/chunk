@@ -105,11 +105,10 @@ releases are verified before reuse. Stop and rerun after editing the example. Ba
 `examples/local/.chunk/local/backend`; placement state is separate for each deployment. This runner does not implement
 overlapping deployment rollouts.
 
-Connection records under `examples/local/.chunk/local` contain private credentials and must not be shared.
-Backend/control use loopback ports 25568/25567; the public listener uses 25565. The runner refuses occupied ports or a
-second owner of its state directory.
-`just local --state <directory> --bind <address> --backend-bind <address> --control-bind <address>` selects another
-local environment; all addresses must remain loopback.
+Connection records under `examples/local/.chunk/local` contain private credentials and must not be shared. Control uses
+loopback port 25567; the public listener uses 25565. The runner refuses occupied ports or a second owner of its state
+directory. `just local --state <directory> --bind <address> --control-bind <address>` selects another local environment;
+all addresses must remain loopback.
 
 Inspect nodes with `chunk nodes --control-file examples/local/.chunk/local/control.json list`. Request a node shutdown
 with the same prefix followed by `shutdown HOST --operation UUID --timeout-seconds 60`; retain the operation ID for

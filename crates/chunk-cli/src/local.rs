@@ -33,8 +33,6 @@ pub(crate) struct Options {
     java: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:25565")]
     bind: SocketAddr,
-    #[arg(long, default_value = "127.0.0.1:25568")]
-    backend_bind: SocketAddr,
     /// Control address, shared by every release.
     #[arg(long, default_value = "127.0.0.1:25567")]
     control_bind: SocketAddr,
@@ -55,7 +53,6 @@ pub(crate) struct Options {
 struct Settings {
     state: PathBuf,
     bind: SocketAddr,
-    backend_bind: SocketAddr,
     control_bind: SocketAddr,
     offline_logins: bool,
 }
@@ -132,7 +129,7 @@ async fn serve(
     if interactive {
         tokio::spawn(logs::follow_jvms(state.join("control").join("nodes"), reporter.clone(), stop.clone()));
     }
-    available_addresses(options.bind, options.backend_bind, options.control_bind)?;
+    available_addresses(options.bind, options.control_bind)?;
     reporter.running("Build", "Gradle chunkArtifacts");
     let started = Instant::now();
     let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), reporter.build_progress()).await?;
@@ -144,7 +141,6 @@ async fn serve(
     let settings = Settings {
         state,
         bind: options.bind,
-        backend_bind: options.backend_bind,
         control_bind: options.control_bind,
         offline_logins: options.offline_logins,
     };
@@ -270,11 +266,11 @@ fn control_config(
     })
 }
 
-fn available_addresses(bind: SocketAddr, backend: SocketAddr, control: SocketAddr) -> io::Result<()> {
-    if bind == backend || bind == control || backend == control {
+fn available_addresses(bind: SocketAddr, control: SocketAddr) -> io::Result<()> {
+    if bind == control {
         return Err(io::Error::other("local service addresses must differ"));
     }
-    for address in [bind, backend, control] {
+    for address in [bind, control] {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(io::Error::other("local runner requires fixed loopback ports"));
         }

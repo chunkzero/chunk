@@ -1,7 +1,7 @@
 mod sync;
 
 use crate::{PlatformTarget, Running};
-use chunk_contract::{BackendConnection, ControlConnection};
+use chunk_contract::ControlConnection;
 use chunk_proxy::GatewayCredential;
 use std::{
     collections::BTreeSet,
@@ -21,9 +21,7 @@ pub struct CoreConfig {
     /// Holds the backend's store under `backend/`, control's credential and JVM files under `control/`, and the
     /// in-process gateway's ID.
     pub state: PathBuf,
-    pub backend_record: PathBuf,
     pub control_record: PathBuf,
-    pub backend_bind: SocketAddr,
     /// The core port, serving control and the sync protocol's `Core` service.
     pub control_bind: SocketAddr,
     /// Where other machines reach the sync protocol's `Core` service, from loopback or private peers only. Unset binds
@@ -44,7 +42,8 @@ pub struct CoreConfig {
 pub struct Core {
     backend: Option<Running>,
     handle: Option<chunk_backend::Backend>,
-    connection: Option<BackendConnection>,
+    /// The deployment the backend served first, or empty without one.
+    deployment: Option<String>,
     control: Option<Running>,
     host: Option<Arc<chunk_control::ProcessHost>>,
     /// Runs control's hosts in place of local JVMs.
@@ -63,7 +62,7 @@ impl Core {
     /// backend, calls `on_backend` once it serves, then starts control. On error, everything started is stopped.
     /// # Errors
     /// Reports an unreadable gateway ID, and backend and control startup errors.
-    pub async fn start(config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
+    pub async fn start(config: CoreConfig, on_backend: impl FnOnce()) -> io::Result<Self> {
         Self::default().launch(config, on_backend).await
     }
 
@@ -73,10 +72,10 @@ impl Core {
     /// As [`Self::start`].
     #[doc(hidden)]
     pub async fn start_with_host(config: CoreConfig, host: Arc<dyn chunk_control::Host>) -> io::Result<Self> {
-        Self { injected_host: Some(host), ..Self::default() }.launch(config, |_| {}).await
+        Self { injected_host: Some(host), ..Self::default() }.launch(config, || {}).await
     }
 
-    async fn launch(self, config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
+    async fn launch(self, config: CoreConfig, on_backend: impl FnOnce()) -> io::Result<Self> {
         if let Some(address) = config.private_address.filter(|address| !chunk_service::net::private(*address)) {
             return Err(io::Error::other(format!("{address} is not a private address")));
         }
@@ -85,7 +84,7 @@ impl Core {
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
         if started.is_ok() {
-            on_backend(core.backend_connection()?);
+            on_backend();
             started = core.start_control(&config).await;
         }
         if let Err(error) = started {
@@ -104,14 +103,12 @@ impl Core {
             bundle: config.bundle.clone(),
             environment: config.environment.clone(),
             state: config.state.join("backend"),
-            connection: config.backend_record.clone(),
-            bind: config.backend_bind,
         };
         self.backend =
             Some(Running { task: tokio::spawn(chunk_backend::server::run(backend, ready, stop.clone())), stop });
         let ready = Running::ready(&mut self.backend, started, "backend").await?;
         self.handle = Some(ready.backend);
-        self.connection = Some(ready.connection);
+        self.deployment = Some(ready.deployment);
         Ok(())
     }
 
@@ -137,10 +134,9 @@ impl Core {
     /// discovery record's endpoint when the record names none, so control serves there, waiting while another process
     /// holds that address. That record stays as it is until they have exited, as control publishes its own elsewhere.
     async fn stop_survivors(&mut self, config: &CoreConfig) -> io::Result<()> {
-        let launches = chunk_control::ProcessHost::new(self.host_config(config)?);
+        let launches = chunk_control::ProcessHost::new(host_config(config));
         let previous =
             chunk_service::read::<ControlConnection>(&config.control_record).ok().map(|record| record.endpoint);
-        let backend = address(&self.backend_connection()?.endpoint);
         let mut waiting = false;
         loop {
             let endpoints = launches.unowned_endpoints().map_err(io::Error::other)?;
@@ -149,12 +145,6 @@ impl Core {
             }
             let known = survivor_bind(&endpoints, previous.as_deref())?;
             let bind = known.unwrap_or(config.control_bind);
-            if backend.is_some_and(|backend| overlaps(backend, bind)) {
-                return Err(io::Error::other(format!(
-                    "JVMs that outlived the previous control re-attach only at {bind}, where the backend now serves; \
-                     choose another backend address"
-                )));
-            }
             match TcpListener::bind(bind).await {
                 Ok(listener) => {
                     if known.is_some() {
@@ -176,15 +166,6 @@ impl Core {
         }
     }
 
-    fn host_config(&self, config: &CoreConfig) -> io::Result<chunk_control::ProcessHostConfig> {
-        let directory = config.state.join("control").join("nodes");
-        Ok(chunk_control::ProcessHostConfig {
-            directory,
-            backend: self.backend_connection()?.clone(),
-            private_address: config.private_address,
-        })
-    }
-
     async fn serve_control(
         &mut self,
         config: &CoreConfig,
@@ -195,7 +176,7 @@ impl Core {
         let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
             host.clone()
         } else {
-            let host = Arc::new(chunk_control::ProcessHost::new(self.host_config(config)?));
+            let host = Arc::new(chunk_control::ProcessHost::new(host_config(config)));
             self.host = Some(host.clone());
             host
         };
@@ -226,12 +207,6 @@ impl Core {
         self.issuer = Some(sync::Issuer::new(&config.environment, token, &ready.connection.token));
         self.authority = Some(ready);
         Ok(())
-    }
-
-    /// # Errors
-    /// Reports a stopped backend.
-    pub fn backend_connection(&self) -> io::Result<&BackendConnection> {
-        self.connection.as_ref().ok_or_else(|| io::Error::other("backend is not running"))
     }
 
     #[must_use]
@@ -302,7 +277,7 @@ impl Core {
         Ok(PlatformTarget {
             core: self.control_connection()?.endpoint.clone(),
             gateway,
-            deployment: self.backend_connection()?.deployment.clone(),
+            deployment: self.deployment.clone().ok_or_else(|| io::Error::other("backend is not running"))?,
         })
     }
 
@@ -414,9 +389,12 @@ fn address(endpoint: &str) -> Option<SocketAddr> {
     endpoint.strip_prefix("http://")?.parse().ok()
 }
 
-/// Whether a listener on `served` keeps `bind` from binding.
-fn overlaps(served: SocketAddr, bind: SocketAddr) -> bool {
-    served.port() == bind.port() && (served.ip() == bind.ip() || served.ip().is_unspecified())
+fn host_config(config: &CoreConfig) -> chunk_control::ProcessHostConfig {
+    chunk_control::ProcessHostConfig {
+        directory: config.state.join("control").join("nodes"),
+        environment: config.environment.clone(),
+        private_address: config.private_address,
+    }
 }
 
 /// The in-process gateway's ID, recorded in `state` on first start so that the claims it holds outlive a restart.

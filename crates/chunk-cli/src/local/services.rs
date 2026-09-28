@@ -112,16 +112,14 @@ impl Version {
 
 /// Starts the backend, control with its first release, and the proxy; on error, everything started is stopped.
 pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Reporter) -> io::Result<(Shared, Version)> {
-    reporter.running("Backend", settings.backend_bind);
+    reporter.running("Backend", "Opening the store");
     let bundle = settings.state.join("deployment.json");
     std::fs::write(&bundle, serde_json::to_vec(&staged.bundle).map_err(io::Error::other)?)?;
     let config = CoreConfig {
         bundle: Some(bundle),
         environment: staged.control.deployment.environment.clone(),
         state: settings.state.clone(),
-        backend_record: settings.state.join("backend.json"),
         control_record: settings.state.join("control").join("connection.json"),
-        backend_bind: settings.backend_bind,
         control_bind: settings.control_bind,
         core_bind: None,
         private_address: None,
@@ -129,8 +127,8 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,
     };
-    let core = Core::start(config, |connection| {
-        reporter.done("Backend", &connection.endpoint);
+    let core = Core::start(config, || {
+        reporter.done("Backend", "embedded");
         reporter.running("Control", settings.control_bind);
     })
     .await?;

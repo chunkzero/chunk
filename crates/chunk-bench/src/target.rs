@@ -169,10 +169,8 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
     let config = chunk_environment::CoreConfig {
         bundle: init.config.scenario.is_backend().then(|| init.backend.clone().into()),
         environment: backend::ENVIRONMENT.into(),
-        backend_record: state.join("backend.json"),
         control_record: state.join("control.json"),
         state,
-        backend_bind: "127.0.0.1:0".parse()?,
         control_bind: "127.0.0.1:0".parse()?,
         core_bind: None,
         private_address: None,
@@ -181,7 +179,7 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
     };
     if init.config.scenario.is_backend() {
         chunk_backend::observe(backend::observe);
-        return Ok(chunk_environment::Core::start(config, |_| {}).await?);
+        return Ok(chunk_environment::Core::start(config, || {}).await?);
     }
     let host = Arc::new(fixtures::SyntheticHost::default());
     let core = chunk_environment::Core::start_with_host(config, host.clone()).await?;
