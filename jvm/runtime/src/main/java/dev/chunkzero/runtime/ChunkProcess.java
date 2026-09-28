@@ -11,6 +11,7 @@ import dev.chunkzero.runtime.control.ProcessState;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.net.InetAddress;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
@@ -86,6 +87,11 @@ public final class ChunkProcess implements AutoCloseable {
 
     public boolean isReady() {
         return health.acceptsWork();
+    }
+
+    /** The address engine adapters serve players on. */
+    InetAddress playerAddress() {
+        return environment.playerAddress();
     }
 
     /** Engine adapters bind their player endpoint and state once, before application readiness. */

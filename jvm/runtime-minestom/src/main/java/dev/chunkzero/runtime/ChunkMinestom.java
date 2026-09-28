@@ -16,6 +16,7 @@ import net.minestom.server.timer.TaskSchedule;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -96,9 +97,14 @@ public final class ChunkMinestom implements AutoCloseable {
                                     })
                             .repeat(TaskSchedule.tick(1))
                             .schedule();
-            server.start(new InetSocketAddress("127.0.0.1", 0));
+            var address = chunk.playerAddress();
+            server.start(new InetSocketAddress(address, 0));
+            var host =
+                    address instanceof Inet6Address
+                            ? "[" + address.getHostAddress() + "]"
+                            : address.getHostAddress();
             chunk.bind(
-                    "127.0.0.1:" + server.server().getPort(),
+                    host + ":" + server.server().getPort(),
                     MinecraftConstants.PROTOCOL_VERSION,
                     service);
             started = true;
