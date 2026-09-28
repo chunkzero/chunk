@@ -304,6 +304,35 @@ async fn withdraw(source: &ClaimGuard) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
 }
 
+/// Withdraws every open claim in this gateway's topic, each under its own operation ID, retrying until each one is
+/// withdrawing or gone. A process that has taken no login holds no claims, so these belong to an earlier process under
+/// the same gateway ID, whose players' connections ended with it. Control completes a withdrawal whose JVM has yet to
+/// confirm it.
+pub(super) async fn withdraw_inherited(platform: &Platform) -> io::Result<()> {
+    loop {
+        let inherited = platform.claims(|view| Some(view.unwithdrawn())).await?;
+        if inherited.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(claims = inherited.len(), "withdrawing claims an earlier gateway process left open");
+        let (mut latest, mut unresolved) = (None, false);
+        for operation in &inherited {
+            match platform.call::<WithdrawResult>("withdraw", operation, &(), RPC_TIMEOUT).await {
+                Ok((_, position)) => latest = position.or(latest),
+                Err(error) => {
+                    unresolved = true;
+                    tracing::warn!(%error, operation, "inherited claim withdrawal unresolved; retrying");
+                }
+            }
+        }
+        if unresolved {
+            sleep(Duration::from_secs(1)).await;
+        } else {
+            platform.claims(|view| view.passed(latest.as_ref()).then_some(())).await?;
+        }
+    }
+}
+
 /// Waits until the claim view shows the claim arrived.
 async fn arrive(guard: &ClaimGuard, identity: ClaimIdentity) -> io::Result<()> {
     let arrived = guard.platform.claims(|view| {

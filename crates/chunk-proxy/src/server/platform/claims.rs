@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, io, time::Duration};
 
 use chunk_proto::{
     sync::v1::{
-        Cursor, GatewayClaim, Position, SubscribeRequest, Update, core_client::CoreClient, entry::State, error::Code,
+        ClaimPhase, Cursor, GatewayClaim, Position, SubscribeRequest, Update, core_client::CoreClient, entry::State,
+        error::Code,
     },
     v1::ClaimIdentity,
 };
@@ -40,6 +41,12 @@ impl View {
     /// Whether the claim `identity` names was released: the view has passed its creation without holding it.
     pub fn released(&self, identity: &ClaimIdentity) -> bool {
         self.reached(identity.delivery_generation) && self.claim(identity).is_none()
+    }
+
+    /// The operations of the open claims no withdrawal has reached.
+    pub fn unwithdrawn(&self) -> Vec<String> {
+        let open = self.claims.iter().filter(|(_, claim)| claim.phase() != ClaimPhase::Withdrawing);
+        open.map(|(operation, _)| operation.clone()).collect()
     }
 
     /// Whether the view is at or past `position`.

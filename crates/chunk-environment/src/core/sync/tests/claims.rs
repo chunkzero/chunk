@@ -125,6 +125,50 @@ async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_withdraws_the_claims_an_earlier_process_under_its_id_left_before_taking_logins() {
+    let (mut fixture, jvm) = with_jvm().await;
+    let (endpoint, gateway, other) =
+        (fixture.endpoint.clone(), fixture.gateway.clone(), fixture.gateways.mint("other"));
+    let target = |id: &str, credential: &str| chunk_proxy::PlatformTarget {
+        core: endpoint.clone(),
+        gateway: chunk_proxy::GatewayCredential { id: id.into(), credential: credential.into() },
+        deployment: "test".into(),
+    };
+    let elsewhere =
+        || chunk_proxy::testing::login(target("other", &other), runtime::PLAYER, "player", runtime::demand("lobby"));
+
+    // A process of gateway `proxy` stops without withdrawing its arrived player's claim.
+    let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
+    fixture.platform(&gateway, &first.stream, "login", "chunk:claim", &login("connection")).await;
+    fixture.platform(&gateway, &first.stream, "login", "chunk:activate", &()).await;
+    arrival(&mut updates, "login").await;
+    drop(updates);
+    assert_eq!(elsewhere().await.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+    // The next process under that ID withdraws the claim before its listener accepts, which frees the player.
+    let config = chunk_proxy::Config { platform: Some(target("proxy", &gateway)), ..chunk_proxy::Config::default() };
+    let proxy = chunk_proxy::Proxy::bind("127.0.0.1:0".parse().unwrap(), config).await.unwrap();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let running = tokio::spawn(proxy.run(async move {
+        stopped.cancelled().await;
+        Ok(())
+    }));
+    let control = fixture.control.clone();
+    let released = async {
+        while !control.players().unwrap().players.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), released).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), elsewhere()).await.unwrap().unwrap();
+    stop.cancel();
+    running.await.unwrap().unwrap();
+    fixture.stop().await;
+    jvm.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claim_calls_naming_a_superseded_or_foreign_stream_are_stopped() {
     let mut fixture = Fixture::start().await;
     let gateway = fixture.gateway.clone();
