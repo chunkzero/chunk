@@ -59,27 +59,44 @@ fn all_in_one(core: CoreConfig, bind: SocketAddr) -> Config {
     Config::Core { core, gateway: Some(GatewayConfig::new(bind)), management: None }
 }
 
-/// A loopback address nothing listens on.
-fn free_address() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+/// Runs a gateway machine for `core` on a loopback port until `stop`, returning its task and the address its listener
+/// binds, once it does.
+fn gateway_machine(
+    core: RemoteCore,
+    stop: CancellationToken,
+) -> (JoinHandle<io::Result<()>>, tokio::sync::mpsc::UnboundedReceiver<SocketAddr>) {
+    let (listening, addresses) = tokio::sync::mpsc::unbounded_channel();
+    let config = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
+    let running = tokio::spawn(gateway::run_remote(core, config, stop, move |address| _ = listening.send(address)));
+    (running, addresses)
 }
 
-/// The server list message a status ping to `address` returns, or `None` while nothing listens there.
+/// The address a gateway machine's listener binds.
+async fn listening(addresses: &mut tokio::sync::mpsc::UnboundedReceiver<SocketAddr>) -> SocketAddr {
+    tokio::time::timeout(Duration::from_secs(30), addresses.recv()).await.unwrap().unwrap()
+}
+
+/// The server list message a status ping to `address` returns, or `None` while nothing there answers within 5 seconds.
 async fn motd(address: SocketAddr) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
-    // A handshake for protocol 776 that asks for status, then the status request.
-    let mut handshake = vec![0x00, 0x88, 0x06, 9];
-    handshake.extend_from_slice(b"localhost");
-    handshake.extend_from_slice(&address.port().to_be_bytes());
-    handshake.push(0x01);
-    let mut packets = vec![u8::try_from(handshake.len()).unwrap()];
-    packets.extend(handshake);
-    packets.extend([0x01, 0x00]);
-    stream.write_all(&packets).await.ok()?;
-    stream.shutdown().await.ok()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.ok()?;
+    let response = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+        // A handshake for protocol 776 that asks for status, then the status request.
+        let mut handshake = vec![0x00, 0x88, 0x06, 9];
+        handshake.extend_from_slice(b"localhost");
+        handshake.extend_from_slice(&address.port().to_be_bytes());
+        handshake.push(0x01);
+        let mut packets = vec![u8::try_from(handshake.len()).unwrap()];
+        packets.extend(handshake);
+        packets.extend([0x01, 0x00]);
+        stream.write_all(&packets).await.ok()?;
+        stream.shutdown().await.ok()?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.ok()?;
+        Some(response)
+    })
+    .await
+    .ok()??;
     let response = String::from_utf8_lossy(&response);
     let status: serde_json::Value = serde_json::from_str(&response[response.find('{')?..]).ok()?;
     status["description"]["text"].as_str().map(str::to_owned)
@@ -190,7 +207,8 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
         environment: environment.into(),
     };
     assert_eq!(remote("test").gateway().unwrap().id, "remote");
-    let foreign = Config::Gateway { gateway: GatewayConfig::new(free_address()), core: remote("other") };
+    let foreign =
+        Config::Gateway { gateway: GatewayConfig::new("127.0.0.1:0".parse().unwrap()), core: remote("other") };
     let error = run(foreign, CancellationToken::new()).await.unwrap_err();
     assert!(error.to_string().contains("belongs to environment \"test\""), "{error}");
 
@@ -199,17 +217,17 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
     for (id, granted) in [("remote", true), ("other", false)] {
         let topic = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
         let mut updates = client.subscribe(authorized(topic, &credential)).await.unwrap().into_inner();
-        assert_eq!(updates.message().await.unwrap().unwrap().error.is_none(), granted);
+        let first = tokio::time::timeout(Duration::from_secs(30), updates.message()).await.unwrap();
+        assert_eq!(first.unwrap().unwrap().error.is_none(), granted);
     }
 
-    let address = free_address();
     let stop = CancellationToken::new();
-    let machine = Config::Gateway { gateway: GatewayConfig::new(address), core: remote("test") };
-    let running = tokio::spawn(run(machine, stop.clone()));
+    let (running, mut addresses) = gateway_machine(remote("test"), stop.clone());
     // No release is current, so the gateway takes no logins yet.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(motd(address).await, None);
+    assert!(addresses.is_empty());
     core.control().unwrap().activate_release(release("test")).unwrap();
+    let address = listening(&mut addresses).await;
     until_motd(address, Some("Serving test")).await;
     core.deploy(bundle("next", "Serving next")).await.unwrap();
     core.control().unwrap().activate_release(release("next")).unwrap();

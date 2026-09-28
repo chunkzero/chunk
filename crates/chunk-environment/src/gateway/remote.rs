@@ -53,11 +53,16 @@ impl RemoteCore {
 
 /// Runs the gateway for `core` until `stop`, until core revokes its credential, or until the gateway stops on its own.
 /// The listener starts once core's `deployment` topic first names a deployment, so no login is taken before then, and
-/// each later one retargets it.
+/// each later one retargets it. `on_listening` receives the listener's address once it starts.
 /// # Errors
 /// Reports a credential of another environment, an endpoint that isn't private, a credential core rejects, a gateway
 /// that stopped on its own, and gateway startup and shutdown errors.
-pub(crate) async fn run(core: RemoteCore, config: GatewayConfig, stop: CancellationToken) -> io::Result<()> {
+pub(crate) async fn run(
+    core: RemoteCore,
+    config: GatewayConfig,
+    stop: CancellationToken,
+    on_listening: impl Fn(SocketAddr),
+) -> io::Result<()> {
     let identity = core.gateway()?;
     let client = core.client()?;
     let gateway = OnceLock::new();
@@ -75,7 +80,7 @@ pub(crate) async fn run(core: RemoteCore, config: GatewayConfig, stop: Cancellat
     let failure = tokio::select! {
         () = stop.cancelled() => Ok(()),
         () = failed => Err(io::Error::other("gateway stopped")),
-        result = follow(client, target, &config, &gateway) => result,
+        result = follow(client, target, &config, &gateway, &on_listening) => result,
     };
     let result = match gateway.into_inner() {
         Some(gateway) => gateway.stop().await.inspect_err(|error| tracing::error!(%error, "gateway shutdown failed")),
@@ -91,6 +96,7 @@ async fn follow(
     mut target: PlatformTarget,
     config: &GatewayConfig,
     gateway: &OnceLock<Gateway>,
+    on_listening: &impl Fn(SocketAddr),
 ) -> io::Result<()> {
     loop {
         let mut request = tonic::Request::new(SubscribeRequest { topic: "deployment".into(), ..Default::default() });
@@ -133,7 +139,7 @@ async fn follow(
                 Some(deployment) if deployment != target.deployment => {
                     target.deployment = deployment;
                     tracing::info!(deployment = %target.deployment, "routing logins");
-                    route(gateway, config, target.clone()).await?;
+                    route(gateway, config, target.clone(), on_listening).await?;
                 }
                 None if target.deployment.is_empty() => tracing::info!("waiting for a current release"),
                 _ => {}
@@ -156,10 +162,17 @@ fn deployment(update: &Update) -> io::Result<Option<String>> {
 }
 
 /// Sends later player connections to `target`, starting the gateway for the first one.
-async fn route(gateway: &OnceLock<Gateway>, config: &GatewayConfig, target: PlatformTarget) -> io::Result<()> {
+async fn route(
+    gateway: &OnceLock<Gateway>,
+    config: &GatewayConfig,
+    target: PlatformTarget,
+    on_listening: impl Fn(SocketAddr),
+) -> io::Result<()> {
     if let Some(gateway) = gateway.get() {
         return gateway.retarget(target);
     }
-    _ = gateway.set(Gateway::start(config.clone(), target).await?);
+    let started = Gateway::start(config.clone(), target).await?;
+    on_listening(started.address());
+    _ = gateway.set(started);
     Ok(())
 }

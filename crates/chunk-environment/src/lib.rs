@@ -93,7 +93,7 @@ impl Config {
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     match config {
         Config::Core { core, gateway, management } => run_core(core, gateway, management, stop).await,
-        Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop).await,
+        Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop, |_| {}).await,
     }
 }
 
