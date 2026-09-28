@@ -1,6 +1,6 @@
 //! The Java command that runs a verified release's app.
 
-use crate::{Failure, config::Config};
+use crate::{Failure, config::Config, memory};
 use chunk_build::VerifiedRelease;
 use chunk_proto::sync::v1::JvmLaunch;
 use sha2::{Digest, Sha256};
@@ -44,7 +44,7 @@ pub(crate) fn prepare(
         )));
     }
     let profile = release.profiles.get(&launch.profile).map(|profile| u64::from(profile.memory_mib));
-    let heap = heap_mib(visible_mib(&config.memory_max, &config.meminfo), profile)?;
+    let heap = heap_mib(memory::visible_mib(&config.proc), profile)?;
     let jar = checked_jar(directory, &app.jar, &app.sha256)?;
     let working = tempfile::Builder::new()
         .prefix("chunk-jvm-")
@@ -102,17 +102,6 @@ fn parse_major(value: &str) -> Option<u32> {
     value[..digits].parse().ok()
 }
 
-/// The memory this machine lets the runner use, in MiB: the lower of the cgroup v2 limit at `memory_max` and
-/// `MemTotal` in `meminfo`, whichever are known.
-fn visible_mib(memory_max: &Path, meminfo: &Path) -> Option<u64> {
-    let limit = fs::read_to_string(memory_max).ok().and_then(|limit| limit.trim().parse::<u64>().ok());
-    let total = fs::read_to_string(meminfo).ok().and_then(|meminfo| {
-        let line = meminfo.lines().find_map(|line| line.strip_prefix("MemTotal:"))?;
-        line.trim().strip_suffix("kB")?.trim().parse::<u64>().ok().map(|kib| kib * 1024)
-    });
-    [limit, total].into_iter().flatten().min().map(|bytes| bytes / (1024 * 1024))
-}
-
 /// The heap for a machine with `visible` MiB, capped by its profile's `profile` MiB: that memory less the non-heap
 /// reserve.
 fn heap_mib(visible: Option<u64>, profile: Option<u64>) -> Result<u64, Failure> {
@@ -143,16 +132,6 @@ mod tests {
 
     #[test]
     fn the_heap_is_the_visible_or_profile_memory_less_the_reserve() {
-        let directory = tempfile::tempdir().unwrap();
-        let (memory_max, meminfo) = (directory.path().join("memory.max"), directory.path().join("meminfo"));
-        assert_eq!(visible_mib(&memory_max, &meminfo), None);
-        fs::write(&meminfo, "MemFree:  100 kB\nMemTotal:       2097152 kB\n").unwrap();
-        assert_eq!(visible_mib(&memory_max, &meminfo), Some(2048));
-        fs::write(&memory_max, "max\n").unwrap();
-        assert_eq!(visible_mib(&memory_max, &meminfo), Some(2048));
-        fs::write(&memory_max, "1073741824\n").unwrap();
-        assert_eq!(visible_mib(&memory_max, &meminfo), Some(1024));
-
         assert_eq!(heap_mib(Some(1024), None).unwrap(), 1024 - 200 - 102);
         assert_eq!(heap_mib(Some(1024), Some(512)).unwrap(), 512 - 200 - 51);
         assert_eq!(heap_mib(None, Some(4096)).unwrap(), 4096 - 200 - 409);

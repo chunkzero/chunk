@@ -25,9 +25,8 @@ pub(crate) struct Config {
     pub expected: Expected,
     /// How long calls to core are retried while it is unavailable.
     pub retry: Duration,
-    /// The cgroup v2 memory limit and the kernel's memory report, which bound the heap.
-    pub memory_max: PathBuf,
-    pub meminfo: PathBuf,
+    /// The proc filesystem, whose cgroup membership, mounts and memory report bound the heap.
+    pub proc: PathBuf,
     /// Where the JVM's working directory is created.
     pub work_root: PathBuf,
 }
@@ -84,8 +83,7 @@ impl Config {
                 profile: var("CHUNK_MACHINE_PROFILE"),
             },
             retry: Duration::from_secs(120),
-            memory_max: "/sys/fs/cgroup/memory.max".into(),
-            meminfo: "/proc/meminfo".into(),
+            proc: "/proc".into(),
             work_root: std::env::temp_dir(),
         })
     }

@@ -23,11 +23,11 @@ machine must be replaced; restarting the runner gets exit code 77.
 | `CHUNK_RELEASE_ID`, `CHUNK_APP_ID`, `CHUNK_MACHINE_PROFILE` | no       | Cross-checks: the runner stops if core launches something else                                                                   |
 
 The JVM runs as `java -Xmx<heap>m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -jar <app jar>` in a fresh working directory
-under `/tmp`. The heap is the lower of the cgroup v2 `memory.max`, the machine's `MemTotal` and the launch profile's
-memory, less 200 MiB and a tenth of that memory for everything outside the heap. The JVM gets the environment
-`RuntimeEnvironment` reads: `CHUNK_PROCESS_TOKEN` (the machine credential), `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`,
-`CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST` and
-`CHUNK_PLAYER_ADDRESS`.
+under `/tmp`. The heap is the lower of the lowest cgroup v2 `memory.max` from the runner's cgroup up to the hierarchy's
+mount, the machine's `MemTotal` and the launch profile's memory, less 200 MiB and a tenth of that memory for everything
+outside the heap. The JVM gets the environment `RuntimeEnvironment` reads: `CHUNK_PROCESS_TOKEN` (the machine
+credential), `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`,
+`CHUNK_MACHINE_PROFILE`, `CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST` and `CHUNK_PLAYER_ADDRESS`.
 
 ## Exit codes
 

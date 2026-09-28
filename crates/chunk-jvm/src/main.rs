@@ -6,6 +6,7 @@ mod cache;
 mod config;
 mod fetch;
 mod launch;
+mod memory;
 mod supervise;
 
 use chunk_proto::sync::v1::JvmLaunch;

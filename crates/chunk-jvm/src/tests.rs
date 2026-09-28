@@ -175,7 +175,14 @@ impl Machine {
         fs::write(&java, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nenv > \"$0.env\"\npwd > \"$0.pwd\"\n")
             .unwrap();
         fs::set_permissions(&java, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(directory.path().join("memory.max"), "1073741824\n").unwrap();
+        let proc = directory.path().join("proc/self");
+        fs::create_dir_all(&proc).unwrap();
+        fs::write(proc.join("cgroup"), "0::/\n").unwrap();
+        let cgroup = directory.path().join("cgroup");
+        fs::write(proc.join("mountinfo"), format!("35 24 0:30 / {} rw - cgroup2 cgroup2 rw\n", cgroup.display()))
+            .unwrap();
+        fs::create_dir(&cgroup).unwrap();
+        fs::write(cgroup.join("memory.max"), "1073741824\n").unwrap();
         fs::create_dir(directory.path().join("work")).unwrap();
         Self { directory }
     }
@@ -196,8 +203,7 @@ impl Machine {
             java_home: self.path("java"),
             expected: Expected::default(),
             retry: Duration::from_secs(10),
-            memory_max: self.path("memory.max"),
-            meminfo: self.path("meminfo"),
+            proc: self.path("proc"),
             work_root: self.path("work"),
         }
     }
