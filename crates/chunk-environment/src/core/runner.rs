@@ -436,6 +436,10 @@ impl Host for RunnerHost {
         // The launch runs on if this wait is dropped, and the wait holds no turn, so a release never waits for it.
         if let Some((mut ended, deadline)) = started {
             let _ = tokio::time::timeout_at(deadline, ended.wait_for(Option::is_some)).await;
+            // Reported from the launch itself, since a release may have finished and control pruned the host since.
+            if let Some(Err(failure)) = ended.borrow().clone() {
+                return Ok(Progress::Failed(failure));
+            }
         }
         Ok(self.progress(id, deployment, app, profile)?.unwrap_or(Progress::Pending))
     }

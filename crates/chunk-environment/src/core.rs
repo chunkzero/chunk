@@ -4,7 +4,9 @@ mod sync;
 
 pub(crate) use archives::Archives;
 pub use archives::ReleaseArchive;
-pub use runner::{CommandLauncher, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, RunnerConfig};
+#[cfg(unix)]
+pub use runner::CommandLauncher;
+pub use runner::{LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, RunnerConfig};
 
 use crate::{PlatformTarget, Running};
 use chunk_contract::ControlConnection;

@@ -341,6 +341,30 @@ async fn a_release_during_a_stalled_launch_cancels_it_and_leaves_no_machine() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_outlives_the_ensure_that_started_it_until_its_release() {
+    let (fixture, runner, machines) = start(READINESS).await;
+    let held = machines.launches.write().await;
+    let ensuring = tokio::spawn({
+        let runner = runner.clone();
+        async move { ensure(&runner).await }
+    });
+    machines.wait(|call| matches!(call, Call::Launch { .. })).await;
+    // As when control's capacity task is cancelled while it waits.
+    ensuring.abort();
+    assert!(ensuring.await.is_err_and(|error| error.is_cancelled()));
+    assert!(!machines.fleet.borrow().launching.is_empty(), "the launch runs on");
+    let releasing = tokio::spawn({
+        let runner = runner.clone();
+        async move { runner.release(HOST).await }
+    });
+    assert!(settled(releasing).await.unwrap());
+    drop(held);
+    assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
+    assert!(machines.running(1).await.is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_released_before_it_launched_never_launches_even_after_a_restart() {
     let (fixture, runner, machines) = start(READINESS).await;
     // Nothing ran there, so the release is confirmed at once, and the ensure that arrives after it launches nothing.
