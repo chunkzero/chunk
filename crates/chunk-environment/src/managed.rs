@@ -311,7 +311,7 @@ impl<'a> Managed<'a> {
         let pending = Activation { predecessor, activated: deployment.clone() };
         activation::write(&self.activation, &pending)?;
         let release = loaded.control(&self.environment, deployment);
-        if let Err(error) = self.core.activate(deployment, loaded.distribution(), release) {
+        if let Err(error) = self.core.activate(release) {
             _ = activation::clear(&self.activation);
             return Err(error);
         }

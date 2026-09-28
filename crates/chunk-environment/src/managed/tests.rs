@@ -346,6 +346,7 @@ impl Harness {
             control_bind: "127.0.0.1:0".parse().unwrap(),
             core_bind: None,
             private_address: None,
+            java: "java".into(),
             environment_token: None,
             fresh: false,
         }
@@ -378,7 +379,7 @@ impl Harness {
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
         let config = Config::Core {
-            core: self.core(),
+            core: Box::new(self.core()),
             gateway: Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
             management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
         };

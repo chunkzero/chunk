@@ -37,6 +37,8 @@ pub struct CoreConfig {
     pub core_bind: Option<SocketAddr>,
     /// This machine's address on the environment's private network, where local JVMs serve players. It must be private.
     pub private_address: Option<IpAddr>,
+    /// The Java executable local JVMs run with.
+    pub java: PathBuf,
     /// The token management issued the environment, whose SHA-256 keys machine and operator credentials. Without one,
     /// control's credential keys them.
     pub environment_token: Option<String>,
@@ -362,19 +364,11 @@ impl Core {
         Err(io::Error::other("backend stayed busy for 10s; deployment not activated"))
     }
 
-    /// Makes `release` control's current release, whose JVMs launch from `distribution`. Earlier releases keep their
-    /// sessions.
+    /// Makes `release` control's current release. Local JVMs launch from its release directory under `releases/` in the
+    /// state directory. Earlier releases keep their sessions.
     /// # Errors
     /// Reports a stopped control or a rejected release.
-    pub fn activate(
-        &self,
-        deployment: &str,
-        distribution: chunk_control::Distribution,
-        release: chunk_control::Release,
-    ) -> io::Result<()> {
-        if let Some(host) = &self.host {
-            host.add_release(deployment, distribution).map_err(io::Error::other)?;
-        }
+    pub fn activate(&self, release: chunk_control::Release) -> io::Result<()> {
         self.control()?.activate_release(release).map_err(io::Error::other)
     }
 
@@ -479,6 +473,8 @@ fn address(endpoint: &str) -> Option<SocketAddr> {
 fn host_config(config: &CoreConfig) -> chunk_control::ProcessHostConfig {
     chunk_control::ProcessHostConfig {
         directory: config.state.join("control").join("nodes"),
+        releases: config.state.join("releases"),
+        java: config.java.clone(),
         environment: config.environment.clone(),
         private_address: config.private_address,
     }

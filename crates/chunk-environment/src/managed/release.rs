@@ -49,7 +49,6 @@ struct Checked {
 
 /// A verified release, unpacked under the state directory, which reclamation leaves alone until it is dropped.
 pub(super) struct Loaded {
-    directory: PathBuf,
     release: VerifiedRelease,
     _claim: Claim,
 }
@@ -134,7 +133,7 @@ pub(super) async fn load(
     };
     let path = archive_path(&store.archives, &artifact.release_id);
     store.kept.insert(artifact.release_id.clone(), ReleaseArchive { path, sha256: digest.sha256, size: digest.size });
-    Ok(Some(Loaded { directory, release, _claim: claim }))
+    Ok(Some(Loaded { release, _claim: claim }))
 }
 
 /// The install of release `id` at `directory`, installed again from its archive kept in `archives` unless it still
@@ -290,11 +289,6 @@ impl Loaded {
         let mut bundle = self.release.backend.clone();
         deployment.clone_into(&mut bundle.id);
         bundle
-    }
-
-    /// Where control launches the release's JVMs from, with the `java` on the `PATH`.
-    pub(super) fn distribution(&self) -> chunk_control::Distribution {
-        chunk_control::Distribution { directory: self.directory.clone(), java: "java".into() }
     }
 
     /// The release as control runs it for `deployment`.

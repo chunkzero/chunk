@@ -53,13 +53,14 @@ fn core_config(directory: &Path) -> CoreConfig {
         control_bind: "127.0.0.1:0".parse().unwrap(),
         core_bind: None,
         private_address: None,
+        java: "java".into(),
         environment_token: None,
         fresh: false,
     }
 }
 
 fn all_in_one(core: CoreConfig, bind: SocketAddr) -> Config {
-    Config::Core { core, gateway: Some(GatewayConfig::new(bind)), management: None }
+    Config::Core { core: Box::new(core), gateway: Some(GatewayConfig::new(bind)), management: None }
 }
 
 /// Runs a gateway machine for `core` on a loopback port until `stop`, returning its task and the address its listener

@@ -38,9 +38,7 @@ use chunk_proto::control::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{
-    Distribution, Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection,
-};
+pub use host::{Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection};
 pub use launches::{Launch, recorded_launches};
 pub use machines::MachineKind;
 pub use moves::{MoveRequest, MoveSource};
@@ -101,7 +99,8 @@ pub struct Config {
 pub struct Release {
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
-    /// The ID of the release the deployment runs, which names the archive runners download.
+    /// The ID of the release the deployment runs, which names the archive runners download and the directory local
+    /// JVMs launch from.
     pub release_id: String,
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
@@ -138,7 +137,7 @@ impl Release {
     fn validate(&self) -> Result<()> {
         if self.deployment.environment.is_empty()
             || self.deployment.deployment.is_empty()
-            || self.release_id.is_empty()
+            || !plain(&self.release_id)
             || self.max_processes == 0
             || self.max_processes > 32
             || self.idle_node_timeout_seconds > 3600
@@ -344,4 +343,9 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+/// Whether `id` names a release as a single path component: ASCII letters, digits and hyphens.
+fn plain(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }

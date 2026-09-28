@@ -174,6 +174,7 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
         control_bind: "127.0.0.1:0".parse()?,
         core_bind: None,
         private_address: None,
+        java: "java".into(),
         environment_token: None,
         fresh: false,
     };

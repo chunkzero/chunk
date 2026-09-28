@@ -15,15 +15,16 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
+    let unpacked = unpacked(&directory);
     let library = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
-    let library_path = directory.path().join(format!("libs/{:x}.jar", Sha256::digest(&library)));
-    std::fs::create_dir_all(directory.path().join("libs")).unwrap();
+    let library_path = unpacked.join(format!("libs/{:x}.jar", Sha256::digest(&library)));
+    std::fs::create_dir_all(unpacked.join("libs")).unwrap();
     std::fs::write(&library_path, &library).unwrap();
     let launcher = manifest_jar(&format!(
         "Manifest-Version: 1.0\r\nClass-Path: {}\r\n\r\n",
-        library_path.strip_prefix(directory.path()).unwrap().display()
+        library_path.strip_prefix(&unpacked).unwrap().display()
     ));
-    std::fs::write(directory.path().join(&artifact.jar), &launcher).unwrap();
+    std::fs::write(unpacked.join(&artifact.jar), &launcher).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&launcher));
     let mut release = release(artifact);
     release.profiles.insert("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 2 });
@@ -57,7 +58,7 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     assert!(!host.release(&stale).await.unwrap());
     assert!(!host.stopped(&stale));
     let invalid = uuid::Uuid::new_v4().to_string();
-    let jar = directory.path().join("app.jar");
+    let jar = unpacked.join("app.jar");
     std::fs::write(&jar, b"changed artifact").unwrap();
     assert!(matches!(host.ensure(&invalid, &release, "bridge", "local").await, Ok(Progress::Failed(_))));
     assert!(!host.path(&invalid, "launch").unwrap().exists());
@@ -92,7 +93,7 @@ async fn jvms_serve_players_on_the_machines_private_address() {
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
-    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
     let host = private_host(directory.path(), java, Some("fdaa::2".parse().unwrap()));
     host.configure("http://127.0.0.1:1".into()).unwrap();
@@ -138,7 +139,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
-    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
     let release = release(artifact);
     let crashed = host(directory.path(), java.clone());
@@ -213,7 +214,7 @@ fn release(artifact: chunk_contract::AppArtifact) -> Release {
     }
 }
 
-/// A host in `directory` that launches release `build` with `java`.
+/// A host in `directory` that launches releases with `java`.
 fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
     private_host(directory, java, None)
 }
@@ -224,13 +225,20 @@ fn private_host(
     java: std::path::PathBuf,
     private_address: Option<std::net::IpAddr>,
 ) -> ProcessHost {
-    let host = ProcessHost::new(ProcessHostConfig {
+    ProcessHost::new(ProcessHostConfig {
         directory: directory.join("nodes"),
+        releases: directory.join("releases"),
+        java,
         environment: "test".into(),
         private_address,
-    });
-    host.add_release("build", Distribution { directory: directory.into(), java }).unwrap();
-    host
+    })
+}
+
+/// Where a host in `directory` finds the tests' release unpacked.
+fn unpacked(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    let path = directory.path().join("releases").join(crate::tests::release().release_id);
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }
 
 /// A host that launches nothing in `directory`.
@@ -328,7 +336,7 @@ async fn a_jvm_whose_pid_cannot_be_recorded_never_starts() {
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
-    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
     let host = host(directory.path(), java);
     host.configure("http://127.0.0.1:1".into()).unwrap();
