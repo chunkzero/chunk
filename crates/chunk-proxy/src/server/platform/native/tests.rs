@@ -9,13 +9,10 @@ use crate::PlatformTarget;
 use chunk_backend::{Backend, Call};
 use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};
 use chunk_js::{DeploymentId, Json};
-use chunk_proto::{
-    sync::v1::{
-        self as sync, CallResponse, PrepareResult, SubscribeRequest, Update, call_response,
-        core_server::{Core, CoreServer},
-        error::Code,
-    },
-    v1::Identity,
+use chunk_proto::sync::v1::{
+    self as sync, CallResponse, PlayerIdentity, PrepareResult, SubscribeRequest, Update, call_response,
+    core_server::{Core, CoreServer},
+    error::Code,
 };
 use chunk_store::SqliteStore;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -150,12 +147,11 @@ impl Fixture {
     }
 }
 
-fn claim(name: &str) -> ClaimRequest {
-    ClaimRequest {
+fn claim(name: &str) -> Claim {
+    Claim {
         operation_id: name.into(),
-        proxy_id: "proxy".into(),
         connection_id: "connection".into(),
-        identity: Some(Identity { uuid: "alice".into(), username: "Alice".into(), ..Default::default() }),
+        player: PlayerIdentity { uuid: "alice".into(), username: "Alice".into(), ..Default::default() },
         ..Default::default()
     }
 }
@@ -166,14 +162,14 @@ async fn real_native_dispatch_orders_admission_rechecks_moves_and_pings_without_
     assert!(String::from_utf8_lossy(&fixture.platform.status("localhost").await.unwrap()).contains("native"));
     assert_eq!(fixture.trace().await, "");
     let mut source = claim("login");
-    source.demand = Some(fixture.platform.route_claim(&source).await.unwrap());
+    source.demand = fixture.platform.route_claim(&source).await.unwrap();
     assert_eq!(fixture.trace().await, "root,route,parent,lobby,");
-    let destination = ClaimRequest {
-        demand: Some(SessionDemand {
+    let destination = Claim {
+        demand: SessionDemand {
             key: "arena".into(),
             session_type: "arena/default".into(),
             machine_profile: "local".into(),
-        }),
+        },
         ..claim("move")
     };
     fixture.platform.approve_move(&source, &destination).await.unwrap();
@@ -207,7 +203,7 @@ async fn real_native_dispatch_orders_admission_rechecks_moves_and_pings_without_
 async fn move_cancels_default_notifications_but_follow_player_retains_its_captured_scope() {
     let fixture = Fixture::new().await;
     let mut source = claim("login");
-    source.demand = Some(fixture.platform.route_claim(&source).await.unwrap());
+    source.demand = fixture.platform.route_claim(&source).await.unwrap();
     let mut lifecycle = Lifecycle::new(fixture.platform.clone());
     lifecycle.arrived(&source).unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -236,7 +232,7 @@ async fn move_cancels_default_notifications_but_follow_player_retains_its_captur
 async fn notification_execution_preserves_the_order_of_domain_transitions() {
     let fixture = Fixture::new().await;
     let mut source = claim("login");
-    source.demand = Some(fixture.platform.route_claim(&source).await.unwrap());
+    source.demand = fixture.platform.route_claim(&source).await.unwrap();
     let mut lifecycle = Lifecycle::new(fixture.platform.clone());
     lifecycle.arrived(&source).unwrap();
     fixture.platform.cleanup.close();
@@ -250,12 +246,12 @@ async fn notification_execution_preserves_the_order_of_domain_transitions() {
 #[tokio::test]
 async fn an_expired_notification_batch_cancels_its_running_hook() {
     let fixture = Fixture::new().await;
-    let arena = ClaimRequest {
-        demand: Some(SessionDemand {
+    let arena = Claim {
+        demand: SessionDemand {
             key: "arena".into(),
             session_type: "arena/default".into(),
             machine_profile: "local".into(),
-        }),
+        },
         ..claim("login")
     };
     assert!(fixture.platform.manifest().await.unwrap().is_some());

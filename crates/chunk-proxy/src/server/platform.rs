@@ -1,10 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use chunk_contract::DomainManifest;
-use chunk_proto::{
-    sync::v1::{CallRequest, Caller, Position, PrepareResult},
-    v1::SessionDemand,
-};
+use chunk_proto::sync::v1::{CallRequest, Caller, Position, PrepareResult, SessionDemand};
 use prost::Message;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -14,7 +11,7 @@ use tonic::{
     transport::{Channel, Endpoint},
 };
 
-use super::transport::invalid_data;
+use super::{claim::Claim, transport::invalid_data};
 use crate::PlatformTarget;
 
 mod claims;
@@ -32,7 +29,6 @@ pub(super) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) struct Platform {
     pub target: PlatformTarget,
     pub cleanup: tokio_util::task::TaskTracker,
-    pub proxy_id: String,
     hooks: Arc<Semaphore>,
     status_hooks: Arc<Semaphore>,
     /// The domain manifest of the target's deployment, read once.
@@ -56,7 +52,6 @@ impl Platform {
         Self {
             manifest: Arc::default(),
             cleanup,
-            proxy_id: sync.gateway().to_owned(),
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),
             sync,
@@ -148,9 +143,8 @@ impl Platform {
         self.hook::<Admission>("admit", arguments, player).await?.check()
     }
 
-    async fn legacy_approve_move(&self, claim: &chunk_proto::v1::ClaimRequest) -> io::Result<()> {
-        let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing move identity"))?;
-        let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing move demand"))?;
+    async fn legacy_approve_move(&self, claim: &Claim) -> io::Result<()> {
+        let (identity, demand) = (&claim.player, &claim.demand);
         let player = Some(identity.uuid.as_str());
         self.admit(&json!({"uuid": identity.uuid, "username": identity.username}), player).await?;
         let route: Route = self.hook("move", &json!({

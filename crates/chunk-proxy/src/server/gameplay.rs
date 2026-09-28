@@ -1,6 +1,6 @@
 use std::{io, net::SocketAddr};
 
-use chunk_proto::v1::{Identity, PlayerPreparation, PlayerSetup, Property};
+use chunk_proto::sync::v1::{PlayerIdentity, PlayerProperty, PlayerSetup};
 use chunk_protocol::{
     McString, RemainingBytes, VarInt, decode_packet,
     versions::v26_2::{
@@ -17,15 +17,15 @@ use super::{
     transport::{Transport, invalid_data},
 };
 
-pub(super) fn identity(profile: &LoginSuccess) -> Identity {
-    Identity {
+pub(super) fn identity(profile: &LoginSuccess) -> PlayerIdentity {
+    PlayerIdentity {
         uuid: uuid::Uuid::from_bytes(profile.uuid.0).to_string(),
         username: profile.username.as_str().into(),
         properties: profile
             .properties
             .as_slice()
             .iter()
-            .map(|p| Property {
+            .map(|p| PlayerProperty {
                 name: p.name.as_str().into(),
                 value: p.value.as_str().into(),
                 signature: p.signature.as_ref().map(|s| s.as_str().into()),
@@ -37,12 +37,13 @@ pub(super) fn identity(profile: &LoginSuccess) -> Identity {
 pub(super) async fn login<S>(
     authenticated: &Authenticated<S>,
     settings: &ConfigurationClientInformation,
-    prepared: PlayerPreparation,
+    endpoint: &str,
+    setup: PlayerSetup,
 ) -> io::Result<Transport<TcpStream>> {
-    if prepared.capability.len() != 32 {
+    if setup.capability.len() != 32 {
         return Err(invalid_data("invalid player preparation"));
     }
-    let address = destination(&prepared.endpoint)?;
+    let address = destination(endpoint)?;
     let socket = TcpStream::connect(address).await?;
     socket.set_nodelay(true)?;
     let mut internal = Transport::new(socket);
@@ -64,7 +65,6 @@ pub(super) async fn login<S>(
     if challenge.channel.as_str() != "chunk:delivery" {
         return Err(invalid_data("unexpected login plugin request"));
     }
-    let setup = PlayerSetup { operation_id: prepared.operation_id, capability: prepared.capability };
     internal
         .write_packet(&LoginPluginResponse {
             message_id: challenge.message_id,

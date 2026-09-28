@@ -118,7 +118,7 @@ async fn a_later_gateway_process_withdraws_the_claims_earlier_ones_left_before_s
         (address, retarget, stop, running)
     };
     let hold = |proxy, uuid| {
-        let held = chunk_proxy::testing::hold(proxy, uuid, "player", runtime::demand("lobby"));
+        let held = chunk_proxy::testing::hold(proxy, uuid, "player", runtime::gateway_demand("lobby"));
         async { tokio::time::timeout(Duration::from_secs(30), held).await.unwrap().unwrap() }
     };
     let control = &fixture.control;

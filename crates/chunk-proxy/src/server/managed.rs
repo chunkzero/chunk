@@ -11,12 +11,9 @@ mod tests;
 
 use std::{io, time::Duration};
 
-use chunk_proto::{
-    sync::v1::{
-        AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal, ClaimResult,
-        GatewayLogin, PlayerIdentity, PlayerProperty, Position, SessionDemand, WithdrawResult, claim_result::Outcome,
-    },
-    v1::{ClaimIdentity, ClaimRequest, PlayerPreparation},
+use chunk_proto::sync::v1::{
+    AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal, ClaimResult,
+    GatewayLogin, PlayerSetup, Position, WithdrawResult, claim_result::Outcome,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -27,6 +24,7 @@ use tokio::{
 use super::{
     Retarget,
     authentication::Authenticated,
+    claim::{Claim, ClaimIdentity},
     configuration, gameplay,
     platform::{Lifecycle, Platform, RPC_TIMEOUT, generation},
     transport::{Transport, invalid_data},
@@ -38,7 +36,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct ClaimGuard {
     platform: Platform,
-    claim: ClaimRequest,
+    claim: Claim,
     armed: bool,
     failure: Option<String>,
 }
@@ -88,30 +86,22 @@ struct Assignment {
     #[cfg(feature = "test-support")]
     session: String,
     protocol: i32,
-    preparation: PlayerPreparation,
+    /// The destination JVM's player listener.
+    endpoint: String,
+    setup: PlayerSetup,
 }
 
 impl Assignment {
-    /// A login's membership begins with its claim; a move keeps its source's.
-    fn new(assigned: ClaimAssignment, claim: &ClaimRequest) -> io::Result<Self> {
+    fn new(assigned: ClaimAssignment, claim: &Claim) -> io::Result<Self> {
         let delivery =
             assigned.generation.as_ref().map(generation).ok_or_else(|| invalid_data("missing generation"))?;
-        let membership = claim.source.as_ref().map_or(delivery, |source| source.membership_generation);
         Ok(Self {
-            identity: ClaimIdentity {
-                operation_id: claim.operation_id.clone(),
-                proxy_id: claim.proxy_id.clone(),
-                membership_generation: membership,
-                delivery_generation: delivery,
-            },
+            identity: ClaimIdentity { operation_id: claim.operation_id.clone(), delivery_generation: delivery },
             #[cfg(feature = "test-support")]
             session: assigned.session,
             protocol: assigned.protocol,
-            preparation: PlayerPreparation {
-                operation_id: claim.operation_id.clone(),
-                endpoint: assigned.endpoint,
-                capability: assigned.capability,
-            },
+            endpoint: assigned.endpoint,
+            setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
         })
     }
 }
@@ -135,27 +125,11 @@ async fn claim(guard: &ClaimGuard) -> io::Result<Option<Assignment>> {
     }
 }
 
-fn login(claim: &ClaimRequest) -> GatewayLogin {
+fn login(claim: &Claim) -> GatewayLogin {
     GatewayLogin {
         connection_id: claim.connection_id.clone(),
-        player: claim.identity.as_ref().map(|identity| PlayerIdentity {
-            uuid: identity.uuid.clone(),
-            username: identity.username.clone(),
-            properties: identity
-                .properties
-                .iter()
-                .map(|property| PlayerProperty {
-                    name: property.name.clone(),
-                    value: property.value.clone(),
-                    signature: property.signature.clone(),
-                })
-                .collect(),
-        }),
-        demand: claim.demand.as_ref().map(|demand| SessionDemand {
-            key: demand.key.clone(),
-            session_type: demand.session_type.clone(),
-            machine_profile: demand.machine_profile.clone(),
-        }),
+        player: Some(claim.player.clone()),
+        demand: Some(claim.demand.clone()),
         deployment: claim.deployment.clone(),
     }
 }
@@ -202,7 +176,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         }
         lifecycle.arrived(&guard.claim)?;
         commands.arrived();
-        tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.identity.as_ref().map_or("", |identity| identity.uuid.as_str()), "player arrived in managed session");
+        tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.player.uuid, "player arrived in managed session");
         let next = relay::until(
             &mut authenticated.transport,
             &mut internal,
@@ -235,14 +209,13 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 /// Routes and claims `login` through the current release. A failed routing through a release that is no longer
 /// current, which a reload may have released meanwhile, is routed again, as is a claim core refuses because its
 /// release no longer accepts logins. The caller bounds the retries.
-async fn claim_destination(login: &ClaimRequest, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
+async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
     loop {
         let platform = current.platform();
         let deployment = &platform.target.deployment;
-        let mut claim =
-            ClaimRequest { proxy_id: platform.proxy_id.clone(), deployment: deployment.clone(), ..login.clone() };
+        let mut claim = Claim { deployment: deployment.clone(), ..login.clone() };
         claim.demand = match platform.route_claim(&claim).await {
-            Ok(demand) => Some(demand),
+            Ok(demand) => demand,
             Err(_) if current.platform().target.deployment != *deployment => continue,
             Err(error) => return Err(error),
         };
@@ -256,12 +229,12 @@ async fn claim_destination(login: &ClaimRequest, current: &Retarget) -> io::Resu
     }
 }
 
-fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, connection_id: String) -> ClaimRequest {
-    ClaimRequest {
+fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, connection_id: String) -> Claim {
+    Claim {
         operation_id: uuid::Uuid::new_v4().to_string(),
         connection_id,
-        identity: Some(gameplay::identity(profile)),
-        ..ClaimRequest::default()
+        player: gameplay::identity(profile),
+        ..Claim::default()
     }
 }
 
@@ -275,7 +248,7 @@ async fn open<S>(
         return Err(invalid_data("destination protocol differs from client"));
     }
     activate(guard).await?;
-    gameplay::login(authenticated, settings, assignment.preparation.clone()).await
+    gameplay::login(authenticated, settings, &assignment.endpoint, assignment.setup.clone()).await
 }
 
 /// Records admission intent. A roster member waits for the rest of its group; the caller bounds the wait.

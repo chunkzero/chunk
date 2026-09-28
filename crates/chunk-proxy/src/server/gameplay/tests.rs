@@ -8,11 +8,8 @@ use chunk_protocol::{
 #[tokio::test]
 async fn native_login_presents_capability_and_preserves_profile_and_settings() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let prepared = PlayerPreparation {
-        operation_id: "operation".into(),
-        endpoint: listener.local_addr().unwrap().to_string(),
-        capability: vec![7; 32],
-    };
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let setup = PlayerSetup { operation_id: "operation".into(), capability: vec![7; 32] };
     let authenticated = authenticated();
     let settings = settings();
     let expected = settings.clone();
@@ -37,9 +34,12 @@ async fn native_login_presents_capability_and_preserves_profile_and_settings() {
             .unwrap();
         let response = decode_packet::<LoginPluginResponse>(&backend.read_frame(4096).await.unwrap()).unwrap();
         assert_eq!(response.message_id, VarInt(17));
-        let setup = PlayerSetup::decode(response.data.unwrap().as_slice()).unwrap();
-        assert_eq!(setup.operation_id, "operation");
-        assert_eq!(setup.capability, vec![7; 32]);
+        // The JVM decodes field 1 as the operation ID and field 2 as the capability.
+        let mut payload = vec![0x0a, 9];
+        payload.extend_from_slice(b"operation");
+        payload.extend([0x12, 32]);
+        payload.extend([7; 32]);
+        assert_eq!(response.data.unwrap().as_slice(), payload);
         backend.write_packet(&profile).await.unwrap();
         backend.write_packet(&FinishConfiguration).await.unwrap();
         decode_packet::<LoginAcknowledged>(&backend.read_frame(4096).await.unwrap()).unwrap();
@@ -48,7 +48,7 @@ async fn native_login_presents_capability_and_preserves_profile_and_settings() {
             expected
         );
     });
-    let mut internal = within(WRITE_TIMEOUT, login(&authenticated, &settings, prepared)).await.unwrap();
+    let mut internal = within(WRITE_TIMEOUT, login(&authenticated, &settings, &endpoint, setup)).await.unwrap();
     decode_packet::<FinishConfiguration>(&internal.read_frame(4096).await.unwrap()).unwrap();
     task.await.unwrap();
 }
@@ -95,12 +95,9 @@ async fn dials_only_private_endpoints() {
     {
         assert_eq!(destination(endpoint).unwrap_err().kind(), io::ErrorKind::InvalidData, "{endpoint}");
     }
-    let prepared = PlayerPreparation {
-        operation_id: "operation".into(),
-        endpoint: "203.0.113.1:25565".into(),
-        capability: vec![7; 32],
-    };
-    let Err(error) = within(WRITE_TIMEOUT, login(&authenticated(), &settings(), prepared)).await else {
+    let setup = PlayerSetup { operation_id: "operation".into(), capability: vec![7; 32] };
+    let Err(error) = within(WRITE_TIMEOUT, login(&authenticated(), &settings(), "203.0.113.1:25565", setup)).await
+    else {
         panic!("a public gameplay endpoint was dialed");
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);

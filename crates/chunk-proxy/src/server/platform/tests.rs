@@ -119,15 +119,14 @@ fn core_endpoint_must_be_private() {
 
 async fn route(platform: &Platform) -> io::Result<SessionDemand> {
     platform
-        .route_claim(&chunk_proto::v1::ClaimRequest {
+        .route_claim(&Claim {
             operation_id: uuid::Uuid::new_v4().to_string(),
-            proxy_id: platform.proxy_id.clone(),
             connection_id: "test".into(),
-            identity: Some(chunk_proto::v1::Identity {
+            player: chunk_proto::sync::v1::PlayerIdentity {
                 uuid: "uuid".into(),
                 username: "Alex".into(),
                 ..Default::default()
-            }),
+            },
             ..Default::default()
         })
         .await

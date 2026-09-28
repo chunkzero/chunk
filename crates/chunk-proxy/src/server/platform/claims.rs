@@ -6,19 +6,16 @@ use std::{
     time::Duration,
 };
 
-use chunk_proto::{
-    sync::v1::{
-        ClaimPhase, Cursor, GatewayArguments, GatewayClaim, Position, SubscribeRequest, Update,
-        core_client::CoreClient, entry::State, error::Code,
-    },
-    v1::ClaimIdentity,
+use chunk_proto::sync::v1::{
+    ClaimPhase, Cursor, GatewayArguments, GatewayClaim, Position, SubscribeRequest, Update, core_client::CoreClient,
+    entry::State, error::Code,
 };
 use prost::Message;
 use tokio::sync::watch;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::transport::Channel;
 
-use crate::GatewayCredential;
+use crate::{GatewayCredential, server::claim::ClaimIdentity};
 
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// Revision bits of control's `uint64` generations, below the epoch.
@@ -113,7 +110,7 @@ fn connection_prefix(instance: &str) -> String {
     format!("{instance}/")
 }
 
-/// `position` as the `uint64` generation control's legacy messages carry: the epoch above 40 revision bits.
+/// `position` as one generation: the epoch above 40 revision bits.
 pub(in crate::server) fn generation(position: &Position) -> u64 {
     position.epoch << REVISION_BITS | position.revision
 }

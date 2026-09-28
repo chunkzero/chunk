@@ -40,10 +40,6 @@ impl Connection {
         Ok(Self { client, gateway, instance, claims: OnceLock::new() })
     }
 
-    pub fn gateway(&self) -> &str {
-        &self.gateway.id
-    }
-
     /// A new ID for a player's connection to this process.
     pub fn connection_id(&self) -> String {
         claims::connection_id(&self.instance)

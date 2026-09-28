@@ -1,14 +1,11 @@
 use std::{io, sync::Arc};
 
 use chunk_contract::{DomainManifest, HookEvent};
-use chunk_proto::{
-    sync::v1::{CallRequest, ManifestResult},
-    v1::{ClaimRequest, SessionDemand},
-};
+use chunk_proto::sync::v1::{CallRequest, ManifestResult, SessionDemand};
 use prost::Message;
 use serde_json::{Value, json};
 
-use super::{Admission, Platform, RPC_TIMEOUT, Route, Status, invalid_data};
+use super::{Admission, Claim, Platform, RPC_TIMEOUT, Route, Status, invalid_data};
 
 mod lifecycle;
 pub(in crate::server) use lifecycle::Lifecycle;
@@ -41,13 +38,12 @@ impl Platform {
             .cloned()
     }
 
-    pub(in crate::server) async fn route_claim(&self, claim: &ClaimRequest) -> io::Result<SessionDemand> {
+    pub(in crate::server) async fn route_claim(&self, claim: &Claim) -> io::Result<SessionDemand> {
         tokio::time::timeout(RPC_TIMEOUT, async {
             let Some(manifest) = self.manifest().await? else {
-                let identity = claim.identity.as_ref().ok_or_else(|| invalid_data("missing player identity"))?;
-                return self.legacy_route(&identity.uuid, &identity.username).await;
+                return self.legacy_route(&claim.player.uuid, &claim.player.username).await;
             };
-            let mut payload = payload(claim)?;
+            let mut payload = payload(claim);
             payload["destination"] = Value::Null;
             self.run_hooks(&manifest, HookEvent::PlayerLogin, &[String::new()], &payload, None).await?;
             let routed = self
@@ -70,23 +66,18 @@ impl Platform {
         .map_err(io::Error::other)?
     }
 
-    pub(in crate::server) async fn approve_move(
-        &self,
-        source: &ClaimRequest,
-        destination: &ClaimRequest,
-    ) -> io::Result<()> {
+    pub(in crate::server) async fn approve_move(&self, source: &Claim, destination: &Claim) -> io::Result<()> {
         tokio::time::timeout(RPC_TIMEOUT, async {
             let Some(manifest) = self.manifest().await? else {
                 return self.legacy_approve_move(destination).await;
             };
-            let demand = destination.demand.as_ref().ok_or_else(|| invalid_data("missing move destination"))?;
-            let source_demand = source.demand.as_ref().ok_or_else(|| invalid_data("missing source destination"))?;
-            let mut payload = payload(destination)?;
+            let demand = &destination.demand;
+            let mut payload = payload(destination);
             payload["destination"] = demand_json(demand);
-            payload["sourceDomain"] = domain(&manifest, source_demand)?.into();
+            payload["sourceDomain"] = domain(&manifest, &source.demand)?.into();
             let scopes = ancestors(domain(&manifest, demand)?);
             // The player holds their source claim throughout.
-            let player = destination.identity.as_ref().map(|identity| identity.uuid.as_str());
+            let player = Some(destination.player.uuid.as_str());
             // Entry authorization is fresh for every move, including common ancestors.
             self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes, &payload, player).await?;
             self.run_hooks(&manifest, HookEvent::PlayerBeforeMove, &scopes, &payload, player).await?;
@@ -173,9 +164,9 @@ fn ancestors(domain: &str) -> Vec<String> {
     result
 }
 
-fn payload(claim: &ClaimRequest) -> io::Result<Value> {
-    let player = claim.identity.as_ref().ok_or_else(|| invalid_data("missing authenticated identity"))?;
-    Ok(json!({"eventId":claim.operation_id,"player":{"uuid":player.uuid,"username":player.username}}))
+fn payload(claim: &Claim) -> Value {
+    let player = &claim.player;
+    json!({"eventId":claim.operation_id,"player":{"uuid":player.uuid,"username":player.username}})
 }
 
 fn demand_json(demand: &SessionDemand) -> Value {

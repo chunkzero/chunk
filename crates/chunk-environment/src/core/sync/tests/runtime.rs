@@ -3,7 +3,7 @@
 use super::{Fixture, jvm::Launches, jvm_effects::SyncJvm};
 use chunk_control::{Control, operator::Players};
 use chunk_proto::{
-    sync::v1::{ClaimPhase, JvmDeliveryPhase, JvmHealth, OperatorPlayer, entry::State},
+    sync::v1::{self as sync, ClaimPhase, JvmDeliveryPhase, JvmHealth, OperatorPlayer, entry::State},
     v1::{ClaimRequest, Identity, SessionDemand},
 };
 use prost::Message;
@@ -41,6 +41,11 @@ pub fn session_methods() -> serde_json::Value {
 
 pub fn demand(key: &str) -> SessionDemand {
     SessionDemand { key: key.into(), session_type: "bridge/default".into(), machine_profile: "small".into() }
+}
+
+/// The routed session `key` as a gateway claims it.
+pub fn gateway_demand(key: &str) -> sync::SessionDemand {
+    sync::SessionDemand { key: key.into(), session_type: "bridge/default".into(), machine_profile: "small".into() }
 }
 
 pub fn login() -> ClaimRequest {

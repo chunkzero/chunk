@@ -6,10 +6,7 @@ pub(super) use core_service::Held;
 use super::*;
 use crate::server::platform::generation;
 use chunk_contract::CommandRoute;
-use chunk_proto::{
-    sync::v1::{self as sync, ClaimPhase, GatewayLogin, GatewayMove, core_server},
-    v1::{Identity, SessionDemand},
-};
+use chunk_proto::sync::v1::{self as sync, ClaimPhase, GatewayLogin, GatewayMove, core_server};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize},
@@ -99,7 +96,7 @@ fn auth<T>(request: &Request<T>, token: &str) -> Result<(), Status> {
 pub(super) struct Fixture {
     pub commands: Commands,
     pub service: Service,
-    pub claim: ClaimRequest,
+    pub claim: Claim,
     pub identity: ClaimIdentity,
     stop: CancellationToken,
     server: tokio::task::JoinHandle<()>,
@@ -113,12 +110,8 @@ impl Fixture {
             generation: sync::Position { epoch: 1, revision: 1 },
             phase: ClaimPhase::Arrived,
         };
-        let identity = ClaimIdentity {
-            operation_id: "claim".into(),
-            proxy_id: "proxy".into(),
-            membership_generation: generation(&held.generation),
-            delivery_generation: generation(&held.generation),
-        };
+        let identity =
+            ClaimIdentity { operation_id: "claim".into(), delivery_generation: generation(&held.generation) };
         let service = Service {
             movement: Arc::default(),
             claim: Arc::new(Mutex::new(held)),
@@ -251,17 +244,16 @@ fn declarations() -> BTreeMap<String, Command> {
     commands
 }
 
-fn claim() -> ClaimRequest {
-    ClaimRequest {
+fn claim() -> Claim {
+    Claim {
         operation_id: "claim".into(),
-        proxy_id: "proxy".into(),
         connection_id: "connection".into(),
-        identity: Some(Identity { uuid: "player".into(), username: "Player".into(), ..Default::default() }),
-        demand: Some(SessionDemand {
+        player: sync::PlayerIdentity { uuid: "player".into(), username: "Player".into(), ..Default::default() },
+        demand: sync::SessionDemand {
             key: "lobby".into(),
             session_type: "lobby/default".into(),
             machine_profile: "local".into(),
-        }),
+        },
         source: None,
         deployment: String::new(),
     }

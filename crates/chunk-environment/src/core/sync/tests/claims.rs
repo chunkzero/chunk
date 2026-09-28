@@ -115,7 +115,7 @@ async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive
         gateway: chunk_proxy::GatewayCredential { id: "proxy".into(), credential: fixture.gateway.clone() },
         deployment: "test".into(),
     };
-    let login = chunk_proxy::testing::login(target, runtime::PLAYER, "player", runtime::demand("lobby"));
+    let login = chunk_proxy::testing::login(target, runtime::PLAYER, "player", runtime::gateway_demand("lobby"));
     let session = tokio::time::timeout(Duration::from_secs(30), login).await.unwrap().unwrap();
     assert!(!session.is_empty());
     fixture.stop().await;

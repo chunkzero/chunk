@@ -4,12 +4,12 @@ mod run;
 mod scope;
 
 use super::super::{
+    claim::{Claim, ClaimIdentity},
     platform::Platform,
     transport::{Transport, invalid_data},
 };
 use crate::command_tree::CommandTreeCatalog;
 use chunk_contract::{Command, DomainManifest};
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
 use chunk_protocol::{commands::CommandTree, encode_packet};
 use scope::Origin;
 use std::{
@@ -52,7 +52,7 @@ impl Tasks {
         let current = self.current.borrow().clone().ok_or_else(|| invalid_data("player is configuring"))?;
         if (!follow && !current.matches(origin))
             || current.claim.connection_id != origin.claim.connection_id
-            || current.claim.identity != origin.claim.identity
+            || current.claim.player != origin.claim.player
         {
             return Err(invalid_data("command player ownership changed"));
         }
@@ -113,18 +113,14 @@ impl Commands {
             refreshing: false,
         })
     }
-    pub fn bind(&mut self, claim: &ClaimRequest, identity: &ClaimIdentity) -> io::Result<()> {
+    pub fn bind(&mut self, claim: &Claim, identity: &ClaimIdentity) -> io::Result<()> {
         self.configuration();
         let Some(manifest) = &self.manifest else {
             self.origin = None;
             return Ok(());
         };
-        let app = claim
-            .demand
-            .as_ref()
-            .and_then(|d| d.session_type.split_once('/'))
-            .map(|(app, _)| app)
-            .ok_or_else(|| invalid_data("missing command destination"))?;
+        let (app, _) =
+            claim.demand.session_type.split_once('/').ok_or_else(|| invalid_data("missing command destination"))?;
         let domain = manifest.apps.get(app).ok_or_else(|| invalid_data("missing command domain"))?.clone();
         self.descriptors = manifest
             .commands
@@ -138,7 +134,7 @@ impl Commands {
             .collect();
         self.catalog =
             Some(CommandTreeCatalog::new(CommandTree::empty(), &self.descriptors, &domain).map_err(invalid_data)?);
-        self.origin = Some(Origin::new(claim, identity, domain)?);
+        self.origin = Some(Origin::new(claim, identity, domain));
         self.tree_received = false;
         self.allowed.clear();
         self.refreshing = false;
