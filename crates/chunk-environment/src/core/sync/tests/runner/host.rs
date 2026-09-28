@@ -155,7 +155,7 @@ fn credential(fixture: &Fixture) -> String {
 
 /// The release `HOST` runs, whose archive core keeps.
 fn release() -> chunk_control::Release {
-    chunk_control::Release { artifact_digest: RELEASE.into(), ..super::super::runtime::release() }
+    chunk_control::Release { release_id: RELEASE.into(), ..super::super::runtime::release() }
 }
 
 async fn ensure(runner: &RunnerHost) -> Progress {

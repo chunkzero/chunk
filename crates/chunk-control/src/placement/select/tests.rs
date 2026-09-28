@@ -7,7 +7,7 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
     let mut config: Release = serde_json::from_value(serde_json::json!({
         "apps":{"arena":{"id":"arena","jar":"arena.jar","sha256":"artifact","java_version":25,
             "sessions":{"default":{"machine_profile":"small","capacity":16}}}},
-        "deployment":{"environment":"test","deployment":"release"},"artifact_digest":"artifact",
+        "deployment":{"environment":"test","deployment":"release"},"release_id":"artifact",
         "profiles":{"small":{"memory_mib":512,"max_sessions":4},"large":{"memory_mib":1024,"max_sessions":4}},
         "session_types":{"arena/default":{"app":"arena","machine_profile":"small","capacity":16}},
         "max_processes":4,"idle_node_timeout_seconds":0,
@@ -55,7 +55,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
         contracts: Contracts::default(),
         apps: BTreeMap::new(),
         deployment: chunk_proto::control::v1::DeploymentRef::default(),
-        artifact_digest: "release".into(),
+        release_id: "release".into(),
         profiles: BTreeMap::from([
             ("small".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 4 }),
             ("large".into(), crate::MachineProfile { memory_mib: 1024, max_sessions: 4 }),

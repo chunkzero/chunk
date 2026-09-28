@@ -142,11 +142,10 @@ impl<'a> Managed<'a> {
         if let Err(error) = release::sweep(&self.releases).await {
             tracing::warn!(%error, "abandoned release downloads not removed");
         }
-        let restored =
-            match self.core.control().and_then(|control| control.release_artifacts().map_err(io::Error::other)) {
-                Ok(retained) => release::restore(&self.releases, retained).await,
-                Err(error) => Err(error),
-            };
+        let restored = match self.core.control().and_then(|control| control.release_ids().map_err(io::Error::other)) {
+            Ok(retained) => release::restore(&self.releases, retained).await,
+            Err(error) => Err(error),
+        };
         if let Err(error) = restored {
             tracing::warn!(%error, "kept release archives not restored");
         }

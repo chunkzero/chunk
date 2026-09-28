@@ -259,7 +259,7 @@ impl RunnerHost {
         } else {
             let launch = Launch {
                 deployment: deployment.deployment.clone(),
-                release: release.artifact_digest.clone(),
+                release: release.release_id.clone(),
                 app: app.to_owned(),
                 profile: profile.to_owned(),
                 process_id: uuid::Uuid::new_v4().to_string(),

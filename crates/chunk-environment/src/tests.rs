@@ -33,7 +33,7 @@ fn release(deployment: &str) -> chunk_control::Release {
     serde_json::from_value(serde_json::json!({
         "apps": {"lobby": {"id": "lobby", "jar": "lobby.jar", "sha256": "digest", "java_version": 25,
             "sessions": {"default": {"machine_profile": "small", "capacity": 8}}}},
-        "deployment": {"environment": "test", "deployment": deployment}, "artifact_digest": "digest",
+        "deployment": {"environment": "test", "deployment": deployment}, "release_id": "digest",
         "profiles": {"small": {"memory_mib": 512, "max_sessions": 2}},
         "session_types": {"lobby/default": {"app": "lobby", "machine_profile": "small", "capacity": 8}},
         "max_processes": 1, "idle_node_timeout_seconds": 0

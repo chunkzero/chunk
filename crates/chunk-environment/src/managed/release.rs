@@ -326,7 +326,7 @@ impl Loaded {
                 environment: environment.into(),
                 deployment: deployment.into(),
             },
-            artifact_digest: release.id.clone(),
+            release_id: release.id.clone(),
             profiles: profiles.collect(),
             session_types,
             max_processes: MAX_PROCESSES,

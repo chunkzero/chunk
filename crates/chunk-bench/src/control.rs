@@ -25,7 +25,7 @@ pub fn release() -> Result<chunk_control::Release> {
     Ok(serde_json::from_value(serde_json::json!({
         "apps": {"bench": {"id":"bench", "jar":"bench.jar", "sha256":"bench", "java_version":25,
             "sessions":{"default":{"machine_profile":"bench","capacity":128}}}},
-        "deployment":{"environment":"bench","deployment":"bench"}, "artifact_digest":"bench",
+        "deployment":{"environment":"bench","deployment":"bench"}, "release_id":"bench",
         "profiles":{"bench":{"memory_mib":512,"max_sessions":1}},
         "session_types":{"bench/default":{"app":"bench","machine_profile":"bench","capacity":128}},
         "max_processes":32, "idle_node_timeout_seconds":0

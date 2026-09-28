@@ -102,7 +102,7 @@ pub struct Release {
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
     /// The ID of the release the deployment runs, which names the archive runners download.
-    pub artifact_digest: String,
+    pub release_id: String,
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,
     /// JVMs this release may run at once.
@@ -138,7 +138,7 @@ impl Release {
     fn validate(&self) -> Result<()> {
         if self.deployment.environment.is_empty()
             || self.deployment.deployment.is_empty()
-            || self.artifact_digest.is_empty()
+            || self.release_id.is_empty()
             || self.max_processes == 0
             || self.max_processes > 32
             || self.idle_node_timeout_seconds > 3600

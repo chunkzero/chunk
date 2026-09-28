@@ -548,7 +548,7 @@ pub(crate) fn release() -> Release {
         contracts: Contracts::default(),
         apps: BTreeMap::from([("bridge".into(), test_app())]),
         deployment: DeploymentRef { environment: "test".into(), deployment: "build".into() },
-        artifact_digest: "artifact".into(),
+        release_id: "artifact".into(),
         profiles: BTreeMap::from([("local".into(), MachineProfile { memory_mib: 512, max_sessions: 2 })]),
         session_types: BTreeMap::from([(
             "bridge/default".into(),

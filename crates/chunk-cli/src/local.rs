@@ -244,7 +244,7 @@ fn control_config(
             environment: local.environment.clone(),
             deployment: deployment.into(),
         },
-        artifact_digest: release.into(),
+        release_id: release.into(),
         profiles: local
             .profiles
             .iter()
