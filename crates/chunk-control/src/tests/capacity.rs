@@ -85,8 +85,11 @@ async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["active"].session].host.clone();
     fixture.host.unconfirmed.store(true, Ordering::Release);
-    let command =
-        chunk_proto::v1::ShutdownNodeRequest { operation_id: "stop".into(), host_id: host.clone(), timeout_seconds: 0 };
+    let command = chunk_proto::control::v1::ShutdownNodeRequest {
+        operation_id: "stop".into(),
+        host_id: host.clone(),
+        timeout_seconds: 0,
+    };
     control.shutdown_node(&command).unwrap();
     control.progress_drains().unwrap();
     // The executor keeps asking the host, but an unconfirmed exit changes nothing.

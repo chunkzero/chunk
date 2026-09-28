@@ -240,7 +240,7 @@ fn control_config(
     Ok(chunk_control::Release {
         contracts: chunk_control::Contracts::default(),
         apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
-        deployment: chunk_proto::v1::DeploymentRef {
+        deployment: chunk_proto::control::v1::DeploymentRef {
             environment: local.environment.clone(),
             deployment: deployment.into(),
         },

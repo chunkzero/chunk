@@ -1,6 +1,6 @@
 mod select;
 
-use chunk_proto::v1::{
+use chunk_proto::control::v1::{
     Assignment, ClaimPhase, ClaimRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery, PlayerRef, SessionRef,
 };
 use prost::Message;

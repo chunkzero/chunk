@@ -11,8 +11,8 @@ use std::{
 };
 
 use chunk_proto::{
+    control::v1::ShutdownNodeRequest,
     sync::v1::{JvmDeliveryPhase, JvmDeliveryStatus, JvmReport, JvmSessionPhase},
-    v1::ShutdownNodeRequest,
 };
 use prost::Message;
 

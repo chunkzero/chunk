@@ -1,6 +1,6 @@
 use super::*;
 use crate::{RosterMember, RosterMove};
-use chunk_proto::v1::ClaimIdentity;
+use chunk_proto::control::v1::ClaimIdentity;
 
 /// Sessions of capacity 4, and one `arena` session at most.
 fn fixture() -> Fixture {

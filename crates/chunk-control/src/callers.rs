@@ -1,6 +1,6 @@
 //! Who a request to core may act for, checked against control's current state.
 
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
+use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest};
 use prost::Message;
 
 use crate::{Control, Error, Result, state::Phase};

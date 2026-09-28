@@ -8,11 +8,11 @@ use super::{
 };
 use chunk_control::{ALREADY_OWNED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim};
 use chunk_proto::{
+    control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
         DepartResult, Error, GatewayLogin, Position, WithdrawResult, claim_result::Outcome, error::Code,
     },
-    v1 as control,
 };
 use prost::Message;
 

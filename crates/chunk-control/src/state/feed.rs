@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use chunk_proto::v1::ClaimRequest;
+use chunk_proto::control::v1::ClaimRequest;
 use chunk_store::DocumentKey;
 use prost::Message;
 use tokio::sync::watch;

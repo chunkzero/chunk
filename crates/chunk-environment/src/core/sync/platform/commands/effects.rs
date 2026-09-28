@@ -7,8 +7,8 @@ use chunk_backend::{ActionHandle, Backend, CommandEffect, CommandEffects, Reques
 use chunk_contract::{Effect, EffectDestination};
 use chunk_control::{ArrivedClaim, Control, MoveRequest, MoveSource};
 use chunk_proto::{
+    control::v1::SessionDemand,
     sync::v1::{self as sync, CommandTitle, JvmMethodPhase, command_effect},
-    v1::SessionDemand,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinSet;

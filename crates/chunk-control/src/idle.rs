@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use chunk_proto::v1::{ClaimRequest, ShutdownNodeRequest};
+use chunk_proto::control::v1::{ClaimRequest, ShutdownNodeRequest};
 use prost::Message;
 
 use crate::{

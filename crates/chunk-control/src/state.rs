@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest};
+use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest};
 use prost::Message;
 use sha2::{Digest, Sha256};
 

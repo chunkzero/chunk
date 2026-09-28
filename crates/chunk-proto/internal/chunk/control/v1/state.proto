@@ -1,0 +1,111 @@
+// Control's system-table row encodings. Never on a wire.
+syntax = "proto3";
+
+package chunk.control.v1;
+
+message ClaimRequest {
+  string operation_id = 1;
+  string proxy_id = 2;
+  string connection_id = 3;
+  Identity identity = 4;
+  SessionDemand demand = 5;
+  ClaimIdentity source = 6;
+  // The deployment version whose routing chose a login's demand. Control reserves the login on that release while it
+  // accepts logins, and otherwise rejects it as unavailable so the proxy routes it again. Empty uses the current
+  // release; a move stays on its source's release.
+  string deployment = 7;
+}
+
+message SessionDemand {
+  string key = 1;
+  string session_type = 2;
+  string machine_profile = 3;
+}
+
+message ClaimIdentity {
+  string operation_id = 1;
+  string proxy_id = 2;
+  uint64 membership_generation = 3;
+  uint64 delivery_generation = 4;
+}
+
+// What the proxy verified at login.
+message Identity {
+  string uuid = 1;
+  string username = 2;
+  repeated Property properties = 3;
+}
+
+message Property {
+  string name = 1;
+  string value = 2;
+  optional string signature = 3;
+}
+
+message Assignment {
+  ClaimIdentity claim = 1;
+  ClaimPhase phase = 2;
+  PlayerDelivery delivery = 3;
+  ConfigurationResponse configuration = 4;
+  PlayerPreparation preparation = 5;
+}
+
+enum ClaimPhase {
+  CLAIM_PHASE_UNSPECIFIED = 0;
+  CLAIM_PHASE_RESERVED = 1;
+  CLAIM_PHASE_ACTIVATING = 2;
+  CLAIM_PHASE_ATTACHED = 3;
+  CLAIM_PHASE_ARRIVED = 4;
+  CLAIM_PHASE_WITHDRAWING = 5;
+  CLAIM_PHASE_RELEASED = 6;
+}
+
+message PlayerDelivery {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  string operation_id = 3;
+  SessionRef session = 4;
+  PlayerRef player = 5;
+  uint64 owner_generation = 6;
+  Identity identity = 7;
+  int32 protocol = 8;
+  string runtime_id = 9;
+  uint64 session_generation = 10;
+  uint64 membership_generation = 11;
+  string proxy_id = 12;
+  string connection_id = 13;
+}
+
+// Destination metadata; control fills it in when it answers a claim and does not store it.
+message ConfigurationResponse {
+  DeploymentRef deployment = 1;
+  uint64 process_generation = 2;
+  int32 protocol = 3;
+  string runtime_id = 4;
+}
+
+message PlayerPreparation {
+  string operation_id = 1;
+  string endpoint = 2;
+  bytes capability = 3;
+}
+
+message DeploymentRef {
+  string environment = 1;
+  string deployment = 2;
+}
+
+message SessionRef {
+  string id = 1;
+}
+
+message PlayerRef {
+  string id = 1;
+}
+
+// Retries bind this operation to the same host and drain deadline.
+message ShutdownNodeRequest {
+  string operation_id = 1;
+  string host_id = 2;
+  uint32 timeout_seconds = 3;
+}

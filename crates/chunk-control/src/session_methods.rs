@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use chunk_contract::{Schema, validate_wire_value};
 use chunk_proto::{
+    control::v1::{Assignment, ClaimIdentity, PlayerDelivery},
     sync::v1 as sync,
-    v1::{Assignment, ClaimIdentity, PlayerDelivery},
 };
 use prost::Message;
 use serde_json::Value;

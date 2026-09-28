@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use chunk_proto::{
+    control::v1::{ConfigurationResponse, DeploymentRef, PlayerPreparation},
     sync::v1::{self as sync, JvmDeliveryPhase},
-    v1::{ConfigurationResponse, DeploymentRef, PlayerPreparation},
 };
 use prost::Message;
 use tokio::{sync::watch, time::Instant};

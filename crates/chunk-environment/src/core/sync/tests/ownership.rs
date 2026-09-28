@@ -3,8 +3,8 @@
 use super::{runtime::with_jvm, *};
 use chunk_control::{Control, MoveRequest};
 use chunk_proto::{
+    control::v1::{ClaimRequest, Identity},
     sync::v1::{ClaimPhase, GatewayClaim},
-    v1::{ClaimRequest, Identity},
 };
 
 /// Subscribes to `gateway/proxy` as process `instance`, after `after`'s stream and position when set, returning the

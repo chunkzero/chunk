@@ -7,7 +7,7 @@ mod players;
 pub use nodes::Nodes;
 pub use players::Players;
 
-use chunk_proto::{sync::v1 as sync, v1::SessionDemand};
+use chunk_proto::{control::v1::SessionDemand, sync::v1 as sync};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;

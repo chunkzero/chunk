@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use chunk_proto::{sync::v1 as sync, v1::ClaimRequest};
+use chunk_proto::{control::v1::ClaimRequest, sync::v1 as sync};
 use prost::Message;
 use tokio::sync::watch;
 
