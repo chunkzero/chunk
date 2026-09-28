@@ -18,7 +18,7 @@ impl Fixture {
         (updates, first)
     }
 
-    async fn platform(
+    pub(super) async fn platform(
         &mut self,
         credential: &str,
         stream: &str,
@@ -67,7 +67,7 @@ fn arena(operation: &str) -> MovePlayerRequest {
 }
 
 /// Reads `updates` until claim `key` has arrived, returning that update and the claim.
-async fn arrival(updates: &mut Streaming<Update>, key: &str) -> (Update, GatewayClaim) {
+pub(super) async fn arrival(updates: &mut Streaming<Update>, key: &str) -> (Update, GatewayClaim) {
     loop {
         let update = next(updates).await;
         let arrived = update.upserts.iter().find_map(|entry| match &entry.state {
