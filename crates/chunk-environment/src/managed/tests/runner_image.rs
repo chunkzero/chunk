@@ -13,14 +13,12 @@ use std::{
     sync::OnceLock,
 };
 
-const CONTAINERS: &str = "chunk-jvm-e2e-";
-
-/// Removes every e2e container, including after a failure.
-struct Cleanup;
+/// Removes every container this run started, named with its prefix, including after a failure.
+struct Cleanup(String);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let listed = podman(&["ps", "-aq", "--filter", &format!("name=^{CONTAINERS}")]);
+        let listed = podman(&["ps", "-aq", "--filter", &format!("name=^{}", self.0)]);
         for id in listed.lines() {
             podman(&["rm", "-f", "-t", "0", "--ignore", id]);
         }
@@ -79,7 +77,9 @@ fn login() -> ClaimRequest {
 async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
     let image = std::env::var("CHUNK_E2E_IMAGE").expect("CHUNK_E2E_IMAGE names the image");
     let archive = std::path::PathBuf::from(std::env::var("CHUNK_E2E_RELEASE").expect("CHUNK_E2E_RELEASE is set"));
-    let _cleanup = Cleanup;
+    // Unique to this run, so a concurrent run's containers are left alone.
+    let prefix = format!("chunk-jvm-e2e-{}-", std::process::id());
+    let _cleanup = Cleanup(prefix.clone());
     let started = tokio::time::Instant::now();
     let mut harness = Harness::new().await;
     let release_id = archive.file_name().unwrap().to_str().unwrap().trim_end_matches(".tar.gz").to_owned();
@@ -93,10 +93,10 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
     let sh = |script: &str| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned(), image.clone()];
     let launcher = CommandLauncher {
         launch: sh(&format!(
-            r#"exec podman run -d --rm --network host --name "{CONTAINERS}$CHUNK_HOST_ID" -e CHUNK_CORE_ENDPOINT \
+            r#"exec podman run -d --rm --network host --name "{prefix}$CHUNK_HOST_ID" -e CHUNK_CORE_ENDPOINT \
             -e CHUNK_JVM_CREDENTIAL -e CHUNK_ENVIRONMENT_ID "$0" >/dev/null"#
         )),
-        release: sh(&format!(r#"exec podman rm -f -t 20 --ignore "{CONTAINERS}$CHUNK_HOST_ID" >/dev/null"#)),
+        release: sh(&format!(r#"exec podman rm -f -t 20 --ignore "{prefix}$CHUNK_HOST_ID" >/dev/null"#)),
     };
     let core = Core::start_with_launcher(config, RunnerConfig::new(Arc::new(launcher))).await.unwrap();
     let gateway = OnceLock::new();
@@ -134,7 +134,7 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
             }
         };
         let host = tokio::time::timeout(Duration::from_secs(30), online).await.expect("one host is online");
-        let container = format!("{CONTAINERS}{host}");
+        let container = format!("{prefix}{host}");
         // Started while the container runs, since a removed container can't be waited for.
         let exit = tokio::process::Command::new("podman").args(["wait", &container]).stdout(Stdio::piped()).spawn();
 
