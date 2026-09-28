@@ -40,9 +40,7 @@ export function capacityServices({ sql }: Deps): CapacityServices {
       const environmentId = environmentOf(context);
       const { requestId, workload, machineProfile, releaseId, appId } = request;
       if (!requestId || requestId.length > 128) throw invalid("request_id must be set, and at most 128 characters");
-      if (![Workload.JVM, Workload.GATEWAY, Workload.EXEC].includes(workload)) {
-        throw invalid("workload must be JVM, GATEWAY or EXEC");
-      }
+      if (![Workload.JVM, Workload.GATEWAY].includes(workload)) throw invalid("workload must be JVM or GATEWAY");
       required(machineProfile, "machine_profile");
       required(releaseId, "release_id");
       if ((workload === Workload.JVM) !== (appId !== "")) throw invalid("app_id is required for JVM workloads only");

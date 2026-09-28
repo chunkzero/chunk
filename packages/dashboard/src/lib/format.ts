@@ -55,7 +55,6 @@ export const sourceLabels: Record<LogSource, string> = {
   [LogSource.UNSPECIFIED]: "",
   [LogSource.CORE]: "core",
   [LogSource.GATEWAY]: "gateway",
-  [LogSource.EXEC]: "exec",
   [LogSource.JVM]: "jvm",
 };
 

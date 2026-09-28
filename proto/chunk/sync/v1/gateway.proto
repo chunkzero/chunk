@@ -51,6 +51,17 @@ message SessionDemand {
   string machine_profile = 3;
 }
 
+// The `deployment` topic carries the deployment gateways route new logins with: the current release's. Any gateway
+// credential may subscribe, with no arguments, deployment or caller. Every update is a snapshot, including a resumed
+// stream's first, and core sends one whenever the current release changes. Its one entry is keyed `current` and its
+// value is a GatewayDeployment; the snapshot is empty while no release is current.
+
+// The value of the `deployment` topic's `current` entry.
+message GatewayDeployment {
+  // The current release's deployment, which GatewayLogin.deployment and hook calls name.
+  string deployment = 1;
+}
+
 // Methods a gateway calls to admit players and move them, with its own credential only; core takes the gateway's ID
 // from that credential. Each call names the gateway's current `gateway/<id>` stream in `CallRequest.stream`, and
 // fails with STOPPED once that stream is superseded or if it names another. It carries no deployment or caller. Its
@@ -123,7 +134,7 @@ message ClaimAssignment {
   string session = 2;
   // The Minecraft protocol version the destination JVM speaks.
   int32 protocol = 3;
-  // The loopback address the gateway connects the player to.
+  // The destination JVM's player endpoint, which the gateway connects the player to.
   string endpoint = 4;
   // The 32-byte secret that presents the player to the JVM at login.
   bytes capability = 5;

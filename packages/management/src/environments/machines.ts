@@ -21,7 +21,6 @@ const joinTokenLifetimeMs = 15 * 60 * 1000;
 const workloadNames: Record<number, string> = {
   [Workload.JVM]: "jvm",
   [Workload.GATEWAY]: "gateway",
-  [Workload.EXEC]: "exec",
 };
 
 /** Machine names are unique per provider and valid hostnames, so they carry the environment ID with `_` as `-`. */
