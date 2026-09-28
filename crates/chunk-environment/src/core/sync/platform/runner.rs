@@ -21,8 +21,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-/// The most one archive chunk carries.
-const CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// The most one archive chunk carries, leaving room for the response's framing under tonic's default 4 MiB limit.
+const CHUNK_BYTES: usize = 4 * 1024 * 1024 - 1024;
 const BOOT_BYTES: usize = 128;
 
 #[derive(Clone, Copy)]
@@ -112,9 +112,13 @@ impl ArchiveReads {
             return Err(errors::error(Code::Overloaded, "another archive read of this host is running"));
         }
         let reading = Reading { hosts: self.reading.clone(), host: host.to_owned() };
+        #[cfg(test)]
+        let stall = self.archives.stall.clone();
         let read = tokio::task::spawn_blocking(move || {
             // The host's read ends only once the file is no longer being read, even if its call was dropped.
             let _reading = reading;
+            #[cfg(test)]
+            drop(stall.blocking_lock());
             let length = usize::try_from(archive.size - offset).unwrap_or(usize::MAX).min(CHUNK_BYTES);
             let mut file = File::open(&archive.path)?;
             file.seek(SeekFrom::Start(offset))?;

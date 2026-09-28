@@ -218,9 +218,10 @@ message JvmHealth {
 //   that boot returns the same launch. Any other boot is DENIED for good. A host core launches nothing on is DENIED
 //   too, and one whose release archive core no longer keeps fails with CONTRACT.
 // - `chunk:archive` takes JvmArchiveRead and returns JvmArchiveChunk: the bytes of the host's release archive from
-//   `offset`, at most 4 MiB, which only the bound boot may read. An offset at or past the archive's end is INVALID.
-//   A host reads one chunk at a time, and a read while another of its reads runs gets OVERLOADED. The runner checks
-//   the whole archive against JvmLaunch's size and digest before unpacking it.
+//   `offset`, at most 4 MiB less 1 KiB so a response fits a default 4 MiB gRPC message limit, which only the bound
+//   boot may read. An offset at or past the archive's end is INVALID. A host reads one chunk at a time, and a read
+//   while another of its reads runs gets OVERLOADED. The runner checks the whole archive against JvmLaunch's size and
+//   digest before unpacking it.
 
 // Arguments of `chunk:launch` and the runner's identity: a random ID the runner makes up once per boot, 1 to 128 bytes.
 message JvmBoot {
@@ -251,7 +252,7 @@ message JvmArchiveRead {
   uint64 offset = 2;
 }
 
-// The result of `chunk:archive`: the archive's bytes from the requested offset, at most 4 MiB.
+// The result of `chunk:archive`: the archive's bytes from the requested offset, at most 4 MiB less 1 KiB.
 message JvmArchiveChunk {
   bytes data = 1;
 }

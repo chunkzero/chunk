@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 const HOST: &str = "runner-1";
 const RELEASE: &str = "release-1";
-const CHUNK: usize = 4 * 1024 * 1024;
+const CHUNK: usize = 4 * 1024 * 1024 - 1024;
 
 /// Runs `HOST` remotely, whose JVM registers with its machine credential. `JVM` is `host-1`'s process credential.
 #[derive(Default)]
@@ -82,9 +82,7 @@ impl Fixture {
     async fn runner_call(&self, credential: &str, method: &str, arguments: &impl Message) -> CallResponse {
         let message =
             CallRequest { method: method.into(), arguments: arguments.encode_to_vec(), ..CallRequest::default() };
-        // A full chunk and its framing exceed tonic's default 4 MiB, but not the protocol's message limit.
-        let mut client = self.client.clone().max_decoding_message_size(MESSAGE_BYTES);
-        client.call(authorized(message, credential)).await.unwrap().into_inner()
+        self.client.clone().call(authorized(message, credential)).await.unwrap().into_inner()
     }
 
     async fn launch(&self, credential: &str, boot: &str) -> CallResponse {
@@ -127,13 +125,71 @@ async fn a_runner_boots_its_host_once_and_downloads_the_bound_release() {
     while downloaded.len() < archive.len() {
         let offset = u64::try_from(downloaded.len()).unwrap();
         let chunk = result::<JvmArchiveChunk>(&fixture.read(&credential, "boot-1", offset).await).data;
-        assert!(!chunk.is_empty() && chunk.len() <= CHUNK);
+        assert_eq!(chunk.len(), CHUNK.min(archive.len() - downloaded.len()));
         downloaded.extend(chunk);
     }
     assert_eq!(auth::hex(&Sha256::digest(&downloaded)), expected.archive_sha256);
     for offset in [expected.archive_size, expected.archive_size + 1] {
         assert_eq!(code(&fixture.read(&credential, "boot-1", offset).await), Code::Invalid);
     }
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_boot_stays_bound_across_a_core_restart() {
+    let (fixture, credential, _) = runner().await;
+    let launched = fixture.launch(&credential, "boot-1").await;
+    let kept = fixture.archives.get(RELEASE).unwrap();
+    let fixture = fixture.restart(Arc::new(Remote::default())).await;
+    // The restarted core keeps the archive again, and its runner host records the same launch.
+    fixture.archives.insert(RELEASE.into(), kept);
+    fixture.control.record_launch(HOST, launch()).unwrap();
+
+    assert_eq!(fixture.launch(&credential, "boot-1").await, launched);
+    result::<JvmArchiveChunk>(&fixture.read(&credential, "boot-1", 0).await);
+    assert_eq!(code(&fixture.launch(&credential, "boot-2").await), Code::Denied);
+    assert_eq!(code(&fixture.read(&credential, "boot-2", 0).await), Code::Denied);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_archive_read_holds_it_until_the_read_ends_even_if_its_caller_left() {
+    let (fixture, credential, archive) = runner().await;
+    result::<JvmLaunch>(&fixture.launch(&credential, "boot-1").await);
+    let stalled = fixture.archives.stall.lock().await;
+
+    let message = CallRequest {
+        method: "chunk:archive".into(),
+        arguments: JvmArchiveRead { boot: "boot-1".into(), offset: 0 }.encode_to_vec(),
+        ..CallRequest::default()
+    };
+    let (mut client, request) = (fixture.client.clone(), authorized(message, &credential));
+    let first = tokio::spawn(async move { client.call(request).await });
+    // A read that got past the held one would stall too, so each gives up rather than hang.
+    let second = || async {
+        let read = tokio::time::timeout(Duration::from_secs(5), fixture.read(&credential, "boot-1", 0)).await;
+        code(&read.expect("the read did not stall"))
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(second().await, Code::Overloaded);
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    // Gives core time to drop the cancelled call.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(second().await, Code::Overloaded);
+
+    drop(stalled);
+    let resumed = async {
+        loop {
+            let response = fixture.read(&credential, "boot-1", 0).await;
+            if !matches!(&response.outcome, Some(Outcome::Error(error)) if error.code() == Code::Overloaded) {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let response = tokio::time::timeout(Duration::from_secs(10), resumed).await.expect("the host read again");
+    assert_eq!(result::<JvmArchiveChunk>(&response).data, archive[..CHUNK]);
     fixture.stop().await;
 }
 
