@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::oneshot,
 };
 use tokio_stream::{Stream, StreamExt, wrappers::TcpListenerStream};
@@ -189,6 +189,22 @@ pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationTo
     }
 }
 
+/// Binds the network listener at `address`. An IPv6 address is dual-stack whatever the host's default, so IPv4 peers
+/// arrive as IPv4-mapped addresses.
+/// # Errors
+/// Reports a failed bind.
+pub async fn network_listener(address: SocketAddr) -> io::Result<TcpListener> {
+    if address.is_ipv4() {
+        return TcpListener::bind(address).await;
+    }
+    let socket = TcpSocket::new_v6()?;
+    socket2::SockRef::from(&socket).set_only_v6(false)?;
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(1024)
+}
+
 /// The connections `listener` accepts, dropping those from peers `admit` refuses.
 fn accept(listener: TcpListener, admit: fn(IpAddr) -> bool) -> impl Stream<Item = io::Result<TcpStream>> {
     TcpListenerStream::new(listener).filter(move |stream| {
@@ -228,8 +244,8 @@ mod tests {
             read = client.read(&mut byte) => assert!(read.is_err() || read.is_ok_and(|read| read == 0)),
         }
 
-        // A dual-stack unspecified bind sees IPv4 peers as IPv4-mapped addresses.
-        let listener = TcpListener::bind("[::]:0").await.unwrap();
+        // An unspecified IPv6 bind is dual-stack and sees IPv4 peers as IPv4-mapped addresses.
+        let listener = network_listener("[::]:0".parse().unwrap()).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut admitted = std::pin::pin!(accept(listener, chunk_service::net::private));
         let _client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();

@@ -123,7 +123,7 @@ impl Core {
         }
         let listener = TcpListener::bind(config.control_bind).await?;
         let network = match config.core_bind {
-            Some(bind) => Some(TcpListener::bind(bind).await?),
+            Some(bind) => Some(chunk_control::server::network_listener(bind).await?),
             None => None,
         };
         self.serve_control(config, listener, network, config.control_record.clone()).await
