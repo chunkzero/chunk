@@ -608,3 +608,5 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
     fs::write(&kept.path, corrupt).unwrap();
     assert_eq!(restart().await, (None, None));
 }
+
+mod runner_image;
