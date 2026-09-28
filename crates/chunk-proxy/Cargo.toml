@@ -11,7 +11,15 @@ publish = false
 default = ["mc-26-2"]
 bench-support = ["mc-26-2"]
 test-support = ["mc-26-2"]
-mc-26-2 = ["chunk-protocol/mc-26-2", "dep:chunk-service", "dep:openssl", "dep:reqwest", "dep:serde", "dep:libdeflater", "dep:zeroize"]
+mc-26-2 = [
+  "chunk-protocol/mc-26-2",
+  "dep:chunk-service",
+  "dep:openssl",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:libdeflater",
+  "dep:zeroize",
+]
 
 [dependencies]
 tokio-util = { version = "0.7", features = ["io", "rt"] }
