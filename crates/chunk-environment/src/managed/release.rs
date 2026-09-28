@@ -125,6 +125,7 @@ pub(super) async fn load(
         let (destination, archives, expected) = (directory.clone(), store.archives.clone(), digest.clone());
         blocking(move || {
             let release = chunk_build::install_release(&staged.0, &expected, &id, &destination)?;
+            fs::File::open(&staged.0)?.sync_all()?;
             fs::rename(&staged.0, archive_path(&archives, &id))?;
             record(&archives, &id, &expected)?;
             Ok((release, claim))
@@ -203,14 +204,16 @@ fn intact(archive: &Path, digest: &ArchiveDigest) -> io::Result<bool> {
     }
 }
 
-/// Durably records `digest` as the one release `id`'s kept archive was verified against.
+/// Durably records `digest` as the one release `id`'s kept archive was verified against, then syncs `archives` so
+/// the renamed archive and record both survive a crash.
 fn record(archives: &Path, id: &str, digest: &ArchiveDigest) -> io::Result<()> {
     let checked = Checked { sha256: digest.sha256.clone(), size: digest.size };
     let staged = Staged(archives.join(format!(".{}.json", uuid::Uuid::new_v4())));
     let mut file = fs::File::create(&staged.0)?;
     file.write_all(&serde_json::to_vec(&checked).map_err(io::Error::other)?)?;
     file.sync_all()?;
-    fs::rename(&staged.0, record_path(archives, id))
+    fs::rename(&staged.0, record_path(archives, id))?;
+    fs::File::open(archives)?.sync_all()
 }
 
 fn archive_path(archives: &Path, id: &str) -> PathBuf {
