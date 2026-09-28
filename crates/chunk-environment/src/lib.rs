@@ -27,7 +27,8 @@ pub struct Config {
 
 impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
-    /// `CHUNK_CONTROL_BIND`, and the gateway's `CHUNK_BIND`, `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With
+    /// `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND`, `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`), and the gateway's
+    /// `CHUNK_BIND`, `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With
     /// `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it
     /// serves `CHUNK_BUNDLE`. Connection records go to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`.
     /// # Errors
@@ -57,6 +58,12 @@ impl Config {
             state,
             backend_bind: optional("CHUNK_BACKEND_BIND")?.unwrap_or(([127, 0, 0, 1], 25568).into()),
             control_bind: optional("CHUNK_CONTROL_BIND")?.unwrap_or(([127, 0, 0, 1], 25567).into()),
+            core_bind: optional("CHUNK_CORE_BIND")?,
+            private_address: match optional("CHUNK_PRIVATE_ADDRESS")? {
+                Some(address) => Some(address),
+                None => optional("FLY_PRIVATE_IP")?,
+            },
+            environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,
         };
         let mut gateway = GatewayConfig::new(optional("CHUNK_BIND")?.unwrap_or(([0, 0, 0, 0], 25565).into()));

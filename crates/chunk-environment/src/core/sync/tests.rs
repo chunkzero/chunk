@@ -5,6 +5,7 @@ mod hooks;
 mod jvm;
 mod jvm_effects;
 mod jvm_methods;
+mod network;
 mod operator;
 mod runtime;
 mod shutdown;
@@ -178,6 +179,8 @@ struct Fixture {
     control: Arc<Control>,
     /// Core's endpoint.
     endpoint: String,
+    /// The network listener's endpoint, on loopback.
+    network: String,
     client: CoreClient<Channel>,
     cli: String,
     /// The credential of gateway `proxy`, which holds the fake JVM's claims.
@@ -211,14 +214,16 @@ impl Fixture {
             system: backend.system(),
             connection: directory.path().join("control.json"),
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            network: Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()),
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
-            services: Some(services(backend.clone(), gateways.clone())),
+            services: Some(services(backend.clone(), gateways.clone(), "test".into(), None)),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
         let endpoint = started.connection.endpoint;
+        let network = format!("http://{}", started.network.unwrap());
         let client = CoreClient::connect(endpoint.clone()).await.unwrap();
         Self {
             directory,
@@ -227,6 +232,7 @@ impl Fixture {
             task,
             control: started.control,
             endpoint,
+            network,
             client,
             cli: started.connection.token,
             gateway,

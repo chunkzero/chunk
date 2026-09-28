@@ -1,4 +1,4 @@
-//! The sync protocol's `Core` service, served on control's listener: app function calls, platform methods and topic
+//! The sync protocol's `Core` service, served on control's listeners: app function calls, platform methods and topic
 //! subscriptions for gateways, JVMs and the CLI.
 
 mod app;
@@ -30,16 +30,24 @@ const OPERATION_BYTES: usize = 256;
 const NAME_BYTES: usize = 512;
 const ARGUMENT_BYTES: usize = 1024 * 1024;
 
-pub(crate) use auth::Gateways;
+pub(crate) use auth::{Gateways, Issuer};
 
-/// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. Each gateway presents the
-/// credential `gateways` minted for it, the CLI presents control's credential, and each JVM its process credential.
-pub(crate) fn services(backend: Backend, gateways: Arc<Gateways>) -> chunk_control::server::Services {
+/// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. The in-process gateway presents
+/// the credential `gateways` minted for it, and gateway machines theirs, which an [`Issuer`] for `environment` and
+/// `environment_token` derives. The CLI presents control's credential from a loopback peer, management the operator
+/// credential, and each JVM its process credential.
+pub(crate) fn services(
+    backend: Backend,
+    gateways: Arc<Gateways>,
+    environment: String,
+    environment_token: Option<String>,
+) -> chunk_control::server::Services {
     Box::new(move |control, token, stop, operations| {
         let service = SyncService {
             credentials: Arc::new(auth::Credentials {
                 gateways: gateways.clone(),
                 cli: token.to_owned(),
+                issuer: Issuer::new(&environment, environment_token.as_deref(), token),
                 control: control.clone(),
             }),
             control: control.clone(),

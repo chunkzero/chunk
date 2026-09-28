@@ -30,6 +30,9 @@ fn config(directory: &Path, bind: SocketAddr) -> Config {
             state,
             backend_bind: "127.0.0.1:0".parse().unwrap(),
             control_bind: "127.0.0.1:0".parse().unwrap(),
+            core_bind: None,
+            private_address: None,
+            environment_token: None,
             fresh: false,
         },
         gateway: GatewayConfig::new(bind),
@@ -74,6 +77,22 @@ async fn failed_gateway_bind_releases_core() {
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert!(!backend.exists());
         assert!(!control.exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_binds_its_network_listener_only_when_configured_and_mints_stable_gateway_credentials() {
+    for bind in [None, Some("127.0.0.1:0".parse().unwrap())] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        config.core_bind = bind;
+        let core = Core::start(config, |_| {}).await.unwrap();
+        assert_eq!(core.network_address().is_some(), bind.is_some());
+        let credential = core.gateway_credential("remote").unwrap();
+        assert_eq!(core.gateway_credential("remote").unwrap(), credential);
+        core.revoke_gateway("remote").unwrap();
+        assert!(core.gateway_credential("remote").is_err());
+        core.stop(|| {}).await.unwrap();
     }
 }
 

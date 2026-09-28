@@ -6,16 +6,18 @@
 //! sooner. Rust clients multiplexing many independently-consumed streams on one connection should still raise h2's
 //! `data_frame_budget` or lower their stream window, since a stalled stream's small frames can exceed the budget.
 
-use super::{MESSAGE_BYTES, errors};
+use super::{
+    MESSAGE_BYTES,
+    auth::{hex, hmac},
+    errors,
+};
 use chunk_backend::RequestCharge;
 use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, entry::State, error::Code};
 use chunk_service::same_secret;
 use chunk_store::Revision;
 use prost::Message;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    fmt::Write,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, ready},
@@ -78,14 +80,7 @@ impl StreamKey {
             message.extend_from_slice(&(field.len() as u64).to_be_bytes());
             message.extend_from_slice(field);
         }
-        let mut block = [0; 64];
-        block[..32].copy_from_slice(&self.0);
-        let inner = Sha256::new().chain_update(block.map(|byte| byte ^ 0x36)).chain_update(&message).finalize();
-        let mac = Sha256::new().chain_update(block.map(|byte| byte ^ 0x5c)).chain_update(inner).finalize();
-        mac.iter().fold(String::with_capacity(64), |mut id, byte| {
-            let _ = write!(id, "{byte:02x}");
-            id
-        })
+        hex(&hmac(&self.0, &message))
     }
 }
 

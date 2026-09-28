@@ -127,6 +127,7 @@ async fn reopen(fixture: &Fixture) -> io::Result<()> {
         system: fixture.backend.system(),
         connection: fixture.directory.path().join("control.json"),
         listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        network: None,
         control: chunk_control::Config { environment: "test".into() },
         host: Arc::new(Host),
         fresh: false,

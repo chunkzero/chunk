@@ -53,7 +53,7 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
 
 impl Gateway {
     /// Sends the first update, then one for each control commit, until the client leaves, core stops, the credential
-    /// lapses or a newer stream supersedes this one.
+    /// lapses, as when it's revoked, or a newer stream supersedes this one.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         let Self { mut topic, first, control, mut positions, grant, superseded } = self;
         if !send(&grant, &sender, first) {
@@ -65,6 +65,7 @@ impl Gateway {
                 () = superseded.cancelled() => {
                     return sender.fail(errors::error(Code::Stopped, "a newer stream for this gateway superseded this one"));
                 }
+                error = grant.lapsed() => return sender.fail(error),
                 () = sender.closed() => return,
                 () = changed(&mut positions) => {}
             }
