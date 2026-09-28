@@ -76,20 +76,20 @@ fn signals() -> std::io::Result<mpsc::UnboundedReceiver<Signal>> {
 }
 
 /// Fetches and starts the release core names for this host, and returns the JVM's exit code. SIGTERM or SIGINT before
-/// the JVM starts stops the runner with 128 plus the signal's number.
+/// the JVM starts stops the runner cleanly.
 pub(crate) async fn run(config: Config, mut signals: mpsc::UnboundedReceiver<Signal>) -> Result<i32, Failure> {
     let mut jvm = tokio::select! {
         jvm = prepare(&config) => jvm?,
-        signal = stopped(&mut signals) => return Ok(128 + signal.as_raw()),
+        () = stopped(&mut signals) => return Ok(0),
     };
     supervise::run(&mut jvm.command, &mut signals, config.stop_grace).await
 }
 
 /// The first SIGTERM or SIGINT.
-async fn stopped(signals: &mut mpsc::UnboundedReceiver<Signal>) -> Signal {
+async fn stopped(signals: &mut mpsc::UnboundedReceiver<Signal>) {
     loop {
         match signals.recv().await {
-            Some(signal) if signal != Signal::QUIT => return signal,
+            Some(signal) if signal != Signal::QUIT => return,
             Some(_) => {}
             None => std::future::pending().await,
         }
@@ -106,7 +106,7 @@ async fn prepare(config: &Config) -> Result<launch::Jvm, Failure> {
     let boot = uuid::Uuid::new_v4().to_string();
     let launch = core.launch(&boot).await?;
     cross_check(config, &launch)?;
-    tracing::info!(release = %launch.release_id, app = %launch.app, profile = %launch.profile, "core named the launch");
+    tracing::info!(host = %config.host, release = %launch.release_id, app = %launch.app, profile = %launch.profile, "core named the launch");
     let directory = cache.directory(&launch.release_id)?;
     let release = if let Some(release) = cache::cached(&directory, &launch.release_id)? {
         release

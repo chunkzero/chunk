@@ -57,12 +57,8 @@ pub(crate) fn prepare(
         .arg(jar)
         .current_dir(working.path())
         .env("CHUNK_PROCESS_TOKEN", &config.credential)
-        .env("CHUNK_ENVIRONMENT", &config.environment)
         .env("CHUNK_DEPLOYMENT", &launch.deployment)
         .env("CHUNK_CORE_ENDPOINT", &config.endpoint)
-        // The endpoint's older name, for runtime JARs that predate `CHUNK_CORE_ENDPOINT`.
-        .env("CHUNK_CONTROL_ENDPOINT", &config.endpoint)
-        .env("CHUNK_INSTANCE_ID", &config.host)
         .env("CHUNK_PROCESS_ID", &launch.process_id)
         .env("CHUNK_PROCESS_GENERATION", launch.generation.to_string())
         .env("CHUNK_MACHINE_PROFILE", &launch.profile)

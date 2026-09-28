@@ -184,7 +184,6 @@ impl Machine {
             endpoint: endpoint.into(),
             core: endpoint.strip_prefix("http://").unwrap().parse().unwrap(),
             credential: CREDENTIAL.into(),
-            environment: "env".into(),
             host: "host-1".into(),
             cache: self.path("cache"),
             player_address: None,
@@ -244,8 +243,6 @@ async fn a_runner_retries_an_unavailable_core_then_starts_the_verified_release()
         ("CHUNK_APP_ID", "lobby"),
         ("CHUNK_ARTIFACT_DIGEST", &format!("{:x}", Sha256::digest(fs::read(jar).unwrap()))),
         ("CHUNK_PLAYER_ADDRESS", "127.0.0.1"),
-        ("CHUNK_ENVIRONMENT", "env"),
-        ("CHUNK_INSTANCE_ID", "host-1"),
     ] {
         assert_eq!(env.get(name), Some(&value), "{name}");
     }

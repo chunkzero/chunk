@@ -27,20 +27,19 @@ under `/tmp`. The heap is the lower of the cgroup v2 `memory.max`, the machine's
 memory, less 200 MiB and a tenth of that memory for everything outside the heap. The JVM gets the environment
 `RuntimeEnvironment` reads: `CHUNK_PROCESS_TOKEN` (the machine credential), `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`,
 `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST` and
-`CHUNK_PLAYER_ADDRESS`. It also gets `CHUNK_ENVIRONMENT` and `CHUNK_INSTANCE_ID` (the host).
+`CHUNK_PLAYER_ADDRESS`.
 
 ## Exit codes
 
-| Code         | Meaning                                                                                       |
-| ------------ | --------------------------------------------------------------------------------------------- |
-| 0            | The JVM exited cleanly                                                                        |
-| Java's code  | The JVM's own exit code, or 128 plus the signal that ended it (137 after the grace's SIGKILL) |
-| 128 + signal | SIGTERM or SIGINT arrived before the JVM started                                              |
-| 64           | Bad environment, or too little memory for a heap                                              |
-| 65           | The archive, the cached release or the app JAR failed verification                            |
-| 69           | Core stayed unreachable for 2 minutes, or failed the request                                  |
-| 74           | A local I/O error, such as an unwritable cache                                                |
-| 77           | Core rejected the credential or refused the boot; permanent, so don't restart                 |
-| 78           | The image's Java is older than the release's, or can't be run                                 |
+| Code        | Meaning                                                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| 0           | The JVM exited cleanly, or stopped on a forwarded SIGTERM or SIGINT, or one arrived before it started |
+| Java's code | The JVM's own exit code, or 128 plus the signal that ended it (137 after the grace's SIGKILL)         |
+| 64          | Bad environment, or too little memory for a heap                                                      |
+| 65          | The archive, the cached release or the app JAR failed verification                                    |
+| 69          | Core stayed unreachable for 2 minutes, or failed the request                                          |
+| 74          | A local I/O error, such as an unwritable cache                                                        |
+| 77          | Core rejected the credential or refused the boot; permanent, so don't restart                         |
+| 78          | The image's Java is older than the release's, or can't be run                                         |
 
 Any exit other than the JVM's prints one JSON line on stderr: `{"level":"error","code":<code>,"message":"..."}`.

@@ -13,7 +13,6 @@ pub(crate) struct Config {
     pub core: SocketAddr,
     /// The machine credential core minted for this host.
     pub credential: String,
-    pub environment: String,
     /// The host the credential names.
     pub host: String,
     pub cache: PathBuf,
@@ -74,7 +73,6 @@ impl Config {
             endpoint,
             core,
             credential,
-            environment,
             host,
             cache: var("CHUNK_CACHE").unwrap_or_else(|| "/var/cache/chunk".into()).into(),
             player_address,

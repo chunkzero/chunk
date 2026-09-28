@@ -36,6 +36,15 @@ async fn signals_are_forwarded_and_the_jvms_exit_code_passes_through() {
 }
 
 #[tokio::test]
+async fn a_jvm_that_the_forwarded_stop_ends_exits_cleanly() {
+    let (sender, mut signals) = mpsc::unbounded_channel();
+    let mut command = java("exec sleep 30");
+    let supervised = tokio::spawn(async move { run(&mut command, &mut signals, Duration::from_secs(30)).await });
+    sender.send(Signal::TERM).unwrap();
+    assert_eq!(supervised.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn a_jvm_that_outlives_its_stop_grace_is_killed() {
     let directory = tempfile::tempdir().unwrap();
     let ready = directory.path().join("ready");
