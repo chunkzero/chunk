@@ -2,9 +2,9 @@
 
 use std::io;
 
-use chunk_proto::v1::{ClaimRequest, Identity, SessionDemand};
+use chunk_proto::sync::v1::{PlayerIdentity, SessionDemand};
 
-use super::{Assignment, ClaimGuard, activate, arrive, claim};
+use super::{Assignment, Claim, ClaimGuard, activate, arrive, claim};
 use crate::{PlatformTarget, Retarget, server::platform::Platform};
 
 /// Claims a login of player `uuid` into `demand` through `target` as a managed connection does, activates it, waits
@@ -36,13 +36,12 @@ async fn arrived(
     username: &str,
     demand: SessionDemand,
 ) -> io::Result<(ClaimGuard, Assignment)> {
-    let login = ClaimRequest {
+    let login = Claim {
         operation_id: uuid::Uuid::new_v4().to_string(),
-        proxy_id: platform.proxy_id.clone(),
         connection_id: platform.connection_id(),
-        identity: Some(Identity { uuid: uuid.into(), username: username.into(), properties: vec![] }),
-        demand: Some(demand),
-        ..ClaimRequest::default()
+        player: PlayerIdentity { uuid: uuid.into(), username: username.into(), properties: vec![] },
+        demand,
+        ..Claim::default()
     };
     let guard = ClaimGuard { platform: platform.clone(), claim: login, armed: true, failure: None };
     let assignment = claim(&guard).await?.ok_or_else(|| io::Error::other("core asked to route the login again"))?;

@@ -1,16 +1,16 @@
 use std::{io, sync::Arc};
 
 use chunk_contract::{DomainManifest, HookEvent};
-use chunk_proto::{sync::v1::DepartResult, v1::ClaimRequest};
+use chunk_proto::sync::v1::DepartResult;
 use tokio_util::sync::CancellationToken;
 
-use super::{Platform, RPC_TIMEOUT, ancestors, domain, invalid_data, payload};
+use super::{Claim, Platform, RPC_TIMEOUT, ancestors, domain, payload};
 
 /// One socket's captured domain and claim.
 pub(in crate::server) struct Lifecycle {
     platform: Platform,
     arrived: Option<Arrival>,
-    cleanup_claim: Option<ClaimRequest>,
+    cleanup_claim: Option<Claim>,
     connection: CancellationToken,
     session: CancellationToken,
 }
@@ -18,7 +18,7 @@ pub(in crate::server) struct Lifecycle {
 struct Arrival {
     manifest: Arc<DomainManifest>,
     domain: String,
-    claim: ClaimRequest,
+    claim: Claim,
 }
 
 impl Lifecycle {
@@ -32,18 +32,17 @@ impl Lifecycle {
         }
     }
 
-    pub(in crate::server) fn cutover(&mut self, claim: &ClaimRequest) {
+    pub(in crate::server) fn cutover(&mut self, claim: &Claim) {
         self.session.cancel();
         self.session = CancellationToken::new();
         self.cleanup_claim = Some(claim.clone());
     }
 
-    pub(in crate::server) fn arrived(&mut self, claim: &ClaimRequest) -> io::Result<()> {
+    pub(in crate::server) fn arrived(&mut self, claim: &Claim) -> io::Result<()> {
         let Some(Some(manifest)) = self.platform.manifest.get() else {
             return Ok(());
         };
-        let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing arrived destination"))?;
-        let domain = domain(manifest, demand)?.to_owned();
+        let domain = domain(manifest, &claim.demand)?.to_owned();
         let events = transition(self.arrived.as_ref().map(|arrival| arrival.domain.as_str()), &domain);
         let mut notifications = Vec::new();
         for (event, scope) in events {
@@ -125,7 +124,7 @@ fn transition(previous: Option<&str>, next: &str) -> Vec<(HookEvent, String)> {
         .collect()
 }
 
-type Notification = ((HookEvent, String), ClaimRequest);
+type Notification = ((HookEvent, String), Claim);
 
 impl Platform {
     /// Runs the hooks of `notifications` in order, naming each one's player as the caller while `held`, when this
@@ -140,14 +139,12 @@ impl Platform {
     ) {
         let mut calls = Vec::new();
         for ((event, scope), claim) in notifications {
-            let Ok(mut payload) = payload(&claim) else {
-                continue;
-            };
+            let mut payload = payload(&claim);
             payload["domain"] = scope.clone().into();
             if event == HookEvent::PlayerDisconnect {
                 payload["reason"] = "connection closed".into();
             }
-            let player = claim.identity.as_ref().filter(|_| held).map(|identity| identity.uuid.clone());
+            let player = held.then(|| claim.player.uuid.clone());
             for (id, hook) in &manifest.hooks {
                 if hook.event == event && hook.domain == scope {
                     calls.push((id.clone(), event, payload.clone(), player.clone(), hook.follow_player));

@@ -1,12 +1,10 @@
 use std::io;
 
-use chunk_proto::{
-    sync::v1::ClaimPhase,
-    v1::{ClaimIdentity, ClaimRequest},
-};
+use chunk_proto::sync::v1::ClaimPhase;
 use tokio_util::sync::CancellationToken;
 
 use crate::server::{
+    claim::{Claim, ClaimIdentity},
     platform::{Platform, RPC_TIMEOUT},
     transport::invalid_data,
 };
@@ -14,7 +12,7 @@ use crate::server::{
 /// The claim a connection's commands are bound to, from binding until the next configuration.
 #[derive(Clone)]
 pub(in crate::server::managed) struct Origin {
-    pub claim: ClaimRequest,
+    pub claim: Claim,
     pub identity: ClaimIdentity,
     /// Names this binding.
     pub id: String,
@@ -25,16 +23,15 @@ pub(in crate::server::managed) struct Origin {
     pub cancellation: CancellationToken,
 }
 impl Origin {
-    pub fn new(claim: &ClaimRequest, identity: &ClaimIdentity, domain: String) -> io::Result<Self> {
-        let player = claim.identity.as_ref().ok_or_else(|| invalid_data("missing command player"))?;
-        Ok(Self {
+    pub fn new(claim: &Claim, identity: &ClaimIdentity, domain: String) -> Self {
+        Self {
             claim: claim.clone(),
             identity: identity.clone(),
             id: uuid::Uuid::new_v4().to_string(),
-            player: player.uuid.clone(),
+            player: claim.player.uuid.clone(),
             domain,
             cancellation: CancellationToken::new(),
-        })
+        }
     }
     /// Confirms from the claim view that this scope's claim is still arrived under the same identity.
     pub async fn check(&self, platform: &Platform) -> io::Result<()> {

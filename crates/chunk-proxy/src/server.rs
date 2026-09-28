@@ -1,4 +1,5 @@
 mod authentication;
+mod claim;
 mod configuration;
 mod connection;
 mod gameplay;

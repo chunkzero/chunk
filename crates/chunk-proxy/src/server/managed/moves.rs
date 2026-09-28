@@ -1,9 +1,6 @@
-use super::{Assignment, ClaimGuard, ClaimIdentity, ClaimRequest, Platform, WAIT_TIMEOUT, claim, invalid_data};
+use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, WAIT_TIMEOUT, claim, invalid_data};
 use crate::server::platform::{RPC_TIMEOUT, failure};
-use chunk_proto::{
-    sync::v1::{Position, error::Code},
-    v1::SessionDemand,
-};
+use chunk_proto::sync::v1::{Position, error::Code};
 use std::{io, time::Duration};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 
@@ -41,13 +38,9 @@ pub(super) async fn next_move(
         });
         let pending = pending.await?;
         let demand = pending.destination.ok_or_else(|| invalid_data("move without destination"))?;
-        let claim = ClaimRequest {
+        let claim = Claim {
             operation_id: pending.operation_id,
-            demand: Some(SessionDemand {
-                key: demand.key,
-                session_type: demand.session_type,
-                machine_profile: demand.machine_profile,
-            }),
+            demand,
             source: Some(identity.clone()),
             ..source.claim.clone()
         };
@@ -130,7 +123,7 @@ pub(super) fn rpc_error(error: &io::Error) -> Option<&tonic::Status> {
 }
 
 /// Confirms from the claim view that `destination` is still the move pending from its source.
-pub(super) async fn check_move(platform: &Platform, destination: &ClaimRequest) -> io::Result<()> {
+pub(super) async fn check_move(platform: &Platform, destination: &Claim) -> io::Result<()> {
     let source = destination.source.as_ref().ok_or_else(|| invalid_data("move without source"))?;
     let pending = platform.claims(|view| {
         let pending = view.claim(source)?.pending_move.as_ref();
