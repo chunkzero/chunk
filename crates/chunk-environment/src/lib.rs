@@ -6,7 +6,7 @@ mod managed;
 mod services;
 
 pub use self::core::{Core, CoreConfig};
-pub use gateway::{Gateway, GatewayConfig, PlatformTarget};
+pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
 pub use managed::ManagementConfig;
 pub use services::{Service, Services};
 
@@ -17,38 +17,51 @@ use tokio_util::sync::CancellationToken;
 
 const STARTUP: Duration = Duration::from_secs(30);
 
-pub struct Config {
-    pub services: Services,
-    pub core: CoreConfig,
-    pub gateway: GatewayConfig,
-    /// Set when the management service deploys the environment; otherwise core serves its bundle.
-    pub management: Option<ManagementConfig>,
+#[expect(clippy::large_enum_variant, reason = "a process reads its configuration once")]
+pub enum Config {
+    /// Core, with the in-process gateway when `gateway` is set.
+    Core {
+        core: CoreConfig,
+        gateway: Option<GatewayConfig>,
+        /// Set when the management service deploys the environment; otherwise core serves its bundle.
+        management: Option<ManagementConfig>,
+    },
+    /// The gateway alone, joined to core on another machine.
+    Gateway { gateway: GatewayConfig, core: RemoteCore },
 }
 
 impl Config {
-    /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
-    /// `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND`, `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`), and the gateway's
-    /// `CHUNK_BIND`, `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With
+    /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
+    /// `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With core, it also reads `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
+    /// `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`). With
     /// `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it
     /// serves `CHUNK_BUNDLE`. Connection records go to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`.
+    /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
     /// Reports missing or invalid variables.
     pub fn from_env() -> io::Result<Self> {
         let services: Services =
             optional::<String>("CHUNK_SERVICES")?.map_or_else(|| Ok(Services::default()), |s| s.parse())?;
-        if !services.contains(Service::Core) {
-            return Err(gateway_only());
-        }
-        let state: std::path::PathBuf = required("CHUNK_STATE")?;
-        let management = match optional("CHUNK_MANAGEMENT_URL")? {
-            Some(url) => Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")? }),
-            None => None,
-        };
         let environment = match optional("CHUNK_ENVIRONMENT_ID")? {
             Some(environment) => environment,
             None => {
                 optional("CHUNK_ENVIRONMENT")?.ok_or_else(|| io::Error::other("CHUNK_ENVIRONMENT_ID is required"))?
             }
+        };
+        let mut gateway = GatewayConfig::new(optional("CHUNK_BIND")?.unwrap_or(([0, 0, 0, 0], 25565).into()));
+        gateway.motd = optional("CHUNK_MOTD")?.unwrap_or_else(|| "chunk".into());
+        if let Some(max_connections) = optional("CHUNK_MAX_CONNECTIONS")? {
+            gateway.max_connections = max_connections;
+        }
+        if !services.contains(Service::Core) {
+            let endpoint = required("CHUNK_CORE_ENDPOINT")?;
+            let credential = required("CHUNK_GATEWAY_CREDENTIAL")?;
+            return Ok(Self::Gateway { gateway, core: RemoteCore { endpoint, credential, environment } });
+        }
+        let state: std::path::PathBuf = required("CHUNK_STATE")?;
+        let management = match optional("CHUNK_MANAGEMENT_URL")? {
+            Some(url) => Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")? }),
+            None => None,
         };
         let core = CoreConfig {
             bundle: if management.is_some() { None } else { Some(required("CHUNK_BUNDLE")?) },
@@ -66,34 +79,35 @@ impl Config {
             environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,
         };
-        let mut gateway = GatewayConfig::new(optional("CHUNK_BIND")?.unwrap_or(([0, 0, 0, 0], 25565).into()));
-        gateway.motd = optional("CHUNK_MOTD")?.unwrap_or_else(|| "chunk".into());
-        if let Some(max_connections) = optional("CHUNK_MAX_CONNECTIONS")? {
-            gateway.max_connections = max_connections;
-        }
-        Ok(Self { services, core, gateway, management })
+        let gateway = services.contains(Service::Gateway).then_some(gateway);
+        Ok(Self::Core { core, gateway, management })
     }
 }
 
-fn gateway_only() -> io::Error {
-    io::Error::other("CHUNK_SERVICES=gateway is not supported yet; run core,gateway or core")
-}
-
-/// Runs the selected services until `stop` or until one of them stops, then stops the gateway before core. Under
-/// management, the gateway starts with the first deployment, and a core that management fences stops.
+/// Runs the configured services until `stop` or until one of them stops. With core, the gateway stops before core;
+/// under management, the gateway starts with the first deployment, and a core that management fences stops. The
+/// gateway alone follows core's current deployment and stops once core revokes its credential.
 /// # Errors
-/// Reports a layout without core, which is not supported yet, startup errors, a service that stopped on its own, a
-/// fenced core, and shutdown errors.
+/// Reports startup errors, a service that stopped on its own, a fenced core, a gateway credential core rejects, and
+/// shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
-    if !config.services.contains(Service::Core) {
-        return Err(gateway_only());
+    match config {
+        Config::Core { core, gateway, management } => run_core(core, gateway, management, stop).await,
+        Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop).await,
     }
-    let environment = config.core.environment.clone();
-    let state = config.core.state.clone();
-    let core = Core::start(config.core, |_| {}).await?;
+}
+
+async fn run_core(
+    config: CoreConfig,
+    gateway_config: Option<GatewayConfig>,
+    management: Option<ManagementConfig>,
+    stop: CancellationToken,
+) -> io::Result<()> {
+    let environment = config.environment.clone();
+    let state = config.state.clone();
+    let core = Core::start(config, |_| {}).await?;
     let gateway = OnceLock::new();
-    let gateway_config = config.services.contains(Service::Gateway).then_some(config.gateway);
-    let managed = if let Some(management) = config.management {
+    let managed = if let Some(management) = management {
         Some(managed::Managed::new(management, environment, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {

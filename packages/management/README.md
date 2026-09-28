@@ -75,8 +75,9 @@ with `TEST_MINIO_URL=http://127.0.0.1:59000`.
 With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
 machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
 for accepted wakes and due wake alarms. Every machine runs the environment image, and `CHUNK_SERVICES` selects what it
-runs: `core,gateway` on the core machine, and `jvm` or `gateway` on an extra machine. The environment binary runs
-neither on its own yet, so extra machines exit at startup.
+runs: `core,gateway` on the core machine, and `jvm` or `gateway` on an extra machine. A `gateway` machine joins core
+with its credential and routes players to core's current deployment. The environment binary doesn't run `jvm` yet, so
+JVM machines exit at startup.
 
 Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN`, and `CHUNK_CORE_BIND` set to
 `[::]:$CHUNK_CORE_PORT`, so it accepts extra machines on every interface; core drops peers without a private address.

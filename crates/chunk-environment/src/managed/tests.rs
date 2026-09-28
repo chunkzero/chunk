@@ -1,4 +1,4 @@
-use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig, Services};
+use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig};
 use bytes::Bytes;
 use chunk_contract::BackendConnection;
 use chunk_management::v1::{
@@ -349,10 +349,9 @@ impl Harness {
     }
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let config = Config {
-            services: Services::default(),
+        let config = Config::Core {
             core: self.core(),
-            gateway: GatewayConfig::new("127.0.0.1:0".parse().unwrap()),
+            gateway: Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
             management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
         };
         let stop = CancellationToken::new();

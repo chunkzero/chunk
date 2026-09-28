@@ -5,38 +5,96 @@ use chunk_proto::{
     v1::backend_client::BackendClient,
 };
 use prost::Message;
-use std::{collections::BTreeMap, net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path};
 
-fn config(directory: &Path, bind: SocketAddr) -> Config {
-    let bundle = chunk_contract::Deployment {
-        contracts: chunk_contract::Contracts::default(),
-        contract_version: 2,
-        runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
-        id: "test".into(),
-        source: "export const value=1;".into(),
-        tables: BTreeMap::new(),
-        functions: BTreeMap::new(),
-    };
+/// A deployment whose `shared/proxy/status` hook answers with `motd`.
+fn bundle(id: &str, motd: &str) -> chunk_contract::Deployment {
+    let string = serde_json::json!({"schema": {"type": "string"}});
+    let integer = serde_json::json!({"schema": {"type": "integer"}});
+    serde_json::from_value(serde_json::json!({
+        "contract_version": 2, "runtime_profile": "transactional_v1", "id": id, "tables": {},
+        "source": format!("export function status() {{ return {{motd: {motd:?}, online: 0, max: 8}}; }}"),
+        "functions": {"shared/proxy/status": {
+            "kind": "query", "visibility": "public", "export": "status",
+            "arguments": {"type": "object", "fields": {"host": string}},
+            "result": {"type": "object", "fields": {"motd": string, "online": integer, "max": integer}}
+        }}
+    }))
+    .unwrap()
+}
+
+/// A release of `deployment` in environment `test`.
+fn release(deployment: &str) -> chunk_control::Release {
+    serde_json::from_value(serde_json::json!({
+        "apps": {"lobby": {"id": "lobby", "jar": "lobby.jar", "sha256": "digest", "java_version": 25,
+            "sessions": {"default": {"machine_profile": "small", "capacity": 8}}}},
+        "deployment": {"environment": "test", "deployment": deployment}, "artifact_digest": "digest",
+        "profiles": {"small": {"memory_mib": 512, "max_sessions": 2}},
+        "session_types": {"lobby/default": {"app": "lobby", "machine_profile": "small", "capacity": 8}},
+        "max_processes": 1, "idle_node_timeout_seconds": 0
+    }))
+    .unwrap()
+}
+
+fn core_config(directory: &Path) -> CoreConfig {
     let path = directory.join("bundle.json");
-    std::fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&bundle("test", "Serving test")).unwrap()).unwrap();
     let state = directory.join("state");
-    Config {
-        services: Services::default(),
-        core: CoreConfig {
-            bundle: Some(path),
-            environment: "test".into(),
-            backend_record: state.join("backend.json"),
-            control_record: state.join("control.json"),
-            state,
-            backend_bind: "127.0.0.1:0".parse().unwrap(),
-            control_bind: "127.0.0.1:0".parse().unwrap(),
-            core_bind: None,
-            private_address: None,
-            environment_token: None,
-            fresh: false,
-        },
-        gateway: GatewayConfig::new(bind),
-        management: None,
+    CoreConfig {
+        bundle: Some(path),
+        environment: "test".into(),
+        backend_record: state.join("backend.json"),
+        control_record: state.join("control.json"),
+        state,
+        backend_bind: "127.0.0.1:0".parse().unwrap(),
+        control_bind: "127.0.0.1:0".parse().unwrap(),
+        core_bind: None,
+        private_address: None,
+        environment_token: None,
+        fresh: false,
+    }
+}
+
+fn all_in_one(core: CoreConfig, bind: SocketAddr) -> Config {
+    Config::Core { core, gateway: Some(GatewayConfig::new(bind)), management: None }
+}
+
+/// A loopback address nothing listens on.
+fn free_address() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+}
+
+/// The server list message a status ping to `address` returns, or `None` while nothing listens there.
+async fn motd(address: SocketAddr) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+    // A handshake for protocol 776 that asks for status, then the status request.
+    let mut handshake = vec![0x00, 0x88, 0x06, 9];
+    handshake.extend_from_slice(b"localhost");
+    handshake.extend_from_slice(&address.port().to_be_bytes());
+    handshake.push(0x01);
+    let mut packets = vec![u8::try_from(handshake.len()).unwrap()];
+    packets.extend(handshake);
+    packets.extend([0x01, 0x00]);
+    stream.write_all(&packets).await.ok()?;
+    stream.shutdown().await.ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.ok()?;
+    let response = String::from_utf8_lossy(&response);
+    let status: serde_json::Value = serde_json::from_str(&response[response.find('{')?..]).ok()?;
+    status["description"]["text"].as_str().map(str::to_owned)
+}
+
+/// Waits until a status ping to `address` returns `expected`.
+async fn until_motd(address: SocketAddr, expected: Option<&str>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let motd = motd(address).await;
+        if motd.as_deref() == expected {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the gateway answers {motd:?}, not {expected:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -46,8 +104,8 @@ fn authorized<T>(message: T, token: &str) -> tonic::Request<T> {
     request
 }
 
-#[tokio::test]
-async fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
+#[test]
+fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
     assert_eq!("gateway, core".parse::<Services>().unwrap(), Services::default());
     assert_eq!("core,gateway,exec".parse::<Services>().unwrap(), Services::default());
     let core = "core,exec".parse::<Services>().unwrap();
@@ -55,12 +113,8 @@ async fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
     for rejected in ["", "exec", "core,jvm", "core,,gateway"] {
         assert!(rejected.parse::<Services>().is_err(), "{rejected:?} was accepted");
     }
-
-    let directory = tempfile::tempdir().unwrap();
-    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap());
-    config.services = "gateway".parse().unwrap();
-    let error = run(config, CancellationToken::new()).await.unwrap_err();
-    assert!(error.to_string().contains("not supported yet"), "{error}");
+    let gateway = "gateway".parse::<Services>().unwrap();
+    assert!(gateway.contains(Service::Gateway) && !gateway.contains(Service::Core));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -68,8 +122,9 @@ async fn failed_gateway_bind_releases_core() {
     let directory = tempfile::tempdir().unwrap();
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     for _ in 0..2 {
-        let config = config(directory.path(), occupied.local_addr().unwrap());
-        let (backend, control) = (config.core.backend_record.clone(), config.core.control_record.clone());
+        let core = core_config(directory.path());
+        let (backend, control) = (core.backend_record.clone(), core.control_record.clone());
+        let config = all_in_one(core, occupied.local_addr().unwrap());
         let error = tokio::time::timeout(Duration::from_secs(30), run(config, CancellationToken::new()))
             .await
             .unwrap()
@@ -84,7 +139,7 @@ async fn failed_gateway_bind_releases_core() {
 async fn core_binds_its_network_listener_only_when_configured_and_mints_stable_gateway_credentials() {
     for bind in [None, Some("127.0.0.1:0".parse().unwrap())] {
         let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        let mut config = core_config(directory.path());
         config.core_bind = bind;
         let core = Core::start(config, |_| {}).await.unwrap();
         assert_eq!(core.network_address().is_some(), bind.is_some());
@@ -100,7 +155,7 @@ async fn core_binds_its_network_listener_only_when_configured_and_mints_stable_g
 async fn gateway_credentials_and_their_revocation_survive_a_restart() {
     let directory = tempfile::tempdir().unwrap();
     let start = || {
-        let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        let mut config = core_config(directory.path());
         config.core_bind = Some("127.0.0.1:0".parse().unwrap());
         Core::start(config, |_| {})
     };
@@ -123,12 +178,57 @@ async fn gateway_credentials_and_their_revocation_survive_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_is_revoked() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = core_config(directory.path());
+    config.core_bind = Some("127.0.0.1:0".parse().unwrap());
+    let core = Core::start(config, |_| {}).await.unwrap();
+    let credential = core.gateway_credential("remote").unwrap();
+    let remote = |environment: &str| RemoteCore {
+        endpoint: format!("http://{}", core.network_address().unwrap()),
+        credential: credential.clone(),
+        environment: environment.into(),
+    };
+    assert_eq!(remote("test").gateway().unwrap().id, "remote");
+    let foreign = Config::Gateway { gateway: GatewayConfig::new(free_address()), core: remote("other") };
+    let error = run(foreign, CancellationToken::new()).await.unwrap_err();
+    assert!(error.to_string().contains("belongs to environment \"test\""), "{error}");
+
+    // Core grants the credential its own gateway's topic only.
+    let mut client = CoreClient::connect(format!("http://{}", core.network_address().unwrap())).await.unwrap();
+    for (id, granted) in [("remote", true), ("other", false)] {
+        let topic = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+        let mut updates = client.subscribe(authorized(topic, &credential)).await.unwrap().into_inner();
+        assert_eq!(updates.message().await.unwrap().unwrap().error.is_none(), granted);
+    }
+
+    let address = free_address();
+    let stop = CancellationToken::new();
+    let machine = Config::Gateway { gateway: GatewayConfig::new(address), core: remote("test") };
+    let running = tokio::spawn(run(machine, stop.clone()));
+    // No release is current, so the gateway takes no logins yet.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(motd(address).await, None);
+    core.control().unwrap().activate_release(release("test")).unwrap();
+    until_motd(address, Some("Serving test")).await;
+    core.deploy(bundle("next", "Serving next")).await.unwrap();
+    core.control().unwrap().activate_release(release("next")).unwrap();
+    until_motd(address, Some("Serving next")).await;
+
+    core.revoke_gateway("remote").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    assert!(!stop.is_cancelled());
+    assert_eq!(motd(address).await, None);
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_in_one_serves_backend_and_control_until_stopped() {
     let directory = tempfile::tempdir().unwrap();
-    let config = config(directory.path(), "127.0.0.1:0".parse().unwrap());
-    let (backend_record, control_record) = (config.core.backend_record.clone(), config.core.control_record.clone());
+    let core = core_config(directory.path());
+    let (backend_record, control_record) = (core.backend_record.clone(), core.control_record.clone());
     let stop = CancellationToken::new();
-    let running = tokio::spawn(run(config, stop.clone()));
+    let running = tokio::spawn(run(all_in_one(core, "127.0.0.1:0".parse().unwrap()), stop.clone()));
     tokio::time::timeout(Duration::from_secs(30), async {
         while !control_record.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -159,7 +259,7 @@ async fn a_restarted_core_keeps_its_gateway_id() {
     let directory = tempfile::tempdir().unwrap();
     let mut gateways = Vec::new();
     for _ in 0..2 {
-        let config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        let config = core_config(directory.path());
         let core = Core::start(config, |_| {}).await.unwrap();
         gateways.push(core.target().unwrap().gateway);
         core.stop(|| {}).await.unwrap();
@@ -172,7 +272,7 @@ async fn a_restarted_core_keeps_its_gateway_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopped() {
     let directory = tempfile::tempdir().unwrap();
-    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+    let mut config = core_config(directory.path());
     config.fresh = true;
     let nodes = config.state.join("control").join("nodes");
     std::fs::create_dir_all(&nodes).unwrap();
@@ -199,7 +299,7 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
 async fn a_fresh_start_refuses_a_backend_on_the_address_surviving_jvms_re_attach_at() {
     let directory = tempfile::tempdir().unwrap();
     let previous = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+    let mut config = core_config(directory.path());
     (config.fresh, config.backend_bind) = (true, previous);
     let nodes = config.state.join("control").join("nodes");
     std::fs::create_dir_all(&nodes).unwrap();
@@ -233,7 +333,7 @@ async fn a_fresh_start_stops_a_survivor_without_a_recorded_address_at_the_previo
 #[cfg(target_os = "linux")]
 async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     let directory = tempfile::tempdir().unwrap();
-    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+    let mut config = core_config(directory.path());
     config.fresh = true;
     // The survivor's control served elsewhere; another process holds that address for now.
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

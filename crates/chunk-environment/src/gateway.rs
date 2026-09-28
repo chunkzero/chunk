@@ -1,3 +1,8 @@
+mod remote;
+
+pub use remote::RemoteCore;
+pub(crate) use remote::run as run_remote;
+
 use crate::Running;
 use std::{io, net::SocketAddr, num::NonZeroUsize};
 use tokio_util::sync::CancellationToken;
