@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Connects one immutable app process to core. */
 public final class ChunkProcess implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(ChunkProcess.class.getName());
     private final RuntimeEnvironment environment;
     private final SessionBackend backend;
     private final AtomicLong ticks = new AtomicLong();
@@ -47,6 +48,11 @@ public final class ChunkProcess implements AutoCloseable {
         return shutdown.minimalCompletionStage();
     }
 
+    /**
+     * Waits until shutdown is requested.
+     *
+     * @throws IllegalStateException if core refused the JVM for good
+     */
     public void awaitShutdown() throws InterruptedException {
         try {
             shutdown.get();
@@ -85,6 +91,16 @@ public final class ChunkProcess implements AutoCloseable {
         shutdown.complete(null);
     }
 
+    /** Stops accepting new work and fails the shutdown request, unless one was already made. */
+    private void fail(RuntimeException error) {
+        health.drain();
+        if (shutdown.completeExceptionally(error))
+            LOG.log(
+                    System.Logger.Level.ERROR,
+                    "Core refused the JVM for good; shutting down",
+                    error);
+    }
+
     public boolean isReady() {
         return health.acceptsWork();
     }
@@ -106,7 +122,7 @@ public final class ChunkProcess implements AutoCloseable {
     /**
      * Marks application initialization complete, and waits for core to accept this launch.
      *
-     * @throws IllegalStateException if core refuses the launch
+     * @throws IllegalStateException if core refuses the credential or launch
      */
     public void ready() {
         CoreLink started;
@@ -130,7 +146,8 @@ public final class ChunkProcess implements AutoCloseable {
                                     .build(),
                             state,
                             health::snapshot,
-                            this::requestShutdown);
+                            this::requestShutdown,
+                            this::fail);
             link = started;
         }
         try {

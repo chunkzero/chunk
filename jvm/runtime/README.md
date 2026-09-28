@@ -50,12 +50,16 @@ another machine only at the address it connects from, and one that connects over
 machine's private address.
 
 `ready()` registers the frozen process with core's `chunk:register` only after application initialization, retrying
-while core is unavailable. Core checks that the deployment is active, and a refused registration fails `ready()`. The
+while core is unavailable. Core checks that the deployment is active, and a refused registration or credential fails
+`ready()`. The
 JVM then follows its `jvm/<host>` topic for the sessions, deliveries and session methods to run and whether to stop, and
 reports with `chunk:report` on a channel of its own: everything it holds on each new stream, then what changed, with its
 health at least every three seconds. Core counts a JVM unhealthy once it has reported no health for ten seconds. Health
 carries engine progress recorded by the tick thread, heap use, GC counters, CPU load and session/player counts, so a
 responsive link alone does not establish engine health. A broken or superseded stream registers and subscribes again.
+Once core rejects the JVM's credential (`UNAUTHENTICATED`), which it never accepts again, the JVM stops following core
+and shutdown is requested with that failure: `shutdownRequested()` completes exceptionally and `awaitShutdown()` throws,
+so the process exits non-zero.
 
 `shutdownRequested()` provides a completion stage; `awaitShutdown()` is the blocking main-thread equivalent.
 `requestShutdown()` lets the app stop accepting work and notify its shutdown handler; core's `stop` entry requests it

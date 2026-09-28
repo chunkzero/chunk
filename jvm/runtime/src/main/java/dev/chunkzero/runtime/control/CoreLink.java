@@ -21,6 +21,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
@@ -36,14 +37,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
  * The JVM's link to core. It registers with {@code chunk:register}, follows its {@code jvm/<host>}
  * topic, and reports on each stream with {@code chunk:report}: everything it holds first, then what
  * changed and its health at least every few seconds. Once a stream ends or a call on it fails, it
- * registers and subscribes again. The topic's updates wait in a latest-value slot for the link's
- * own thread, which applies them and makes every call, on a channel of its own.
+ * registers and subscribes again, unless core rejected the JVM's credential, which ends the link
+ * for good. The topic's updates wait in a latest-value slot for the link's own thread, which
+ * applies them and makes every call, on a channel of its own.
  */
 @ApiStatus.Internal
 public final class CoreLink implements AutoCloseable {
@@ -59,14 +62,15 @@ public final class CoreLink implements AutoCloseable {
     private final ProcessState state;
     private final Supplier<JvmHealth> health;
     private final Runnable stop;
+    private final Consumer<RuntimeException> refused;
     private final Map<String, JvmMethodResult> results = new ConcurrentHashMap<>();
     private volatile boolean closed;
     private volatile @Nullable Thread worker;
     private String host = "";
 
     /**
-     * {@code stop} runs once core asks the JVM to stop, or once core refuses its registration for
-     * good.
+     * {@code stop} runs once core asks the JVM to stop, and {@code refused} once core refuses the
+     * JVM's credential or registration for good.
      */
     public CoreLink(
             String endpoint,
@@ -74,11 +78,13 @@ public final class CoreLink implements AutoCloseable {
             JvmRegistration registration,
             ProcessState state,
             Supplier<JvmHealth> health,
-            Runnable stop) {
+            Runnable stop,
+            Consumer<RuntimeException> refused) {
         this.registration = registration;
         this.state = state;
         this.health = health;
         this.stop = stop;
+        this.refused = refused;
         var metadata = new Metadata();
         metadata.put(
                 Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
@@ -92,7 +98,8 @@ public final class CoreLink implements AutoCloseable {
     /**
      * Registers, retrying while core is unavailable, then follows the topic in the background.
      *
-     * @throws IllegalStateException if core refuses the registration or the link closes first
+     * @throws IllegalStateException if core refuses the credential or registration, or the link
+     *     closes first
      */
     public void start() {
         long backoff = MIN_BACKOFF_MILLIS;
@@ -102,7 +109,7 @@ public final class CoreLink implements AutoCloseable {
                 register();
                 break;
             } catch (Refused error) {
-                throw new IllegalStateException("Core refused the registration", error);
+                throw new IllegalStateException("Core refused the JVM", error);
             } catch (RuntimeException error) {
                 pause(backoff);
                 backoff = Math.min(backoff * 2, MAX_BACKOFF_MILLIS);
@@ -147,8 +154,7 @@ public final class CoreLink implements AutoCloseable {
                 registered = false;
                 if (follow()) backoff = MIN_BACKOFF_MILLIS;
             } catch (Refused error) {
-                LOG.log(System.Logger.Level.ERROR, "Core refused the JVM's registration", error);
-                stop.run();
+                refused.accept(error);
                 return;
             } catch (RuntimeException ignored) {
                 // Core is unreachable or the stream broke; register and subscribe again.
@@ -221,6 +227,8 @@ public final class CoreLink implements AutoCloseable {
                 }
                 LockSupport.parkNanos(id == null ? HEALTH_NANOS : healthDue - System.nanoTime());
             }
+            var failure = stream.failure;
+            if (failure != null && rejected(failure)) throw new Refused(failure);
             return reported != null;
         } finally {
             context.cancel(null);
@@ -297,7 +305,17 @@ public final class CoreLink implements AutoCloseable {
     }
 
     private CallResponse call(CallRequest.Builder request) {
-        return calls.withDeadlineAfter(5, TimeUnit.SECONDS).call(request.build());
+        try {
+            return calls.withDeadlineAfter(5, TimeUnit.SECONDS).call(request.build());
+        } catch (StatusRuntimeException error) {
+            if (rejected(error)) throw new Refused(error);
+            throw error;
+        }
+    }
+
+    /** Whether core rejected the JVM's credential, which it never accepts again. */
+    private static boolean rejected(Throwable error) {
+        return Status.fromThrowable(error).getCode() == Status.Code.UNAUTHENTICATED;
     }
 
     /** Waits {@code millis} unless the link closes first; waking the link doesn't cut it short. */
@@ -326,6 +344,7 @@ public final class CoreLink implements AutoCloseable {
         final AtomicReference<Map<String, ByteString>> latest = new AtomicReference<>();
         final Thread owner;
         volatile @Nullable String id;
+        volatile @Nullable Throwable failure;
         volatile boolean ended;
         private final List<Update> parts = new ArrayList<>();
         private Map<String, ByteString> view = Map.of();
@@ -364,6 +383,7 @@ public final class CoreLink implements AutoCloseable {
 
         @Override
         public void onError(Throwable error) {
+            failure = error;
             ended = true;
             LockSupport.unpark(owner);
         }
@@ -375,12 +395,16 @@ public final class CoreLink implements AutoCloseable {
         }
     }
 
-    /** Core refused the JVM's registration, and will again. */
+    /** Core refused the JVM's credential or registration, and will again. */
     private static final class Refused extends RuntimeException {
         private static final long serialVersionUID = 1;
 
         Refused(Error error) {
             super(error.getCode() + ": " + error.getMessage());
+        }
+
+        Refused(Throwable rejection) {
+            super("Core rejected the JVM's credential", rejection);
         }
     }
 }

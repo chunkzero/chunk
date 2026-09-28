@@ -65,7 +65,8 @@ final class FakeCore extends CoreGrpc.CoreImplBase implements AutoCloseable {
                         JvmRegistration.getDefaultInstance(),
                         state,
                         JvmHealth::getDefaultInstance,
-                        () -> {});
+                        () -> {},
+                        error -> {});
         link.set(connected);
         connected.start();
     }
