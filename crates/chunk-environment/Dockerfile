@@ -32,6 +32,6 @@ COPY --from=build /usr/local/bin/chunk-environment /usr/local/bin/chunk-environm
 COPY --from=build --chown=65532:65532 /data /data
 ENV CHUNK_STATE=/data
 VOLUME /data
-# The gateway's player port. Backend and control bind loopback.
+# The gateway's player port. Control binds loopback.
 EXPOSE 25565
 ENTRYPOINT ["/usr/local/bin/chunk-environment"]
