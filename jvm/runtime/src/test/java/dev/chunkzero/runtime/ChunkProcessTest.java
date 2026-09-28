@@ -32,6 +32,7 @@ import io.grpc.stub.StreamObserver;
 
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -127,7 +128,8 @@ class ChunkProcessTest {
                 1,
                 "local",
                 "digest",
-                "app");
+                "app",
+                InetAddress.ofLiteral("127.0.0.1"));
     }
 
     /** Registers the JVM as {@code host} and serves its topic, numbering each stream. */

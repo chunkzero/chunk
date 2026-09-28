@@ -19,7 +19,7 @@ use chunk_proto::sync::v1::{
 };
 use chunk_store::Revision;
 use prost::Message;
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
@@ -35,12 +35,13 @@ pub(crate) use auth::{Gateways, Issuer};
 /// Serves `chunk.sync.v1.Core` beside control, running app functions on `backend`. The in-process gateway presents
 /// the credential `gateways` minted for it, and gateway machines theirs, which an [`Issuer`] for `environment` and
 /// `environment_token` derives. The CLI presents control's credential from a loopback peer, management the operator
-/// credential, and each JVM its process credential.
+/// credential, and each JVM its process credential. JVMs on this machine may serve players at `private_address`.
 pub(crate) fn services(
     backend: Backend,
     gateways: Arc<Gateways>,
     environment: String,
     environment_token: Option<String>,
+    private_address: Option<IpAddr>,
 ) -> chunk_control::server::Services {
     Box::new(move |control, token, stop, operations| {
         let service = SyncService {
@@ -56,6 +57,7 @@ pub(crate) fn services(
             streams: streams::StreamKey::new(),
             fences: streams::Fences::default(),
             runs: Arc::default(),
+            private_address,
             stop,
             operations,
         };
@@ -74,6 +76,8 @@ pub(crate) struct SyncService {
     runs: Arc<runs::Runs>,
     /// The store's epoch, fixed while the backend runs.
     epoch: u64,
+    /// This machine's address on the environment's private network.
+    private_address: Option<IpAddr>,
     /// Ends open streams when control's transport shuts down.
     stop: CancellationToken,
     operations: chunk_control::Operations,

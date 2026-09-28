@@ -15,6 +15,7 @@ use chunk_proto::sync::v1::{
 };
 use chunk_store::Revision;
 use prost::Message;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Clone, Copy)]
 pub(super) enum Method {
@@ -54,6 +55,7 @@ pub(super) async fn call(
                 return Err(errors::invalid("a registration names no stream"));
             }
             let registration: JvmRegistration = decode(&request.arguments)?;
+            check_endpoint(&registration.player_endpoint, principal.peer, service.private_address)?;
             let unknown = |_| errors::error(Code::Contract, "unknown deployment");
             let deployment = DeploymentId::new(&registration.deployment).map_err(unknown)?;
             if let Err(failure) = service.app.backend().check_deployment(deployment).await {
@@ -88,6 +90,58 @@ pub(super) async fn call(
             let recorded = service.control.method_result(&host, &request.stream, &request.operation_id, result);
             recorded.map_err(|failure| errors::operation(&failure))?;
             Ok((None, Vec::new()))
+        }
+    }
+}
+
+/// Requires a player endpoint with a port that gateways may dial: a JVM connecting from another machine names the
+/// address it connects from, and one connecting over loopback runs on core's machine, so it names loopback or that
+/// machine's `private_address`.
+fn check_endpoint(endpoint: &str, peer: Option<SocketAddr>, private_address: Option<IpAddr>) -> Result<(), Error> {
+    let address: SocketAddr = endpoint.parse().map_err(|_| errors::invalid("the player endpoint is not an address"))?;
+    let named = address.ip().to_canonical();
+    let allowed = match peer.map(|peer| peer.ip().to_canonical()) {
+        Some(peer) if peer.is_loopback() => {
+            named.is_loopback() || private_address.is_some_and(|private| private.to_canonical() == named)
+        }
+        Some(peer) => named == peer,
+        None => false,
+    };
+    if !allowed || address.port() == 0 || !chunk_service::net::private(named) {
+        return Err(errors::denied("the player endpoint must be on the JVM's own machine"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jvms_name_their_peer_or_their_machines_addresses() {
+        let private = Some("fdaa::2".parse().unwrap());
+        let loopback = Some("127.0.0.1:4000".parse().unwrap());
+        let remote = Some("[::ffff:10.0.0.3]:4000".parse().unwrap());
+        let remote_v6 = Some("[fdaa::3]:4000".parse().unwrap());
+        let denied = Some(Code::Denied);
+        for (endpoint, peer, expected) in [
+            ("127.0.0.1:25565", loopback, None),
+            ("[::1]:25565", loopback, None),
+            ("[fdaa::2]:25565", loopback, None),
+            ("[fdaa::3]:25565", loopback, denied),
+            ("10.0.0.3:25565", loopback, denied),
+            ("127.0.0.1:0", loopback, denied),
+            ("10.0.0.3:25565", remote, None),
+            ("[fdaa::3]:25565", remote_v6, None),
+            ("[fdaa::4]:25565", remote_v6, denied),
+            ("10.0.0.4:25565", remote, denied),
+            ("127.0.0.1:25565", remote, denied),
+            ("[fdaa::2]:25565", remote, denied),
+            ("127.0.0.1:25565", None, denied),
+            ("http://127.0.0.1:25565", loopback, Some(Code::Invalid)),
+        ] {
+            let code = check_endpoint(endpoint, peer, private).err().map(|error| error.code());
+            assert_eq!(code, expected, "{endpoint} from {peer:?}");
         }
     }
 }

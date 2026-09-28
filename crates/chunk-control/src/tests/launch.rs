@@ -12,6 +12,7 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
             endpoint: "http://127.0.0.1:1".into(),
             token: "unused".into(),
         },
+        private_address: None,
     };
     let distribution = crate::Distribution { directory: fixture.directory.path().into(), java: "unused-java".into() };
     let host = Arc::new(crate::ProcessHost::new(host_config()));

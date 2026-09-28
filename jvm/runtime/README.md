@@ -43,7 +43,11 @@ requirements creates a new release while preserving the executable bytes.
 
 The platform supplies `CHUNK_PROCESS_TOKEN`, `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT` (read as `CHUNK_CONTROL_ENDPOINT`
 when unset), `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`, `CHUNK_ARTIFACT_DIGEST` and
-`CHUNK_APP_ID`. There is no deployment fallback or standalone unbound fixture mode.
+`CHUNK_APP_ID`. There is no deployment fallback or standalone unbound fixture mode. It may also supply
+`CHUNK_PLAYER_ADDRESS`, the IP literal Minestom binds and advertises for players, which defaults to `127.0.0.1`. Startup
+fails unless it is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7). Core accepts a JVM on
+another machine only at the address it connects from, and one that connects over loopback only at loopback or its
+machine's private address.
 
 `ready()` registers the frozen process with core's `chunk:register` only after application initialization, retrying
 while core is unavailable. Core checks that the deployment is active, and a refused registration fails `ready()`. The
@@ -59,10 +63,10 @@ too. The app closes engine resources when shutdown is requested. The host allows
 the owned process if necessary and waits for exit. Player ownership is released only after withdrawal or confirmed
 process exit.
 
-The proxy connects directly to Minestom's loopback Minecraft listener. Single-use `chunk:delivery` capabilities
-authorize native login. There is no per-server Rust process or intermediate TCP relay. Minestom owns configuration,
-socket buffering, player creation and worlds. The current host and engine adapter are local; hosted networking/providers
-require additional implementations. Use `just local` to run the example.
+The proxy connects directly to Minestom's Minecraft listener at `CHUNK_PLAYER_ADDRESS`. Single-use `chunk:delivery`
+capabilities authorize native login. There is no per-server Rust process or intermediate TCP relay. Minestom owns
+configuration, socket buffering, player creation and worlds. The current host and engine adapter are local; hosted
+networking/providers require additional implementations. Use `just local` to run the example.
 
 The `dev.chunkzero.runtime` package retains the public app/session API. Generic process wiring lives in `bootstrap` and
 `control`; Minestom wiring lives in `minestom.internal`. Cross-package implementation APIs are marked

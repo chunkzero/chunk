@@ -91,6 +91,9 @@ pub struct ProcessHostConfig {
     pub directory: std::path::PathBuf,
     /// The environment's backend. Each JVM connects to its release's deployment.
     pub backend: chunk_contract::BackendConnection,
+    /// This machine's address on the environment's private network. When set, each JVM serves players there, so
+    /// gateways on other machines reach it; otherwise it serves them on loopback.
+    pub private_address: Option<std::net::IpAddr>,
 }
 
 /// Where a release's distribution was unpacked, and the Java executable that runs its apps.
