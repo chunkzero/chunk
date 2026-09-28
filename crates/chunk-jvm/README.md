@@ -43,3 +43,14 @@ credential), `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`, `CHUNK_PROCESS_ID`, `CHU
 | 78          | The image's Java is older than the release's, or can't be run                                         |
 
 Any exit other than the JVM's prints one JSON line on stderr: `{"level":"error","code":<code>,"message":"..."}`.
+
+## Image
+
+`just jvm-image` builds `chunk-jvm:25` from `crates/chunk-jvm/Dockerfile`; `just jvm-image <java>` builds on another
+Java major version. The image is `eclipse-temurin:<java>-jre` with the runner as its entrypoint, so the runner is PID 1.
+It runs as uid 65532 and keeps its cache in the `/var/cache/chunk` volume. Started without its environment, it exits 64.
+
+`just jvm-e2e` checks the image end to end with podman. It builds a release of `examples/local` and starts a managed
+core on this machine's LAN address with a fake management service. A claim makes core launch a host whose runner runs in
+`podman run --network host` and whose JVM serves players at that address. Stopping core stops the JVM, and the container
+exits 0. The test removes the `chunk-jvm-e2e-*` containers it started, even when it fails.

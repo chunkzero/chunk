@@ -85,3 +85,19 @@ image:
     version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
     "$engine" build -f crates/chunk-environment/Dockerfile -t "chunk-environment:$version" \
         --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
+
+# Build the remote JVM runner image on a Java `java` runtime with podman or docker, tagged `chunk-jvm:<java>`.
+jvm-image java="25":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=$(command -v podman || command -v docker)
+    version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+    "$engine" build -f crates/chunk-jvm/Dockerfile -t "chunk-jvm:{{ java }}" --build-arg JAVA_VERSION="{{ java }}" \
+        --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
+
+# Run a managed core whose JVM runs in the chunk-jvm image under podman, from a release of the local example.
+jvm-e2e: toolchain (jvm-image "25")
+    rm -rf target/jvm-e2e
+    target/debug/chunk build examples/local --output target/jvm-e2e
+    CHUNK_E2E_IMAGE=chunk-jvm:25 CHUNK_E2E_RELEASE="$(realpath target/jvm-e2e/*.tar.gz)" \
+        cargo test -p chunk-environment --lib runner_image -- --ignored --nocapture
