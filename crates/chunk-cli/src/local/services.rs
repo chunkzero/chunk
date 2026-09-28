@@ -239,3 +239,6 @@ pub(super) async fn move_player(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
