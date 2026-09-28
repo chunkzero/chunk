@@ -35,6 +35,9 @@ tonic = "0.14.6"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [dev-dependencies]
 chunk-build = { path = "../chunk-build" }
 chunk-proxy = { path = "../chunk-proxy", default-features = false, features = ["test-support"] }

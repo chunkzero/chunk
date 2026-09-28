@@ -38,9 +38,10 @@ pub struct CoreConfig {
     /// The token management issued the environment, whose SHA-256 keys machine and operator credentials. Without one,
     /// control's credential keys them.
     pub environment_token: Option<String>,
-    /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
-    /// that outlived the previous control are stopped first, and so are the machines of every launch it recorded for
-    /// remote runners; one whose stop isn't confirmed fails the start.
+    /// Drops every control row and control's local files before serving, as when a local session starts over. The
+    /// machines of every launch the previous control recorded for remote runners are stopped first, then local JVMs
+    /// that outlived it. Only a core with a launcher can stop remote machines, so one without refuses to start while
+    /// any are recorded, and so does a core whose stops aren't confirmed.
     pub fresh: bool,
 }
 
@@ -132,20 +133,14 @@ impl Core {
         Ok(())
     }
 
-    /// Starts control. When `fresh`, the previous control's files and discovery record are deleted once every JVM it
-    /// launched has confirmed its exit.
+    /// Starts control. When `fresh`, the previous control's files and discovery record are deleted once every remote
+    /// machine and local JVM it launched has confirmed its exit.
     async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
         if config.fresh {
-            if let Some(runner) = &self.runner {
-                // Only control's launch records name the machines an earlier core started, so they stop first.
-                let system = self.system()?;
-                let recorded = tokio::task::spawn_blocking(move || chunk_control::recorded_launches(system));
-                let hosts = recorded.await.map_err(io::Error::other)?.map_err(io::Error::other)?;
-                let stopped = runner.stop_recorded(hosts).await;
-                stopped.map_err(|error| io::Error::other(format!("not starting fresh: {error}")))?;
-            } else {
-                self.stop_survivors(config).await?;
-            }
+            // Only control's launch records name the remote machines an earlier core started, and stopping local
+            // survivors drops them, so remote machines stop first.
+            self.stop_remote_machines().await?;
+            self.stop_survivors(config).await?;
             // The record names the previous control's credential, which is deleted with its files.
             if_present(fs::remove_file(&config.control_record))?;
             if_present(fs::remove_dir_all(config.state.join("control")))?;
@@ -155,7 +150,40 @@ impl Core {
             Some(bind) => Some(chunk_control::server::network_listener(bind).await?),
             None => None,
         };
-        self.serve_control(config, listener, network, config.control_record.clone()).await
+        let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
+            host.clone()
+        } else if let Some(runner) = &self.runner {
+            runner.clone()
+        } else {
+            let host = Arc::new(chunk_control::ProcessHost::new(host_config(config)));
+            self.host = Some(host.clone());
+            host
+        };
+        self.serve_control(config, listener, network, config.control_record.clone(), host).await?;
+        if let (Some(runner), Some(ready), Some(issuer)) = (&self.runner, &self.authority, &self.issuer) {
+            runner.attach(&ready.control, issuer.clone(), runner_endpoint(ready, config.private_address));
+        }
+        Ok(())
+    }
+
+    /// Stops the machines of every launch the previous control recorded for remote runners, which only this core's
+    /// launcher can do.
+    async fn stop_remote_machines(&self) -> io::Result<()> {
+        let system = self.system()?;
+        let recorded = tokio::task::spawn_blocking(move || chunk_control::recorded_launches(system));
+        let hosts = recorded.await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+        if hosts.is_empty() {
+            return Ok(());
+        }
+        let Some(runner) = &self.runner else {
+            return Err(io::Error::other(format!(
+                "not starting fresh: control records {} remote machines; start with the launcher that created them so \
+                 core can release them",
+                hosts.len()
+            )));
+        };
+        let stopped = runner.stop_recorded(hosts).await;
+        stopped.map_err(|error| io::Error::other(format!("not starting fresh: {error}")))
     }
 
     /// Stops the JVMs of the previous control that may still hold their launch locks, since only a control on its
@@ -163,7 +191,7 @@ impl Core {
     /// discovery record's endpoint when the record names none, so control serves there, waiting while another process
     /// holds that address. That record stays as it is until they have exited, as control publishes its own elsewhere.
     async fn stop_survivors(&mut self, config: &CoreConfig) -> io::Result<()> {
-        let launches = chunk_control::ProcessHost::new(host_config(config));
+        let launches = Arc::new(chunk_control::ProcessHost::new(host_config(config)));
         let previous =
             chunk_service::read::<ControlConnection>(&config.control_record).ok().map(|record| record.endpoint);
         let mut waiting = false;
@@ -182,7 +210,9 @@ impl Core {
                         tracing::warn!(%bind, "stopping JVMs that outlived the previous control at an address they may not know");
                     }
                     let record = config.state.join("control").join("recovery.json");
-                    self.serve_control(config, listener, None, record).await?;
+                    // Local JVMs re-attach only to a process host, whatever host this core serves with.
+                    self.host = Some(launches.clone());
+                    self.serve_control(config, listener, None, record, launches.clone()).await?;
                     return self.stop_control(|| {}).await;
                 }
                 Err(error) => {
@@ -201,16 +231,8 @@ impl Core {
         listener: TcpListener,
         network: Option<TcpListener>,
         record: PathBuf,
+        host: Arc<dyn chunk_control::Host>,
     ) -> io::Result<()> {
-        let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
-            host.clone()
-        } else if let Some(runner) = &self.runner {
-            runner.clone()
-        } else {
-            let host = Arc::new(chunk_control::ProcessHost::new(host_config(config)));
-            self.host = Some(host.clone());
-            host
-        };
         let backend = self.handle.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
@@ -236,11 +258,7 @@ impl Core {
             Some(Running { task: tokio::spawn(chunk_control::server::run(control, ready, stop.clone())), stop });
         let ready = Running::ready(&mut self.control, started, "control").await?;
         let token = config.environment_token.as_deref();
-        let issuer = sync::Issuer::new(&config.environment, token, &ready.connection.token);
-        if let Some(runner) = &self.runner {
-            runner.attach(&ready.control, issuer.clone(), runner_endpoint(&ready, config.private_address));
-        }
-        self.issuer = Some(issuer);
+        self.issuer = Some(sync::Issuer::new(&config.environment, token, &ready.connection.token));
         self.authority = Some(ready);
         Ok(())
     }

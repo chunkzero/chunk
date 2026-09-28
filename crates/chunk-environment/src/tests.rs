@@ -325,6 +325,17 @@ async fn a_restarted_core_keeps_its_gateway_id() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopped() {
+    deletes_control_files_only_once_surviving_jvms_have_stopped(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_with_a_launcher_still_stops_surviving_local_jvms() {
+    deletes_control_files_only_once_surviving_jvms_have_stopped(true).await;
+}
+
+#[cfg(unix)]
+async fn deletes_control_files_only_once_surviving_jvms_have_stopped(launcher: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut config = core_config(directory.path());
     config.fresh = true;
@@ -337,7 +348,12 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
     lock.try_lock().unwrap();
     let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
 
-    let starting = tokio::spawn(Core::start(config, || {}));
+    let starting = if launcher {
+        let machines = std::sync::Arc::new(Machines::default());
+        tokio::spawn(Core::start_with_launcher(config, RunnerConfig::new(machines)))
+    } else {
+        tokio::spawn(Core::start(config, || {}))
+    };
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!starting.is_finished());
     assert!(marker.exists());
@@ -461,7 +477,13 @@ struct Machines {
 
 #[tonic::async_trait]
 impl Launcher for Machines {
-    async fn launch(&self, _: &str, _: &str, _: &LaunchSpec) -> std::io::Result<()> {
+    async fn launch(
+        &self,
+        _: &str,
+        _: &str,
+        _: &LaunchSpec,
+        _: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<()> {
         Err(std::io::Error::other("launches nothing"))
     }
 
@@ -492,6 +514,11 @@ async fn a_fresh_start_stops_every_recorded_remote_machine_before_forgetting_it(
     let core = Core::start(core_config(directory.path()), || {}).await.unwrap();
     launched(&core);
     core.stop(|| {}).await.unwrap();
+    // Only a launcher can stop the machine, so a fresh start without one refuses and keeps its record.
+    let mut config = core_config(directory.path());
+    config.fresh = true;
+    let Err(error) = Core::start(config, || {}).await else { panic!("the remote machine may still run") };
+    assert!(error.to_string().contains("launcher"), "{error}");
 
     let machines = std::sync::Arc::new(Machines::default());
     let fresh = || {

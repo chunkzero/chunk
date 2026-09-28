@@ -2,11 +2,15 @@
 //! the runner and its JVM.
 
 use super::*;
-use crate::core::{LaunchSpec, Launcher, READINESS, RunnerConfig, runner::RunnerHost};
+use crate::core::{LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, RunnerConfig, runner::RunnerHost};
 use chunk_control::Host as _;
 use chunk_proto::sync::v1::NodePhase;
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{RwLock, watch};
+use tokio_util::sync::CancellationToken;
 
 const OTHER: &str = "runner-2";
 
@@ -16,26 +20,79 @@ enum Call {
     Release(String),
 }
 
-/// Records each call, which tests await. A call returns only once no test holds its kind.
+/// Records each call, which tests await. A call returns only once no test holds its kind, and a launch as soon as it
+/// is cancelled unless it's `stubborn`. The machine a launch requests is created apart from that call, as a detached
+/// request would be, once no test holds `creations`: unless its host was released, whose release is terminal as the
+/// `Launcher` contract asks.
 #[derive(Default)]
 struct Machines {
     calls: watch::Sender<Vec<Call>>,
     launches: RwLock<()>,
     releases: RwLock<()>,
+    creations: Arc<RwLock<()>>,
+    fleet: Arc<watch::Sender<Fleet>>,
+    /// Whether a launch ignores its cancellation.
+    stubborn: AtomicBool,
+}
+
+#[derive(Default)]
+struct Fleet {
+    /// Hosts whose machine runs.
+    running: BTreeSet<String>,
+    /// Hosts released for good, whose machine never starts.
+    released: BTreeSet<String>,
+    /// How many machine creations ended, whether they created one or not.
+    created: usize,
+    /// Hosts whose launch call runs.
+    launching: BTreeSet<String>,
+    /// Hosts released while their launch call ran, which core must never do.
+    overlapped: BTreeSet<String>,
 }
 
 #[tonic::async_trait]
 impl Launcher for Machines {
-    async fn launch(&self, id: &str, credential: &str, spec: &LaunchSpec) -> std::io::Result<()> {
+    async fn launch(
+        &self,
+        id: &str,
+        credential: &str,
+        spec: &LaunchSpec,
+        cancel: &CancellationToken,
+    ) -> io::Result<()> {
         let call = Call::Launch { host: id.into(), credential: credential.into(), spec: spec.clone() };
         self.calls.send_modify(|calls| calls.push(call));
-        drop(self.launches.read().await);
+        self.fleet.send_modify(|fleet| _ = fleet.launching.insert(id.into()));
+        let (fleet, creations, host) = (self.fleet.clone(), self.creations.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let _creating = creations.read().await;
+            fleet.send_modify(|fleet| {
+                if !fleet.released.contains(&host) {
+                    fleet.running.insert(host);
+                }
+                fleet.created += 1;
+            });
+        });
+        if self.stubborn.load(Ordering::Relaxed) {
+            drop(self.launches.read().await);
+        } else {
+            tokio::select! {
+                _ = self.launches.read() => {}
+                () = cancel.cancelled() => {}
+            }
+        }
+        self.fleet.send_modify(|fleet| _ = fleet.launching.remove(id));
         Ok(())
     }
 
-    async fn release(&self, id: &str) -> std::io::Result<bool> {
+    async fn release(&self, id: &str) -> io::Result<bool> {
         self.calls.send_modify(|calls| calls.push(Call::Release(id.into())));
+        self.fleet.send_modify(|fleet| {
+            if fleet.launching.contains(id) {
+                fleet.overlapped.insert(id.into());
+            }
+            fleet.released.insert(id.into());
+        });
         drop(self.releases.read().await);
+        self.fleet.send_modify(|fleet| _ = fleet.running.remove(id));
         Ok(true)
     }
 }
@@ -43,6 +100,15 @@ impl Launcher for Machines {
 impl Machines {
     fn calls(&self) -> Vec<Call> {
         self.calls.borrow().clone()
+    }
+
+    /// The hosts whose machine runs once `created` machine creations ended.
+    async fn running(&self, created: usize) -> BTreeSet<String> {
+        let mut fleet = self.fleet.subscribe();
+        let ended = tokio::time::timeout(Duration::from_secs(10), fleet.wait_for(|fleet| fleet.created >= created));
+        let fleet = ended.await.expect("the machines were created").unwrap();
+        assert!(fleet.overlapped.is_empty(), "core released {:?} while it launched", fleet.overlapped);
+        fleet.running.clone()
     }
 
     /// The calls once one satisfies `made`.
@@ -54,7 +120,11 @@ impl Machines {
 }
 
 fn runner_host(machines: &Arc<Machines>, readiness: Duration) -> Arc<RunnerHost> {
-    let config = RunnerConfig { readiness, ..RunnerConfig::new(machines.clone()) };
+    runner_host_with(machines, readiness, RELEASE_TIMEOUT)
+}
+
+fn runner_host_with(machines: &Arc<Machines>, readiness: Duration, release_timeout: Duration) -> Arc<RunnerHost> {
+    let config = RunnerConfig { readiness, release_timeout, ..RunnerConfig::new(machines.clone()) };
     Arc::new(RunnerHost::new("test", config))
 }
 
@@ -68,8 +138,12 @@ fn attach(fixture: &Fixture, runner: &RunnerHost) {
 }
 
 async fn start(readiness: Duration) -> (Fixture, Arc<RunnerHost>, Arc<Machines>) {
+    start_with(readiness, RELEASE_TIMEOUT).await
+}
+
+async fn start_with(readiness: Duration, release_timeout: Duration) -> (Fixture, Arc<RunnerHost>, Arc<Machines>) {
     let machines = Arc::new(Machines::default());
-    let runner = runner_host(&machines, readiness);
+    let runner = runner_host_with(&machines, readiness, release_timeout);
     let fixture = Fixture::with_host(runner.clone()).await;
     attach(&fixture, &runner);
     (fixture, runner, machines)
@@ -134,7 +208,10 @@ async fn ensure_launches_one_machine_whose_jvm_registers_and_becomes_ready() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_jvm_that_misses_the_readiness_deadline_fails_its_host() {
-    let (fixture, runner, machines) = start(Duration::ZERO).await;
+    let readiness = Duration::from_millis(500);
+    let (fixture, runner, machines) = start(readiness).await;
+    assert!(matches!(ensure(&runner).await, Progress::Pending));
+    tokio::time::sleep(readiness).await;
     let Progress::Failed(reason) = ensure(&runner).await else { panic!("the deadline passed") };
     assert!(reason.contains("did not register"), "{reason}");
     assert!(matches!(ensure(&runner).await, Progress::Failed(_)));
@@ -235,8 +312,9 @@ async fn a_machine_that_boots_again_fails_its_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_release_during_a_stalled_launch_cancels_it_then_stops_the_machine() {
+async fn a_release_during_a_stalled_launch_cancels_it_and_leaves_no_machine() {
     let (fixture, runner, machines) = start(READINESS).await;
+    let creating = machines.creations.write().await;
     let held = machines.launches.write().await;
     let ensuring = tokio::spawn({
         let runner = runner.clone();
@@ -247,13 +325,15 @@ async fn a_release_during_a_stalled_launch_cancels_it_then_stops_the_machine() {
         let runner = runner.clone();
         async move { runner.release(HOST).await }
     });
-    // The release takes the host's turn only once the launch it cancelled has ended, so the machine it stops is the
-    // one the launch may have started.
+    // The launcher releases the host only once the launch it cancelled has ended.
     let Progress::Failed(reason) = settled(ensuring).await else { panic!("the release cancelled the launch") };
     assert!(reason.contains("released"), "{reason}");
     assert!(settled(releasing).await.unwrap());
     drop(held);
     assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
+    // The machine that launch requested is created only after the release, which the launcher made terminal.
+    drop(creating);
+    assert!(machines.running(1).await.is_empty());
     assert!(runner.stopped(HOST) && fixture.control.launch(HOST).is_none());
     assert!(matches!(ensure(&runner).await, Progress::Failed(_)));
     assert_eq!(machines.calls().len(), 2);
@@ -290,16 +370,31 @@ async fn a_host_released_before_it_launched_never_launches_even_after_a_restart(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_that_ignores_its_cancellation_holds_its_hosts_release_back() {
+    let (fixture, runner, machines) = start_with(READINESS, Duration::from_millis(200)).await;
+    machines.stubborn.store(true, Ordering::Relaxed);
+    let held = machines.launches.write().await;
+    let ensuring = tokio::spawn({
+        let runner = runner.clone();
+        async move { ensure(&runner).await }
+    });
+    machines.wait(|call| matches!(call, Call::Launch { .. })).await;
+    // Each attempt waits for the launch no longer than a release may take, and asks the launcher for nothing.
+    assert!(!runner.release(HOST).await.unwrap());
+    assert!(!runner.stopped(HOST));
+    assert_eq!(machines.calls().len(), 1);
+
+    drop(held);
+    assert!(matches!(settled(ensuring).await, Progress::Failed(_)));
+    assert!(runner.release(HOST).await.unwrap());
+    assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
+    assert!(machines.running(1).await.is_empty() && runner.stopped(HOST));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_launcher_calls_time_out_and_the_host_is_still_released() {
-    let machines = Arc::new(Machines::default());
-    let config = RunnerConfig {
-        readiness: Duration::from_millis(200),
-        release_timeout: Duration::from_millis(200),
-        ..RunnerConfig::new(machines.clone())
-    };
-    let runner = Arc::new(RunnerHost::new("test", config));
-    let fixture = Fixture::with_host(runner.clone()).await;
-    attach(&fixture, &runner);
+    let (fixture, runner, machines) = start_with(Duration::from_millis(200), Duration::from_millis(200)).await;
     let launches = machines.launches.write().await;
     let Progress::Failed(reason) = ensure(&runner).await else { panic!("the launch timed out") };
     assert!(reason.contains("did not finish"), "{reason}");
