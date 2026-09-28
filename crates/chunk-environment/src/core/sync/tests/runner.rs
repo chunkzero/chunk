@@ -1,5 +1,7 @@
 //! A remote runner's `chunk:launch` and `chunk:archive`, and the JVM machine credential it and its JVM present.
 
+mod host;
+
 use super::{jvm::registration, *};
 use crate::core::ReleaseArchive;
 use chunk_control::{Launch, MachineKind, Progress, Registration, RuntimeConnection};
@@ -63,7 +65,6 @@ fn launch() -> Launch {
 /// credential and the archive's bytes.
 async fn runner() -> (Fixture, String, Vec<u8>) {
     let fixture = Fixture::with_host(Arc::new(Remote::default())).await;
-    fixture.control.add_machine(HOST, MachineKind::Jvm).unwrap();
     let credential = Issuer::new("test", None, &fixture.cli).machine(MachineKind::Jvm, HOST);
     let archive: Vec<u8> = (0..2 * CHUNK + 7).map(|index| u8::try_from(index % 251).unwrap()).collect();
     let path = fixture.directory.path().join("release.tar.gz");

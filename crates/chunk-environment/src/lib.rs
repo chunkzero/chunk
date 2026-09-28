@@ -5,7 +5,11 @@ mod gateway;
 mod managed;
 mod services;
 
-pub use self::core::{Core, CoreConfig, ReleaseArchive};
+#[cfg(unix)]
+pub use self::core::CommandLauncher;
+pub use self::core::{
+    Core, CoreConfig, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, ReleaseArchive, RunnerConfig,
+};
 pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
 pub use managed::ManagementConfig;
 pub use services::{Service, Services};

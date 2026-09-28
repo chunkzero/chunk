@@ -325,6 +325,17 @@ async fn a_restarted_core_keeps_its_gateway_id() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopped() {
+    deletes_control_files_only_once_surviving_jvms_have_stopped(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_with_a_launcher_still_stops_surviving_local_jvms() {
+    deletes_control_files_only_once_surviving_jvms_have_stopped(true).await;
+}
+
+#[cfg(unix)]
+async fn deletes_control_files_only_once_surviving_jvms_have_stopped(launcher: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut config = core_config(directory.path());
     config.fresh = true;
@@ -337,7 +348,12 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
     lock.try_lock().unwrap();
     let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
 
-    let starting = tokio::spawn(Core::start(config, || {}));
+    let starting = if launcher {
+        let machines = std::sync::Arc::new(Machines::default());
+        tokio::spawn(Core::start_with_launcher(config, RunnerConfig::new(machines)))
+    } else {
+        tokio::spawn(Core::start(config, || {}))
+    };
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!starting.is_finished());
     assert!(marker.exists());
@@ -448,4 +464,92 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     assert!(!marker.exists());
     assert_ne!(core.control_connection().unwrap().endpoint, format!("http://{previous}"));
     core.stop(|| {}).await.unwrap();
+}
+
+const REMOTE: &str = "remote-1";
+
+/// Records each machine release, which it confirms only while `stops` is set.
+#[derive(Default)]
+struct Machines {
+    stops: std::sync::atomic::AtomicBool,
+    released: std::sync::Mutex<Vec<String>>,
+}
+
+#[tonic::async_trait]
+impl Launcher for Machines {
+    async fn launch(
+        &self,
+        _: &str,
+        _: &str,
+        _: &LaunchSpec,
+        _: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other("launches nothing"))
+    }
+
+    async fn release(&self, id: &str) -> std::io::Result<bool> {
+        self.released.lock().unwrap().push(id.into());
+        Ok(self.stops.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Records a launch on `REMOTE` whose machine runs until something releases it.
+fn launched(core: &Core) {
+    let launch = chunk_control::Launch {
+        deployment: "test".into(),
+        release: "release-1".into(),
+        app: "lobby".into(),
+        profile: "small".into(),
+        process_id: "process-1".into(),
+        generation: 1,
+        boot: None,
+    };
+    core.control().unwrap().record_launch(REMOTE, launch).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_stops_every_recorded_remote_machine_before_forgetting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    // Local JVMs ignore remote launch records, so this core leaves the machine running, as a crashed one would.
+    let core = Core::start(core_config(directory.path()), || {}).await.unwrap();
+    launched(&core);
+    core.stop(|| {}).await.unwrap();
+    // Only a launcher can stop the machine, so a fresh start without one refuses and keeps its record.
+    let mut config = core_config(directory.path());
+    config.fresh = true;
+    let Err(error) = Core::start(config, || {}).await else { panic!("the remote machine may still run") };
+    assert!(error.to_string().contains("launcher"), "{error}");
+
+    let machines = std::sync::Arc::new(Machines::default());
+    let fresh = || {
+        let mut config = core_config(directory.path());
+        config.fresh = true;
+        Core::start_with_launcher(config, RunnerConfig::new(machines.clone()))
+    };
+    // A machine whose stop isn't confirmed keeps its record, and core doesn't start.
+    assert!(fresh().await.is_err());
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE]);
+    machines.stops.store(true, std::sync::atomic::Ordering::Relaxed);
+    let core = fresh().await.unwrap();
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE, REMOTE]);
+    assert!(core.control().unwrap().launch(REMOTE).is_none());
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_stops_remote_machines_once_its_store_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let machines = std::sync::Arc::new(Machines::default());
+    machines.stops.store(true, std::sync::atomic::Ordering::Relaxed);
+    let config = core_config(directory.path());
+    let core = Core::start_with_launcher(config, RunnerConfig::new(machines.clone())).await.unwrap();
+    launched(&core);
+    let backend = core.backend().unwrap();
+    tokio::task::spawn_blocking(move || backend.stop()).await.unwrap();
+    assert!(core.control().unwrap().store_stopped());
+
+    // Control can't record the release, yet the machine stops, once, and so does core, whatever control reports.
+    let stopped = tokio::time::timeout(Duration::from_secs(30), core.stop(|| {})).await;
+    stopped.expect("core stopped").ok();
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE]);
 }

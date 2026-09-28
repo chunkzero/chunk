@@ -147,6 +147,11 @@ impl State {
 
 /// The durable control state. Reads share the last committed state; writers serialize here, then commit through the
 /// environment's system lane.
+/// The control state `system` stores, read without serving it. Blocks on the store.
+pub(crate) fn load(system: chunk_backend::System) -> Result<State> {
+    store::Store::new(system)?.load()
+}
+
 pub(crate) struct Authority {
     system: chunk_backend::System,
     store: Mutex<Writable>,

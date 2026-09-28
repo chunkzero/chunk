@@ -41,7 +41,7 @@ use tokio::sync::Mutex as AsyncMutex;
 pub use host::{
     Distribution, Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection,
 };
-pub use launches::Launch;
+pub use launches::{Launch, recorded_launches};
 pub use machines::MachineKind;
 pub use moves::{MoveRequest, MoveSource};
 pub use operations::Operations;
@@ -101,6 +101,7 @@ pub struct Config {
 pub struct Release {
     pub apps: BTreeMap<String, chunk_contract::AppArtifact>,
     pub deployment: DeploymentRef,
+    /// The ID of the release the deployment runs, which names the archive runners download.
     pub artifact_digest: String,
     pub profiles: BTreeMap<String, MachineProfile>,
     pub session_types: BTreeMap<String, SessionType>,

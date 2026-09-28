@@ -11,9 +11,7 @@ impl Control {
     /// Rejects an ID that isn't 1 to 128 visible ASCII characters without `/`, one recorded for another kind or
     /// revoked, and reports a stopped store.
     pub fn add_machine(&self, id: &str, kind: MachineKind) -> Result<()> {
-        if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/') {
-            return Err(Error::Invalid("invalid machine ID"));
-        }
+        validate(id)?;
         self.update(|state| match state.machines.get(id) {
             Some(machine) if machine.kind != kind => Err(Error::Invalid("the machine ID names another kind")),
             Some(machine) if machine.revoked => Err(Error::Invalid("the machine's credential was revoked")),
@@ -43,4 +41,12 @@ impl Control {
         let state = self.state();
         state.is_ok_and(|state| state.machines.get(id).is_some_and(|machine| machine.kind == kind && !machine.revoked))
     }
+}
+
+/// Requires 1 to 128 visible ASCII characters without `/`.
+pub(crate) fn validate(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/') {
+        return Err(Error::Invalid("invalid machine ID"));
+    }
+    Ok(())
 }
