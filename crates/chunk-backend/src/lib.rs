@@ -15,7 +15,6 @@ pub mod server;
 mod service;
 mod system;
 mod timing;
-mod transport;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
 pub use chunk_js::{DeploymentId, HttpMethod};
@@ -26,7 +25,6 @@ pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Progress, Reque
 pub use system::{ScopeLock, System};
 #[cfg(feature = "bench-support")]
 pub use timing::{Phase, observe};
-pub use transport::Service;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

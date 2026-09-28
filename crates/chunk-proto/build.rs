@@ -1,6 +1,6 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = "../../proto";
-    let files = ["common", "gameplay", "supervision", "control", "backend", "session_methods", "commands"]
+    let files = ["common", "gameplay", "supervision", "control", "session_methods", "commands"]
         .map(|name| format!("{root}/chunk/v1/{name}.proto"))
         .into_iter()
         .chain(["core", "gateway", "jvm", "operator"].map(|name| format!("{root}/chunk/sync/v1/{name}.proto")))

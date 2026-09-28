@@ -1,9 +1,6 @@
 use super::*;
-use chunk_contract::{BackendConnection, ControlConnection};
-use chunk_proto::{
-    sync::v1::{CallRequest, JvmRegistration, SubscribeRequest, core_client::CoreClient},
-    v1::backend_client::BackendClient,
-};
+use chunk_contract::ControlConnection;
+use chunk_proto::sync::v1::{CallRequest, JvmRegistration, SubscribeRequest, core_client::CoreClient};
 use prost::Message;
 use std::{net::SocketAddr, path::Path};
 
@@ -43,10 +40,8 @@ fn core_config(directory: &Path) -> CoreConfig {
     CoreConfig {
         bundle: Some(path),
         environment: "test".into(),
-        backend_record: state.join("backend.json"),
         control_record: state.join("control.json"),
         state,
-        backend_bind: "127.0.0.1:0".parse().unwrap(),
         control_bind: "127.0.0.1:0".parse().unwrap(),
         core_bind: None,
         private_address: None,
@@ -140,14 +135,13 @@ async fn failed_gateway_bind_releases_core() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     for _ in 0..2 {
         let core = core_config(directory.path());
-        let (backend, control) = (core.backend_record.clone(), core.control_record.clone());
+        let control = core.control_record.clone();
         let config = all_in_one(core, occupied.local_addr().unwrap());
         let error = tokio::time::timeout(Duration::from_secs(30), run(config, CancellationToken::new()))
             .await
             .unwrap()
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
-        assert!(!backend.exists());
         assert!(!control.exists());
     }
 }
@@ -158,7 +152,7 @@ async fn core_binds_its_network_listener_only_when_configured_and_mints_stable_g
         let directory = tempfile::tempdir().unwrap();
         let mut config = core_config(directory.path());
         config.core_bind = bind;
-        let core = Core::start(config, |_| {}).await.unwrap();
+        let core = Core::start(config, || {}).await.unwrap();
         assert_eq!(core.network_address().is_some(), bind.is_some());
         let credential = core.gateway_credential("remote").unwrap();
         assert_eq!(core.gateway_credential("remote").unwrap(), credential);
@@ -174,7 +168,7 @@ async fn gateway_credentials_and_their_revocation_survive_a_restart() {
     let start = || {
         let mut config = core_config(directory.path());
         config.core_bind = Some("127.0.0.1:0".parse().unwrap());
-        Core::start(config, |_| {})
+        Core::start(config, || {})
     };
     let core = start().await.unwrap();
     let active = core.gateway_credential("active").unwrap();
@@ -199,7 +193,7 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
     let directory = tempfile::tempdir().unwrap();
     let mut config = core_config(directory.path());
     config.core_bind = Some("127.0.0.1:0".parse().unwrap());
-    let core = Core::start(config, |_| {}).await.unwrap();
+    let core = Core::start(config, || {}).await.unwrap();
     let credential = core.gateway_credential("remote").unwrap();
     let remote = |environment: &str| RemoteCore {
         endpoint: format!("http://{}", core.network_address().unwrap()),
@@ -246,7 +240,7 @@ async fn a_gateway_machine_follows_core_across_restarts_until_core_rejects_its_c
     let start = |core_bind| {
         let mut config = core_config(directory.path());
         config.core_bind = core_bind;
-        Core::start(config, |_| {})
+        Core::start(config, || {})
     };
     let core = start(Some("127.0.0.1:0".parse().unwrap())).await.unwrap();
     let network = core.network_address();
@@ -283,7 +277,7 @@ async fn a_gateway_machine_follows_core_across_restarts_until_core_rejects_its_c
 async fn all_in_one_serves_backend_and_control_until_stopped() {
     let directory = tempfile::tempdir().unwrap();
     let core = core_config(directory.path());
-    let (backend_record, control_record) = (core.backend_record.clone(), core.control_record.clone());
+    let (state, control_record) = (core.state.clone(), core.control_record.clone());
     let stop = CancellationToken::new();
     let running = tokio::spawn(run(all_in_one(core, "127.0.0.1:0".parse().unwrap()), stop.clone()));
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -293,21 +287,16 @@ async fn all_in_one_serves_backend_and_control_until_stopped() {
     })
     .await
     .unwrap();
-    let backend: BackendConnection = chunk_service::read(&backend_record).unwrap();
-    let mut request = authorized((), &backend.token);
-    request.metadata_mut().insert("x-chunk-environment", "test".parse().unwrap());
-    request.metadata_mut().insert("x-chunk-deployment", "test".parse().unwrap());
-    BackendClient::connect(backend.endpoint).await.unwrap().check_deployment(request).await.unwrap();
     let control: ControlConnection = chunk_service::read(&control_record).unwrap();
     let mut client = CoreClient::connect(control.endpoint).await.unwrap();
     let nodes = SubscribeRequest { topic: "nodes".into(), ..SubscribeRequest::default() };
     let mut updates = client.subscribe(authorized(nodes, &control.token)).await.unwrap().into_inner();
     let snapshot = updates.message().await.unwrap().unwrap();
     assert!(snapshot.snapshot && snapshot.error.is_none());
+    assert!(!state.join("backend.json").exists());
     drop(updates);
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
-    assert!(!backend_record.exists());
     assert!(!control_record.exists());
 }
 
@@ -317,7 +306,7 @@ async fn a_restarted_core_keeps_its_gateway_id() {
     let mut gateways = Vec::new();
     for _ in 0..2 {
         let config = core_config(directory.path());
-        let core = Core::start(config, |_| {}).await.unwrap();
+        let core = Core::start(config, || {}).await.unwrap();
         gateways.push(core.target().unwrap().gateway);
         core.stop(|| {}).await.unwrap();
     }
@@ -340,7 +329,7 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
     lock.try_lock().unwrap();
     let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
 
-    let starting = tokio::spawn(Core::start(config, |_| {}));
+    let starting = tokio::spawn(Core::start(config, || {}));
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!starting.is_finished());
     assert!(marker.exists());
@@ -349,30 +338,6 @@ async fn a_fresh_start_deletes_control_files_only_once_surviving_jvms_have_stopp
     let core = tokio::time::timeout(Duration::from_secs(30), starting).await.unwrap().unwrap().unwrap();
     assert!(!marker.exists());
     core.stop(|| {}).await.unwrap();
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fresh_start_refuses_a_backend_on_the_address_surviving_jvms_re_attach_at() {
-    let directory = tempfile::tempdir().unwrap();
-    let previous = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let mut config = core_config(directory.path());
-    (config.fresh, config.backend_bind) = (true, previous);
-    let nodes = config.state.join("control").join("nodes");
-    std::fs::create_dir_all(&nodes).unwrap();
-    let marker = nodes.join("5f1d3c9e-2a4b-4c8d-9e6f-0a1b2c3d4e5f.launch");
-    let launch = serde_json::json!({"process_id": "jvm", "generation": 1, "token_sha256": "",
-        "control_endpoint": format!("http://{previous}")});
-    std::fs::write(&marker, launch.to_string()).unwrap();
-    let lock = std::fs::File::open(&marker).unwrap();
-    lock.try_lock().unwrap();
-    let mut jvm = std::process::Command::new("sleep").arg("60").stdin(lock).spawn().unwrap();
-
-    let started = tokio::time::timeout(Duration::from_secs(30), Core::start(config, |_| {})).await.unwrap();
-    assert!(started.is_err());
-    assert!(marker.exists());
-    jvm.kill().unwrap();
-    jvm.wait().unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -466,7 +431,7 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
         }
     });
 
-    let starting = tokio::spawn(Core::start(config, |_| {}));
+    let starting = tokio::spawn(Core::start(config, || {}));
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!watched.is_finished());
     drop(occupied);

@@ -4,8 +4,8 @@
 and one read engine per core (up to four). Supply a store with exclusive writer authority. `deploy` validates and
 initializes a versioned `chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains
 the bundle before enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`,
-`subscribe`, or `subscribe_group` from transport tasks. `Service` exposes authenticated gRPC; only trusted platform
-processes may supply caller identity. Internal functions are inaccessible through this ingress. Activation waits for the
+`subscribe`, or `subscribe_group` from transport tasks. `server::run` embeds it in core, whose sync protocol is its only
+ingress; only core supplies caller identity. Internal functions are inaccessible through calls. Activation waits for the
 commit pipeline to drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during
 activation. Schema changes advance the revision; every successful activation reevaluates existing subscriptions.
 

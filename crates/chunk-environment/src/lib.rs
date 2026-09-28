@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 const STARTUP: Duration = Duration::from_secs(30);
 
-#[expect(clippy::large_enum_variant, reason = "a process reads its configuration once")]
 pub enum Config {
     /// Core, with the in-process gateway when `gateway` is set.
     Core {
@@ -32,10 +31,10 @@ pub enum Config {
 
 impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
-    /// `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With core, it also reads `CHUNK_STATE`, `CHUNK_BACKEND_BIND`,
-    /// `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`). With
-    /// `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it
-    /// serves `CHUNK_BUNDLE`. Connection records go to `$CHUNK_STATE/backend.json` and `$CHUNK_STATE/control.json`.
+    /// `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With core, it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`,
+    /// `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads
+    /// `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's
+    /// connection record goes to `$CHUNK_STATE/control.json`.
     /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
     /// Reports missing or invalid variables.
@@ -66,10 +65,8 @@ impl Config {
         let core = CoreConfig {
             bundle: if management.is_some() { None } else { Some(required("CHUNK_BUNDLE")?) },
             environment,
-            backend_record: state.join("backend.json"),
             control_record: state.join("control.json"),
             state,
-            backend_bind: optional("CHUNK_BACKEND_BIND")?.unwrap_or(([127, 0, 0, 1], 25568).into()),
             control_bind: optional("CHUNK_CONTROL_BIND")?.unwrap_or(([127, 0, 0, 1], 25567).into()),
             core_bind: optional("CHUNK_CORE_BIND")?,
             private_address: match optional("CHUNK_PRIVATE_ADDRESS")? {
@@ -105,7 +102,7 @@ async fn run_core(
 ) -> io::Result<()> {
     let environment = config.environment.clone();
     let state = config.state.clone();
-    let core = Core::start(config, |_| {}).await?;
+    let core = Core::start(config, || {}).await?;
     let gateway = OnceLock::new();
     let managed = if let Some(management) = management {
         Some(managed::Managed::new(management, environment, &state, &core, &gateway, gateway_config))

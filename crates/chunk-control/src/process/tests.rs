@@ -247,12 +247,7 @@ fn private_host(
 ) -> ProcessHost {
     let host = ProcessHost::new(ProcessHostConfig {
         directory: directory.join("nodes"),
-        backend: chunk_contract::BackendConnection {
-            environment: "test".into(),
-            deployment: "build".into(),
-            endpoint: "http://127.0.0.1:1".into(),
-            token: "unused".into(),
-        },
+        environment: "test".into(),
         private_address,
     });
     host.add_release("build", Distribution { directory: directory.into(), java }).unwrap();

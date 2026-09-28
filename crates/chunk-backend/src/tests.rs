@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc as signals;
 
 use crate::{Backend, Call, Error, Limit, Update};
+use integration::deployment;
 
 pub(crate) const SOURCE: &str = r"
 export function get(ctx, args) { return ctx.db.get('profiles', args.id)?.coins ?? 0; }
@@ -745,6 +746,89 @@ async fn concurrent_stops_both_wait_for_a_pending_commit() {
         stopper.join().unwrap();
     }
     assert_eq!(first.await.unwrap().revision, Revision(harness.base.0 + 1));
+}
+
+#[tokio::test]
+async fn activation_installs_schema_and_release_is_durable_after_references_drain() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("activation.db");
+    let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
+    backend.deploy(deployment("old")).await.unwrap();
+    let call = |version: &str, function: &str| Call {
+        deployment: DeploymentId::new(version).unwrap(),
+        function: function.into(),
+        arguments: serde_json::Value::Null.into(),
+        caller: serde_json::Value::Null.into(),
+    };
+    let first = backend.mutate("first".into(), call("old", "increment")).await.unwrap();
+    let mut next = deployment("new");
+    next.tables
+        .get_mut("counters")
+        .unwrap()
+        .fields
+        .insert("label".into(), serde_json::from_value(json!({"schema":{"type":"string"},"optional":true})).unwrap());
+    next.tables.get_mut("counters").unwrap().indexes.insert("by_value".into(), vec!["value".into()]);
+    backend.deploy(next.clone()).await.unwrap();
+    let mut group = backend.subscribe_group(vec![call("old", "get"), call("new", "get")]).await.unwrap();
+    let initial = group.next().await.unwrap();
+    assert!(initial.revision > first.revision);
+    assert!(matches!(backend.release(DeploymentId::new("old").unwrap()).await, Err(crate::Error::Busy)));
+    let second = backend.mutate("second".into(), call("new", "increment")).await.unwrap();
+    let update = group.next().await.unwrap();
+    assert_eq!(update.revision, second.revision);
+    assert_eq!(&*update.results[0].as_ref().unwrap().clone(), "2");
+    assert_eq!(&*update.results[1].as_ref().unwrap().clone(), "2");
+    let mut bad = next.clone();
+    bad.id = "bad".into();
+    bad.tables.get_mut("counters").unwrap().fields.get_mut("value").unwrap().schema = chunk_contract::Schema::String;
+    assert!(matches!(backend.deploy(bad).await, Err(crate::Error::Contract)));
+    assert!(backend.query(call("bad", "get")).await.is_err());
+    assert_eq!(&*backend.query(call("old", "get")).await.unwrap().json, "2");
+    assert!(matches!(backend.mutate("failed-old".into(), call("old", "badResult")).await, Err(crate::Error::Contract)));
+    drop(group);
+    assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
+    assert!(matches!(backend.deploy(deployment("old")).await, Err(crate::Error::Contract)));
+    assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
+    drop(backend);
+    let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
+    assert!(backend.query(call("old", "get")).await.is_err());
+    assert!(backend.query(call("bad", "get")).await.is_err());
+    assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
+    let mut changed = deployment("old");
+    changed.source.push_str("\n// changed");
+    assert!(matches!(backend.deploy(changed).await, Err(crate::Error::Contract)));
+    assert_eq!(backend.mutate("first".into(), call("new", "increment")).await.unwrap().revision, first.revision);
+    assert!(matches!(backend.mutate("failed-old".into(), call("new", "badResult")).await,
+            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::OperationMismatch)));
+    assert!(backend.mutate("bad-result".into(), call("new", "badResult")).await.is_err());
+    assert_eq!(&*backend.query(call("new", "get")).await.unwrap().json, "2");
+}
+
+#[tokio::test]
+async fn activation_failing_before_commit_keeps_the_previous_deployment_serving() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rollback.db");
+    let store = SqliteStore::open(&path, "local").unwrap();
+    // A table the store does not track makes the next deployment's DDL fail inside its transaction.
+    rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TABLE extras (x)").unwrap();
+    let backend = Backend::new("local".into(), Box::new(store)).unwrap();
+    backend.deploy(deployment("old")).await.unwrap();
+    let call = |function: &str| Call {
+        deployment: DeploymentId::new("old").unwrap(),
+        function: function.into(),
+        arguments: serde_json::Value::Null.into(),
+        caller: serde_json::Value::Null.into(),
+    };
+    backend.mutate("first".into(), call("increment")).await.unwrap();
+    let mut next = deployment("new");
+    next.tables.insert(
+        "extras".into(),
+        serde_json::from_value(json!({"fields": {"x": {"schema": {"type": "integer"}}}})).unwrap(),
+    );
+    assert!(matches!(backend.deploy(next).await,
+            Err(crate::Error::Storage(error)) if matches!(error.as_ref(), chunk_store::Error::RolledBack(_))));
+    assert_eq!(&*backend.query(call("get")).await.unwrap().json, "1");
+    assert_eq!(&*backend.mutate("second".into(), call("increment")).await.unwrap().json, "2");
 }
 
 mod actions;

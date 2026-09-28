@@ -89,8 +89,8 @@ pub trait Host: Send + Sync {
 pub struct ProcessHostConfig {
     /// Holds each host's launch marker, exit record and JVM log.
     pub directory: std::path::PathBuf,
-    /// The environment's backend. Each JVM connects to its release's deployment.
-    pub backend: chunk_contract::BackendConnection,
+    /// The environment whose releases this host launches.
+    pub environment: String,
     /// This machine's address on the environment's private network. When set, each JVM serves players there, so
     /// gateways on other machines reach it; otherwise it serves them on loopback.
     pub private_address: Option<std::net::IpAddr>,
