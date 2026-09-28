@@ -215,12 +215,11 @@ fn authorized<T>(body: T, token: &str) -> io::Result<Request<T>> {
 }
 
 fn endpoint(endpoint: &str) -> io::Result<Endpoint> {
-    let address = endpoint
-        .strip_prefix("http://")
-        .ok_or_else(|| invalid_data("local service requires http loopback endpoint"))?;
+    let address =
+        endpoint.strip_prefix("http://").ok_or_else(|| invalid_data("core endpoint must be an http address"))?;
     let address: std::net::SocketAddr = address.parse().map_err(invalid_data)?;
-    if !address.ip().is_loopback() {
-        return Err(invalid_data("local service requires loopback endpoint"));
+    if !chunk_service::net::private(address.ip()) {
+        return Err(invalid_data("core endpoint must be a private address"));
     }
     Ok(Channel::from_shared(endpoint.to_owned())
         .map_err(invalid_data)?

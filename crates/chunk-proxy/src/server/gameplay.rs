@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, net::SocketAddr};
 
 use chunk_proto::v1::{Identity, PlayerPreparation, PlayerSetup, Property};
 use chunk_protocol::{
@@ -42,10 +42,7 @@ pub(super) async fn login<S>(
     if prepared.capability.len() != 32 {
         return Err(invalid_data("invalid player preparation"));
     }
-    let address: std::net::SocketAddr = prepared.endpoint.parse().map_err(invalid_data)?;
-    if !address.ip().is_loopback() {
-        return Err(invalid_data("local gameplay endpoint must be loopback"));
-    }
+    let address = destination(&prepared.endpoint)?;
     let socket = TcpStream::connect(address).await?;
     socket.set_nodelay(true)?;
     let mut internal = Transport::new(socket);
@@ -85,6 +82,15 @@ pub(super) async fn login<S>(
     internal.write_packet(&LoginAcknowledged).await?;
     internal.write_packet(settings).await?;
     Ok(internal)
+}
+
+/// The JVM's player listener, which must be a private address.
+fn destination(endpoint: &str) -> io::Result<SocketAddr> {
+    let address: SocketAddr = endpoint.parse().map_err(invalid_data)?;
+    if !chunk_service::net::private(address.ip()) {
+        return Err(invalid_data("gameplay endpoint must be a private address"));
+    }
+    Ok(address)
 }
 
 #[cfg(test)]

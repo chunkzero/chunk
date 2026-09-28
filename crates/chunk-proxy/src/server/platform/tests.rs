@@ -105,6 +105,18 @@ async fn status_is_live_and_failed_admission_never_routes() {
     let _ = server.await;
 }
 
+#[test]
+fn core_endpoint_must_be_private() {
+    for core in ["http://127.0.0.1:7070", "http://10.0.0.2:7070", "http://[fdaa::1]:7070"] {
+        assert!(endpoint(core).is_ok(), "{core}");
+    }
+    for core in
+        ["http://203.0.113.1:7070", "http://[2001:db8::1]:7070", "http://169.254.169.254:80", "https://10.0.0.2:7070"]
+    {
+        assert!(endpoint(core).is_err(), "{core}");
+    }
+}
+
 async fn route(platform: &Platform) -> io::Result<SessionDemand> {
     platform
         .route_claim(&chunk_proto::v1::ClaimRequest {

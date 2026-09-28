@@ -736,6 +736,7 @@ dependencies = [
  "chunk-js",
  "chunk-proto",
  "chunk-protocol",
+ "chunk-service",
  "chunk-store",
  "libdeflater",
  "openssl",
