@@ -29,21 +29,33 @@ export interface CapacityRow {
   machine_id: string;
   machine_addresses: string[];
   torn_down: boolean;
+  /** Sealed under `capacityCredentialContext`. */
+  credential: Uint8Array;
+  /** `keys.fingerprint` of the plaintext credential. */
+  credential_digest: Uint8Array;
 }
 
 type CapacityServices = Pick<ServiceImpl<typeof EnvironmentService>, "ensureCapacity" | "releaseCapacity">;
 
+/** Binds a sealed credential to its request. */
+export function capacityCredentialContext(environmentId: string, requestId: string): string {
+  return `capacity-credential/${environmentId}/${requestId}`;
+}
+
 /** Records capacity intents for the reconciler; neither call waits for the provider. */
-export function capacityServices({ sql }: Deps): CapacityServices {
+export function capacityServices({ sql, keys }: Deps): CapacityServices {
   return {
     async ensureCapacity(request, context) {
       const environmentId = environmentOf(context);
-      const { requestId, workload, machineProfile, releaseId, appId } = request;
+      const { requestId, workload, machineProfile, releaseId, appId, credential } = request;
       if (!requestId || requestId.length > 128) throw invalid("request_id must be set, and at most 128 characters");
       if (![Workload.JVM, Workload.GATEWAY].includes(workload)) throw invalid("workload must be JVM or GATEWAY");
       required(machineProfile, "machine_profile");
       required(releaseId, "release_id");
       if ((workload === Workload.JVM) !== (appId !== "")) throw invalid("app_id is required for JVM workloads only");
+      required(credential, "credential");
+      const plaintext = new TextEncoder().encode(credential);
+      const digest = keys.fingerprint(plaintext);
 
       const { row } = await sql.begin(async (tx) => {
         const [environment] = await tx<{ lease: bigint; project_id: string }[]>`
@@ -57,7 +69,8 @@ export function capacityServices({ sql }: Deps): CapacityServices {
             existing.workload === workload &&
             existing.machine_profile === machineProfile &&
             existing.release_id === releaseId &&
-            existing.app_id === appId;
+            existing.app_id === appId &&
+            Buffer.from(existing.credential_digest).equals(digest);
           if (!same) throw new ConnectError("request_id was already used with different arguments", Code.AlreadyExists);
           return { row: existing };
         }
@@ -73,11 +86,13 @@ export function capacityServices({ sql }: Deps): CapacityServices {
         if (workload === Workload.JVM && !release.manifest.apps.some((app) => app.id === appId)) {
           throw invalid(`release ${releaseId} has no app ${JSON.stringify(appId)}`);
         }
+        const sealed = await keys.cipher.seal(plaintext, capacityCredentialContext(environmentId, requestId));
         const [inserted] = await tx<CapacityRow[]>`
           insert into capacity_requests
-            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, state)
+            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, state, credential,
+              credential_digest)
           values (${environmentId}, ${requestId}, ${workload}, ${machineProfile}, ${releaseId}, ${appId},
-            ${profile.memory_mib}, ${CapacityState.PROVISIONING})
+            ${profile.memory_mib}, ${CapacityState.PROVISIONING}, ${sealed}, ${digest})
           returning *`;
         await notify(tx, { kind: "environment", environmentId });
         return { row: inserted };

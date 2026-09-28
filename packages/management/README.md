@@ -41,7 +41,7 @@ bun src/main.ts
 | `CHUNK_MACHINE_NETWORK`              | `chunk`                     | The container network machines join; created when missing.                                         |
 | `CHUNK_MACHINE_MANAGEMENT_URL`       | `$CHUNK_PUBLIC_URL`         | How machines reach this service.                                                                   |
 | `CHUNK_CORE_MEMORY_MIB`              | `1024`                      | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.                      |
-| `CHUNK_CORE_PORT`                    | `7070`                      | The port extra machines reach core on.                                                             |
+| `CHUNK_CORE_PORT`                    | `7070`                      | The port core's network listener binds, and extra machines reach core on.                          |
 
 Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, using
 the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,
@@ -78,17 +78,19 @@ for accepted wakes and due wake alarms. Every machine runs the environment image
 runs: `core,gateway` on the core machine, and `jvm` or `gateway` on an extra machine. The environment binary runs
 neither on its own yet, so extra machines exit at startup.
 
-Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID` and its `CHUNK_ENVIRONMENT_TOKEN`. Extra machines never call
-this service. They get `CHUNK_CORE_ADDRESS` and a `CHUNK_JOIN_TOKEN` valid for 15 minutes, plus the request's
-`CHUNK_CAPACITY_REQUEST_ID`, `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and `CHUNK_MACHINE_PROFILE`. A join token is
-`chunkjoin.v1.<claims>.<mac>`: base64url JSON claims (`environment_id`, `request_id`, `workload`, `expire_time` in Unix
-seconds) and the base64url HMAC-SHA256 of everything before the last dot, keyed by the SHA-256 of core's environment
-token. See `verifyJoinToken` in `src/environments/machines.ts`.
+Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN`, and `CHUNK_CORE_BIND` set to
+`[::]:$CHUNK_CORE_PORT`, so it accepts extra machines on every interface; core drops peers without a private address.
+Extra machines never call this service. They get `CHUNK_CORE_ENDPOINT`, `http://<core's address>:$CHUNK_CORE_PORT` with
+IPv6 addresses bracketed, and the credential core minted for the machine and sent in `EnsureCapacity`:
+`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`. They also get the request's `CHUNK_CAPACITY_REQUEST_ID`,
+`CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and `CHUNK_MACHINE_PROFILE`. The credential is stored sealed, with a keyed digest
+that retries are matched on, and is never returned. Traffic between machines is plaintext, so machines must share a
+private, encrypted network.
 
 Every container and volume carries ownership labels with this install's ID (from the `installation` table), the
 environment and the capacity request. The provider refuses to adopt, start, stop or remove anything under a name it uses
 that lacks them. Core is restarted by the engine. Extra machines are stateless and are not: the reconciler replaces one
-that exits or disappears, under the same request, with a fresh join token.
+that exits or disappears, under the same request, with the same credential.
 
 ## Log replication
 
