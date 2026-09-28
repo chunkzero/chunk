@@ -16,9 +16,9 @@ use chunk_store::{Revision, Snapshot, Storage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc as queue, oneshot, watch};
 
 use crate::{
-    ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result,
+    ActionEffects, ActionHandle, ActionId, ActionStatus, Error, Result, SendBudget,
     actor::Actor,
-    limits::{EngineQueue, Limit, REQUEST_BYTES, REQUEST_OVERHEAD, action_bytes},
+    limits::{EngineQueue, Limit, REQUEST_BYTES, REQUEST_OVERHEAD, action_bytes, send_bytes},
 };
 
 /// Admission is bounded by `limits::REQUEST_BYTES`; this only bounds the channel's own memory.
@@ -305,6 +305,7 @@ struct Owner {
     environment: String,
     events: queue::Sender<Event>,
     memory: Arc<Semaphore>,
+    send: SendBudget,
     queue: Arc<EngineQueue>,
     lane: Arc<crate::system::Lane>,
     stopped: Arc<AtomicBool>,
@@ -350,6 +351,7 @@ impl Backend {
             environment: "test".into(),
             events,
             memory: memory.clone(),
+            send: SendBudget::new(send_bytes()),
             queue: Arc::default(),
             lane: Arc::default(),
             stopped: Arc::default(),
@@ -442,6 +444,7 @@ impl Backend {
             environment,
             events,
             memory,
+            send: SendBudget::new(send_bytes()),
             queue: engine_queue,
             lane,
             stopped,
@@ -501,6 +504,12 @@ impl Backend {
     #[must_use]
     pub fn request_bytes(&self) -> usize {
         REQUEST_BYTES - self.0.memory.available_permits()
+    }
+
+    /// The budget outgoing sync messages are charged against, sized from the machine's memory.
+    #[must_use]
+    pub fn send_budget(&self) -> &SendBudget {
+        &self.0.send
     }
 
     /// `charge`, grown to admit a request carrying `bytes` of input.
