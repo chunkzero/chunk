@@ -200,6 +200,9 @@ impl ProcessHost {
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))
                 .kill_on_drop(true);
+            if let Some(address) = self.config.private_address {
+                command.env("CHUNK_PLAYER_ADDRESS", address.to_string());
+            }
             inherit_lock(&mut command, marker)?;
             command.spawn()
         })();
@@ -308,6 +311,21 @@ impl ProcessHost {
         }
         true
     }
+    /// Requires a player endpoint with a port on loopback or on this machine's private address.
+    fn validate_endpoint(&self, registration: &ProcessRegistration) -> Result<()> {
+        let endpoint = &registration.player_endpoint;
+        let address: std::net::SocketAddr = endpoint
+            .strip_prefix("http://")
+            .unwrap_or(endpoint)
+            .parse()
+            .map_err(|_| Error::Invalid("process endpoint"))?;
+        let ip = address.ip().to_canonical();
+        let local = ip.is_loopback() || self.config.private_address.is_some_and(|private| private.to_canonical() == ip);
+        if !local || address.port() == 0 {
+            return Err(Error::Invalid("process requires loopback or this machine's private address"));
+        }
+        Ok(())
+    }
     /// Stops all owned JVMs, including launches awaiting readiness, and launches no more.
     /// # Errors
     /// Reports unconfirmed process exits, including those of launches this host does not own.
@@ -374,7 +392,7 @@ impl Host for ProcessHost {
         if process.stop.is_cancelled() || process.stopped.load(Ordering::Acquire) {
             return Err(Error::Stopped);
         }
-        validate_endpoint(&registration)?;
+        self.validate_endpoint(&registration)?;
         let mut frozen = process.registration.lock().map_err(|_| Error::Unresolved("registration poisoned"))?;
         if frozen.as_ref().is_some_and(|previous| previous != &registration) {
             return Err(Error::Invalid("registration changed"));
@@ -411,7 +429,7 @@ impl Host for ProcessHost {
         found
     }
     fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
-        validate_endpoint(&registration)?;
+        self.validate_endpoint(&registration)?;
         let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
         let id = identity.runtime_id.clone();
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
@@ -601,17 +619,6 @@ pub(crate) const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// How long a JVM asked to stop may take to exit before control kills it.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
-
-/// Requires a loopback player endpoint.
-fn validate_endpoint(registration: &ProcessRegistration) -> Result<()> {
-    let endpoint = &registration.player_endpoint;
-    let address: std::net::SocketAddr =
-        endpoint.strip_prefix("http://").unwrap_or(endpoint).parse().map_err(|_| Error::Invalid("process endpoint"))?;
-    if !address.ip().is_loopback() || address.port() == 0 {
-        return Err(Error::Invalid("process requires loopback"));
-    }
-    Ok(())
-}
 
 mod classpath;
 mod pid;

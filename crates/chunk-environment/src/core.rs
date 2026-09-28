@@ -29,7 +29,7 @@ pub struct CoreConfig {
     /// Where other machines reach the sync protocol's `Core` service, from loopback or private peers only. Unset binds
     /// nothing.
     pub core_bind: Option<SocketAddr>,
-    /// This machine's address on the environment's private network.
+    /// This machine's address on the environment's private network, where local JVMs serve players. It must be private.
     pub private_address: Option<IpAddr>,
     /// The token management issued the environment, whose SHA-256 keys machine and operator credentials. Without one,
     /// control's credential keys them.
@@ -77,6 +77,9 @@ impl Core {
     }
 
     async fn launch(self, config: CoreConfig, on_backend: impl FnOnce(&BackendConnection)) -> io::Result<Self> {
+        if let Some(address) = config.private_address.filter(|address| !chunk_service::net::private(*address)) {
+            return Err(io::Error::other(format!("{address} is not a private address")));
+        }
         let mut core = self;
         let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
@@ -175,7 +178,11 @@ impl Core {
 
     fn host_config(&self, config: &CoreConfig) -> io::Result<chunk_control::ProcessHostConfig> {
         let directory = config.state.join("control").join("nodes");
-        Ok(chunk_control::ProcessHostConfig { directory, backend: self.backend_connection()?.clone() })
+        Ok(chunk_control::ProcessHostConfig {
+            directory,
+            backend: self.backend_connection()?.clone(),
+            private_address: config.private_address,
+        })
     }
 
     async fn serve_control(
@@ -209,6 +216,7 @@ impl Core {
                 self.gateways.clone(),
                 config.environment.clone(),
                 config.environment_token.clone(),
+                config.private_address,
             )),
         };
         self.control =

@@ -255,6 +255,17 @@ async fn a_jvm_registers_follows_its_sessions_and_reports_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jvm_on_cores_machine_serves_players_on_loopback_or_its_private_address() {
+    let fixture = Fixture::with_host(Arc::new(Launches::of("host-1", false))).await;
+    let foreign = JvmRegistration { player_endpoint: "10.0.0.9:25565".into(), ..registration() };
+    assert_eq!(code(&fixture.jvm_call(JVM, "chunk:register", "", &foreign).await), Code::Denied);
+    let private = JvmRegistration { player_endpoint: format!("{PRIVATE}:25565"), ..registration() };
+    let registered = fixture.jvm_call(JVM, "chunk:register", "", &private).await;
+    assert!(matches!(registered.outcome, Some(Outcome::Result(_))), "{registered:?}");
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_jvm_streams_resolve_to_one_current_stream() {
     let fixture = Fixture::with_host(Arc::new(Launches::of("host-1", false))).await;
     fixture.register().await;

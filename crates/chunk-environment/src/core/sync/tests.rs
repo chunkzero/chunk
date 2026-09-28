@@ -20,6 +20,8 @@ use tokio::{sync::oneshot, task::JoinHandle};
 use tonic::{Streaming, transport::Channel};
 
 const JVM: &str = "jvm-credential-with-at-least-32-bytes-long";
+/// Core's machine's private address.
+const PRIVATE: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
 const SOURCE: &str = r"
 export function get(ctx) { return ctx.db.get('counters', 'count')?.value ?? 0; }
 export function add(ctx, by) { const value = get(ctx) + by; ctx.db.put('counters', 'count', {value}); return value; }
@@ -218,7 +220,7 @@ impl Fixture {
             control: chunk_control::Config { environment: "test".into() },
             host,
             fresh: false,
-            services: Some(services(backend.clone(), gateways.clone(), "test".into(), None)),
+            services: Some(services(backend.clone(), gateways.clone(), "test".into(), None, Some(PRIVATE))),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();

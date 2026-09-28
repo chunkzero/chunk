@@ -98,6 +98,40 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     drop(held);
 }
 
+#[tokio::test]
+async fn jvms_serve_players_on_the_machines_private_address() {
+    let directory = tempfile::tempdir().unwrap();
+    let java = directory.path().join("java");
+    std::fs::write(&java, "#!/bin/sh\necho \"$CHUNK_PLAYER_ADDRESS\"\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut artifact = crate::tests::test_app();
+    let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
+    std::fs::write(directory.path().join(&artifact.jar), &jar).unwrap();
+    artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
+    let host = private_host(directory.path(), java, Some("fdaa::2".parse().unwrap()));
+    host.configure("http://127.0.0.1:1".into()).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let process = host.launch(&id, &release(artifact), "bridge", "local").unwrap().unwrap();
+    let log = host.path(&id, "jvm.log").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read_to_string(&log).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the JVM logged its player address");
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2\n");
+    let registration = |endpoint: &str| ProcessRegistration {
+        identity: Some(process.identity.clone()),
+        control_endpoint: String::new(),
+        player_endpoint: endpoint.into(),
+    };
+    let token = format!("Bearer {}", process.token);
+    for refused in ["[fdaa::3]:25565", "10.0.0.2:25565", "[fdaa::2]:0"] {
+        assert!(host.register(&token, registration(refused)).is_err(), "{refused}");
+    }
+    assert_eq!(host.register(&token, registration("[fdaa::2]:25565")).unwrap(), process.identity);
+    assert!(host.release(&id).await.unwrap());
+}
+
 async fn assert_stopped_hosts_are_pruned(host: &ProcessHost, retained: &str, unconfirmed: &str) {
     // The unconfirmed launch's JVM may still run.
     assert!(matches!(host.shutdown().await, Err(Error::Unresolved(_))));
@@ -202,6 +236,15 @@ fn release(artifact: chunk_contract::AppArtifact) -> Release {
 
 /// A host in `directory` that launches release `build` with `java`.
 fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
+    private_host(directory, java, None)
+}
+
+/// A host as [`host`] makes, on a machine whose private address is `private_address`.
+fn private_host(
+    directory: &std::path::Path,
+    java: std::path::PathBuf,
+    private_address: Option<std::net::IpAddr>,
+) -> ProcessHost {
     let host = ProcessHost::new(ProcessHostConfig {
         directory: directory.join("nodes"),
         backend: chunk_contract::BackendConnection {
@@ -210,6 +253,7 @@ fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
             endpoint: "http://127.0.0.1:1".into(),
             token: "unused".into(),
         },
+        private_address,
     });
     host.add_release("build", Distribution { directory: directory.into(), java }).unwrap();
     host
