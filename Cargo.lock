@@ -626,6 +626,7 @@ dependencies = [
  "chunk-service",
  "chunk-store",
  "flate2",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",

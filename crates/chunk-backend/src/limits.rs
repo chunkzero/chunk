@@ -23,6 +23,11 @@ pub(crate) const ACTION_BYTES: usize = 256 * 1024 * 1024;
 /// Live actions may reserve 1/`ACTION_SHARE` of the machine's memory. Core may share the machine with Minecraft servers,
 /// and each engine may also hold `ArrayBuffer` backing storage up to its heap limit beyond its reservation.
 const ACTION_SHARE: usize = 8;
+/// Outgoing sync messages, from encoding until the transport frees them. The budget is [`send_bytes`], never less than
+/// this.
+pub(crate) const SEND_BYTES: usize = 128 * 1024 * 1024;
+/// Outgoing sync messages may hold 1/`SEND_SHARE` of the machine's memory.
+const SEND_SHARE: usize = 16;
 /// Retained action outcomes, live actions and prepared action identities; outcomes give way first.
 pub(crate) const RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -42,6 +47,8 @@ pub enum Limit {
     SubscriptionMemory,
     #[error("live actions reached their engine heap budget and queued actions filled the queue or waited over 500 ms")]
     ActionMemory,
+    #[error("outgoing sync messages reached their memory budget")]
+    SendMemory,
     #[error("live actions and prepared action identities reached 64 MiB of retention")]
     Retention,
     #[error("scheduled jobs reached the store's job budget; retry once jobs finish or expire")]
@@ -59,6 +66,13 @@ impl Limit {
 pub(crate) fn action_bytes() -> usize {
     machine_memory(|path| std::fs::read_to_string(path))
         .map_or(ACTION_BYTES, |bytes| (bytes / ACTION_SHARE).max(ACTION_BYTES))
+}
+
+/// The send budget: [`SEND_SHARE`] of the machine's memory, or of the process's cgroup limit when lower, and
+/// [`SEND_BYTES`] when either can't be established.
+pub(crate) fn send_bytes() -> usize {
+    machine_memory(|path| std::fs::read_to_string(path))
+        .map_or(SEND_BYTES, |bytes| (bytes / SEND_SHARE).max(SEND_BYTES))
 }
 
 /// The machine's memory bounded by the process's cgroup limit, given a reader for `/proc` and the cgroup files.

@@ -176,7 +176,7 @@ pub(super) fn failure(update: &Update) -> Option<Code> {
 }
 
 /// Waits up to 10 seconds for `condition`.
-async fn until(condition: impl Fn() -> bool) {
+pub(super) async fn until(condition: impl Fn() -> bool) {
     let met = async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;

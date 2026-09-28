@@ -1,11 +1,9 @@
 //! Commands that wait for the backend: for its action capacity, or while it's busy.
 
 use super::*;
-use chunk_backend::{ActionHandle, Backend, Call, CommandIdentity};
+use chunk_backend::{ActionHandle, Backend, Call, CommandIdentity, SendBudget, SendCharge};
 use tonic::transport::Endpoint;
 
-/// The backend's request memory.
-const REQUEST_BYTES: usize = 64 * 1024 * 1024;
 /// What a `say big` outcome holds at least: its error, cut at 64 KiB.
 const BIG: usize = 64 * 1024;
 
@@ -210,23 +208,36 @@ async fn a_suggestion_is_charged_for_its_input_before_it_waits_for_the_backend()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_command_subscriptions_stay_charged_until_their_streams_drop() {
+    stalled_subscriptions_stay_charged(0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_messages_stay_charged_while_http2_holds_them_for_a_stalled_client() {
+    stalled_subscriptions_stay_charged(1024).await;
+}
+
+/// Follows commands on a client that never reads, whose streams have room for `window` bytes.
+async fn stalled_subscriptions_stay_charged(window: u32) {
     let arrived = arrived().await;
     let (gateway, backend) = (&arrived.gateway, arrived.fixture.backend.clone());
-    let stalled = stalled(&arrived).await;
-    let idle = backend.request_bytes();
+    let send = backend.send_budget().clone();
+    let stalled = stalled(&arrived, window).await;
+    let (idle, sending) = (backend.request_bytes(), send.bytes());
     let finished = start(gateway, "say big").await;
     assert!(failed(&outcome(&mut gateway.follow(&finished).await).await));
 
-    // Commands that finish while followed hold their outcomes, and their topics a copy, until their streams drop.
+    // Commands that finish while followed hold a copy of their outcomes in their streams until the streams drop. With
+    // no room, their topics never hand the copy over, so the commands hold their outcomes too.
     let mut streams = Vec::new();
     for _ in 0..2 {
         streams.push(stalled.follow(&start(gateway, "say big").await).await);
     }
-    until(|| backend.request_bytes() >= idle + 4 * BIG).await;
+    let held = || send.bytes() >= sending + 2 * BIG && (window > 0 || backend.request_bytes() >= idle + 2 * BIG);
+    until(held).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(backend.request_bytes() >= idle + 4 * BIG, "outcomes were released while their streams stalled");
-    // Leaves room for eight more outcomes.
-    let filler = backend.charge_request(REQUEST_BYTES - backend.request_bytes() - 1024 - 8 * BIG).unwrap();
+    assert!(held(), "outcomes were released while their streams stalled");
+    // Leaves room for eight more copies.
+    let filler = fill(&send, 8 * BIG);
     // Once all its effects are pending, each subscription replaces the one before, whose effects its client has yet to
     // take.
     let pending = start(gateway, "say pending").await;
@@ -234,18 +245,27 @@ async fn stalled_command_subscriptions_stay_charged_until_their_streams_drop() {
     while next(&mut all).await.upserts.len() < 6 {}
     streams.push(stalled.follow(&pending).await);
     assert_eq!(failure(&next(&mut all).await), Some(Code::Stopped));
-    while backend.request_bytes() + 2 * BIG <= REQUEST_BYTES {
-        let held = backend.request_bytes();
+    while send.available() >= BIG {
+        let held = send.bytes();
         streams.push(stalled.follow(&pending).await);
-        until(|| backend.request_bytes() >= held + BIG).await;
+        until(|| send.bytes() >= held + BIG).await;
     }
-    // Following a finished command needs room for its outcome twice.
+    // Following a finished command needs room for a copy of its outcome.
     let mut rejected = gateway.follow(&finished).await;
     assert_eq!(failure(&next(&mut rejected).await), Some(Code::Overloaded));
 
     drop((streams, filler));
-    until(|| backend.request_bytes() < idle + BIG).await;
+    until(|| backend.request_bytes() < idle + BIG && send.bytes() < sending + BIG).await;
     arrived.stop().await;
+}
+
+/// Charges `budget` until `room` bytes are left.
+fn fill(budget: &SendBudget, room: usize) -> Vec<SendCharge> {
+    let mut filler = Vec::new();
+    while budget.available() > room {
+        filler.push(budget.charge((budget.available() - room).min(1 << 30)).unwrap());
+    }
+    filler
 }
 
 #[tokio::test]
@@ -272,10 +292,10 @@ async fn reservations_closed_before_their_commands_started_stay_charged_until_fo
     fixture.stop().await;
 }
 
-/// The arrived gateway on a client that never reads, whose streams have no room.
-async fn stalled(arrived: &Arrived) -> Gateway {
+/// The arrived gateway on a client that never reads, whose streams have room for `window` bytes.
+async fn stalled(arrived: &Arrived, window: u32) -> Gateway {
     let endpoint = Endpoint::from_shared(arrived.fixture.endpoint.clone()).unwrap();
-    let channel = endpoint.initial_stream_window_size(Some(0)).connect().await.unwrap();
+    let channel = endpoint.initial_stream_window_size(Some(window)).connect().await.unwrap();
     Gateway { client: CoreClient::new(channel), ..arrived.gateway.clone() }
 }
 

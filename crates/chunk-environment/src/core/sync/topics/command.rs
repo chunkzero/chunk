@@ -4,8 +4,8 @@
 //! is cancelled once nothing follows it. A subscription under an unused ID reserves it for its gateway credential: it
 //! sends an empty snapshot at once, then waits for the command to start, and closing it first cancels the command. The
 //! subscription's request is charged against the backend's request memory, with room for the record of a command it
-//! closes before it started, until its topic ends or that record is forgotten, and each snapshot until the client took
-//! it.
+//! closes before it started, until its topic ends or that record is forgotten. Each snapshot is charged against the
+//! send budget from the moment it's pending, a charge the stream's messages then take over.
 
 use super::super::{
     SyncService,
@@ -91,7 +91,7 @@ async fn retained(backend: &Backend, id: chunk_backend::ActionId, credential: &s
 impl Command {
     /// Sends an empty snapshot while the command has yet to start, then a snapshot of the pending effects whenever they
     /// change, then the command's outcome, until the client took it or leaves, core stops, the credential lapses, as
-    /// when it's revoked, the backend has no room for a snapshot, or the subscription itself or, once the command
+    /// when it's revoked, the send budget has no room for a snapshot, or the subscription itself or, once the command
     /// started, the gateway stream it names is superseded. A subscription that ends for its command or the backend
     /// releases what its client has yet to take at once.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
@@ -121,7 +121,7 @@ impl Command {
                     return sender.fail(error);
                 }
                 let update = Update { stream: first.take().unwrap_or_default(), ..update };
-                match backend.charge_request(update.encoded_len()) {
+                match backend.send_budget().charge(update.encoded_len()) {
                     Ok(charge) => sender.send_snapshot(update, charge),
                     Err(failure) => return sender.end(errors::backend(&failure)),
                 }

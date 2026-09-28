@@ -9,6 +9,7 @@ mod platform;
 mod runs;
 mod streams;
 mod topics;
+mod transport;
 
 use chunk_backend::{Backend, Call, Update as Outcome};
 use chunk_control::Control;
@@ -63,7 +64,7 @@ pub(crate) fn services(
         };
         let server =
             CoreServer::new(service).max_decoding_message_size(MESSAGE_BYTES).max_encoding_message_size(MESSAGE_BYTES);
-        tonic::service::Routes::new(server)
+        tonic::service::Routes::new(transport::ChargeBodies(server))
     })
 }
 
@@ -158,20 +159,30 @@ fn position(epoch: u64, revision: Revision) -> Option<Position> {
 
 #[tonic::async_trait]
 impl Core for SyncService {
+    /// Answers with the result, charged against the send budget until HTTP/2 frees it, or with an error when the
+    /// result exceeds the message limit or the budget has no room for it by [`transport::DEADLINE`].
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         let principal = self.credentials.authenticate(&request)?;
         let response = match self.dispatch(&principal, request.into_inner()).await {
             Ok((position, result)) => CallResponse { position, outcome: Some(call_response::Outcome::Result(result)) },
             Err(error) => CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) },
         };
+        let failed = |error| CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) };
         if response.encoded_len() > MESSAGE_BYTES {
-            let error = errors::invalid("the result exceeds the 16 MiB message limit");
-            return Ok(Response::new(CallResponse {
-                position: None,
-                outcome: Some(call_response::Outcome::Error(error)),
-            }));
+            return Ok(Response::new(failed(errors::invalid("the result exceeds the 16 MiB message limit"))));
         }
-        Ok(Response::new(response))
+        let ledger = transport::Ledger::default();
+        let budget = self.app.backend().send_budget();
+        let response = match transport::charge(budget, response.encoded_len() + transport::PREFIX_BYTES).await {
+            Ok(charge) => {
+                ledger.push(charge);
+                response
+            }
+            Err(failure) => failed(errors::backend(&failure)),
+        };
+        let mut response = Response::new(response);
+        response.extensions_mut().insert(ledger);
+        Ok(response)
     }
 
     type SubscribeStream = streams::Stream;
@@ -179,12 +190,15 @@ impl Core for SyncService {
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let principal = self.credentials.authenticate(&request)?;
         let request = request.into_inner();
-        let (sender, stream) = streams::channel();
+        let (sender, stream) = streams::channel(self.app.backend().send_budget().clone());
         match self.open(principal, &request).await {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),
         }
-        Ok(Response::new(stream))
+        let ledger = stream.ledger();
+        let mut response = Response::new(stream);
+        response.extensions_mut().insert(ledger);
+        Ok(response)
     }
 }
 

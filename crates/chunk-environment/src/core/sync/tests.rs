@@ -9,6 +9,7 @@ mod network;
 mod operator;
 mod ownership;
 mod runtime;
+mod sends;
 mod shutdown;
 
 use super::*;
