@@ -1,6 +1,7 @@
 //! Subscription topics, by name.
 
 mod command;
+mod deployment;
 mod gateway;
 mod jvm;
 mod operator;
@@ -16,6 +17,7 @@ pub(super) enum Topic {
     Queries(queries::Queries),
     Command(command::Command),
     Gateway(gateway::Gateway),
+    Deployment(deployment::Deployment),
     Jvm(jvm::Jvm),
     Operator(operator::Operator),
 }
@@ -56,6 +58,7 @@ impl Topic {
                 command::open(service, principal, request).await.map(Self::Command)
             }
             topic if topic.starts_with("gateway/") => gateway::open(service, principal, request).map(Self::Gateway),
+            "deployment" => deployment::open(service, principal, request).map(Self::Deployment),
             topic if topic.starts_with("jvm/") => jvm::open(service, principal, request).map(Self::Jvm),
             "nodes" | "players" => operator::open(service, &principal, request).map(Self::Operator),
             _ => Err(errors::invalid("unknown topic")),
@@ -67,6 +70,7 @@ impl Topic {
             Self::Queries(queries) => queries.run(sender, stop).await,
             Self::Command(command) => command.run(sender, stop).await,
             Self::Gateway(gateway) => gateway.run(sender, stop).await,
+            Self::Deployment(deployment) => deployment.run(sender, stop).await,
             Self::Jvm(jvm) => jvm.run(sender, stop).await,
             Self::Operator(operator) => operator.run(sender, stop).await,
         }

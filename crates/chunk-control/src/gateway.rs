@@ -1,6 +1,10 @@
 //! The `gateway/<id>` sync topic: the open claims one gateway holds, keyed by operation ID, with the moves pending
 //! from them. Values are `chunk.sync.v1.GatewayClaim` messages.
 
+mod deployment;
+
+pub use deployment::Deployment;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chunk_proto::{sync::v1 as sync, v1::ClaimRequest};

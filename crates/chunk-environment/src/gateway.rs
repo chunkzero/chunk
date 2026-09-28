@@ -1,3 +1,8 @@
+mod remote;
+
+pub use remote::RemoteCore;
+pub(crate) use remote::run as run_remote;
+
 use crate::Running;
 use std::{io, net::SocketAddr, num::NonZeroUsize};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +31,7 @@ impl GatewayConfig {
 pub struct Gateway {
     running: Running,
     retarget: Option<chunk_proxy::Retarget>,
+    address: SocketAddr,
 }
 
 impl Gateway {
@@ -43,6 +49,7 @@ impl Gateway {
             },
         )
         .await?;
+        let address = proxy.local_addr()?;
         let retarget = proxy.retarget();
         let stop = CancellationToken::new();
         let shutdown = stop.clone();
@@ -50,7 +57,13 @@ impl Gateway {
             shutdown.cancelled().await;
             Ok(())
         }));
-        Ok(Self { running: Running { stop, task }, retarget })
+        Ok(Self { running: Running { stop, task }, retarget, address })
+    }
+
+    /// Where the listener accepts players.
+    #[must_use]
+    pub fn address(&self) -> SocketAddr {
+        self.address
     }
 
     /// Sends later player connections to `target`.
