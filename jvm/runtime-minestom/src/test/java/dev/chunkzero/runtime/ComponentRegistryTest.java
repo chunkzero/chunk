@@ -352,7 +352,6 @@ final class ComponentRegistryTest {
             return new SessionScope(
                     process,
                     id,
-                    1,
                     ticks,
                     () -> CompletableFuture.completedFuture(null),
                     null,

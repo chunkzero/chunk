@@ -88,13 +88,13 @@ public final class SessionMethodService {
                         || now.getAsLong() >= call.getDeadlineMs()
                         || !arrived.test(call.getDelivery(), call.getSession()))
                     throw new IllegalStateException("The method may not start");
-                session = manager.get(call.getSession(), 1);
+                session = manager.get(call.getSession());
                 session.requireMethodReady();
             } catch (RuntimeException error) {
                 cancel(operation);
                 return;
             }
-            binding = bindings.get(session.getCommand().getSessionType() + "/" + call.getMethod());
+            binding = bindings.get(session.getSessionType() + "/" + call.getMethod());
             operation.started = true;
         }
         JvmMethodResult result;

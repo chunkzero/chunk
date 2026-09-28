@@ -4,9 +4,8 @@ import chunk.sync.v1.CoreOuterClass.Position
 import chunk.sync.v1.Gateway.PlayerIdentity
 import chunk.sync.v1.Jvm.JvmDelivery
 import chunk.sync.v1.Jvm.JvmDeliveryPhase
+import chunk.sync.v1.Jvm.JvmSession
 import chunk.sync.v1.Jvm.PlayerSetup
-import chunk.v1.Common.SessionRef
-import chunk.v1.Supervision.SessionCommand
 import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.minestom.internal.GameplayService
 import net.minestom.server.ServerProcess
@@ -82,18 +81,14 @@ class GameplayLifecycleTest {
             ).schedule()
         minecraft.start(InetSocketAddress("127.0.0.1", 0))
         try {
-            fun command(id: String) =
-                SessionCommand
+            fun session(type: String = "flat") =
+                JvmSession
                     .newBuilder()
-                    .setOperationId(id)
-                    .setSession(
-                        SessionRef.newBuilder().setId(id),
-                    ).setGeneration(1)
-                    .setSessionType("flat")
+                    .setSessionType(type)
                     .setCapacity(2)
                     .build()
-            manager.create(command("a")).get(3, TimeUnit.SECONDS)
-            manager.create(command("b")).get(3, TimeUnit.SECONDS)
+            manager.create("a", session()).get(3, TimeUnit.SECONDS)
+            manager.create("b", session()).get(3, TimeUnit.SECONDS)
             val uuid = UUID.randomUUID().toString()
             val wanted = mutableMapOf<String, JvmDelivery>()
 
@@ -169,12 +164,12 @@ class GameplayLifecycleTest {
             assertTrue(oldPlayer in closedPlayers)
             assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
             arrive(connect("next", delivery("b", 3)), "next")
-            manager.finish(command("a")).get(3, TimeUnit.SECONDS)
+            manager.finish("a", session()).get(3, TimeUnit.SECONDS)
             val current = minecraft.connectionManager().onlinePlayers.single()
             assertEquals(uuid, current.uuid.toString())
             assertTrue(
                 manager
-                    .get("b", 1)
+                    .get("b")
                     .scope.instances
                     .contains(current.instance),
             )
@@ -182,7 +177,7 @@ class GameplayLifecycleTest {
             assertEquals(setOf(oldPlayer), closedPlayers)
             withdraw("next")
             await("next", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
-            manager.create(command("c").toBuilder().setSessionType("gated").build()).get(3, TimeUnit.SECONDS)
+            manager.create("c", session("gated")).get(3, TimeUnit.SECONDS)
             connect("pending", delivery("c", 4))
             joinStarted.get(3, TimeUnit.SECONDS)
             assertTrue(phase("pending") != JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED)
@@ -198,8 +193,8 @@ class GameplayLifecycleTest {
             arrive(connect("replacement", delivery("c", 6)), "replacement")
             withdraw("replacement")
             await("replacement", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
-            manager.finish(command("c")).get(3, TimeUnit.SECONDS)
-            manager.finish(command("b")).get(3, TimeUnit.SECONDS)
+            manager.finish("c", session("gated")).get(3, TimeUnit.SECONDS)
+            manager.finish("b", session()).get(3, TimeUnit.SECONDS)
         } finally {
             sockets.forEach { it.close() }
             service.close()

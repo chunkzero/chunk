@@ -1,6 +1,6 @@
 package dev.chunkzero.runtime;
 
-import chunk.v1.Supervision.SessionInventory;
+import chunk.sync.v1.Jvm.JvmSessionStatus;
 
 import dev.chunkzero.runtime.minestom.internal.AppRegistry;
 import dev.chunkzero.runtime.minestom.internal.ComponentRegistry;
@@ -92,7 +92,7 @@ public final class ChunkMinestom implements AutoCloseable {
                                         chunk.progress(
                                                 sessions.activeCount(),
                                                 inventory.stream()
-                                                        .mapToInt(SessionInventory::getAttached)
+                                                        .mapToInt(JvmSessionStatus::getAttached)
                                                         .sum());
                                     })
                             .repeat(TaskSchedule.tick(1))

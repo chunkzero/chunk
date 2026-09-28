@@ -52,7 +52,6 @@ public final class SessionScope {
 
     private final ServerProcess process;
     private final String id;
-    private final long generation;
     private final TickExecutor ticks;
     private final Supplier<CompletionStage<Void>> requestFinish;
     private final @Nullable BackendSession backend;
@@ -70,36 +69,26 @@ public final class SessionScope {
     SessionScope(
             ServerProcess process,
             String id,
-            long generation,
             TickExecutor ticks,
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend) {
-        this(
-                process,
-                id,
-                generation,
-                ticks,
-                requestFinish,
-                backend,
-                new ComponentRegistry(List.of()));
+        this(process, id, ticks, requestFinish, backend, new ComponentRegistry(List.of()));
     }
 
     SessionScope(
             ServerProcess process,
             String id,
-            long generation,
             TickExecutor ticks,
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend,
             ComponentRegistry components) {
         this.process = process;
         this.id = id;
-        this.generation = generation;
         this.ticks = ticks;
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
-        events = EventNode.event("session-" + id + "-" + generation, EventFilter.ALL, this::owns);
+        events = EventNode.event("session-" + id, EventFilter.ALL, this::owns);
         try {
             var schedulers = process.schedulerManager();
             scheduler = schedulers.createScheduler();
@@ -124,10 +113,6 @@ public final class SessionScope {
 
     public String getId() {
         return id;
-    }
-
-    public long getGeneration() {
-        return generation;
     }
 
     public @Nullable BackendSession getBackend() {

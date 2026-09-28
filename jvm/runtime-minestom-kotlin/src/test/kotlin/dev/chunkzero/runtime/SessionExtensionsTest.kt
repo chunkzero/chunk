@@ -27,7 +27,7 @@ class SessionExtensionsTest {
         process = ServerProcess.create()
         val ticks = TickExecutor()
         ticks.flush()
-        scope = SessionScope(process, "extensions", 1, ticks, { CompletableFuture.completedFuture(null) }, null)
+        scope = SessionScope(process, "extensions", ticks, { CompletableFuture.completedFuture(null) }, null)
     }
 
     @AfterEach
