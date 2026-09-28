@@ -5,7 +5,7 @@ use super::{
     *,
 };
 use chunk_control::MachineKind;
-use chunk_proto::sync::v1::CommandStarted;
+use chunk_proto::sync::v1::{CommandStarted, GatewayDeployment};
 use tonic::transport::server::TcpConnectInfo;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -36,6 +36,30 @@ async fn a_gateway_machine_authenticates_over_the_network_until_revoked() {
     assert_eq!(last.code(), Code::Stopped);
     let status = client.call(authorized(read, &credential)).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_deployment_topic_follows_the_current_release_for_gateways_until_revoked() {
+    let fixture = Fixture::start().await;
+    fixture.control.add_machine("remote", MachineKind::Gateway).unwrap();
+    let credential = Issuer::new("test", None, &fixture.cli).machine(MachineKind::Gateway, "remote");
+    let mut client = CoreClient::connect(fixture.network.clone()).await.unwrap();
+    let subscription = SubscribeRequest { topic: "deployment".into(), ..SubscribeRequest::default() };
+    let mut denied = fixture.client.clone().subscribe(authorized(subscription.clone(), &fixture.cli)).await.unwrap();
+    assert_eq!(next(denied.get_mut()).await.error.unwrap().code(), Code::Denied);
+
+    let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
+    let first = next(&mut updates).await;
+    assert!(first.snapshot && first.upserts.is_empty() && !first.stream.is_empty());
+    fixture.control.activate_release(runtime::release()).unwrap();
+    let current = next(&mut updates).await;
+    let value = GatewayDeployment { deployment: "test".into() }.encode_to_vec();
+    assert!(current.snapshot && current.position.is_some());
+    assert_eq!(current.upserts, [Entry { key: "current".into(), state: Some(State::Value(value)) }]);
+
+    fixture.control.revoke_machine("remote", MachineKind::Gateway).unwrap();
+    assert_eq!(next(&mut updates).await.error.unwrap().code(), Code::Stopped);
     fixture.stop().await;
 }
 
