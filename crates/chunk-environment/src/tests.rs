@@ -43,15 +43,21 @@ fn authorized<T>(message: T, token: &str) -> tonic::Request<T> {
     request
 }
 
-#[test]
-fn services_accept_only_the_all_in_one_layouts() {
+#[tokio::test]
+async fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
+    assert_eq!("gateway, core".parse::<Services>().unwrap(), Services::default());
     assert_eq!("core,gateway,exec".parse::<Services>().unwrap(), Services::default());
-    let services = "exec, core".parse::<Services>().unwrap();
-    assert!(services.contains(Service::Core) && services.contains(Service::Exec));
-    assert!(!services.contains(Service::Gateway));
-    for rejected in ["", "core", "core,gateway", "gateway,exec", "core,exec,jvm"] {
+    let core = "core,exec".parse::<Services>().unwrap();
+    assert!(core.contains(Service::Core) && !core.contains(Service::Gateway));
+    for rejected in ["", "exec", "core,jvm", "core,,gateway"] {
         assert!(rejected.parse::<Services>().is_err(), "{rejected:?} was accepted");
     }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap());
+    config.services = "gateway".parse().unwrap();
+    let error = run(config, CancellationToken::new()).await.unwrap_err();
+    assert!(error.to_string().contains("not supported yet"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

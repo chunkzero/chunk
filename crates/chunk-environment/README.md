@@ -1,7 +1,8 @@
 # Environment process
 
-`chunk-environment` runs an environment's core, gateway and exec services in one process. `CHUNK_SERVICES` picks them:
-`core,gateway,exec` (the default) or `core,exec`.
+`chunk-environment` runs an environment's core and gateway services in one process. Core runs the backend functions
+itself. `CHUNK_SERVICES` picks the services: `core,gateway` (the default) or `core`. A legacy `exec` is ignored with a
+warning, and `gateway` alone is not supported yet.
 
 ## Container image
 
@@ -17,7 +18,7 @@ It reads these variables:
 
 | Variable                  | Default                                 | Meaning                                                                        |
 | ------------------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
-| `CHUNK_SERVICES`          | `core,gateway,exec`                     | The services to run.                                                           |
+| `CHUNK_SERVICES`          | `core,gateway`                          | The services to run.                                                           |
 | `CHUNK_ENVIRONMENT_ID`    | required                                | The environment ID; `CHUNK_ENVIRONMENT` is accepted too.                       |
 | `CHUNK_MANAGEMENT_URL`    | unset                                   | The management service that deploys the environment.                           |
 | `CHUNK_ENVIRONMENT_TOKEN` | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for the management service.                     |

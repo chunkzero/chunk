@@ -182,8 +182,8 @@ in `.chunk/local/releases`; each is deleted once no running version uses it, and
 one's control state and JVM logs.
 
 The `chunk-environment` binary runs an environment's services in one process and calls the same libraries as
-`chunk dev`. `CHUNK_SERVICES` selects them: `core,gateway,exec` (the default) or `core,exec`. Core is the backend and
-the control that shares its store, exec runs backend code beside core, and gateway is the proxy's player listener. It
+`chunk dev`. `CHUNK_SERVICES` selects them: `core,gateway` (the default) or `core`. Core is the backend, which runs
+backend functions in its process, and the control that shares its store; gateway is the proxy's player listener. It
 reads environment variables and has no CLI argument parser. It requires `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`),
 `CHUNK_STATE`, and either `CHUNK_BUNDLE` or `CHUNK_MANAGEMENT_URL` with `CHUNK_ENVIRONMENT_TOKEN`, under which it serves
 the releases the management service deploys. It accepts `CHUNK_BACKEND_BIND` (default `127.0.0.1:25568`),

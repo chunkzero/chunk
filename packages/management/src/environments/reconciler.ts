@@ -191,7 +191,7 @@ async function saveCoreAddresses({ sql }: Deps, environment: EnvironmentRow, cor
 
 /**
  * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime, so one that exited or
- * went missing fails its request; gateway and exec machines are stateless and are replaced, with a fresh join token.
+ * went missing fails its request; gateway machines are stateless and are replaced, with a fresh join token.
  * A provider error fails the request for good; core retries with a new request ID.
  */
 async function keepRunning(

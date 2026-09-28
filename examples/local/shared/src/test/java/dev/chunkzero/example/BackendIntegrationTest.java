@@ -143,7 +143,7 @@ class BackendIntegrationTest {
                     .putAll(
                             java.util.Map.of(
                                     "CHUNK_SERVICES",
-                                    "core,exec",
+                                    "core",
                                     "CHUNK_BUNDLE",
                                     bundlePath.toString(),
                                     "CHUNK_ENVIRONMENT",

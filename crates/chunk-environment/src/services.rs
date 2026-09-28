@@ -2,12 +2,10 @@ use std::{collections::BTreeSet, io, str::FromStr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Service {
-    /// The environment's store, backend and control.
+    /// The environment's store, backend, control and backend functions.
     Core,
     /// The player listener.
     Gateway,
-    /// Backend code execution.
-    Exec,
 }
 
 /// The services one environment process runs, selected by `CHUNK_SERVICES` as a comma list.
@@ -23,26 +21,26 @@ impl Services {
 
 impl Default for Services {
     fn default() -> Self {
-        Self([Service::Core, Service::Gateway, Service::Exec].into())
+        Self([Service::Core, Service::Gateway].into())
     }
 }
 
 impl FromStr for Services {
     type Err = io::Error;
 
-    /// Accepts `core,gateway,exec` and `core,exec`, in any order.
+    /// Accepts `core,gateway`, `core` and `gateway`, in any order. A legacy `exec` is ignored with a warning.
     fn from_str(value: &str) -> io::Result<Self> {
-        let services = value
-            .split(',')
-            .map(|name| match name.trim() {
-                "core" => Ok(Service::Core),
-                "gateway" => Ok(Service::Gateway),
-                "exec" => Ok(Service::Exec),
-                name => Err(io::Error::other(format!("unknown service {name:?} in CHUNK_SERVICES"))),
-            })
-            .collect::<io::Result<BTreeSet<_>>>()?;
-        if !services.contains(&Service::Core) || !services.contains(&Service::Exec) {
-            return Err(io::Error::other("CHUNK_SERVICES must be core,gateway,exec or core,exec"));
+        let mut services = BTreeSet::new();
+        for name in value.split(',').map(str::trim) {
+            match name {
+                "core" => _ = services.insert(Service::Core),
+                "gateway" => _ = services.insert(Service::Gateway),
+                "exec" => tracing::warn!("ignoring exec in CHUNK_SERVICES; core runs backend functions"),
+                name => return Err(io::Error::other(format!("unknown service {name:?} in CHUNK_SERVICES"))),
+            }
+        }
+        if services.is_empty() {
+            return Err(io::Error::other("CHUNK_SERVICES must be core,gateway, core or gateway"));
         }
         Ok(Self(services))
     }

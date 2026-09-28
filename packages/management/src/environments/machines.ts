@@ -44,7 +44,7 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
     name: coreMachineName(environmentId),
     image: options.image,
     env: {
-      CHUNK_SERVICES: "core,gateway,exec",
+      CHUNK_SERVICES: "core,gateway",
       CHUNK_ENVIRONMENT_ID: environmentId,
       CHUNK_MANAGEMENT_URL: options.managementUrl,
       CHUNK_ENVIRONMENT_TOKEN: token,

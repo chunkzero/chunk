@@ -54,7 +54,12 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   test("core gets a machine with its own token, and the addresses it has once started", async () => {
     const env = await running();
     expect(env.core()?.state).toBe("running");
-    expect(machines.get(env.coreName)?.spec).toMatchObject({ memoryMib: 2048, cpus: 1, restart: true });
+    expect(machines.get(env.coreName)?.spec).toMatchObject({
+      memoryMib: 2048,
+      cpus: 1,
+      restart: true,
+      env: { CHUNK_SERVICES: "core,gateway" },
+    });
     const [row] = await h.sql<{ machine_addresses: string[] }[]>`
       select machine_addresses from environments where id = ${env.environmentId}`;
     expect(row?.machine_addresses).toEqual(env.core()?.addresses ?? []);
@@ -80,7 +85,10 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const ready = (await env.client.ensureCapacity(request)).capacity;
     expect(ready?.state).toBe(CapacityState.READY);
     const machine = machines.get(ready?.machineId ?? "");
-    expect(machine?.spec).toMatchObject({ restart: false, env: { CHUNK_CORE_ADDRESS: `${env.coreName}:7070` } });
+    expect(machine?.spec).toMatchObject({
+      restart: false,
+      env: { CHUNK_SERVICES: "jvm", CHUNK_CORE_ADDRESS: `${env.coreName}:7070` },
+    });
     expect(verifyJoinToken(env.token, machine?.spec.env.CHUNK_JOIN_TOKEN ?? "")).toMatchObject({
       environment_id: env.environmentId,
       request_id: "cap-1",

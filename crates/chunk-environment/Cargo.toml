@@ -1,6 +1,6 @@
 [package]
 name = "chunk-environment"
-description = "Environment process running the core, gateway and exec services"
+description = "Environment process running the core and gateway services"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
