@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -58,8 +59,31 @@ class PrivateAddressTest {
             }
         }
         for (var endpoint :
-                new String[] {"http://203.0.113.1:7070", "http://[2001:db8::1]:7070", "http://169.254.169.254:80"}) {
+                new String[] {
+                    "http://203.0.113.1:7070",
+                    "http://[2001:db8::1]:7070",
+                    "http://169.254.169.254:80",
+                    "http://localhost:7070",
+                    "http://core.internal:7070",
+                    "http://10.0.0.2.nip.io:7070"
+                }) {
             assertThrows(IllegalArgumentException.class, () -> CoreChannel.open(endpoint), endpoint);
+        }
+    }
+
+    @Test
+    void coreChannelDialsTheLiteralAddress() throws Exception {
+        try (var core = new ServerSocket(0, 1, InetAddress.ofLiteral("127.0.0.1"))) {
+            core.setSoTimeout(5000);
+            var channel = CoreChannel.open("http://127.0.0.1:" + core.getLocalPort());
+            try {
+                channel.getState(true);
+                try (var accepted = core.accept()) {
+                    assertEquals(InetAddress.ofLiteral("127.0.0.1"), accepted.getInetAddress());
+                }
+            } finally {
+                channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            }
         }
     }
 
