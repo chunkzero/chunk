@@ -22,7 +22,8 @@ pub(in super::super) struct Gateway {
 }
 
 /// Opens the gateway topic `request` names under a new stream ID, resuming after its cursor when that names a stream
-/// of the same scope in the current epoch, and supersedes the gateway's earlier stream.
+/// of the same scope in the current epoch, and supersedes the gateway's earlier stream. Resuming a stream that another
+/// has since superseded fails, so a process that lost its gateway ID never takes it back.
 pub(super) fn open(service: &SyncService, principal: Principal, request: &SubscribeRequest) -> Result<Gateway, Error> {
     let id = request.topic.strip_prefix("gateway/").unwrap_or_default();
     if principal.class != (Class::Gateway { id: id.to_owned() }) {
@@ -33,6 +34,9 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
     }
     let credential = &principal.credential;
     let after = request.after.as_ref().filter(|after| service.streams.verify(&after.stream, request, credential));
+    if after.is_some_and(|after| service.fences.superseded(&request.topic, &after.stream)) {
+        return Err(errors::error(Code::Superseded, "a newer stream for this gateway superseded the one this resumes"));
+    }
     let after = after.and_then(|after| after.position);
     let after = after
         .filter(|position| position.epoch == service.epoch)

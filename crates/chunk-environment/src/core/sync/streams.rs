@@ -108,6 +108,12 @@ impl Fences {
         superseded
     }
 
+    /// Whether a stream other than `stream` has since become `topic`'s current one.
+    pub fn superseded(&self, topic: &str, stream: &str) -> bool {
+        let fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        fences.get(topic).is_some_and(|fence| fence.stream != stream)
+    }
+
     /// Checks that `stream` is the current stream of a fenced topic `credential` opened.
     pub fn check(&self, stream: &str, credential: &str) -> Result<(), Error> {
         self.follow(stream, credential).map(drop)

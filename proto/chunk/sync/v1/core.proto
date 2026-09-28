@@ -176,8 +176,8 @@ message Error {
     // An effectful operation may or may not have taken effect, and core no longer knows. Never retry it under a new
     // ID.
     CODE_OUTCOME_UNKNOWN = 9;
-    // A newer stream of the `gateway/<id>` topic superseded this one: another process under the gateway's ID follows
-    // its claims now, and this one must stop.
+    // A newer stream of the `gateway/<id>` topic superseded this one, or the one a subscription resumes: another
+    // process under the gateway's ID follows its claims now, and this one must stop.
     CODE_SUPERSEDED = 10;
   }
   Code code = 1;

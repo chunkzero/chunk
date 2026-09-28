@@ -577,6 +577,10 @@ async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
     }
     assert_eq!(last.error.map(|error| error.code()), Some(Code::Superseded));
     assert!(first.message().await.unwrap().is_none());
+    let after = Cursor { stream: snapshot.stream.clone(), position: snapshot.position };
+    let stale = SubscribeRequest { topic: "gateway/proxy".into(), after: Some(after), ..SubscribeRequest::default() };
+    let mut stale = fixture.client.subscribe(authorized(stale, &gateway)).await.unwrap().into_inner();
+    assert_eq!(next(&mut stale).await.error.map(|error| error.code()), Some(Code::Superseded));
     assert_eq!(code(&fixture.call_on(&gateway, &snapshot.stream).await), Code::Stopped);
     let current = fixture.call_on(&gateway, &update.stream).await;
     assert_eq!(current.outcome, Some(Outcome::Result(b"0".to_vec())));
