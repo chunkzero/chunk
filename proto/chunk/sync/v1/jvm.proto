@@ -98,8 +98,9 @@ message JvmRegistration {
   string artifact_digest = 5;
   // The deployment the JVM runs. An inactive or unknown one fails with CONTRACT.
   string deployment = 6;
-  // The address players connect to: a loopback or private address. Core requires its host to be the address the JVM
-  // connects from.
+  // The address players connect to: a loopback or private address. A JVM that connects to core from another machine
+  // must name the address it connects from. One that connects over loopback runs on core's machine, and may name
+  // loopback or that machine's private address.
   string player_endpoint = 7;
   // The Minecraft protocol version the JVM speaks.
   int32 protocol = 8;
