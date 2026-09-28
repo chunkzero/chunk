@@ -26,8 +26,8 @@ pub(super) struct Batch {
     /// The changes' own charge until the parts are charged, then theirs.
     charge: Option<SendCharge>,
     charged: bool,
-    /// When the budget first had no room for the parts.
-    pub refused: Option<Instant>,
+    /// When the budget first had no room for the parts, until it had.
+    refused: Option<Instant>,
 }
 
 impl Batch {
@@ -42,6 +42,29 @@ impl Batch {
 
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty()
+    }
+
+    /// When the budget first had no room for the parts, while it still has none and so none was taken.
+    pub fn refused(&self) -> Option<Instant> {
+        self.refused
+    }
+
+    /// Merges `newer` changes into parts the budget has no room for, which keep when it first refused them.
+    pub fn merge(&mut self, mut newer: Changes) {
+        debug_assert!(self.refused.is_some(), "only refused parts take newer changes");
+        let mut changes = Changes::default();
+        for (part, _) in self.parts.drain(..) {
+            changes.merge(part);
+        }
+        let charge = match (self.charge.take(), newer.charge.take()) {
+            (Some(mut charge), Some(newer)) => {
+                charge.merge(newer);
+                Some(charge)
+            }
+            (charge, newer) => charge.or(newer),
+        };
+        changes.merge(newer.into_update());
+        *self = Self { charge, refused: self.refused, ..Self::new(changes) };
     }
 
     /// The next part with its share of the charge, charging all the parts first, or none once they're all taken.
@@ -60,6 +83,7 @@ impl Batch {
                 return Err(failure);
             }
             self.charged = true;
+            self.refused = None;
         }
         let (update, bytes) = self.parts.pop_front().expect("a part");
         let charge = if self.parts.is_empty() {

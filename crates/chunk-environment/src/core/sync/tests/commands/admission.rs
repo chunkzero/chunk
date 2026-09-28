@@ -236,11 +236,10 @@ async fn stalled_subscriptions_stay_charged(window: u32) {
     until(held).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(held(), "outcomes were released while their streams stalled");
-    // Leaves room for eight more copies.
-    let filler = fill(&send, 8 * BIG);
     // Once all its effects are pending, each subscription replaces the one before, whose effects its client has yet to
-    // take.
+    // take. The filler leaves room for eight more copies.
     let pending = start(gateway, "say pending").await;
+    let filler = fill(&send, 8 * BIG);
     let mut all = gateway.follow(&pending).await;
     while next(&mut all).await.upserts.len() < 6 {}
     streams.push(stalled.follow(&pending).await);
@@ -250,12 +249,28 @@ async fn stalled_subscriptions_stay_charged(window: u32) {
         streams.push(stalled.follow(&pending).await);
         until(|| send.bytes() >= held + BIG).await;
     }
-    // Following a finished command needs room for a copy of its outcome.
+    // Following a finished command needs room for a copy of its outcome by the stream's deadline.
     let mut rejected = gateway.follow(&finished).await;
     assert_eq!(failure(&next(&mut rejected).await), Some(Code::Overloaded));
 
     drop((streams, filler));
     until(|| backend.request_bytes() < idle + BIG && send.bytes() < sending + BIG).await;
+    arrived.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_survives_a_snapshot_the_send_budget_has_room_for_before_its_deadline() {
+    let arrived = arrived().await;
+    let (gateway, send) = (&arrived.gateway, arrived.fixture.backend.send_budget().clone());
+    let operation = start(gateway, "say hold").await;
+    // Overdrawn, the budget has no room even as other streams release their charges.
+    let filler = send.overdraw(send.available() + BIG);
+    let mut topic = gateway.follow(&operation).await;
+    let refused = tokio::time::timeout(Duration::from_millis(500), topic.message()).await;
+    assert!(refused.is_err(), "the snapshot was sent without room");
+
+    drop(filler);
+    assert_eq!(returned(&outcome(&mut topic).await), b"null");
     arrived.stop().await;
 }
 

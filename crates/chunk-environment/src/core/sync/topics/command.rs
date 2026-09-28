@@ -5,7 +5,8 @@
 //! sends an empty snapshot at once, then waits for the command to start, and closing it first cancels the command. The
 //! subscription's request is charged against the backend's request memory, with room for the record of a command it
 //! closes before it started, until its topic ends or that record is forgotten. Each snapshot is charged against the
-//! send budget from the moment it's pending, a charge the stream's messages then take over.
+//! send budget from the moment it's pending, a charge the stream's messages then take over; one the budget has no
+//! room for yet is charged by the stream as it sends it, which retries until the stream's deadline.
 
 use super::super::{
     SyncService,
@@ -90,9 +91,9 @@ async fn retained(backend: &Backend, id: chunk_backend::ActionId, credential: &s
 
 impl Command {
     /// Sends an empty snapshot while the command has yet to start, then a snapshot of the pending effects whenever they
-    /// change, then the command's outcome, until the client took it or leaves, core stops, the credential lapses, as
-    /// when it's revoked, the send budget has no room for a snapshot, or the subscription itself or, once the command
-    /// started, the gateway stream it names is superseded. A subscription that ends for its command or the backend
+    /// change, then the command's outcome, until the client took it or leaves, its stream ends for want of send
+    /// budget, core stops, the credential lapses, as when it's revoked, or the subscription itself or, once the
+    /// command started, the gateway stream it names is superseded. A subscription that ends for its command or the backend
     /// releases what its client has yet to take at once.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         let Self { mut pending, subscription, stream, superseded, grant, backend } = self;
@@ -121,10 +122,8 @@ impl Command {
                     return sender.fail(error);
                 }
                 let update = Update { stream: first.take().unwrap_or_default(), ..update };
-                match backend.send_budget().charge(update.encoded_len()) {
-                    Ok(charge) => sender.send_snapshot(update, charge),
-                    Err(failure) => return sender.end(errors::backend(&failure)),
-                }
+                let charge = backend.send_budget().charge(update.encoded_len()).ok();
+                sender.send_snapshot(update, charge);
                 if last {
                     finished = true;
                     sender.finish();

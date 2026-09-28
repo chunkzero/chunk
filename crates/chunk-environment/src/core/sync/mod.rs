@@ -30,6 +30,9 @@ const OPERATION_BYTES: usize = 256;
 /// Methods, topics, deployments, keys, stream IDs and caller fields.
 const NAME_BYTES: usize = 512;
 const ARGUMENT_BYTES: usize = 1024 * 1024;
+/// The send budget a call needs left to run. Results are rarely larger, so one admitted near the limit seldom
+/// overdraws it, and calls are refused only once the budget is all but full: this is under 1% of its 128 MiB floor.
+const CALL_ROOM: usize = 1024 * 1024;
 
 pub(crate) use auth::{Gateways, Issuer};
 
@@ -159,27 +162,27 @@ fn position(epoch: u64, revision: Revision) -> Option<Position> {
 
 #[tonic::async_trait]
 impl Core for SyncService {
-    /// Answers with the result, charged against the send budget until HTTP/2 frees it, or with an error when the
-    /// result exceeds the message limit or the budget has no room for it by [`transport::DEADLINE`].
+    /// Runs the call while the send budget has [`CALL_ROOM`] left, or else refuses it with OVERLOADED before anything
+    /// ran. Answers with the result, or an error when it exceeds the message limit.
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         let principal = self.credentials.authenticate(&request)?;
-        let response = match self.dispatch(&principal, request.into_inner()).await {
-            Ok((position, result)) => CallResponse { position, outcome: Some(call_response::Outcome::Result(result)) },
-            Err(error) => CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) },
+        let budget = self.app.backend().send_budget();
+        let outcome = match budget.check(CALL_ROOM) {
+            Ok(()) => self.dispatch(&principal, request.into_inner()).await,
+            Err(failure) => Err(errors::backend(&failure)),
         };
         let failed = |error| CallResponse { position: None, outcome: Some(call_response::Outcome::Error(error)) };
-        if response.encoded_len() > MESSAGE_BYTES {
-            return Ok(Response::new(failed(errors::invalid("the result exceeds the 16 MiB message limit"))));
-        }
-        let ledger = transport::Ledger::default();
-        let budget = self.app.backend().send_budget();
-        let response = match transport::charge(budget, response.encoded_len() + transport::PREFIX_BYTES).await {
-            Ok(charge) => {
-                ledger.push(charge);
-                response
-            }
-            Err(failure) => failed(errors::backend(&failure)),
+        let mut response = match outcome {
+            Ok((position, result)) => CallResponse { position, outcome: Some(call_response::Outcome::Result(result)) },
+            Err(error) => failed(error),
         };
+        if response.encoded_len() > MESSAGE_BYTES {
+            response = failed(errors::invalid("the result exceeds the 16 MiB message limit"));
+        }
+        // The call may have committed, so its response is charged until HTTP/2 frees it even beyond the budget, never
+        // waiting or failing; an overdrawn budget refuses later calls until it has room again, which bounds these.
+        let ledger = transport::Ledger::default();
+        ledger.push(budget.overdraw(response.encoded_len() + transport::PREFIX_BYTES));
         let mut response = Response::new(response);
         response.extensions_mut().insert(ledger);
         Ok(response)

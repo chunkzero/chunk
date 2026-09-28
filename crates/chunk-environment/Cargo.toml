@@ -45,6 +45,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+tonic-prost = "0.14.6"
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 [lints]

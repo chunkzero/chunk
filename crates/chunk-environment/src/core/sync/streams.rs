@@ -1,8 +1,9 @@
 //! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
 //! nudges after a credential's own writes. Each message is charged its encoded bytes against the send budget before
 //! the client takes it, and the charge moves through the stream's [`Ledger`] into the response frame that carries it.
-//! While the budget has no room, changes keep coalescing and the charge is retried every [`RETRY`]; a stream still
-//! refused after [`DEADLINE`] ends with OVERLOADED.
+//! While the budget has no room, changes keep coalescing, newer ones merging into the refused message, and the charge
+//! is retried every [`RETRY`]; a stream still refused after [`DEADLINE`] ends with OVERLOADED. A stream's final
+//! update overdraws the budget rather than wait, so each stream holds at most one such message beyond it.
 //!
 //! A stream sends position-only updates at most every [`ADVANCE_INTERVAL`], so a slow client's advances coalesce
 //! sooner. Rust clients multiplexing many independently-consumed streams on one connection should still raise h2's
@@ -13,13 +14,14 @@ mod parts;
 use super::{
     auth::{hex, hmac},
     errors,
-    transport::{DEADLINE, Ledger, RETRY},
+    transport::{Ledger, PREFIX_BYTES},
 };
 use chunk_backend::{SendBudget, SendCharge};
 use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, error::Code};
 use chunk_service::same_secret;
 use chunk_store::Revision;
 use parts::{Batch, Part};
+use prost::Message;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     pin::Pin,
@@ -39,6 +41,10 @@ const NONCE_BYTES: usize = 32;
 
 /// The least time between a stream's sends when the later one only advances its position.
 const ADVANCE_INTERVAL: Duration = Duration::from_millis(50);
+/// How often a message the send budget had no room for is charged again.
+const RETRY: Duration = Duration::from_millis(50);
+/// How long a message is charged again before its stream ends with OVERLOADED.
+const DEADLINE: Duration = Duration::from_secs(5);
 
 /// Keys stream IDs for this process only, so a stream from before a restart never resumes.
 pub(super) struct StreamKey([u8; 32]);
@@ -232,14 +238,14 @@ impl Sender {
         });
     }
 
-    /// Replaces what the client has yet to take with snapshot `update`, which holds `charge` until it's replaced or
-    /// the charge grows to cover its messages.
-    pub fn send_snapshot(&self, update: Update, charge: SendCharge) {
+    /// Replaces what the client has yet to take with snapshot `update`, which holds `charge`, if any, until it's
+    /// replaced or the charge grows to cover its messages.
+    pub fn send_snapshot(&self, update: Update, charge: Option<SendCharge>) {
         self.slot.update(|pending| {
             if pending.error.is_none() {
                 let changes = pending.changes.get_or_insert_default();
                 changes.merge(Update { snapshot: true, ..update });
-                changes.charge = Some(charge);
+                changes.charge = charge;
             }
         });
     }
@@ -350,7 +356,8 @@ impl Changes {
 
 /// Hands the slot's changes to `client` as it takes them, split to fit in messages and charged against `budget`, and
 /// ends after the slot's error, or once the stream is abandoned while the client has no room. Changes that only
-/// advance the position wait out [`ADVANCE_INTERVAL`] since the previous send.
+/// advance the position wait out [`ADVANCE_INTERVAL`] since the previous send, and changes the budget has no room for
+/// take in newer ones until it has.
 async fn write(slot: Arc<Slot>, client: mpsc::Sender<Part>, closed: CancellationToken, budget: SendBudget) {
     let _closed = closed.drop_guard();
     let mut batch = Batch::default();
@@ -373,22 +380,25 @@ async fn write(slot: Arc<Slot>, client: mpsc::Sender<Part>, closed: Cancellation
             {
                 let mut pending = slot.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(error) = pending.error.take() {
-                    break (Part { update: Update { error: Some(error), ..Update::default() }, charge: None }, true);
+                    break (last(&budget, error), true);
                 }
                 let paced = !pending.ended && Instant::now() < advance_at;
                 if batch.is_empty()
                     && let Some(changes) = pending.changes.take_if(|changes| !(paced && changes.only_advances()))
                 {
                     batch = Batch::new(changes);
+                } else if batch.refused().is_some()
+                    && let Some(changes) = pending.changes.take()
+                {
+                    batch.merge(changes);
                 }
                 wake_at = match batch.next(&budget) {
                     Ok(Some(part)) => break (part, false),
                     Ok(None) if pending.ended => return,
                     Ok(None) => pending.changes.is_some().then_some(advance_at),
-                    Err(failure) if batch.refused.is_some_and(|refused| refused.elapsed() >= DEADLINE) => {
+                    Err(failure) if batch.refused().is_some_and(|refused| refused.elapsed() >= DEADLINE) => {
                         pending.changes = None;
-                        let update = Update { error: Some(errors::backend(&failure)), ..Update::default() };
-                        break (Part { update, charge: None }, true);
+                        break (last(&budget, errors::backend(&failure)), true);
                     }
                     Err(_) => Some(Instant::now() + RETRY),
                 };
@@ -407,123 +417,12 @@ async fn write(slot: Arc<Slot>, client: mpsc::Sender<Part>, closed: Cancellation
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        super::{MESSAGE_BYTES, transport::PREFIX_BYTES},
-        *,
-    };
-    use chunk_proto::sync::v1::entry::State;
-    use prost::Message;
-
-    fn upsert(key: &str, value: &str, revision: u64) -> Update {
-        Update {
-            position: Some(Position { epoch: 1, revision }),
-            upserts: vec![Entry { key: key.into(), state: Some(State::Value(value.as_bytes().to_vec())) }],
-            ..Update::default()
-        }
-    }
-
-    #[test]
-    fn merged_changes_keep_every_key_at_its_latest_value() {
-        let mut changes = Changes::default();
-        changes.merge(upsert("a", "1", 2));
-        changes.merge(upsert("b", "1", 3));
-        changes.merge(upsert("a", "2", 4));
-        changes.merge(Update {
-            position: Some(Position { epoch: 1, revision: 5 }),
-            removed: vec!["b".into()],
-            ..Update::default()
-        });
-
-        let update = changes.into_update();
-        assert_eq!(update.position, Some(Position { epoch: 1, revision: 5 }));
-        let values: Vec<_> = update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
-        assert_eq!(values, [("a", Some(State::Value(b"2".to_vec())))]);
-        assert_eq!(update.removed, ["b"]);
-    }
-
-    #[tokio::test]
-    async fn ending_a_stalled_stream_releases_what_its_client_has_yet_to_take() {
-        let (sender, mut stream) = channel(SendBudget::new(MESSAGE_BYTES));
-        sender.send(upsert("a", "1", 1));
-        while stream.parts.is_empty() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        sender.send(upsert("b", "1", 2));
-        sender.end(errors::invalid("replaced"));
-        let released = async {
-            while !stream.parts.is_closed() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(1), released).await.expect("the writer ended without a reader");
-        assert_eq!(stream.parts.recv().await.unwrap().update.upserts[0].key, "a");
-        assert!(stream.parts.recv().await.is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn position_only_updates_are_paced_but_data_is_not() {
-        let (sender, mut stream) = channel(SendBudget::new(MESSAGE_BYTES));
-        let mut received = 0;
-        for revision in 1..=500 {
-            sender.send(Update { position: Some(Position { epoch: 1, revision }), ..Update::default() });
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            while stream.parts.try_recv().is_ok() {
-                received += 1;
-            }
-        }
-        assert!((10..=11).contains(&received), "{received} advances in 500 ms");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let held = stream.parts.recv().await.unwrap().update;
-        assert_eq!(held.position, Some(Position { epoch: 1, revision: 500 }));
-
-        let sent = Instant::now();
-        sender.send(upsert("a", "1", 501));
-        let update = stream.parts.recv().await.unwrap().update;
-        assert_eq!(Instant::now(), sent);
-        assert_eq!((update.upserts.len(), update.position), (1, Some(Position { epoch: 1, revision: 501 })));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn changes_the_budget_has_no_room_for_keep_coalescing_and_are_retried() {
-        let budget = SendBudget::new(1024);
-        let filler = budget.charge(1024).unwrap();
-        let (sender, mut stream) = channel(budget.clone());
-        sender.send(upsert("a", "1", 1));
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        sender.send(upsert("b", "1", 2));
-        sender.send(upsert("b", "2", 3));
-        sender.send(upsert("c", "1", 4));
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(stream.parts.try_recv().is_err());
-
-        drop(filler);
-        let freed = Instant::now();
-        let first = stream.parts.recv().await.unwrap();
-        assert!(freed.elapsed() <= RETRY);
-        assert_eq!(first.update.upserts[0].key, "a");
-        assert_eq!(first.charge.as_ref().map(SendCharge::bytes), Some(first.update.encoded_len() + PREFIX_BYTES));
-        let second = stream.parts.recv().await.unwrap();
-        let values: Vec<_> =
-            second.update.upserts.iter().map(|entry| (entry.key.as_str(), entry.state.clone())).collect();
-        assert_eq!(values, [("b", Some(State::Value(b"2".to_vec()))), ("c", Some(State::Value(b"1".to_vec())))]);
-        drop((first, second));
-        assert_eq!(budget.bytes(), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_stream_the_budget_has_no_room_for_until_its_deadline_ends_overloaded() {
-        let budget = SendBudget::new(1024);
-        let filler = budget.charge(1024).unwrap();
-        let (sender, mut stream) = channel(budget.clone());
-        sender.send(upsert("a", "1", 1));
-        let refused = Instant::now();
-        let last = stream.parts.recv().await.unwrap();
-        assert!(refused.elapsed() >= DEADLINE);
-        assert_eq!(last.update.error.map(|error| error.code()), Some(Code::Overloaded));
-        assert!(stream.parts.recv().await.is_none());
-        drop(filler);
-        assert_eq!(budget.bytes(), 0);
-    }
+/// The stream's final update, with `error`, charged even beyond the budget so it never waits for room.
+fn last(budget: &SendBudget, error: Error) -> Part {
+    let update = Update { error: Some(error), ..Update::default() };
+    let charge = budget.overdraw(update.encoded_len() + PREFIX_BYTES);
+    Part { update, charge: Some(charge) }
 }
+
+#[cfg(test)]
+mod tests;

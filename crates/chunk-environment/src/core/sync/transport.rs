@@ -3,16 +3,14 @@
 //! charges drop with the last copy of the frame in hyper's or h2's send buffers.
 
 use bytes::Bytes;
-use chunk_backend::{SendBudget, SendCharge};
+use chunk_backend::SendCharge;
 use http_body::{Body, Frame, SizeHint};
 use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, PoisonError},
     task::{Context, Poll, ready},
-    time::Duration,
 };
-use tokio::time::Instant;
 use tonic::{
     codegen::{Service, http},
     server::NamedService,
@@ -20,10 +18,6 @@ use tonic::{
 
 /// The length prefix gRPC adds to each message.
 pub(super) const PREFIX_BYTES: usize = 5;
-/// How often a charge the send budget had no room for is retried.
-pub(super) const RETRY: Duration = Duration::from_millis(50);
-/// How long a charge is retried before its message is refused.
-pub(super) const DEADLINE: Duration = Duration::from_secs(5);
 /// tonic hands on what it encoded once it reaches this much.
 const YIELD_BYTES: usize = 32 * 1024;
 
@@ -42,17 +36,6 @@ impl Ledger {
 
     fn take(&self) -> Vec<SendCharge> {
         std::mem::take(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
-    }
-}
-
-/// Charges `bytes`, retrying every [`RETRY`] while the budget has no room, until [`DEADLINE`].
-pub(super) async fn charge(budget: &SendBudget, bytes: usize) -> chunk_backend::Result<SendCharge> {
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        match budget.charge(bytes) {
-            Err(_) if Instant::now() < deadline => tokio::time::sleep(RETRY).await,
-            charged => return charged,
-        }
     }
 }
 
@@ -137,6 +120,7 @@ impl AsRef<[u8]> for Charged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chunk_backend::SendBudget;
     use http_body_util::{BodyExt, Full};
 
     async fn frame(ledger: Option<Ledger>, data: &Bytes) -> Bytes {

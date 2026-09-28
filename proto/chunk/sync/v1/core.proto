@@ -191,7 +191,8 @@ message Error {
 // issues one ID. The effectful call and its retries use that ID. A call under an ID this core didn't issue, or issued
 // before it restarted or restored, gets OUTCOME_UNKNOWN, as does one whose outcome core retired. Core retains an
 // outcome for up to 24 hours, or less under memory pressure (oldest completed first), and an unused ID for 24 hours.
-// `chunk:prepare` gets OVERLOADED only while running calls and unused IDs fill the retention budget.
+// `chunk:prepare` gets OVERLOADED only while running calls and unused IDs fill the retention budget, or while core's
+// outgoing messages fill its send budget, which refuses every call before it runs.
 // Issued IDs begin with `prep:`, which is reserved: actions, hooks and commands require such an ID. Any other call
 // under a `prep:` ID first resolves it: one this core never issued or no longer holds gets OUTCOME_UNKNOWN, one that
 // ran an action, hook or command gets OPERATION_MISMATCH, and an unused one is INVALID.

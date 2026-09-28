@@ -75,7 +75,8 @@ through a retained deployment exposing the same mutation. If a retained bundle p
 exclusive writer authority and call `Storage::release_deployment` with its ID before constructing the backend again.
 
 `Backend::send_budget` covers core's outgoing sync messages from encoding until the transport frees them. It is a
-sixteenth of the memory the live-action budget is sized from, at least 128 MiB.
+sixteenth of the memory the live-action budget is sized from, at least 128 MiB. An overdrawing charge always succeeds,
+for messages that must not wait, and the budget then refuses other charges until usage drops back under it.
 
 The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
 cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
