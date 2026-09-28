@@ -156,7 +156,7 @@ async fn a_hosts_boot_stays_bound_across_a_core_restart() {
 async fn a_hosts_archive_read_holds_it_until_the_read_ends_even_if_its_caller_left() {
     let (fixture, credential, archive) = runner().await;
     result::<JvmLaunch>(&fixture.launch(&credential, "boot-1").await);
-    let stalled = fixture.archives.stall.lock().await;
+    let stalled = fixture.archives.stall.held.lock().await;
 
     let message = CallRequest {
         method: "chunk:archive".into(),
@@ -170,7 +170,8 @@ async fn a_hosts_archive_read_holds_it_until_the_read_ends_even_if_its_caller_le
         let read = tokio::time::timeout(Duration::from_secs(5), fixture.read(&credential, "boot-1", 0)).await;
         code(&read.expect("the read did not stall"))
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let entered = tokio::time::timeout(Duration::from_secs(10), fixture.archives.stall.entered.notified()).await;
+    entered.expect("the first read reached its blocking I/O");
     assert_eq!(second().await, Code::Overloaded);
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());

@@ -19,9 +19,17 @@ pub struct ReleaseArchive {
 #[derive(Default)]
 pub(crate) struct Archives {
     kept: Mutex<BTreeMap<String, ReleaseArchive>>,
-    /// Held by tests to stall archive reads in their blocking I/O.
     #[cfg(test)]
-    pub(crate) stall: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub(crate) stall: std::sync::Arc<Stall>,
+}
+
+/// Held by tests to stall archive reads in their blocking I/O.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Stall {
+    pub held: tokio::sync::Mutex<()>,
+    /// Notified as each read reaches the stall.
+    pub entered: tokio::sync::Notify,
 }
 
 impl Archives {

@@ -118,7 +118,10 @@ impl ArchiveReads {
             // The host's read ends only once the file is no longer being read, even if its call was dropped.
             let _reading = reading;
             #[cfg(test)]
-            drop(stall.blocking_lock());
+            {
+                stall.entered.notify_one();
+                drop(stall.held.blocking_lock());
+            }
             let length = usize::try_from(archive.size - offset).unwrap_or(usize::MAX).min(CHUNK_BYTES);
             let mut file = File::open(&archive.path)?;
             file.seek(SeekFrom::Start(offset))?;
