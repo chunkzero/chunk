@@ -6,7 +6,7 @@ use std::{
 
 use chunk_proto::{
     sync::v1::JvmDeliveryPhase,
-    v1::{ActivateClaim, ClaimPhase, ClaimRequest, DeploymentRef, Identity, ProcessIdentity, SessionDemand},
+    v1::{ActivateClaim, ClaimPhase, ClaimRequest, DeploymentRef, Identity, SessionDemand},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -71,13 +71,13 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let runtime = Arc::new(FakeRuntime::new(ProcessIdentity {
-            app_id: "bridge".into(),
-            deployment: Some(DeploymentRef { environment: "test".into(), deployment: "build".into() }),
-            runtime_id: "runtime".into(),
+        let runtime = Arc::new(FakeRuntime::new(crate::JvmIdentity {
+            host: "runtime".into(),
             process_id: "jvm".into(),
             generation: 1,
-            machine_profile: "local".into(),
+            deployment: "build".into(),
+            app: "bridge".into(),
+            profile: "local".into(),
             artifact_digest: "artifact".into(),
         }));
         let host = Arc::new(FakeHost::new(runtime.clone()));
@@ -565,7 +565,7 @@ pub(crate) fn test_app() -> chunk_contract::AppArtifact {
 
 #[tokio::test]
 async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
-    use chunk_proto::v1::{NodePhase, ShutdownNodeRequest};
+    use chunk_proto::{sync::v1::NodePhase, v1::ShutdownNodeRequest};
     let fixture = Fixture::new();
     let control = fixture.control().await;
     let request = request("active", &uuid::Uuid::new_v4().to_string());
@@ -573,21 +573,19 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     fixture.arrive(&control, "active").await;
     control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
     control.poll_health().unwrap();
-    let online = control.nodes().unwrap().nodes.remove(0);
-    assert_eq!(online.phase, NodePhase::Online as i32);
+    let online = control.nodes().unwrap().remove(0);
+    assert_eq!(online.phase, NodePhase::Online);
     assert!(online.health.as_ref().unwrap().ready);
     fixture.runtime.unhealthy.store(true, Ordering::Release);
-    eventually(|| control.jvms.health(&online.host_id).is_some_and(|health| !health.ready)).await;
+    eventually(|| control.jvms.health(&online.host).is_some_and(|health| !health.ready)).await;
     control.poll_health().unwrap();
-    let unhealthy = control.nodes().unwrap().nodes.remove(0);
-    assert_eq!((unhealthy.phase, unhealthy.consecutive_failures), (NodePhase::Unhealthy as i32, 1));
+    let unhealthy = control.nodes().unwrap().remove(0);
+    assert_eq!((unhealthy.phase, unhealthy.consecutive_failures), (NodePhase::Unhealthy, 1));
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
-    let command = ShutdownNodeRequest {
-        operation_id: "operator-stop".into(),
-        host_id: online.host_id.clone(),
-        timeout_seconds: 60,
-    };
-    assert_eq!(control.shutdown_node(&command).unwrap().phase, NodePhase::Draining as i32);
+    let command =
+        ShutdownNodeRequest { operation_id: "operator-stop".into(), host_id: online.host.clone(), timeout_seconds: 60 };
+    control.shutdown_node(&command).unwrap();
+    assert_eq!(control.nodes().unwrap()[0].phase, NodePhase::Draining);
     let deadline = control.state().unwrap().drains["node/operator-stop"].deadline_ms;
     drop(control);
     let control = fixture.control().await;
@@ -597,15 +595,15 @@ async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
     control.poll_health().unwrap();
     control.poll_health().unwrap();
     control.poll_health().unwrap();
-    assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopping as i32);
-    assert!(!fixture.host.stopped(&online.host_id));
+    assert_eq!(control.nodes().unwrap()[0].phase, NodePhase::Stopping);
+    assert!(!fixture.host.stopped(&online.host));
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
     control.progress_drains().unwrap();
-    eventually(|| control.state().unwrap().released(&online.host_id)).await;
+    eventually(|| control.state().unwrap().released(&online.host)).await;
     let closed = control.claim(request).await.unwrap_err();
     assert!(matches!(closed, Error::Invalid("claim closed")), "{closed}");
     control.reconcile_all().await.unwrap();
-    assert_eq!(control.nodes().unwrap().nodes[0].phase, NodePhase::Stopped as i32);
+    assert_eq!(control.nodes().unwrap()[0].phase, NodePhase::Stopped);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Released);
     fixture.close().await;
 }

@@ -1,7 +1,7 @@
 //! Session methods a JVM registered over sync runs through its topic, within its method budget.
 
 use super::{jvm::Launches, jvm_effects::arrive, *};
-use chunk_proto::v1::SessionMethodPhase;
+use chunk_proto::sync::v1::JvmMethodPhase;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -15,7 +15,7 @@ async fn session_methods_run_and_cancel_through_the_topic() {
 
     let score = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
     let result = control.call_session_method(&score, &CancellationToken::new()).await.unwrap();
-    assert_eq!((result.phase(), result.result_json.as_str()), (SessionMethodPhase::Completed, "7"));
+    assert_eq!((result.phase, result.result_json.as_str()), (Some(JvmMethodPhase::Completed), "7"));
     // A retry returns the recorded result rather than running the method again.
     assert_eq!(control.call_session_method(&score, &CancellationToken::new()).await.unwrap(), result);
     // A method prepared earlier runs even when first called after a later one ran.
@@ -23,7 +23,7 @@ async fn session_methods_run_and_cancel_through_the_topic() {
     let later = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
     for method in [&later, &earlier] {
         let result = control.call_session_method(method, &CancellationToken::new()).await.unwrap();
-        assert_eq!(result.phase(), SessionMethodPhase::Completed);
+        assert_eq!(result.phase, Some(JvmMethodPhase::Completed));
     }
 
     let hold = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
@@ -36,13 +36,13 @@ async fn session_methods_run_and_cancel_through_the_topic() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     cancellation.cancel();
-    assert_eq!(call.await.unwrap().unwrap().phase(), SessionMethodPhase::Cancelled);
+    assert_eq!(call.await.unwrap().unwrap().phase, Some(JvmMethodPhase::Cancelled));
     assert!(jvm.runnable(hold.operation_id()));
 
     // A call cancelled before it reaches the topic is never runnable there.
     let early = control.prepare_session_method(&captured, "hold", serde_json::json!({}), timeout).unwrap();
     let result = control.call_session_method(&early, &cancellation).await.unwrap();
-    assert_eq!(result.phase(), SessionMethodPhase::Cancelled);
+    assert_eq!(result.phase, Some(JvmMethodPhase::Cancelled));
     assert!(!jvm.runnable(early.operation_id()));
     fixture.stop().await;
 }
@@ -61,7 +61,7 @@ async fn a_jvms_method_budget_rejects_new_calls_and_keeps_charging_unanswered_on
 
     // A method the JVM never answers stays on its topic after its outcome turned unknown.
     let stuck = prepare("stuck", serde_json::json!({}));
-    assert_eq!(control.call_session_method(&stuck, &cancelled).await.unwrap().phase(), SessionMethodPhase::Unknown);
+    assert_eq!(control.call_session_method(&stuck, &cancelled).await.unwrap().phase, None);
 
     // Pending methods with large arguments reach the byte limit well before the count limit.
     let text = "x".repeat(16 * 1024);
@@ -88,13 +88,13 @@ async fn a_jvms_method_budget_rejects_new_calls_and_keeps_charging_unanswered_on
     later.cancel();
     let mut answered = pending.len();
     for call in pending {
-        assert_eq!(call.await.unwrap().unwrap().phase(), SessionMethodPhase::Cancelled);
+        assert_eq!(call.await.unwrap().unwrap().phase, Some(JvmMethodPhase::Cancelled));
     }
 
     // Answered methods fill the rest of the 256 the budget holds, which then rejects new ones.
     let rejected = loop {
         match control.call_session_method(&prepare("hold", serde_json::json!({})), &cancelled).await {
-            Ok(result) => assert_eq!(result.phase(), SessionMethodPhase::Cancelled),
+            Ok(result) => assert_eq!(result.phase, Some(JvmMethodPhase::Cancelled)),
             Err(error) => break error,
         }
         answered += 1;
@@ -116,7 +116,7 @@ async fn a_jvm_whose_stop_failed_keeps_its_method_history() {
     let timeout = Duration::from_secs(10);
     let score = control.prepare_session_method(&captured, "score", serde_json::json!({}), timeout).unwrap();
     let result = control.call_session_method(&score, &CancellationToken::new()).await.unwrap();
-    assert_eq!(result.phase(), SessionMethodPhase::Completed);
+    assert_eq!(result.phase, Some(JvmMethodPhase::Completed));
     let stuck = control.prepare_session_method(&captured, "stuck", serde_json::json!({}), timeout).unwrap();
     let call = {
         let (control, stuck) = (control.clone(), stuck.clone());

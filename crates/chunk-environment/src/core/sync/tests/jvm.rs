@@ -1,10 +1,9 @@
 //! A JVM's topic, registration and reports over the sync protocol.
 
 use super::*;
-use chunk_control::{Progress, RuntimeConnection};
-use chunk_proto::{
-    sync::v1::{JvmHealth, JvmRegistered, JvmRegistration, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus},
-    v1::{NodePhase, NodeStatus, ProcessIdentity, ProcessRegistration},
+use chunk_control::{NodeStatus, Progress, Registration, RuntimeConnection};
+use chunk_proto::sync::v1::{
+    JvmHealth, JvmRegistered, JvmRegistration, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus, NodePhase,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,7 +18,7 @@ pub(super) struct Launches(pub(super) Arc<Mutex<Launch>>);
 #[derive(Default)]
 pub(super) struct Launch {
     host: Option<String>,
-    registration: Option<ProcessRegistration>,
+    registration: Option<Registration>,
     survivor: bool,
     pub(super) released: bool,
     /// Releases that fail before one stops the JVM.
@@ -69,11 +68,10 @@ impl chunk_control::Host for Launches {
         let launch = self.0.lock().unwrap();
         Ok(launch.host.iter().filter(|_| Self::awaiting(&launch)).cloned().collect())
     }
-    fn register(&self, token: &str, registration: ProcessRegistration) -> chunk_control::Result<ProcessIdentity> {
+    fn register(&self, token: &str, registration: Registration) -> chunk_control::Result<()> {
         let mut launch = self.0.lock().unwrap();
-        let identity = registration.identity.clone().unwrap_or_default();
         if Self::awaiting(&launch)
-            || launch.host != Some(identity.runtime_id.clone())
+            || launch.host.as_ref() != Some(&registration.identity.host)
             || token != format!("Bearer {JVM}")
         {
             return Err(chunk_control::Error::Invalid("unknown process"));
@@ -82,9 +80,9 @@ impl chunk_control::Host for Launches {
             return Err(chunk_control::Error::Invalid("registration changed"));
         }
         launch.registration = Some(registration);
-        Ok(identity)
+        Ok(())
     }
-    fn adopt(&self, token: &str, registration: ProcessRegistration) -> chunk_control::Result<()> {
+    fn adopt(&self, token: &str, registration: Registration) -> chunk_control::Result<()> {
         let mut launch = self.0.lock().unwrap();
         if !Self::awaiting(&launch) || token != JVM {
             return Err(chunk_control::Error::Invalid("process is not awaiting re-attachment"));
@@ -97,7 +95,7 @@ impl chunk_control::Host for Launches {
         let registration = launch.registration.clone().filter(|_| launch.host.as_deref() == Some(id))?;
         Some(RuntimeConnection {
             token: JVM.into(),
-            identity: registration.identity?,
+            identity: registration.identity,
             player_endpoint: registration.player_endpoint,
         })
     }
@@ -166,8 +164,8 @@ impl Fixture {
     async fn node(&self, host: &str, matching: impl Fn(&NodeStatus) -> bool) {
         let found = async {
             loop {
-                let nodes = self.control.nodes().unwrap().nodes;
-                if nodes.iter().any(|node| node.host_id == host && matching(node)) {
+                let nodes = self.control.nodes().unwrap();
+                if nodes.iter().any(|node| node.host == host && matching(node)) {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -330,9 +328,9 @@ async fn a_superseded_streams_reports_change_nothing_and_pushed_health_expires()
 
     tokio::time::pause();
     let sample = |node: &NodeStatus| node.health.as_ref().is_some_and(|health| health.tick_count == 200);
-    fixture.node(&host, |node| node.phase() == NodePhase::Online && sample(node)).await;
+    fixture.node(&host, |node| node.phase == NodePhase::Online && sample(node)).await;
     // Reports without health don't renew the sample: without one for 10 seconds, the JVM counts as unhealthy.
-    let unhealthy = fixture.node(&host, |node| node.phase() == NodePhase::Unhealthy);
+    let unhealthy = fixture.node(&host, |node| node.phase == NodePhase::Unhealthy);
     let reporting = async {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;

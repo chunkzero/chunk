@@ -50,7 +50,7 @@ async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_mov
         .unwrap();
     control.claim(destination).await.unwrap();
     assert_eq!(release_of(&control, "move"), "build");
-    let nodes = control.nodes().unwrap().nodes;
+    let nodes = control.nodes().unwrap();
     let releases: BTreeSet<_> = nodes.iter().map(|node| node.deployment.as_str()).collect();
     assert_eq!(releases, BTreeSet::from(["build", "next"]));
     fixture.close().await;

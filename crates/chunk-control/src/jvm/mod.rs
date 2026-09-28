@@ -17,18 +17,12 @@ use std::{
     time::Duration,
 };
 
-use chunk_proto::{
-    sync::v1 as sync,
-    v1::{
-        DeliveryInventory, DeliveryPhase, DeploymentRef, PlayerDelivery, PlayerRef, ProcessHealth, ProcessIdentity,
-        ProcessRegistration, ProcessReport, SessionInventory, SessionPhase, SessionRef,
-    },
-};
+use chunk_proto::sync::v1 as sync;
 use tokio::{sync::watch, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Control, Error, Generation, Result,
+    Control, Error, Generation, JvmIdentity, Registration, Result,
     state::{Phase, State},
     sync::Links,
 };
@@ -46,7 +40,7 @@ struct Jvm {
     /// The host's current topic stream, the only one whose reports count.
     stream: Option<Stream>,
     /// The health the JVM last reported, and when.
-    health: Option<(Instant, ProcessHealth)>,
+    health: Option<(Instant, sync::JvmHealth)>,
     /// What control wants of the JVM beyond its log.
     work: watch::Sender<Work>,
     /// What the JVM last reported of each open claim's delivery at the claim's generation, by operation ID.
@@ -55,8 +49,8 @@ struct Jvm {
 
 /// A delivery's phase at `generation`, as its JVM reported it, with the capability it minted while prepared.
 struct Reported {
-    generation: u64,
-    phase: DeliveryPhase,
+    generation: Generation,
+    phase: sync::JvmDeliveryPhase,
     capability: Vec<u8>,
 }
 
@@ -106,10 +100,10 @@ impl Jvms {
     }
 
     /// The health `host`'s JVM last pushed, unless it has pushed none for 10 seconds.
-    pub fn health(&self, host: &str) -> Option<ProcessHealth> {
+    pub fn health(&self, host: &str) -> Option<sync::JvmHealth> {
         let jvms = self.0.lock().ok()?;
         let (sampled, health) = jvms.get(host)?.health.as_ref()?;
-        (sampled.elapsed() <= HEALTH).then(|| health.clone())
+        (sampled.elapsed() <= HEALTH).then_some(*health)
     }
 
     /// The Minecraft protocol `host`'s JVM registered with.
@@ -119,10 +113,15 @@ impl Jvms {
 
     /// The phase `host`'s JVM last reported for `operation`'s delivery at `generation`, with the capability it minted
     /// while prepared.
-    pub fn delivery(&self, host: &str, operation: &str, generation: Generation) -> Option<(DeliveryPhase, Vec<u8>)> {
+    pub fn delivery(
+        &self,
+        host: &str,
+        operation: &str,
+        generation: Generation,
+    ) -> Option<(sync::JvmDeliveryPhase, Vec<u8>)> {
         let jvms = self.0.lock().ok()?;
         let reported = jvms.get(host)?.deliveries.get(operation)?;
-        (reported.generation == generation.wire()).then(|| (reported.phase, reported.capability.clone()))
+        (reported.generation == generation).then(|| (reported.phase, reported.capability.clone()))
     }
 
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -143,7 +142,7 @@ impl Control {
             return changed();
         }
         // Registering may commit, so it runs outside the JVMs' lock.
-        self.register(&format!("Bearer {credential}"), self.process(host, &registration))?;
+        self.register(&format!("Bearer {credential}"), process(host, &registration))?;
         match self.jvms.lock()?.entry(host.into()) {
             btree_map::Entry::Occupied(jvm) if jvm.get().registration != registration => changed(),
             btree_map::Entry::Occupied(_) => Ok(()),
@@ -167,29 +166,10 @@ impl Control {
     /// # Errors
     /// Rejects a registration its launch record or the log does not match.
     pub fn stop_survivor(&self, host: &str, credential: &str, registration: &sync::JvmRegistration) -> Result<()> {
-        let identity = self.register(&format!("Bearer {credential}"), self.process(host, registration))?;
+        let registration = process(host, registration);
+        let identity = registration.identity.clone();
+        self.register(&format!("Bearer {credential}"), registration)?;
         self.stop_recovered(host, &identity, "its deployment is gone")
-    }
-
-    /// The process registration `registration` stands for: `host`'s process.
-    fn process(&self, host: &str, registration: &sync::JvmRegistration) -> ProcessRegistration {
-        let identity = ProcessIdentity {
-            deployment: Some(DeploymentRef {
-                environment: self.config.environment.clone(),
-                deployment: registration.deployment.clone(),
-            }),
-            runtime_id: host.into(),
-            process_id: registration.process_id.clone(),
-            generation: registration.generation,
-            machine_profile: registration.profile.clone(),
-            artifact_digest: registration.artifact_digest.clone(),
-            app_id: registration.app.clone(),
-        };
-        ProcessRegistration {
-            identity: Some(identity),
-            control_endpoint: String::new(),
-            player_endpoint: registration.player_endpoint.clone(),
-        }
     }
 
     /// Commits `report` from the JVM running `host`, sent on its topic stream `stream`. The commit checks that
@@ -199,7 +179,7 @@ impl Control {
     /// # Errors
     /// Reports a superseded stream as stopped, and rejects a stream's reports before its first complete one and
     /// malformed deliveries.
-    pub fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: sync::JvmReport) -> Result<()> {
+    pub fn report_jvm(&self, host: &str, credential: &str, stream: &str, report: &sync::JvmReport) -> Result<()> {
         let prepared = |status: &sync::JvmDeliveryStatus| status.phase() == sync::JvmDeliveryPhase::Prepared;
         if report.deliveries.iter().any(|status| {
             status.operation_id.is_empty()
@@ -209,20 +189,16 @@ impl Control {
         }) {
             return Err(Error::Invalid("invalid delivery status"));
         }
-        let runtime = self.host.connection(host).ok_or(Error::Invalid("unregistered or replaced process"))?;
-        let sessions = report.sessions.into_iter().map(inventory).collect();
-        let mut inventory =
-            ProcessReport { identity: Some(runtime.identity.clone()), sessions, deliveries: Vec::new() };
-        let health = report.health.map(|health| process_health(runtime.identity.clone(), health));
+        let identity = self.host.connection(host).ok_or(Error::Invalid("unregistered or replaced process"))?.identity;
         let applied = self.update(|state| {
             let mut jvms = self.jvms.lock()?;
             let jvm = jvms.get_mut(host).ok_or(Error::Stopped)?;
             let current = jvm.stream.as_mut().filter(|current| current.id == stream).ok_or(Error::Stopped)?;
-            let deliveries = report.deliveries.iter().map(|status| delivery(state, &runtime.identity, status));
-            inventory.deliveries = deliveries.collect();
             match current.link {
-                Some(link) => self.merge_in(state, host, link, &inventory)?,
-                None if report.complete => current.link = Some(self.attach_in(state, host, credential, &inventory)?),
+                Some(link) => self.merge_in(state, host, link, &identity, report)?,
+                None if report.complete => {
+                    current.link = Some(self.attach_in(state, host, credential, &identity, report)?);
+                }
                 None => return Err(Error::Invalid("a stream's first report must be complete")),
             }
             if report.complete {
@@ -230,20 +206,18 @@ impl Control {
             }
             // Only a delivery at the generation of an open claim on this host counts, so a stale one or another host's
             // neither supplies nor removes the current one's capability.
-            for (status, binding) in report.deliveries.iter().zip(&inventory.deliveries) {
-                if let Some(delivery) = binding.delivery.as_ref().filter(|delivery| owned(state, host, delivery)) {
-                    let reported = Reported {
-                        generation: delivery.owner_generation,
-                        phase: binding.phase(),
-                        capability: status.capability.clone(),
-                    };
+            for status in report.deliveries.iter().filter(|status| owned(state, host, status)) {
+                if let Some(generation) = generation(status) {
+                    let reported =
+                        Reported { generation, phase: status.phase(), capability: status.capability.clone() };
                     jvm.deliveries.insert(status.operation_id.clone(), reported);
                 }
             }
             jvm.deliveries.retain(|operation, reported| {
-                state.claims.get(operation).is_some_and(|claim| {
-                    claim.phase != Phase::Released && claim.generation.wire() == reported.generation
-                })
+                state
+                    .claims
+                    .get(operation)
+                    .is_some_and(|claim| claim.phase != Phase::Released && claim.generation == reported.generation)
             });
             jvm.work.send_if_modified(|work| {
                 work.prune();
@@ -253,19 +227,16 @@ impl Control {
             // lost has its tombstone.
             let recovering = self.recovery.pending()?.iter().any(|pending| pending == host);
             let mut done = Vec::new();
-            for binding in &inventory.deliveries {
-                let Some(delivery) = binding.delivery.as_ref().filter(|delivery| !owned(state, host, delivery)) else {
-                    continue;
-                };
-                if binding.phase == DeliveryPhase::Closed as i32 {
+            for status in &report.deliveries {
+                if status.phase() == sync::JvmDeliveryPhase::Closed && !owned(state, host, status) {
                     if recovering {
-                        crate::recovery::retire_unknown(state, delivery);
+                        crate::recovery::retire_unknown(state, status);
                     }
-                    done.push(delivery.operation_id.clone());
+                    done.push(status.operation_id.clone());
                 }
             }
             self.links.forget_deliveries(host, &done);
-            if let Some(health) = health {
+            if let Some(health) = report.health {
                 jvm.health = Some((Instant::now(), health));
             }
             Ok(())
@@ -299,85 +270,31 @@ impl Control {
     }
 }
 
-/// Whether an open claim on one of `host`'s sessions owns `delivery`, which `host` reported, with the same
-/// generations.
-pub(crate) fn owned(state: &State, host: &str, delivery: &PlayerDelivery) -> bool {
-    state.claims.get(&delivery.operation_id).is_some_and(|claim| {
+/// Whether an open claim on one of `host`'s sessions owns the delivery `status` reports, at the same generation.
+pub(crate) fn owned(state: &State, host: &str, status: &sync::JvmDeliveryStatus) -> bool {
+    state.claims.get(&status.operation_id).is_some_and(|claim| {
         claim.phase != Phase::Released
-            && claim.generation.wire() == delivery.owner_generation
-            && claim.membership.wire() == delivery.membership_generation
+            && Some(claim.generation) == generation(status)
             && state.sessions.get(&claim.session).is_some_and(|session| session.host == host)
     })
 }
 
-/// The delivery `status` reports, as control's inventory states it. A JVM names only a delivery's operation and
-/// generation; the rest is its claim's, when the log has one.
-fn delivery(state: &State, identity: &ProcessIdentity, status: &sync::JvmDeliveryStatus) -> DeliveryInventory {
-    let mut delivery = PlayerDelivery {
-        operation_id: status.operation_id.clone(),
-        owner_generation: generation(status).map_or(0, Generation::wire),
-        ..PlayerDelivery::default()
-    };
-    if let Some(claim) = state.claims.get(&status.operation_id) {
-        delivery.deployment.clone_from(&identity.deployment);
-        delivery.runtime_id.clone_from(&identity.runtime_id);
-        delivery.process_generation = identity.generation;
-        delivery.session = Some(SessionRef { id: claim.session.clone() });
-        delivery.session_generation = 1;
-        delivery.membership_generation = claim.membership.wire();
-        delivery.proxy_id.clone_from(&claim.proxy);
-        delivery.player = Some(PlayerRef { id: claim.player.clone() });
-    }
-    let phase = match status.phase() {
-        sync::JvmDeliveryPhase::Unspecified => DeliveryPhase::Unspecified,
-        sync::JvmDeliveryPhase::Prepared => DeliveryPhase::Prepared,
-        sync::JvmDeliveryPhase::Attached => DeliveryPhase::Attached,
-        sync::JvmDeliveryPhase::Arrived => DeliveryPhase::Arrived,
-        sync::JvmDeliveryPhase::Withdrawing => DeliveryPhase::Withdrawing,
-        sync::JvmDeliveryPhase::Closed => DeliveryPhase::Closed,
-    };
-    DeliveryInventory { delivery: Some(delivery), phase: phase.into() }
-}
-
 /// The generation `status` reports, unless it is out of range.
-fn generation(status: &sync::JvmDeliveryStatus) -> Option<Generation> {
+pub(crate) fn generation(status: &sync::JvmDeliveryStatus) -> Option<Generation> {
     let position = status.generation.as_ref()?;
     Generation::new(position.epoch, position.revision).ok()
 }
 
-fn inventory(status: sync::JvmSessionStatus) -> SessionInventory {
-    let phase = match status.phase() {
-        sync::JvmSessionPhase::Unspecified => SessionPhase::Unspecified,
-        sync::JvmSessionPhase::Starting => SessionPhase::Starting,
-        sync::JvmSessionPhase::Ready => SessionPhase::Ready,
-        sync::JvmSessionPhase::Ending => SessionPhase::Ending,
-        sync::JvmSessionPhase::Ended => SessionPhase::Ended,
-        sync::JvmSessionPhase::Failed => SessionPhase::Failed,
+/// The registration `registration` stands for: `host`'s JVM.
+fn process(host: &str, registration: &sync::JvmRegistration) -> Registration {
+    let identity = JvmIdentity {
+        host: host.into(),
+        process_id: registration.process_id.clone(),
+        generation: registration.generation,
+        deployment: registration.deployment.clone(),
+        app: registration.app.clone(),
+        profile: registration.profile.clone(),
+        artifact_digest: registration.artifact_digest.clone(),
     };
-    SessionInventory {
-        session: Some(SessionRef { id: status.id }),
-        generation: 1,
-        session_type: status.session_type,
-        phase: phase.into(),
-        capacity: status.capacity,
-        prepared: status.prepared,
-        attached: status.attached,
-    }
-}
-
-fn process_health(identity: ProcessIdentity, health: sync::JvmHealth) -> ProcessHealth {
-    ProcessHealth {
-        identity: Some(identity),
-        ready: health.ready,
-        draining: health.draining,
-        tick_count: health.tick_count,
-        last_tick_age_millis: health.last_tick_age_millis,
-        heap_used_bytes: health.heap_used_bytes,
-        heap_max_bytes: health.heap_max_bytes,
-        gc_count: health.gc_count,
-        gc_time_millis: health.gc_time_millis,
-        process_cpu_load: health.process_cpu_load,
-        sessions: health.sessions,
-        players: health.players,
-    }
+    Registration { identity, player_endpoint: registration.player_endpoint.clone() }
 }

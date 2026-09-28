@@ -1,8 +1,5 @@
 use super::*;
-use chunk_proto::{
-    sync::v1::JvmRegistration,
-    v1::{DeliveryInventory, DeliveryPhase, PlayerDelivery, ProcessReport},
-};
+use chunk_proto::sync::v1::{JvmDeliveryStatus, JvmRegistration, JvmReport};
 
 #[tokio::test]
 async fn an_unreachable_surviving_jvm_keeps_admission_closed_past_the_deadline_until_it_is_confirmed_stopped() {
@@ -176,22 +173,19 @@ fn recovery_fences_its_hosts_unassigned_reservations_but_never_another_hosts() {
         state.claims.insert(host.into(), claim);
     }
     // Recovering host A's JVM reports its own reservation prepared and B's, by operation and generation, arrived.
-    let binding = |operation: &str, phase: DeliveryPhase| DeliveryInventory {
-        delivery: Some(PlayerDelivery {
-            operation_id: operation.into(),
-            owner_generation: generation.wire(),
-            membership_generation: generation.wire(),
-            ..PlayerDelivery::default()
-        }),
+    let binding = |operation: &str, phase: JvmDeliveryPhase| JvmDeliveryStatus {
+        operation_id: operation.into(),
+        generation: crate::gateway::position(generation),
         phase: phase.into(),
+        capability: Vec::new(),
     };
-    let report = ProcessReport {
-        deliveries: vec![binding("a", DeliveryPhase::Prepared), binding("b", DeliveryPhase::Arrived)],
-        ..ProcessReport::default()
+    let report = JvmReport {
+        deliveries: vec![binding("a", JvmDeliveryPhase::Prepared), binding("b", JvmDeliveryPhase::Arrived)],
+        ..JvmReport::default()
     };
     crate::recovery::retire_unowned(&mut state, "a", &report).unwrap();
     let (a, b) = (&state.claims["a"], &state.claims["b"]);
     assert!(a.phase == Phase::Released && a.request.is_empty());
     assert!(b.phase == Phase::Reserved && b.request == b"b");
-    assert!(!crate::jvm::owned(&state, "a", report.deliveries[1].delivery.as_ref().unwrap()));
+    assert!(!crate::jvm::owned(&state, "a", &report.deliveries[1]));
 }

@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
-use chunk_proto::v1::{DeliveryInventory, ProcessIdentity, ProcessReport, SessionInventory};
+use chunk_proto::sync::v1::{JvmDeliveryStatus, JvmReport, JvmSessionStatus};
 use tokio::sync::watch;
 
-use crate::{Error, Result};
+use crate::{Error, JvmIdentity, Result};
 
 /// The actual state each JVM last reported, kept in memory: a JVM reports it again whenever it reconnects. A link
 /// outlives its stream, so a JVM's inventory stands while it reconnects, until a newer stream's complete report
@@ -18,24 +18,20 @@ pub(crate) struct Links {
 }
 
 struct Link {
-    identity: ProcessIdentity,
+    identity: JvmIdentity,
     /// The stream whose reports merge into the link, while one is attached.
     stream: Option<u64>,
-    sessions: BTreeMap<String, SessionInventory>,
-    deliveries: BTreeMap<String, DeliveryInventory>,
+    sessions: BTreeMap<String, JvmSessionStatus>,
+    deliveries: BTreeMap<String, JvmDeliveryStatus>,
 }
 
 impl Link {
-    fn merge(&mut self, report: &ProcessReport) {
+    fn merge(&mut self, report: &JvmReport) {
         for session in &report.sessions {
-            if let Some(reference) = &session.session {
-                self.sessions.insert(reference.id.clone(), session.clone());
-            }
+            self.sessions.insert(session.id.clone(), session.clone());
         }
-        for binding in &report.deliveries {
-            if let Some(delivery) = &binding.delivery {
-                self.deliveries.insert(delivery.operation_id.clone(), binding.clone());
-            }
+        for status in &report.deliveries {
+            self.deliveries.insert(status.operation_id.clone(), status.clone());
         }
     }
 }
@@ -46,7 +42,7 @@ impl Links {
     }
 
     /// Replaces `host`'s link with a stream whose first report is `report`, returning the stream's ID.
-    pub fn attach(&self, host: &str, identity: ProcessIdentity, report: &ProcessReport) -> Result<u64> {
+    pub fn attach(&self, host: &str, identity: JvmIdentity, report: &JvmReport) -> Result<u64> {
         let stream = self.streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut link = Link { identity, stream: Some(stream), sessions: BTreeMap::new(), deliveries: BTreeMap::new() };
         link.merge(report);
@@ -54,12 +50,12 @@ impl Links {
         Ok(stream)
     }
 
-    /// Merges a later report from `stream`. Rejects a replaced stream or another process.
-    pub fn merge(&self, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
+    /// Merges a later report of `identity`'s JVM from `stream`. Rejects a replaced stream or another process.
+    pub fn merge(&self, host: &str, stream: u64, identity: &JvmIdentity, report: &JvmReport) -> Result<()> {
         let mut links = self.lock()?;
         let link = links
             .get_mut(host)
-            .filter(|link| link.stream == Some(stream) && report.identity.as_ref() == Some(&link.identity))
+            .filter(|link| link.stream == Some(stream) && link.identity == *identity)
             .ok_or(Error::Invalid("stale process report"))?;
         link.merge(report);
         Ok(())
@@ -112,23 +108,24 @@ impl Links {
         self.reports.subscribe()
     }
 
-    /// Everything `identity` last reported on `host`.
-    pub fn report(&self, host: &str, identity: &ProcessIdentity) -> Option<ProcessReport> {
+    /// Everything `identity` last reported on `host`, as one complete report without health.
+    pub fn report(&self, host: &str, identity: &JvmIdentity) -> Option<JvmReport> {
         let links = self.hosts.lock().ok()?;
         let link = links.get(host).filter(|link| link.identity == *identity)?;
-        Some(ProcessReport {
-            identity: Some(link.identity.clone()),
+        Some(JvmReport {
+            complete: true,
             sessions: link.sessions.values().cloned().collect(),
+            health: None,
             deliveries: link.deliveries.values().cloned().collect(),
         })
     }
 
-    pub fn session(&self, host: &str, identity: &ProcessIdentity, id: &str) -> Option<SessionInventory> {
+    pub fn session(&self, host: &str, identity: &JvmIdentity, id: &str) -> Option<JvmSessionStatus> {
         let links = self.hosts.lock().ok()?;
         links.get(host).filter(|link| link.identity == *identity)?.sessions.get(id).cloned()
     }
 
-    pub fn delivery(&self, host: &str, identity: &ProcessIdentity, operation: &str) -> Option<DeliveryInventory> {
+    pub fn delivery(&self, host: &str, identity: &JvmIdentity, operation: &str) -> Option<JvmDeliveryStatus> {
         let links = self.hosts.lock().ok()?;
         links.get(host).filter(|link| link.identity == *identity)?.deliveries.get(operation).cloned()
     }

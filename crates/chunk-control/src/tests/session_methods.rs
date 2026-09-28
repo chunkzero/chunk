@@ -1,5 +1,5 @@
 use super::*;
-use chunk_proto::v1::SessionMethodPhase;
+use chunk_proto::sync::v1::JvmMethodPhase;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +23,7 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     assert!(control.prepare_session_method(&captured, "score", json!({"authority":"admin"}), timeout).is_err());
     let operation = control.prepare_session_method(&captured, "score", json!({}), timeout).unwrap();
     let result = control.call_session_method(&operation, &CancellationToken::new()).await.unwrap();
-    assert_eq!(result.phase, SessionMethodPhase::Completed as i32);
+    assert_eq!(result.phase, Some(JvmMethodPhase::Completed));
     assert_eq!(result.result_json, "7");
     assert_eq!(result, control.call_session_method(&operation, &CancellationToken::new()).await.unwrap());
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 1);
@@ -33,10 +33,7 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     assert_ne!(next.operation_id(), operation.operation_id());
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    assert_eq!(
-        control.call_session_method(&next, &cancelled).await.unwrap().phase,
-        SessionMethodPhase::Cancelled as i32
-    );
+    assert_eq!(control.call_session_method(&next, &cancelled).await.unwrap().phase, Some(JvmMethodPhase::Cancelled));
     assert_eq!(fixture.runtime.method_requests.lock().unwrap().len(), 1);
     control.cancel(claim).await.unwrap();
     assert!(control.capture_session(&identity).is_err());

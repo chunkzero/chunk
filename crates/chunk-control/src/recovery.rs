@@ -10,14 +10,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_proto::v1::{
-    DeliveryPhase, PlayerDelivery, ProcessIdentity, ProcessRegistration, ProcessReport, SessionPhase,
-    ShutdownNodeRequest,
+use chunk_proto::{
+    sync::v1::{JvmDeliveryPhase, JvmDeliveryStatus, JvmReport, JvmSessionPhase},
+    v1::ShutdownNodeRequest,
 };
 use prost::Message;
 
 use crate::{
-    Control, Error, Result, RuntimeConnection,
+    Control, Error, JvmIdentity, Registration, Result, RuntimeConnection,
     drain::retire_host,
     placement::runs_host,
     state::{Capacity, Claim, Generation, HostState, Phase, SessionState, State},
@@ -157,7 +157,7 @@ impl Control {
     /// Records each session a logged host's JVM runs without a log row, such as one whose creation a restore lost, as
     /// a retired session to finish. Until the JVM confirms it ended, its row counts toward the host's capacity. A lost
     /// orphan host's sessions end with its JVM instead.
-    fn retire_unknown_sessions(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
+    fn retire_unknown_sessions(&self, id: &str, identity: &JvmIdentity) -> Result<()> {
         self.update(|state| {
             // A released host's JVM has exited, and its sessions with it.
             let live = state.hosts.get(id).is_some_and(|host| host.capacity != Capacity::Released);
@@ -165,12 +165,9 @@ impl Control {
                 return Ok(());
             };
             for observed in &inventory.sessions {
-                let Some(session) = &observed.session else {
-                    continue;
-                };
                 let ended =
-                    observed.phase == SessionPhase::Ended as i32 && observed.prepared == 0 && observed.attached == 0;
-                if ended || state.sessions.contains_key(&session.id) {
+                    observed.phase() == JvmSessionPhase::Ended && observed.prepared == 0 && observed.attached == 0;
+                if ended || state.sessions.contains_key(&observed.id) {
                     continue;
                 }
                 let tombstone = SessionState {
@@ -184,7 +181,7 @@ impl Control {
                     configuration: serde_json::json!({}),
                     retired: true,
                 };
-                state.sessions.insert(session.id.clone(), tombstone);
+                state.sessions.insert(observed.id.clone(), tombstone);
             }
             Ok(())
         })
@@ -193,7 +190,7 @@ impl Control {
     /// Records a fenced JVM whose host row a restore lost as ready, retiring capacity of the release it names, so the
     /// host lifecycle stops it: its drain releases it at once, and control shutdown stops it like any logged host. The
     /// release need not be known: after another restart, the JVM re-attaches to this row by its launch record alone.
-    fn retire_orphan(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
+    fn retire_orphan(&self, id: &str, identity: &JvmIdentity) -> Result<()> {
         self.update(|state| {
             if state.hosts.contains_key(id) {
                 return Ok(());
@@ -209,7 +206,7 @@ impl Control {
     /// Stops the JVM that outlived control on `id` for `reason` by releasing its host, recording a host row a restore
     /// lost as [`Self::retire_orphan`] does. The capacity executor retries the release until the host confirms the JVM
     /// exited, and recovery resolves the host only once its capacity is released.
-    pub(crate) fn stop_recovered(&self, id: &str, identity: &ProcessIdentity, reason: &str) -> Result<()> {
+    pub(crate) fn stop_recovered(&self, id: &str, identity: &JvmIdentity, reason: &str) -> Result<()> {
         self.update(|state| {
             state.hosts.entry(id.into()).or_insert_with(|| orphan(identity));
             crate::capacity::stop(state, id, Some(reason.into()));
@@ -223,19 +220,20 @@ impl Control {
     /// which requires the credential recorded before launch, and it still runs its logged host's app. A JVM whose
     /// host row a restore lost re-attaches by its launch record alone; the log owns none of its deliveries, so
     /// recovery withdraws them all.
-    pub(crate) fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
+    pub(crate) fn register(&self, token: &str, registration: Registration) -> Result<()> {
         let error = match self.host.register(token, registration.clone()) {
-            Ok(identity) => {
+            Ok(()) => {
                 self.wake_capacity();
-                return Ok(identity);
+                return Ok(());
             }
             Err(error) => error,
         };
-        let (Some(identity), Some(secret)) = (registration.identity.clone(), token.strip_prefix("Bearer ")) else {
+        let Some(secret) = token.strip_prefix("Bearer ") else {
             return Err(error);
         };
+        let identity = registration.identity.clone();
         let state = self.state()?;
-        if let Some(host) = state.hosts.get(&identity.runtime_id) {
+        if let Some(host) = state.hosts.get(&identity.host) {
             let connection = RuntimeConnection {
                 token: secret.into(),
                 identity: identity.clone(),
@@ -245,14 +243,14 @@ impl Control {
                 return Err(error);
             }
         }
-        self.recovery.reattach(&identity.runtime_id, || self.host.adopt(secret, registration))?;
+        self.recovery.reattach(&identity.host, || self.host.adopt(secret, registration))?;
         self.wake_capacity();
-        tracing::info!(host = identity.runtime_id, "re-attached a JVM that outlived control");
-        Ok(identity)
+        tracing::info!(host = identity.host, "re-attached a JVM that outlived control");
+        Ok(())
     }
 
     /// Retires the operations of `id`'s surviving deliveries the log does not own, as [`retire_unowned`] does.
-    fn retire_unknown_operations(&self, id: &str, identity: &ProcessIdentity) -> Result<()> {
+    fn retire_unknown_operations(&self, id: &str, identity: &JvmIdentity) -> Result<()> {
         self.update(|state| match self.links.report(id, identity) {
             Some(inventory) => retire_unowned(state, id, &inventory),
             None => Ok(()),
@@ -262,23 +260,21 @@ impl Control {
     /// Whether `host`'s JVM reported closed every delivery in `inventory` that no open claim on `host` owns with the
     /// same generations. Its topic leaves those deliveries out, so the JVM closes them itself. `inventory` must be
     /// reported before state is read, so every delivery control prepared already has its claim.
-    pub(crate) fn fenced(&self, host: &str, inventory: &ProcessReport) -> Result<bool> {
+    pub(crate) fn fenced(&self, host: &str, inventory: &JvmReport) -> Result<bool> {
         let state = self.state()?;
         Ok(inventory
             .deliveries
             .iter()
-            .filter(|binding| binding.phase != DeliveryPhase::Closed as i32)
-            .filter_map(|binding| binding.delivery.as_ref())
-            .all(|delivery| crate::jvm::owned(&state, host, delivery)))
+            .filter(|status| status.phase() != JvmDeliveryPhase::Closed)
+            .all(|status| crate::jvm::owned(&state, host, status)))
     }
 }
 
 /// A ready host row for the JVM `identity` names, whose row a restore lost.
-fn orphan(identity: &ProcessIdentity) -> HostState {
-    let release = identity.deployment.as_ref().map(|deployment| deployment.deployment.as_str());
+fn orphan(identity: &JvmIdentity) -> HostState {
     HostState {
         capacity: Capacity::Ready,
-        ..HostState::requested(release.unwrap_or_default(), &identity.app_id, &identity.machine_profile)
+        ..HostState::requested(&identity.deployment, &identity.app, &identity.profile)
     }
 }
 
@@ -287,35 +283,35 @@ fn orphan(identity: &ProcessIdentity) -> HostState {
 /// player again under an operation ID the JVM already holds. A reservation on `host` whose assignment a restore lost
 /// is released as such a tombstone too, whatever phase its delivery reached: control can't adopt a delivery it never
 /// recorded the capability of, so it fences it before admission reopens.
-pub(crate) fn retire_unowned(state: &mut State, host: &str, inventory: &ProcessReport) -> Result<()> {
-    for delivery in inventory.deliveries.iter().filter_map(|binding| binding.delivery.as_ref()) {
-        let operation = &delivery.operation_id;
-        if crate::jvm::owned(state, host, delivery)
+pub(crate) fn retire_unowned(state: &mut State, host: &str, inventory: &JvmReport) -> Result<()> {
+    for status in &inventory.deliveries {
+        let operation = &status.operation_id;
+        if crate::jvm::owned(state, host, status)
             && state.claims.get(operation).is_some_and(|claim| claim.assignment.is_none())
         {
             crate::delivery::release(state, operation)?;
             state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?.request.clear();
         }
-        retire_unknown(state, delivery);
+        retire_unknown(state, status);
     }
     Ok(())
 }
 
-/// Records a released claim standing for `delivery`'s operation unless the log knows it. Its empty request matches no
-/// retry.
-pub(crate) fn retire_unknown(state: &mut State, delivery: &PlayerDelivery) {
-    state.claims.entry(delivery.operation_id.clone()).or_insert_with(|| tombstone(delivery));
+/// Records a released claim standing for the operation of the delivery `status` reports unless the log knows it. Its
+/// empty request matches no retry.
+pub(crate) fn retire_unknown(state: &mut State, status: &JvmDeliveryStatus) {
+    state.claims.entry(status.operation_id.clone()).or_insert_with(|| tombstone(status));
 }
 
-fn tombstone(delivery: &PlayerDelivery) -> Claim {
+fn tombstone(status: &JvmDeliveryStatus) -> Claim {
     let now = crate::now_ms();
     Claim {
         request: Vec::new(),
-        player: delivery.player.as_ref().map(|player| player.id.clone()).unwrap_or_default(),
-        proxy: delivery.proxy_id.clone(),
-        membership: Generation::from_wire(delivery.membership_generation),
-        generation: Generation::from_wire(delivery.owner_generation),
-        session: delivery.session.as_ref().map(|session| session.id.clone()).unwrap_or_default(),
+        player: String::new(),
+        proxy: String::new(),
+        membership: Generation::default(),
+        generation: crate::jvm::generation(status).unwrap_or_default(),
+        session: String::new(),
         phase: Phase::Released,
         assignment: None,
         activated: false,

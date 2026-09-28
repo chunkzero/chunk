@@ -76,7 +76,7 @@ pub(super) async fn call(
         Method::Report => {
             let report: JvmReport = decode(&request.arguments)?;
             // Not an accepted operation: shutdown must not wait on a JVM that keeps reporting before it stops it.
-            let reported = service.control.report_jvm(&host, &principal.credential, &request.stream, report);
+            let reported = service.control.report_jvm(&host, &principal.credential, &request.stream, &report);
             reported.map_err(|failure| errors::operation(&failure))?;
             let generation = *service.control.subscribe().borrow();
             Ok((position(generation.epoch, Revision(generation.revision)), Vec::new()))

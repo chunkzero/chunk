@@ -3,16 +3,13 @@ use std::{sync::Arc, time::Duration};
 use chunk_contract::{Schema, validate_wire_value};
 use chunk_proto::{
     sync::v1 as sync,
-    v1::{
-        Assignment, ClaimIdentity, PlayerDelivery, ProcessIdentity, SessionMethodCaller, SessionMethodPhase,
-        SessionMethodRequest, SessionMethodResult,
-    },
+    v1::{Assignment, ClaimIdentity, PlayerDelivery},
 };
 use prost::Message;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Control, Error, Generation, Release, Result, RuntimeConnection};
+use crate::{Control, Error, Generation, JvmIdentity, Release, Result, RuntimeConnection};
 
 pub(crate) const MAX_JSON: usize = 48 * 1024;
 
@@ -24,7 +21,7 @@ const CANCEL_GRACE: Duration = Duration::from_secs(2);
 pub struct CapturedSession {
     claim: ClaimIdentity,
     delivery: PlayerDelivery,
-    identity: ProcessIdentity,
+    identity: JvmIdentity,
     session_type: String,
     /// The release the session's host runs, which declares its methods.
     release: Arc<Release>,
@@ -34,18 +31,35 @@ pub struct CapturedSession {
 #[derive(Clone)]
 pub struct PreparedSessionMethod {
     target: CapturedSession,
-    request: SessionMethodRequest,
+    operation_id: String,
+    /// The operation's place in its JVM's order of methods.
+    sequence: u64,
+    /// The call as its JVM's topic carries it, not yet cancelled.
+    call: sync::JvmMethodCall,
     result: Schema,
 }
 
 impl PreparedSessionMethod {
     pub(crate) fn deadline_ms(&self) -> u64 {
-        self.request.deadline_ms
+        self.call.deadline_ms
     }
     #[must_use]
     pub fn operation_id(&self) -> &str {
-        &self.request.operation_id
+        &self.operation_id
     }
+}
+
+/// How a session method call ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MethodOutcome {
+    /// How the JVM says the method ended; `None` when control can't confirm whether it ran.
+    pub phase: Option<sync::JvmMethodPhase>,
+    /// What the method returned as JSON, set only when it completed.
+    pub result_json: String,
+}
+
+impl MethodOutcome {
+    const UNKNOWN: Self = Self { phase: None, result_json: String::new() };
 }
 
 impl Control {
@@ -68,9 +82,9 @@ impl Control {
         let assignment = Assignment::decode(claim.assignment.as_deref().ok_or(Error::Invalid("missing assignment"))?)?;
         let delivery = assignment.delivery.ok_or(Error::Invalid("missing delivered identity"))?;
         if !crate::placement::runs_host(&state, &runtime, host)
-            || runtime.identity.runtime_id != delivery.runtime_id
+            || runtime.identity.host != delivery.runtime_id
             || runtime.identity.generation != delivery.process_generation
-            || release.session_types.get(&session.session_type).is_none_or(|spec| spec.app != runtime.identity.app_id)
+            || release.session_types.get(&session.session_type).is_none_or(|spec| spec.app != runtime.identity.app)
         {
             return Err(Error::Invalid("method process changed"));
         }
@@ -101,7 +115,7 @@ impl Control {
             .as_ref()
             .and_then(|methods| {
                 methods.methods.iter().find(|method| {
-                    method.app == target.identity.app_id
+                    method.app == target.identity.app
                         && format!("{}/{}", method.app, method.session) == target.session_type
                         && method.name == name
                 })
@@ -122,26 +136,21 @@ impl Control {
         })?;
         let sequence = self.state()?.method_sequence;
         drop(writer);
-        let issued_at_ms = crate::now_ms();
-        let request = SessionMethodRequest {
-            identity: Some(target.identity.clone()),
+        let call = sync::JvmMethodCall {
+            session: target.delivery.session.as_ref().map(|session| session.id.clone()).unwrap_or_default(),
+            method: name.into(),
+            arguments_json: json.into_bytes(),
+            delivery: target.delivery.operation_id.clone(),
+            deadline_ms: crate::now_ms().checked_add(timeout_ms).ok_or(Error::Capacity)?,
+            cancel: false,
+        };
+        Ok(PreparedSessionMethod {
+            target: target.clone(),
             operation_id: format!("{}/{sequence}", target.identity.process_id),
             sequence,
-            session: target.delivery.session.clone(),
-            session_generation: target.delivery.session_generation,
-            session_type: target.session_type.clone(),
-            method: name.into(),
-            arguments_json: json,
-            caller: Some(SessionMethodCaller {
-                delivery_operation_id: target.delivery.operation_id.clone(),
-                player: target.delivery.player.clone(),
-                membership_generation: target.delivery.membership_generation,
-                owner_generation: target.delivery.owner_generation,
-            }),
-            issued_at_ms,
-            deadline_ms: issued_at_ms.checked_add(timeout_ms).ok_or(Error::Capacity)?,
-        };
-        Ok(PreparedSessionMethod { target: target.clone(), request, result: method.result.clone() })
+            call,
+            result: method.result.clone(),
+        })
     }
 
     /// Puts the operation on its JVM's topic, unless it is already there, and waits for the JVM's result. A cancelled
@@ -154,35 +163,34 @@ impl Control {
         &self,
         operation: &PreparedSessionMethod,
         cancellation: &CancellationToken,
-    ) -> Result<SessionMethodResult> {
-        let request = &operation.request;
-        let host = &operation.target.identity.runtime_id;
+    ) -> Result<MethodOutcome> {
+        let host = &operation.target.identity.host;
         if self.host.connection(host).is_none_or(|runtime| runtime.identity != operation.target.identity) {
-            return Ok(unknown(operation));
+            return Ok(MethodOutcome::UNKNOWN);
         }
         let stopped = || {
             cancellation.is_cancelled()
-                || crate::now_ms() >= request.deadline_ms
+                || crate::now_ms() >= operation.deadline_ms()
                 || self.method_runtime(&operation.target).is_err()
         };
-        let call = self.jvms.call(host, &request.operation_id, request.sequence, sync_call(operation, stopped()))?;
-        let Some(mut call) = call else {
-            return Ok(unknown(operation));
+        let topic = sync::JvmMethodCall { cancel: stopped(), ..operation.call.clone() };
+        let Some(mut call) = self.jvms.call(host, &operation.operation_id, operation.sequence, topic)? else {
+            return Ok(MethodOutcome::UNKNOWN);
         };
         let mut cancelled = None;
         loop {
             if let Some(result) = call.result() {
-                return validate_result(operation, from_sync(&request.operation_id, result)?);
+                return outcome(operation, &result);
             }
             if cancelled.is_none() && stopped() {
-                self.jvms.cancel(host, &request.operation_id);
+                self.jvms.cancel(host, &operation.operation_id);
                 cancelled = Some(tokio::time::Instant::now());
             }
             if cancelled.is_some_and(|at| at.elapsed() >= CANCEL_GRACE) {
-                return Ok(unknown(operation));
+                return Ok(MethodOutcome::UNKNOWN);
             }
             tokio::select! {
-                changed = call.changed() => if !changed { return Ok(unknown(operation)) },
+                changed = call.changed() => if !changed { return Ok(MethodOutcome::UNKNOWN) },
                 () = tokio::time::sleep(Duration::from_millis(100)) => {},
                 () = cancellation.cancelled(), if cancelled.is_none() => {},
             }
@@ -196,14 +204,10 @@ impl Control {
         operation: &PreparedSessionMethod,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
-    ) -> SessionMethodResult {
+    ) -> MethodOutcome {
         loop {
-            let response =
-                self.call_session_method(operation, cancellation).await.unwrap_or_else(|_| unknown(operation));
-            if response.phase != SessionMethodPhase::Unknown as i32
-                || crate::now_ms() >= operation.deadline_ms()
-                || stop.is_cancelled()
-            {
+            let response = self.call_session_method(operation, cancellation).await.unwrap_or(MethodOutcome::UNKNOWN);
+            if response.phase.is_some() || crate::now_ms() >= operation.deadline_ms() || stop.is_cancelled() {
                 return response;
             }
             tokio::select! {
@@ -221,69 +225,26 @@ impl Control {
         {
             return Err(Error::Invalid("captured session changed"));
         }
-        self.host.connection(&target.identity.runtime_id).ok_or(Error::Unresolved("method process unavailable"))
+        self.host.connection(&target.identity.host).ok_or(Error::Unresolved("method process unavailable"))
     }
 }
 
-/// The operation as its JVM's topic carries it.
-fn sync_call(operation: &PreparedSessionMethod, cancel: bool) -> sync::JvmMethodCall {
-    let request = &operation.request;
-    sync::JvmMethodCall {
-        session: request.session.as_ref().map(|session| session.id.clone()).unwrap_or_default(),
-        method: request.method.clone(),
-        arguments_json: request.arguments_json.clone().into_bytes(),
-        delivery: operation.target.delivery.operation_id.clone(),
-        deadline_ms: request.deadline_ms,
-        cancel,
-    }
-}
-
-fn unknown(operation: &PreparedSessionMethod) -> SessionMethodResult {
-    SessionMethodResult {
-        operation_id: operation.request.operation_id.clone(),
-        phase: SessionMethodPhase::Unknown as i32,
-        ..Default::default()
-    }
-}
-
-/// The result a JVM sent for `operation`, as control states it.
-fn from_sync(operation: &str, result: sync::JvmMethodResult) -> Result<SessionMethodResult> {
-    let phase = match result.phase() {
-        sync::JvmMethodPhase::Completed => SessionMethodPhase::Completed,
-        sync::JvmMethodPhase::Cancelled => SessionMethodPhase::Cancelled,
-        sync::JvmMethodPhase::Failed => SessionMethodPhase::Failed,
-        sync::JvmMethodPhase::Unspecified => return Err(Error::Invalid("invalid session method phase")),
-    };
-    Ok(SessionMethodResult {
-        operation_id: operation.into(),
-        phase: phase as i32,
-        result_json: String::from_utf8(result.result_json)
-            .map_err(|_| Error::Invalid("invalid session method result"))?,
-        error: None,
-    })
-}
-
-fn validate_result(operation: &PreparedSessionMethod, mut result: SessionMethodResult) -> Result<SessionMethodResult> {
-    if result.operation_id != operation.request.operation_id || result.encoded_len() > MAX_JSON + 4096 {
-        return Err(Error::Invalid("invalid session method reply"));
-    }
-    match SessionMethodPhase::try_from(result.phase) {
-        Ok(SessionMethodPhase::Completed) => {
-            let mut value: Value = serde_json::from_str(&result.result_json)?;
+/// The outcome of `result`, which a JVM sent for `operation`: a completed method's result must match its declaration.
+fn outcome(operation: &PreparedSessionMethod, result: &sync::JvmMethodResult) -> Result<MethodOutcome> {
+    let phase = result.phase();
+    match phase {
+        sync::JvmMethodPhase::Unspecified => Err(Error::Invalid("invalid session method phase")),
+        sync::JvmMethodPhase::Completed => {
+            let mut value: Value = serde_json::from_slice(&result.result_json)?;
             operation.result.normalize_api(&mut value);
             validate_wire_value(&value).map_err(Error::Invalid)?;
-            if !operation.result.accepts(&value) || result.error.is_some() {
+            if !operation.result.accepts(&value) {
                 return Err(Error::Invalid("invalid session method result"));
             }
-            result.result_json = serde_json::to_string(&value)?;
+            Ok(MethodOutcome { phase: Some(phase), result_json: serde_json::to_string(&value)? })
         }
-        Ok(
-            SessionMethodPhase::Accepted
-            | SessionMethodPhase::Cancelled
-            | SessionMethodPhase::Failed
-            | SessionMethodPhase::Unknown,
-        ) if result.result_json.is_empty() => {}
-        _ => return Err(Error::Invalid("invalid session method phase")),
+        sync::JvmMethodPhase::Cancelled | sync::JvmMethodPhase::Failed => {
+            Ok(MethodOutcome { phase: Some(phase), result_json: String::new() })
+        }
     }
-    Ok(result)
 }

@@ -26,7 +26,8 @@ mod sessions;
 mod state;
 mod sync;
 pub use callers::{ArrivedClaim, SessionScope, StoredClaim};
-pub use session_methods::{CapturedSession, PreparedSessionMethod};
+pub use nodes::NodeStatus;
+pub use session_methods::{CapturedSession, MethodOutcome, PreparedSessionMethod};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -37,7 +38,9 @@ use chunk_proto::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use host::{Distribution, Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
+pub use host::{
+    Distribution, Host, JvmIdentity, MachineProfile, ProcessHostConfig, Progress, Registration, RuntimeConnection,
+};
 pub use machines::MachineKind;
 pub use operations::Operations;
 pub use process::ProcessHost;

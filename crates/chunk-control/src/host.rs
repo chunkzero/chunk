@@ -1,5 +1,4 @@
 use crate::{Error, Release, Result};
-use chunk_proto::v1::{ProcessIdentity, ProcessRegistration};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -10,13 +9,33 @@ pub struct MachineProfile {
     pub max_sessions: u16,
 }
 
+/// Who a JVM is: the host it runs, the process launched for it, and the release, app and profile it runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JvmIdentity {
+    pub host: String,
+    pub process_id: String,
+    pub generation: u64,
+    /// The deployment whose release the JVM runs.
+    pub deployment: String,
+    pub app: String,
+    pub profile: String,
+    /// The SHA-256 digest of the app's artifact, in lowercase hex.
+    pub artifact_digest: String,
+}
+
+/// What a JVM registers with: who it is, and the endpoint players connect to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Registration {
+    pub identity: JvmIdentity,
+    pub player_endpoint: String,
+}
+
 /// A registered JVM's credential and identity, and the endpoint players connect to. Control reaches the JVM only
 /// through its `jvm/<host>` topic. Never include this record in diagnostics.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub struct RuntimeConnection {
     pub token: String,
-    pub identity: ProcessIdentity,
+    pub identity: JvmIdentity,
     pub player_endpoint: String,
 }
 
@@ -62,14 +81,14 @@ pub trait Host: Send + Sync {
     }
     /// # Errors
     /// Rejects unowned launches, credentials or changed registrations.
-    fn register(&self, _token: &str, _registration: ProcessRegistration) -> Result<ProcessIdentity> {
+    fn register(&self, _token: &str, _registration: Registration) -> Result<()> {
         Err(Error::Invalid("host does not accept process registrations"))
     }
     /// Takes over a process launched for `registration`'s host before control restarted. Control has already
     /// matched `token` and the identity against its log.
     /// # Errors
     /// Rejects hosts that cannot adopt processes, or a host already running or stopped.
-    fn adopt(&self, _token: &str, _registration: ProcessRegistration) -> Result<()> {
+    fn adopt(&self, _token: &str, _registration: Registration) -> Result<()> {
         Err(Error::Invalid("host cannot adopt processes"))
     }
     fn connection(&self, _id: &str) -> Option<RuntimeConnection> {

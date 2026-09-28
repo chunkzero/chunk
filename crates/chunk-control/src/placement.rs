@@ -114,19 +114,13 @@ impl Control {
 /// it only reports and stops.
 pub(crate) fn runs_host(state: &State, runtime: &RuntimeConnection, host: &HostState) -> bool {
     let identity = &runtime.identity;
-    let deployment = identity.deployment.as_ref();
-    if deployment.map_or("", |deployment| deployment.deployment.as_str()) != host.release
-        || identity.app_id != host.app
-        || identity.machine_profile != host.profile
-    {
+    if identity.deployment != host.release || identity.app != host.app || identity.profile != host.profile {
         return false;
     }
     let Some(release) = state.releases.get(&host.release) else {
         return true;
     };
-    let release = &release.release;
-    deployment == Some(&release.deployment)
-        && release.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
+    release.release.apps.get(&host.app).is_some_and(|app| app.sha256 == identity.artifact_digest)
 }
 
 /// The delivery `runtime` prepares for `claim`.
@@ -150,7 +144,7 @@ fn delivery(
         owner_generation: claim.generation.wire(),
         identity: request.identity.clone(),
         protocol: config.protocol,
-        runtime_id: runtime.identity.runtime_id.clone(),
+        runtime_id: runtime.identity.host.clone(),
     }
 }
 

@@ -1,8 +1,5 @@
 use super::*;
-use chunk_proto::{
-    sync::v1::JvmReport,
-    v1::{DeliveryInventory, DeliveryPhase, PlayerDelivery, ProcessReport},
-};
+use chunk_proto::sync::v1::{JvmDeliveryStatus, JvmReport};
 
 /// Claims `operation` for a new player on the fake JVM, then closes the fake JVM's stream. Returns the claim's host.
 async fn claimed(fixture: &Fixture, control: &Control, operation: &str) -> String {
@@ -58,7 +55,7 @@ async fn a_reconnecting_jvm_is_repaired_in_one_pass() {
         bindings.get_mut("leaving").unwrap().phase = JvmDeliveryPhase::Closed;
     }
     let _topic = open(&control, &host, "reconnected");
-    control.report_jvm(&host, CREDENTIAL, "reconnected", complete(&fixture, &host)).unwrap();
+    control.report_jvm(&host, CREDENTIAL, "reconnected", &complete(&fixture, &host)).unwrap();
     let state = control.state().unwrap();
     assert!(state.claims["arriving"].phase == Phase::Arrived);
     assert!(state.claims["leaving"].phase == Phase::Released);
@@ -71,20 +68,20 @@ async fn stale_generations_and_replaced_streams_cannot_write_back() {
     let control = fixture.control().await;
     let host = claimed(&fixture, &control, "claimed").await;
     let _older = open(&control, &host, "older");
-    control.report_jvm(&host, CREDENTIAL, "older", complete(&fixture, &host)).unwrap();
+    control.report_jvm(&host, CREDENTIAL, "older", &complete(&fixture, &host)).unwrap();
     let mut stale = delivered(fixture.host.report(&host), JvmDeliveryPhase::Closed);
     stale.deliveries[0].generation.as_mut().unwrap().revision -= 1;
-    control.report_jvm(&host, CREDENTIAL, "older", stale).unwrap();
+    control.report_jvm(&host, CREDENTIAL, "older", &stale).unwrap();
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Reserved);
 
     // Once a replacement stream reports an arrival, neither the old stream nor an older phase can undo it.
     let _replacement = open(&control, &host, "replacement");
     let arrived = delivered(complete(&fixture, &host), JvmDeliveryPhase::Arrived);
-    assert!(control.report_jvm(&host, "another-credential", "replacement", arrived.clone()).is_err());
-    control.report_jvm(&host, CREDENTIAL, "replacement", arrived).unwrap();
+    assert!(control.report_jvm(&host, "another-credential", "replacement", &arrived).is_err());
+    control.report_jvm(&host, CREDENTIAL, "replacement", &arrived).unwrap();
     let attached = delivered(fixture.host.report(&host), JvmDeliveryPhase::Attached);
-    assert!(matches!(control.report_jvm(&host, CREDENTIAL, "older", attached.clone()), Err(Error::Stopped)));
-    control.report_jvm(&host, CREDENTIAL, "replacement", attached).unwrap();
+    assert!(matches!(control.report_jvm(&host, CREDENTIAL, "older", &attached), Err(Error::Stopped)));
+    control.report_jvm(&host, CREDENTIAL, "replacement", &attached).unwrap();
     assert!(control.state().unwrap().claims["claimed"].phase == Phase::Arrived);
     fixture.close().await;
 }
@@ -109,11 +106,11 @@ async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
     assert!(scope(&player).is_ok());
 
     let _topic = open(&control, &host, "held");
-    control.report_jvm(&host, CREDENTIAL, "held", complete(&fixture, &host)).unwrap();
+    control.report_jvm(&host, CREDENTIAL, "held", &complete(&fixture, &host)).unwrap();
     for (phase, held) in
         [(JvmDeliveryPhase::Attached, true), (JvmDeliveryPhase::Withdrawing, true), (JvmDeliveryPhase::Closed, false)]
     {
-        control.report_jvm(&host, CREDENTIAL, "held", delivered(fixture.host.report(&host), phase)).unwrap();
+        control.report_jvm(&host, CREDENTIAL, "held", &delivered(fixture.host.report(&host), phase)).unwrap();
         assert_eq!(scope(&player).is_ok(), held, "{phase:?}");
     }
     assert!(scope("another-player").is_err());
@@ -123,22 +120,22 @@ async fn a_jvm_names_a_player_from_reservation_until_its_delivery_closes() {
 #[test]
 fn a_jvms_inventory_outlives_its_stream_until_a_newer_stream_reports() {
     let links = crate::sync::Links::default();
-    let identity = ProcessIdentity { runtime_id: "host".into(), ..ProcessIdentity::default() };
-    let report = |operation: &str| ProcessReport {
-        identity: Some(identity.clone()),
-        sessions: Vec::new(),
-        deliveries: vec![DeliveryInventory {
-            delivery: Some(PlayerDelivery { operation_id: operation.into(), ..PlayerDelivery::default() }),
-            phase: DeliveryPhase::Arrived.into(),
+    let identity = crate::JvmIdentity { host: "host".into(), ..crate::JvmIdentity::default() };
+    let report = |operation: &str| JvmReport {
+        deliveries: vec![JvmDeliveryStatus {
+            operation_id: operation.into(),
+            phase: JvmDeliveryPhase::Arrived.into(),
+            ..JvmDeliveryStatus::default()
         }],
+        ..JvmReport::default()
     };
     let first = links.attach("host", identity.clone(), &report("kept")).unwrap();
     links.detach("host", first);
     // A reconnecting JVM's deliveries stand, but its ended stream no longer reports.
     assert!(links.delivery("host", &identity, "kept").is_some());
-    assert!(links.merge("host", first, &report("late")).is_err());
+    assert!(links.merge("host", first, &identity, &report("late")).is_err());
     let second = links.attach("host", identity.clone(), &report("current")).unwrap();
     assert!(links.delivery("host", &identity, "kept").is_none());
-    links.merge("host", second, &report("later")).unwrap();
+    links.merge("host", second, &identity, &report("later")).unwrap();
     assert!(links.delivery("host", &identity, "later").is_some());
 }
