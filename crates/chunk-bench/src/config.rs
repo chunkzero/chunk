@@ -75,6 +75,9 @@ pub struct Config {
     pub slow_readers: u32,
     #[arg(long, default_value_t = 5000)]
     pub slow_read_ms: u32,
+    /// Sync queries: bytes of padding added to the leaderboard result, e.g. 65536, to press on core's send budget.
+    #[arg(long, default_value_t = 0)]
+    pub result_padding: u32,
     /// Pin the target process with `taskset -c`, e.g. `12-13`. Pin the generator by running under taskset.
     #[arg(long)]
     pub target_cpus: Option<String>,
@@ -137,6 +140,7 @@ impl Config {
             self.slow_readers <= self.subscribers && (1..=600_000).contains(&self.slow_read_ms),
             "slow readers must be at most the subscribers, and their read delay 1..=600000 ms"
         );
+        ensure!(self.result_padding <= 512 * 1024, "result padding must be at most 524288 bytes");
         ensure!(
             self.target_cpus.as_ref().is_none_or(|cpus| {
                 !cpus.is_empty() && cpus.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '-')
