@@ -19,7 +19,7 @@ pub fn release() -> chunk_control::Release {
     serde_json::from_value(serde_json::json!({
         "apps": {"bridge": {"id": "bridge", "jar": "bridge.jar", "sha256": "digest", "java_version": 25,
             "sessions": {"default": {"machine_profile": "small", "capacity": 8}}}},
-        "deployment": {"environment": "test", "deployment": "test"}, "artifact_digest": "digest",
+        "deployment": {"environment": "test", "deployment": "test"}, "release_id": "digest",
         "profiles": {"small": {"memory_mib": 512, "max_sessions": 2}},
         "session_types": {"bridge/default": {"app": "bridge", "machine_profile": "small", "capacity": 8}},
         "max_processes": 1, "idle_node_timeout_seconds": 0, "session_methods": session_methods()

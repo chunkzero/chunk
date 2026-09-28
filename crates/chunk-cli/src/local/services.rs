@@ -3,7 +3,7 @@ use chunk_build::Release;
 use chunk_contract::ControlConnection;
 use chunk_environment::{Core, CoreConfig, Gateway, GatewayConfig, PlatformTarget};
 use chunk_proto::sync::v1::{MovePlayerArguments, MovePlayerResult, Node, OperatorPlayer, SessionDemand};
-use std::{collections::BTreeMap, convert::Infallible, io, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, convert::Infallible, io, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -35,9 +35,7 @@ impl Shared {
     /// Makes `version` control's current release, whose JVMs launch from its release directory. Earlier releases keep
     /// their sessions.
     pub fn activate(&self, version: &Version) -> io::Result<()> {
-        let distribution =
-            chunk_control::Distribution { directory: version.release.directory.clone(), java: version.java.clone() };
-        self.core.activate(&version.deployment, distribution, version.control.clone())
+        self.core.activate(version.control.clone())
     }
 
     /// Sends later player connections to `version`'s backend.
@@ -95,7 +93,6 @@ pub(super) struct Version {
     pub deployment: String,
     pub destinations: Vec<Destination>,
     control: chunk_control::Release,
-    java: PathBuf,
 }
 
 impl Version {
@@ -105,7 +102,6 @@ impl Version {
             release: staged.release,
             deployment: staged.bundle.id,
             control: staged.control,
-            java: staged.java,
         }
     }
 }
@@ -123,6 +119,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         control_bind: settings.control_bind,
         core_bind: None,
         private_address: None,
+        java: settings.java.clone(),
         environment_token: None,
         // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,

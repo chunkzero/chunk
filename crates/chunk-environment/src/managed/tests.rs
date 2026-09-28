@@ -261,8 +261,9 @@ fn artifact(management: &Management, url: &str, release_id: &str, bytes: Vec<u8>
 }
 
 /// Whether the backend holds `deployment`: a CLI call to the `status` query every test release declares fails its
-/// contract only once the deployment isn't resident.
-async fn serves(record: &Path, deployment: &str) -> bool {
+/// contract only once the deployment isn't resident. `None` while the backend releases it, since it refuses calls to a
+/// deployment it is releasing as unavailable.
+async fn serves(record: &Path, deployment: &str) -> Option<bool> {
     let control: ControlConnection = chunk_service::read(record).unwrap();
     let call = CallRequest {
         method: "status".into(),
@@ -274,8 +275,9 @@ async fn serves(record: &Path, deployment: &str) -> bool {
     request.metadata_mut().insert("authorization", format!("Bearer {}", control.token).parse().unwrap());
     let response = CoreClient::connect(control.endpoint).await.unwrap().call(request).await.unwrap().into_inner();
     match response.outcome {
-        Some(Outcome::Result(_)) => true,
-        Some(Outcome::Error(error)) if error.code() == Code::Contract => false,
+        Some(Outcome::Result(_)) => Some(true),
+        Some(Outcome::Error(error)) if error.code() == Code::Contract => Some(false),
+        Some(Outcome::Error(error)) if error.code() == Code::Unavailable => None,
         outcome => panic!("{deployment}: {outcome:?}"),
     }
 }
@@ -346,6 +348,7 @@ impl Harness {
             control_bind: "127.0.0.1:0".parse().unwrap(),
             core_bind: None,
             private_address: None,
+            java: "java".into(),
             environment_token: None,
             fresh: false,
         }
@@ -378,7 +381,7 @@ impl Harness {
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
         let config = Config::Core {
-            core: self.core(),
+            core: Box::new(self.core()),
             gateway: Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
             management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
         };
@@ -401,13 +404,14 @@ impl Harness {
     }
 
     async fn serves(&self, deployment: &str) -> bool {
-        serves(&self.state().join("control.json"), deployment).await
+        let serves = serves(&self.state().join("control.json"), deployment).await;
+        serves.unwrap_or_else(|| panic!("{deployment} is unavailable"))
     }
 
     /// Waits until the backend no longer holds `deployment`.
     async fn released(&self, deployment: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        while self.serves(deployment).await {
+        while serves(&self.state().join("control.json"), deployment).await != Some(false) {
             assert!(tokio::time::Instant::now() < deadline, "{deployment} was never released");
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

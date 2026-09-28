@@ -51,7 +51,7 @@ impl Managed<'_> {
     /// claims.
     async fn remove_unused_releases(&self) {
         let Ok(control) = self.core.control() else { return };
-        let used = match control.release_artifacts() {
+        let used = match control.release_ids() {
             Ok(used) => used,
             Err(error) => return tracing::warn!(%error, "releases in use unknown"),
         };

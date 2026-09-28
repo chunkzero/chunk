@@ -1,17 +1,12 @@
 use super::*;
 use chunk_proto::sync::v1::NodePhase;
+use std::path::{Path, PathBuf};
 
 #[tokio::test]
 async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     let fixture = Fixture::new();
-    let host_config = || crate::ProcessHostConfig {
-        directory: fixture.directory.path().join("nodes"),
-        environment: "test".into(),
-        private_address: None,
-    };
-    let distribution = crate::Distribution { directory: fixture.directory.path().into(), java: "unused-java".into() };
+    let host_config = || host_config(fixture.directory.path(), "unused-java".into());
     let host = Arc::new(crate::ProcessHost::new(host_config()));
-    host.add_release("build", distribution.clone()).unwrap();
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let path = fixture.directory.path().join("launch.sqlite");
     let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
@@ -34,7 +29,6 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     drop(host);
 
     let host = Arc::new(crate::ProcessHost::new(host_config()));
-    host.add_release("build", distribution).unwrap();
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
     let executor = Executor::start(&control);
@@ -63,4 +57,66 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     }
     executor.stop().await;
     fixture.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_activated_again() {
+    use sha2::Digest;
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let directory = fixture.directory.path();
+    let (java, arguments) = (directory.join("java"), directory.join("java.args"));
+    let script = format!("#!/bin/sh\necho \"$@\" > {}\nexec sleep 60\n", arguments.display());
+    std::fs::write(&java, script).unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut previous = fixture.release.clone();
+    previous.deployment.deployment = "previous".into();
+    previous.release_id = "previous-release".into();
+    let jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new())).finish().unwrap().into_inner();
+    let unpacked = directory.join("releases").join(&previous.release_id);
+    std::fs::create_dir_all(&unpacked).unwrap();
+    std::fs::write(unpacked.join("app.jar"), &jar).unwrap();
+    previous.apps.get_mut("bridge").unwrap().sha256 = format!("{:x}", sha2::Sha256::digest(&jar));
+    let path = directory.join("launch.sqlite");
+    let host = || {
+        let host = Arc::new(crate::ProcessHost::new(host_config(directory, java.clone())));
+        host.configure("http://127.0.0.1:1".into()).unwrap();
+        host
+    };
+    let control = open(&path, previous, host()).unwrap();
+    control.activate_release(fixture.release.clone()).unwrap();
+    drop(control);
+
+    // Control restarts with `build` current; `previous` is never activated again.
+    let host = host();
+    let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
+    let executor = Executor::start(&control);
+    let request =
+        ClaimRequest { deployment: "previous".into(), ..request("previous", &uuid::Uuid::new_v4().to_string()) };
+    let claim = tokio::spawn({
+        let control = control.clone();
+        async move { control.claim(request).await }
+    });
+    // Java ran the previous release's app from its unpacked directory.
+    let jar = unpacked.join("app.jar").display().to_string();
+    eventually(|| std::fs::read_to_string(&arguments).is_ok_and(|ran| ran.contains(&jar))).await;
+    assert!(
+        control.nodes().unwrap().iter().any(|node| node.deployment == "previous" && node.phase != NodePhase::Stopped)
+    );
+    claim.abort();
+    executor.stop().await;
+    host.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+/// A process host in `directory` that launches apps with `java`.
+fn host_config(directory: &Path, java: PathBuf) -> crate::ProcessHostConfig {
+    crate::ProcessHostConfig {
+        directory: directory.join("nodes"),
+        releases: directory.join("releases"),
+        java,
+        environment: "test".into(),
+        private_address: None,
+    }
 }

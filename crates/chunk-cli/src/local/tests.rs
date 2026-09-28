@@ -16,7 +16,7 @@ fn local_control_uses_discovered_apps_and_resolved_runtime_requirements() {
             .unwrap();
     assert_eq!(config.deployment.environment, "development");
     assert_eq!(config.deployment.deployment, "release-id-1");
-    assert_eq!(config.artifact_digest, "release-id");
+    assert_eq!(config.release_id, "release-id");
     assert_eq!(config.session_types.keys().map(String::as_str).collect::<Vec<_>>(), ["arena/default", "lobby/default"]);
     assert_eq!(config.session_types["arena/default"].machine_profile, "large");
     assert_eq!(config.session_types["arena/default"].capacity, 8);

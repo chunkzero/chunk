@@ -189,13 +189,14 @@ impl<'a> Session<'a> {
             Trigger::Restart => self.reporter.running("Reload", "forced restart"),
         }
         let (root, releases) = (self.options.project.clone(), self.settings.state.join("releases"));
-        let (java, stop) = (self.options.java.clone(), stop.clone());
+        // Core launches every release's JVMs with the Java it started with.
+        let (java, stop) = (self.settings.java.clone(), stop.clone());
         let progress = self.reporter.build_progress();
         let task = tokio::spawn(async move {
             let started = Instant::now();
             let project = building::inspect(root.canonicalize()?, releases)?;
             let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), progress).await?;
-            let staged = super::stage(&project, built, java.as_deref(), &stop).await?;
+            let staged = super::stage(&project, built, Some(&java), &stop).await?;
             Ok((staged, started.elapsed()))
         });
         (task, forced)

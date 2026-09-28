@@ -108,16 +108,13 @@ pub trait Host: Send + Sync {
 pub struct ProcessHostConfig {
     /// Holds each host's launch marker, exit record and JVM log.
     pub directory: std::path::PathBuf,
+    /// Holds each release this host launches unpacked at `<releases>/<release ID>`.
+    pub releases: std::path::PathBuf,
+    /// The Java executable that runs every release's apps.
+    pub java: std::path::PathBuf,
     /// The environment whose releases this host launches.
     pub environment: String,
     /// This machine's address on the environment's private network. When set, each JVM serves players there, so
     /// gateways on other machines reach it; otherwise it serves them on loopback.
     pub private_address: Option<std::net::IpAddr>,
-}
-
-/// Where a release's distribution was unpacked, and the Java executable that runs its apps.
-#[derive(Clone)]
-pub struct Distribution {
-    pub directory: std::path::PathBuf,
-    pub java: std::path::PathBuf,
 }

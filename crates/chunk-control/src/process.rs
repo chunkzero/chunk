@@ -1,7 +1,4 @@
-use crate::{
-    Distribution, Error, Host, JvmIdentity, ProcessHostConfig, Progress, Registration, Release, Result,
-    RuntimeConnection,
-};
+use crate::{Error, Host, JvmIdentity, ProcessHostConfig, Progress, Registration, Release, Result, RuntimeConnection};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,8 +20,6 @@ use tokio_util::sync::CancellationToken;
 pub struct ProcessHost {
     config: ProcessHostConfig,
     endpoint: OnceLock<String>,
-    /// Each launchable release's distribution, by deployment version.
-    distributions: Mutex<BTreeMap<String, Distribution>>,
     processes: Mutex<Processes>,
 }
 #[derive(Default)]
@@ -66,15 +61,7 @@ impl Drop for ProcessHost {
 impl ProcessHost {
     #[must_use]
     pub fn new(config: ProcessHostConfig) -> Self {
-        Self { config, endpoint: OnceLock::new(), distributions: Mutex::default(), processes: Mutex::default() }
-    }
-    /// Launches JVMs of `deployment`'s release from `distribution`.
-    /// # Errors
-    /// Reports a poisoned host.
-    pub fn add_release(&self, deployment: &str, distribution: Distribution) -> Result<()> {
-        let mut distributions = self.distributions.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
-        distributions.insert(deployment.into(), distribution);
-        Ok(())
+        Self { config, endpoint: OnceLock::new(), processes: Mutex::default() }
     }
     fn path(&self, id: &str, extension: &str) -> Result<std::path::PathBuf> {
         uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("invalid host ID"))?;
@@ -130,21 +117,15 @@ impl ProcessHost {
     fn start(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Arc<Process>> {
         let endpoint = self.endpoint.get().ok_or(Error::Unresolved("control not listening"))?;
         let deployment = &release.deployment;
-        let distribution = self
-            .distributions
-            .lock()
-            .map_err(|_| Error::Unresolved("host poisoned"))?
-            .get(&deployment.deployment)
-            .cloned()
-            .ok_or(Error::Invalid("unknown release distribution"))?;
         let artifact = release.apps.get(app).ok_or(Error::Invalid("unknown app"))?;
         // Placement already bound the profile to the app's session or one of its declared destinations.
         let size = release.profiles.get(profile).ok_or(Error::Invalid("unknown profile"))?;
         if self.config.environment != deployment.environment {
             return Err(Error::Invalid("release belongs to another environment"));
         }
-        let root = distribution.directory.canonicalize()?;
-        let jar = distribution.directory.join(&artifact.jar).canonicalize()?;
+        let directory = self.config.releases.join(&release.release_id);
+        let root = directory.canonicalize()?;
+        let jar = directory.join(&artifact.jar).canonicalize()?;
         let bytes = std::fs::read(&jar)?;
         if !jar.starts_with(&root) || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256 {
             return Err(Error::Invalid("app artifact digest mismatch"));
@@ -181,7 +162,7 @@ impl ProcessHost {
             let mut command = Command::new("/bin/sh");
             command
                 .args(["-c", GATE, "sh"])
-                .arg(&distribution.java)
+                .arg(&self.config.java)
                 .arg(format!("-Xmx{}m", size.memory_mib))
                 .arg("-jar")
                 .arg(&jar)

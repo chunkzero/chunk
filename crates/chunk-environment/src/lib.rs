@@ -24,7 +24,7 @@ const STARTUP: Duration = Duration::from_secs(30);
 pub enum Config {
     /// Core, with the in-process gateway when `gateway` is set.
     Core {
-        core: CoreConfig,
+        core: Box<CoreConfig>,
         gateway: Option<GatewayConfig>,
         /// Set when the management service deploys the environment; otherwise core serves its bundle.
         management: Option<ManagementConfig>,
@@ -77,11 +77,12 @@ impl Config {
                 Some(address) => Some(address),
                 None => optional("FLY_PRIVATE_IP")?,
             },
+            java: "java".into(),
             environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,
         };
         let gateway = services.contains(Service::Gateway).then_some(gateway);
-        Ok(Self::Core { core, gateway, management })
+        Ok(Self::Core { core: Box::new(core), gateway, management })
     }
 }
 
@@ -93,7 +94,7 @@ impl Config {
 /// shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     match config {
-        Config::Core { core, gateway, management } => run_core(core, gateway, management, stop).await,
+        Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop).await,
         Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop, |_| {}).await,
     }
 }

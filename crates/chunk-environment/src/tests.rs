@@ -33,7 +33,7 @@ fn release(deployment: &str) -> chunk_control::Release {
     serde_json::from_value(serde_json::json!({
         "apps": {"lobby": {"id": "lobby", "jar": "lobby.jar", "sha256": "digest", "java_version": 25,
             "sessions": {"default": {"machine_profile": "small", "capacity": 8}}}},
-        "deployment": {"environment": "test", "deployment": deployment}, "artifact_digest": "digest",
+        "deployment": {"environment": "test", "deployment": deployment}, "release_id": "digest",
         "profiles": {"small": {"memory_mib": 512, "max_sessions": 2}},
         "session_types": {"lobby/default": {"app": "lobby", "machine_profile": "small", "capacity": 8}},
         "max_processes": 1, "idle_node_timeout_seconds": 0
@@ -53,13 +53,14 @@ fn core_config(directory: &Path) -> CoreConfig {
         control_bind: "127.0.0.1:0".parse().unwrap(),
         core_bind: None,
         private_address: None,
+        java: "java".into(),
         environment_token: None,
         fresh: false,
     }
 }
 
 fn all_in_one(core: CoreConfig, bind: SocketAddr) -> Config {
-    Config::Core { core, gateway: Some(GatewayConfig::new(bind)), management: None }
+    Config::Core { core: Box::new(core), gateway: Some(GatewayConfig::new(bind)), management: None }
 }
 
 /// Runs a gateway machine for `core` on a loopback port until `stop`, returning its task and the address its listener

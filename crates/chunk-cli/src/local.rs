@@ -52,6 +52,8 @@ pub(crate) struct Options {
 
 struct Settings {
     state: PathBuf,
+    /// The Java executable every release's JVMs run with.
+    java: PathBuf,
     bind: SocketAddr,
     control_bind: SocketAddr,
     offline_logins: bool,
@@ -140,6 +142,7 @@ async fn serve(
     reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
     let settings = Settings {
         state,
+        java: staged.java.clone(),
         bind: options.bind,
         control_bind: options.control_bind,
         offline_logins: options.offline_logins,
@@ -244,7 +247,7 @@ fn control_config(
             environment: local.environment.clone(),
             deployment: deployment.into(),
         },
-        artifact_digest: release.into(),
+        release_id: release.into(),
         profiles: local
             .profiles
             .iter()
