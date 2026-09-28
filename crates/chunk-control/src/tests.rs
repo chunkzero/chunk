@@ -5,8 +5,8 @@ use std::{
 };
 
 use chunk_proto::{
+    control::v1::{ClaimPhase, ClaimRequest, DeploymentRef, Identity, SessionDemand},
     sync::v1::{self as wire, JvmDeliveryPhase},
-    v1::{ClaimPhase, ClaimRequest, DeploymentRef, Identity, SessionDemand},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -143,7 +143,7 @@ impl Fixture {
 
 impl Control {
     /// The claim's current assignment.
-    fn inspect(&self, request: &ClaimRequest) -> Result<chunk_proto::v1::Assignment> {
+    fn inspect(&self, request: &ClaimRequest) -> Result<chunk_proto::control::v1::Assignment> {
         let claim = self.state()?.claims.get(&request.operation_id).cloned().ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(request)?;
         Ok(prost::Message::decode(
@@ -567,7 +567,7 @@ pub(crate) fn test_app() -> chunk_contract::AppArtifact {
 
 #[tokio::test]
 async fn node_health_and_shutdown_preserve_ownership_until_confirmed_exit() {
-    use chunk_proto::{sync::v1::NodePhase, v1::ShutdownNodeRequest};
+    use chunk_proto::{control::v1::ShutdownNodeRequest, sync::v1::NodePhase};
     let fixture = Fixture::new();
     let control = fixture.control().await;
     let request = request("active", &uuid::Uuid::new_v4().to_string());

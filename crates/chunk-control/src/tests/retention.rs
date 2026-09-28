@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::MoveIntent;
-use chunk_proto::v1::ClaimIdentity;
+use chunk_proto::control::v1::ClaimIdentity;
 use prost::Message;
 
 #[tokio::test]

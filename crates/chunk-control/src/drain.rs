@@ -1,4 +1,4 @@
-use chunk_proto::v1::ClaimRequest;
+use chunk_proto::control::v1::ClaimRequest;
 use prost::Message;
 use std::time::Duration;
 use tokio::task::JoinSet;

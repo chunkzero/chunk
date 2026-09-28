@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use chunk_proto::v1::SessionDemand;
+use chunk_proto::control::v1::SessionDemand;
 
 use crate::{
     Error, Release, Result,

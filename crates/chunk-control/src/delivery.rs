@@ -1,6 +1,6 @@
 use chunk_proto::{
+    control::v1::{Assignment, ClaimIdentity, ClaimPhase, ClaimRequest},
     sync::v1::{JvmDeliveryPhase, JvmDeliveryStatus},
-    v1::{Assignment, ClaimIdentity, ClaimPhase, ClaimRequest},
 };
 use prost::Message;
 use std::collections::BTreeSet;

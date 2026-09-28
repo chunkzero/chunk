@@ -3,8 +3,8 @@
 use super::{Fixture, jvm::Launches, jvm_effects::SyncJvm};
 use chunk_control::{Control, operator::Players};
 use chunk_proto::{
+    control::v1::{ClaimRequest, Identity, SessionDemand},
     sync::v1::{self as sync, ClaimPhase, JvmDeliveryPhase, JvmHealth, OperatorPlayer, entry::State},
-    v1::{ClaimRequest, Identity, SessionDemand},
 };
 use prost::Message;
 use std::{

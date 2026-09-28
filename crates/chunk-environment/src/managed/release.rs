@@ -204,7 +204,7 @@ impl Loaded {
         let contracts = &release.backend.contracts;
         chunk_control::Release {
             apps: release.apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
-            deployment: chunk_proto::v1::DeploymentRef {
+            deployment: chunk_proto::control::v1::DeploymentRef {
                 environment: environment.into(),
                 deployment: deployment.into(),
             },

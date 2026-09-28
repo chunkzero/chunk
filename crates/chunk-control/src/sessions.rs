@@ -1,6 +1,6 @@
 use chunk_proto::{
+    control::v1::ClaimIdentity,
     sync::v1::{JvmSessionPhase, JvmSessionStatus},
-    v1::ClaimIdentity,
 };
 
 use crate::{

@@ -1,4 +1,4 @@
-use chunk_proto::v1::{ClaimIdentity, ClaimRequest, SessionDemand};
+use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest, SessionDemand};
 use prost::Message;
 
 use crate::{

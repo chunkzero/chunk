@@ -4,8 +4,8 @@ use crate::{
     state::{Capacity, State},
 };
 use chunk_proto::{
+    control::v1::ShutdownNodeRequest,
     sync::v1::{JvmHealth, NodePhase},
-    v1::ShutdownNodeRequest,
 };
 use prost::Message;
 use std::collections::BTreeSet;

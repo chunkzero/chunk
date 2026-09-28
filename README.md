@@ -37,7 +37,7 @@ branch; dashboard integration and asset uploads remain deferred.
 | `crates/`                 | Rust proxy, protocol, platform and toolchain crates                                      |
 | `jvm/`                    | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
 | `crates/chunk-build/sdk/` | Embedded TypeScript SDK sources and internal tests                                       |
-| `proto/`                  | Generated lifecycle/backend/control contracts and remaining transport proposals          |
+| `proto/`                  | Sync protocol and management API contracts                                               |
 | `examples/local/`         | App modules, shared gameplay, TypeScript backend and project configuration               |
 | `examples/java/`          | Java consumer using the runtime and generated typed backend API                          |
 | `docs/architecture.md`    | Implemented boundaries and deferred platform design                                      |

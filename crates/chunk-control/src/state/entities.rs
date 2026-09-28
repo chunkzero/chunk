@@ -1,6 +1,6 @@
 //! Control's system table rows. Each type serializes to exactly the document its table declares.
 
-use chunk_proto::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
+use chunk_proto::control::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 

@@ -18,7 +18,7 @@ fn explicit_creation_profile_and_frozen_values_control_reuse_and_host_capacity()
     }))
     .unwrap();
     config.validate().unwrap();
-    let demand = chunk_proto::v1::SessionDemand {
+    let demand = chunk_proto::control::v1::SessionDemand {
         key: "public-arena".into(),
         session_type: "arena/default".into(),
         machine_profile: "large".into(),
@@ -54,7 +54,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
     let mut config = Release {
         contracts: Contracts::default(),
         apps: BTreeMap::new(),
-        deployment: chunk_proto::v1::DeploymentRef::default(),
+        deployment: chunk_proto::control::v1::DeploymentRef::default(),
         artifact_digest: "release".into(),
         profiles: BTreeMap::from([
             ("small".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 4 }),
@@ -79,7 +79,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
             &mut state,
             "release",
             &config,
-            &chunk_proto::v1::SessionDemand {
+            &chunk_proto::control::v1::SessionDemand {
                 key: key.into(),
                 session_type: session_type.into(),
                 machine_profile: String::new(),
@@ -98,7 +98,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
             &mut state,
             "release",
             &config,
-            &chunk_proto::v1::SessionDemand {
+            &chunk_proto::control::v1::SessionDemand {
                 key: "changed".into(),
                 session_type: "arena/large".into(),
                 machine_profile: "small".into()

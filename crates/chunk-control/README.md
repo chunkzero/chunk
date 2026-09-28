@@ -23,8 +23,8 @@ profile. A prepared slot is a reservation, not a second attached player. A claim
 of the commit that created it: the system lane hands control that commit's revision before control computes its writes,
 even when app commits share the log. Its membership generation is that of the login it continues. Generations compare as
 pairs, because a restore starts a new epoch and may reuse revisions. The sync protocol carries a pair as a `Position`;
-the persisted `chunk.v1` claim messages pack it into one `uint64`, the epoch above 40 revision bits. The session and
-process have their own incarnations. Duplicate login is rejected while an earlier owner remains unresolved. An old
+the persisted `chunk.control.v1` claim messages pack it into one `uint64`, the epoch above 40 revision bits. The session
+and process have their own incarnations. Duplicate login is rejected while an earlier owner remains unresolved. An old
 cancellation cannot release a newer connection. Unactivated reservations expire after 60 seconds; active membership
 never expires solely because a control channel becomes unavailable.
 

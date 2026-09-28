@@ -6,11 +6,11 @@ use super::{
     *,
 };
 use chunk_proto::{
+    control::v1::Assignment,
     sync::v1::{
         ClaimPhase, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase,
         JvmMethodResult, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus, OperatorPlayer,
     },
-    v1::Assignment,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},

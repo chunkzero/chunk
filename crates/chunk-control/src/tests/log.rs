@@ -8,7 +8,7 @@ async fn reopens_state_larger_than_the_default_scan_budget() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     let mut first = request("claim-0", &uuid::Uuid::new_v4().to_string());
-    first.identity.as_mut().unwrap().properties.push(chunk_proto::v1::Property {
+    first.identity.as_mut().unwrap().properties.push(chunk_proto::control::v1::Property {
         name: "textures".into(),
         value: "a".repeat(60 * 1024),
         signature: None,

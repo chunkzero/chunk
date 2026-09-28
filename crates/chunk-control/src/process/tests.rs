@@ -207,7 +207,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
 fn release(artifact: chunk_contract::AppArtifact) -> Release {
     Release {
         apps: BTreeMap::from([("bridge".into(), artifact)]),
-        deployment: chunk_proto::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
+        deployment: chunk_proto::control::v1::DeploymentRef { environment: "test".into(), deployment: "build".into() },
         profiles: BTreeMap::from([("local".into(), crate::MachineProfile { memory_mib: 512, max_sessions: 2 })]),
         ..crate::tests::release()
     }

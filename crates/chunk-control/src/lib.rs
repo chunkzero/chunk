@@ -33,7 +33,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chunk_proto::v1::DeploymentRef;
+use chunk_proto::control::v1::DeploymentRef;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 

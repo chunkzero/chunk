@@ -4,13 +4,7 @@ modules:
 lint:
   use:
     - STANDARD
-  # Services are named for what they are (Backend, Gameplay, Supervisor),
-  # and the streaming RPCs reuse message types by design.
+  # The sync protocol's service is `Core`, and its subscription streams `Update`s.
   except:
     - SERVICE_SUFFIX
-    - RPC_REQUEST_RESPONSE_UNIQUE
-    - RPC_REQUEST_STANDARD_NAME
     - RPC_RESPONSE_STANDARD_NAME
-breaking:
-  use:
-    - FILE

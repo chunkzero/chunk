@@ -150,11 +150,10 @@ the separate `feat/self-hosted-dashboard-assets` branch and is not part of this 
 
 ## Transport status
 
-`proto/chunk/v1` and `proto/chunk/sync/v1` generate matching Rust and Java bindings. Gateways, the `chunk` CLI and each
-JVM reach core over the sync protocol's `Core` service; a JVM registers, follows its `jvm/<host>` topic and reports
-back. These internal RPCs cover backend calls/watches, placement, process/session lifecycle, delivery preparation and
-player operations. Application code uses session and typed backend APIs instead of issuing provisioning commands
-directly.
+`proto/chunk/sync/v1` generates matching Rust and Java bindings. Gateways, the `chunk` CLI and each JVM reach core over
+the sync protocol's `Core` service; a JVM registers, follows its `jvm/<host>` topic and reports back. These internal
+RPCs cover backend calls/watches, placement, process/session lifecycle, delivery preparation and player operations.
+Application code uses session and typed backend APIs instead of issuing provisioning commands directly.
 
 Service credentials authenticate trusted platform processes. Deployment, process/session generations and player
 ownership accompany version-sensitive operations and are checked against registered state. Mutation outcome recovery,
