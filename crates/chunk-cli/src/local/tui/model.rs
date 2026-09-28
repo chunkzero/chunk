@@ -3,13 +3,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_proto::v1::NodeStatus;
+use chunk_proto::sync::v1::Node;
 
 use super::super::report::{Deployment, Event, Source, Step};
 
 mod players;
 
-pub(super) use players::{Input, MoveForm, id_of, name};
+pub(super) use players::{Input, MoveForm};
 
 const RETAINED_LINES: usize = 2000;
 pub(super) const STARTUP: [&str; 7] = ["Project", "Compile", "Release", "Java", "Backend", "Control", "Proxy"];
@@ -252,21 +252,21 @@ impl Model {
     }
 
     pub fn hosts(&self) -> Vec<&str> {
-        self.deployments.iter().flat_map(|deployment| &deployment.nodes).map(|node| node.host_id.as_str()).collect()
+        self.deployments.iter().flat_map(|deployment| &deployment.nodes).map(|(host, _)| host.as_str()).collect()
     }
 
-    pub fn selected_node(&self) -> Option<(&Deployment, &NodeStatus)> {
+    pub fn selected_node(&self) -> Option<(&Deployment, &(String, Node))> {
         let host = self.node.as_deref()?;
-        self.deployments.iter().find_map(|deployment| {
-            deployment.nodes.iter().find(|node| node.host_id == host).map(|node| (deployment, node))
-        })
+        self.deployments
+            .iter()
+            .find_map(|deployment| deployment.nodes.iter().find(|(id, _)| id == host).map(|node| (deployment, node)))
     }
 
     pub fn players(&self) -> u32 {
         self.deployments
             .iter()
             .flat_map(|deployment| &deployment.nodes)
-            .filter_map(|node| node.health.as_ref())
+            .filter_map(|(_, node)| node.health.as_ref())
             .map(|health| health.players)
             .sum()
     }

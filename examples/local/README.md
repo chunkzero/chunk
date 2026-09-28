@@ -121,5 +121,5 @@ official-client scenario above; it does not simulate Minecraft login or player m
 
 Inspect nodes with `chunk nodes --control-file examples/local/.chunk/local/control.json list`. Request a node shutdown
 with the same prefix followed by `shutdown HOST --operation UUID --timeout-seconds 60`; retain the operation ID for
-retries. The response means shutdown was queued. Poll `list` for confirmed `Stopped` state. This rework requires
-rebuilding releases; old local control state is incompatible.
+retries. The response means shutdown was queued. Poll `list` for a confirmed `NODE_PHASE_STOPPED` phase. This rework
+requires rebuilding releases; old local control state is incompatible.

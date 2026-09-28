@@ -19,10 +19,11 @@ chunk players --player <uuid> move --session-type arena --key arena
 chunk players --player <uuid> drain --timeout-seconds 60
 ```
 
-These local operator commands use the private control connection file. A move is queued for the owning proxy; a drain
-retires the selected player's current runtime, queues replacement moves, and stops it when empty or at its persisted
-deadline. The CLI reports completion only after confirmed runtime/JVM shutdown. Retain the printed operation ID with
-`--operation` when retrying an uncertain command.
+These local operator commands call `chunk:move_player` and `chunk:drain` on core's sync protocol, presenting the
+credential in the private control connection file. A move is queued for the owning proxy; a drain retires the selected
+player's current runtime, queues replacement moves, and stops it when empty or at its persisted deadline. The CLI
+follows the `nodes` topic and reports completion only once the runtime is stopped, giving up 30 seconds past the
+deadline. Retain the printed operation ID with `--operation` when retrying an uncertain command.
 
 ## Environment gateway
 

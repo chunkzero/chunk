@@ -1,4 +1,4 @@
-use chunk_proto::v1::{NodePhase, NodeStatus};
+use chunk_proto::sync::v1::NodePhase;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -34,11 +34,11 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
         if deployment.nodes.is_empty() {
             items.push(ListItem::new("  No nodes yet").dark_gray());
         }
-        for node in &deployment.nodes {
-            if model.node.as_deref() == Some(node.host_id.as_str()) {
+        for (host, node) in &deployment.nodes {
+            if model.node.as_deref() == Some(host.as_str()) {
                 selected = items.len();
             }
-            let phase = phase(node);
+            let phase = node.phase();
             let players = node
                 .health
                 .as_ref()
@@ -46,10 +46,10 @@ fn render_list(frame: &mut Frame, model: &Model, area: Rect, sidebar: bool) {
             items.push(ListItem::new(vec![
                 Line::from(vec![
                     Span::styled("● ", Style::new().fg(color(phase))),
-                    Span::raw(&node.app_id).bold(),
+                    Span::raw(&node.app).bold(),
                     Span::raw(format!(" · {}", label(phase))).dark_gray(),
                 ]),
-                Line::from(format!("  {} · {players}", short(&node.host_id))).dark_gray(),
+                Line::from(format!("  {} · {players}", short(host))).dark_gray(),
             ]));
         }
     }
@@ -75,10 +75,10 @@ fn render_header(frame: &mut Frame, model: &Model, area: Rect) {
                 format!("{} · {}", count(model.hosts().len(), "node"), count(model.players(), "player")),
             )
         },
-        |(deployment, node)| {
-            let phase = phase(node);
+        |(deployment, (host, node))| {
+            let phase = node.phase();
             let title = Line::from(vec![
-                Span::raw(format!("{} · {}  ", node.app_id, short(&node.host_id))).bold(),
+                Span::raw(format!("{} · {}  ", node.app, short(host))).bold(),
                 Span::styled(label(phase), Style::new().fg(color(phase))),
             ]);
             let health = node.health.as_ref().map_or_else(
@@ -109,10 +109,6 @@ fn render_header(frame: &mut Frame, model: &Model, area: Rect) {
             .block(Block::default().borders(Borders::BOTTOM).border_style(Style::new().dark_gray())),
         metadata,
     );
-}
-
-fn phase(node: &NodeStatus) -> NodePhase {
-    NodePhase::try_from(node.phase).unwrap_or(NodePhase::Unspecified)
 }
 
 fn label(phase: NodePhase) -> &'static str {

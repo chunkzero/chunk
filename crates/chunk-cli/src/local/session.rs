@@ -5,9 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_proto::v1::{NodeStatus, PlayerStatus, SessionDemand};
+use chunk_proto::sync::v1::{Node, NodePhase, OperatorPlayer, SessionDemand};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     task::{JoinError, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ use super::{
     Command, Options, Settings, Staged,
     reload::{self, Change, Retirement},
     report::{self, Deployment, Reporter},
-    services::{self, Shared, Version},
+    services::{self, Observed, Shared, Version},
     short,
 };
 use crate::building;
@@ -36,8 +36,8 @@ enum Trigger {
 struct Live {
     version: Version,
     retirement: Option<Retirement>,
-    nodes: Option<Vec<NodeStatus>>,
-    players: Vec<PlayerStatus>,
+    nodes: Option<Vec<(String, Node)>>,
+    players: Vec<(String, OperatorPlayer)>,
 }
 
 impl Live {
@@ -117,8 +117,9 @@ impl<'a> Session<'a> {
         stop: &CancellationToken,
     ) -> io::Result<()> {
         // Points `control.json` at control for `chunk players` and `chunk nodes`.
-        let connection = self.shared.control_connection()?;
-        self.pointer = Some(chunk_service::Record::publish(&self.settings.state.join("control.json"), connection)?);
+        let connection = self.shared.control_connection()?.clone();
+        self.pointer = Some(chunk_service::Record::publish(&self.settings.state.join("control.json"), &connection)?);
+        let (observed, _observing) = services::observe(connection);
         let reload = if self.options.no_watch { "r restarts" } else { "reloads on save · r restarts" };
         self.reporter.done(
             "Ready",
@@ -158,7 +159,7 @@ impl<'a> Session<'a> {
                 },
                 (result, forced) = finished(&mut build) => self.finish(result, forced).await,
                 _ = tick.tick() => {
-                    if let Err(error) = self.observe().await {
+                    if let Err(error) = self.observe(&observed) {
                         break Err(error);
                     }
                 }
@@ -292,27 +293,29 @@ impl<'a> Session<'a> {
         Ok(version)
     }
 
-    /// Polls every release's nodes and stops retiring releases that are due.
-    async fn observe(&mut self) -> io::Result<()> {
+    /// Takes every release's latest nodes and players and stops retiring releases that are due.
+    fn observe(&mut self, observed: &watch::Receiver<Option<Observed>>) -> io::Result<()> {
         if self.shared.failed() {
             return Err(io::Error::other("local backend or proxy stopped"));
         }
         if self.shared.control_failed() {
             return Err(io::Error::other("local control stopped"));
         }
-        let observed = match self.shared.control_connection() {
-            Ok(connection) => services::observe(connection).await.ok(),
-            Err(_) => None,
-        };
+        let observed = observed.borrow().clone();
         for live in &mut self.live {
             (live.nodes, live.players) = match &observed {
-                Some((nodes, players)) => {
-                    let nodes: Vec<_> =
-                        nodes.iter().filter(|node| node.deployment == live.version.deployment).cloned().collect();
+                Some(Observed { nodes, players }) => {
+                    let mut nodes: Vec<_> = nodes
+                        .iter()
+                        .filter(|(_, node)| node.deployment == live.version.deployment)
+                        .map(|(host, node)| (host.clone(), node.clone()))
+                        .collect();
+                    // Stopped nodes stay listed for their logs, below the running ones.
+                    nodes.sort_by_key(|(_, node)| node.phase() == NodePhase::Stopped);
                     let players = players
                         .iter()
-                        .filter(|player| nodes.iter().any(|node| node.host_id == player.host_id))
-                        .cloned()
+                        .filter(|(_, player)| nodes.iter().any(|(host, _)| *host == player.host))
+                        .map(|(id, player)| (id.clone(), player.clone()))
                         .collect();
                     (Some(nodes), players)
                 }

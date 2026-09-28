@@ -4,7 +4,7 @@ use std::{
 };
 
 use chunk_build::Release;
-use chunk_proto::v1::{NodePhase, NodeStatus};
+use chunk_proto::sync::v1::{Node, NodePhase};
 use notify::{EventKind, RecursiveMode, Watcher as _};
 use tokio::sync::mpsc;
 
@@ -53,18 +53,18 @@ impl Retirement {
     }
 
     /// Whether the release can stop now; `nodes` is `None` while its control is unreachable.
-    pub fn due(&mut self, nodes: Option<&[NodeStatus]>, now: Instant) -> bool {
+    pub fn due(&mut self, nodes: Option<&[(String, Node)]>, now: Instant) -> bool {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             return true;
         }
         let Some(nodes) = nodes else { return false };
-        let live: Vec<_> = nodes.iter().filter(|node| node.phase != i32::from(NodePhase::Stopped)).collect();
+        let live: Vec<_> =
+            nodes.iter().map(|(_, node)| node).filter(|node| node.phase() != NodePhase::Stopped).collect();
         if live.is_empty() {
             return true;
         }
         if live.iter().any(|node| {
-            node.phase == i32::from(NodePhase::Starting)
-                || node.health.as_ref().is_some_and(|health| health.players > 0)
+            node.phase() == NodePhase::Starting || node.health.as_ref().is_some_and(|health| health.players > 0)
         }) {
             self.empty_since = None;
             return false;

@@ -10,12 +10,13 @@ hashes. Control verifies the selected artifact and sends the JVM session creatio
 factories locally and enforces the supplied capacity. Future container/machine providers implement the same `Host`
 boundary.
 
-The private `.chunk/local/control.json` connection file authorizes gRPC calls; under `chunk dev` it names the
-environment's control. `Claim` accepts authenticated identity, proxy incarnation, connection identity and a session
-demand key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and returns
-configuration plus a single-use TCP capability. The proxy records admission intent with `Activate` and opens the native
-Minecraft connection using the capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before releasing
-the reservation. Runtime credentials remain inside control.
+The private `.chunk/local/control.json` connection file carries control's credential, which the `chunk` CLI presents to
+core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. `Claim` accepts
+authenticated identity, proxy incarnation, connection identity and a session demand key/type/profile. It reserves
+capacity, starts an app JVM if needed, waits for session readiness, and returns configuration plus a single-use TCP
+capability. The proxy records admission intent with `Activate` and opens the native Minecraft connection using the
+capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before releasing the reservation. Runtime
+credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
 profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
@@ -57,13 +58,13 @@ any member's claim ending, or `Control::cancel_roster`, fails every member's mov
 limit. Until the group is complete, activation fails with `UNAVAILABLE` "roster awaiting members", which gateways retry
 within their connection timeout.
 
-`Nodes` reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped states, including the
-last observed JVM health metrics and observation timestamp. Health is polled every five seconds; missing or stalled
-engine progress blocks new placement and three consecutive failures request termination. `ShutdownNode` binds an
-operation ID to a node and deadline, retires its capacity, queues player moves, and stops the JVM when empty or at the
-deadline. Zero seconds requests immediate termination. `chunk nodes --control-file PATH list` emits JSON;
-`shutdown HOST --operation ID --timeout-seconds 60` queues an idempotent shutdown. A queued request is not an exit
-acknowledgment.
+The operator's `nodes` topic reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped
+states, including the last observed JVM health metrics and observation timestamp. Health is polled every five seconds;
+missing or stalled engine progress blocks new placement and three consecutive failures request termination.
+`chunk:drain` binds an operation ID to a node, or a player's node, and a deadline, retires its capacity, queues player
+moves, and stops the JVM when empty or at the deadline. Zero seconds requests immediate termination.
+`chunk nodes --control-file PATH list` emits JSON; `shutdown HOST --operation ID --timeout-seconds 60` queues an
+idempotent shutdown. A queued request is not an exit acknowledgment.
 
 Graceful control shutdown stops owned JVMs, and reports their exit unconfirmed while any launch it does not own may
 still run. After an abrupt control-process failure, local child handles cannot be recovered: durable launch markers
