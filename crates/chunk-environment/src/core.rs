@@ -4,7 +4,7 @@ mod sync;
 
 pub(crate) use archives::Archives;
 pub use archives::ReleaseArchive;
-pub use runner::{CommandLauncher, LaunchSpec, Launcher, READINESS, RunnerConfig};
+pub use runner::{CommandLauncher, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, RunnerConfig};
 
 use crate::{PlatformTarget, Running};
 use chunk_contract::ControlConnection;
@@ -39,7 +39,8 @@ pub struct CoreConfig {
     /// control's credential keys them.
     pub environment_token: Option<String>,
     /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
-    /// that outlived the previous control are stopped first.
+    /// that outlived the previous control are stopped first, and so are the machines of every launch it recorded for
+    /// remote runners; one whose stop isn't confirmed fails the start.
     pub fresh: bool,
 }
 
@@ -135,7 +136,16 @@ impl Core {
     /// launched has confirmed its exit.
     async fn start_control(&mut self, config: &CoreConfig) -> io::Result<()> {
         if config.fresh {
-            self.stop_survivors(config).await?;
+            if let Some(runner) = &self.runner {
+                // Only control's launch records name the machines an earlier core started, so they stop first.
+                let system = self.system()?;
+                let recorded = tokio::task::spawn_blocking(move || chunk_control::recorded_launches(system));
+                let hosts = recorded.await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                let stopped = runner.stop_recorded(hosts).await;
+                stopped.map_err(|error| io::Error::other(format!("not starting fresh: {error}")))?;
+            } else {
+                self.stop_survivors(config).await?;
+            }
             // The record names the previous control's credential, which is deleted with its files.
             if_present(fs::remove_file(&config.control_record))?;
             if_present(fs::remove_dir_all(config.state.join("control")))?;
@@ -348,13 +358,6 @@ impl Core {
         self.control()?.activate_release(release).map_err(io::Error::other)
     }
 
-    /// Makes remote runners of `deployment`'s JVMs download release `release`'s kept archive.
-    pub(crate) fn add_release_archive(&self, deployment: &str, release: &str) {
-        if let Some(runner) = &self.runner {
-            runner.add_release(deployment, release);
-        }
-    }
-
     /// Whether the backend stopped.
     #[must_use]
     pub fn failed(&self) -> bool {
@@ -372,7 +375,9 @@ impl Core {
     /// Reports control shutdown errors.
     pub async fn stop_control(&mut self, on_wait: impl Fn()) -> io::Result<()> {
         let mut waiting = false;
-        if let Ok(control) = self.control() {
+        // Kept until remote machines have stopped, since only control's launch records name some of them.
+        let control = self.control().ok();
+        if let Some(control) = &control {
             // While control serves, a JVM that outlived an earlier control can still re-attach and be stopped.
             while let Err(error) = control.shutdown().await
                 && !self.control_failed()
@@ -394,6 +399,13 @@ impl Core {
             }
         }
         self.host = None;
+        // Stops the remote machines control could not, as once its store stopped.
+        if let Some(runner) = &self.runner {
+            while let Err(error) = runner.shutdown().await {
+                wait_for_jvms(&on_wait, &mut waiting, &error).await;
+            }
+        }
+        drop(control);
         result
     }
 

@@ -1,23 +1,70 @@
 //! What remote runners start on their hosts. Each host is booted once: the first runner boot that asks binds it, and a
 //! machine that stopped fully and boots again is refused, failing its host.
 
-use crate::{Control, Error, MachineKind, Result};
+use crate::{
+    Control, Error, MachineKind, Result,
+    state::{self, Machine},
+};
 use std::collections::BTreeSet;
 
 pub use crate::state::Launch;
 
+/// The hosts whose launch the control state in `system` records, read without serving control, as before a fresh start
+/// drops that state. Blocks on the store.
+/// # Errors
+/// Reports a store that cannot be read, or that a serving control holds.
+pub fn recorded_launches(system: chunk_backend::System) -> Result<BTreeSet<String>> {
+    Ok(state::load(system)?.launches.into_keys().collect())
+}
+
 impl Control {
-    /// Records what a remote runner starts on `host`, with no boot bound yet. Recording the same launch again changes
-    /// nothing.
+    /// Records what a remote runner starts on `host`, with no boot bound yet, and `host`'s JVM machine, whose credential
+    /// the runner presents, in one commit. Recording the same launch again changes nothing.
     /// # Errors
-    /// Rejects a launch that differs from the one recorded, and reports a stopped store.
+    /// Rejects a launch that differs from the one recorded, an invalid machine ID or one revoked, and reports a stopped
+    /// store.
     pub fn record_launch(&self, host: &str, launch: Launch) -> Result<()> {
+        crate::machines::validate(host)?;
         let launch = Launch { boot: None, ..launch };
-        self.update(|state| match state.launches.get(host) {
-            Some(recorded) if Launch { boot: None, ..recorded.clone() } == launch => Ok(()),
-            Some(_) => Err(Error::Invalid("the host's launch was recorded differently")),
+        self.update(|state| {
+            match state.machines.get(host) {
+                Some(machine) if machine.kind != MachineKind::Jvm => {
+                    return Err(Error::Invalid("the machine ID names another kind"));
+                }
+                Some(machine) if machine.revoked => return Err(Error::Invalid("the machine's credential was revoked")),
+                Some(_) => {}
+                None => {
+                    let machine = Machine { kind: MachineKind::Jvm, created_at_ms: crate::now_ms(), revoked: false };
+                    state.machines.insert(host.to_owned(), machine);
+                }
+            }
+            match state.launches.get(host) {
+                Some(recorded) if Launch { boot: None, ..recorded.clone() } == launch => Ok(()),
+                Some(_) => Err(Error::Invalid("the host's launch was recorded differently")),
+                None => {
+                    state.launches.insert(host.to_owned(), launch);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    /// Revokes `host`'s JVM machine credential for good, recording the revocation even when none was minted, so no
+    /// launch is recorded for `host` again. Its launch record stays until [`Self::remove_launch`].
+    /// # Errors
+    /// Rejects a machine of another kind, and reports a stopped store.
+    pub fn revoke_launch(&self, host: &str) -> Result<()> {
+        self.update(|state| match state.machines.get_mut(host) {
+            Some(machine) if machine.kind != MachineKind::Jvm => {
+                Err(Error::Invalid("the machine ID names another kind"))
+            }
+            Some(machine) => {
+                machine.revoked = true;
+                Ok(())
+            }
             None => {
-                state.launches.insert(host.to_owned(), launch);
+                let machine = Machine { kind: MachineKind::Jvm, created_at_ms: crate::now_ms(), revoked: true };
+                state.machines.insert(host.to_owned(), machine);
                 Ok(())
             }
         })

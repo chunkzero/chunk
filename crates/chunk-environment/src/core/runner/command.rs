@@ -4,7 +4,8 @@ use std::{io, process::Stdio};
 /// Starts each host's machine by running `launch`, and stops it by running `release`, such as scripts or `podman`
 /// commands. Each runs with `CHUNK_HOST_ID` set, and `launch` with the runner's environment and `CHUNK_MEMORY_MIB` too.
 /// `launch` must exit once the machine has started, and `release` exit successfully only once no machine for the host
-/// runs, including one never launched.
+/// runs, including one never launched or whose `launch` was killed. A command core stops waiting for, past the host's
+/// readiness deadline or its release timeout, is killed, though not the processes it started.
 pub struct CommandLauncher {
     /// The program and its arguments.
     pub launch: Vec<String>,
@@ -40,6 +41,7 @@ async fn run(command: &[String], id: &str, env: Vec<(&str, String)>) -> io::Resu
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn commands_run_with_the_runners_environment() {
@@ -58,5 +60,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&output).unwrap(), "host-1 credential 512 10.0.0.3");
         assert!(launcher.release("host-1").await.is_err());
         assert!(CommandLauncher { launch: Vec::new(), release: sh("true") }.release("host-1").await.unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_core_stops_waiting_for_is_killed() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid = directory.path().join("pid");
+        let script =
+            vec!["sh".into(), "-c".into(), r#"echo $$ > "$0.tmp" && mv "$0.tmp" "$0" && exec sleep 60"#.into()];
+        let launcher =
+            CommandLauncher { launch: Vec::new(), release: [script, vec![pid.display().to_string()]].concat() };
+        let started = async {
+            while !pid.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            released = launcher.release("host-1") => panic!("the command exited: {released:?}"),
+            () = started => {}
+        }
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        // The process is gone, or a zombie until the runtime reaps it.
+        let killed = async {
+            while std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+                .is_ok_and(|stat| stat.rsplit_once(") ").is_some_and(|(_, state)| !state.starts_with('Z')))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), killed).await.expect("the command was killed");
     }
 }

@@ -449,3 +449,80 @@ async fn stops_a_survivor_at_its_previous_control_address(recorded: bool) {
     assert_ne!(core.control_connection().unwrap().endpoint, format!("http://{previous}"));
     core.stop(|| {}).await.unwrap();
 }
+
+const REMOTE: &str = "remote-1";
+
+/// Records each machine release, which it confirms only while `stops` is set.
+#[derive(Default)]
+struct Machines {
+    stops: std::sync::atomic::AtomicBool,
+    released: std::sync::Mutex<Vec<String>>,
+}
+
+#[tonic::async_trait]
+impl Launcher for Machines {
+    async fn launch(&self, _: &str, _: &str, _: &LaunchSpec) -> std::io::Result<()> {
+        Err(std::io::Error::other("launches nothing"))
+    }
+
+    async fn release(&self, id: &str) -> std::io::Result<bool> {
+        self.released.lock().unwrap().push(id.into());
+        Ok(self.stops.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Records a launch on `REMOTE` whose machine runs until something releases it.
+fn launched(core: &Core) {
+    let launch = chunk_control::Launch {
+        deployment: "test".into(),
+        release: "release-1".into(),
+        app: "lobby".into(),
+        profile: "small".into(),
+        process_id: "process-1".into(),
+        generation: 1,
+        boot: None,
+    };
+    core.control().unwrap().record_launch(REMOTE, launch).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_start_stops_every_recorded_remote_machine_before_forgetting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    // Local JVMs ignore remote launch records, so this core leaves the machine running, as a crashed one would.
+    let core = Core::start(core_config(directory.path()), || {}).await.unwrap();
+    launched(&core);
+    core.stop(|| {}).await.unwrap();
+
+    let machines = std::sync::Arc::new(Machines::default());
+    let fresh = || {
+        let mut config = core_config(directory.path());
+        config.fresh = true;
+        Core::start_with_launcher(config, RunnerConfig::new(machines.clone()))
+    };
+    // A machine whose stop isn't confirmed keeps its record, and core doesn't start.
+    assert!(fresh().await.is_err());
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE]);
+    machines.stops.store(true, std::sync::atomic::Ordering::Relaxed);
+    let core = fresh().await.unwrap();
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE, REMOTE]);
+    assert!(core.control().unwrap().launch(REMOTE).is_none());
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_stops_remote_machines_once_its_store_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let machines = std::sync::Arc::new(Machines::default());
+    machines.stops.store(true, std::sync::atomic::Ordering::Relaxed);
+    let config = core_config(directory.path());
+    let core = Core::start_with_launcher(config, RunnerConfig::new(machines.clone())).await.unwrap();
+    launched(&core);
+    let backend = core.backend().unwrap();
+    tokio::task::spawn_blocking(move || backend.stop()).await.unwrap();
+    assert!(core.control().unwrap().store_stopped());
+
+    // Control can't record the release, yet the machine stops, once, and so does core, whatever control reports.
+    let stopped = tokio::time::timeout(Duration::from_secs(30), core.stop(|| {})).await;
+    stopped.expect("core stopped").ok();
+    assert_eq!(*machines.released.lock().unwrap(), [REMOTE]);
+}

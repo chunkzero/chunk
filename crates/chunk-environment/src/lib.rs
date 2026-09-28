@@ -6,7 +6,7 @@ mod managed;
 mod services;
 
 pub use self::core::{
-    CommandLauncher, Core, CoreConfig, LaunchSpec, Launcher, READINESS, ReleaseArchive, RunnerConfig,
+    CommandLauncher, Core, CoreConfig, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, ReleaseArchive, RunnerConfig,
 };
 pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
 pub use managed::ManagementConfig;

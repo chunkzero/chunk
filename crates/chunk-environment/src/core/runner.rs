@@ -16,22 +16,33 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::Duration,
 };
-use tokio::time::Instant;
+use tokio::{sync::OwnedMutexGuard, time::Instant};
+use tokio_util::sync::CancellationToken;
 
-/// How long a launched JVM has to register by default. A cold remote start downloads its release first.
+/// How long a launched JVM has to register by default, its machine's launch included. A cold remote start downloads its
+/// release first.
 pub const READINESS: Duration = Duration::from_secs(120);
+
+/// How long a machine's release may take by default before core gives up on that attempt and tries again.
+pub const RELEASE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Why a JVM's registration is refused when it differs from what core launched on its host.
 pub(crate) const LAUNCH_MISMATCH: &str = "the JVM differs from its host's launch";
 
+/// Why a released host provides nothing.
+const RELEASED: &str = "the host was released";
+
 /// Starts and stops the machines remote runners boot on.
 #[tonic::async_trait]
 pub trait Launcher: Send + Sync {
-    /// Starts host `id`'s machine, whose runner presents `credential`. Core calls it at most once per host.
+    /// Starts host `id`'s machine, whose runner presents `credential`. Core calls it at most once per host, and drops
+    /// the call once the host's readiness deadline passes or the host is released; either way it releases the host.
     /// # Errors
     /// Reports a machine that may not have started; core then releases the host.
     async fn launch(&self, id: &str, credential: &str, spec: &LaunchSpec) -> io::Result<()>;
-    /// Stops host `id`'s machine. `true` only once no machine for `id` runs; `false` asks core to try again.
+    /// Stops host `id`'s machine, including one whose launch failed or was dropped. `true` only once no machine for `id`
+    /// runs, as for one never launched; `false` asks core to try again, as does a call core drops after its release
+    /// timeout.
     /// # Errors
     /// Reports a stop that may not have happened; core tries again.
     async fn release(&self, id: &str) -> io::Result<bool>;
@@ -65,29 +76,32 @@ impl LaunchSpec {
 
 pub struct RunnerConfig {
     pub launcher: Arc<dyn Launcher>,
-    /// How long a launched JVM has to register before its host fails.
+    /// How long a host's machine has to launch and its JVM to register before the host fails.
     pub readiness: Duration,
+    /// How long one release of a machine may take before core tries again.
+    pub release_timeout: Duration,
     /// Where every launched JVM serves players, as when each machine shares this one's network.
     pub player_address: Option<IpAddr>,
 }
 
 impl RunnerConfig {
-    /// Launches through `launcher` with the default readiness deadline.
+    /// Launches through `launcher` with the default readiness deadline and release timeout.
     #[must_use]
     pub fn new(launcher: Arc<dyn Launcher>) -> Self {
-        Self { launcher, readiness: READINESS, player_address: None }
+        Self { launcher, readiness: READINESS, release_timeout: RELEASE_TIMEOUT, player_address: None }
     }
 }
 
 /// Runs each host on a machine its [`Launcher`] starts. The machine credentials and launch records it keeps in control
-/// outlive core, so a JVM launched before core restarted re-attaches by them.
+/// outlive core, so a JVM launched before core restarted re-attaches by them. Each host's launch and release take turns,
+/// and a host released once never launches again.
 pub(crate) struct RunnerHost {
     environment: String,
     config: RunnerConfig,
     core: OnceLock<Attached>,
-    /// The release whose archive each deployment's runners download, by deployment.
-    releases: Mutex<BTreeMap<String, String>>,
-    runners: Mutex<BTreeMap<String, Runner>>,
+    hosts: Mutex<Hosts>,
+    /// The turn each host's launch or release holds, while one is held or awaited.
+    turns: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// The control this host runs for, set once it serves.
@@ -96,6 +110,15 @@ struct Attached {
     issuer: Issuer,
     /// Where runners reach core.
     endpoint: String,
+}
+
+#[derive(Default)]
+struct Hosts {
+    runners: BTreeMap<String, Runner>,
+    /// Hosts whose release began, which never launch again. Control's revoked machine records it durably too.
+    released: BTreeSet<String>,
+    /// Released hosts whose machine the launcher confirmed stopped, whether or not control could record it.
+    stopped: BTreeSet<String>,
 }
 
 struct Runner {
@@ -108,6 +131,8 @@ struct Runner {
     since: Instant,
     /// Why the host can never provide its runtime.
     failure: Option<String>,
+    /// Cancels its machine's launch while it runs.
+    cancel: CancellationToken,
 }
 
 impl Runner {
@@ -133,11 +158,13 @@ impl Runner {
             return Progress::Ready(Box::new(connection));
         }
         if self.since.elapsed() >= readiness {
-            let failure = format!("the JVM did not register within {} seconds", readiness.as_secs());
-            self.failure = Some(failure.clone());
-            return Progress::Failed(failure);
+            return self.fail(format!("the JVM did not register within {} seconds", readiness.as_secs()));
         }
         Progress::Pending
+    }
+
+    fn fail(&mut self, failure: String) -> Progress {
+        Progress::Failed(self.failure.get_or_insert(failure).clone())
     }
 }
 
@@ -147,8 +174,8 @@ impl RunnerHost {
             environment: environment.to_owned(),
             config,
             core: OnceLock::new(),
-            releases: Mutex::default(),
-            runners: Mutex::default(),
+            hosts: Mutex::default(),
+            turns: Mutex::default(),
         }
     }
 
@@ -157,24 +184,33 @@ impl RunnerHost {
         let _ = self.core.set(Attached { control: Arc::downgrade(control), issuer, endpoint });
     }
 
-    /// Launches `deployment`'s JVMs from release `release`'s kept archive.
-    pub fn add_release(&self, deployment: &str, release: &str) {
-        lock(&self.releases).insert(deployment.to_owned(), release.to_owned());
-    }
-
     fn core(&self) -> Result<(&Attached, Arc<Control>)> {
         let core = self.core.get().ok_or(Error::Unresolved("core is not serving yet"))?;
         Ok((core, core.control.upgrade().ok_or(Error::Unresolved("control stopped"))?))
     }
 
-    fn runners(&self) -> Result<MutexGuard<'_, BTreeMap<String, Runner>>> {
-        self.runners.lock().map_err(|_| Error::Unresolved("host poisoned"))
+    fn hosts(&self) -> Result<MutexGuard<'_, Hosts>> {
+        self.hosts.lock().map_err(|_| Error::Unresolved("host poisoned"))
+    }
+
+    /// Waits for `id`'s turn to launch or release, which it holds until the guard drops.
+    async fn turn(&self, id: &str) -> OwnedMutexGuard<()> {
+        let turn = {
+            let mut turns = lock(&self.turns);
+            // Only the map holds an idle turn, so dropping it cannot split a holder from its waiters.
+            turns.retain(|_, turn| Arc::strong_count(turn) > 1);
+            turns.entry(id.to_owned()).or_default().clone()
+        };
+        turn.lock_owned().await
     }
 
     /// The progress of `id`'s runner, if this core knows it.
     fn progress(&self, id: &str, deployment: &str, app: &str, profile: &str) -> Result<Option<Progress>> {
-        let mut runners = self.runners()?;
-        let Some(runner) = runners.get_mut(id) else { return Ok(None) };
+        let mut hosts = self.hosts()?;
+        if hosts.released.contains(id) {
+            return Ok(Some(Progress::Failed(RELEASED.into())));
+        }
+        let Some(runner) = hosts.runners.get_mut(id) else { return Ok(None) };
         let identity = &runner.identity;
         if identity.deployment != deployment || identity.app != app || identity.profile != profile {
             return Ok(Some(Progress::Failed("host binding changed".into())));
@@ -183,6 +219,7 @@ impl RunnerHost {
     }
 
     /// Launches `id`'s machine unless its launch was recorded before core restarted, whose JVM may still re-attach.
+    /// Holds `id`'s turn.
     async fn start(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Progress> {
         let (core, control) = self.core()?;
         let deployment = &release.deployment;
@@ -194,17 +231,16 @@ impl RunnerHost {
         let (launch, launched) = if let Some(launch) = control.launch(id) {
             (launch, false)
         } else {
-            let archive = lock(&self.releases).get(&deployment.deployment).cloned();
             let launch = Launch {
                 deployment: deployment.deployment.clone(),
-                release: archive.ok_or(Error::Invalid("core keeps no archive of the host's release"))?,
+                release: release.artifact_digest.clone(),
                 app: app.to_owned(),
                 profile: profile.to_owned(),
                 process_id: uuid::Uuid::new_v4().to_string(),
                 generation: 1,
                 boot: None,
             };
-            control.add_machine(id, MachineKind::Jvm)?;
+            // Recorded before the machine exists, so every machine that may run has a launch to release.
             control.record_launch(id, launch.clone())?;
             (launch, true)
         };
@@ -227,9 +263,18 @@ impl RunnerHost {
             launched,
             since: Instant::now(),
             failure: None,
+            cancel: CancellationToken::new(),
         };
-        // A JVM that re-attached meanwhile keeps its runner.
-        self.runners()?.entry(id.to_owned()).or_insert(runner);
+        let (cancel, deadline) = {
+            let mut hosts = self.hosts()?;
+            // A release that began meanwhile has cancelled no launch yet.
+            if hosts.released.contains(id) {
+                return Ok(Progress::Failed(RELEASED.into()));
+            }
+            // A JVM that re-attached meanwhile keeps its runner.
+            let runner = hosts.runners.entry(id.to_owned()).or_insert(runner);
+            (runner.cancel.clone(), runner.since + self.config.readiness)
+        };
         if launched {
             let spec = LaunchSpec {
                 core_endpoint: core.endpoint.clone(),
@@ -237,22 +282,117 @@ impl RunnerHost {
                 player_address: self.config.player_address,
                 memory_mib: size.memory_mib,
             };
-            if let Err(error) = self.config.launcher.launch(id, &credential, &spec).await {
-                let failure = format!("launching the host's machine failed: {error}");
-                if let Some(runner) = self.runners()?.get_mut(id) {
-                    runner.failure = Some(failure.clone());
+            // A launch that doesn't finish may still have started a machine, whose launch record stays for its release.
+            let failure = tokio::select! {
+                launched = tokio::time::timeout_at(deadline, self.config.launcher.launch(id, &credential, &spec)) => {
+                    match launched {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => Some(format!("launching the host's machine failed: {error}")),
+                        Err(_) => Some(format!(
+                            "launching the host's machine did not finish within {:?}",
+                            self.config.readiness
+                        )),
+                    }
                 }
-                return Ok(Progress::Failed(failure));
+                () = cancel.cancelled() => Some(RELEASED.to_owned()),
+            };
+            if let Some(failure) = failure {
+                let mut hosts = self.hosts()?;
+                return Ok(hosts
+                    .runners
+                    .get_mut(id)
+                    .map_or(Progress::Failed(failure.clone()), |runner| runner.fail(failure)));
             }
         }
         Ok(self.progress(id, &deployment.deployment, app, profile)?.unwrap_or(Progress::Pending))
+    }
+
+    /// Marks `id` released, so it never launches again, and cancels its machine's launch if one runs.
+    fn fence(&self, id: &str) -> Result<()> {
+        let mut hosts = self.hosts()?;
+        hosts.released.insert(id.to_owned());
+        if let Some(runner) = hosts.runners.get_mut(id) {
+            runner.failure.get_or_insert_with(|| RELEASED.into());
+            runner.cancel.cancel();
+        }
+        Ok(())
+    }
+
+    /// Stops `id`'s machine through the launcher unless it already confirmed that, or `control`, when given, records
+    /// nothing that may run there. Needs no commit, so it works once the store stopped. Holds `id`'s turn.
+    async fn stop_machine(&self, id: &str, control: Option<&Control>) -> Result<bool> {
+        let may_run = {
+            let hosts = self.hosts()?;
+            if hosts.stopped.contains(id) {
+                return Ok(true);
+            }
+            hosts.runners.contains_key(id) || control.is_none_or(|control| control.launch_may_run(id).unwrap_or(true))
+        };
+        if may_run {
+            let Ok(released) =
+                tokio::time::timeout(self.config.release_timeout, self.config.launcher.release(id)).await
+            else {
+                let timeout = self.config.release_timeout.as_secs();
+                tracing::warn!(host = id, timeout, "the machine's release did not finish in time; trying again");
+                return Ok(false);
+            };
+            if !released? {
+                return Ok(false);
+            }
+        }
+        let mut hosts = self.hosts()?;
+        hosts.runners.remove(id);
+        hosts.stopped.insert(id.to_owned());
+        Ok(true)
+    }
+
+    /// Stops every machine that may run: each this core launched or that re-attached, and each whose launch control
+    /// still records, without committing, as when control could not stop them. None launches again.
+    /// # Errors
+    /// Reports a machine whose stop is unconfirmed.
+    pub async fn shutdown(&self) -> Result<()> {
+        let control = self.core().ok().map(|(_, control)| control);
+        let mut ids: BTreeSet<_> = self.hosts()?.runners.keys().cloned().collect();
+        if let Some(control) = &control {
+            ids.extend(control.launched_hosts()?);
+        }
+        let mut result = Ok(());
+        for id in ids {
+            self.fence(&id)?;
+            let _turn = self.turn(&id).await;
+            match self.stop_machine(&id, control.as_deref()).await {
+                Ok(true) => {}
+                Ok(false) => result = Err(Error::Unresolved("machine stop not confirmed")),
+                Err(error) => result = Err(error),
+            }
+        }
+        result
+    }
+
+    /// Stops the machines an earlier core launched for `hosts`, as before a fresh start drops their launch records.
+    /// # Errors
+    /// Reports a machine that may still run, whose records must then stay.
+    pub async fn stop_recorded(&self, hosts: BTreeSet<String>) -> io::Result<()> {
+        for id in hosts {
+            let _turn = self.turn(&id).await;
+            if !self.stop_machine(&id, None).await.map_err(io::Error::other)? {
+                return Err(io::Error::other(format!("host {id}'s machine may still run")));
+            }
+        }
+        Ok(())
     }
 }
 
 #[tonic::async_trait]
 impl Host for RunnerHost {
     async fn ensure(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Progress> {
-        if let Some(progress) = self.progress(id, &release.deployment.deployment, app, profile)? {
+        let deployment = &release.deployment.deployment;
+        if let Some(progress) = self.progress(id, deployment, app, profile)? {
+            return Ok(progress);
+        }
+        let _turn = self.turn(id).await;
+        // A release or another launch may have taken the turn first.
+        if let Some(progress) = self.progress(id, deployment, app, profile)? {
             return Ok(progress);
         }
         match self.start(id, release, app, profile).await {
@@ -263,43 +403,52 @@ impl Host for RunnerHost {
     }
 
     async fn release(&self, id: &str) -> Result<bool> {
-        let (_, control) = self.core()?;
-        if let Some(runner) = self.runners()?.get_mut(id) {
-            runner.failure.get_or_insert_with(|| "released".into());
-        }
-        if control.machine(id, MachineKind::Jvm) {
-            control.revoke_machine(id, MachineKind::Jvm)?;
-        }
-        if control.launch_may_run(id)? && !self.config.launcher.release(id).await? {
+        let control = self.core().ok().map(|(_, control)| control);
+        self.fence(id)?;
+        let _turn = self.turn(id).await;
+        let revoked =
+            control.as_ref().map_or(Err(Error::Unresolved("control stopped")), |control| control.revoke_launch(id));
+        // A revocation that didn't commit, as once the store stopped, still stops the machine.
+        if !self.stop_machine(id, control.as_deref()).await? {
             return Ok(false);
         }
-        control.remove_launch(id)?;
-        self.runners()?.remove(id);
+        revoked?;
+        control.map_or(Ok(()), |control| control.remove_launch(id))?;
         Ok(true)
     }
 
     fn stopped(&self, id: &str) -> bool {
-        self.core().is_ok_and(|(_, control)| control.launch_may_run(id).is_ok_and(|may_run| !may_run))
+        self.hosts().is_ok_and(|hosts| hosts.stopped.contains(id))
+            || self.core().is_ok_and(|(_, control)| control.launch_may_run(id).is_ok_and(|may_run| !may_run))
     }
 
     fn unresolved(&self, id: &str) -> bool {
         let Ok((_, control)) = self.core() else { return true };
-        let attached = self.runners().is_ok_and(|runners| runners.get(id).is_some_and(Runner::attached));
-        !attached && control.launch(id).is_some()
+        let Ok(hosts) = self.hosts() else { return true };
+        let owned = hosts.runners.get(id).is_some_and(Runner::attached) || hosts.stopped.contains(id);
+        !owned && control.launch(id).is_some()
     }
 
     fn unowned(&self) -> Result<BTreeSet<String>> {
         // Before core serves, only control opening asks, and every launch it records has a host row.
         let Ok((_, control)) = self.core() else { return Ok(BTreeSet::new()) };
-        let mut hosts = control.launched_hosts()?;
-        let runners = self.runners()?;
-        hosts.retain(|id| !runners.get(id).is_some_and(Runner::attached));
-        Ok(hosts)
+        let mut ids = control.launched_hosts()?;
+        let hosts = self.hosts()?;
+        ids.retain(|id| !hosts.runners.get(id).is_some_and(Runner::attached) && !hosts.stopped.contains(id));
+        Ok(ids)
+    }
+
+    fn prune(&self, retained: &BTreeSet<String>) -> Result<()> {
+        // Control no longer ensures a host it forgot, and its revoked machine still fences it.
+        let mut hosts = self.hosts()?;
+        hosts.released.retain(|id| retained.contains(id));
+        hosts.stopped.retain(|id| retained.contains(id));
+        Ok(())
     }
 
     fn register(&self, token: &str, registration: Registration) -> Result<()> {
-        let mut runners = self.runners()?;
-        let runner = runners.get_mut(&registration.identity.host).filter(|runner| runner.attached());
+        let mut hosts = self.hosts()?;
+        let runner = hosts.runners.get_mut(&registration.identity.host).filter(|runner| runner.attached());
         let runner = runner.ok_or(Error::Invalid("unknown process"))?;
         let secret = token.strip_prefix("Bearer ").unwrap_or_default();
         if !chunk_service::same_secret(secret, &runner.credential) {
@@ -334,8 +483,11 @@ impl Host for RunnerHost {
         {
             return Err(Error::Invalid(LAUNCH_MISMATCH));
         }
-        let mut runners = self.runners()?;
-        match runners.get_mut(&identity.host) {
+        let mut hosts = self.hosts()?;
+        if hosts.released.contains(&identity.host) {
+            return Err(Error::Stopped);
+        }
+        match hosts.runners.get_mut(&identity.host) {
             Some(runner) if runner.identity != identity => Err(Error::Invalid(LAUNCH_MISMATCH)),
             Some(runner) if runner.failure.is_some() => Err(Error::Stopped),
             Some(runner) if runner.attached() => Err(Error::Invalid("process is not awaiting re-attachment")),
@@ -352,15 +504,16 @@ impl Host for RunnerHost {
                     launched: false,
                     since: Instant::now(),
                     failure: None,
+                    cancel: CancellationToken::new(),
                 };
-                runners.insert(host, runner);
+                hosts.runners.insert(host, runner);
                 Ok(())
             }
         }
     }
 
     fn connection(&self, id: &str) -> Option<RuntimeConnection> {
-        self.runners().ok()?.get(id)?.connection()
+        self.hosts().ok()?.runners.get(id)?.connection()
     }
 }
 
