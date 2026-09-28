@@ -1,6 +1,11 @@
 //! Embeddable control server with explicit host ownership.
 use crate::{Control, ControlConnection, Host, Operations};
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tokio_util::sync::CancellationToken;
@@ -46,7 +51,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     let services = config.services;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
-        let token = chunk_service::secret(&config.state.join("token"))?;
+        let token = credential(&config.state.join("token"))?;
         let control =
             Control::open(config.system, config.control, config.host, config.fresh).map_err(io::Error::other)?;
         Ok((control, token))
@@ -166,4 +171,13 @@ pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationTo
             tracing::warn!(%error, "node health poll failed");
         }
     }
+}
+
+/// Loads control's credential, refusing a persisted one too short to be a secret.
+pub(crate) fn credential(path: &Path) -> io::Result<String> {
+    let token = chunk_service::secret(path)?;
+    if token.len() < 32 {
+        return Err(io::Error::other("control credential too short"));
+    }
+    Ok(token)
 }

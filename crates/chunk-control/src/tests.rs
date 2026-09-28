@@ -691,6 +691,17 @@ async fn departure_fences_only_the_captured_membership_and_waits_for_pending_mov
     fixture.close().await;
 }
 
+#[test]
+fn control_refuses_a_short_persisted_credential() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("token");
+    assert_eq!(crate::server::credential(&path).unwrap().len(), 64);
+    for short in ["", "x"] {
+        std::fs::write(&path, short).unwrap();
+        assert!(crate::server::credential(&path).is_err());
+    }
+}
+
 mod capacity;
 mod creation;
 mod destinations;
