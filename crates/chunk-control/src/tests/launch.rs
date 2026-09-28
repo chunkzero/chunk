@@ -66,8 +66,9 @@ async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_acti
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let directory = fixture.directory.path();
-    let java = directory.join("java");
-    std::fs::write(&java, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    let (java, arguments) = (directory.join("java"), directory.join("java.args"));
+    let script = format!("#!/bin/sh\necho \"$@\" > {}\nexec sleep 60\n", arguments.display());
+    std::fs::write(&java, script).unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut previous = fixture.release.clone();
     previous.deployment.deployment = "previous".into();
@@ -97,11 +98,12 @@ async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_acti
         let control = control.clone();
         async move { control.claim(request).await }
     });
-    let launched = |node: &crate::NodeStatus| {
-        node.deployment == "previous" && directory.join("nodes").join(&node.host).with_extension("launch").exists()
-    };
-    eventually(|| control.nodes().unwrap().iter().any(launched)).await;
-    assert!(control.nodes().unwrap().iter().all(|node| node.phase != NodePhase::Stopped));
+    // Java ran the previous release's app from its unpacked directory.
+    let jar = unpacked.join("app.jar").display().to_string();
+    eventually(|| std::fs::read_to_string(&arguments).is_ok_and(|ran| ran.contains(&jar))).await;
+    assert!(
+        control.nodes().unwrap().iter().any(|node| node.deployment == "previous" && node.phase != NodePhase::Stopped)
+    );
     claim.abort();
     executor.stop().await;
     host.shutdown().await.unwrap();
