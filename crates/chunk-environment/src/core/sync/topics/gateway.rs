@@ -63,7 +63,7 @@ impl Gateway {
             tokio::select! {
                 () = stop.cancelled() => return sender.fail(errors::error(Code::Unavailable, "core is stopping")),
                 () = superseded.cancelled() => {
-                    return sender.fail(errors::error(Code::Stopped, "a newer stream for this gateway superseded this one"));
+                    return sender.fail(errors::error(Code::Superseded, "a newer stream for this gateway superseded this one"));
                 }
                 error = grant.lapsed() => return sender.fail(error),
                 () = sender.closed() => return,

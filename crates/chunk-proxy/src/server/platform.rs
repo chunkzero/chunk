@@ -1,4 +1,4 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{convert::Infallible, io, sync::Arc, time::Duration};
 
 use chunk_contract::DomainManifest;
 use chunk_proto::{
@@ -67,6 +67,13 @@ impl Platform {
     /// Waits for a live view of this gateway's claims in which `ready` returns a value.
     pub async fn claims<T>(&self, ready: impl FnMut(&View) -> Option<T>) -> io::Result<T> {
         self.sync.claims(ready).await
+    }
+
+    /// Resolves once another process under this gateway's ID replaced this one by following its claims. Starts
+    /// following them, as [`Self::claims`] does.
+    pub async fn replaced(&self) -> io::Error {
+        let Err(error) = self.claims(|_| None::<Infallible>).await;
+        error
     }
 
     /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's

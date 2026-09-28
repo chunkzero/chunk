@@ -304,33 +304,30 @@ async fn withdraw(source: &ClaimGuard) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
 }
 
-/// Withdraws every open claim in this gateway's topic, each under its own operation ID, retrying until each one is
-/// withdrawing or gone. A process that has taken no login holds no claims, so these belong to an earlier process under
-/// the same gateway ID, whose players' connections ended with it. Control completes a withdrawal whose JVM has yet to
-/// confirm it.
+/// Withdraws the open claims in the first live view of this gateway's topic, each under its own operation ID,
+/// retrying each until core takes its withdrawal. Following the topic superseded every earlier process under this
+/// gateway's ID, which stops then, and this one has taken no login yet, so these claims are the earlier processes'.
+/// Claims the view shows later are never withdrawn here. Control completes a withdrawal whose JVM has yet to confirm
+/// it.
 pub(super) async fn withdraw_inherited(platform: &Platform) -> io::Result<()> {
-    loop {
-        let inherited = platform.claims(|view| Some(view.unwithdrawn())).await?;
-        if inherited.is_empty() {
-            return Ok(());
-        }
+    let mut inherited = platform.claims(|view| Some(view.unwithdrawn())).await?;
+    if !inherited.is_empty() {
         tracing::info!(claims = inherited.len(), "withdrawing claims an earlier gateway process left open");
-        let (mut latest, mut unresolved) = (None, false);
-        for operation in &inherited {
-            match platform.call::<WithdrawResult>("withdraw", operation, &(), RPC_TIMEOUT).await {
-                Ok((_, position)) => latest = position.or(latest),
-                Err(error) => {
-                    unresolved = true;
-                    tracing::warn!(%error, operation, "inherited claim withdrawal unresolved; retrying");
-                }
+    }
+    while !inherited.is_empty() {
+        let mut unresolved = Vec::new();
+        for operation in inherited {
+            if let Err(error) = platform.call::<WithdrawResult>("withdraw", &operation, &(), RPC_TIMEOUT).await {
+                tracing::warn!(%error, operation, "inherited claim withdrawal unresolved; retrying");
+                unresolved.push(operation);
             }
         }
-        if unresolved {
+        if !unresolved.is_empty() {
             sleep(Duration::from_secs(1)).await;
-        } else {
-            platform.claims(|view| view.passed(latest.as_ref()).then_some(())).await?;
         }
+        inherited = unresolved;
     }
+    Ok(())
 }
 
 /// Waits until the claim view shows the claim arrived.

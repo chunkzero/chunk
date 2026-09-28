@@ -575,7 +575,7 @@ async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
     while last.error.is_none() {
         last = next(&mut first).await;
     }
-    assert_eq!(last.error.map(|error| error.code()), Some(Code::Stopped));
+    assert_eq!(last.error.map(|error| error.code()), Some(Code::Superseded));
     assert!(first.message().await.unwrap().is_none());
     assert_eq!(code(&fixture.call_on(&gateway, &snapshot.stream).await), Code::Stopped);
     let current = fixture.call_on(&gateway, &update.stream).await;

@@ -69,6 +69,16 @@ impl Running {
         self.jvm.get().expect("a connected JVM").health(health).await;
     }
 
+    /// Keeps each delivery the JVM is asked to withdraw open, until [`Self::close`] closes it.
+    pub fn stall_withdrawals(&self) {
+        self.jvm.get().expect("a connected JVM").stall_withdrawals();
+    }
+
+    /// Reports `operation`'s delivery closed.
+    pub async fn close(&self, operation: &str) {
+        self.jvm.get().expect("a connected JVM").player(operation, JvmDeliveryPhase::Closed).await;
+    }
+
     /// How many methods the JVM completed, held until cancelled, and cancelled.
     pub fn methods(&self) -> (usize, usize, usize) {
         self.jvm.get().map(SyncJvm::methods).unwrap_or_default()

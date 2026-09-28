@@ -24,6 +24,8 @@ const REVISION_BITS: u32 = 40;
 #[derive(Default)]
 pub(in crate::server) struct View {
     live: bool,
+    /// Another process under this gateway's ID superseded the follower's stream, so it follows no more.
+    replaced: bool,
     /// The stream the last update came from, cleared whenever it ends, before the follower subscribes again.
     stream: String,
     position: Option<Position>,
@@ -95,8 +97,8 @@ pub(in crate::server) fn generation(position: &Position) -> u64 {
     position.epoch << REVISION_BITS | position.revision
 }
 
-/// Follows `gateway`'s topic until the guard drops. A broken stream resumes after the last position applied, and a
-/// superseded one starts over from a snapshot.
+/// Follows `gateway`'s topic until the guard drops, or until another process under the gateway's ID supersedes it. A
+/// broken stream resumes after the last position applied, and a stream core stopped starts over from a snapshot.
 pub(super) fn follow(client: CoreClient<Channel>, gateway: GatewayCredential) -> (watch::Receiver<View>, DropGuard) {
     let (view, receiver) = watch::channel(View::default());
     let stop = CancellationToken::new();
@@ -110,6 +112,9 @@ pub(super) fn follow(client: CoreClient<Channel>, gateway: GatewayCredential) ->
                     view.live = false;
                     view.stream.clear();
                 });
+                if view.borrow().replaced {
+                    return;
+                }
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         };
@@ -151,7 +156,12 @@ async fn stream(
         };
         if let Some(error) = update.error {
             tracing::debug!(message = %error.message, "gateway topic ended");
-            return if error.code() == Code::Stopped { None } else { cursor };
+            match error.code() {
+                Code::Superseded => view.send_modify(|view| view.replaced = true),
+                Code::Stopped => return None,
+                _ => {}
+            }
+            return cursor;
         }
         let continued = update.continued;
         pending.push(update);
@@ -171,17 +181,24 @@ async fn stream(
     }
 }
 
-/// Waits for a live view in which `ready` returns a value.
+/// Waits for a live view in which `ready` returns a value. Fails once another process under this gateway's ID
+/// superseded the follower.
 pub(super) async fn wait<T>(
     mut view: watch::Receiver<View>,
     mut ready: impl FnMut(&View) -> Option<T>,
 ) -> io::Result<T> {
     let mut result = None;
     view.wait_for(|view| {
-        result = if view.live { ready(view) } else { None };
+        result = if view.replaced {
+            Some(Err(io::Error::other("another process under this gateway's ID replaced this one")))
+        } else if view.live {
+            ready(view).map(Ok)
+        } else {
+            None
+        };
         result.is_some()
     })
     .await
     .map_err(io::Error::other)?;
-    result.ok_or_else(|| io::Error::other("claim view closed"))
+    result.unwrap_or_else(|| Err(io::Error::other("claim view closed")))
 }

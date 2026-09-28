@@ -146,17 +146,27 @@ impl Proxy {
 
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it first
     /// withdraws the claims an earlier process under this gateway's ID left open, and accepts no connection until then.
+    /// It stops once a later process under that ID replaces it.
     ///
     /// # Errors
-    /// Returns shutdown-signal errors. Accept errors are retried with backoff.
+    /// Returns shutdown-signal errors and replacement by a later process. Accept errors are retried with backoff.
     /// Client failures are logged and do not stop the listener.
     pub async fn run(self, shutdown: impl Future<Output = io::Result<()>>) -> io::Result<()> {
         tokio::pin!(shutdown);
-        if let Some(platform) = self.retarget().as_ref().map(Retarget::platform) {
+        let platform = self.retarget().as_ref().map(Retarget::platform);
+        let replaced = async {
+            match &platform {
+                Some(platform) => platform.replaced().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(replaced);
+        if let Some(platform) = &platform {
             tokio::select! {
                 biased;
                 result = &mut shutdown => return result,
-                withdrawn = managed::withdraw_inherited(&platform) => withdrawn?,
+                error = &mut replaced => return Err(error),
+                withdrawn = managed::withdraw_inherited(platform) => withdrawn?,
             }
         }
         let mut connections = JoinSet::new();
@@ -165,6 +175,7 @@ impl Proxy {
             tokio::select! {
                 biased;
                 result = &mut shutdown => break result,
+                error = &mut replaced => break Err(error),
                 Some(result) = connections.join_next(), if !connections.is_empty() => {
                     if let Err(error) = result {
                         tracing::error!(%error, "connection task failed");

@@ -125,47 +125,77 @@ async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_gateway_withdraws_the_claims_an_earlier_process_under_its_id_left_before_taking_logins() {
-    let (mut fixture, jvm) = with_jvm().await;
-    let (endpoint, gateway, other) =
-        (fixture.endpoint.clone(), fixture.gateway.clone(), fixture.gateways.mint("other"));
-    let target = |id: &str, credential: &str| chunk_proxy::PlatformTarget {
-        core: endpoint.clone(),
-        gateway: chunk_proxy::GatewayCredential { id: id.into(), credential: credential.into() },
-        deployment: "test".into(),
+async fn a_later_gateway_process_replaces_a_live_one_and_withdraws_only_its_inherited_claims_before_serving() {
+    const OTHER: &str = "00000000-0000-0000-0000-000000000002";
+    let (fixture, jvm) = with_jvm().await;
+    let gateway = chunk_proxy::GatewayCredential { id: "proxy".into(), credential: fixture.gateway.clone() };
+    let target = chunk_proxy::PlatformTarget { core: fixture.endpoint.clone(), gateway, deployment: "test".into() };
+    let config = chunk_proxy::Config { platform: Some(target), ..chunk_proxy::Config::default() };
+    let start = || async {
+        let proxy = chunk_proxy::Proxy::bind("127.0.0.1:0".parse().unwrap(), config.clone()).await.unwrap();
+        let (address, retarget) = (proxy.local_addr().unwrap(), proxy.retarget().unwrap());
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let running = tokio::spawn(proxy.run(async move {
+            stopped.cancelled().await;
+            Ok(())
+        }));
+        (address, retarget, stop, running)
     };
-    let elsewhere =
-        || chunk_proxy::testing::login(target("other", &other), runtime::PLAYER, "player", runtime::demand("lobby"));
-
-    // A process of gateway `proxy` stops without withdrawing its arrived player's claim.
-    let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
-    fixture.platform(&gateway, &first.stream, "login", "chunk:claim", &login("connection")).await;
-    fixture.platform(&gateway, &first.stream, "login", "chunk:activate", &()).await;
-    arrival(&mut updates, "login").await;
-    drop(updates);
-    assert_eq!(elsewhere().await.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-
-    // The next process under that ID withdraws the claim before its listener accepts, which frees the player.
-    let config = chunk_proxy::Config { platform: Some(target("proxy", &gateway)), ..chunk_proxy::Config::default() };
-    let proxy = chunk_proxy::Proxy::bind("127.0.0.1:0".parse().unwrap(), config).await.unwrap();
-    let stop = CancellationToken::new();
-    let stopped = stop.clone();
-    let running = tokio::spawn(proxy.run(async move {
-        stopped.cancelled().await;
-        Ok(())
-    }));
-    let control = fixture.control.clone();
-    let released = async {
-        while !control.players().unwrap().players.is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    let hold = |proxy, uuid| {
+        let held = chunk_proxy::testing::hold(proxy, uuid, "player", runtime::demand("lobby"));
+        async { tokio::time::timeout(Duration::from_secs(30), held).await.unwrap().unwrap() }
     };
-    tokio::time::timeout(Duration::from_secs(5), released).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), elsewhere()).await.unwrap().unwrap();
+    let phase = |uuid: &str| {
+        let players = fixture.control.players().unwrap().players;
+        let player = players.into_iter().find(|player| player.identity.as_ref().is_some_and(|id| id.uuid == uuid));
+        player.map(|player| player.phase())
+    };
+
+    // Process A serves a player when process B starts under the same gateway ID, which ends A.
+    let (_, earlier, _, replaced) = start().await;
+    let inherited = hold(&earlier, runtime::PLAYER).await;
+    jvm.stall_withdrawals();
+    let (address, later, stop, running) = start().await;
+    let error = tokio::time::timeout(Duration::from_secs(5), replaced).await.unwrap().unwrap().unwrap_err();
+    assert!(error.to_string().contains("replaced"), "{error}");
+
+    // B withdraws A's claim, which the JVM holds open, and serves no connection meanwhile.
+    while phase(runtime::PLAYER) != Some(chunk_proto::v1::ClaimPhase::Withdrawing) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let ping = tokio::spawn(status(address));
+    // A claim B takes after its first view of the topic isn't one it inherited.
+    hold(&later, OTHER).await;
+    assert!(!ping.is_finished());
+    jvm.close(&inherited).await;
+    let answer = tokio::time::timeout(Duration::from_secs(10), ping).await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&answer).contains("description"));
+    assert_eq!((phase(runtime::PLAYER), phase(OTHER)), (None, Some(chunk_proto::v1::ClaimPhase::Arrived)));
+
     stop.cancel();
     running.await.unwrap().unwrap();
     fixture.stop().await;
     jvm.abort();
+}
+
+/// Sends a status ping to `address`, returning everything the listener answers.
+async fn status(address: std::net::SocketAddr) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    // A handshake for protocol 776 that asks for status, then the status request.
+    let mut handshake = vec![0x00, 0x88, 0x06, 9];
+    handshake.extend_from_slice(b"localhost");
+    handshake.extend_from_slice(&address.port().to_be_bytes());
+    handshake.push(0x01);
+    let mut packets = vec![u8::try_from(handshake.len()).unwrap()];
+    packets.extend(handshake);
+    packets.extend([0x01, 0x00]);
+    stream.write_all(&packets).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await.unwrap();
+    answer
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
