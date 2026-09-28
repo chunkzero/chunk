@@ -1,13 +1,14 @@
 package dev.chunkzero.runtime
 
-import chunk.v1.BackendGrpc
-import chunk.v1.BackendOuterClass.BackendMutation
-import chunk.v1.BackendOuterClass.BackendResult
-import chunk.v1.BackendOuterClass.BackendUpdate
-import chunk.v1.BackendOuterClass.BackendWatchGroup
-import chunk.v1.Common.SessionRef
-import chunk.v1.Supervision.SessionCommand
-import chunk.v1.Supervision.SessionPhase
+import chunk.sync.v1.CoreGrpc
+import chunk.sync.v1.CoreOuterClass.CallRequest
+import chunk.sync.v1.CoreOuterClass.CallResponse
+import chunk.sync.v1.CoreOuterClass.Entry
+import chunk.sync.v1.CoreOuterClass.Position
+import chunk.sync.v1.CoreOuterClass.SubscribeRequest
+import chunk.sync.v1.CoreOuterClass.Update
+import chunk.sync.v1.Jvm.JvmSession
+import chunk.sync.v1.Jvm.JvmSessionPhase
 import com.google.protobuf.ByteString
 import dev.chunkzero.backend.CoroutineBackend
 import dev.chunkzero.backend.api.BackendValues
@@ -52,41 +53,37 @@ class SessionCoroutinesTest {
             ServerBuilder
                 .forPort(0)
                 .addService(
-                    object : BackendGrpc.BackendImplBase() {
-                        override fun mutate(
-                            request: BackendMutation,
-                            response: StreamObserver<BackendResult>,
+                    object : CoreGrpc.CoreImplBase() {
+                        override fun call(
+                            request: CallRequest,
+                            response: StreamObserver<CallResponse>,
                         ) {
                             mutationStarted.complete(Unit)
                             result.thenRun {
                                 response.onNext(
-                                    BackendResult
+                                    CallResponse
                                         .newBuilder()
-                                        .setRevision(
-                                            2,
-                                        ).setResultJson(ByteString.copyFromUtf8("7"))
+                                        .setPosition(at(2))
+                                        .setResult(ByteString.copyFromUtf8("7"))
                                         .build(),
                                 )
                                 response.onCompleted()
                             }
                         }
 
-                        override fun watchGroup(
-                            request: BackendWatchGroup,
-                            response: StreamObserver<BackendUpdate>,
+                        override fun subscribe(
+                            request: SubscribeRequest,
+                            response: StreamObserver<Update>,
                         ) {
-                            (response as ServerCallStreamObserver<BackendUpdate>).setOnCancelHandler {
-                                watchClosed.complete(
-                                    Unit,
-                                )
+                            (response as ServerCallStreamObserver<Update>).setOnCancelHandler {
+                                watchClosed.complete(Unit)
                             }
                             response.onNext(
-                                BackendUpdate
+                                Update
                                     .newBuilder()
-                                    .setRevision(
-                                        1,
-                                    ).addResultsJson(ByteString.copyFromUtf8("3"))
-                                    .addErrors("")
+                                    .setPosition(at(1))
+                                    .setSnapshot(true)
+                                    .addUpserts(Entry.newBuilder().setKey("0").setValue(ByteString.copyFromUtf8("3")))
                                     .build(),
                             )
                         }
@@ -111,10 +108,9 @@ class SessionCoroutinesTest {
                                     scope.createInstance()
                                     backend =
                                         scope.coroutines.backend(
-                                            BackendSession(
+                                            BackendSession.overCore(
                                                 channel,
                                                 "test-credential-with-at-least-32-bytes",
-                                                "local",
                                                 "build",
                                                 SessionIdentity(SessionId(scope.id), "duels", Optional.empty()),
                                                 scheduler,
@@ -156,18 +152,12 @@ class SessionCoroutinesTest {
                 ),
             )
 
-        fun command(
-            id: String,
-            type: String,
-        ) = SessionCommand
-            .newBuilder()
-            .setOperationId(
-                id,
-            ).setSession(SessionRef.newBuilder().setId(id))
-            .setGeneration(1)
-            .setSessionType(type)
-            .setCapacity(2)
-            .build()
+        fun session(type: String) =
+            JvmSession
+                .newBuilder()
+                .setSessionType(type)
+                .setCapacity(2)
+                .build()
 
         fun pump(until: () -> Boolean) {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
@@ -178,22 +168,22 @@ class SessionCoroutinesTest {
             assertTrue(until())
         }
         try {
-            val game = command("game", "game")
-            val other = command("other", "flat")
-            val created = manager.create(game)
-            val independent = manager.create(other)
+            val game = session("game")
+            val other = session("flat")
+            val created = manager.create("game", game)
+            val independent = manager.create("other", other)
             pump { created.isDone && independent.isDone && observed }
-            assertEquals(SessionPhase.SESSION_PHASE_READY, created.join().phase)
-            val ending = manager.finish(game)
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, created.join().phase)
+            val ending = manager.finish("game", game)
             pump { mutationStarted.isDone }
             assertFalse(ending.isDone)
             assertFalse(watchClosed.isDone)
             result.complete(Unit)
             pump { ending.isDone && watchClosed.isDone }
-            assertEquals(SessionPhase.SESSION_PHASE_ENDED, ending.join().phase)
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDED, ending.join().phase)
             assertTrue(committed)
-            assertEquals(SessionPhase.SESSION_PHASE_READY, manager.get("other", 1).phase)
-            val stopOther = manager.finish(other)
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, manager.get("other").phase)
+            val stopOther = manager.finish("other", other)
             pump { stopOther.isDone }
         } finally {
             result.complete(Unit)
@@ -204,4 +194,11 @@ class SessionCoroutinesTest {
             minestom.stop()
         }
     }
+
+    private fun at(revision: Long) =
+        Position
+            .newBuilder()
+            .setEpoch(1)
+            .setRevision(revision)
+            .build()
 }

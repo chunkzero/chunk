@@ -1,8 +1,8 @@
 package dev.chunkzero.runtime;
 
-import chunk.v1.Supervision.SessionCommand;
-import chunk.v1.Supervision.SessionInventory;
-import chunk.v1.Supervision.SessionPhase;
+import chunk.sync.v1.Jvm.JvmSession;
+import chunk.sync.v1.Jvm.JvmSessionPhase;
+import chunk.sync.v1.Jvm.JvmSessionStatus;
 
 import dev.chunkzero.backend.api.BackendJson;
 import dev.chunkzero.backend.client.BackendSession;
@@ -47,7 +47,7 @@ public final class SessionManager {
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
 
     /** Sessions that failed to start or were never created, as reported to control. */
-    private final Map<String, SessionInventory> outcomes = new ConcurrentHashMap<>();
+    private final Map<String, JvmSessionStatus> outcomes = new ConcurrentHashMap<>();
 
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
@@ -111,64 +111,58 @@ public final class SessionManager {
      * Creates the session, or reports it failed if it cannot start. Beyond 256 live sessions it
      * reports nothing, since control still counts the session and so never sees room for it.
      */
-    public CompletableFuture<SessionInventory> create(SessionCommand command) {
+    public CompletableFuture<JvmSessionStatus> create(String id, JvmSession session) {
         return ticks.submit(
                         () -> {
-                            var id = command.getSession().getId();
                             if (!sessions.containsKey(id) && activeCount() >= 256)
                                 throw new IllegalStateException("Too many live sessions");
                             try {
-                                return start(command);
+                                return start(id, session);
                             } catch (RuntimeException error) {
                                 if (!sessions.containsKey(id))
-                                    outcome(command, SessionPhase.SESSION_PHASE_FAILED);
+                                    outcome(id, session, JvmSessionPhase.JVM_SESSION_PHASE_FAILED);
                                 throw error;
                             }
                         })
-                .thenCompose(session -> session.ready.thenApply(ignored -> session.inventory()));
+                .thenCompose(managed -> managed.ready.thenApply(ignored -> managed.status()));
     }
 
     /** Reports a session this process will not create, such as one requested while draining. */
-    public void reject(SessionCommand command) {
+    public void reject(String id, JvmSession session) {
         ticks.submit(
                 () -> {
-                    if (!sessions.containsKey(command.getSession().getId()))
-                        outcome(command, SessionPhase.SESSION_PHASE_FAILED);
+                    if (!sessions.containsKey(id))
+                        outcome(id, session, JvmSessionPhase.JVM_SESSION_PHASE_FAILED);
                     return null;
                 });
     }
 
-    private ManagedSession start(SessionCommand command) {
-        if (!SESSION_ID.matcher(command.getSession().getId()).matches()
-                || command.getGeneration() <= 0
-                || command.getOperationId().isEmpty()
-                || command.getOperationId().length() > 128
-                || command.getCapacity() < 1
-                || command.getCapacity() > 128) {
-            throw new IllegalArgumentException("Invalid session command");
+    private ManagedSession start(String id, JvmSession session) {
+        if (!SESSION_ID.matcher(id).matches()
+                || session.getCapacity() < 1
+                || session.getCapacity() > 128) {
+            throw new IllegalArgumentException("Invalid session");
         }
-        var configuration = configuration(command);
-        var previous = sessions.get(command.getSession().getId());
+        var configuration = configuration(session);
+        var previous = sessions.get(id);
         if (previous != null) {
-            if (!previous.command.toBuilder()
-                            .clearConfigurationJson()
-                            .build()
-                            .equals(command.toBuilder().clearConfigurationJson().build())
-                    || !configuration(previous.command).equals(configuration))
+            if (!previous.session.getSessionType().equals(session.getSessionType())
+                    || previous.session.getCapacity() != session.getCapacity()
+                    || !configuration(previous.session).equals(configuration))
                 throw new IllegalArgumentException("Session creation changed");
             return previous;
         }
-        var factory = factories.get(command.getSessionType());
+        var factory = factories.get(session.getSessionType());
         if (factory == null) throw new IllegalArgumentException("Unknown session type");
-        var session = new ManagedSession(command, factory, configuration.toString());
-        outcomes.remove(command.getSession().getId());
-        sessions.put(command.getSession().getId(), session);
-        session.start();
-        return session;
+        var managed = new ManagedSession(id, session, factory, configuration.toString());
+        outcomes.remove(id);
+        sessions.put(id, managed);
+        managed.start();
+        return managed;
     }
 
-    private static JsonNode configuration(SessionCommand command) {
-        var bytes = command.getConfigurationJson();
+    private static JsonNode configuration(JvmSession session) {
+        var bytes = session.getConfigurationJson();
         if (bytes.size() > 64 * 1024 || !bytes.isValidUtf8())
             throw new IllegalArgumentException("Invalid session configuration encoding or size");
         var config = BackendJson.mapper().readTree(bytes.isEmpty() ? "{}" : bytes.toStringUtf8());
@@ -177,35 +171,37 @@ public final class SessionManager {
         return config;
     }
 
-    public CompletableFuture<SessionInventory> finish(SessionCommand command) {
-        var current = sessions.get(command.getSession().getId());
-        if (current != null && current.command.getGeneration() == command.getGeneration())
-            current.methodsClosed = true;
+    /**
+     * Ends session {@code id}. One that never started ends at once, reported with {@code session}'s
+     * type and capacity.
+     */
+    public CompletableFuture<JvmSessionStatus> finish(String id, JvmSession session) {
+        var current = sessions.get(id);
+        if (current != null) current.methodsClosed = true;
         return ticks.submit(
                         () -> {
-                            var session = sessions.get(command.getSession().getId());
-                            // A session that never started has nothing to end.
-                            if (session == null)
+                            var managed = sessions.get(id);
+                            if (managed == null)
                                 return CompletableFuture.completedFuture(
-                                        outcome(command, SessionPhase.SESSION_PHASE_ENDED));
-                            if (session.command.getGeneration() != command.getGeneration())
-                                throw new IllegalArgumentException("Unknown session generation");
-                            return session.finish().thenApply(ignored -> session.inventory());
+                                        outcome(
+                                                id,
+                                                session,
+                                                JvmSessionPhase.JVM_SESSION_PHASE_ENDED));
+                            return managed.finish().thenApply(ignored -> managed.status());
                         })
                 .thenCompose(Function.identity());
     }
 
-    private SessionInventory outcome(SessionCommand command, SessionPhase phase) {
-        var inventory =
-                SessionInventory.newBuilder()
-                        .setSession(command.getSession())
-                        .setGeneration(command.getGeneration())
-                        .setSessionType(command.getSessionType())
-                        .setCapacity(command.getCapacity())
+    private JvmSessionStatus outcome(String id, JvmSession session, JvmSessionPhase phase) {
+        var status =
+                JvmSessionStatus.newBuilder()
+                        .setId(id)
+                        .setSessionType(session.getSessionType())
+                        .setCapacity(session.getCapacity())
                         .setPhase(phase)
                         .build();
-        outcomes.put(command.getSession().getId(), inventory);
-        return inventory;
+        outcomes.put(id, status);
+        return status;
     }
 
     /** Drops the record of a session control no longer tracks, once it can hold nothing. */
@@ -221,32 +217,30 @@ public final class SessionManager {
                 });
     }
 
-    private static boolean terminal(SessionPhase phase) {
-        return phase == SessionPhase.SESSION_PHASE_ENDED
-                || phase == SessionPhase.SESSION_PHASE_FAILED;
+    public static boolean terminal(JvmSessionPhase phase) {
+        return phase == JvmSessionPhase.JVM_SESSION_PHASE_ENDED
+                || phase == JvmSessionPhase.JVM_SESSION_PHASE_FAILED;
     }
 
     /** The phase of session {@code id}, or null while this manager has no record of it. */
-    public @Nullable SessionPhase phase(String id) {
+    public @Nullable JvmSessionPhase phase(String id) {
         var session = sessions.get(id);
         if (session != null) return session.phase;
         var outcome = outcomes.get(id);
         return outcome == null ? null : outcome.getPhase();
     }
 
-    public ManagedSession get(String id, long generation) {
+    public ManagedSession get(String id) {
         var session = sessions.get(id);
         if (session == null) throw new IllegalArgumentException("Unknown session");
-        if (session.command.getGeneration() != generation)
-            throw new IllegalArgumentException("Stale session generation");
-        if (session.phase != SessionPhase.SESSION_PHASE_READY)
+        if (session.phase != JvmSessionPhase.JVM_SESSION_PHASE_READY)
             throw new IllegalStateException("Session unavailable");
         return session;
     }
 
-    public List<SessionInventory> inventory() {
-        var inventory = new ArrayList<SessionInventory>();
-        sessions.values().forEach(session -> inventory.add(session.inventory()));
+    public List<JvmSessionStatus> inventory() {
+        var inventory = new ArrayList<JvmSessionStatus>();
+        sessions.values().forEach(session -> inventory.add(session.status()));
         inventory.addAll(outcomes.values());
         return inventory;
     }
@@ -257,9 +251,9 @@ public final class SessionManager {
                         .filter(
                                 session ->
                                         switch (session.phase) {
-                                            case SESSION_PHASE_STARTING,
-                                                    SESSION_PHASE_READY,
-                                                    SESSION_PHASE_ENDING ->
+                                            case JVM_SESSION_PHASE_STARTING,
+                                                    JVM_SESSION_PHASE_READY,
+                                                    JVM_SESSION_PHASE_ENDING ->
                                                     true;
                                             default -> false;
                                         })
@@ -268,37 +262,45 @@ public final class SessionManager {
 
     @ApiStatus.Internal
     public final class ManagedSession {
-        private final SessionCommand command;
+        private final String id;
+        private final JvmSession session;
         private final Session behavior;
         private final SessionScope scope;
         private final CompletableFuture<Void> ready = new CompletableFuture<>();
         private final CompletableFuture<Void> ended = new CompletableFuture<>();
         private final Set<Player> joined = Collections.newSetFromMap(new IdentityHashMap<>());
-        private volatile SessionPhase phase = SessionPhase.SESSION_PHASE_STARTING;
+        private volatile JvmSessionPhase phase = JvmSessionPhase.JVM_SESSION_PHASE_STARTING;
         private boolean finishing;
         private volatile boolean methodsClosed;
         private @Nullable Throwable creationFailure;
 
         ManagedSession(
-                SessionCommand command, SessionRegistration registration, String configuration) {
-            this.command = command;
-            behavior = registration.create(command.getCapacity(), configuration);
+                String id,
+                JvmSession session,
+                SessionRegistration registration,
+                String configuration) {
+            this.id = id;
+            this.session = session;
+            behavior = registration.create(session.getCapacity(), configuration);
             scope =
                     new SessionScope(
                             process,
-                            command.getSession().getId(),
-                            command.getGeneration(),
+                            id,
                             ticks,
                             this::finish,
-                            registration.backend(command.getSession().getId(), backend),
+                            registration.backend(id, backend),
                             components);
         }
 
-        public SessionCommand getCommand() {
-            return command;
+        public String getSessionType() {
+            return session.getSessionType();
         }
 
-        public SessionPhase getPhase() {
+        public int getCapacity() {
+            return session.getCapacity();
+        }
+
+        public JvmSessionPhase getPhase() {
             return phase;
         }
 
@@ -313,7 +315,7 @@ public final class SessionManager {
         }
 
         public void requireMethodReady() {
-            if (methodsClosed || phase != SessionPhase.SESSION_PHASE_READY)
+            if (methodsClosed || phase != JvmSessionPhase.JVM_SESSION_PHASE_READY)
                 throw new IllegalStateException("Session unavailable");
         }
 
@@ -326,7 +328,9 @@ public final class SessionManager {
                                                 if (error == null
                                                         && !scope.getInstances().isEmpty()) {
                                                     if (!finishing)
-                                                        phase = SessionPhase.SESSION_PHASE_READY;
+                                                        phase =
+                                                                JvmSessionPhase
+                                                                        .JVM_SESSION_PHASE_READY;
                                                     process.eventHandler()
                                                             .call(new SessionCreateEvent(scope));
                                                     ready.complete(null);
@@ -347,7 +351,7 @@ public final class SessionManager {
         public CompletableFuture<Void> join(Player player) {
             return ticks.submit(
                             () -> {
-                                if (phase != SessionPhase.SESSION_PHASE_READY)
+                                if (phase != JvmSessionPhase.JVM_SESSION_PHASE_READY)
                                     throw new IllegalStateException("Session unavailable");
                                 scope.getPlayers().add(player);
                                 return invoke(() -> behavior.onJoin(player));
@@ -410,11 +414,10 @@ public final class SessionManager {
                     () -> {
                         if (!finishing) {
                             finishing = true;
-                            phase = SessionPhase.SESSION_PHASE_ENDING;
+                            phase = JvmSessionPhase.JVM_SESSION_PHASE_ENDING;
                             // Creation must settle before scoped resources can be disposed.
                             ready.handle((ignored, error) -> null)
-                                    .thenCompose(
-                                            ignored -> withdraw.apply(command.getSession().getId()))
+                                    .thenCompose(ignored -> withdraw.apply(id))
                                     .thenCompose(
                                             ignored ->
                                                     ticks.submit(() -> invoke(behavior::onFinish))
@@ -439,10 +442,10 @@ public final class SessionManager {
                                                                                 : error;
                                                                 phase =
                                                                         failure == null
-                                                                                ? SessionPhase
-                                                                                        .SESSION_PHASE_ENDED
-                                                                                : SessionPhase
-                                                                                        .SESSION_PHASE_FAILED;
+                                                                                ? JvmSessionPhase
+                                                                                        .JVM_SESSION_PHASE_ENDED
+                                                                                : JvmSessionPhase
+                                                                                        .JVM_SESSION_PHASE_FAILED;
                                                                 if (failure == null)
                                                                     ended.complete(null);
                                                                 else
@@ -456,12 +459,11 @@ public final class SessionManager {
             return ended;
         }
 
-        SessionInventory inventory() {
-            return SessionInventory.newBuilder()
-                    .setSession(command.getSession())
-                    .setGeneration(command.getGeneration())
-                    .setSessionType(command.getSessionType())
-                    .setCapacity(command.getCapacity())
+        JvmSessionStatus status() {
+            return JvmSessionStatus.newBuilder()
+                    .setId(id)
+                    .setSessionType(session.getSessionType())
+                    .setCapacity(session.getCapacity())
                     .setPhase(phase)
                     .setAttached(scope.getPlayers().size())
                     .build();

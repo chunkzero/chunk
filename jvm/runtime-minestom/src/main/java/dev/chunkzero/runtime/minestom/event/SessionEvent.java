@@ -11,7 +11,7 @@ import org.jetbrains.annotations.NotNull;
  * observe lifecycle transitions; asynchronous setup and cleanup belong in the session hooks.
  */
 public interface SessionEvent extends Event {
-    /** The owning scope, including its session ID and generation. */
+    /** The owning scope, including its session ID. */
     @NotNull
     SessionScope getSession();
 }

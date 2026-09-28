@@ -5,7 +5,7 @@ Kotlin production dependencies. Its lobby provider implements the generated `Lob
 and receives a typed greeting configuration declared in `apps/lobby/app.ts`. The session join hook queries a typed
 greeting and sends the result on the tick thread. It also implements the generated `Announce` session-method interface
 from `apps/lobby/server/methods.ts`; the generated binding sends a message to that session’s players. Internal control
-dispatch binds calls to the current player membership and session generation.
+dispatch binds calls to the current player membership and session.
 
 From the repository root:
 

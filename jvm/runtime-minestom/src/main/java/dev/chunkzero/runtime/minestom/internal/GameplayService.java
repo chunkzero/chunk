@@ -3,8 +3,8 @@ package dev.chunkzero.runtime.minestom.internal;
 import chunk.sync.v1.Jvm.JvmDelivery;
 import chunk.sync.v1.Jvm.JvmDeliveryPhase;
 import chunk.sync.v1.Jvm.JvmDeliveryStatus;
+import chunk.sync.v1.Jvm.JvmSessionPhase;
 import chunk.sync.v1.Jvm.PlayerSetup;
-import chunk.v1.Supervision.SessionPhase;
 
 import dev.chunkzero.runtime.ManagedPlayer;
 import dev.chunkzero.runtime.SessionManager;
@@ -150,7 +150,7 @@ public final class GameplayService {
         for (var operation : List.copyOf(pending.keySet())) {
             var delivery = wanted.get(operation);
             var phase = manager.phase(delivery.getSession());
-            if (phase == SessionPhase.SESSION_PHASE_READY && !delivery.getWithdraw()) {
+            if (phase == JvmSessionPhase.JVM_SESSION_PHASE_READY && !delivery.getWithdraw()) {
                 try {
                     prepare(operation, delivery);
                 } catch (RuntimeException error) {
@@ -158,7 +158,7 @@ public final class GameplayService {
                 }
             } else if (delivery.getWithdraw()
                     || !ready.getAsBoolean()
-                    || (phase != null && phase != SessionPhase.SESSION_PHASE_STARTING)
+                    || (phase != null && phase != JvmSessionPhase.JVM_SESSION_PHASE_STARTING)
                     || now.getAsLong() - pending.get(operation) >= WAIT_NANOS) {
                 refused.put(operation, delivery);
             } else continue;
@@ -181,7 +181,7 @@ public final class GameplayService {
         }
         if (preparations.size() >= 4096)
             throw new IllegalStateException("Process delivery capacity reached");
-        var session = manager.get(delivery.getSession(), 1);
+        var session = manager.get(delivery.getSession());
         var reserved =
                 preparations.values().stream()
                         .filter(
@@ -192,8 +192,7 @@ public final class GameplayService {
                                                         .equals(delivery.getSession())
                                                 && !candidate.isReleased())
                         .count();
-        if (reserved >= session.getCommand().getCapacity())
-            throw new IllegalStateException("Session full");
+        if (reserved >= session.getCapacity()) throw new IllegalStateException("Session full");
         preparations.put(
                 operation,
                 new PreparedDelivery(

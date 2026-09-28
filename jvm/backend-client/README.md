@@ -1,9 +1,9 @@
 # Java backend client
 
-`BackendSession` binds an environment, immutable deployment, session/app/player identity, call deadline and lifecycle.
-Construct it from trusted session ownership; function arguments never modify caller identity. The channel and scheduler
-belong to the parent runtime. Closing the session cancels its calls, watches and player children; closing
-`forPlayer(...)` cancels only that child.
+`BackendSession` binds an immutable deployment, session/app/player identity, call deadline and lifecycle. Construct it
+from trusted session ownership; function arguments never modify caller identity. The channel and scheduler belong to the
+parent runtime. Closing the session cancels its calls, watches and player children; closing `forPlayer(...)` cancels
+only that child.
 
 `chunk gen PROJECT --target java` writes `java-client/<package>/BackendClient.java` beside the generated models. The
 [Gradle plugin](../gradle-plugin/README.md) compiles both source roots into one shared bindings JAR. For explicit
@@ -20,9 +20,8 @@ playerBackend.shared().players().watchStats(observer);
 `BackendSession.overCore(...)` calls core's sync protocol (`chunk.sync.v1.Core`) with a JVM's process credential:
 queries and mutations are `Call`s carrying Jackson-generated JSON, the deployment and the session's `Caller`, and groups
 follow the `queries` topic. Core checks the caller against the JVM's sessions and derives the caller app code sees.
-Protocol errors surface as `StatusRuntimeException`s with the matching gRPC code. The public constructor instead uses
-the `chunk.v1.Backend` service, fixing `x-chunk-environment` and `x-chunk-deployment` metadata and sending its own
-caller. Mutations require an operation ID; the backend checks the declared function kind independently.
+Protocol errors surface as `StatusRuntimeException`s with the matching gRPC code. Mutations require an operation ID; the
+backend checks the declared function kind independently.
 
 Calls return `CompletableFuture<R>`. Object arguments use records such as `BackendTypes.Shared.Players.StatsArgs`; empty
 objects also have argument-free overloads that send `{}`. Scalar and list results remain unwrapped. Mutation methods

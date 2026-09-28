@@ -1,7 +1,6 @@
 package dev.chunkzero.runtime
 
-import chunk.v1.Common.SessionRef
-import chunk.v1.Supervision.SessionCommand
+import chunk.sync.v1.Jvm.JvmSession
 import dev.chunkzero.runtime.minestom.event.SessionCreateEvent
 import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent
 import dev.chunkzero.runtime.minestom.event.SessionEvent
@@ -97,16 +96,15 @@ class SessionEventsTest {
                     override fun onFinish() = finishing
                 },
             )
-        val create = manager.create(command("first"))
+        val create = manager.create("first", game)
         ticks.flush()
         assertTrue(global.isEmpty())
         completeOffThread(creating)
         assertTrue(global.isEmpty())
         await(create)
-        val session = manager.get("first", 1)
+        val session = manager.get("first")
         assertSame(scope, global.single().session)
         assertEquals("first", global.single().session.id)
-        assertEquals(1, global.single().session.generation)
 
         val otherManager =
             manager(
@@ -118,7 +116,7 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(otherManager.create(command("second")))
+        await(otherManager.create("second", game))
         val player = player()
         val join = session.join(player)
         ticks.flush()
@@ -146,7 +144,7 @@ class SessionEventsTest {
         assertEquals(1, playerTicks)
         await(session.leave(player))
 
-        val finish = manager.finish(command("first"))
+        val finish = manager.finish("first", game)
         repeat(4) { ticks.flush() }
         assertFalse(disposed)
         completeOffThread(finishing)
@@ -163,9 +161,9 @@ class SessionEventsTest {
         assertEquals(local, global.filter { it.session === scope })
         assertEquals(1, other.size)
         assertFalse(process.eventHandler().children.contains(scope.events))
-        await(manager.finish(command("first")))
+        await(manager.finish("first", game))
         assertEquals(4, local.size)
-        await(otherManager.finish(command("second")))
+        await(otherManager.finish("second", game))
     }
 
     @Test
@@ -182,13 +180,13 @@ class SessionEventsTest {
                         CompletableFuture.failedFuture<Void>(IllegalStateException("Join failed"))
                 },
             )
-        await(manager.create(command("first")))
-        await(manager.create(command("first")))
-        val session = manager.get("first", 1)
+        await(manager.create("first", game))
+        await(manager.create("first", game))
+        val session = manager.get("first")
         val player = player()
         assertThrows(CompletionException::class.java) { await(session.join(player)) }
         await(session.leave(player))
-        await(manager.finish(command("first")))
+        await(manager.finish("first", game))
         assertEquals(
             listOf(SessionCreateEvent::class.java, SessionDestroyEvent::class.java),
             global.map { it.javaClass },
@@ -211,8 +209,8 @@ class SessionEventsTest {
                     }
                 },
             )
-        assertThrows(CompletionException::class.java) { await(failed.create(command("failed"))) }
-        assertThrows(CompletionException::class.java) { await(failed.finish(command("failed"))) }
+        assertThrows(CompletionException::class.java) { await(failed.create("failed", game)) }
+        assertThrows(CompletionException::class.java) { await(failed.finish("failed", game)) }
         assertEquals(1, global.count { it.session.id == "failed" && it is SessionDestroyEvent })
         assertFalse(global.any { it.session.id == "failed" && it is SessionCreateEvent })
         process.schedulerManager().processTick()
@@ -236,8 +234,8 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create(command("first")))
-        await(manager.create(command("second")))
+        await(manager.create("first", game))
+        await(manager.create("second", game))
         val (first, second) = scopes
         val firstEvents = mutableListOf<Event>()
         val secondEvents = mutableListOf<Event>()
@@ -272,14 +270,14 @@ class SessionEventsTest {
         schedulers.processTickEnd()
         assertEquals(1 to 1, starts to ends)
 
-        await(manager.finish(command("first")))
+        await(manager.finish("first", game))
         schedulers.processTick()
         schedulers.processTickEnd()
         assertEquals(1 to 1, starts to ends)
         assertTrue(entity.isRemoved)
         assertFalse(outsider.isRemoved)
         assertEquals(setOf(second.instances.single(), outsider.instance), process.instanceManager().instances)
-        await(manager.finish(command("second")))
+        await(manager.finish("second", game))
     }
 
     @Test
@@ -298,9 +296,9 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create(command("owner")))
+        await(manager.create("owner", game))
         assertEquals(1, registered)
-        assertThrows(Throwable::class.java) { await(manager.finish(command("owner"))) }
+        assertThrows(Throwable::class.java) { await(manager.finish("owner", game)) }
         assertTrue(process.instanceManager().instances.isEmpty())
         assertFalse(process.eventHandler().children.contains(scope.events))
         assertEquals(1, global.count { it is SessionDestroyEvent })
@@ -319,7 +317,7 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create(command("native")))
+        await(manager.create("native", game))
         val owned = CompletableFuture<Thread>()
         scope.events.addListener(EntityTickEvent::class.java) {
             if (!owned.isDone) {
@@ -329,7 +327,7 @@ class SessionEventsTest {
         }
         repeat(20) { if (!owned.isDone) process.ticker().tick(System.nanoTime()) }
         assertSame(process.dispatcher().threads().single(), owned.join())
-        await(manager.finish(command("native")))
+        await(manager.finish("native", game))
     }
 
     @Test
@@ -353,13 +351,13 @@ class SessionEventsTest {
                     override fun onLeave(player: Player) = CompletableFuture.failedFuture<Void>(hookFailure)
                 },
             )
-        await(manager.create(command("first")))
-        val session = manager.get("first", 1)
+        await(manager.create("first", game))
+        val session = manager.get("first")
         val player = player()
         await(session.join(player))
         val leave = assertThrows(CompletionException::class.java) { await(session.leave(player)) }
         assertSame(hookFailure, leave.cause)
-        assertThrows(CompletionException::class.java) { await(manager.finish(command("first"))) }
+        assertThrows(CompletionException::class.java) { await(manager.finish("first", game)) }
         assertEquals(3, reported.size)
         assertTrue(reported.all { it === listenerFailure })
         assertTrue(global.last() is SessionDestroyEvent)
@@ -383,12 +381,9 @@ class SessionEventsTest {
 
     private fun manager(session: Session) = SessionManager(process, ticks, mapOf("game" to Supplier { session }))
 
-    private fun command(id: String) =
-        SessionCommand
+    private val game =
+        JvmSession
             .newBuilder()
-            .setOperationId(id)
-            .setSession(SessionRef.newBuilder().setId(id))
-            .setGeneration(1)
             .setSessionType("game")
             .setCapacity(2)
             .build()

@@ -16,7 +16,7 @@ class SessionOwnershipTest {
         val process = ServerProcess.create()
         val ticks = TickExecutor()
         ticks.flush()
-        val scope = SessionScope(process, "owned", 1, ticks, { CompletableFuture.completedFuture(null) }, null)
+        val scope = SessionScope(process, "owned", ticks, { CompletableFuture.completedFuture(null) }, null)
         try {
             val coroutines = scope.coroutines
             assertSame(coroutines, scope.coroutines)

@@ -4,8 +4,8 @@ import chunk.sync.v1.Gateway.PlayerIdentity;
 import chunk.sync.v1.Jvm.JvmDelivery;
 import chunk.sync.v1.Jvm.JvmDeliveryPhase;
 import chunk.sync.v1.Jvm.JvmDeliveryStatus;
+import chunk.sync.v1.Jvm.JvmSessionPhase;
 import chunk.sync.v1.Jvm.PlayerSetup;
-import chunk.v1.Supervision.SessionPhase;
 
 import com.google.protobuf.ByteString;
 
@@ -80,7 +80,7 @@ final class PreparedDelivery {
                 && player.isOnline()
                 && connection != null
                 && connection.isOnline()
-                && session.getPhase() == SessionPhase.SESSION_PHASE_READY
+                && session.getPhase() == JvmSessionPhase.JVM_SESSION_PHASE_READY
                 && delivery.getSession().equals(id);
     }
 
@@ -95,7 +95,7 @@ final class PreparedDelivery {
     synchronized InstanceContainer configure(ManagedPlayer current) {
         if (closed || connection != current.getPlayerConnection())
             throw new IllegalStateException("Delivery closed");
-        if (session.getPhase() != SessionPhase.SESSION_PHASE_READY)
+        if (session.getPhase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)
             throw new IllegalStateException("Session unavailable");
         current.setBinding(delivery);
         player = current;
@@ -127,7 +127,7 @@ final class PreparedDelivery {
     synchronized GameProfile consume(
             PlayerSetup setup, GameProfile presented, PlayerConnection accepted) {
         checkDeadline();
-        if (closed || consumed || session.getPhase() != SessionPhase.SESSION_PHASE_READY) {
+        if (closed || consumed || session.getPhase() != JvmSessionPhase.JVM_SESSION_PHASE_READY) {
             throw new IllegalStateException("Delivery unavailable");
         }
         if (!setup.getOperationId().equals(operation)

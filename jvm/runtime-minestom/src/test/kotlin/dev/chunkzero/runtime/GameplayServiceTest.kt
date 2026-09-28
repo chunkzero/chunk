@@ -6,8 +6,8 @@ import chunk.sync.v1.Gateway.PlayerProperty
 import chunk.sync.v1.Jvm.JvmDelivery
 import chunk.sync.v1.Jvm.JvmDeliveryPhase
 import chunk.sync.v1.Jvm.JvmSession
+import chunk.sync.v1.Jvm.JvmSessionPhase
 import chunk.sync.v1.Jvm.PlayerSetup
-import chunk.v1.Supervision.SessionPhase
 import com.google.protobuf.ByteString
 import dev.chunkzero.runtime.bootstrap.FlatSession
 import dev.chunkzero.runtime.minestom.internal.GameplayService
@@ -62,7 +62,7 @@ class GameplayServiceTest {
                     .build(),
             )
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (manager.phase("bridge") != SessionPhase.SESSION_PHASE_READY) {
+            while (manager.phase("bridge") != JvmSessionPhase.JVM_SESSION_PHASE_READY) {
                 check(System.nanoTime() < deadline) { "The session never became ready" }
                 Thread.sleep(10)
             }

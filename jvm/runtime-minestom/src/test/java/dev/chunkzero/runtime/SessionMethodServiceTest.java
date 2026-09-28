@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import chunk.sync.v1.Jvm.JvmMethodCall;
 import chunk.sync.v1.Jvm.JvmMethodPhase;
 import chunk.sync.v1.Jvm.JvmSession;
-import chunk.v1.Supervision.SessionPhase;
+import chunk.sync.v1.Jvm.JvmSessionPhase;
 
 import com.google.protobuf.ByteString;
 
@@ -62,7 +62,7 @@ class SessionMethodServiceTest {
             core.put(
                     "session/session",
                     JvmSession.newBuilder().setSessionType("lobby/default").setCapacity(2).build());
-            while (manager.phase("session") != SessionPhase.SESSION_PHASE_READY) {
+            while (manager.phase("session") != JvmSessionPhase.JVM_SESSION_PHASE_READY) {
                 ticks.flush();
                 Thread.sleep(10);
             }

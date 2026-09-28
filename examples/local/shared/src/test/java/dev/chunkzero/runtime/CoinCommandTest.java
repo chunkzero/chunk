@@ -2,20 +2,18 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import chunk.sync.v1.CoreGrpc;
+import chunk.sync.v1.CoreOuterClass.CallRequest;
+import chunk.sync.v1.CoreOuterClass.CallResponse;
+import chunk.sync.v1.CoreOuterClass.Entry;
 import chunk.sync.v1.CoreOuterClass.Position;
+import chunk.sync.v1.CoreOuterClass.SubscribeRequest;
+import chunk.sync.v1.CoreOuterClass.Update;
 import chunk.sync.v1.Jvm.JvmDelivery;
-import chunk.v1.BackendGrpc;
-import chunk.v1.BackendOuterClass.BackendMutation;
-import chunk.v1.BackendOuterClass.BackendQuery;
-import chunk.v1.BackendOuterClass.BackendResult;
-import chunk.v1.BackendOuterClass.BackendUpdate;
-import chunk.v1.BackendOuterClass.BackendWatchGroup;
-import chunk.v1.Common.SessionRef;
-import chunk.v1.Supervision.SessionCommand;
+import chunk.sync.v1.Jvm.JvmSession;
 
 import com.google.protobuf.ByteString;
 
-import dev.chunkzero.backend.api.BackendJson;
 import dev.chunkzero.backend.api.SessionId;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.SessionIdentity;
@@ -53,51 +51,46 @@ class CoinCommandTest {
         var process = ServerProcess.create();
         ExampleSessions.INSTANCE.register(process);
         var ticks = new TickExecutor();
-        var coins = new LinkedBlockingQueue<BackendMutation>();
+        var coins = new LinkedBlockingQueue<CallRequest>();
+        var stats = ByteString.copyFromUtf8("{\"coins\":0,\"visits\":0}");
         var server =
                 ServerBuilder.forPort(0)
                         .addService(
-                                new BackendGrpc.BackendImplBase() {
+                                new CoreGrpc.CoreImplBase() {
                                     @Override
-                                    public void query(
-                                            BackendQuery request,
-                                            StreamObserver<BackendResult> response) {
-                                        assertEquals("shared/players/stats", request.getFunction());
+                                    public void call(
+                                            CallRequest request,
+                                            StreamObserver<CallResponse> response) {
+                                        var query = request.getOperationId().isEmpty();
+                                        if (query)
+                                            assertEquals(
+                                                    "shared/players/stats", request.getMethod());
                                         response.onNext(
-                                                BackendResult.newBuilder()
-                                                        .setRevision(1)
-                                                        .setResultJson(
-                                                                ByteString.copyFromUtf8(
-                                                                        "{\"coins\":0,\"visits\":0}"))
+                                                CallResponse.newBuilder()
+                                                        .setPosition(at(1))
+                                                        .setResult(
+                                                                query
+                                                                        ? stats
+                                                                        : ByteString.copyFromUtf8(
+                                                                                "1"))
                                                         .build());
                                         response.onCompleted();
-                                    }
-
-                                    @Override
-                                    public void mutate(
-                                            BackendMutation request,
-                                            StreamObserver<BackendResult> response) {
-                                        response.onNext(
-                                                BackendResult.newBuilder()
-                                                        .setRevision(1)
-                                                        .setResultJson(ByteString.copyFromUtf8("1"))
-                                                        .build());
-                                        response.onCompleted();
-                                        if (request.getFunction().equals("shared/players/coin"))
+                                        if (request.getMethod().equals("shared/players/coin"))
                                             coins.add(request);
                                     }
 
                                     @Override
-                                    public void watchGroup(
-                                            BackendWatchGroup request,
-                                            StreamObserver<BackendUpdate> response) {
+                                    public void subscribe(
+                                            SubscribeRequest request,
+                                            StreamObserver<Update> response) {
                                         response.onNext(
-                                                BackendUpdate.newBuilder()
-                                                        .setRevision(1)
-                                                        .addResultsJson(
-                                                                ByteString.copyFromUtf8(
-                                                                        "{\"coins\":0,\"visits\":0}"))
-                                                        .addErrors("")
+                                                Update.newBuilder()
+                                                        .setPosition(at(1))
+                                                        .setSnapshot(true)
+                                                        .addUpserts(
+                                                                Entry.newBuilder()
+                                                                        .setKey("0")
+                                                                        .setValue(stats))
                                                         .build());
                                     }
                                 })
@@ -121,10 +114,9 @@ class CoinCommandTest {
                                                 "arena",
                                                 () -> ExampleSessions.INSTANCE.arena("Arena"))),
                         (session, app) ->
-                                new BackendSession(
+                                BackendSession.overCore(
                                         channel,
                                         "test-credential-with-at-least-32-bytes",
-                                        "test",
                                         "build",
                                         new SessionIdentity(
                                                 new SessionId(session), app, Optional.empty()),
@@ -133,8 +125,8 @@ class CoinCommandTest {
         var lobby = session("lobby");
         var arena = session("arena");
         try {
-            await(ticks, manager.create(lobby));
-            await(ticks, manager.create(arena));
+            await(ticks, manager.create("lobby", lobby));
+            await(ticks, manager.create("arena", arena));
             var uuid = UUID.randomUUID();
             long generation = 0;
             for (var destination : List.of("lobby", "arena", "arena")) {
@@ -151,12 +143,8 @@ class CoinCommandTest {
                         };
                 connection.setClientState(ConnectionState.PLAY);
                 var player = new ManagedPlayer(connection, new GameProfile(uuid, "player"));
-                player.setBinding(
-                        JvmDelivery.newBuilder()
-                                .setGeneration(
-                                        Position.newBuilder().setEpoch(1).setRevision(generation))
-                                .build());
-                var managed = manager.get(destination, 1);
+                player.setBinding(JvmDelivery.newBuilder().setGeneration(at(generation)).build());
+                var managed = manager.get(destination);
                 try {
                     await(ticks, managed.join(player));
                     var result =
@@ -165,9 +153,8 @@ class CoinCommandTest {
                                     .get(5, TimeUnit.SECONDS);
                     assertEquals(CommandResult.Type.SUCCESS, result.getType());
                     var call = pump(ticks, coins::poll);
-                    var caller = BackendJson.mapper().readTree(call.getCallerJson().toStringUtf8());
-                    assertEquals(uuid.toString(), caller.get("player").asString());
-                    assertEquals(destination, caller.get("session").asString());
+                    assertEquals(uuid.toString(), call.getCaller().getPlayer());
+                    assertEquals(destination, call.getCaller().getSession());
                     assertEquals(
                             destination + "/" + uuid + "/1." + generation + "/coin-0",
                             call.getOperationId());
@@ -178,8 +165,8 @@ class CoinCommandTest {
             }
         } finally {
             try {
-                await(ticks, manager.finish(lobby));
-                await(ticks, manager.finish(arena));
+                await(ticks, manager.finish("lobby", lobby));
+                await(ticks, manager.finish("arena", arena));
             } finally {
                 channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
                 server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
@@ -190,14 +177,12 @@ class CoinCommandTest {
         }
     }
 
-    private static SessionCommand session(String id) {
-        return SessionCommand.newBuilder()
-                .setOperationId(id)
-                .setSession(SessionRef.newBuilder().setId(id))
-                .setGeneration(1)
-                .setSessionType(id)
-                .setCapacity(2)
-                .build();
+    private static JvmSession session(String type) {
+        return JvmSession.newBuilder().setSessionType(type).setCapacity(2).build();
+    }
+
+    private static Position at(long revision) {
+        return Position.newBuilder().setEpoch(1).setRevision(revision).build();
     }
 
     private static void await(TickExecutor ticks, CompletableFuture<?> future) throws Exception {

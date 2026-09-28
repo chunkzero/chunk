@@ -4,12 +4,6 @@ import chunk.sync.v1.Jvm.JvmDelivery;
 import chunk.sync.v1.Jvm.JvmMethodCall;
 import chunk.sync.v1.Jvm.JvmReport;
 import chunk.sync.v1.Jvm.JvmSession;
-import chunk.sync.v1.Jvm.JvmSessionPhase;
-import chunk.sync.v1.Jvm.JvmSessionStatus;
-import chunk.v1.Common.SessionRef;
-import chunk.v1.Supervision.SessionCommand;
-import chunk.v1.Supervision.SessionInventory;
-import chunk.v1.Supervision.SessionPhase;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -28,8 +22,7 @@ import java.util.function.BooleanSupplier;
 
 /**
  * Runs the sessions, deliveries and session methods core's topic lists, and reports the engine's
- * sessions and deliveries. Core numbers no session generations, so each session runs as generation
- * 1.
+ * sessions and deliveries.
  */
 @ApiStatus.Internal
 public final class ProcessService implements ProcessState {
@@ -59,11 +52,10 @@ public final class ProcessService implements ProcessState {
         var report = JvmReport.newBuilder().addAllDeliveries(gameplay.deliveries(prepared));
         var desired = this.desired;
         for (var session : sessions.inventory()) {
-            var id = session.getSession().getId();
-            if (!desired.contains(id) && terminal(session.getPhase())) sessions.forget(id);
-            else
-                report.addSessions(
-                        status(session).toBuilder().setPrepared(prepared.getOrDefault(id, 0)));
+            var id = session.getId();
+            if (!desired.contains(id) && SessionManager.terminal(session.getPhase()))
+                sessions.forget(id);
+            else report.addSessions(session.toBuilder().setPrepared(prepared.getOrDefault(id, 0)));
         }
         return report.build();
     }
@@ -74,17 +66,16 @@ public final class ProcessService implements ProcessState {
         var listed = entries(entries, "session/", JvmSession.parser());
         listed.forEach(
                 (id, session) -> {
-                    var command = command(id, session);
                     if (created.add(id) && !session.getFinish()) {
-                        if (ready.getAsBoolean()) sessions.create(command);
-                        else sessions.reject(command);
+                        if (ready.getAsBoolean()) sessions.create(id, session);
+                        else sessions.reject(id, session);
                     }
-                    if (session.getFinish() && finished.add(id)) sessions.finish(command);
+                    if (session.getFinish() && finished.add(id)) sessions.finish(id, session);
                 });
         for (var id : Set.copyOf(created)) {
             if (listed.containsKey(id)) continue;
             created.remove(id);
-            if (finished.add(id)) sessions.finish(command(id, JvmSession.getDefaultInstance()));
+            if (finished.add(id)) sessions.finish(id, JvmSession.getDefaultInstance());
         }
         finished.retainAll(created);
         desired = Set.copyOf(listed.keySet());
@@ -106,42 +97,5 @@ public final class ProcessService implements ProcessState {
                     }
                 });
         return parsed;
-    }
-
-    private static SessionCommand command(String id, JvmSession session) {
-        return SessionCommand.newBuilder()
-                .setOperationId(id)
-                .setSession(SessionRef.newBuilder().setId(id))
-                .setGeneration(1)
-                .setSessionType(session.getSessionType())
-                .setCapacity(session.getCapacity())
-                .setConfigurationJson(session.getConfigurationJson())
-                .build();
-    }
-
-    static JvmSessionStatus status(SessionInventory session) {
-        return JvmSessionStatus.newBuilder()
-                .setId(session.getSession().getId())
-                .setSessionType(session.getSessionType())
-                .setCapacity(session.getCapacity())
-                .setPhase(phase(session.getPhase()))
-                .setAttached(session.getAttached())
-                .build();
-    }
-
-    private static JvmSessionPhase phase(SessionPhase phase) {
-        return switch (phase) {
-            case SESSION_PHASE_STARTING -> JvmSessionPhase.JVM_SESSION_PHASE_STARTING;
-            case SESSION_PHASE_READY -> JvmSessionPhase.JVM_SESSION_PHASE_READY;
-            case SESSION_PHASE_ENDING -> JvmSessionPhase.JVM_SESSION_PHASE_ENDING;
-            case SESSION_PHASE_ENDED -> JvmSessionPhase.JVM_SESSION_PHASE_ENDED;
-            case SESSION_PHASE_FAILED -> JvmSessionPhase.JVM_SESSION_PHASE_FAILED;
-            default -> JvmSessionPhase.JVM_SESSION_PHASE_UNSPECIFIED;
-        };
-    }
-
-    private static boolean terminal(SessionPhase phase) {
-        return phase == SessionPhase.SESSION_PHASE_ENDED
-                || phase == SessionPhase.SESSION_PHASE_FAILED;
     }
 }

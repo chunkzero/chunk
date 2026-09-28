@@ -40,22 +40,6 @@ public final class BackendSession implements AutoCloseable {
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
     private final Duration deadline;
 
-    /** A session on the {@code chunk.v1.Backend} service, which sends its own caller identity. */
-    public BackendSession(
-            Channel channel,
-            String credential,
-            String environment,
-            String deployment,
-            SessionIdentity identity,
-            ScheduledExecutorService scheduler,
-            Duration deadline) {
-        this(
-                new LegacyTransport(channel, credential, environment, deployment),
-                identity,
-                scheduler,
-                deadline);
-    }
-
     private BackendSession(
             Transport transport,
             SessionIdentity identity,

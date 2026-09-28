@@ -2,10 +2,9 @@ package dev.chunkzero.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import chunk.v1.Common.SessionRef;
-import chunk.v1.Supervision.SessionCommand;
-import chunk.v1.Supervision.SessionInventory;
-import chunk.v1.Supervision.SessionPhase;
+import chunk.sync.v1.Jvm.JvmSession;
+import chunk.sync.v1.Jvm.JvmSessionPhase;
+import chunk.sync.v1.Jvm.JvmSessionStatus;
 
 import com.google.protobuf.ByteString;
 
@@ -65,10 +64,10 @@ class SessionCreationTest {
                                 new SessionRegistration("arena", FlatSession::new)),
                         null);
         try {
-            var first = command("first", 16, "{\"map\":\"forest\",\"mode\":\"solo\"}");
-            var second = command("second", 32, "{\"map\":\"desert\",\"mode\":\"solo\"}");
-            var firstResult = manager.create(first);
-            var secondResult = manager.create(second);
+            var first = session(16, "{\"map\":\"forest\",\"mode\":\"solo\"}");
+            var second = session(32, "{\"map\":\"desert\",\"mode\":\"solo\"}");
+            var firstResult = manager.create("first", first);
+            var secondResult = manager.create("second", second);
             flush(ticks);
             assertEquals(16, firstResult.join().getCapacity());
             assertEquals(32, secondResult.join().getCapacity());
@@ -79,6 +78,7 @@ class SessionCreationTest {
                     settings);
             var replay =
                     manager.create(
+                            "first",
                             first.toBuilder()
                                     .setConfigurationJson(
                                             ByteString.copyFromUtf8(
@@ -88,6 +88,7 @@ class SessionCreationTest {
             assertEquals(firstResult.join(), replay.join());
             var changed =
                     manager.create(
+                            "first",
                             first.toBuilder()
                                     .setConfigurationJson(second.getConfigurationJson())
                                     .build());
@@ -102,13 +103,14 @@ class SessionCreationTest {
                             "{\"map\":\"forest\",\"mode\":\"solo\",\"extra\":true}",
                             "{\"map\":\"" + "x".repeat(65_536) + "\",\"mode\":\"solo\"}");
             for (var json : invalidValues) {
-                var invalid = manager.create(command("invalid", 16, json));
+                var invalid = manager.create("invalid", session(16, json));
                 flush(ticks);
                 assertTrue(invalid.isCompletedExceptionally());
             }
             var invalidEncoding =
                     manager.create(
-                            command("invalid", 16, "{}").toBuilder()
+                            "invalid",
+                            session(16, "{}").toBuilder()
                                     .setConfigurationJson(
                                             ByteString.copyFrom(new byte[] {(byte) 0xFF}))
                                     .build());
@@ -117,20 +119,20 @@ class SessionCreationTest {
             assertEquals(2, settings.size());
             var legacy =
                     manager.create(
-                            command("legacy", 16, "{}").toBuilder()
-                                    .setSessionType("arena/legacy")
-                                    .build());
+                            "legacy",
+                            session(16, "{}").toBuilder().setSessionType("arena/legacy").build());
             var invalidLegacy =
                     manager.create(
-                            command("invalidLegacy", 16, "{\"map\":\"forest\"}").toBuilder()
+                            "invalidLegacy",
+                            session(16, "{\"map\":\"forest\"}").toBuilder()
                                     .setSessionType("arena/legacy")
                                     .build());
             flush(ticks);
             legacy.join();
             assertTrue(invalidLegacy.isCompletedExceptionally());
-            manager.finish(first);
-            manager.finish(second);
-            manager.finish(command("legacy", 16, "{}"));
+            manager.finish("first", first);
+            manager.finish("second", second);
+            manager.finish("legacy", session(16, "{}"));
             flush(ticks);
         } finally {
             process.stop();
@@ -154,15 +156,15 @@ class SessionCreationTest {
                                         })),
                         null);
         try {
-            var failed = manager.create(command("failed", 16, "{}"));
-            var unknown = manager.finish(command("unknown", 16, "{}"));
+            var failed = manager.create("failed", session(16, "{}"));
+            var unknown = manager.finish("unknown", session(16, "{}"));
             flush(ticks);
             assertTrue(failed.isCompletedExceptionally());
-            assertEquals(SessionPhase.SESSION_PHASE_ENDED, unknown.join().getPhase());
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDED, unknown.join().getPhase());
             assertEquals(
                     Map.of(
-                            "failed", SessionPhase.SESSION_PHASE_FAILED,
-                            "unknown", SessionPhase.SESSION_PHASE_ENDED),
+                            "failed", JvmSessionPhase.JVM_SESSION_PHASE_FAILED,
+                            "unknown", JvmSessionPhase.JVM_SESSION_PHASE_ENDED),
                     phases(manager));
         } finally {
             process.stop();
@@ -215,21 +217,20 @@ class SessionCreationTest {
                                 new SessionRegistration("arena", leaking)),
                         null);
         try {
-            var leaky =
-                    command("leaky", 16, "{}").toBuilder().setSessionType("arena/leaky").build();
-            manager.create(command("failed", 16, "{}"));
-            manager.create(leaky);
-            manager.finish(leaky);
+            var leaky = session(16, "{}").toBuilder().setSessionType("arena/leaky").build();
+            manager.create("failed", session(16, "{}"));
+            manager.create("leaky", leaky);
+            manager.finish("leaky", leaky);
             for (var tick = 0; tick < 20; tick++) {
                 ticks.flush();
                 if (tick == 10) cleanup.complete(null);
                 var phases = phases(manager);
-                if (terminal(phases.get("failed")))
+                if (SessionManager.terminal(phases.get("failed")))
                     assertFalse(instances.getFirst().isRegistered());
-                assertFalse(terminal(phases.get("leaky")));
+                assertFalse(SessionManager.terminal(phases.get("leaky")));
             }
-            assertEquals(SessionPhase.SESSION_PHASE_FAILED, phases(manager).get("failed"));
-            assertEquals(SessionPhase.SESSION_PHASE_ENDING, phases(manager).get("leaky"));
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, phases(manager).get("failed"));
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDING, phases(manager).get("leaky"));
         } finally {
             process.stop();
         }
@@ -247,13 +248,14 @@ class SessionCreationTest {
                         null);
         try {
             for (var index = 0; index < 300; index++) {
-                var command = command("session" + index, 16, "{}");
-                var created = manager.create(command);
+                var id = "session" + index;
+                var session = session(16, "{}");
+                var created = manager.create(id, session);
                 flush(ticks);
                 created.join();
-                manager.finish(command);
+                manager.finish(id, session);
                 flush(ticks);
-                manager.forget(command.getSession().getId());
+                manager.forget(id);
                 flush(ticks);
             }
             assertTrue(manager.inventory().isEmpty());
@@ -262,24 +264,13 @@ class SessionCreationTest {
         }
     }
 
-    private static Map<String, SessionPhase> phases(SessionManager manager) {
+    private static Map<String, JvmSessionPhase> phases(SessionManager manager) {
         return manager.inventory().stream()
-                .collect(
-                        Collectors.toMap(
-                                session -> session.getSession().getId(),
-                                SessionInventory::getPhase));
+                .collect(Collectors.toMap(JvmSessionStatus::getId, JvmSessionStatus::getPhase));
     }
 
-    private static boolean terminal(SessionPhase phase) {
-        return phase == SessionPhase.SESSION_PHASE_ENDED
-                || phase == SessionPhase.SESSION_PHASE_FAILED;
-    }
-
-    private static SessionCommand command(String id, int capacity, String config) {
-        return SessionCommand.newBuilder()
-                .setSession(SessionRef.newBuilder().setId(id))
-                .setOperationId(id)
-                .setGeneration(1)
+    private static JvmSession session(int capacity, String config) {
+        return JvmSession.newBuilder()
                 .setSessionType("arena/default")
                 .setCapacity(capacity)
                 .setConfigurationJson(ByteString.copyFromUtf8(config))
