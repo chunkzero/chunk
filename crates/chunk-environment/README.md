@@ -29,7 +29,13 @@ It reads these variables:
 | `CHUNK_MAX_CONNECTIONS`   | `1024`                                  | The gateway's connection limit.                                                |
 | `CHUNK_BACKEND_BIND`      | `127.0.0.1:25568`                       | The backend's gRPC listener.                                                   |
 | `CHUNK_CONTROL_BIND`      | `127.0.0.1:25567`                       | Control's gRPC listener; it must be loopback.                                  |
+| `CHUNK_CORE_BIND`         | unset                                   | Core's listener for other machines; it drops peers that aren't private.        |
+| `CHUNK_PRIVATE_ADDRESS`   | `FLY_PRIVATE_IP`                        | This machine's address on the environment's private network.                   |
 | `RUST_LOG`                | `info`                                  | The log filter.                                                                |
+
+Chunk sends credentials between machines in the clear, so `CHUNK_CORE_BIND` belongs on a private, encrypted network,
+such as WireGuard or Fly's 6PN; prefer that network's address to an unspecified one. The listener serves the same `Core`
+service as the loopback control listener, and drops connections from peers that aren't loopback or private.
 
 ## Under management
 

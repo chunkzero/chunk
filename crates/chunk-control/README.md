@@ -29,13 +29,13 @@ cancellation cannot release a newer connection. Unactivated reservations expire 
 never expires solely because a control channel becomes unavailable.
 
 Control keeps its state as system tables (`chunk_releases`, `chunk_hosts`, `chunk_sessions`, `chunk_players`,
-`chunk_claims`, `chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment
-backend's store, so an environment has one log. Each update is one commit through the backend's system lane, which takes
-it into the next durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt from the
-tables on open. Apps cannot declare, read or write `chunk_` tables. One control authority runs per environment and holds
-it exclusively, so a second control on one backend fails to open until the first drops. A new `chunk dev` session drops
-every row as its control opens. When the backend's commit pipeline fails or stops, as after another store fences this
-one, control stops too.
+`chunk_claims`, `chunk_moves`, `chunk_drains`, `chunk_rosters`, `chunk_machines` and the `chunk_control` rows) in the
+environment backend's store, so an environment has one log. Each update is one commit through the backend's system lane,
+which takes it into the next durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt
+from the tables on open. Apps cannot declare, read or write `chunk_` tables. One control authority runs per environment
+and holds it exclusively, so a second control on one backend fails to open until the first drops. A new `chunk dev`
+session drops every row as its control opens. When the backend's commit pipeline fails or stops, as after another store
+fences this one, control stops too.
 
 Control runs every release that still has hosts. `Control::activate_release` records a deployment version's apps,
 profiles and limits, and makes it current. A login is placed on the release its proxy routed it with, or the current one

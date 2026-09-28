@@ -30,6 +30,9 @@ fn config(directory: &Path, bind: SocketAddr) -> Config {
             state,
             backend_bind: "127.0.0.1:0".parse().unwrap(),
             control_bind: "127.0.0.1:0".parse().unwrap(),
+            core_bind: None,
+            private_address: None,
+            environment_token: None,
             fresh: false,
         },
         gateway: GatewayConfig::new(bind),
@@ -75,6 +78,48 @@ async fn failed_gateway_bind_releases_core() {
         assert!(!backend.exists());
         assert!(!control.exists());
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_binds_its_network_listener_only_when_configured_and_mints_stable_gateway_credentials() {
+    for bind in [None, Some("127.0.0.1:0".parse().unwrap())] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        config.core_bind = bind;
+        let core = Core::start(config, |_| {}).await.unwrap();
+        assert_eq!(core.network_address().is_some(), bind.is_some());
+        let credential = core.gateway_credential("remote").unwrap();
+        assert_eq!(core.gateway_credential("remote").unwrap(), credential);
+        core.revoke_gateway("remote").unwrap();
+        assert!(core.gateway_credential("remote").is_err());
+        core.stop(|| {}).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_credentials_and_their_revocation_survive_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let start = || {
+        let mut config = config(directory.path(), "127.0.0.1:0".parse().unwrap()).core;
+        config.core_bind = Some("127.0.0.1:0".parse().unwrap());
+        Core::start(config, |_| {})
+    };
+    let core = start().await.unwrap();
+    let active = core.gateway_credential("active").unwrap();
+    let revoked = core.gateway_credential("revoked").unwrap();
+    core.revoke_gateway("revoked").unwrap();
+    core.stop(|| {}).await.unwrap();
+
+    let core = start().await.unwrap();
+    let mut client = CoreClient::connect(format!("http://{}", core.network_address().unwrap())).await.unwrap();
+    let gateway = |id: &str| SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+    let mut updates = client.subscribe(authorized(gateway("active"), &active)).await.unwrap().into_inner();
+    assert!(updates.message().await.unwrap().unwrap().error.is_none());
+    let refused = client.subscribe(authorized(gateway("revoked"), &revoked)).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+    assert!(core.gateway_credential("revoked").is_err());
+    drop(updates);
+    core.stop(|| {}).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

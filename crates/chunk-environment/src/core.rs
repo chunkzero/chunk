@@ -6,7 +6,7 @@ use chunk_proxy::GatewayCredential;
 use std::{
     collections::BTreeSet,
     fs, io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -26,6 +26,14 @@ pub struct CoreConfig {
     pub backend_bind: SocketAddr,
     /// The core port, serving control and the sync protocol's `Core` service.
     pub control_bind: SocketAddr,
+    /// Where other machines reach the sync protocol's `Core` service, from loopback or private peers only. Unset binds
+    /// nothing.
+    pub core_bind: Option<SocketAddr>,
+    /// This machine's address on the environment's private network.
+    pub private_address: Option<IpAddr>,
+    /// The token management issued the environment, whose SHA-256 keys machine and operator credentials. Without one,
+    /// control's credential keys them.
+    pub environment_token: Option<String>,
     /// Drops every control row and control's local files before serving, as when a local session starts over. JVMs
     /// that outlived the previous control are stopped first.
     pub fresh: bool,
@@ -46,6 +54,8 @@ pub struct Core {
     gateways: Arc<sync::Gateways>,
     /// The credential of the gateway serving in this process.
     gateway: Option<GatewayCredential>,
+    /// Derives gateway machines' credentials.
+    issuer: Option<sync::Issuer>,
 }
 
 impl Core {
@@ -112,7 +122,11 @@ impl Core {
             if_present(fs::remove_dir_all(config.state.join("control")))?;
         }
         let listener = TcpListener::bind(config.control_bind).await?;
-        self.serve_control(config, listener, config.control_record.clone()).await
+        let network = match config.core_bind {
+            Some(bind) => Some(chunk_control::server::network_listener(bind).await?),
+            None => None,
+        };
+        self.serve_control(config, listener, network, config.control_record.clone()).await
     }
 
     /// Stops the JVMs of the previous control that may still hold their launch locks, since only a control on its
@@ -146,7 +160,7 @@ impl Core {
                         tracing::warn!(%bind, "stopping JVMs that outlived the previous control at an address they may not know");
                     }
                     let record = config.state.join("control").join("recovery.json");
-                    self.serve_control(config, listener, record).await?;
+                    self.serve_control(config, listener, None, record).await?;
                     return self.stop_control(|| {}).await;
                 }
                 Err(error) => {
@@ -164,7 +178,13 @@ impl Core {
         Ok(chunk_control::ProcessHostConfig { directory, backend: self.backend_connection()?.clone() })
     }
 
-    async fn serve_control(&mut self, config: &CoreConfig, listener: TcpListener, record: PathBuf) -> io::Result<()> {
+    async fn serve_control(
+        &mut self,
+        config: &CoreConfig,
+        listener: TcpListener,
+        network: Option<TcpListener>,
+        record: PathBuf,
+    ) -> io::Result<()> {
         let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
             host.clone()
         } else {
@@ -180,14 +200,23 @@ impl Core {
             state: config.state.join("control"),
             system: self.system()?,
             listener,
+            network,
             control: chunk_control::Config { environment: config.environment.clone() },
             host,
             fresh: config.fresh,
-            services: Some(sync::services(backend, self.gateways.clone())),
+            services: Some(sync::services(
+                backend,
+                self.gateways.clone(),
+                config.environment.clone(),
+                config.environment_token.clone(),
+            )),
         };
         self.control =
             Some(Running { task: tokio::spawn(chunk_control::server::run(control, ready, stop.clone())), stop });
-        self.authority = Some(Running::ready(&mut self.control, started, "control").await?);
+        let ready = Running::ready(&mut self.control, started, "control").await?;
+        let token = config.environment_token.as_deref();
+        self.issuer = Some(sync::Issuer::new(&config.environment, token, &ready.connection.token));
+        self.authority = Some(ready);
         Ok(())
     }
 
@@ -231,6 +260,29 @@ impl Core {
     /// Reports a stopped control.
     pub fn control(&self) -> io::Result<Arc<chunk_control::Control>> {
         Ok(self.authority()?.control.clone())
+    }
+
+    /// Where the network listener serves, if `core_bind` configured one.
+    #[must_use]
+    pub fn network_address(&self) -> Option<SocketAddr> {
+        self.authority.as_ref().and_then(|authority| authority.network)
+    }
+
+    /// Gateway `id`'s machine credential, which authenticates it as that gateway until [`Self::revoke_gateway`].
+    /// Minting it again returns the same credential.
+    /// # Errors
+    /// Reports a stopped control or store, and rejects an invalid or revoked ID.
+    pub fn gateway_credential(&self, id: &str) -> io::Result<String> {
+        let issuer = self.issuer.as_ref().ok_or_else(|| io::Error::other("control is not running"))?;
+        self.control()?.add_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)?;
+        Ok(issuer.machine(chunk_control::MachineKind::Gateway, id))
+    }
+
+    /// Revokes gateway `id`'s machine credential for good, which ends the streams it opened with `STOPPED`.
+    /// # Errors
+    /// Reports a stopped control or store, and rejects an unknown gateway.
+    pub fn revoke_gateway(&self, id: &str) -> io::Result<()> {
+        self.control()?.revoke_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)
     }
 
     /// Core's endpoint and the in-process gateway's credential, with the backend deployment it routes players

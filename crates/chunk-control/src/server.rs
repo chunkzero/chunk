@@ -2,12 +2,17 @@
 use crate::{Control, ControlConnection, Host, Operations};
 use std::{
     io,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::oneshot};
-use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
+use tokio::{
+    net::{TcpListener, TcpSocket, TcpStream},
+    sync::oneshot,
+};
+use tokio_stream::{Stream, StreamExt, wrappers::TcpListenerStream};
 use tokio_util::sync::CancellationToken;
 
 /// Builds the services control serves on its listener, from control, its credential, a token cancelled when the
@@ -23,6 +28,9 @@ pub struct Config {
     pub connection: PathBuf,
     /// Loopback listener control serves on.
     pub listener: TcpListener,
+    /// Listener other machines reach core on, serving the same services. It drops connections from peers that aren't
+    /// loopback or private, so it may bind an unspecified address.
+    pub network: Option<TcpListener>,
     pub control: crate::Config,
     pub host: Arc<dyn Host>,
     /// Drops every control row before serving, as when a local session starts over.
@@ -34,6 +42,8 @@ pub struct Config {
 pub struct Ready {
     pub connection: ControlConnection,
     pub control: Arc<Control>,
+    /// The network listener's address.
+    pub network: Option<SocketAddr>,
 }
 
 /// Serves control requests and awaits accepted operations before stopping hosts. Stops once the environment store
@@ -47,6 +57,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         return Err(io::Error::other("control must bind loopback"));
     }
     config.host.configure(format!("http://{address}")).map_err(io::Error::other)?;
+    let network = config.network;
+    let network_address = network.as_ref().map(TcpListener::local_addr).transpose()?;
     let path = config.connection;
     let services = config.services;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
@@ -81,9 +93,13 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         let routes = services.map_or_else(tonic::service::Routes::default, |services| {
             services(&control, &connection.token, transport.clone(), operations.clone())
         });
-        let _ = ready.send(Ready { connection, control: control.clone() });
+        let _ = ready.send(Ready { connection, control: control.clone(), network: network_address });
         let connections = chunk_service::Connections::default();
-        let incoming = TcpListenerStream::new(listener).map(|stream| {
+        let network: Pin<Box<dyn Stream<Item = io::Result<TcpStream>> + Send>> = match network {
+            Some(network) => Box::pin(accept(network, chunk_service::net::private)),
+            None => Box::pin(tokio_stream::pending()),
+        };
+        let incoming = TcpListenerStream::new(listener).merge(network).map(|stream| {
             let stream = stream?;
             stream.set_nodelay(true)?;
             Ok::<_, io::Error>(connections.track(stream))
@@ -96,7 +112,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         tokio::pin!(reconcile);
         let health = monitor_health(&control, &stop);
         tokio::pin!(health);
-        tracing::info!(%address, "control ready");
+        tracing::info!(%address, network = ?network_address, "control ready");
         let result = tokio::select! {
             result = &mut server => {
                 stop.cancel();
@@ -173,6 +189,35 @@ pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationTo
     }
 }
 
+/// Binds the network listener at `address`. An IPv6 address is dual-stack whatever the host's default, so IPv4 peers
+/// arrive as IPv4-mapped addresses.
+/// # Errors
+/// Reports a failed bind.
+pub async fn network_listener(address: SocketAddr) -> io::Result<TcpListener> {
+    if address.is_ipv4() {
+        return TcpListener::bind(address).await;
+    }
+    let socket = TcpSocket::new_v6()?;
+    socket2::SockRef::from(&socket).set_only_v6(false)?;
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(1024)
+}
+
+/// The connections `listener` accepts, dropping those from peers `admit` refuses.
+fn accept(listener: TcpListener, admit: fn(IpAddr) -> bool) -> impl Stream<Item = io::Result<TcpStream>> {
+    TcpListenerStream::new(listener).filter(move |stream| {
+        let Ok(stream) = stream else { return true };
+        let peer = stream.peer_addr();
+        let admitted = peer.as_ref().is_ok_and(|peer| admit(peer.ip()));
+        if !admitted {
+            tracing::debug!(?peer, "dropped a connection from a peer that isn't private");
+        }
+        admitted
+    })
+}
+
 /// Loads control's credential, refusing a persisted one too short to be a secret.
 pub(crate) fn credential(path: &Path) -> io::Result<String> {
     let token = chunk_service::secret(path)?;
@@ -180,4 +225,31 @@ pub(crate) fn credential(path: &Path) -> io::Result<String> {
         return Err(io::Error::other("control credential too short"));
     }
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn the_network_listener_drops_peers_it_refuses() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut refused = std::pin::pin!(accept(listener, |_| false));
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        tokio::select! {
+            accepted = refused.next() => panic!("accepted {accepted:?}"),
+            read = client.read(&mut byte) => assert!(read.is_err() || read.is_ok_and(|read| read == 0)),
+        }
+
+        // An unspecified IPv6 bind is dual-stack and sees IPv4 peers as IPv4-mapped addresses.
+        let listener = network_listener("[::]:0".parse().unwrap()).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut admitted = std::pin::pin!(accept(listener, chunk_service::net::private));
+        let _client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let peer = admitted.next().await.unwrap().unwrap().peer_addr().unwrap().ip();
+        assert_eq!(peer, "::ffff:127.0.0.1".parse::<IpAddr>().unwrap());
+    }
 }

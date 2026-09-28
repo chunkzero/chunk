@@ -8,6 +8,7 @@ pub mod gateway;
 mod host;
 mod idle;
 pub mod jvm;
+mod machines;
 mod moves;
 mod nodes;
 mod operations;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub use host::{Distribution, Host, MachineProfile, ProcessHostConfig, Progress, RuntimeConnection};
+pub use machines::MachineKind;
 pub use operations::Operations;
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};

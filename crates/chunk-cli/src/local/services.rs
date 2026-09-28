@@ -123,6 +123,9 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         control_record: settings.state.join("control").join("connection.json"),
         backend_bind: settings.backend_bind,
         control_bind: settings.control_bind,
+        core_bind: None,
+        private_address: None,
+        environment_token: None,
         // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,
     };

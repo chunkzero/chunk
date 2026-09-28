@@ -90,10 +90,10 @@ async fn retained(backend: &Backend, id: chunk_backend::ActionId, credential: &s
 
 impl Command {
     /// Sends an empty snapshot while the command has yet to start, then a snapshot of the pending effects whenever they
-    /// change, then the command's outcome, until the client took it or leaves, core stops, the credential lapses, the
-    /// backend has no room for a snapshot, or the subscription itself or, once the command started, the gateway stream
-    /// it names is superseded. A subscription that ends for its command or the backend releases what its client has yet
-    /// to take at once.
+    /// change, then the command's outcome, until the client took it or leaves, core stops, the credential lapses, as
+    /// when it's revoked, the backend has no room for a snapshot, or the subscription itself or, once the command
+    /// started, the gateway stream it names is superseded. A subscription that ends for its command or the backend
+    /// releases what its client has yet to take at once.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
         let Self { mut pending, subscription, stream, superseded, grant, backend } = self;
         let (mut first, mut finished) = (Some(stream), false);
@@ -137,6 +137,7 @@ impl Command {
                     subscription.superseded();
                     return sender.end(errors::error(Code::Stopped, "a newer gateway stream superseded the one named"));
                 }
+                error = grant.lapsed() => return sender.fail(error),
                 changed = pending.changed() => if changed.is_err() { return },
             }
         }

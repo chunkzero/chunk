@@ -10,16 +10,16 @@ use chunk_proto::sync::v1::{
 mod admission;
 
 /// Core with the player arrived through gateway `proxy`, whose topic stream it holds, and the fake JVM.
-struct Arrived {
-    fixture: Fixture,
-    updates: Streaming<Update>,
-    gateway: Gateway,
-    jvm: runtime::Running,
+pub(super) struct Arrived {
+    pub fixture: Fixture,
+    pub updates: Streaming<Update>,
+    pub gateway: Gateway,
+    pub jvm: runtime::Running,
 }
 
 /// A gateway's credential and its current `gateway/<id>` stream.
 #[derive(Clone)]
-struct Gateway {
+pub(super) struct Gateway {
     client: CoreClient<Channel>,
     credential: String,
     stream: String,
@@ -40,7 +40,7 @@ async fn connected() -> Arrived {
 
 impl Arrived {
     /// Claims and activates the player's login, then waits until they arrived.
-    async fn arrive(&self) {
+    pub(super) async fn arrive(&self) {
         use chunk_proto::v1::{ActivateClaim, ClaimPhase};
         let assignment = self.fixture.control.claim(runtime::login()).await.unwrap();
         self.fixture.control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
@@ -59,7 +59,7 @@ impl Arrived {
         (other, updates)
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         drop(self.updates);
         self.fixture.stop().await;
         self.jvm.abort();
@@ -68,7 +68,7 @@ impl Arrived {
 
 impl Gateway {
     /// Follows `gateway/<id>` as `credential`.
-    async fn follow_own(fixture: &Fixture, credential: String, id: &str) -> (Streaming<Update>, Self) {
+    pub(super) async fn follow_own(fixture: &Fixture, credential: String, id: &str) -> (Streaming<Update>, Self) {
         let mut client = fixture.client.clone();
         let subscription = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
         let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
@@ -80,7 +80,7 @@ impl Gateway {
         call(self.client.clone(), &self.credential, &self.stream, operation, method, arguments, runtime::PLAYER).await
     }
 
-    async fn prepare(&self) -> String {
+    pub(super) async fn prepare(&self) -> String {
         let message = CallRequest { method: "chunk:prepare".into(), ..CallRequest::default() };
         let response = self.client.clone().call(authorized(message, &self.credential)).await.unwrap();
         decoded::<PrepareResult>(&response.into_inner()).operation_id
@@ -94,12 +94,12 @@ impl Gateway {
     }
 
     /// Starts `say` with `input` under prepared `operation`.
-    async fn say(&self, operation: &str, input: &str) -> CallResponse {
+    pub(super) async fn say(&self, operation: &str, input: &str) -> CallResponse {
         self.start(operation, SAY, input, runtime::PLAYER).await
     }
 
     /// Follows the command under `operation`.
-    async fn follow(&self, operation: &str) -> Streaming<Update> {
+    pub(super) async fn follow(&self, operation: &str) -> Streaming<Update> {
         let topic = SubscribeRequest {
             topic: format!("command/{operation}"),
             arguments: CommandSubscription { stream: self.stream.clone() }.encode_to_vec(),
@@ -164,14 +164,14 @@ fn failed(outcome: &CommandOutcome) -> bool {
     matches!(outcome.outcome, Some(command_outcome::Outcome::Error(_)))
 }
 
-fn decoded<T: Message + Default>(response: &CallResponse) -> T {
+pub(super) fn decoded<T: Message + Default>(response: &CallResponse) -> T {
     match &response.outcome {
         Some(Outcome::Result(result)) => T::decode(result.as_slice()).unwrap(),
         outcome => panic!("expected a result, got {outcome:?}"),
     }
 }
 
-fn failure(update: &Update) -> Option<Code> {
+pub(super) fn failure(update: &Update) -> Option<Code> {
     update.error.as_ref().map(chunk_proto::sync::v1::Error::code)
 }
 

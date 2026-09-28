@@ -323,6 +323,9 @@ impl Harness {
             state,
             backend_bind: "127.0.0.1:0".parse().unwrap(),
             control_bind: "127.0.0.1:0".parse().unwrap(),
+            core_bind: None,
+            private_address: None,
+            environment_token: None,
             fresh: false,
         }
     }

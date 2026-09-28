@@ -25,8 +25,8 @@ impl Grant {
 
     /// The caller app code receives, if the credential still grants it under control's current state.
     pub fn check(&self) -> Result<chunk_js::Json, Error> {
-        if self.credentials.class(&self.principal.credential).as_ref() != Some(&self.principal.class) {
-            return Err(errors::error(Code::Stopped, "the credential's process stopped"));
+        if !self.credentials.holds(&self.principal) {
+            return Err(errors::error(Code::Stopped, "the credential was revoked or its process stopped"));
         }
         derive(&self.credentials.control, &self.principal.class, &self.deployment, self.caller.as_ref())
     }
@@ -34,6 +34,20 @@ impl Grant {
     /// Changes whenever control's state does.
     pub fn changes(&self) -> watch::Receiver<Generation> {
         self.credentials.control.subscribe()
+    }
+
+    /// Resolves with why the grant lapsed, rechecking it now and whenever control's state changes, as when the
+    /// credential is revoked.
+    pub async fn lapsed(&self) -> Error {
+        let mut changes = self.changes();
+        loop {
+            if let Err(error) = self.check() {
+                return error;
+            }
+            if changes.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
     }
 }
 

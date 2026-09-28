@@ -44,7 +44,7 @@ impl Jvm {
         let ended = topic.ended();
         let mut next = Ok(Some(first));
         loop {
-            if credentials.class(&principal.credential).as_ref() != Some(&principal.class) {
+            if !credentials.holds(&principal) {
                 return sender.fail(errors::error(Code::Stopped, "the credential's process stopped"));
             }
             match next {

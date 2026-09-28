@@ -5,7 +5,7 @@ use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Revision, S
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use super::{Capacity, Generation, Meta, OperatorMethod, Phase, State, entities::Stamp};
+use super::{Capacity, Generation, MachineKind, Meta, OperatorMethod, Phase, State, entities::Stamp};
 use crate::{Error, Result};
 
 pub(crate) const CLAIMS: &str = "chunk_claims";
@@ -18,7 +18,9 @@ const PLAYERS: &str = "chunk_players";
 const DRAINS: &str = "chunk_drains";
 const ROSTERS: &str = "chunk_rosters";
 const OPERATOR_CALLS: &str = "chunk_operator_calls";
-const TABLES: [&str; 10] = [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS, OPERATOR_CALLS];
+const MACHINES: &str = "chunk_machines";
+const TABLES: [&str; 11] =
+    [META, RELEASES, HOSTS, SESSIONS, PLAYERS, CLAIMS, MOVES, DRAINS, ROSTERS, OPERATOR_CALLS, MACHINES];
 
 /// Control state as system tables in the environment's store, which one control authority owns exclusively.
 pub(super) struct Store {
@@ -90,6 +92,7 @@ impl Store {
             drains: scan(&snapshot, DRAINS, budget)?,
             operator_calls: scan(&snapshot, OPERATOR_CALLS, budget)?,
             rosters: scan(&snapshot, ROSTERS, budget)?,
+            machines: scan(&snapshot, MACHINES, budget)?,
             epoch: self.system.epoch().0,
             revision: snapshot.revision.0,
         };
@@ -127,6 +130,7 @@ impl Store {
         diff(DRAINS, &previous.drains, &next.drains, &mut writes)?;
         diff(ROSTERS, &previous.rosters, &next.rosters, &mut writes)?;
         diff(OPERATOR_CALLS, &previous.operator_calls, &next.operator_calls, &mut writes)?;
+        diff(MACHINES, &previous.machines, &next.machines, &mut writes)?;
         Ok(writes)
     }
 }
@@ -242,6 +246,9 @@ fn schema() -> DatabaseSchema {
         DRAINS: {"request": string, "host": string, "deadline_ms": integer, "automatic": boolean},
         ROSTERS: {"version": integer, "members": strings, "ready": strings, "admitted": boolean},
         OPERATOR_CALLS: {"method": {"type": "enum", "values": OperatorMethod::NAMES}, "digest": string},
+        MACHINES: {
+            "kind": {"type": "enum", "values": MachineKind::NAMES}, "created_at_ms": integer, "revoked": boolean,
+        },
     });
     let tables = tables.as_object().into_iter().flatten().map(|(table, fields)| {
         let fields: serde_json::Map<_, _> = fields
