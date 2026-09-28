@@ -28,13 +28,17 @@ import io.grpc.ServerBuilder;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
 import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -119,6 +123,70 @@ class ChunkProcessTest {
         }
     }
 
+    @Test
+    void retriesRegistrationWhileCoreIsUnavailable() throws Exception {
+        var core = new FakeCore();
+        var server = core.start();
+        core.rejecting = Status.UNAVAILABLE;
+        try (var process = new ChunkProcess(environment(server.getPort()))) {
+            process.bind("127.0.0.1:25566", 775, idle());
+            var ready = CompletableFuture.runAsync(process::ready);
+            for (int attempt = 0; attempt < 3; attempt++)
+                assertNotNull(core.rejected.poll(5, TimeUnit.SECONDS));
+            assertFalse(ready.isDone());
+
+            core.rejecting = null;
+            ready.get(5, TimeUnit.SECONDS);
+            core.call("chunk:register");
+        } finally {
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void stopsForGoodOnceCoreRejectsItsCredential() throws Exception {
+        var core = new FakeCore();
+        var server = core.start();
+        core.rejecting = Status.UNAUTHENTICATED;
+        try (var process = new ChunkProcess(environment(server.getPort()))) {
+            process.bind("127.0.0.1:25566", 775, idle());
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(5),
+                    () -> assertThrows(IllegalStateException.class, process::ready));
+            assertFalse(process.isReady());
+
+            // Core revokes a linked JVM's credential: its stream ends and it may not register
+            // again.
+            core.rejecting = null;
+            process.ready();
+            core.call("chunk:register");
+            core.subscriptions.poll(5, TimeUnit.SECONDS);
+            core.rejected.clear();
+            core.rejecting = Status.UNAUTHENTICATED;
+            core.end(Error.Code.CODE_STOPPED);
+            var shutdown = process.shutdownRequested().toCompletableFuture();
+            assertThrows(ExecutionException.class, () -> shutdown.get(5, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, process::awaitShutdown);
+            assertFalse(process.isReady());
+            assertNotNull(core.rejected.poll(5, TimeUnit.SECONDS));
+            assertNull(core.rejected.poll(2, TimeUnit.SECONDS));
+        } finally {
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    private static ProcessState idle() {
+        return new ProcessState() {
+            @Override
+            public JvmReport inventory() {
+                return JvmReport.getDefaultInstance();
+            }
+
+            @Override
+            public void apply(Map<String, ByteString> entries) {}
+        };
+    }
+
     private static RuntimeEnvironment environment(int port) {
         return new RuntimeEnvironment(
                 TOKEN,
@@ -132,10 +200,15 @@ class ChunkProcessTest {
                 InetAddress.ofLiteral("127.0.0.1"));
     }
 
-    /** Registers the JVM as {@code host} and serves its topic, numbering each stream. */
+    /**
+     * Registers the JVM as {@code host} and serves its topic, numbering each stream. While {@code
+     * rejecting} is set, it fails every request with that status and records the request's method.
+     */
     private static final class FakeCore extends CoreGrpc.CoreImplBase {
         final BlockingQueue<CallRequest> calls = new LinkedBlockingQueue<>();
         final BlockingQueue<SubscribeRequest> subscriptions = new LinkedBlockingQueue<>();
+        final BlockingQueue<String> rejected = new LinkedBlockingQueue<>();
+        volatile Status rejecting;
         private StreamObserver<Update> topic;
         private String stream = "";
         private int streams;
@@ -155,7 +228,11 @@ class ChunkProcessTest {
                                                     Metadata.Key.of(
                                                             "authorization",
                                                             Metadata.ASCII_STRING_MARSHALLER)));
-                                    return next.startCall(call, headers);
+                                    var status = rejecting;
+                                    if (status == null) return next.startCall(call, headers);
+                                    rejected.add(call.getMethodDescriptor().getBareMethodName());
+                                    call.close(status, new Metadata());
+                                    return new ServerCall.Listener<>() {};
                                 }
                             })
                     .addService(this)
