@@ -21,7 +21,7 @@ async fn arrived(fixture: &Fixture, control: &Control, operation: &str) -> Claim
     let request = request(operation, &uuid::Uuid::new_v4().to_string());
     let assignment = control.claim(request.clone()).await.unwrap();
     fixture.arrive(control, operation).await;
-    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     request
 }
 
@@ -40,12 +40,11 @@ async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_mov
     let capacity = |operation: &str| state.sessions[&state.claims[operation].session].capacity;
     assert_eq!((capacity("first"), capacity("second")), (2, 1));
     let destination = control
-        .move_player(chunk_proto::v1::MovePlayerRequest {
-            expected_source: None,
-            expected_connection_id: String::new(),
+        .move_player(MoveRequest {
             operation_id: "move".into(),
             player_id: first.identity.clone().unwrap().uuid,
-            demand: Some(SessionDemand { key: "arena".into(), ..first.demand.clone().unwrap() }),
+            demand: SessionDemand { key: "arena".into(), ..first.demand.clone().unwrap() },
+            source: None,
         })
         .unwrap();
     control.claim(destination).await.unwrap();

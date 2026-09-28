@@ -1,10 +1,10 @@
 //! Which gateway process owns a `gateway/<id>` topic, and the claims a process that takes it over withdraws.
 
 use super::{runtime::with_jvm, *};
-use chunk_control::Control;
+use chunk_control::{Control, MoveRequest};
 use chunk_proto::{
     sync::v1::{ClaimPhase, GatewayClaim},
-    v1::{ClaimRequest, Identity, MovePlayerRequest},
+    v1::{ClaimRequest, Identity},
 };
 
 /// Subscribes to `gateway/proxy` as process `instance`, after `after`'s stream and position when set, returning the
@@ -144,11 +144,11 @@ async fn a_later_gateway_process_withdraws_the_claims_earlier_ones_left_before_s
     // While B serves, control moves B's player, whose destination claim keeps B's connection, and a claim of A's
     // commits only now, as one A's call made before B took over may. B withdraws A's, and would have reached `move`
     // first, since it withdraws in operation order.
-    let request = MovePlayerRequest {
+    let request = MoveRequest {
         operation_id: "move".into(),
         player_id: OTHER.into(),
-        demand: Some(runtime::demand("arena")),
-        ..MovePlayerRequest::default()
+        demand: runtime::demand("arena"),
+        ..MoveRequest::default()
     };
     control.claim(control.move_player(request).unwrap()).await.unwrap();
     let identity = Identity { uuid: STRAY.into(), username: "stray".into(), properties: vec![] };

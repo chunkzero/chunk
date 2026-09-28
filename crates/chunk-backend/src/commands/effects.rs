@@ -1,8 +1,7 @@
 use chunk_contract::{Deployment, Effect, Field, Schema, validate_wire_value};
 use chunk_js::Json;
-use chunk_proto::v1::CommandScope;
 
-use crate::{Error, Result};
+use crate::{CommandScope, Error, Result};
 
 pub(crate) fn validate(deployment: &Deployment, scope: &CommandScope, request: &Json) -> Result<(Json, Schema, bool)> {
     if request.as_str().len() > 64 * 1024 {

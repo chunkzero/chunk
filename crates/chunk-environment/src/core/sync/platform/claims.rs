@@ -96,8 +96,7 @@ async fn activate(service: &SyncService, gateway: &str, operation: &str) -> Resu
     let identity = held(service, gateway, operation)?.and_then(|stored| stored.identity);
     let identity = identity.ok_or_else(|| errors::invalid("no claim under this operation ID"))?;
     let control = service.control.clone();
-    let activation = control::ActivateClaim { claim: Some(identity) };
-    match service.operations.admit(async move { control.activate(activation).await }).await {
+    match service.operations.admit(async move { control.activate(identity).await }).await {
         Ok(_) => Ok(ActivateResult { waiting: false }),
         Err(Failure::Unresolved(ROSTER_WAITING)) => Ok(ActivateResult { waiting: true }),
         Err(failure) => Err(errors::operation(&failure)),
@@ -118,9 +117,7 @@ async fn withdraw(
     let control = service.control.clone();
     let withdrawn = service.operations.admit(async move {
         match reason {
-            Some(reason) => {
-                control.abandon_move(control::AbandonMoveRequest { claim: Some(stored.request), reason }).await
-            }
+            Some(reason) => control.abandon_move(stored.request, reason).await,
             None => control.cancel(stored.request).await,
         }
     });
@@ -133,9 +130,9 @@ async fn depart(service: &SyncService, gateway: &str, operation: &str) -> Result
     let stored = held(service, gateway, operation)?;
     let stored = stored.ok_or_else(|| errors::invalid("no claim under this operation ID"))?;
     let control = service.control.clone();
-    let status = service.operations.admit(async move { control.reconcile_departure(stored.request).await });
-    let status = status.await.map_err(|failure| errors::operation(&failure))?;
-    Ok(DepartResult { departed: status.departed })
+    let departed = service.operations.admit(async move { control.reconcile_departure(stored.request).await });
+    let departed = departed.await.map_err(|failure| errors::operation(&failure))?;
+    Ok(DepartResult { departed })
 }
 
 /// The claim or queued move stored under `operation`, which must be `gateway`'s.

@@ -8,13 +8,12 @@ use std::{
 };
 
 use anyhow::Result;
-use chunk_control::{Control, Host, JvmIdentity, Progress, Registration, Release, RuntimeConnection, jvm::Topic};
-use chunk_proto::{
-    sync::v1::{
-        self as sync, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmRegistration, JvmReport,
-        JvmSession, JvmSessionPhase, JvmSessionStatus,
-    },
-    v1::ClaimPhase,
+use chunk_control::{
+    Control, Host, JvmIdentity, Progress, Registration, Release, RuntimeConnection, jvm::Topic, operator::Players,
+};
+use chunk_proto::sync::v1::{
+    self as sync, ClaimPhase, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmRegistration, JvmReport,
+    JvmSession, JvmSessionPhase, JvmSessionStatus, OperatorPlayer, entry::State,
 };
 use prost::Message;
 
@@ -226,17 +225,20 @@ impl Jvm {
     }
 
     /// Arrives each prepared delivery whose claim is activating, as when its player connects.
-    fn arrive(&mut self, control: &Control, report: &mut JvmReport) -> Result<()> {
+    fn arrive(&mut self, control: &Arc<Control>, report: &mut JvmReport) -> Result<()> {
         let prepared = |delivery: &Delivery| delivery.status.phase() == JvmDeliveryPhase::Prepared;
         if !self.deliveries.values().any(prepared) {
             return Ok(());
         }
-        let players = control.players()?.players;
-        let activating: BTreeSet<_> = players
-            .into_iter()
-            .filter(|player| player.phase() == ClaimPhase::Activating)
-            .filter_map(|player| player.identity.map(|identity| identity.uuid))
-            .collect();
+        let (_, players) = Players::open(control)?;
+        let mut activating = BTreeSet::new();
+        for entry in players.upserts {
+            if let Some(State::Value(value)) = entry.state
+                && OperatorPlayer::decode(value.as_slice())?.phase() == ClaimPhase::Activating
+            {
+                activating.insert(entry.key);
+            }
+        }
         for delivery in self.deliveries.values_mut().filter(|delivery| prepared(delivery)) {
             if activating.contains(&delivery.player) {
                 delivery.status.phase = JvmDeliveryPhase::Arrived.into();

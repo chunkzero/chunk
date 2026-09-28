@@ -151,12 +151,12 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     let source = demand("source", "small");
     let assignment = control.claim(source.clone()).await.unwrap();
     fixture.arrive(&control, "source").await;
-    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     assert!(matches!(
-        control.move_player(chunk_proto::v1::MovePlayerRequest {
+        control.move_player(MoveRequest {
             operation_id: "invalid-move".into(),
             player_id: source.identity.as_ref().unwrap().uuid.clone(),
-            demand: Some(SessionDemand { key: "undeclared".into(), ..source.demand.clone().unwrap() }),
+            demand: SessionDemand { key: "undeclared".into(), ..source.demand.clone().unwrap() },
             ..Default::default()
         }),
         Err(Error::Invalid("session configuration differs from its implementation schema"))

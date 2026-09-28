@@ -1,5 +1,4 @@
 use super::*;
-use chunk_proto::v1::MovePlayerRequest;
 
 #[tokio::test]
 async fn queued_moves_reach_the_watching_proxy_without_polling() {
@@ -9,7 +8,7 @@ async fn queued_moves_reach_the_watching_proxy_without_polling() {
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
     fixture.arrive(&control, "source").await;
-    control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
+    control.activate(first.claim.clone().unwrap()).await.unwrap();
     let mut positions = control.subscribe();
     let (mut view, snapshot) = View::open(&control, "proxy-1", None).unwrap();
     let [(operation, initial)] = &snapshot.upserts[..] else { panic!("expected one claim") };
@@ -17,12 +16,11 @@ async fn queued_moves_reach_the_watching_proxy_without_polling() {
     assert!(initial.phase == Phase::Arrived && initial.generation.wire() == first.claim.unwrap().delivery_generation);
 
     let destination = control
-        .move_player(MovePlayerRequest {
-            expected_source: None,
-            expected_connection_id: String::new(),
+        .move_player(MoveRequest {
             operation_id: "move".into(),
             player_id: uuid,
-            demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
+            demand: SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() },
+            source: None,
         })
         .unwrap();
     let update = changed(&control, &mut view, &mut positions).await;

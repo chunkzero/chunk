@@ -5,10 +5,10 @@
 use super::super::super::runs::Run;
 use chunk_backend::{ActionHandle, Backend, CommandEffect, CommandEffects, RequestCharge};
 use chunk_contract::{Effect, EffectDestination};
-use chunk_control::{ArrivedClaim, Control};
+use chunk_control::{ArrivedClaim, Control, MoveRequest, MoveSource};
 use chunk_proto::{
     sync::v1::{self as sync, CommandTitle, JvmMethodPhase, command_effect},
-    v1::{MovePlayerRequest, SessionDemand},
+    v1::SessionDemand,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinSet;
@@ -96,16 +96,15 @@ impl Performer {
 
     /// Queues the player's move from their `current` claim, which the gateway carries out as control's move.
     fn enter(&self, effect: CommandEffect, current: ArrivedClaim, destination: EffectDestination) {
-        let request = MovePlayerRequest {
+        let request = MoveRequest {
             operation_id: effect.operation_id(),
             player_id: self.player.clone(),
-            demand: Some(SessionDemand {
+            demand: SessionDemand {
                 key: destination.key,
                 session_type: destination.session_type,
                 machine_profile: destination.machine_profile,
-            }),
-            expected_source: Some(current.identity),
-            expected_connection_id: current.request.connection_id,
+            },
+            source: Some(MoveSource { claim: current.identity, connection_id: current.request.connection_id }),
         };
         match self.control.move_player(request) {
             Ok(_) => effect.accept(),

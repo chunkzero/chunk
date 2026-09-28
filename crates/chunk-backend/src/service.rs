@@ -129,15 +129,15 @@ impl<T> Request<T> {
 pub(crate) enum Command {
     Catalog {
         id: DeploymentId,
-        scope: chunk_proto::v1::CommandScope,
+        scope: crate::CommandScope,
         caller: Json,
-        reply: Request<chunk_proto::v1::CommandCatalog>,
+        reply: Request<crate::CommandCatalog>,
     },
     Suggest {
         id: DeploymentId,
-        request: chunk_proto::v1::CommandSuggestionRequest,
+        request: crate::CommandSuggestionRequest,
         caller: Json,
-        reply: Request<chunk_proto::v1::CommandSuggestionResult>,
+        reply: Request<Vec<String>>,
     },
     DomainManifest {
         id: DeploymentId,

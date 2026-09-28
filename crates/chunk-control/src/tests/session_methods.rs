@@ -13,7 +13,7 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     let identity = assignment.claim.clone().unwrap();
     assert!(control.capture_session(&identity).is_err());
     fixture.arrive(&control, &claim.operation_id).await;
-    control.activate(ActivateClaim { claim: Some(identity.clone()) }).await.unwrap();
+    control.activate(identity.clone()).await.unwrap();
     let captured = control.capture_session(&identity).unwrap();
     let mut wrong = identity.clone();
     wrong.membership_generation += 1;

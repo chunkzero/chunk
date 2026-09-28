@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::MoveIntent;
-use chunk_proto::v1::{ClaimIdentity, MovePlayerRequest};
+use chunk_proto::v1::ClaimIdentity;
 use prost::Message;
 
 #[tokio::test]
@@ -43,13 +43,12 @@ async fn released_claims_stay_while_an_open_claim_of_their_move_references_them(
     let source = request("source", &uuid);
     let first = control.claim(source.clone()).await.unwrap();
     fixture.arrive(&control, "source").await;
-    control.activate(ActivateClaim { claim: first.claim }).await.unwrap();
-    let command = |operation: &str| MovePlayerRequest {
-        expected_source: None,
-        expected_connection_id: String::new(),
+    control.activate(first.claim.unwrap()).await.unwrap();
+    let command = |operation: &str| MoveRequest {
         operation_id: operation.into(),
         player_id: uuid.clone(),
-        demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
+        demand: SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() },
+        source: None,
     };
     let expire = |operation: &str| {
         control
@@ -71,7 +70,7 @@ async fn released_claims_stay_while_an_open_claim_of_their_move_references_them(
     let second = control.claim(destination).await.unwrap();
     fixture.arrive(&control, "moved").await;
     control.cancel(source.clone()).await.unwrap();
-    let activation = ActivateClaim { claim: second.claim };
+    let activation = second.claim.unwrap();
     control.activate(activation.clone()).await.unwrap();
     expire("source");
     control.activate(activation).await.unwrap();
@@ -85,7 +84,7 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
     let source = request("source", &uuid::Uuid::new_v4().to_string());
     let first = control.claim(source.clone()).await.unwrap();
     fixture.arrive(&control, "source").await;
-    control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
+    control.activate(first.claim.clone().unwrap()).await.unwrap();
     let destination = ClaimRequest {
         operation_id: "direct".into(),
         demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
@@ -95,7 +94,7 @@ async fn released_sources_stay_while_a_direct_destination_claim_is_open() {
     let second = control.claim(destination).await.unwrap();
     fixture.arrive(&control, "direct").await;
     control.cancel(source).await.unwrap();
-    let activation = ActivateClaim { claim: second.claim };
+    let activation = second.claim.unwrap();
     control.activate(activation.clone()).await.unwrap();
     control
         .update(|state| {

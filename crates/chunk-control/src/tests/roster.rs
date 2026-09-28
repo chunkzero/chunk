@@ -1,6 +1,6 @@
 use super::*;
 use crate::{RosterMember, RosterMove};
-use chunk_proto::v1::{ClaimIdentity, MovePlayerRequest};
+use chunk_proto::v1::ClaimIdentity;
 
 /// Sessions of capacity 4, and one `arena` session at most.
 fn fixture() -> Fixture {
@@ -29,7 +29,7 @@ async fn arrive(fixture: &Fixture, control: &Arc<Control>, operation: &str) -> (
     let player = uuid::Uuid::new_v4().to_string();
     let assignment = control.claim(request(operation, &player)).await.unwrap();
     fixture.arrive(control, operation).await;
-    control.activate(ActivateClaim { claim: assignment.claim.clone() }).await.unwrap();
+    control.activate(assignment.claim.clone().unwrap()).await.unwrap();
     (player, assignment.claim.unwrap())
 }
 
@@ -61,12 +61,11 @@ async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a
     for (player, source) in players[3..].iter().cloned() {
         let control = control.clone();
         tasks.spawn(async move {
-            let destination = control.move_player(MovePlayerRequest {
+            let destination = control.move_player(MoveRequest {
                 operation_id: format!("solo/{}", source.operation_id),
                 player_id: player,
-                demand: Some(arena()),
-                expected_source: None,
-                expected_connection_id: String::new(),
+                demand: arena(),
+                source: None,
             })?;
             control.claim(destination).await.map(|_| ())
         });
@@ -125,7 +124,7 @@ async fn a_roster_is_reserved_and_admitted_whole_or_fails_whole() {
     for (destination, (player, source)) in destinations.iter().zip([&first, &second]) {
         let prepared = control.claim(destination.clone()).await.unwrap();
         control.cancel(request(&source.operation_id, player)).await.unwrap();
-        activations.push(ActivateClaim { claim: prepared.claim });
+        activations.push(prepared.claim.unwrap());
     }
     // A gateway's activation reports this failure as waiting, and it retries until the group is complete.
     let waiting = control.activate(activations[0].clone()).await.unwrap_err();
@@ -166,25 +165,21 @@ async fn new_rosters_reject_terminal_member_operations_without_changing_state() 
         let group = roster("party", 1, &members);
         let member = &group.members[1];
         let destination = control
-            .move_player(MovePlayerRequest {
+            .move_player(MoveRequest {
                 operation_id: member.operation_id.clone(),
                 player_id: member.player_id.clone(),
-                demand: Some(group.demand.clone()),
-                expected_source: Some(member.expected_source.clone()),
-                expected_connection_id: member.expected_connection_id.clone(),
+                demand: group.demand.clone(),
+                source: Some(MoveSource {
+                    claim: member.expected_source.clone(),
+                    connection_id: member.expected_connection_id.clone(),
+                }),
             })
             .unwrap();
         if prepare {
             control.claim(destination.clone()).await.unwrap();
         }
         if fail {
-            control
-                .abandon_move(chunk_proto::v1::AbandonMoveRequest {
-                    claim: Some(destination),
-                    reason: "destination preparation failed".into(),
-                })
-                .await
-                .unwrap();
+            control.abandon_move(destination, "destination preparation failed".into()).await.unwrap();
             control.reconcile_all().await.unwrap();
         } else {
             control.cancel(destination).await.unwrap();

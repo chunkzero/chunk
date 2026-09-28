@@ -1,10 +1,10 @@
-use chunk_proto::v1::{ClaimRequest, DrainRequest, DrainStatus, MovePlayerRequest};
+use chunk_proto::v1::ClaimRequest;
 use prost::Message;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::{
-    Control, Error, Result,
+    Control, Error, MoveRequest, Result,
     state::{Capacity, Claim, Drain, Phase, State},
 };
 
@@ -34,37 +34,6 @@ pub(crate) fn retire_host(
 }
 
 impl Control {
-    /// Retires a runtime's capacity before queuing moves, retaining a durable shutdown deadline.
-    /// # Errors
-    /// Rejects changed operations, unknown players and unbounded drain deadlines.
-    pub fn drain(&self, request: DrainRequest) -> Result<DrainStatus> {
-        if request.operation_id.is_empty()
-            || request.operation_id.len() > 128
-            || !(10..=120).contains(&request.timeout_seconds)
-        {
-            return Err(Error::Invalid("invalid drain request"));
-        }
-        self.update(|state| {
-            retire_host(
-                state,
-                request.operation_id.clone(),
-                request.encode_to_vec(),
-                request.timeout_seconds,
-                false,
-                |state| player_host(state, &request.player_id),
-            )
-        })?;
-        let state = self.state()?;
-        let drain = &state.drains[&request.operation_id];
-        Ok(DrainStatus {
-            operation_id: request.operation_id,
-            host_id: drain.host.clone(),
-            deadline_ms: drain.deadline_ms,
-            remaining_claims: open_claims(&state, &drain.host).count().try_into().map_err(|_| Error::Capacity)?,
-            stopped: state.released(&drain.host),
-        })
-    }
-
     /// Waits for `tasks`, advancing drains every second so evacuation deadlines still fire.
     pub(crate) async fn join_progressing_drains(&self, mut tasks: JoinSet<()>) -> Result<()> {
         let mut drains = tokio::time::interval(Duration::from_secs(1));
@@ -91,12 +60,11 @@ impl Control {
             } else {
                 for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {
                     let source = ClaimRequest::decode(claim.request.as_slice())?;
-                    let result = self.move_player(MovePlayerRequest {
-                        expected_source: None,
-                        expected_connection_id: String::new(),
+                    let result = self.move_player(MoveRequest {
                         operation_id: uuid::Uuid::new_v4().to_string(),
                         player_id: claim.player.clone(),
-                        demand: source.demand,
+                        demand: source.demand.unwrap_or_default(),
+                        source: None,
                     });
                     if let Err(error) = result {
                         tracing::debug!(%error, "drain awaits pending player move");

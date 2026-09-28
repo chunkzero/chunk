@@ -7,16 +7,13 @@ mod players;
 pub use nodes::Nodes;
 pub use players::Players;
 
-use chunk_proto::{
-    sync::v1 as sync,
-    v1::{MovePlayerRequest, SessionDemand},
-};
+use chunk_proto::{sync::v1 as sync, v1::SessionDemand};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use crate::{
-    Control, Error, Result,
+    Control, Error, MoveRequest, Result,
     drain::{player_host, retire_host},
     moves,
     state::{OperatorCall, OperatorMethod, State},
@@ -29,15 +26,16 @@ impl Control {
     /// Rejects invalid arguments, a player who can't move now, an operation that names a claim with
     /// [`crate::MOVE_NAMES_CLAIM`], and one first used for another call with [`crate::OPERATOR_CALL_CHANGED`].
     pub fn move_operator(&self, operation: &str, arguments: &sync::MovePlayerArguments) -> Result<()> {
-        let request = MovePlayerRequest {
+        let destination = arguments.destination.clone().ok_or(Error::Invalid("invalid move request"))?;
+        let request = MoveRequest {
             operation_id: operation.to_owned(),
             player_id: arguments.player.clone(),
-            demand: arguments.destination.clone().map(|demand| SessionDemand {
-                key: demand.key,
-                session_type: demand.session_type,
-                machine_profile: demand.machine_profile,
-            }),
-            ..MovePlayerRequest::default()
+            demand: SessionDemand {
+                key: destination.key,
+                session_type: destination.session_type,
+                machine_profile: destination.machine_profile,
+            },
+            source: None,
         };
         moves::validate(&request)?;
         self.update(|state| {

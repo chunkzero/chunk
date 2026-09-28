@@ -81,7 +81,7 @@ async fn capacity_is_released_only_once_its_host_confirms_the_runtime_exited() {
     let control = fixture.control().await;
     let assignment = control.claim(request("active", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     fixture.arrive(&control, "active").await;
-    control.activate(ActivateClaim { claim: assignment.claim }).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["active"].session].host.clone();
     fixture.host.unconfirmed.store(true, Ordering::Release);
