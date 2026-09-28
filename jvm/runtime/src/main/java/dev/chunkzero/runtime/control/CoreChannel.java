@@ -17,21 +17,25 @@ public final class CoreChannel {
 
     private CoreChannel() {}
 
-    /** A new channel to {@code endpoint}, which must be a loopback HTTP address. */
+    /** A new channel to {@code endpoint}, which must be a private HTTP address. */
     public static ManagedChannel open(String endpoint) {
         var uri = URI.create(endpoint);
+        var host = uri.getHost();
+        if (host != null && host.startsWith("[") && host.endsWith("]")) {
+            host = host.substring(1, host.length() - 1);
+        }
         if (!"http".equals(uri.getScheme())
-                || uri.getHost() == null
+                || host == null
                 || uri.getRawQuery() != null
                 || uri.getFragment() != null
                 || uri.getUserInfo() != null
                 || (uri.getPath() != null && !uri.getPath().isEmpty() && !uri.getPath().equals("/"))
                 || uri.getPort() < 1
                 || uri.getPort() > 65535
-                || !loopback(uri.getHost())) {
-            throw new IllegalArgumentException("The core endpoint must be a loopback HTTP address");
+                || !privateHost(host)) {
+            throw new IllegalArgumentException("The core endpoint must be a private HTTP address");
         }
-        return NettyChannelBuilder.forAddress(uri.getHost(), uri.getPort())
+        return NettyChannelBuilder.forAddress(host, uri.getPort())
                 .usePlaintext()
                 .maxInboundMessageSize(MESSAGE_BYTES)
                 .keepAliveTime(30, TimeUnit.SECONDS)
@@ -39,9 +43,9 @@ public final class CoreChannel {
                 .build();
     }
 
-    private static boolean loopback(String host) {
+    private static boolean privateHost(String host) {
         try {
-            return InetAddress.getByName(host).isLoopbackAddress();
+            return PrivateAddress.contains(InetAddress.getByName(host));
         } catch (UnknownHostException error) {
             return false;
         }
