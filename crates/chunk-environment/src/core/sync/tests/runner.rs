@@ -1,5 +1,7 @@
 //! A remote runner's `chunk:launch` and `chunk:archive`, and the JVM machine credential it and its JVM present.
 
+mod host;
+
 use super::{jvm::registration, *};
 use crate::core::ReleaseArchive;
 use chunk_control::{Launch, MachineKind, Progress, Registration, RuntimeConnection};

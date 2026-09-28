@@ -1,8 +1,10 @@
 mod archives;
+mod runner;
 mod sync;
 
 pub(crate) use archives::Archives;
 pub use archives::ReleaseArchive;
+pub use runner::{CommandLauncher, LaunchSpec, Launcher, READINESS, RunnerConfig};
 
 use crate::{PlatformTarget, Running};
 use chunk_contract::ControlConnection;
@@ -52,6 +54,8 @@ pub struct Core {
     host: Option<Arc<chunk_control::ProcessHost>>,
     /// Runs control's hosts in place of local JVMs.
     injected_host: Option<Arc<dyn chunk_control::Host>>,
+    /// Runs control's hosts on machines a launcher starts, in place of local JVMs.
+    runner: Option<Arc<runner::RunnerHost>>,
     authority: Option<chunk_control::server::Ready>,
     /// Every gateway's credential, which the sync protocol authenticates.
     gateways: Arc<sync::Gateways>,
@@ -79,6 +83,15 @@ impl Core {
     #[doc(hidden)]
     pub async fn start_with_host(config: CoreConfig, host: Arc<dyn chunk_control::Host>) -> io::Result<Self> {
         Self { injected_host: Some(host), ..Self::default() }.launch(config, || {}).await
+    }
+
+    /// Starts core as [`Self::start`] does, with control running every host on a machine `runner`'s launcher starts,
+    /// whose runner downloads its release from core.
+    /// # Errors
+    /// As [`Self::start`].
+    pub async fn start_with_launcher(config: CoreConfig, runner: RunnerConfig) -> io::Result<Self> {
+        let runner = Arc::new(runner::RunnerHost::new(&config.environment, runner));
+        Self { runner: Some(runner), ..Self::default() }.launch(config, || {}).await
     }
 
     async fn launch(self, config: CoreConfig, on_backend: impl FnOnce()) -> io::Result<Self> {
@@ -181,6 +194,8 @@ impl Core {
     ) -> io::Result<()> {
         let host: Arc<dyn chunk_control::Host> = if let Some(host) = &self.injected_host {
             host.clone()
+        } else if let Some(runner) = &self.runner {
+            runner.clone()
         } else {
             let host = Arc::new(chunk_control::ProcessHost::new(host_config(config)));
             self.host = Some(host.clone());
@@ -211,7 +226,11 @@ impl Core {
             Some(Running { task: tokio::spawn(chunk_control::server::run(control, ready, stop.clone())), stop });
         let ready = Running::ready(&mut self.control, started, "control").await?;
         let token = config.environment_token.as_deref();
-        self.issuer = Some(sync::Issuer::new(&config.environment, token, &ready.connection.token));
+        let issuer = sync::Issuer::new(&config.environment, token, &ready.connection.token);
+        if let Some(runner) = &self.runner {
+            runner.attach(&ready.control, issuer.clone(), runner_endpoint(&ready, config.private_address));
+        }
+        self.issuer = Some(issuer);
         self.authority = Some(ready);
         Ok(())
     }
@@ -323,9 +342,17 @@ impl Core {
         distribution: chunk_control::Distribution,
         release: chunk_control::Release,
     ) -> io::Result<()> {
-        let host = self.host.as_ref().ok_or_else(|| io::Error::other("control is not running"))?;
-        host.add_release(deployment, distribution).map_err(io::Error::other)?;
+        if let Some(host) = &self.host {
+            host.add_release(deployment, distribution).map_err(io::Error::other)?;
+        }
         self.control()?.activate_release(release).map_err(io::Error::other)
+    }
+
+    /// Makes remote runners of `deployment`'s JVMs download release `release`'s kept archive.
+    pub(crate) fn add_release_archive(&self, deployment: &str, release: &str) {
+        if let Some(runner) = &self.runner {
+            runner.add_release(deployment, release);
+        }
     }
 
     /// Whether the backend stopped.
@@ -400,6 +427,16 @@ fn survivor_bind(endpoints: &BTreeSet<Option<String>>, previous: Option<&str>) -
             .map(Some)
             .ok_or_else(|| io::Error::other(format!("surviving JVM has invalid control endpoint {endpoint}"))),
         (Some(_), Some(_)) => Err(io::Error::other("surviving JVMs were given different control endpoints")),
+    }
+}
+
+/// Where runners on other machines reach core: its network listener, at the private address when it binds an
+/// unspecified one, and otherwise control's endpoint.
+fn runner_endpoint(ready: &chunk_control::server::Ready, private: Option<IpAddr>) -> String {
+    match (ready.network, private) {
+        (Some(network), _) if !network.ip().is_unspecified() => format!("http://{network}"),
+        (Some(network), Some(private)) => format!("http://{}", SocketAddr::new(private, network.port())),
+        _ => ready.connection.endpoint.clone(),
     }
 }
 

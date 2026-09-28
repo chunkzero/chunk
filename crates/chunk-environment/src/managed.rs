@@ -312,6 +312,7 @@ impl<'a> Managed<'a> {
         let pending = Activation { predecessor, activated: deployment.clone() };
         activation::write(&self.activation, &pending)?;
         let release = loaded.control(&self.environment, deployment);
+        self.core.add_release_archive(deployment, &artifact.release_id);
         if let Err(error) = self.core.activate(deployment, loaded.distribution(), release) {
             _ = activation::clear(&self.activation);
             return Err(error);
