@@ -47,12 +47,13 @@ service EnvironmentService {
   // by request_id: the first call records the intent and may return while the
   // machine is still provisioning. Repeat the call with the same request_id
   // and arguments to observe progress or recover a lost reply; the same
-  // request_id with a different workload, machine_profile, release_id or
-  // app_id fails with ALREADY_EXISTS; the lease is not part of that match. A
-  // failed request stays failed; retry with a new request_id. A JVM request is
-  // one machine lifetime: a JVM machine that exits fails its request and is
-  // never replaced under it. GATEWAY and EXEC machines are stateless and are
-  // replaced under the same request. Fenced by lease.
+  // request_id with a different workload, machine_profile, release_id,
+  // app_id or credential fails with ALREADY_EXISTS; the lease is not part of
+  // that match. A failed request stays failed; retry with a new request_id. A
+  // JVM request is one machine lifetime: a JVM machine that exits fails its
+  // request and is never replaced under it. GATEWAY machines are stateless
+  // and are replaced under the same request, with the same credential. Fenced
+  // by lease.
   rpc EnsureCapacity(EnsureCapacityRequest) returns (EnsureCapacityResponse);
   // Returns the capacity granted under an EnsureCapacity request_id. The
   // response is RELEASING until the machine is gone, then RELEASED; repeat the
@@ -223,16 +224,20 @@ message EnsureCapacityRequest {
   string app_id = 5;
   // The lease from this core's Attach.
   uint64 lease = 6;
+  // The secret core minted for the machine, which the machine presents to
+  // core. Required for WORKLOAD_GATEWAY and WORKLOAD_JVM. Management never
+  // returns it, and a retry must repeat it.
+  string credential = 7;
 }
 
 enum Workload {
+  reserved 3;
+  reserved "WORKLOAD_EXEC";
   WORKLOAD_UNSPECIFIED = 0;
   // JVMs for the release's apps.
   WORKLOAD_JVM = 1;
   // An extra gateway-only instance of the environment image.
   WORKLOAD_GATEWAY = 2;
-  // An extra exec-only instance of the environment image.
-  WORKLOAD_EXEC = 3;
 }
 
 message EnsureCapacityResponse {
@@ -242,7 +247,7 @@ message EnsureCapacityResponse {
 message Capacity {
   string request_id = 1;
   CapacityState state = 2;
-  // The provider's machine ID once known. The machine presents request_id when it connects to core.
+  // The provider's machine ID once known. The machine presents its credential when it connects to core.
   string machine_id = 3;
   // Why provisioning failed.
   string message = 4;

@@ -1,9 +1,10 @@
-// The sync protocol: the one contract between an environment's core and everything that dials it (gateways, JVMs,
-// exec and the CLI). Call runs one method; Subscribe follows one topic.
+// The sync protocol: the one contract between an environment's core and everything that dials it (gateways, JVMs and
+// the CLI). Call runs one method; Subscribe follows one topic.
 //
 // Names. Methods and topics are strings. A method is an app function path from the deployment's contract, or a
-// platform method named `chunk:<name>`; function paths never contain `:`. Planned topic families, not normative:
-// `deployment`, `queries`, `gateway/<id>`, `jvm/<host>`, `command/<op>`, `method/<op>`, `nodes`, `players`.
+// platform method named `chunk:<name>`; function paths never contain `:`. Topics are `queries`, which follows app
+// queries; `gateway/<id>`, `deployment` and `command/<op>` in gateway.proto; `jvm/<host>` in jvm.proto; and `nodes`
+// and `players` in operator.proto.
 //
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
@@ -52,9 +53,17 @@
 // an unknown outcome. Retry the call with the same operation ID, or resume the subscription.
 //
 // Auth. Every request carries `authorization: Bearer <credential>` metadata. Core derives the credential's class
-// (gateway, jvm, exec or cli) and identity from it, and checks each method, topic, deployment and caller against
-// them; request fields are never authority. `cli` is the operator class: the `chunk` CLI presents control's
-// credential, and only it may use the operator surface in operator.proto.
+// (gateway, jvm or cli) and identity from it, and checks each method, topic, deployment and caller against them;
+// request fields are never authority. Core mints the credential of each gateway and JVM machine, scoped to one
+// environment and to that machine's identity. `cli` is the operator class, and only it may use the operator surface
+// in operator.proto. Core accepts a `cli` credential in two forms: control's credential, which the `chunk` CLI
+// presents, only from a loopback peer; and the environment's operator credential, which management presents when it
+// relays operator calls.
+//
+// Network. Chunk does no TLS and sends credentials in the clear, so an environment's machines must talk over a
+// private, encrypted network, such as WireGuard between hosts or Fly's 6PN. Core accepts connections only from
+// loopback or private peers: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 and fc00::/7, including their
+// IPv4-mapped forms, and never link-local addresses.
 //
 // Limits. Operation IDs are at most 256 bytes; methods, topics, deployments, keys, stream IDs and caller fields at
 // most 512 bytes. `arguments` is at most 1 MiB unless its method declares more: `chunk:commit` carries a mutation's
@@ -76,7 +85,7 @@ message Position {
 
 // Who a request acts for. Core checks it against current ownership and builds the caller app code receives. A
 // gateway names a player it holds a claim for. A JVM names a session its host runs and, optionally, a player on that
-// session. Exec and the CLI name none.
+// session. The CLI names none.
 message Caller {
   string session = 1;
   string player = 2;
@@ -146,8 +155,8 @@ message Entry {
 message Error {
   enum Code {
     CODE_UNSPECIFIED = 0;
-    // Retryable with the same operation ID, which returns the outcome if the operation did run. Core, exec or
-    // storage can't take the request right now.
+    // Retryable with the same operation ID, which returns the outcome if the operation did run. Core or storage
+    // can't take the request right now.
     CODE_UNAVAILABLE = 1;
     // Retryable after backing off. An admission limit or storage budget refused the request; the message names it.
     CODE_OVERLOADED = 2;

@@ -42,10 +42,11 @@ message LogEntry {
 }
 
 enum LogSource {
+  reserved 3;
+  reserved "LOG_SOURCE_EXEC";
   LOG_SOURCE_UNSPECIFIED = 0;
   LOG_SOURCE_CORE = 1;
   LOG_SOURCE_GATEWAY = 2;
-  LOG_SOURCE_EXEC = 3;
   LOG_SOURCE_JVM = 4;
 }
 

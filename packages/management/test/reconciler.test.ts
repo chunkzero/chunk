@@ -71,6 +71,10 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", machineProfile: "huge" }))).toBe(
       Code.InvalidArgument,
     );
+    // 3 is the reserved WORKLOAD_EXEC.
+    expect(await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", workload: 3 as Workload }))).toBe(
+      Code.InvalidArgument,
+    );
 
     await pass();
     const ready = (await env.client.ensureCapacity(request)).capacity;
