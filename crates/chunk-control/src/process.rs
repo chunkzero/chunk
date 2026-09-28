@@ -1,5 +1,7 @@
-use crate::{Distribution, Error, Host, ProcessHostConfig, Progress, Release, Result, RuntimeConnection};
-use chunk_proto::v1::{ProcessIdentity, ProcessRegistration};
+use crate::{
+    Distribution, Error, Host, JvmIdentity, ProcessHostConfig, Progress, Registration, Release, Result,
+    RuntimeConnection,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,9 +35,9 @@ struct Processes {
     stopping: bool,
 }
 struct Process {
-    identity: ProcessIdentity,
+    identity: JvmIdentity,
     token: String,
-    registration: Mutex<Option<ProcessRegistration>>,
+    registration: Mutex<Option<Registration>>,
     stop: CancellationToken,
     stopped: AtomicBool,
     /// Re-attached after control restarted, so no child handle can confirm its exit.
@@ -86,9 +88,9 @@ impl ProcessHost {
     fn launch(&self, id: &str, release: &Release, app: &str, profile: &str) -> Result<Option<Arc<Process>>> {
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
         if let Some(process) = processes.running.get(id) {
-            if process.identity.deployment.as_ref() != Some(&release.deployment)
-                || process.identity.app_id != app
-                || process.identity.machine_profile != profile
+            if process.identity.deployment != release.deployment.deployment
+                || process.identity.app != app
+                || process.identity.profile != profile
             {
                 return Err(Error::Invalid("host binding changed"));
             }
@@ -153,14 +155,14 @@ impl ProcessHost {
         let exit = self.path(id, "exit")?;
         let pid_path = self.path(id, "pid")?;
         let process = Arc::new(Process {
-            identity: ProcessIdentity {
-                deployment: Some(deployment.clone()),
-                runtime_id: id.into(),
+            identity: JvmIdentity {
+                host: id.into(),
                 process_id: uuid::Uuid::new_v4().to_string(),
                 generation: 1,
-                machine_profile: profile.into(),
+                deployment: deployment.deployment.clone(),
+                app: app.into(),
+                profile: profile.into(),
                 artifact_digest: artifact.sha256.clone(),
-                app_id: app.into(),
             },
             token: format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()),
             registration: Mutex::default(),
@@ -311,7 +313,7 @@ impl ProcessHost {
         true
     }
     /// Requires a player endpoint with a port on loopback or on this machine's private address.
-    fn validate_endpoint(&self, registration: &ProcessRegistration) -> Result<()> {
+    fn validate_endpoint(&self, registration: &Registration) -> Result<()> {
         let endpoint = &registration.player_endpoint;
         let address: std::net::SocketAddr = endpoint
             .strip_prefix("http://")
@@ -379,13 +381,12 @@ impl Host for ProcessHost {
         }
         Ok(Progress::Pending)
     }
-    fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
-        let identity = registration.identity.as_ref().ok_or(Error::Invalid("missing process identity"))?;
-        let process = self.process(&identity.runtime_id)?.ok_or(Error::Invalid("unknown process"))?;
+    fn register(&self, token: &str, registration: Registration) -> Result<()> {
+        let process = self.process(&registration.identity.host)?.ok_or(Error::Invalid("unknown process"))?;
         if token != format!("Bearer {}", process.token) {
             return Err(Error::Invalid("invalid process credential"));
         }
-        if *identity != process.identity {
+        if registration.identity != process.identity {
             return Err(Error::Invalid("process identity mismatch"));
         }
         if process.stop.is_cancelled() || process.stopped.load(Ordering::Acquire) {
@@ -397,7 +398,7 @@ impl Host for ProcessHost {
             return Err(Error::Invalid("registration changed"));
         }
         *frozen = Some(registration);
-        Ok(process.identity.clone())
+        Ok(())
     }
     fn authenticate(&self, credential: &str) -> Option<String> {
         let processes = self.processes.lock().ok()?;
@@ -427,10 +428,10 @@ impl Host for ProcessHost {
         }
         found
     }
-    fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
+    fn adopt(&self, token: &str, registration: Registration) -> Result<()> {
         self.validate_endpoint(&registration)?;
-        let identity = registration.identity.clone().ok_or(Error::Invalid("missing process identity"))?;
-        let id = identity.runtime_id.clone();
+        let identity = registration.identity.clone();
+        let id = identity.host.clone();
         let mut processes = self.processes.lock().map_err(|_| Error::Unresolved("host poisoned"))?;
         if processes.running.contains_key(&id)
             || processes.failed.contains(&id)
@@ -575,7 +576,7 @@ struct LaunchRecord {
 }
 
 impl LaunchRecord {
-    fn of(identity: &ProcessIdentity, token: &str, control_endpoint: &str) -> Self {
+    fn of(identity: &JvmIdentity, token: &str, control_endpoint: &str) -> Self {
         Self {
             process_id: identity.process_id.clone(),
             generation: identity.generation,
@@ -584,7 +585,7 @@ impl LaunchRecord {
         }
     }
 
-    fn authenticates(&self, identity: &ProcessIdentity, token: &str) -> bool {
+    fn authenticates(&self, identity: &JvmIdentity, token: &str) -> bool {
         self.process_id == identity.process_id
             && self.generation == identity.generation
             && self.token_sha256 == digest(token)

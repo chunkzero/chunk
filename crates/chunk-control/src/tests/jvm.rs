@@ -10,17 +10,16 @@ use std::{
     time::Duration,
 };
 
-use chunk_proto::{
-    sync::v1::{
-        self as sync, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase,
-        JvmMethodResult, JvmRegistration, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus,
-    },
-    v1::{DeploymentRef, ProcessIdentity, ProcessRegistration},
+use chunk_proto::sync::v1::{
+    self as sync, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmMethodCall, JvmMethodPhase,
+    JvmMethodResult, JvmRegistration, JvmReport, JvmSession, JvmSessionPhase, JvmSessionStatus,
 };
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Control, Error, Host, Progress, Release, Result, RuntimeConnection, jvm::Topic};
+use crate::{
+    Control, Error, Host, JvmIdentity, Progress, Registration, Release, Result, RuntimeConnection, jvm::Topic,
+};
 
 /// The credential of every host's JVM.
 pub(super) const CREDENTIAL: &str = "test-runtime-credential";
@@ -34,7 +33,7 @@ pub(super) struct Binding {
 }
 
 pub(super) struct FakeRuntime {
-    pub(super) identity: ProcessIdentity,
+    pub(super) identity: JvmIdentity,
     /// The session methods it ran, by operation.
     pub(super) method_requests: Mutex<BTreeMap<String, JvmMethodCall>>,
     pub(super) sessions: Mutex<BTreeMap<String, JvmSession>>,
@@ -57,7 +56,7 @@ pub(super) struct FakeRuntime {
 }
 
 impl FakeRuntime {
-    pub(super) fn new(identity: ProcessIdentity) -> Self {
+    pub(super) fn new(identity: JvmIdentity) -> Self {
         Self {
             identity,
             method_requests: Mutex::default(),
@@ -183,7 +182,7 @@ pub(super) struct FakeHost {
     /// Runs once when an adoption has published its process, before the adoption returns.
     pub(super) adopted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The release each host runs, where it differs from the runtime's.
-    pub(super) deployments: Mutex<BTreeMap<String, DeploymentRef>>,
+    pub(super) deployments: Mutex<BTreeMap<String, String>>,
     /// The host each session control asked for runs on.
     pub(super) sessions: Mutex<BTreeMap<String, String>>,
 }
@@ -206,11 +205,11 @@ impl FakeHost {
     }
 
     /// The runtime's identity as host `id`'s JVM, which runs that host's release.
-    pub(super) fn identity(&self, id: &str) -> ProcessIdentity {
+    pub(super) fn identity(&self, id: &str) -> JvmIdentity {
         let deployment = self.deployments.lock().unwrap().get(id).cloned();
-        ProcessIdentity {
-            deployment: deployment.or_else(|| self.runtime.identity.deployment.clone()),
-            runtime_id: id.into(),
+        JvmIdentity {
+            host: id.into(),
+            deployment: deployment.unwrap_or_else(|| self.runtime.identity.deployment.clone()),
             ..self.runtime.identity.clone()
         }
     }
@@ -221,10 +220,10 @@ impl FakeHost {
         JvmRegistration {
             process_id: identity.process_id,
             generation: identity.generation,
-            app: identity.app_id,
-            profile: identity.machine_profile,
+            app: identity.app,
+            profile: identity.profile,
             artifact_digest: identity.artifact_digest,
-            deployment: identity.deployment.map(|deployment| deployment.deployment).unwrap_or_default(),
+            deployment: identity.deployment,
             player_endpoint: "127.0.0.1:1".into(),
             protocol: 776,
         }
@@ -301,7 +300,7 @@ impl Host for FakeHost {
 
     async fn ensure(&self, id: &str, release: &Release, _: &str, _: &str) -> Result<Progress> {
         self.ids.lock().unwrap().insert(id.into());
-        self.deployments.lock().unwrap().insert(id.into(), release.deployment.clone());
+        self.deployments.lock().unwrap().insert(id.into(), release.deployment.deployment.clone());
         if self.stopped(id) {
             return Ok(Progress::Failed("JVM exited".into()));
         }
@@ -328,24 +327,24 @@ impl Host for FakeHost {
         let ids = self.ids.lock().unwrap().clone();
         Ok(if forgotten { ids.into_iter().filter(|id| !self.stopped(id)).collect() } else { BTreeSet::new() })
     }
-    fn register(&self, token: &str, registration: ProcessRegistration) -> Result<ProcessIdentity> {
-        let identity = registration.identity.unwrap_or_default();
+    fn register(&self, token: &str, registration: Registration) -> Result<()> {
+        let identity = registration.identity;
         if self.forgotten.load(Ordering::Acquire)
             || token != format!("Bearer {CREDENTIAL}")
-            || identity != self.identity(&identity.runtime_id)
+            || identity != self.identity(&identity.host)
         {
             return Err(Error::Invalid("unknown process"));
         }
-        self.registered.lock().unwrap().insert(identity.runtime_id.clone());
-        Ok(identity)
+        self.registered.lock().unwrap().insert(identity.host);
+        Ok(())
     }
-    fn adopt(&self, token: &str, registration: ProcessRegistration) -> Result<()> {
-        let identity = registration.identity.unwrap_or_default();
+    fn adopt(&self, token: &str, registration: Registration) -> Result<()> {
+        let identity = registration.identity;
         if token != CREDENTIAL || identity.process_id != self.runtime.identity.process_id {
             return Err(Error::Invalid("process credential does not match its launch record"));
         }
         assert!(self.forgotten.swap(false, Ordering::AcqRel));
-        self.registered.lock().unwrap().insert(identity.runtime_id);
+        self.registered.lock().unwrap().insert(identity.host);
         let adopted = self.adopted.lock().unwrap().take();
         if let Some(adopted) = adopted {
             adopted();
@@ -446,7 +445,7 @@ impl Followed {
         if changes.complete
             || !(changes.sessions.is_empty() && changes.deliveries.is_empty() && changes.health.is_none())
         {
-            control.report_jvm(id, CREDENTIAL, &self.stream, changes)?;
+            control.report_jvm(id, CREDENTIAL, &self.stream, &changes)?;
         }
         self.reported = Some(report);
         for (operation, call) in methods {

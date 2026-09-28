@@ -3,13 +3,33 @@ use crate::{
     drain::retire_host,
     state::{Capacity, State},
 };
-use chunk_proto::v1::{NodeList, NodePhase, NodeStatus, ProcessHealth, ShutdownNodeRequest};
+use chunk_proto::{
+    sync::v1::{JvmHealth, NodePhase},
+    v1::ShutdownNodeRequest,
+};
 use prost::Message;
 use std::collections::BTreeSet;
 
+/// A host's lifecycle, and the health its JVM last reported.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeStatus {
+    pub host: String,
+    /// The deployment whose release the host runs.
+    pub deployment: String,
+    pub app: String,
+    pub profile: String,
+    pub phase: NodePhase,
+    /// Unset before the JVM's first report.
+    pub health: Option<JvmHealth>,
+    /// Unix time in milliseconds of the last health sample; zero before the first.
+    pub observed_at_ms: u64,
+    /// Health checks failed in a row.
+    pub consecutive_failures: u32,
+}
+
 pub(crate) struct Observation {
     phase: NodePhase,
-    health: Option<ProcessHealth>,
+    health: Option<JvmHealth>,
     at: u64,
     failures: u32,
 }
@@ -17,9 +37,9 @@ impl Control {
     /// Current lifecycle and last observed metrics; an unreachable process still owns its players.
     /// # Errors
     /// Reports unavailable durable state.
-    pub fn nodes(&self) -> Result<NodeList> {
+    pub fn nodes(&self) -> Result<Vec<NodeStatus>> {
         let state = self.state()?;
-        Ok(NodeList { nodes: self.statuses(&state)? })
+        self.statuses(&state)
     }
 
     /// Each host's lifecycle in `state`, with its last observed metrics.
@@ -44,12 +64,12 @@ impl Control {
                     observation.map_or(NodePhase::Starting, |o| o.phase)
                 };
                 NodeStatus {
-                    host_id: id.clone(),
+                    host: id.clone(),
                     deployment: host.release.clone(),
-                    app_id: host.app.clone(),
-                    machine_profile: host.profile.clone(),
-                    phase: phase.into(),
-                    health: observation.and_then(|o| o.health.clone()),
+                    app: host.app.clone(),
+                    profile: host.profile.clone(),
+                    phase,
+                    health: observation.and_then(|o| o.health),
                     observed_at_ms: observation.map_or(0, |o| o.at),
                     consecutive_failures: observation.map_or(0, |o| o.failures),
                 }
@@ -60,7 +80,7 @@ impl Control {
     /// Retires capacity immediately and queues evacuation with a bounded shutdown deadline.
     /// # Errors
     /// Rejects changed operations, unknown nodes, or invalid deadlines.
-    pub fn shutdown_node(&self, request: &ShutdownNodeRequest) -> Result<NodeStatus> {
+    pub fn shutdown_node(&self, request: &ShutdownNodeRequest) -> Result<()> {
         if request.operation_id.is_empty()
             || request.operation_id.len() > 128
             || !(0..=120).contains(&request.timeout_seconds)
@@ -76,8 +96,7 @@ impl Control {
                     .then(|| request.host_id.clone())
                     .ok_or(Error::Invalid("unknown node"))
             })
-        })?;
-        self.nodes()?.nodes.into_iter().find(|n| n.host_id == request.host_id).ok_or(Error::Invalid("unknown node"))
+        })
     }
     pub(crate) fn unavailable(&self) -> Result<BTreeSet<String>> {
         Ok(self
@@ -120,7 +139,7 @@ impl Control {
                     0
                 };
                 let at = if health.is_some() { crate::now_ms() } else { previous.map_or(0, |o| o.at) };
-                let retained = health.or_else(|| previous.and_then(|o| o.health.clone()));
+                let retained = health.or_else(|| previous.and_then(|o| o.health));
                 observations.insert(id.clone(), Observation { phase, health: retained, at, failures });
                 failures >= 3 || phase == NodePhase::Draining
             };

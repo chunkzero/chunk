@@ -1,6 +1,6 @@
-use chunk_proto::v1::{
-    ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest, DeliveryInventory, DeliveryPhase,
-    PlayerDelivery, ProcessIdentity,
+use chunk_proto::{
+    sync::v1::{JvmDeliveryPhase, JvmDeliveryStatus},
+    v1::{ActivateClaim, Assignment, ClaimIdentity, ClaimPhase, ClaimRequest},
 };
 use prost::Message;
 use std::collections::BTreeSet;
@@ -197,35 +197,27 @@ impl Control {
     }
 }
 
-/// Records the phase a JVM reported for one delivery. A report that does not match the claim's generations, session
-/// and process is ignored, as is one for a claim control has not prepared yet unless it closed the delivery, which
-/// releases the reservation.
-pub(crate) fn apply(
-    state: &mut State,
-    host: &str,
-    identity: &ProcessIdentity,
-    binding: &DeliveryInventory,
-) -> Result<()> {
-    let Some(delivery) = &binding.delivery else {
-        return Ok(());
-    };
-    let operation = &delivery.operation_id;
+/// Records the phase `host`'s JVM reported for one delivery. A report that does not match the claim's generation and
+/// host is ignored, as is one for a claim control has not prepared yet unless it closed the delivery, which releases
+/// the reservation.
+pub(crate) fn apply(state: &mut State, host: &str, status: &JvmDeliveryStatus) -> Result<()> {
+    let operation = &status.operation_id;
     let Some(claim) = state.claims.get(operation) else {
         return Ok(());
     };
-    if claim.phase == Phase::Released || (claim.assignment.is_none() && binding.phase != DeliveryPhase::Closed as i32) {
+    if claim.phase == Phase::Released || (claim.assignment.is_none() && status.phase() != JvmDeliveryPhase::Closed) {
         return Ok(());
     }
-    if !owns(state, claim, host, identity, delivery) {
+    if !crate::jvm::owned(state, host, status) {
         tracing::debug!(operation, "ignoring a stale delivery report");
         return Ok(());
     }
-    let phase = match DeliveryPhase::try_from(binding.phase) {
-        Ok(DeliveryPhase::Arrived) => Phase::Arrived,
-        Ok(DeliveryPhase::Attached) => Phase::Attached,
-        Ok(DeliveryPhase::Closed) => Phase::Released,
-        Ok(DeliveryPhase::Withdrawing) => Phase::Withdrawing,
-        _ => return Ok(()),
+    let phase = match status.phase() {
+        JvmDeliveryPhase::Arrived => Phase::Arrived,
+        JvmDeliveryPhase::Attached => Phase::Attached,
+        JvmDeliveryPhase::Closed => Phase::Released,
+        JvmDeliveryPhase::Withdrawing => Phase::Withdrawing,
+        JvmDeliveryPhase::Prepared | JvmDeliveryPhase::Unspecified => return Ok(()),
     };
     // A delivery only moves forward; an older report of the same generation cannot undo a newer phase.
     if phase <= claim.phase {
@@ -236,19 +228,6 @@ pub(crate) fn apply(
     } else {
         set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
     }
-}
-
-/// Whether `delivery` is the one control prepared for `claim` on `host`'s current process.
-fn owns(state: &State, claim: &Claim, host: &str, identity: &ProcessIdentity, delivery: &PlayerDelivery) -> bool {
-    delivery.owner_generation == claim.generation.wire()
-        && delivery.membership_generation == claim.membership.wire()
-        && delivery.proxy_id == claim.proxy
-        && delivery.session.as_ref().map(|s| &s.id) == Some(&claim.session)
-        && delivery.session_generation == 1
-        && delivery.runtime_id == identity.runtime_id
-        && delivery.process_generation == identity.generation
-        && delivery.deployment == identity.deployment
-        && state.sessions.get(&claim.session).is_some_and(|session| session.host == host)
 }
 
 pub(crate) fn release(state: &mut State, operation: &str) -> Result<()> {

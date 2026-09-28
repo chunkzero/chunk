@@ -35,29 +35,15 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
     host.launch(&uuid::Uuid::new_v4().to_string(), &release, "bridge", "large").unwrap();
     host.prune(&BTreeSet::new()).unwrap();
     assert!(host.process(&id).unwrap().is_some());
-    let registration = ProcessRegistration {
-        identity: Some(process.identity.clone()),
-        control_endpoint: String::new(),
-        player_endpoint: "127.0.0.1:2".into(),
-    };
+    let registration = Registration { identity: process.identity.clone(), player_endpoint: "127.0.0.1:2".into() };
     let token = format!("Bearer {}", process.token);
     assert!(host.connection(&id).is_none());
     assert!(host.register("wrong-token", registration.clone()).is_err());
-    assert!(
-        host.register(
-            &token,
-            ProcessRegistration {
-                identity: Some(ProcessIdentity { app_id: "changed".into(), ..process.identity.clone() }),
-                ..registration.clone()
-            }
-        )
-        .is_err()
-    );
-    assert_eq!(host.register(&token, registration.clone()).unwrap(), process.identity);
-    assert_eq!(host.register(&token, registration.clone()).unwrap(), process.identity);
-    assert!(
-        host.register(&token, ProcessRegistration { player_endpoint: "127.0.0.1:3".into(), ..registration }).is_err()
-    );
+    let changed = JvmIdentity { app: "changed".into(), ..process.identity.clone() };
+    assert!(host.register(&token, Registration { identity: changed, ..registration.clone() }).is_err());
+    host.register(&token, registration.clone()).unwrap();
+    host.register(&token, registration.clone()).unwrap();
+    assert!(host.register(&token, Registration { player_endpoint: "127.0.0.1:3".into(), ..registration }).is_err());
     assert!(matches!(host.ensure(&id, &release, "changed", "local").await, Ok(Progress::Failed(_))));
     assert!(matches!(host.ensure(&id, &release, "bridge", "local").await, Ok(Progress::Ready(_))));
     assert!(host.release(&id).await.unwrap());
@@ -119,16 +105,13 @@ async fn jvms_serve_players_on_the_machines_private_address() {
         sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2\n");
-    let registration = |endpoint: &str| ProcessRegistration {
-        identity: Some(process.identity.clone()),
-        control_endpoint: String::new(),
-        player_endpoint: endpoint.into(),
-    };
+    let registration =
+        |endpoint: &str| Registration { identity: process.identity.clone(), player_endpoint: endpoint.into() };
     let token = format!("Bearer {}", process.token);
     for refused in ["[fdaa::3]:25565", "10.0.0.2:25565", "[fdaa::2]:0"] {
         assert!(host.register(&token, registration(refused)).is_err(), "{refused}");
     }
-    assert_eq!(host.register(&token, registration("[fdaa::2]:25565")).unwrap(), process.identity);
+    host.register(&token, registration("[fdaa::2]:25565")).unwrap();
     assert!(host.release(&id).await.unwrap());
 }
 
@@ -163,11 +146,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     let id = uuid::Uuid::new_v4().to_string();
     let process = crashed.launch(&id, &release, "bridge", "local").unwrap().unwrap();
     // Registered over sync, the JVM serves no control endpoint.
-    let registration = ProcessRegistration {
-        identity: Some(process.identity.clone()),
-        control_endpoint: String::new(),
-        player_endpoint: "127.0.0.1:2".into(),
-    };
+    let registration = Registration { identity: process.identity.clone(), player_endpoint: "127.0.0.1:2".into() };
     crashed.register(&format!("Bearer {}", process.token), registration.clone()).unwrap();
     // Control dies after acknowledging registration and before committing anything; the JVM survives.
     std::mem::forget(crashed);
@@ -180,7 +159,7 @@ async fn a_jvm_whose_host_crashed_after_registration_re_attaches_by_its_launch_r
     assert!(host.unadopted("another-credential").is_none());
     assert!(host.adopt("another-credential", registration.clone()).is_err());
     let mut changed = registration.clone();
-    changed.identity.as_mut().unwrap().process_id = "another-process".into();
+    changed.identity.process_id = "another-process".into();
     assert!(host.adopt(&process.token, changed).is_err());
     assert!(host.unresolved(&id));
     host.adopt(&process.token, registration.clone()).unwrap();
@@ -330,9 +309,8 @@ async fn a_launch_marker_without_a_record_is_never_adopted() {
     let directory = tempfile::tempdir().unwrap();
     let host = idle_host(&directory);
     let id = uuid::Uuid::new_v4().to_string();
-    let registration = ProcessRegistration {
-        identity: Some(ProcessIdentity { runtime_id: id.clone(), app_id: "bridge".into(), ..Default::default() }),
-        control_endpoint: String::new(),
+    let registration = Registration {
+        identity: JvmIdentity { host: id.clone(), app: "bridge".into(), ..JvmIdentity::default() },
         player_endpoint: "127.0.0.1:2".into(),
     };
     assert!(host.adopt("credential", registration.clone()).is_err());

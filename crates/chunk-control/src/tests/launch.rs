@@ -1,5 +1,5 @@
 use super::*;
-use chunk_proto::v1::NodePhase;
+use chunk_proto::sync::v1::NodePhase;
 
 #[tokio::test]
 async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
@@ -26,9 +26,9 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
         assert!(state.hosts.values().all(|host| host.retired && host.failure.is_some()));
         assert!(state.sessions.values().all(|session| session.retired));
         assert!(state.drains.is_empty());
-        assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
+        assert!(control.nodes().unwrap().iter().all(|node| node.phase == NodePhase::Stopped));
     }
-    assert_eq!(control.nodes().unwrap().nodes.len(), 2);
+    assert_eq!(control.nodes().unwrap().len(), 2);
     executor.stop().await;
     drop(control);
     drop(host);
@@ -38,28 +38,28 @@ async fn failed_launch_is_stopped_not_reused_and_cleaned_up_after_recovery() {
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
     let executor = Executor::start(&control);
-    assert!(control.nodes().unwrap().nodes.iter().all(|node| node.phase == NodePhase::Stopped as i32));
+    assert!(control.nodes().unwrap().iter().all(|node| node.phase == NodePhase::Stopped));
     control.reconcile_all().await.unwrap();
     let state = control.state().unwrap();
     assert!(state.claims.values().all(|claim| claim.phase == Phase::Released));
     assert!(state.sessions.is_empty());
     assert!(state.drains.is_empty());
     assert!(state.hosts.is_empty());
-    assert!(control.nodes().unwrap().nodes.is_empty());
+    assert!(control.nodes().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(host_config().directory).unwrap().count(), 0);
 
     for operation in ["third", "fourth"] {
         let claim = request(operation, &uuid::Uuid::new_v4().to_string());
         assert!(matches!(control.claim(claim.clone()).await, Err(Error::Stopped)));
-        let nodes = control.nodes().unwrap().nodes;
+        let nodes = control.nodes().unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].phase, NodePhase::Stopped as i32);
+        assert_eq!(nodes[0].phase, NodePhase::Stopped);
         control.reconcile_all().await.unwrap();
         assert!(control.state().unwrap().hosts.is_empty());
-        assert!(!host.stopped(&nodes[0].host_id));
+        assert!(!host.stopped(&nodes[0].host));
         assert_eq!(std::fs::read_dir(host_config().directory).unwrap().count(), 0);
         assert!(control.claim(claim).await.is_err());
-        assert!(control.nodes().unwrap().nodes.is_empty());
+        assert!(control.nodes().unwrap().is_empty());
     }
     executor.stop().await;
     fixture.close().await;

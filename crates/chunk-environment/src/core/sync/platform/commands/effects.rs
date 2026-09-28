@@ -7,8 +7,8 @@ use chunk_backend::{ActionHandle, Backend, CommandEffect, CommandEffects, Reques
 use chunk_contract::{Effect, EffectDestination};
 use chunk_control::{ArrivedClaim, Control};
 use chunk_proto::{
-    sync::v1::{self as sync, CommandTitle, command_effect},
-    v1::{MovePlayerRequest, SessionDemand, SessionMethodPhase},
+    sync::v1::{self as sync, CommandTitle, JvmMethodPhase, command_effect},
+    v1::{MovePlayerRequest, SessionDemand},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinSet;
@@ -138,7 +138,7 @@ impl Performer {
             let (call, _admission) = if send { (None, Some(effect.accept_running())) } else { (Some(effect), None) };
             let result = control.run_session_method(&prepared, &cancel.child_token(), &cancel).await;
             if let Some(effect) = call {
-                let completed = result.phase == SessionMethodPhase::Completed as i32;
+                let completed = result.phase == Some(JvmMethodPhase::Completed);
                 effect.finish(completed.then_some(result.result_json.as_bytes()));
             }
         });

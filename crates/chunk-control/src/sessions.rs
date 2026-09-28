@@ -1,4 +1,7 @@
-use chunk_proto::v1::{ClaimIdentity, SessionInventory, SessionPhase};
+use chunk_proto::{
+    sync::v1::{JvmSessionPhase, JvmSessionStatus},
+    v1::ClaimIdentity,
+};
 
 use crate::{
     Control, Error, Result,
@@ -96,25 +99,23 @@ impl Control {
 
 /// Records the phase a JVM reported for one of `host`'s sessions. A session that ended, is ending or failed is retired;
 /// one that ended or failed with no open claim or delivery is finished, which frees its capacity.
-pub(crate) fn apply(state: &mut State, host: &str, observed: &SessionInventory) {
-    let Some(id) = observed.session.as_ref().map(|session| session.id.clone()) else {
+pub(crate) fn apply(state: &mut State, host: &str, observed: &JvmSessionStatus) {
+    let id = &observed.id;
+    let empty = !state.claims.values().any(|claim| claim.session == *id && claim.phase != Phase::Released);
+    let Some(session) = state.sessions.get_mut(id).filter(|session| session.host == host && !session.finished) else {
         return;
     };
-    let empty = !state.claims.values().any(|claim| claim.session == id && claim.phase != Phase::Released);
-    let Some(session) = state.sessions.get_mut(&id).filter(|session| session.host == host && !session.finished) else {
-        return;
-    };
-    if !matches(&id, session, observed) {
+    if !matches(id, session, observed) {
         tracing::debug!(session = id, "ignoring a mismatched session report");
         return;
     }
-    match SessionPhase::try_from(observed.phase) {
-        Ok(SessionPhase::Ended | SessionPhase::Failed) => {
+    match observed.phase() {
+        JvmSessionPhase::Ended | JvmSessionPhase::Failed => {
             session.retired = true;
             session.finish_requested = true;
             session.finished = empty && observed.prepared == 0 && observed.attached == 0;
         }
-        Ok(SessionPhase::Ending) => {
+        JvmSessionPhase::Ending => {
             session.retired = true;
             session.finish_requested = true;
         }
@@ -123,9 +124,6 @@ pub(crate) fn apply(state: &mut State, host: &str, observed: &SessionInventory) 
 }
 
 /// Whether `observed` reports the session control recorded as `id`.
-pub(crate) fn matches(id: &str, session: &SessionState, observed: &SessionInventory) -> bool {
-    observed.session.as_ref().is_some_and(|reference| reference.id == id)
-        && observed.generation == 1
-        && observed.session_type == session.session_type
-        && observed.capacity == session.capacity
+pub(crate) fn matches(id: &str, session: &SessionState, observed: &JvmSessionStatus) -> bool {
+    observed.id == id && observed.session_type == session.session_type && observed.capacity == session.capacity
 }

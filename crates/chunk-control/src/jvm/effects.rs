@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use chunk_proto::{
-    sync::v1 as sync,
-    v1::{ConfigurationResponse, DeliveryPhase, DeploymentRef, PlayerPreparation},
+    sync::v1::{self as sync, JvmDeliveryPhase},
+    v1::{ConfigurationResponse, DeploymentRef, PlayerPreparation},
 };
 use prost::Message;
 use tokio::{sync::watch, time::Instant};
@@ -202,7 +202,7 @@ impl Control {
         deployment: &DeploymentRef,
         runtime: &RuntimeConnection,
     ) -> Result<ConfigurationResponse> {
-        let host = &runtime.identity.runtime_id;
+        let host = &runtime.identity.host;
         let protocol = self.jvms.protocol(host).ok_or(Error::Unresolved("the JVM has not registered"))?;
         Ok(ConfigurationResponse {
             deployment: Some(deployment.clone()),
@@ -222,12 +222,12 @@ impl Control {
         operation: &str,
         generation: Generation,
     ) -> Result<PlayerPreparation> {
-        let host = &runtime.identity.runtime_id;
+        let host = &runtime.identity.host;
         let capability = self
             .reported(host, operation, generation, |reported, released| match reported {
                 _ if released => Some(Err(Error::Invalid("claim no longer reserved"))),
-                Some((DeliveryPhase::Prepared, capability)) => Some(Ok(capability)),
-                Some((DeliveryPhase::Closed, _)) => Some(Err(Error::Unresolved("the JVM closed the delivery"))),
+                Some((JvmDeliveryPhase::Prepared, capability)) => Some(Ok(capability)),
+                Some((JvmDeliveryPhase::Closed, _)) => Some(Err(Error::Unresolved("the JVM closed the delivery"))),
                 _ => None,
             })
             .await?;
@@ -240,7 +240,7 @@ impl Control {
     /// Reports a delivery the JVM did not close within 10 seconds.
     pub(crate) async fn withdrawn(&self, host: &str, operation: &str, generation: Generation) -> Result<()> {
         self.reported(host, operation, generation, |reported, released| {
-            (released || reported.is_some_and(|(phase, _)| phase == DeliveryPhase::Closed)).then_some(Ok(()))
+            (released || reported.is_some_and(|(phase, _)| phase == JvmDeliveryPhase::Closed)).then_some(Ok(()))
         })
         .await
     }
@@ -252,7 +252,7 @@ impl Control {
         host: &str,
         operation: &str,
         generation: Generation,
-        check: impl Fn(Option<(DeliveryPhase, Vec<u8>)>, bool) -> Option<Result<T>>,
+        check: impl Fn(Option<(JvmDeliveryPhase, Vec<u8>)>, bool) -> Option<Result<T>>,
     ) -> Result<T> {
         let mut reports = self.links.subscribe();
         let reported = async {

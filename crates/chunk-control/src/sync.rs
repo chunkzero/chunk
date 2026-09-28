@@ -5,39 +5,50 @@ mod links;
 
 use std::{collections::BTreeMap, time::Duration};
 
-use chunk_proto::{
-    sync::v1::JvmSession,
-    v1::{ProcessIdentity, ProcessReport, SessionPhase},
-};
+use chunk_proto::sync::v1::{JvmReport, JvmSession, JvmSessionPhase};
 
-use crate::{Control, Error, Result, RuntimeConnection, state::State};
+use crate::{Control, Error, JvmIdentity, Result, RuntimeConnection, state::State};
 pub(crate) use links::Links;
 
 impl Control {
-    /// Within a commit, accepts the JVM running `host` if `token` is its credential, applies its complete `report`
-    /// and replaces the host's link with a new stream. Returns the stream's ID.
-    pub(crate) fn attach_in(&self, state: &mut State, host: &str, token: &str, report: &ProcessReport) -> Result<u64> {
-        let runtime = self.registered(state, host, report.identity.as_ref())?;
+    /// Within a commit, accepts `identity`'s JVM running `host` if `token` is its credential, applies its complete
+    /// `report` and replaces the host's link with a new stream. Returns the stream's ID.
+    pub(crate) fn attach_in(
+        &self,
+        state: &mut State,
+        host: &str,
+        token: &str,
+        identity: &JvmIdentity,
+        report: &JvmReport,
+    ) -> Result<u64> {
+        let runtime = self.registered(state, host, identity)?;
         if runtime.token != token {
             return Err(Error::Invalid("invalid process credential"));
         }
-        apply(state, host, &runtime.identity, report)?;
+        apply(state, host, report)?;
         self.links.attach(host, runtime.identity, report)
     }
 
-    /// Within a commit, applies a later `report` from `stream`, which must still be `host`'s link.
-    pub(crate) fn merge_in(&self, state: &mut State, host: &str, stream: u64, report: &ProcessReport) -> Result<()> {
-        let runtime = self.registered(state, host, report.identity.as_ref())?;
-        apply(state, host, &runtime.identity, report)?;
-        self.links.merge(host, stream, report)
+    /// Within a commit, applies a later `report` of `identity`'s JVM from `stream`, which must still be `host`'s link.
+    pub(crate) fn merge_in(
+        &self,
+        state: &mut State,
+        host: &str,
+        stream: u64,
+        identity: &JvmIdentity,
+        report: &JvmReport,
+    ) -> Result<()> {
+        self.registered(state, host, identity)?;
+        apply(state, host, report)?;
+        self.links.merge(host, stream, identity, report)
     }
 
     /// The process currently registered for `host`, if `identity` names it.
-    fn registered(&self, state: &State, host: &str, identity: Option<&ProcessIdentity>) -> Result<RuntimeConnection> {
+    fn registered(&self, state: &State, host: &str, identity: &JvmIdentity) -> Result<RuntimeConnection> {
         let runtime = self
             .host
             .connection(host)
-            .filter(|runtime| Some(&runtime.identity) == identity && !state.released(host))
+            .filter(|runtime| runtime.identity == *identity && !state.released(host))
             .ok_or(Error::Invalid("unregistered or replaced process"))?;
         if let Some(expected) = state.hosts.get(host)
             && !crate::placement::runs_host(state, &runtime, expected)
@@ -63,7 +74,7 @@ impl Control {
                 return Ok(());
             };
             match self.links.delivery(&host, &runtime.identity, operation) {
-                Some(binding) => crate::delivery::apply(state, &host, &runtime.identity, &binding),
+                Some(status) => crate::delivery::apply(state, &host, &status),
                 None => Ok(()),
             }
         })
@@ -71,9 +82,9 @@ impl Control {
 
     /// Reapplies everything `identity` reported on `host`'s current stream. Reading the link inside the commit keeps
     /// it from overwriting a newer report.
-    pub(crate) fn reapply(&self, state: &mut State, host: &str, identity: &ProcessIdentity) -> Result<()> {
+    pub(crate) fn reapply(&self, state: &mut State, host: &str, identity: &JvmIdentity) -> Result<()> {
         match self.links.report(host, identity) {
-            Some(report) => apply(state, host, identity, &report),
+            Some(report) => apply(state, host, &report),
             None => Ok(()),
         }
     }
@@ -91,9 +102,9 @@ impl Control {
                     if !crate::sessions::matches(id, session, &observed) {
                         return Err(Error::Invalid("session inventory binding mismatch"));
                     }
-                    match SessionPhase::try_from(observed.phase) {
-                        Ok(SessionPhase::Ready) => return Ok(()),
-                        Ok(SessionPhase::Starting) => {}
+                    match observed.phase() {
+                        JvmSessionPhase::Ready => return Ok(()),
+                        JvmSessionPhase::Starting => {}
                         _ => return Err(Error::Unresolved("session is not ready")),
                     }
                 }
@@ -107,9 +118,9 @@ impl Control {
 }
 
 /// Records one report. Only a commit that also checks the report's stream, or reads the link, may call this.
-fn apply(state: &mut State, host: &str, identity: &ProcessIdentity, report: &ProcessReport) -> Result<()> {
-    for binding in &report.deliveries {
-        crate::delivery::apply(state, host, identity, binding)?;
+fn apply(state: &mut State, host: &str, report: &JvmReport) -> Result<()> {
+    for status in &report.deliveries {
+        crate::delivery::apply(state, host, status)?;
     }
     for observed in &report.sessions {
         crate::sessions::apply(state, host, observed);

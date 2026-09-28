@@ -7,15 +7,12 @@ use std::{
     time::Duration,
 };
 
-use chunk_proto::{
-    sync::v1 as sync,
-    v1::{NodePhase, NodeStatus, ProcessHealth},
-};
+use chunk_proto::sync::v1::{self as sync, NodePhase};
 use tokio::sync::watch;
 
 use super::{changed, entry};
 use crate::{
-    Control, Generation, Result,
+    Control, Generation, NodeStatus, Result,
     gateway::position,
     nodes::drain_deadline,
     state::{Phase, State},
@@ -108,7 +105,7 @@ impl Nodes {
 fn nodes(state: &State, statuses: Vec<NodeStatus>) -> BTreeMap<String, sync::Node> {
     let retiring = |phase: NodePhase| matches!(phase, NodePhase::Draining | NodePhase::Stopping);
     let hosts: BTreeSet<_> =
-        statuses.iter().filter(|status| retiring(status.phase())).map(|status| status.host_id.as_str()).collect();
+        statuses.iter().filter(|status| retiring(status.phase)).map(|status| status.host.as_str()).collect();
     let mut remaining = BTreeMap::<&str, u32>::new();
     if !hosts.is_empty() {
         for claim in state.claims.values().filter(|claim| claim.phase != Phase::Released) {
@@ -120,49 +117,20 @@ fn nodes(state: &State, statuses: Vec<NodeStatus>) -> BTreeMap<String, sync::Nod
     }
     let mut nodes = BTreeMap::new();
     for status in statuses {
-        let phase = status.phase();
+        let phase = status.phase;
         let draining = phase == NodePhase::Draining;
         let node = sync::Node {
-            drain_deadline_ms: draining.then(|| drain_deadline(state, &status.host_id)).flatten().unwrap_or_default(),
-            remaining_claims: remaining.get(status.host_id.as_str()).copied().filter(|_| retiring(phase)).unwrap_or(0),
+            drain_deadline_ms: draining.then(|| drain_deadline(state, &status.host)).flatten().unwrap_or_default(),
+            remaining_claims: remaining.get(status.host.as_str()).copied().filter(|_| retiring(phase)).unwrap_or(0),
             deployment: status.deployment,
-            app: status.app_id,
-            machine_profile: status.machine_profile,
-            phase: node_phase(phase).into(),
-            health: status.health.as_ref().map(health),
+            app: status.app,
+            machine_profile: status.profile,
+            phase: phase.into(),
+            health: status.health,
             observed_at_ms: status.observed_at_ms,
             consecutive_failures: status.consecutive_failures,
         };
-        nodes.insert(status.host_id, node);
+        nodes.insert(status.host, node);
     }
     nodes
-}
-
-fn node_phase(phase: NodePhase) -> sync::NodePhase {
-    match phase {
-        NodePhase::Unspecified => sync::NodePhase::Unspecified,
-        NodePhase::Starting => sync::NodePhase::Starting,
-        NodePhase::Online => sync::NodePhase::Online,
-        NodePhase::Unhealthy => sync::NodePhase::Unhealthy,
-        NodePhase::Unreachable => sync::NodePhase::Unreachable,
-        NodePhase::Draining => sync::NodePhase::Draining,
-        NodePhase::Stopping => sync::NodePhase::Stopping,
-        NodePhase::Stopped => sync::NodePhase::Stopped,
-    }
-}
-
-fn health(health: &ProcessHealth) -> sync::JvmHealth {
-    sync::JvmHealth {
-        ready: health.ready,
-        draining: health.draining,
-        tick_count: health.tick_count,
-        last_tick_age_millis: health.last_tick_age_millis,
-        heap_used_bytes: health.heap_used_bytes,
-        heap_max_bytes: health.heap_max_bytes,
-        gc_count: health.gc_count,
-        gc_time_millis: health.gc_time_millis,
-        process_cpu_load: health.process_cpu_load,
-        sessions: health.sessions,
-        players: health.players,
-    }
 }

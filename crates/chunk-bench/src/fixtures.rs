@@ -8,13 +8,13 @@ use std::{
 };
 
 use anyhow::Result;
-use chunk_control::{Control, Host, Progress, Release, RuntimeConnection, jvm::Topic};
+use chunk_control::{Control, Host, JvmIdentity, Progress, Registration, Release, RuntimeConnection, jvm::Topic};
 use chunk_proto::{
     sync::v1::{
         self as sync, JvmDelivery, JvmDeliveryPhase, JvmDeliveryStatus, JvmHealth, JvmRegistration, JvmReport,
         JvmSession, JvmSessionPhase, JvmSessionStatus,
     },
-    v1::{ClaimPhase, DeploymentRef, ProcessIdentity, ProcessRegistration},
+    v1::ClaimPhase,
 };
 use prost::Message;
 
@@ -23,15 +23,15 @@ const STREAM: &str = "synthetic";
 /// How often a synthetic JVM pushes its health.
 const HEALTH: Duration = Duration::from_secs(2);
 
-pub fn identity(id: &str) -> ProcessIdentity {
-    ProcessIdentity {
-        deployment: Some(DeploymentRef { environment: "bench".into(), deployment: "bench".into() }),
-        runtime_id: id.into(),
+pub fn identity(id: &str) -> JvmIdentity {
+    JvmIdentity {
+        host: id.into(),
         process_id: format!("jvm-{id}"),
         generation: 1,
-        machine_profile: "bench".into(),
+        deployment: "bench".into(),
+        app: "bench".into(),
+        profile: "bench".into(),
         artifact_digest: "bench".into(),
-        app_id: "bench".into(),
     }
 }
 
@@ -44,10 +44,10 @@ fn registration(id: &str) -> JvmRegistration {
     JvmRegistration {
         process_id: identity.process_id,
         generation: identity.generation,
-        app: identity.app_id,
-        profile: identity.machine_profile,
+        app: identity.app,
+        profile: identity.profile,
         artifact_digest: identity.artifact_digest,
-        deployment: "bench".into(),
+        deployment: identity.deployment,
         player_endpoint: "127.0.0.1:1".into(),
         protocol: 776,
     }
@@ -99,14 +99,13 @@ impl Host for SyntheticHost {
         })
     }
 
-    fn register(&self, token: &str, registration: ProcessRegistration) -> chunk_control::Result<ProcessIdentity> {
-        let registered = registration.identity.unwrap_or_default();
-        let id = registered.runtime_id.clone();
-        if token != format!("Bearer {}", credential(&id)) || registered != identity(&id) {
+    fn register(&self, token: &str, registration: Registration) -> chunk_control::Result<()> {
+        let id = registration.identity.host.clone();
+        if token != format!("Bearer {}", credential(&id)) || registration.identity != identity(&id) {
             return Err(chunk_control::Error::Invalid("unknown synthetic runtime"));
         }
         lock(&self.registered).insert(id);
-        Ok(registered)
+        Ok(())
     }
 
     async fn release(&self, id: &str) -> chunk_control::Result<bool> {
@@ -139,7 +138,7 @@ async fn follow(control: &Arc<Control>, id: &str) -> Result<()> {
             report.health = Some(JvmHealth { ready: true, tick_count: jvm.ticks, ..JvmHealth::default() });
         }
         if complete || !(report.sessions.is_empty() && report.deliveries.is_empty() && report.health.is_none()) {
-            control.report_jvm(id, &credential, STREAM, report)?;
+            control.report_jvm(id, &credential, STREAM, &report)?;
         }
         if stop {
             return Ok(());
