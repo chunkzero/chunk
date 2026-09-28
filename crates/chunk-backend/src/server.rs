@@ -67,7 +67,12 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             deployment,
         };
         if connection_path.exists() {
-            let old: BackendConnection = chunk_service::read(&connection_path)?;
+            // A record left by a crashed backend of another version may carry fields this one dropped.
+            #[derive(serde::Deserialize)]
+            struct Owner {
+                token: String,
+            }
+            let old: Owner = chunk_service::read(&connection_path)?;
             if old.token != token {
                 return Err(io::Error::other("connection file belongs to another backend"));
             }

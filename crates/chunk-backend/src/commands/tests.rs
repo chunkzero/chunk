@@ -268,3 +268,57 @@ async fn command_catalog_admission_charges_retained_scope_and_caller() {
     let required = crate::limits::REQUEST_OVERHEAD + bytes;
     assert!(charged >= required, "retained catalog charged {charged} bytes, but needs at least {required} bytes");
 }
+
+#[tokio::test]
+async fn command_suggestion_admission_charges_retained_scope_input_and_caller() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let request = CommandSuggestionRequest {
+        scope: Some(scope()),
+        command_id: COMMAND.into(),
+        query: "choices".into(),
+        input: "notify o".into(),
+        cursor: 8,
+    };
+    let bytes = scope_bytes(&scope())
+        + request.command_id.len()
+        + request.query.len()
+        + request.input.len()
+        + caller().as_str().len();
+    let charge = backend.charge_request(0).unwrap();
+    let mut suggestions = Box::pin(backend.command_suggestions(id(), charge, request, caller()));
+    crate::tests::pending(suggestions.as_mut()).await;
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + bytes;
+    assert!(charged >= required, "retained suggestion charged {charged} bytes, but needs at least {required} bytes");
+}
+
+#[tokio::test]
+async fn command_start_admission_charges_retained_call_scope_input_and_caller() {
+    let (backend, _incoming, memory) = Backend::held_ingress();
+    let action = crate::ActionId { incarnation: "test-incarnation".into(), sequence: 1 };
+    let input = "notify hello";
+    let call = Call {
+        deployment: id(),
+        function: COMMAND.into(),
+        arguments: json!({"input": input}).into(),
+        caller: caller(),
+    };
+    let bytes = action.incarnation.len() + call.bytes() + scope_bytes(&scope()) + input.len() + caller().as_str().len();
+    let request = CommandRequest::new(COMMAND, input, "alice");
+    let charge = backend.charge_request(0).unwrap();
+    let mut started = Box::pin(backend.start_command(
+        action,
+        charge,
+        GATEWAY,
+        request,
+        id(),
+        scope(),
+        COMMAND.into(),
+        input.into(),
+        caller(),
+    ));
+    crate::tests::pending(started.as_mut()).await;
+    let charged = crate::limits::REQUEST_BYTES - memory.available_permits();
+    let required = crate::limits::REQUEST_OVERHEAD + bytes;
+    assert!(charged >= required, "retained command charged {charged} bytes, but needs at least {required} bytes");
+}
