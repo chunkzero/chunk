@@ -44,6 +44,10 @@ export async function say(ctx, {arguments: {text}}) {
   const method = {app: 'bridge', session: 'default', name: 'status'};
   if (text === 'enter') {
     await ctx.platform({kind: 'enter', destination: {key: 'arena', session_type: 'bridge/default', machine_profile: 'small'}});
+  } else if (text === 'cutover') {
+    await ctx.platform({kind: 'enter', destination: {key: 'arena', session_type: 'bridge/default', machine_profile: 'small'}});
+    while ((await ctx.runQuery('get', null)) === 0) await ctx.sleep(20);
+    await ctx.platform({kind: 'message', text: 'followed'});
   } else if (text === 'status') {
     const status = await ctx.platform({kind: 'session_call', method, arguments: {limit: 1}});
     if (status !== 7) throw new Error(`unexpected status ${status}`);
@@ -74,9 +78,12 @@ export async function say(ctx, {arguments: {text}}) {
   }
   return null;
 }
+export function follow(ctx, input) { return say(ctx, input); }
 ";
 const LOGIN: &str = "shared/domains/hooks/login";
 const SAY: &str = "scopes/commands/say";
+/// `say`, as a command whose effects follow its player to other sessions.
+const FOLLOW: &str = "scopes/commands/follow";
 
 fn deployment() -> Deployment {
     let suggestion = serde_json::json!({
@@ -117,13 +124,22 @@ fn deployment() -> Deployment {
             },
         ),
     ];
+    let route = serde_json::json!(
+        {"literals": [], "arguments": [{"name": "text", "parser": "word", "suggestions": {"query": "choices"}}]}
+    );
     let domains = serde_json::json!({
         "version": 1, "scopes": {"": {"parent": null}}, "apps": {"bridge": ""},
         "hooks": {LOGIN: {"domain": "", "event": "player.login", "export": "login"}},
-        "commands": {SAY: {
-            "domain": "", "name": "say", "aliases": [], "export": "say", "permission": "permit", "follow_player": false,
-            "routes": [{"literals": [], "arguments": [{"name": "text", "parser": "word", "suggestions": {"query": "choices"}}]}]
-        }}
+        "commands": {
+            SAY: {
+                "domain": "", "name": "say", "aliases": [], "export": "say", "permission": "permit",
+                "follow_player": false, "routes": [route]
+            },
+            FOLLOW: {
+                "domain": "", "name": "follow", "aliases": [], "export": "follow", "permission": "permit",
+                "follow_player": true, "routes": [route]
+            }
+        }
     });
     Deployment {
         contracts: Contracts {
