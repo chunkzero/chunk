@@ -1,0 +1,31 @@
+[package]
+name = "chunk-jvm"
+description = "Runner that fetches a JVM's release from core, verifies it and supervises the JVM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunk-build = { path = "../chunk-build", default-features = false }
+chunk-proto = { path = "../chunk-proto" }
+chunk-service = { path = "../chunk-service" }
+prost = "0.14.3"
+rustix = { version = "1", features = ["process"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tonic = "0.14.6"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Tests publish real release archives, which needs the compiler; the runner itself never links it.
+chunk-build = { path = "../chunk-build" }
+tokio-stream = { version = "0.1", features = ["net"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+
+[lints]
+workspace = true

@@ -665,6 +665,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunk-jvm"
+version = "0.1.0"
+dependencies = [
+ "chunk-build",
+ "chunk-proto",
+ "chunk-service",
+ "prost",
+ "rustix 1.1.4",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "chunk-management"
 version = "0.1.0"
 dependencies = [
