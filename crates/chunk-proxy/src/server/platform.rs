@@ -1,4 +1,4 @@
-use std::{convert::Infallible, io, sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 
 use chunk_contract::DomainManifest;
 use chunk_proto::{
@@ -69,11 +69,9 @@ impl Platform {
         self.sync.claims(ready).await
     }
 
-    /// Resolves once another process under this gateway's ID replaced this one by following its claims. Starts
-    /// following them, as [`Self::claims`] does.
-    pub async fn replaced(&self) -> io::Error {
-        let Err(error) = self.claims(|_| None::<Infallible>).await;
-        error
+    /// A new ID for a player's connection to this process. The claims of connections it names are never inherited.
+    pub fn connection_id(&self) -> String {
+        self.sync.connection_id()
     }
 
     /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's

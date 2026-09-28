@@ -144,9 +144,9 @@ impl Proxy {
         self.platform.clone().map(Retarget)
     }
 
-    /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it first
-    /// withdraws the claims an earlier process under this gateway's ID left open, and accepts no connection until then.
-    /// It stops once a later process under that ID replaces it.
+    /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
+    /// claims other processes under this gateway's ID left open, and accepts no connection until those in its first
+    /// view of the gateway's claims are withdrawing or gone. It stops once a later process under that ID takes it over.
     ///
     /// # Errors
     /// Returns shutdown-signal errors and replacement by a later process. Accept errors are retried with backoff.
@@ -154,19 +154,20 @@ impl Proxy {
     pub async fn run(self, shutdown: impl Future<Output = io::Result<()>>) -> io::Result<()> {
         tokio::pin!(shutdown);
         let platform = self.retarget().as_ref().map(Retarget::platform);
-        let replaced = async {
+        let (ready, withdrawn) = tokio::sync::oneshot::channel();
+        let inherited = async {
             match &platform {
-                Some(platform) => platform.replaced().await,
+                Some(platform) => managed::withdraw_inherited(platform, ready).await,
                 None => std::future::pending().await,
             }
         };
-        tokio::pin!(replaced);
-        if let Some(platform) = &platform {
+        tokio::pin!(inherited);
+        if platform.is_some() {
             tokio::select! {
                 biased;
                 result = &mut shutdown => return result,
-                error = &mut replaced => return Err(error),
-                withdrawn = managed::withdraw_inherited(platform) => withdrawn?,
+                error = &mut inherited => return Err(error),
+                _ = withdrawn => {}
             }
         }
         let mut connections = JoinSet::new();
@@ -175,7 +176,7 @@ impl Proxy {
             tokio::select! {
                 biased;
                 result = &mut shutdown => break result,
-                error = &mut replaced => break Err(error),
+                error = &mut inherited => break Err(error),
                 Some(result) = connections.join_next(), if !connections.is_empty() => {
                     if let Err(error) = result {
                         tracing::error!(%error, "connection task failed");

@@ -15,7 +15,7 @@ async fn a_gateway_machine_authenticates_over_the_network_until_revoked() {
     let issuer = Issuer::new("test", None, &fixture.cli);
     let credential = issuer.machine(MachineKind::Gateway, "remote");
     let mut client = CoreClient::connect(fixture.network.clone()).await.unwrap();
-    let subscription = SubscribeRequest { topic: "gateway/remote".into(), ..SubscribeRequest::default() };
+    let subscription = gateway_topic("remote", "test");
     let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
     let first = next(&mut updates).await;
     assert!(first.error.is_none() && !first.stream.is_empty());

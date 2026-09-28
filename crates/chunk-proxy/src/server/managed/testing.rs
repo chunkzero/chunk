@@ -39,7 +39,7 @@ async fn arrived(
     let login = ClaimRequest {
         operation_id: uuid::Uuid::new_v4().to_string(),
         proxy_id: platform.proxy_id.clone(),
-        connection_id: uuid::Uuid::new_v4().to_string(),
+        connection_id: platform.connection_id(),
         identity: Some(Identity { uuid: uuid.into(), username: username.into(), properties: vec![] }),
         demand: Some(demand),
         ..ClaimRequest::default()

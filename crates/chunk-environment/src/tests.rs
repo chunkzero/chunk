@@ -1,8 +1,16 @@
 use super::*;
 use chunk_contract::ControlConnection;
-use chunk_proto::sync::v1::{CallRequest, JvmRegistration, SubscribeRequest, core_client::CoreClient};
+use chunk_proto::sync::v1::{
+    CallRequest, GatewayArguments, JvmRegistration, SubscribeRequest, core_client::CoreClient,
+};
 use prost::Message;
 use std::{net::SocketAddr, path::Path};
+
+/// A subscription to `gateway/<id>` as a gateway process.
+fn gateway_topic(id: &str) -> SubscribeRequest {
+    let arguments = GatewayArguments { instance: "test".into() }.encode_to_vec();
+    SubscribeRequest { topic: format!("gateway/{id}"), arguments, ..SubscribeRequest::default() }
+}
 
 /// A deployment whose `shared/proxy/status` hook answers with `motd`.
 fn bundle(id: &str, motd: &str) -> chunk_contract::Deployment {
@@ -178,7 +186,7 @@ async fn gateway_credentials_and_their_revocation_survive_a_restart() {
 
     let core = start().await.unwrap();
     let mut client = CoreClient::connect(format!("http://{}", core.network_address().unwrap())).await.unwrap();
-    let gateway = |id: &str| SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+    let gateway = |id: &str| gateway_topic(id);
     let mut updates = client.subscribe(authorized(gateway("active"), &active)).await.unwrap().into_inner();
     assert!(updates.message().await.unwrap().unwrap().error.is_none());
     let refused = client.subscribe(authorized(gateway("revoked"), &revoked)).await.unwrap_err();
@@ -209,7 +217,7 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
     // Core grants the credential its own gateway's topic only.
     let mut client = CoreClient::connect(format!("http://{}", core.network_address().unwrap())).await.unwrap();
     for (id, granted) in [("remote", true), ("other", false)] {
-        let topic = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+        let topic = gateway_topic(id);
         let mut updates = client.subscribe(authorized(topic, &credential)).await.unwrap().into_inner();
         let first = tokio::time::timeout(Duration::from_secs(30), updates.message()).await.unwrap();
         assert_eq!(first.unwrap().unwrap().error.is_none(), granted);

@@ -70,7 +70,7 @@ impl Gateway {
     /// Follows `gateway/<id>` as `credential`.
     pub(super) async fn follow_own(fixture: &Fixture, credential: String, id: &str) -> (Streaming<Update>, Self) {
         let mut client = fixture.client.clone();
-        let subscription = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+        let subscription = gateway_topic(id, "test");
         let mut updates = client.subscribe(authorized(subscription, &credential)).await.unwrap().into_inner();
         let stream = next(&mut updates).await.stream;
         (updates, Self { client, credential, stream })

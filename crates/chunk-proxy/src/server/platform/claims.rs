@@ -1,11 +1,15 @@
 //! This gateway's claims, as its `gateway/<id>` topic streams them.
 
-use std::{collections::BTreeMap, io, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    time::Duration,
+};
 
 use chunk_proto::{
     sync::v1::{
-        ClaimPhase, Cursor, GatewayClaim, Position, SubscribeRequest, Update, core_client::CoreClient, entry::State,
-        error::Code,
+        ClaimPhase, Cursor, GatewayArguments, GatewayClaim, Position, SubscribeRequest, Update,
+        core_client::CoreClient, entry::State, error::Code,
     },
     v1::ClaimIdentity,
 };
@@ -23,8 +27,10 @@ const REVISION_BITS: u32 = 40;
 /// The topic's state at the last update applied. Stale while `live` is false, until the next stream's first update.
 #[derive(Default)]
 pub(in crate::server) struct View {
+    /// This process's instance, which owns the topic and starts the connection IDs it names.
+    instance: String,
     live: bool,
-    /// Another process under this gateway's ID superseded the follower's stream, so it follows no more.
+    /// Another process under this gateway's ID took the topic over, so the follower follows no more.
     replaced: bool,
     /// The stream the last update came from, cleared whenever it ends, before the follower subscribes again.
     stream: String,
@@ -45,10 +51,16 @@ impl View {
         self.reached(identity.delivery_generation) && self.claim(identity).is_none()
     }
 
-    /// The operations of the open claims no withdrawal has reached.
-    pub fn unwithdrawn(&self) -> Vec<String> {
-        let open = self.claims.iter().filter(|(_, claim)| claim.phase() != ClaimPhase::Withdrawing);
-        open.map(|(operation, _)| operation.clone()).collect()
+    /// The operations of the open claims no withdrawal has reached that another process under this gateway's ID
+    /// created: their connection IDs aren't this process's. A move's claim keeps its source's connection ID, so
+    /// control's moves of this process's players are its own.
+    pub fn inherited(&self) -> BTreeSet<String> {
+        let prefix = connection_prefix(&self.instance);
+        let inherited = self
+            .claims
+            .iter()
+            .filter(|(_, claim)| claim.phase() != ClaimPhase::Withdrawing && !claim.connection_id.starts_with(&prefix));
+        inherited.map(|(operation, _)| operation.clone()).collect()
     }
 
     /// Whether the view is at or past `position`.
@@ -92,15 +104,29 @@ impl View {
     }
 }
 
+/// A new connection ID of process `instance`.
+pub(super) fn connection_id(instance: &str) -> String {
+    connection_prefix(instance) + &uuid::Uuid::new_v4().to_string()
+}
+
+fn connection_prefix(instance: &str) -> String {
+    format!("{instance}/")
+}
+
 /// `position` as the `uint64` generation control's legacy messages carry: the epoch above 40 revision bits.
 pub(in crate::server) fn generation(position: &Position) -> u64 {
     position.epoch << REVISION_BITS | position.revision
 }
 
-/// Follows `gateway`'s topic until the guard drops, or until another process under the gateway's ID supersedes it. A
-/// broken stream resumes after the last position applied, and a stream core stopped starts over from a snapshot.
-pub(super) fn follow(client: CoreClient<Channel>, gateway: GatewayCredential) -> (watch::Receiver<View>, DropGuard) {
-    let (view, receiver) = watch::channel(View::default());
+/// Follows `gateway`'s topic as process `instance` until the guard drops, or until another process under the gateway's
+/// ID takes the topic over. A broken stream resumes after the last position applied, and a stream core stopped starts
+/// over from a snapshot.
+pub(super) fn follow(
+    client: CoreClient<Channel>,
+    gateway: GatewayCredential,
+    instance: String,
+) -> (watch::Receiver<View>, DropGuard) {
+    let (view, receiver) = watch::channel(View { instance, ..View::default() });
     let stop = CancellationToken::new();
     let guard = stop.clone().drop_guard();
     tokio::spawn(async move {
@@ -131,8 +157,9 @@ async fn stream(
     view: &watch::Sender<View>,
 ) -> Option<Cursor> {
     let mut cursor = after.clone();
+    let arguments = GatewayArguments { instance: view.borrow().instance.clone() }.encode_to_vec();
     let subscription =
-        SubscribeRequest { topic: format!("gateway/{}", gateway.id), after, ..SubscribeRequest::default() };
+        SubscribeRequest { topic: format!("gateway/{}", gateway.id), arguments, after, ..SubscribeRequest::default() };
     let updates = match super::authorized(subscription, &gateway.credential) {
         Ok(request) => client.subscribe(request).await.map_err(io::Error::other),
         Err(error) => Err(error),
@@ -181,8 +208,8 @@ async fn stream(
     }
 }
 
-/// Waits for a live view in which `ready` returns a value. Fails once another process under this gateway's ID
-/// superseded the follower.
+/// Waits for a live view in which `ready` returns a value. Fails once another process under this gateway's ID took the
+/// topic over.
 pub(super) async fn wait<T>(
     mut view: watch::Receiver<View>,
     mut ready: impl FnMut(&View) -> Option<T>,

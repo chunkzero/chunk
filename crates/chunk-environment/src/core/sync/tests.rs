@@ -7,6 +7,7 @@ mod jvm_effects;
 mod jvm_methods;
 mod network;
 mod operator;
+mod ownership;
 mod runtime;
 mod shutdown;
 
@@ -325,6 +326,12 @@ fn revision(position: Option<&Position>) -> u64 {
     position.expect("a position").revision
 }
 
+/// A subscription to `gateway/<id>` as gateway process `instance`.
+fn gateway_topic(id: &str, instance: &str) -> SubscribeRequest {
+    let arguments = chunk_proto::sync::v1::GatewayArguments { instance: instance.into() }.encode_to_vec();
+    SubscribeRequest { topic: format!("gateway/{id}"), arguments, ..SubscribeRequest::default() }
+}
+
 async fn next(updates: &mut Streaming<Update>) -> Update {
     let update = tokio::time::timeout(Duration::from_secs(10), updates.message()).await.unwrap().unwrap();
     update.expect("an update")
@@ -550,44 +557,6 @@ async fn a_player_stream_ends_once_the_player_moves_to_another_session() {
     drop(updates);
     fixture.stop().await;
     jvm.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_newer_gateway_stream_resumes_and_supersedes_the_older_one() {
-    let mut fixture = Fixture::start().await;
-    let gateway = fixture.gateway.clone();
-    let subscription = SubscribeRequest { topic: "gateway/proxy".into(), ..SubscribeRequest::default() };
-    let foreign = SubscribeRequest { topic: "gateway/other".into(), ..SubscribeRequest::default() };
-    let mut denied = fixture.client.subscribe(authorized(foreign, &gateway)).await.unwrap().into_inner();
-    assert_eq!(next(&mut denied).await.error.map(|error| error.code()), Some(Code::Denied));
-
-    let mut first = fixture.client.subscribe(authorized(subscription.clone(), &gateway)).await.unwrap().into_inner();
-    let snapshot = next(&mut first).await;
-    assert!(snapshot.snapshot && !snapshot.stream.is_empty());
-    let after = Cursor { stream: snapshot.stream.clone(), position: snapshot.position };
-    let resumed = SubscribeRequest { after: Some(after), ..subscription };
-    let mut second = fixture.client.subscribe(authorized(resumed, &gateway)).await.unwrap().into_inner();
-    let update = next(&mut second).await;
-    assert!(!update.snapshot && update.error.is_none());
-    assert!(!update.stream.is_empty() && update.stream != snapshot.stream);
-
-    let mut last = next(&mut first).await;
-    while last.error.is_none() {
-        last = next(&mut first).await;
-    }
-    assert_eq!(last.error.map(|error| error.code()), Some(Code::Superseded));
-    assert!(first.message().await.unwrap().is_none());
-    let after = Cursor { stream: snapshot.stream.clone(), position: snapshot.position };
-    let stale = SubscribeRequest { topic: "gateway/proxy".into(), after: Some(after), ..SubscribeRequest::default() };
-    let mut stale = fixture.client.subscribe(authorized(stale, &gateway)).await.unwrap().into_inner();
-    assert_eq!(next(&mut stale).await.error.map(|error| error.code()), Some(Code::Superseded));
-    assert_eq!(code(&fixture.call_on(&gateway, &snapshot.stream).await), Code::Stopped);
-    let current = fixture.call_on(&gateway, &update.stream).await;
-    assert_eq!(current.outcome, Some(Outcome::Result(b"0".to_vec())));
-    let cli = fixture.cli.clone();
-    assert_eq!(code(&fixture.call_on(&cli, &update.stream).await), Code::Stopped);
-    drop((first, second));
-    fixture.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

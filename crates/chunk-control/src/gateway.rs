@@ -53,6 +53,8 @@ pub(crate) struct View {
 pub(crate) struct Watched {
     pub generation: Generation,
     pub phase: Phase,
+    /// The connection its login named, which its moves keep.
+    pub connection_id: String,
     /// The destination of the move pending from this arrived claim.
     pub pending_move: Option<ClaimRequest>,
 }
@@ -92,11 +94,13 @@ impl View {
 
     fn snapshot(&mut self, state: &State) -> Result<Delta> {
         let moves = pending_moves(state)?;
-        self.sent = state
-            .claims
-            .keys()
-            .filter_map(|operation| Some((operation.clone(), watched(state, &moves, operation, &self.gateway)?)))
-            .collect();
+        let mut sent = BTreeMap::new();
+        for operation in state.claims.keys() {
+            if let Some(claim) = watched(state, &moves, operation, &self.gateway)? {
+                sent.insert(operation.clone(), claim);
+            }
+        }
+        self.sent = sent;
         self.position = state.position();
         let upserts = self.sent.iter().map(|(operation, claim)| (operation.clone(), claim.clone())).collect();
         Ok(Delta { position: self.position, snapshot: true, upserts, removed: Vec::new() })
@@ -111,7 +115,7 @@ impl View {
         self.position = state.position();
         let mut delta = Delta { position: self.position, snapshot: false, upserts: Vec::new(), removed: Vec::new() };
         for operation in touched {
-            match watched(state, &moves, operation, &self.gateway) {
+            match watched(state, &moves, operation, &self.gateway)? {
                 Some(claim) if self.sent.get(operation) != Some(&claim) => {
                     delta.upserts.push((operation.clone(), claim.clone()));
                     self.sent.insert(operation.clone(), claim);
@@ -133,6 +137,7 @@ impl Delta {
             let value = sync::GatewayClaim {
                 generation: position(claim.generation),
                 phase: phase(claim.phase).into(),
+                connection_id: claim.connection_id,
                 pending_move: claim.pending_move.map(|destination| sync::GatewayMove {
                     operation_id: destination.operation_id,
                     destination: destination.demand.map(|demand| sync::SessionDemand {
@@ -170,9 +175,22 @@ pub(crate) fn phase(phase: Phase) -> sync::ClaimPhase {
     }
 }
 
-fn watched(state: &State, moves: &BTreeMap<String, ClaimRequest>, operation: &str, gateway: &str) -> Option<Watched> {
-    let claim = state.claims.get(operation).filter(|claim| claim.proxy == gateway && claim.phase != Phase::Released)?;
-    Some(Watched { generation: claim.generation, phase: claim.phase, pending_move: moves.get(operation).cloned() })
+fn watched(
+    state: &State,
+    moves: &BTreeMap<String, ClaimRequest>,
+    operation: &str,
+    gateway: &str,
+) -> Result<Option<Watched>> {
+    let claim = state.claims.get(operation).filter(|claim| claim.proxy == gateway && claim.phase != Phase::Released);
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    Ok(Some(Watched {
+        generation: claim.generation,
+        phase: claim.phase,
+        connection_id: ClaimRequest::decode(claim.request.as_slice())?.connection_id,
+        pending_move: moves.get(operation).cloned(),
+    }))
 }
 
 /// The destination of each arrived claim's pending move, by source operation.
