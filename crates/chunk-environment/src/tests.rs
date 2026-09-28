@@ -1,8 +1,8 @@
 use super::*;
 use chunk_contract::{BackendConnection, ControlConnection};
 use chunk_proto::{
-    sync::v1::{CallRequest, JvmRegistration, core_client::CoreClient},
-    v1::{WatchRequest, backend_client::BackendClient, local_control_client::LocalControlClient},
+    sync::v1::{CallRequest, JvmRegistration, SubscribeRequest, core_client::CoreClient},
+    v1::backend_client::BackendClient,
 };
 use prost::Message;
 use std::{collections::BTreeMap, net::SocketAddr, path::Path};
@@ -91,10 +91,12 @@ async fn all_in_one_serves_backend_and_control_until_stopped() {
     request.metadata_mut().insert("x-chunk-deployment", "test".parse().unwrap());
     BackendClient::connect(backend.endpoint).await.unwrap().check_deployment(request).await.unwrap();
     let control: ControlConnection = chunk_service::read(&control_record).unwrap();
-    let mut client = LocalControlClient::connect(control.endpoint).await.unwrap();
-    let watch = client.watch(authorized(WatchRequest { proxy_id: "test".into() }, &control.token));
-    let snapshot = watch.await.unwrap().into_inner().message().await.unwrap().unwrap();
-    assert!(snapshot.snapshot);
+    let mut client = CoreClient::connect(control.endpoint).await.unwrap();
+    let nodes = SubscribeRequest { topic: "nodes".into(), ..SubscribeRequest::default() };
+    let mut updates = client.subscribe(authorized(nodes, &control.token)).await.unwrap().into_inner();
+    let snapshot = updates.message().await.unwrap().unwrap();
+    assert!(snapshot.snapshot && snapshot.error.is_none());
+    drop(updates);
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
     assert!(!backend_record.exists());

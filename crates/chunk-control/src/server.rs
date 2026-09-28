@@ -1,14 +1,18 @@
 //! Embeddable control server with explicit host ownership.
-use crate::{Control, ControlConnection, Host, Operations, Service};
-use chunk_proto::v1::local_control_server::LocalControlServer;
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use crate::{Control, ControlConnection, Host, Operations};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tokio_util::sync::CancellationToken;
 
-/// Builds services served beside control's own on its listener, from control, its credential, a token cancelled when
-/// the transport begins shutting down, after hosts have stopped, which must end their open streams, and control's
-/// accepted operations, which it awaits before it stops hosts.
+/// Builds the services control serves on its listener, from control, its credential, a token cancelled when the
+/// transport begins shutting down, after hosts have stopped, which must end their open streams, and control's accepted
+/// operations, which it awaits before it stops hosts.
 pub type Services =
     Box<dyn FnOnce(&Arc<Control>, &str, CancellationToken, Operations) -> tonic::service::Routes + Send>;
 
@@ -47,14 +51,14 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     let services = config.services;
     let (control, token) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         std::fs::create_dir_all(&config.state)?;
-        let token = chunk_service::secret(&config.state.join("token"))?;
+        let token = credential(&config.state.join("token"))?;
         let control =
             Control::open(config.system, config.control, config.host, config.fresh).map_err(io::Error::other)?;
         Ok((control, token))
     })
     .await
     .map_err(io::Error::other)??;
-    let service = Service::new(control.clone(), token.clone()).map_err(io::Error::other)?;
+    let operations = Operations::default();
     let executor = CancellationToken::new();
     let capacity = tokio::spawn({
         let (control, executor) = (control.clone(), executor.clone());
@@ -75,16 +79,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         }
         let _record = chunk_service::Record::publish(&path, &connection)?;
         let routes = services.map_or_else(tonic::service::Routes::default, |services| {
-            services(&control, &connection.token, transport.clone(), service.operations())
+            services(&control, &connection.token, transport.clone(), operations.clone())
         });
         let _ = ready.send(Ready { connection, control: control.clone() });
-        let shutdown = {
-            let (transport, service) = (transport.clone(), service.clone());
-            async move {
-                transport.cancelled().await;
-                service.close_watches();
-            }
-        };
         let connections = chunk_service::Connections::default();
         let incoming = TcpListenerStream::new(listener).map(|stream| {
             let stream = stream?;
@@ -93,12 +90,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         });
         let server = tonic::transport::Server::builder()
             .add_routes(routes)
-            .add_service(
-                LocalControlServer::new(service.clone())
-                    .max_decoding_message_size(65_536)
-                    .max_encoding_message_size(8 * 1024 * 1024),
-            )
-            .serve_with_incoming_shutdown(incoming, shutdown);
+            .serve_with_incoming_shutdown(incoming, transport.clone().cancelled_owned());
         tokio::pin!(server);
         let reconcile = reconcile(&control, &stop);
         tokio::pin!(reconcile);
@@ -126,10 +118,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         closing.cancel();
         result
     };
-    let stopping = stop_hosts(&control, &service, capacity, &executor, &closing, &transport);
+    let stopping = stop_hosts(&control, &operations, capacity, &executor, &closing, &transport);
     let (result, stopped) = tokio::join!(serving, stopping);
-    // Every exit closes open watches, so none keeps this authority's scope after `run` returns.
-    service.close_watches();
     result.and(stopped).and(control.close().map_err(io::Error::other))
 }
 
@@ -137,18 +127,15 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
 /// then every host, and only then cancels `transport`.
 async fn stop_hosts(
     control: &Control,
-    service: &Service,
+    operations: &Operations,
     capacity: tokio::task::JoinHandle<()>,
     executor: &CancellationToken,
     closing: &CancellationToken,
     transport: &CancellationToken,
 ) -> io::Result<()> {
     closing.cancelled().await;
-    service.close_watches();
-    service.close_methods();
-    // Otherwise new operations, over either transport, could keep the tracker from ever emptying.
+    // Otherwise new operations could keep the tracker from ever emptying.
     control.stop_admitting();
-    let operations = service.operations();
     operations.close();
     operations.wait().await;
     // Accepted operations may wait on capacity, so the executor stops after them and before hosts stop.
@@ -184,4 +171,13 @@ pub(super) async fn monitor_health(control: &Arc<Control>, stop: &CancellationTo
             tracing::warn!(%error, "node health poll failed");
         }
     }
+}
+
+/// Loads control's credential, refusing a persisted one too short to be a secret.
+pub(crate) fn credential(path: &Path) -> io::Result<String> {
+    let token = chunk_service::secret(path)?;
+    if token.len() < 32 {
+        return Err(io::Error::other("control credential too short"));
+    }
+    Ok(token)
 }

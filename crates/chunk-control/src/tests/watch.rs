@@ -1,6 +1,5 @@
 use super::*;
 use chunk_proto::v1::MovePlayerRequest;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn queued_moves_reach_the_watching_proxy_without_polling() {
@@ -11,13 +10,11 @@ async fn queued_moves_reach_the_watching_proxy_without_polling() {
     let first = control.claim(source.clone()).await.unwrap();
     fixture.arrive(&control, "source").await;
     control.activate(ActivateClaim { claim: first.claim.clone() }).await.unwrap();
-    let (sender, mut updates) = tokio::sync::mpsc::channel(1);
-    let proxy = control.clone();
-    let stream = tokio::spawn(async move { proxy.watch("proxy-1".into(), sender, CancellationToken::new()).await });
-    let snapshot = updates.recv().await.unwrap().unwrap();
-    let [initial] = snapshot.claims.try_into().unwrap();
-    assert!(snapshot.snapshot && initial.claim == first.claim && initial.pending_move.is_none());
-    assert_eq!(initial.phase, ClaimPhase::Arrived as i32);
+    let mut positions = control.subscribe();
+    let (mut view, snapshot) = View::open(&control, "proxy-1", None).unwrap();
+    let [(operation, initial)] = &snapshot.upserts[..] else { panic!("expected one claim") };
+    assert!(snapshot.snapshot && operation == "source" && initial.pending_move.is_none());
+    assert!(initial.phase == Phase::Arrived && initial.generation.wire() == first.claim.unwrap().delivery_generation);
 
     let destination = control
         .move_player(MovePlayerRequest {
@@ -28,10 +25,9 @@ async fn queued_moves_reach_the_watching_proxy_without_polling() {
             demand: Some(SessionDemand { key: "arena".into(), ..source.demand.clone().unwrap() }),
         })
         .unwrap();
-    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv()).await.unwrap().unwrap().unwrap();
-    let [moved] = update.claims.try_into().unwrap();
-    assert!(!update.snapshot && moved.claim == first.claim);
+    let update = changed(&control, &mut view, &mut positions).await;
+    let [(operation, moved)] = &update.upserts[..] else { panic!("expected one claim") };
+    assert!(!update.snapshot && operation == "source");
     assert_eq!(moved.pending_move, Some(destination));
-    stream.abort();
     fixture.close().await;
 }

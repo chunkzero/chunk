@@ -1,10 +1,15 @@
 //! The operator's topics and methods over the sync protocol.
 
-use super::{runtime::with_jvm, *};
+use super::{
+    claims::{arrival, login},
+    runtime::with_jvm,
+    *,
+};
 use chunk_proto::{
     sync::v1::{
-        ClaimPhase, DrainArguments, DrainResult, JvmHealth, MovePlayerArguments, MovePlayerResult, Node, NodePhase,
-        OperatorPlayer, SessionDemand, drain_arguments::Target,
+        ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DrainArguments, DrainResult, GatewayClaim, JvmHealth,
+        MovePlayerArguments, MovePlayerResult, Node, NodePhase, OperatorPlayer, SessionDemand, WithdrawResult,
+        claim_result, drain_arguments::Target,
     },
     v1::{AbandonMoveRequest, ActivateClaim, ClaimPhase as ControlPhase},
 };
@@ -196,6 +201,36 @@ async fn players_follow_claims_and_moves_under_operation_ids_bound_to_the_move()
     control.cancel(current).await.unwrap();
     while !next(&mut players).await.removed.iter().any(|key| key == runtime::PLAYER) {}
     drop(players);
+    fixture.stop().await;
+    jvm.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_carries_out_an_operator_move_but_logs_in_under_no_operator_id() {
+    let (mut fixture, jvm) = with_jvm().await;
+    let (gateway, cli) = (fixture.gateway.clone(), fixture.cli.clone());
+    let (mut updates, first) = fixture.follow(&gateway, "proxy").await;
+    let stream = first.stream.as_str();
+    let reserved = fixture.platform(&gateway, stream, "operator:login", "chunk:claim", &login("connection")).await;
+    assert_eq!(code(&reserved), Code::Invalid);
+    fixture.platform(&gateway, stream, "login", "chunk:claim", &login("connection")).await;
+    fixture.platform(&gateway, stream, "login", "chunk:activate", &()).await;
+    arrival(&mut updates, "login").await;
+
+    // The operator moves the player, and the gateway sees the move pending from the player's claim.
+    let moved = fixture.operate(&cli, "operator:move", "chunk:move_player", &move_to("arena")).await;
+    assert_eq!(result::<MovePlayerResult>(&moved), MovePlayerResult {});
+    let (_, source) = until(&mut updates, "login", |claim: &GatewayClaim| claim.pending_move.is_some()).await;
+    assert_eq!(source.pending_move.map(|pending| pending.operation_id).as_deref(), Some("operator:move"));
+    // The gateway claims the destination under the move's operation ID, releases the source, then activates it.
+    let claimed = fixture.platform(&gateway, stream, "operator:move", "chunk:claim", &ClaimArguments::default()).await;
+    assert!(matches!(result::<ClaimResult>(&claimed).outcome, Some(claim_result::Outcome::Assignment(_))));
+    let withdrawn = fixture.platform(&gateway, stream, "login", "chunk:withdraw", &()).await;
+    assert!(!result::<WithdrawResult>(&withdrawn).unknown);
+    let activated = fixture.platform(&gateway, stream, "operator:move", "chunk:activate", &()).await;
+    assert!(!result::<ActivateResult>(&activated).waiting);
+    arrival(&mut updates, "operator:move").await;
+    drop(updates);
     fixture.stop().await;
     jvm.abort();
 }

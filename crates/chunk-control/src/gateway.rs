@@ -47,7 +47,6 @@ pub(crate) struct View {
 /// An open claim as its gateway sees it.
 #[derive(Clone, PartialEq)]
 pub(crate) struct Watched {
-    pub membership: Generation,
     pub generation: Generation,
     pub phase: Phase,
     /// The destination of the move pending from this arrived claim.
@@ -125,10 +124,6 @@ impl View {
 }
 
 impl Delta {
-    pub fn is_empty(&self) -> bool {
-        !self.snapshot && self.upserts.is_empty() && self.removed.is_empty()
-    }
-
     fn update(self) -> sync::Update {
         let upserts = self.upserts.into_iter().map(|(operation, claim)| {
             let value = sync::GatewayClaim {
@@ -173,12 +168,7 @@ pub(crate) fn phase(phase: Phase) -> sync::ClaimPhase {
 
 fn watched(state: &State, moves: &BTreeMap<String, ClaimRequest>, operation: &str, gateway: &str) -> Option<Watched> {
     let claim = state.claims.get(operation).filter(|claim| claim.proxy == gateway && claim.phase != Phase::Released)?;
-    Some(Watched {
-        membership: claim.membership,
-        generation: claim.generation,
-        phase: claim.phase,
-        pending_move: moves.get(operation).cloned(),
-    })
+    Some(Watched { generation: claim.generation, phase: claim.phase, pending_move: moves.get(operation).cloned() })
 }
 
 /// The destination of each arrived claim's pending move, by source operation.

@@ -150,8 +150,8 @@ the separate `feat/self-hosted-dashboard-assets` branch and is not part of this 
 
 ## Transport status
 
-`proto/chunk/v1` and `proto/chunk/sync/v1` generate matching Rust and Java bindings. `Backend` and `LocalControl` have
-implementations, and each JVM reaches core over the sync protocol's `Core` service: it registers, follows its
+`proto/chunk/v1` and `proto/chunk/sync/v1` generate matching Rust and Java bindings. `Backend` has an implementation.
+Gateways, the `chunk` CLI and each JVM reach core over the sync protocol's `Core` service; a JVM registers, follows its
 `jvm/<host>` topic and reports back. These internal RPCs cover backend calls/watches, placement, process/session
 lifecycle, delivery preparation and player operations. Application code uses session and typed backend APIs instead of
 issuing provisioning commands directly.

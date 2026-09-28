@@ -11,22 +11,22 @@ factories locally and enforces the supplied capacity. Future container/machine p
 boundary.
 
 The private `.chunk/local/control.json` connection file carries control's credential, which the `chunk` CLI presents to
-core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. `Claim` accepts
-authenticated identity, proxy incarnation, connection identity and a session demand key/type/profile. It reserves
-capacity, starts an app JVM if needed, waits for session readiness, and returns configuration plus a single-use TCP
-capability. The proxy records admission intent with `Activate` and opens the native Minecraft connection using the
-capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before releasing the reservation. Runtime
-credentials remain inside control.
+core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. A gateway's
+`chunk:claim` accepts authenticated identity, proxy incarnation, connection identity and a session demand
+key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and returns
+configuration plus a single-use TCP capability. The gateway records admission intent with `chunk:activate` and opens the
+native Minecraft connection using the capability; `chunk:withdraw` withdraws the claim before releasing the reservation.
+Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
 profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
 of the commit that created it: the system lane hands control that commit's revision before control computes its writes,
 even when app commits share the log. Its membership generation is that of the login it continues. Generations compare as
-pairs, because a restore starts a new epoch and may reuse revisions. The current wire contract carries a pair as one
-`uint64`, the epoch above 40 revision bits. The session and process have their own incarnations. Duplicate login is
-rejected while an earlier owner remains unresolved. An old cancellation cannot release a newer connection. Unactivated
-reservations expire after 60 seconds; active membership never expires solely because a control channel becomes
-unavailable.
+pairs, because a restore starts a new epoch and may reuse revisions. The sync protocol carries a pair as a `Position`;
+the persisted `chunk.v1` claim messages pack it into one `uint64`, the epoch above 40 revision bits. The session and
+process have their own incarnations. Duplicate login is rejected while an earlier owner remains unresolved. An old
+cancellation cannot release a newer connection. Unactivated reservations expire after 60 seconds; active membership
+never expires solely because a control channel becomes unavailable.
 
 Control keeps its state as system tables (`chunk_releases`, `chunk_hosts`, `chunk_sessions`, `chunk_players`,
 `chunk_claims`, `chunk_moves`, `chunk_drains`, `chunk_rosters` and the `chunk_control` rows) in the environment
@@ -55,8 +55,8 @@ changes after a log position, and `Control::subscribe` announces new positions.
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
 any member's claim ending, or `Control::cancel_roster`, fails every member's move. Session capacity is the only hard
-limit. Until the group is complete, activation fails with `UNAVAILABLE` "roster awaiting members", which gateways retry
-within their connection timeout.
+limit. Until the group is complete, `chunk:activate` reports that it is waiting, and gateways retry it within their
+connection timeout.
 
 The operator's `nodes` topic reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped
 states, including the last observed JVM health metrics and observation timestamp. Health is polled every five seconds;
@@ -89,8 +89,8 @@ worlds are replayed. State from the previous shared-classpath runtime is incompa
 
 Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
 sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
-operations are in flight; beyond that, new work fails as busy (`UNAVAILABLE`, "control busy") and should be retried.
-These conservative limits are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted
+operations are in flight; beyond that, new work fails as `OVERLOADED` ("control busy") and should be retried. These
+conservative limits are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted
 providers, deployment rollout and directory replication remain outside this local implementation.
 
 Focused tests: `cargo test -p chunk-control`.
@@ -99,13 +99,14 @@ Focused tests: `cargo test -p chunk-control`.
 
 `capture_session` accepts an exact arrived `ClaimIdentity`. `prepare_session_method` checks control's pinned optional
 `session_methods` contract and freezes the target, arguments, deadline and a new operation ID. `call_session_method`
-sends or polls that prepared operation through the authenticated process endpoint. These are trusted Rust APIs; an
-authored TypeScript method reference supplies no player authority.
+puts that prepared operation on the JVM's `jvm/<host>` topic as a `method/<op>` entry, which stays until the JVM reports
+its result with `chunk:method_result`. These are trusted Rust APIs; an authored TypeScript method reference supplies no
+player authority.
 
 The operation sequence is allocated durably by control. Retries must reuse the same `PreparedSessionMethod`; preparing
-again creates a new operation. The JVM caches exact requests/results for up to five minutes, subject to 4096 records and
-a 16 MiB aggregate budget. A monotonic retirement floor prevents evicted operation IDs from running again; late
-out-of-order operations below the floor conservatively return unknown. Process identity and generation fence restarts.
+again creates a new operation. Control keeps a result for five minutes for retries, and holds at most 256 methods and 8
+MiB for one JVM, pending or answered; a pending method reserves room for its result. Control remembers up to 65,536
+retired operations per JVM, so a retired operation ID doesn't run again. Process identity and generation fence restarts.
 
 Arguments and results each have a 48 KiB UTF-8 JSON limit. The existing wire rules bound nesting to 32 levels, require
 finite numbers and limit integral values to ±9,007,199,254,740,991. Deadlines range from 1 ms to 30 seconds. At most 128
@@ -126,18 +127,9 @@ deadline then returns unknown, and a later poll may retrieve the completed resul
 rollback. These calls are transient gameplay effects. A durable job integration will need a persisted invocation record
 and recovery for outcomes that remain unknown; the current prepared-operation API is in memory.
 
-The authenticated `LocalControl` proxy credential can prepare a captured method and receive an opaque handle before any
-gameplay executes. `StartPreparedMethod` starts that retained handle once; `PollPreparedMethod` observes it and
-`CancelPreparedMethod` cancels its exact token. JVM registration and application/backend credentials cannot use these
-RPCs. The authored app, unqualified session and method must match the captured live target and pinned declaration.
-`chunk dev` projects these declarations from the published, content-addressed backend contract into control config.
-
-Prepared handles are local to one control service lifetime. Losing a prepare reply is safe because preparation never
-executes; an unknown, expired or evicted handle cannot be recreated by starting or polling it. Up to 128 pending
-handles, 4096 completed records and 16 MiB of serialized requests/schemas/results are retained. Admission reserves space
-for each pending result. Results expire after five minutes or earlier under capacity pressure. Service shutdown cancels
-method tokens before awaiting tracked tasks. Accepted means the control task was queued; it does not promise gameplay
-has started. Unstarted cancellation is definitive; started cancellation reports unknown until its outcome is resolved.
+Core prepares the methods an app command calls on the session the command started in. The pinned declaration must name
+the method for that session's app and session. `chunk dev` projects these declarations from the published,
+content-addressed backend contract into control config.
 
 Proxy-initiated moves also provide the expected source claim and public connection ID together. Control checks both
 against the exact current arrived owner in the same durable update that accepts or returns the move. Trusted
