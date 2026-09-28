@@ -154,7 +154,7 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
         checks = checks => checks,
     };
     let stopping = tokio::time::Instant::now();
-    core.stop(|| {}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), core.stop(|| {})).await.expect("core stops").unwrap();
     let stopped = stopping.elapsed();
     let exit = tokio::time::timeout(Duration::from_secs(30), exit.wait_with_output()).await.unwrap().unwrap();
     assert_eq!(String::from_utf8_lossy(&exit.stdout).trim(), "0", "the runner exits cleanly");
