@@ -77,6 +77,8 @@ struct Script {
     extra: usize,
     /// The digest core declares instead of the archive's.
     sha256: Option<String>,
+    /// Archive reads are never answered.
+    stall: bool,
 }
 
 struct FakeCore {
@@ -136,6 +138,9 @@ impl core_server::Core for Served {
             }
             "chunk:archive" => {
                 core.reads.fetch_add(1, Ordering::SeqCst);
+                if core.script.stall {
+                    std::future::pending::<()>().await;
+                }
                 let read = JvmArchiveRead::decode(request.arguments.as_slice()).unwrap();
                 let mut archive = RELEASE.0.clone();
                 archive.resize(archive.len() + core.script.extra, 0);
@@ -199,6 +204,11 @@ impl Machine {
 
     /// Runs the runner against a fake core following `script`, returning its exit code and the core.
     async fn run(&self, script: Script) -> (Result<i32, u8>, Arc<FakeCore>) {
+        self.run_within(script, Duration::from_secs(10)).await
+    }
+
+    /// Like `run`, retrying calls to core for up to `retry`.
+    async fn run_within(&self, script: Script, retry: Duration) -> (Result<i32, u8>, Arc<FakeCore>) {
         let core = Arc::new(FakeCore { script, launches: AtomicUsize::new(0), reads: AtomicUsize::new(0) });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -206,7 +216,8 @@ impl Machine {
             tonic::transport::Server::builder().add_service(core_server::CoreServer::new(Served(core.clone())));
         let handle = tokio::spawn(server.serve_with_incoming(TcpListenerStream::new(listener)));
         let (_sender, signals) = mpsc::unbounded_channel();
-        let exit = super::run(self.config(&endpoint), signals).await.map_err(|failure| failure.code);
+        let exit =
+            super::run(Config { retry, ..self.config(&endpoint) }, signals).await.map_err(|failure| failure.code);
         handle.abort();
         (exit, core)
     }
@@ -301,6 +312,14 @@ async fn a_core_that_stays_unavailable_exhausts_the_retries() {
     let config = Config { retry: Duration::from_millis(500), ..machine.config(&endpoint) };
     let (_sender, signals) = mpsc::unbounded_channel();
     assert_eq!(super::run(config, signals).await.unwrap_err().code, 69);
+}
+
+#[tokio::test]
+async fn a_core_that_never_answers_exhausts_the_retries() {
+    let machine = Machine::new();
+    let (exit, core) =
+        machine.run_within(Script { stall: true, ..Script::default() }, Duration::from_millis(500)).await;
+    assert_eq!((exit, core.reads.load(Ordering::SeqCst)), (Err(69), 1));
 }
 
 #[tokio::test]

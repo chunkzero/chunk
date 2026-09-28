@@ -37,7 +37,7 @@ memory, less 200 MiB and a tenth of that memory for everything outside the heap.
 | Java's code | The JVM's own exit code, or 128 plus the signal that ended it (137 after the grace's SIGKILL)         |
 | 64          | Bad environment, or too little memory for a heap                                                      |
 | 65          | The archive, the cached release or the app JAR failed verification                                    |
-| 69          | Core stayed unreachable for 2 minutes, or failed the request                                          |
+| 69          | Core stayed unreachable or silent for 2 minutes, or failed the request                                |
 | 74          | A local I/O error, such as an unwritable cache                                                        |
 | 77          | Core rejected the credential or refused the boot; permanent, so don't restart                         |
 | 78          | The image's Java is older than the release's, or can't be run                                         |

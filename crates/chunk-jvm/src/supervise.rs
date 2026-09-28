@@ -15,7 +15,7 @@ use tokio::{
 
 /// Starts `command` and returns its exit code, or 128 plus the number of the signal that ended it. Each signal
 /// received is forwarded to it; after the first SIGTERM or SIGINT it has `grace` to exit before it gets SIGKILL. A JVM
-/// that the stop signal ends within that grace stopped as asked, so the runner reports 0.
+/// that a forwarded SIGTERM or SIGINT ends within that grace stopped as asked, so the runner reports 0.
 pub(crate) async fn run(
     command: &mut Command,
     signals: &mut mpsc::UnboundedReceiver<Signal>,
@@ -30,11 +30,11 @@ pub(crate) async fn run(
     // The occasional poll also covers exits whose SIGCHLD coalesced with an earlier one.
     let mut poll = interval(Duration::from_secs(1));
     let mut kill_at = None;
-    let mut stop = None;
+    let mut stops = Vec::new();
     loop {
         if let Some(status) = reap(pid, orphans).map_err(|error| failed(error.into()))? {
             let code = code(status);
-            return Ok(if stop.is_some_and(|stop: Signal| code == 128 + stop.as_raw()) { 0 } else { code });
+            return Ok(if stops.iter().any(|stop: &Signal| code == 128 + stop.as_raw()) { 0 } else { code });
         }
         tokio::select! {
             _ = exits.recv() => {}
@@ -42,9 +42,11 @@ pub(crate) async fn run(
             Some(signal) = signals.recv() => {
                 tracing::info!(signal = signal.as_raw(), "forwarding a signal to the JVM");
                 send(pid, signal).map_err(|error| failed(error.into()))?;
-                if signal != Signal::QUIT && stop.is_none() {
-                    stop = Some(signal);
-                    kill_at = Some(Instant::now() + grace);
+                if signal != Signal::QUIT {
+                    if stops.is_empty() {
+                        kill_at = Some(Instant::now() + grace);
+                    }
+                    stops.push(signal);
                 }
             }
             () = async { sleep_until(kill_at.unwrap_or_else(Instant::now)).await }, if kill_at.is_some() => {

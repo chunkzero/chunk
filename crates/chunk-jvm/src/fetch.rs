@@ -8,7 +8,7 @@ use chunk_proto::sync::v1::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Write, time::Duration};
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout_at};
 use tonic::{metadata::MetadataValue, transport::Channel};
 
 const FIRST_BACKOFF: Duration = Duration::from_millis(200);
@@ -27,7 +27,8 @@ impl From<Failure> for Attempt {
     }
 }
 
-/// Runs `attempt` until it succeeds or fails for good, backing off after transient failures for up to `budget`.
+/// Runs `attempt` until it succeeds or fails for good, backing off after transient failures for up to `budget`. An
+/// attempt still unanswered when the budget runs out fails.
 pub(crate) async fn retry<T, F: Future<Output = Result<T, Attempt>>>(
     budget: Duration,
     mut attempt: impl FnMut() -> F,
@@ -35,7 +36,10 @@ pub(crate) async fn retry<T, F: Future<Output = Result<T, Attempt>>>(
     let deadline = Instant::now() + budget;
     let mut backoff = FIRST_BACKOFF;
     loop {
-        match attempt().await {
+        let Ok(attempted) = timeout_at(deadline, attempt()).await else {
+            return Err(Failure::unavailable(format!("core did not answer within {budget:?}")));
+        };
+        match attempted {
             Ok(value) => return Ok(value),
             Err(Attempt::Failed(failure)) => return Err(failure),
             Err(Attempt::Transient(reason)) if Instant::now() + backoff >= deadline => {
