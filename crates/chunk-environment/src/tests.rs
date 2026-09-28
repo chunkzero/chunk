@@ -241,6 +241,45 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_machine_follows_core_across_restarts_until_core_rejects_its_credential() {
+    let directory = tempfile::tempdir().unwrap();
+    let start = |core_bind| {
+        let mut config = core_config(directory.path());
+        config.core_bind = core_bind;
+        Core::start(config, |_| {})
+    };
+    let core = start(Some("127.0.0.1:0".parse().unwrap())).await.unwrap();
+    let network = core.network_address();
+    core.control().unwrap().activate_release(release("test")).unwrap();
+    let remote = RemoteCore {
+        endpoint: format!("http://{}", network.unwrap()),
+        credential: core.gateway_credential("remote").unwrap(),
+        environment: "test".into(),
+    };
+    let (running, mut addresses) = gateway_machine(remote, CancellationToken::new());
+    let address = listening(&mut addresses).await;
+    until_motd(address, Some("Serving test")).await;
+
+    // Once core is back at the same address, the gateway follows it again.
+    core.stop(|| {}).await.unwrap();
+    let core = start(network).await.unwrap();
+    core.deploy(bundle("next", "Serving next")).await.unwrap();
+    core.control().unwrap().activate_release(release("next")).unwrap();
+    until_motd(address, Some("Serving next")).await;
+
+    // Core revokes the credential while the gateway can't reach it, so it rejects the gateway's next subscription.
+    core.stop(|| {}).await.unwrap();
+    let core = start(None).await.unwrap();
+    core.revoke_gateway("remote").unwrap();
+    core.stop(|| {}).await.unwrap();
+    let core = start(network).await.unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap_err();
+    assert!(error.to_string().contains("rejected the gateway credential"), "{error}");
+    assert_eq!(motd(address).await, None);
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_in_one_serves_backend_and_control_until_stopped() {
     let directory = tempfile::tempdir().unwrap();
     let core = core_config(directory.path());
