@@ -44,6 +44,22 @@ async fn captured_methods_require_live_authority_and_keep_operation_identity_acr
     fixture.close().await;
 }
 
+#[tokio::test]
+async fn pinned_method_configuration_validates_declarations_and_keeps_empty_compatibility() {
+    let mut fixture = Fixture::new();
+    let serialized = serde_json::to_value(&fixture.release).unwrap();
+    assert!(serialized.get("session_methods").is_none());
+    let decoded: Release = serde_json::from_value(serialized).unwrap();
+    assert!(decoded.contracts.session_methods.is_none());
+    let mut methods = method_contract();
+    fixture.release.contracts.session_methods = Some(methods.clone());
+    assert!(fixture.release.validate().is_ok());
+    methods.methods[0].session = "missing".into();
+    fixture.release.contracts.session_methods = Some(methods);
+    assert!(fixture.release.validate().is_err());
+    fixture.close().await;
+}
+
 pub(super) fn method_contract() -> chunk_contract::SessionMethods {
     serde_json::from_value(json!({"version":1,"methods":[{"app":"bridge","session":"default","name":"score","arguments":{"type":"object","fields":{}},"result":{"type":"integer"}}]})).unwrap()
 }

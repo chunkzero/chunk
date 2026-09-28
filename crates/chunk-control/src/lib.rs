@@ -19,7 +19,6 @@ mod reconcile;
 mod recovery;
 mod releases;
 mod roster;
-mod rpc;
 pub mod server;
 mod session_methods;
 mod sessions;
@@ -41,7 +40,6 @@ pub use host::{Distribution, Host, MachineProfile, ProcessHostConfig, Progress, 
 pub use operations::Operations;
 pub use process::ProcessHost;
 pub use roster::{RosterMember, RosterMove};
-pub use rpc::Service;
 pub use state::Generation;
 use state::{Authority, State};
 

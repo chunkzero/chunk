@@ -7,6 +7,7 @@ mod jvm_effects;
 mod jvm_methods;
 mod operator;
 mod runtime;
+mod shutdown;
 
 use super::*;
 use chunk_contract::{Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Schema, Visibility};

@@ -11,12 +11,12 @@ factories locally and enforces the supplied capacity. Future container/machine p
 boundary.
 
 The private `.chunk/local/control.json` connection file carries control's credential, which the `chunk` CLI presents to
-core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. `Claim` accepts
-authenticated identity, proxy incarnation, connection identity and a session demand key/type/profile. It reserves
-capacity, starts an app JVM if needed, waits for session readiness, and returns configuration plus a single-use TCP
-capability. The proxy records admission intent with `Activate` and opens the native Minecraft connection using the
-capability. `Inspect` reconciles the same binding; `Cancel` withdraws it before releasing the reservation. Runtime
-credentials remain inside control.
+core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. A gateway's
+`chunk:claim` accepts authenticated identity, proxy incarnation, connection identity and a session demand
+key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and returns
+configuration plus a single-use TCP capability. The gateway records admission intent with `chunk:activate` and opens the
+native Minecraft connection using the capability; `chunk:withdraw` withdraws the claim before releasing the
+reservation. Runtime credentials remain inside control.
 
 Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
 profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
@@ -55,8 +55,8 @@ changes after a log position, and `Control::subscribe` announces new positions.
 `Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
 in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
 any member's claim ending, or `Control::cancel_roster`, fails every member's move. Session capacity is the only hard
-limit. Until the group is complete, activation fails with `UNAVAILABLE` "roster awaiting members", which gateways retry
-within their connection timeout.
+limit. Until the group is complete, `chunk:activate` reports that it is waiting, and gateways retry it within their
+connection timeout.
 
 The operator's `nodes` topic reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped
 states, including the last observed JVM health metrics and observation timestamp. Health is polled every five seconds;
@@ -89,7 +89,7 @@ worlds are replayed. State from the previous shared-classpath runtime is incompa
 
 Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
 sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
-operations are in flight; beyond that, new work fails as busy (`UNAVAILABLE`, "control busy") and should be retried.
+operations are in flight; beyond that, new work fails as `OVERLOADED` ("control busy") and should be retried.
 These conservative limits are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted
 providers, deployment rollout and directory replication remain outside this local implementation.
 
@@ -126,18 +126,9 @@ deadline then returns unknown, and a later poll may retrieve the completed resul
 rollback. These calls are transient gameplay effects. A durable job integration will need a persisted invocation record
 and recovery for outcomes that remain unknown; the current prepared-operation API is in memory.
 
-The authenticated `LocalControl` proxy credential can prepare a captured method and receive an opaque handle before any
-gameplay executes. `StartPreparedMethod` starts that retained handle once; `PollPreparedMethod` observes it and
-`CancelPreparedMethod` cancels its exact token. JVM registration and application/backend credentials cannot use these
-RPCs. The authored app, unqualified session and method must match the captured live target and pinned declaration.
-`chunk dev` projects these declarations from the published, content-addressed backend contract into control config.
-
-Prepared handles are local to one control service lifetime. Losing a prepare reply is safe because preparation never
-executes; an unknown, expired or evicted handle cannot be recreated by starting or polling it. Up to 128 pending
-handles, 4096 completed records and 16 MiB of serialized requests/schemas/results are retained. Admission reserves space
-for each pending result. Results expire after five minutes or earlier under capacity pressure. Service shutdown cancels
-method tokens before awaiting tracked tasks. Accepted means the control task was queued; it does not promise gameplay
-has started. Unstarted cancellation is definitive; started cancellation reports unknown until its outcome is resolved.
+Core prepares the methods an app command calls on the session the command started in. The pinned declaration must name
+the method for that session's app and session. `chunk dev` projects these declarations from the published,
+content-addressed backend contract into control config.
 
 Proxy-initiated moves also provide the expected source claim and public connection ID together. Control checks both
 against the exact current arrived owner in the same durable update that accepts or returns the move. Trusted

@@ -34,16 +34,14 @@ async fn a_reported_arrival_reaches_the_watching_proxy_without_polling() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     control.claim(request("arriving", &uuid::Uuid::new_v4().to_string())).await.unwrap();
-    let (updates, mut watched) = tokio::sync::mpsc::channel(1);
-    let proxy = control.clone();
-    let watch = tokio::spawn(async move { proxy.watch("proxy-1".into(), updates, CancellationToken::new()).await });
-    let [reserved] = watched.recv().await.unwrap().unwrap().claims.try_into().unwrap();
-    assert_eq!(reserved.phase, ClaimPhase::Reserved as i32);
+    let mut positions = control.subscribe();
+    let (mut view, snapshot) = View::open(&control, "proxy-1", None).unwrap();
+    let [(_, reserved)] = &snapshot.upserts[..] else { panic!("expected one claim") };
+    assert!(reserved.phase == Phase::Reserved);
     fixture.runtime.bindings.lock().unwrap().get_mut("arriving").unwrap().phase = JvmDeliveryPhase::Arrived;
-    let update = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await.unwrap().unwrap().unwrap();
-    let [arrived] = update.claims.try_into().unwrap();
-    assert_eq!(arrived.phase, ClaimPhase::Arrived as i32);
-    watch.abort();
+    let update = changed(&control, &mut view, &mut positions).await;
+    let [(_, arrived)] = &update.upserts[..] else { panic!("expected one claim") };
+    assert!(arrived.phase == Phase::Arrived);
     fixture.close().await;
 }
 

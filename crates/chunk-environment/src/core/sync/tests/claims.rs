@@ -11,7 +11,7 @@ use chunk_proto::{
 
 impl Fixture {
     /// Follows `gateway/<id>` as `credential`, returning the stream and its first update.
-    async fn follow(&mut self, credential: &str, id: &str) -> (Streaming<Update>, Update) {
+    pub(super) async fn follow(&mut self, credential: &str, id: &str) -> (Streaming<Update>, Update) {
         let subscription = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
         let mut updates = self.client.subscribe(authorized(subscription, credential)).await.unwrap().into_inner();
         let first = next(&mut updates).await;
@@ -37,7 +37,7 @@ impl Fixture {
     }
 }
 
-fn login(connection: &str) -> ClaimArguments {
+pub(super) fn login(connection: &str) -> ClaimArguments {
     ClaimArguments {
         login: Some(GatewayLogin {
             connection_id: connection.into(),
@@ -81,7 +81,7 @@ async fn arrival(updates: &mut Streaming<Update>, key: &str) -> (Update, Gateway
     }
 }
 
-fn result<T: Message + Default>(response: &CallResponse) -> T {
+pub(super) fn result<T: Message + Default>(response: &CallResponse) -> T {
     match &response.outcome {
         Some(Outcome::Result(result)) => T::decode(result.as_slice()).unwrap(),
         outcome => panic!("expected a result, got {outcome:?}"),

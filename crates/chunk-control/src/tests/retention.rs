@@ -65,7 +65,7 @@ async fn released_claims_stay_while_an_open_claim_of_their_move_references_them(
     control.claim(canceled.clone()).await.unwrap();
     control.cancel(canceled).await.unwrap();
     expire("canceled");
-    assert!(pending_move(&control, &source).await.is_none());
+    assert!(pending_move(&control, &source).is_none());
 
     let destination = control.move_player(command("moved")).unwrap();
     let second = control.claim(destination).await.unwrap();

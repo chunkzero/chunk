@@ -4,29 +4,7 @@ package chunk.v1;
 
 import "chunk/v1/common.proto";
 import "chunk/v1/gameplay.proto";
-import "chunk/v1/session_methods.proto";
 import "chunk/v1/supervision.proto";
-
-// One authenticated local proxy group and one durable ownership authority.
-service LocalControl {
-  rpc Claim(ClaimRequest) returns (Assignment);
-  rpc Activate(ActivateClaim) returns (Assignment);
-  rpc Cancel(ClaimRequest) returns (ClaimIdentity);
-  rpc ReconcileDeparture(ClaimRequest) returns (DepartureStatus);
-  rpc MovePlayer(MovePlayerRequest) returns (ClaimRequest);
-  // Streams the proxy's open claims: a snapshot, then changes. A slow reader receives only each claim's latest state.
-  rpc Watch(WatchRequest) returns (stream ClaimUpdate);
-  // Acknowledges the durable failure; reconciliation completes withdrawal before releasing capacity.
-  rpc AbandonMove(AbandonMoveRequest) returns (ClaimIdentity);
-  rpc Drain(DrainRequest) returns (DrainStatus);
-  rpc Nodes(NodesRequest) returns (NodeList);
-  rpc Players(PlayersRequest) returns (PlayerList);
-  rpc ShutdownNode(ShutdownNodeRequest) returns (NodeStatus);
-  rpc PrepareSessionMethod(PrepareSessionMethodRequest) returns (PreparedMethodHandle);
-  rpc StartPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
-  rpc PollPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
-  rpc CancelPreparedMethod(PreparedMethodRequest) returns (SessionMethodResult);
-}
 
 message SessionDemand {
   string key = 1;

@@ -38,26 +38,9 @@ pub struct PreparedSessionMethod {
     result: Schema,
 }
 
-impl CapturedSession {
-    pub(crate) fn matches_declaration(&self, app: &str, session: &str) -> bool {
-        self.identity.app_id == app && self.session_type == format!("{app}/{session}")
-    }
-}
-
 impl PreparedSessionMethod {
-    pub(crate) fn target(&self) -> &CapturedSession {
-        &self.target
-    }
     pub(crate) fn deadline_ms(&self) -> u64 {
         self.request.deadline_ms
-    }
-    pub(crate) fn retained_bytes(&self) -> Result<usize> {
-        Ok(self.request.encoded_len()
-            + self.target.delivery.encoded_len()
-            + self.target.claim.encoded_len()
-            + self.target.identity.encoded_len()
-            + self.target.session_type.len()
-            + serde_json::to_vec(&self.result)?.len())
     }
     #[must_use]
     pub fn operation_id(&self) -> &str {
@@ -159,13 +142,6 @@ impl Control {
             deadline_ms: issued_at_ms.checked_add(timeout_ms).ok_or(Error::Capacity)?,
         };
         Ok(PreparedSessionMethod { target: target.clone(), request, result: method.result.clone() })
-    }
-
-    /// Checks that the operation's JVM, if it registered, has room for another method.
-    /// # Errors
-    /// Reports a full method budget as over capacity.
-    pub(crate) fn admits_method(&self, operation: &PreparedSessionMethod) -> Result<()> {
-        self.jvms.admits(&operation.target.identity.runtime_id, &sync_call(operation, false))
     }
 
     /// Puts the operation on its JVM's topic, unless it is already there, and waits for the JVM's result. A cancelled

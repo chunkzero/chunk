@@ -20,9 +20,9 @@ use std::{
 const CAPABILITY: [u8; 32] = [7; 32];
 
 /// A JVM following its topic over sync. It runs each session it is asked for, prepares each delivery and closes it
-/// once withdrawn or gone, answers methods `score` and `status` with 7, `hold` and `status` with `limit` 0 only once
-/// they are cancelled, and never answers `stuck`. Its players arrive and leave when a test says. It closes its stream
-/// once asked to stop.
+/// once withdrawn or gone, unless a test stalls withdrawals. It answers methods `score` and `status` with 7, `hold` and
+/// `status` with `limit` 0 only once they are cancelled, and never answers `stuck`. Its players arrive and leave when a
+/// test says. It closes its stream once asked to stop.
 #[derive(Clone)]
 pub(super) struct SyncJvm {
     client: CoreClient<Channel>,
@@ -41,6 +41,8 @@ struct Held {
     answered: BTreeSet<String>,
     /// How many methods it completed, held until cancelled, and cancelled.
     counts: (usize, usize, usize),
+    /// Keeps each withdrawn delivery open while set.
+    stalled: bool,
 }
 
 /// Whether the JVM answers `call` only once it is cancelled.
@@ -114,7 +116,7 @@ impl SyncJvm {
                     let wanted = JvmDelivery::decode(value.as_slice()).unwrap();
                     let current = held.deliveries.get(operation).map(JvmDeliveryStatus::phase);
                     let phase = match current {
-                        _ if wanted.withdraw => JvmDeliveryPhase::Closed,
+                        _ if wanted.withdraw && !held.stalled => JvmDeliveryPhase::Closed,
                         None => JvmDeliveryPhase::Prepared,
                         Some(phase) => phase,
                     };
@@ -194,6 +196,11 @@ impl SyncJvm {
         };
         let report = JvmReport { deliveries: vec![status], ..JvmReport::default() };
         assert_eq!(self.call("chunk:report", "", &stream, &report).await.outcome, ACCEPTED);
+    }
+
+    /// Keeps each delivery it is asked to withdraw open, until a test closes it.
+    pub(super) fn stall_withdrawals(&self) {
+        self.held.lock().unwrap().stalled = true;
     }
 
     /// Reports `health` on the JVM's stream.
@@ -314,7 +321,7 @@ pub(super) async fn arrive(fixture: &Fixture, launches: &Launches) -> (SyncJvm, 
 }
 
 /// Waits for the fake player's claim to reach `phase`, or `None` for none.
-async fn phase(fixture: &Fixture, phase: Option<ClaimPhase>) {
+pub(super) async fn phase(fixture: &Fixture, phase: Option<ClaimPhase>) {
     let reached = async {
         loop {
             let players = fixture.control.players().unwrap().players;

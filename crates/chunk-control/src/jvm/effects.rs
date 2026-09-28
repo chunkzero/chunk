@@ -108,22 +108,6 @@ impl Method {
 }
 
 impl Jvms {
-    /// Checks that `host`'s JVM, if it registered, has room in its method budget for `call`.
-    /// # Errors
-    /// Reports a full budget as over capacity.
-    pub fn admits(&self, host: &str, call: &sync::JvmMethodCall) -> Result<()> {
-        let jvms = self.lock()?;
-        let Some(jvm) = jvms.get(host) else {
-            return Ok(());
-        };
-        let mut admitted = Ok(());
-        jvm.work.send_if_modified(|work| {
-            admitted = work.admit(call.encoded_len() + RESULT_RESERVE);
-            false
-        });
-        admitted
-    }
-
     /// Puts session method `operation`, numbered `sequence`, on `host`'s topic unless it is already there, as for a
     /// retry. `None` for a host whose JVM has not registered, and for a method retired once its result's
     /// retention ended: its outcome is unknown, and the JVM is never asked about it again. The method counts against
