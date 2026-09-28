@@ -122,20 +122,26 @@ mod tests {
         let private = Some("fdaa::2".parse().unwrap());
         let loopback = Some("127.0.0.1:4000".parse().unwrap());
         let remote = Some("[::ffff:10.0.0.3]:4000".parse().unwrap());
-        for (endpoint, peer, allowed) in [
-            ("127.0.0.1:25565", loopback, true),
-            ("[::1]:25565", loopback, true),
-            ("[fdaa::2]:25565", loopback, true),
-            ("[fdaa::3]:25565", loopback, false),
-            ("10.0.0.3:25565", loopback, false),
-            ("127.0.0.1:0", loopback, false),
-            ("10.0.0.3:25565", remote, true),
-            ("10.0.0.4:25565", remote, false),
-            ("127.0.0.1:25565", remote, false),
-            ("[fdaa::2]:25565", remote, false),
-            ("127.0.0.1:25565", None, false),
+        let remote_v6 = Some("[fdaa::3]:4000".parse().unwrap());
+        let denied = Some(Code::Denied);
+        for (endpoint, peer, expected) in [
+            ("127.0.0.1:25565", loopback, None),
+            ("[::1]:25565", loopback, None),
+            ("[fdaa::2]:25565", loopback, None),
+            ("[fdaa::3]:25565", loopback, denied),
+            ("10.0.0.3:25565", loopback, denied),
+            ("127.0.0.1:0", loopback, denied),
+            ("10.0.0.3:25565", remote, None),
+            ("[fdaa::3]:25565", remote_v6, None),
+            ("[fdaa::4]:25565", remote_v6, denied),
+            ("10.0.0.4:25565", remote, denied),
+            ("127.0.0.1:25565", remote, denied),
+            ("[fdaa::2]:25565", remote, denied),
+            ("127.0.0.1:25565", None, denied),
+            ("http://127.0.0.1:25565", loopback, Some(Code::Invalid)),
         ] {
-            assert_eq!(check_endpoint(endpoint, peer, private).is_ok(), allowed, "{endpoint} from {peer:?}");
+            let code = check_endpoint(endpoint, peer, private).err().map(|error| error.code());
+            assert_eq!(code, expected, "{endpoint} from {peer:?}");
         }
     }
 }
