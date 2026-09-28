@@ -4,7 +4,7 @@ import type { Deps } from "../deps.ts";
 import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import type { Machine, Provider } from "../providers/provider.ts";
-import type { CapacityRow } from "./capacity.ts";
+import { type CapacityRow, capacityCredentialContext } from "./capacity.ts";
 import { desiredDeployment } from "./desired.ts";
 import {
   capacityMachineName,
@@ -147,7 +147,7 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
       where id = ${id} and state = ${environment.state}`;
     await notify(sql, { kind: "environment", environmentId: id });
   }
-  for (const request of active) await keepRunning(deps, options, environment, core, request);
+  for (const request of active) await keepRunning(deps, options, core, request);
 }
 
 /** Creates core's machine with the environment's token, issuing one first. Returns the machine once saved. */
@@ -191,16 +191,10 @@ async function saveCoreAddresses({ sql }: Deps, environment: EnvironmentRow, cor
 
 /**
  * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime, so one that exited or
- * went missing fails its request; gateway machines are stateless and are replaced, with a fresh join token.
+ * went missing fails its request; gateway machines are stateless and are replaced, with the same credential.
  * A provider error fails the request for good; core retries with a new request ID.
  */
-async function keepRunning(
-  deps: Deps,
-  options: ReconcilerOptions,
-  environment: EnvironmentRow,
-  core: Machine,
-  request: CapacityRow,
-) {
+async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine, request: CapacityRow) {
   const { sql, keys } = deps;
   const { provider } = options;
   const where = sql`environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
@@ -212,15 +206,12 @@ async function keepRunning(
     }
     if (machine?.state !== "running") {
       const coreHost = core.addresses[0];
-      if (!coreHost || !environment.machine_token) return;
-      const environmentToken = new TextDecoder().decode(
-        await keys.cipher.open(environment.machine_token, `machine-token/${environment.id}`),
-      );
+      if (!coreHost) return;
+      const context = capacityCredentialContext(request.environment_id, request.request_id);
+      const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));
       // A leftover from an earlier attempt, perhaps one whose create reply was lost, holds the name.
       await provider.destroy(capacityMachineName(request));
-      const created = await provider.create(
-        capacityMachineSpec(options, request, { coreAddress: `${coreHost}:${options.corePort}`, environmentToken }),
-      );
+      const created = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
       const saved = await sql`update capacity_requests set machine_id = ${created.id} where ${where}`;
       if (saved.count === 0) return provider.destroy(created.name);
       machine = await provider.start(created.id);

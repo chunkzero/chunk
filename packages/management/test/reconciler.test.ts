@@ -2,12 +2,23 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
-import { capacityMachineName, coreMachineName, verifyJoinToken } from "../src/environments/machines.ts";
+import { capacityCredentialContext, type CapacityRow } from "../src/environments/capacity.ts";
+import { capacityMachineName, capacityMachineSpec, coreMachineName } from "../src/environments/machines.ts";
 import { reconcile, type ReconcilerOptions } from "../src/environments/reconciler.ts";
 import { CapacityState, EnvironmentService, Workload } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { fakeProvider } from "./fake-provider.ts";
 import { codeOf, createEnvironment, databaseUrl, deployRelease, type Harness, next, startHarness } from "./harness.ts";
+
+test("an extra machine reaches core at an endpoint with IPv6 hosts bracketed", () => {
+  const options = { image: "chunk/environment:test", managementUrl: "", coreMemoryMib: 2048, corePort: 7070 };
+  const request = { environment_id: "env_1", request_id: "cap", workload: Workload.GATEWAY, memory_mib: 512 };
+  const endpoint = (coreHost: string) =>
+    capacityMachineSpec(options, request as CapacityRow, { coreHost, credential: "secret" }).env.CHUNK_CORE_ENDPOINT;
+  expect(endpoint("fdaa::1")).toBe("http://[fdaa::1]:7070");
+  expect(endpoint("10.0.0.2")).toBe("http://10.0.0.2:7070");
+  expect(endpoint("chunk-env-1-core")).toBe("http://chunk-env-1-core:7070");
+});
 
 describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
@@ -45,6 +56,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       releaseId: "r1",
       appId: "lobby",
       lease: env.lease,
+      credential: `machine/v1/${env.environmentId}/jvm/${requestId}/secret`,
     };
   }
 
@@ -58,7 +70,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       memoryMib: 2048,
       cpus: 1,
       restart: true,
-      env: { CHUNK_SERVICES: "core,gateway" },
+      env: { CHUNK_SERVICES: "core,gateway", CHUNK_CORE_BIND: "[::]:7070" },
     });
     const [row] = await h.sql<{ machine_addresses: string[] }[]>`
       select machine_addresses from environments where id = ${env.environmentId}`;
@@ -72,7 +84,12 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const env = await running();
     const request = capacityRequest(env, "cap-1");
     expect((await env.client.ensureCapacity(request)).capacity?.state).toBe(CapacityState.PROVISIONING);
+    expect((await env.client.ensureCapacity(request)).capacity?.state).toBe(CapacityState.PROVISIONING);
     expect(await codeOf(env.client.ensureCapacity({ ...request, appId: "hub" }))).toBe(Code.AlreadyExists);
+    expect(await codeOf(env.client.ensureCapacity({ ...request, credential: "another" }))).toBe(Code.AlreadyExists);
+    expect(await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", credential: "" }))).toBe(
+      Code.InvalidArgument,
+    );
     expect(await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", machineProfile: "huge" }))).toBe(
       Code.InvalidArgument,
     );
@@ -87,14 +104,21 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const machine = machines.get(ready?.machineId ?? "");
     expect(machine?.spec).toMatchObject({
       restart: false,
-      env: { CHUNK_SERVICES: "jvm", CHUNK_CORE_ADDRESS: `${env.coreName}:7070` },
+      env: {
+        CHUNK_SERVICES: "jvm",
+        CHUNK_CORE_ENDPOINT: `http://${env.coreName}:7070`,
+        CHUNK_JVM_CREDENTIAL: request.credential,
+      },
     });
-    expect(verifyJoinToken(env.token, machine?.spec.env.CHUNK_JOIN_TOKEN ?? "")).toMatchObject({
-      environment_id: env.environmentId,
-      request_id: "cap-1",
-      workload: "jvm",
-    });
-    expect(verifyJoinToken("another token", machine?.spec.env.CHUNK_JOIN_TOKEN ?? "")).toBeUndefined();
+
+    const [stored] = await h.sql<{ credential: Uint8Array }[]>`
+      select credential from capacity_requests where environment_id = ${env.environmentId} and request_id = 'cap-1'`;
+    const sealed = Buffer.from(stored?.credential ?? []);
+    expect(sealed.includes(request.credential)).toBe(false);
+    const open = (requestId: string) =>
+      h.deps.keys.cipher.open(sealed, capacityCredentialContext(env.environmentId, requestId));
+    expect(new TextDecoder().decode(await open("cap-1"))).toBe(request.credential);
+    await expect(open("cap-2")).rejects.toThrow();
 
     const released = await env.client.releaseCapacity({ requestId: "cap-1", lease: env.lease });
     expect(released.capacity?.state).toBe(CapacityState.RELEASING);
@@ -105,18 +129,19 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("an exited gateway machine is replaced with a fresh join token", async () => {
+  test("an exited gateway machine is replaced with the same credential", async () => {
     const env = await running();
     await env.client.ensureCapacity({ ...capacityRequest(env, "cap-3"), workload: Workload.GATEWAY, appId: "" });
     await pass();
     const name = nameOf(env.environmentId, "cap-3", Workload.GATEWAY);
     const first = machines.get(name)?.spec;
+    expect(first?.env.CHUNK_GATEWAY_CREDENTIAL).toBe(capacityRequest(env, "cap-3").credential);
     await provider.stop(name);
     await pass();
     const replaced = machines.get(name);
     expect(replaced?.spec).not.toBe(first);
     expect(replaced?.machine.state).toBe("running");
-    expect(verifyJoinToken(env.token, replaced?.spec.env.CHUNK_JOIN_TOKEN ?? "")?.request_id).toBe("cap-3");
+    expect(replaced?.spec.env.CHUNK_GATEWAY_CREDENTIAL).toBe(first?.env.CHUNK_GATEWAY_CREDENTIAL);
     env.close();
   });
 
