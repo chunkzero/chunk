@@ -47,7 +47,8 @@ impl Managed<'_> {
         }
     }
 
-    /// Removes the unpacked releases that neither control, whose JVMs run from them, nor a load claims.
+    /// Removes the unpacked releases and their archives that neither control, whose JVMs run from them, nor a load
+    /// claims.
     async fn remove_unused_releases(&self) {
         let Ok(control) = self.core.control() else { return };
         let used = match control.release_artifacts() {
@@ -55,7 +56,7 @@ impl Managed<'_> {
             Err(error) => return tracing::warn!(%error, "releases in use unknown"),
         };
         // Set aside without an await in between, so no loaded release activates and drops its claim meanwhile.
-        let unused = release::set_aside(&self.releases, &self.claims, used);
+        let unused = release::set_aside(&self.releases, used);
         if let Err(error) = release::remove(unused).await {
             tracing::warn!(%error, "unused releases not removed");
         }

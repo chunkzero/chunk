@@ -39,7 +39,7 @@ pub(crate) struct Managed<'a> {
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
-    releases: PathBuf,
+    releases: release::Store,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
     core: &'a Core,
@@ -47,7 +47,6 @@ pub(crate) struct Managed<'a> {
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
-    claims: release::Claims,
     /// The sequence of the latest report under the current lease.
     sequence: AtomicU64,
 }
@@ -124,13 +123,12 @@ impl<'a> Managed<'a> {
             client: Client::new(config.url).with_token(config.token),
             instance_id: uuid::Uuid::new_v4().to_string(),
             environment,
-            releases: state.join("releases"),
+            releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
             core,
             gateway,
             gateway_config,
             deployments: Mutex::default(),
-            claims: release::Claims::default(),
             sequence: AtomicU64::new(0),
         }
     }
@@ -143,6 +141,14 @@ impl<'a> Managed<'a> {
         }
         if let Err(error) = release::sweep(&self.releases).await {
             tracing::warn!(%error, "abandoned release downloads not removed");
+        }
+        let restored =
+            match self.core.control().and_then(|control| control.release_artifacts().map_err(io::Error::other)) {
+                Ok(retained) => release::restore(&self.releases, retained).await,
+                Err(error) => Err(error),
+            };
+        if let Err(error) = restored {
+            tracing::warn!(%error, "kept release archives not restored");
         }
         tokio::select! {
             error = self.follow() => error,
@@ -284,7 +290,7 @@ impl<'a> Managed<'a> {
     /// makes it control's current release. Returns whether it did.
     async fn deploy(&self, desired: &v1::AttachResponse, cancel: &CancellationToken) -> io::Result<bool> {
         let artifact = desired.release.as_ref().ok_or_else(|| io::Error::other("the deployment names no release"))?;
-        let Some(loaded) = release::load(&self.client, &self.releases, &self.claims, artifact, cancel).await? else {
+        let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
             return Ok(false);
         };
         let deployment = &desired.deployment_id;

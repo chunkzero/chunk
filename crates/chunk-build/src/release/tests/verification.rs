@@ -32,6 +32,34 @@ fn unpacked_releases_verify_and_reject_tampering() {
 }
 
 #[test]
+fn installs_keep_what_verifies_and_replace_tampered_installs() {
+    let fixture = Fixture::new();
+    let release = fixture.publish().unwrap();
+    let archive = release.archive.clone().unwrap();
+    let releases = fixture.root.path().join("cache/releases");
+    let directory = releases.join(&release.id);
+    assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Missing));
+    let error = install_release(&archive, &digest(&archive), "other", &directory).unwrap_err().to_string();
+    assert!(error.contains("not other"), "{error}");
+    assert_eq!(fs::read_dir(&releases).unwrap().count(), 0);
+
+    install_release(&archive, &digest(&archive), &release.id, &directory).unwrap();
+    assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));
+    let asset = directory.join("apps/lobby/assets/map.txt");
+    fs::write(&asset, b"tampered").unwrap();
+    let Installed::Invalid(error) = installed_release(&directory, &release.id).unwrap() else { panic!() };
+    assert!(error.to_string().contains("differ from its ID"), "{error}");
+    let mut corrupt = digest(&archive);
+    corrupt.size -= 1;
+    assert!(install_release(&archive, &corrupt, &release.id, &directory).is_err());
+    assert_eq!(fs::read(&asset).unwrap(), b"tampered");
+
+    assert_eq!(install_release(&archive, &digest(&archive), &release.id, &directory).unwrap().id, release.id);
+    assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));
+    assert_eq!(fs::read_dir(&releases).unwrap().count(), 1);
+}
+
+#[test]
 fn verification_rejects_consistently_signed_invalid_releases() {
     let fixture = Fixture::new();
     let (_, directory) = unpacked(&fixture);

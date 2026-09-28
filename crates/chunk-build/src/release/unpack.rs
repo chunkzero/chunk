@@ -14,9 +14,21 @@ use crate::publication::{self, MAX_BYTES, MAX_COMPONENTS, MAX_FILES, MAX_PATH_BY
 const LONG_NAME_LIMIT: u64 = MAX_PATH_BYTES as u64 + 1;
 
 /// The size and lowercase hex SHA-256 a release archive must have.
+#[derive(Clone, Debug)]
 pub struct ArchiveDigest {
     pub sha256: String,
     pub size: u64,
+}
+
+impl ArchiveDigest {
+    /// Whether `archive`, read to its end, has exactly this size and SHA-256.
+    /// # Errors
+    /// Reports read errors.
+    pub fn matches(&self, archive: impl Read) -> io::Result<bool> {
+        let mut digest = Sha256::new();
+        let size = io::copy(&mut archive.take(self.size + 1), &mut digest)?;
+        Ok(size == self.size && format!("{:x}", digest.finalize()) == self.sha256)
+    }
 }
 
 /// How many filesystem entries, files and directories together, and content bytes an archive may unpack to.
@@ -45,9 +57,7 @@ pub fn unpack_release(
     limits: &UnpackLimits,
 ) -> io::Result<()> {
     let mut file = fs::File::open(archive)?;
-    let mut digest = Sha256::new();
-    let size = io::copy(&mut (&file).take(expected.size + 1), &mut digest)?;
-    if size != expected.size || format!("{:x}", digest.finalize()) != expected.sha256 {
+    if !expected.matches(&file)? {
         return Err(io::Error::other("release archive differs from its expected size and SHA-256"));
     }
     file.rewind()?;

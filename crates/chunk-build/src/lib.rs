@@ -11,8 +11,8 @@ pub mod project;
 mod publication;
 mod release;
 pub use release::{
-    ArchiveDigest, JavaRuntime, JvmDescriptor, UnpackLimits, VerifiedRelease, read_jvm_descriptor, unpack_release,
-    verify_release,
+    ArchiveDigest, Installed, JavaRuntime, JvmDescriptor, UnpackLimits, VerifiedRelease, install_release,
+    installed_release, read_jvm_descriptor, unpack_release, verify_release,
 };
 #[cfg(feature = "compiler")]
 pub use release::{Release, ReleaseInputs, publish_release};

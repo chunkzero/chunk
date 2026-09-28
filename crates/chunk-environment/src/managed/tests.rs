@@ -1,4 +1,5 @@
-use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig};
+use super::release;
+use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
@@ -10,7 +11,7 @@ use hyper::body::{Frame, Incoming};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     fs,
     io::Write,
@@ -174,6 +175,7 @@ async fn handle(
                 None => response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap(),
             }
         }
+        _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
             management.stalled.notify_one();
@@ -205,8 +207,8 @@ async fn serve(management: Arc<Management>) -> String {
     format!("http://{address}")
 }
 
-/// A one-app release, as `chunk build` publishes it.
-fn publish(root: &Path) -> std::path::PathBuf {
+/// A one-app release, as `chunk build` publishes it, whose `status` query returns `status`.
+fn publish(root: &Path, status: u8) -> std::path::PathBuf {
     let (project, backend) = (root.join("project"), root.join("backend"));
     fs::create_dir_all(project.join("apps/lobby")).unwrap();
     fs::create_dir_all(&backend).unwrap();
@@ -218,7 +220,7 @@ fn publish(root: &Path) -> std::path::PathBuf {
     .unwrap();
     fs::write(project.join("apps/lobby/app.toml"), "").unwrap();
     fs::write(project.join("apps/lobby/build.gradle.kts"), "").unwrap();
-    fs::write(backend.join("source.mjs"), "export function status() { return 1; }").unwrap();
+    fs::write(backend.join("source.mjs"), format!("export function status() {{ return {status}; }}")).unwrap();
     fs::write(backend.join("contract.json"), r#"{"contract_version":2,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
     let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let class = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69, 1];
@@ -290,7 +292,7 @@ struct Harness {
 impl Harness {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let archive = publish(directory.path());
+        let archive = publish(directory.path(), 1);
         let release_id = archive.file_name().unwrap().to_str().unwrap().trim_end_matches(".tar.gz").to_owned();
         let (reports, reported) = mpsc::unbounded_channel();
         let management = Arc::new(Management {
@@ -311,6 +313,13 @@ impl Harness {
         artifact(&self.management, &self.url, &self.release.0, self.release.1.clone())
     }
 
+    /// The published release, downloaded from a path under `/<route>/`.
+    fn valid_at(&self, route: &str) -> ReleaseArtifact {
+        let path = format!("/{route}/{}.tar.gz", self.release.0);
+        self.management.archives.lock().unwrap().insert(path.clone(), self.release.1.clone());
+        ReleaseArtifact { url: format!("{}{path}", self.url), ..self.valid() }
+    }
+
     fn stalled(&self) -> ReleaseArtifact {
         artifact(&self.management, &self.url, "stalled", self.release.1.clone())
     }
@@ -321,6 +330,10 @@ impl Harness {
 
     fn state(&self) -> std::path::PathBuf {
         self.directory.path().join("state")
+    }
+
+    fn archive(&self, release_id: &str) -> std::path::PathBuf {
+        self.state().join("archives").join(format!("{release_id}.tar.gz"))
     }
 
     fn core(&self) -> CoreConfig {
@@ -409,6 +422,8 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     let (first, _) = harness.expect(1, "dep_a", DeploymentState::InProgress).await;
     let (second, _) = harness.expect(1, "dep_a", DeploymentState::Active).await;
     assert!(first < second);
+    let kept = fs::read(harness.archive(&harness.release.0)).unwrap();
+    assert_eq!(Sha256::digest(&kept), Sha256::digest(&harness.release.1));
 
     // dep_b activates, but its report fails until dep_c has superseded it.
     *harness.management.refused.lock().unwrap() = Some("dep_b".into());
@@ -433,7 +448,7 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     harness.expect(4, "dep_b", DeploymentState::Active).await;
     harness.released("dep_a").await;
     assert!(harness.serves("dep_b").await);
-    assert!(!harness.state().join("releases/rejected").exists());
+    assert!(!harness.state().join("releases/rejected").exists() && !harness.archive("rejected").exists());
     assert!(!running.is_finished());
 
     stop.cancel();
@@ -482,7 +497,13 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     fs::create_dir_all(&abandoned).unwrap();
     let unused = harness.state().join("releases/unused");
     fs::create_dir_all(&unused).unwrap();
-    harness.deploy("dep_c", harness.valid());
+    let (abandoned_archive, unused_archive) = (harness.archive(".abandoned"), harness.archive("unused"));
+    fs::write(&abandoned_archive, b"partial").unwrap();
+    fs::write(&unused_archive, b"unused").unwrap();
+    let installed = harness.state().join("releases").join(&harness.release.0);
+    fs::write(installed.join("source.mjs"), "tampered").unwrap();
+    // Its download unavailable, dep_c's release is installed again from the archive kept for it.
+    harness.deploy("dep_c", harness.valid_at("unavailable"));
     let (stop, running) = harness.start();
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
     harness.expect(3, "dep_c", DeploymentState::Active).await;
@@ -490,7 +511,8 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     harness.released("dep_abandoned_0").await;
     assert!(harness.serves("dep_c").await);
     assert!(!abandoned.exists() && !unused.exists());
-    assert!(harness.state().join("releases").join(&harness.release.0).exists());
+    assert!(!abandoned_archive.exists() && !unused_archive.exists());
+    assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
 
     // dep_d activates, but the core stops before management accepts it, and dep_e supersedes it meanwhile.
     *harness.management.refused.lock().unwrap() = Some("dep_d".into());
@@ -518,4 +540,71 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
 
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unfinished_archive_repair_leaves_the_serving_release_installed() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+
+    // dep_b runs the same release, whose kept archive is corrupt, and dep_c supersedes it mid-download.
+    fs::write(harness.archive(&harness.release.0), b"corrupt").unwrap();
+    harness.deploy("dep_b", harness.valid_at("stalled"));
+    harness.expect(2, "dep_b", DeploymentState::InProgress).await;
+    harness.management.stalled.notified().await;
+    harness.deploy("dep_c", artifact(&harness.management, &harness.url, "rejected", invalid()));
+    harness.expect(3, "dep_c", DeploymentState::InProgress).await;
+    harness.expect(3, "dep_c", DeploymentState::Failed).await;
+
+    // Management falls back to dep_a, which serves from its untouched install.
+    harness.expect(4, "dep_a", DeploymentState::Active).await;
+    let installed = harness.state().join("releases").join(&harness.release.0);
+    assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
+    assert!(harness.serves("dep_a").await);
+    assert!(!harness.archive(&harness.release.0).exists());
+
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_retained_one() {
+    let harness = Harness::new().await;
+    let second = publish(&harness.directory.path().join("second"), 2);
+    let id = second.file_name().unwrap().to_str().unwrap().trim_end_matches(".tar.gz").to_owned();
+    let second = artifact(&harness.management, &harness.url, &id, fs::read(second).unwrap());
+    let first = harness.valid();
+    assert_ne!(first.release_id, second.release_id);
+    let client = chunk_management::Client::new(harness.url.clone()).with_token("secret");
+    let lookup = Arc::new(Archives::default());
+    let store = release::Store::new(&harness.state(), lookup.clone());
+    for artifact in [&first, &second] {
+        release::load(&client, &store, artifact, &CancellationToken::new()).await.unwrap().unwrap();
+    }
+    let kept = lookup.get(&second.release_id).unwrap();
+    assert_eq!((kept.sha256.as_str(), kept.size), (second.sha256.as_str(), second.size_bytes));
+    assert_eq!(format!("{:x}", Sha256::digest(fs::read(&kept.path).unwrap())), second.sha256);
+
+    let aside = release::set_aside(&store, BTreeSet::from([second.release_id.clone()]));
+    release::remove(aside).await.unwrap();
+    assert!(lookup.get(&first.release_id).is_none() && !harness.archive(&first.release_id).exists());
+    let releases = harness.state().join("releases");
+    assert!(!releases.join(&first.release_id).exists() && releases.join(&second.release_id).exists());
+    assert_eq!(lookup.get(&second.release_id).as_ref(), Some(&kept));
+
+    // Restarted, core looks the retained release's archive up again only while it matches the recorded digest.
+    let restart = || async {
+        let lookup = Arc::new(Archives::default());
+        let retained = BTreeSet::from([first.release_id.clone(), second.release_id.clone()]);
+        release::restore(&release::Store::new(&harness.state(), lookup.clone()), retained).await.unwrap();
+        (lookup.get(&first.release_id), lookup.get(&second.release_id))
+    };
+    assert_eq!(restart().await, (None, Some(kept.clone())));
+    let mut corrupt = fs::read(&kept.path).unwrap();
+    corrupt[0] ^= 1;
+    fs::write(&kept.path, corrupt).unwrap();
+    assert_eq!(restart().await, (None, None));
 }

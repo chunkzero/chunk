@@ -10,6 +10,7 @@ mod archive;
 mod descriptor;
 #[cfg(feature = "compiler")]
 mod directory;
+mod install;
 mod jars;
 mod launcher;
 mod manifest;
@@ -20,6 +21,7 @@ mod session_methods;
 mod unpack;
 mod verify;
 pub use descriptor::{JavaRuntime, JvmDescriptor, read_jvm_descriptor};
+pub use install::{Installed, install_release, installed_release};
 #[cfg(feature = "compiler")]
 pub use publish::{Release, ReleaseInputs, publish_release};
 pub use unpack::{ArchiveDigest, UnpackLimits, unpack_release};
