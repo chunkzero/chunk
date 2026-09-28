@@ -33,7 +33,11 @@ impl Config {
     /// # Errors
     /// Reports missing or invalid variables.
     pub fn from_env() -> io::Result<Self> {
-        let services = optional::<String>("CHUNK_SERVICES")?.map_or_else(|| Ok(Services::default()), |s| s.parse())?;
+        let services: Services =
+            optional::<String>("CHUNK_SERVICES")?.map_or_else(|| Ok(Services::default()), |s| s.parse())?;
+        if !services.contains(Service::Core) {
+            return Err(gateway_only());
+        }
         let state: std::path::PathBuf = required("CHUNK_STATE")?;
         let management = match optional("CHUNK_MANAGEMENT_URL")? {
             Some(url) => Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")? }),
@@ -64,6 +68,10 @@ impl Config {
     }
 }
 
+fn gateway_only() -> io::Error {
+    io::Error::other("CHUNK_SERVICES=gateway is not supported yet; run core,gateway or core")
+}
+
 /// Runs the selected services until `stop` or until one of them stops, then stops the gateway before core. Under
 /// management, the gateway starts with the first deployment, and a core that management fences stops.
 /// # Errors
@@ -71,7 +79,7 @@ impl Config {
 /// fenced core, and shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     if !config.services.contains(Service::Core) {
-        return Err(io::Error::other("CHUNK_SERVICES=gateway is not supported yet; run core,gateway or core"));
+        return Err(gateway_only());
     }
     let environment = config.core.environment.clone();
     let state = config.core.state.clone();
