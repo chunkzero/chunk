@@ -145,6 +145,22 @@ impl MachineKind {
     }
 }
 
+/// What a remote runner starts on a host, and the runner boot bound to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Launch {
+    /// The deployment whose release the host runs.
+    pub deployment: String,
+    /// The release whose archive the runner downloads.
+    pub release: String,
+    pub app: String,
+    pub profile: String,
+    pub process_id: String,
+    pub generation: u64,
+    /// The boot of the one runner that may start the host, once one asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<String>,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MoveIntent {
     #[serde(with = "bytes")]
@@ -357,6 +373,7 @@ impl Stamp for PlayerState {}
 impl Stamp for Drain {}
 impl Stamp for OperatorCall {}
 impl Stamp for Machine {}
+impl Stamp for Launch {}
 impl Stamp for Roster {}
 impl Stamp for ReleaseState {}
 

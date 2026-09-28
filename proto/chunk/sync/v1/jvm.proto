@@ -209,3 +209,50 @@ message JvmHealth {
   uint32 sessions = 10;
   uint32 players = 11;
 }
+
+// Methods a remote runner calls before it starts a JVM, to learn what its host runs and to download that release. Only
+// the JVM machine credential core minted for the host may call them, never a process credential, with no deployment,
+// caller or stream. They ignore the operation ID. A host is booted once: a runner makes up a boot ID each time its
+// machine starts, and after a full stop the machine must be replaced, since only a suspend resumes the same JVM.
+// - `chunk:launch` takes JvmBoot and returns JvmLaunch. The first call binds the host to its boot, and a repeat with
+//   that boot returns the same launch. Any other boot is DENIED for good. A host core launches nothing on is DENIED
+//   too, and one whose release archive core no longer keeps fails with CONTRACT.
+// - `chunk:archive` takes JvmArchiveRead and returns JvmArchiveChunk: the bytes of the host's release archive from
+//   `offset`, at most 4 MiB less 1 KiB so a response fits a default 4 MiB gRPC message limit, which only the bound
+//   boot may read. An offset at or past the archive's end is INVALID. A host reads one chunk at a time, and a read
+//   while another of its reads runs gets OVERLOADED. The runner checks the whole archive against JvmLaunch's size and
+//   digest before unpacking it.
+
+// Arguments of `chunk:launch` and the runner's identity: a random ID the runner makes up once per boot, 1 to 128 bytes.
+message JvmBoot {
+  string boot = 1;
+}
+
+// What a host runs. The runner starts the JVM with these values.
+message JvmLaunch {
+  // The deployment the JVM registers with.
+  string deployment = 1;
+  // The release whose archive `chunk:archive` serves, and that archive's size and SHA-256 digest in lowercase hex.
+  string release_id = 2;
+  uint64 archive_size = 3;
+  string archive_sha256 = 4;
+  // The app the JVM runs, and the machine profile it runs on.
+  string app = 5;
+  string profile = 6;
+  // The process ID and generation the JVM registers with.
+  string process_id = 7;
+  uint64 generation = 8;
+}
+
+// Arguments of `chunk:archive`.
+message JvmArchiveRead {
+  // The boot bound to the host.
+  string boot = 1;
+  // Where the chunk starts in the archive.
+  uint64 offset = 2;
+}
+
+// The result of `chunk:archive`: the archive's bytes from the requested offset, at most 4 MiB less 1 KiB.
+message JvmArchiveChunk {
+  bytes data = 1;
+}

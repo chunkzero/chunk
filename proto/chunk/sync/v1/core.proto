@@ -9,10 +9,11 @@
 // Encoding. `arguments`, `result` and entry values are UTF-8 JSON for app functions and query topics, and protobuf
 // messages declared by each `chunk:*` method or platform topic otherwise.
 //
-// Operations. Methods that write require an operation ID; reads, and idempotent `chunk:register` and `chunk:report`,
-// ignore it, except a reserved `prep:` ID (see PrepareResult) or `operator:` ID (see operator.proto). A duplicate of
-// a running operation waits for its outcome instead of running again. A retry must repeat the first request, and one
-// whose method, arguments or caller differ fails with OPERATION_MISMATCH. Each method is one of two kinds:
+// Operations. Methods that write require an operation ID; reads, and idempotent `chunk:register`, `chunk:report`,
+// `chunk:launch` and `chunk:archive`, ignore it, except a reserved `prep:` ID (see PrepareResult) or `operator:` ID
+// (see operator.proto). A duplicate of a running operation waits for its outcome instead of running again. A retry
+// must repeat the first request, and one whose method, arguments or caller differ fails with OPERATION_MISMATCH. Each
+// method is one of two kinds:
 // - Transactional methods (mutations, `chunk:commit`) take effect only by committing. Core records a committed
 //   outcome with the commit, and a retry returns it until retention expires (24 hours by default). A failure
 //   committed nothing, so its retry runs again, as does a retry after expiry or after a restore lost the commit.
@@ -56,8 +57,11 @@
 // Auth. Every request carries `authorization: Bearer <credential>` metadata. Core derives the credential's class
 // (gateway, jvm or cli) and identity from it, and checks each method, topic, deployment and caller against them;
 // request fields are never authority. Core mints the credential of each gateway and JVM machine, scoped to one
-// environment and to that machine's identity. `cli` is the operator class, and only it may use the operator surface
-// in operator.proto. Core accepts a `cli` credential in two forms: control's credential, which the `chunk` CLI
+// environment and to that machine's identity, and it holds until core revokes it. A JVM machine credential authorizes
+// only its own host: that host's `jvm/<host>` topic, its JVM's calls, and its release through `chunk:launch` and
+// `chunk:archive`. A JVM core starts on its own machine presents a credential core issued for that process instead,
+// which can't call `chunk:launch` or `chunk:archive`. `cli` is the operator class, and only it may use the operator
+// surface in operator.proto. Core accepts a `cli` credential in two forms: control's credential, which the `chunk` CLI
 // presents, only from a loopback peer; and the environment's operator credential, which management presents when it
 // relays operator calls.
 //

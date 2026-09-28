@@ -17,7 +17,20 @@ pub struct ReleaseArchive {
 
 /// The archives of the releases core keeps, by release ID.
 #[derive(Default)]
-pub(crate) struct Archives(Mutex<BTreeMap<String, ReleaseArchive>>);
+pub(crate) struct Archives {
+    kept: Mutex<BTreeMap<String, ReleaseArchive>>,
+    #[cfg(test)]
+    pub(crate) stall: std::sync::Arc<Stall>,
+}
+
+/// Held by tests to stall archive reads in their blocking I/O.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Stall {
+    pub held: tokio::sync::Mutex<()>,
+    /// Notified as each read reaches the stall.
+    pub entered: tokio::sync::Notify,
+}
 
 impl Archives {
     /// Release `release`'s archive, while its file is still there with the size it was verified at.
@@ -41,6 +54,6 @@ impl Archives {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ReleaseArchive>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

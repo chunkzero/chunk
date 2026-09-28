@@ -17,7 +17,7 @@ pub(crate) use entities::{
     Capacity, Claim, Drain, HostState, Machine, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase,
     PlayerState, ReleaseState, Roster, SessionState,
 };
-pub use entities::{Generation, MachineKind};
+pub use entities::{Generation, Launch, MachineKind};
 
 #[derive(Clone, Default)]
 pub(crate) struct State {
@@ -39,6 +39,8 @@ pub(crate) struct State {
     pub rosters: BTreeMap<String, Roster>,
     /// Machines core minted credentials for, by ID.
     pub machines: BTreeMap<String, Machine>,
+    /// What remote runners start on each host, by host ID.
+    pub launches: BTreeMap<String, Launch>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
     /// The revision of the last commit this state includes. App commits share the log, so later revisions may
