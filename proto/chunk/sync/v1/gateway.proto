@@ -191,30 +191,35 @@ message ManifestResult {
 // - `chunk:command` starts a command as an effectful call under an operation ID `chunk:prepare` issued. It takes
 //   CommandArguments and a caller naming the player, and returns CommandStarted once the backend admitted the command,
 //   which then belongs to the calling gateway credential. It resolves the operation ID first: under an unused one it
-//   derives the command's scope from the player's current claim, and a rejection leaves the ID unused. A retry under
-//   an ID whose command started returns CommandStarted again without consulting the player's claim or deployment; one
-//   by another credential gets DENIED, and one that changes the command, input or player, or under an ID that ran an
-//   action or hook, gets OPERATION_MISMATCH. At most 4 retries wait while the backend admits the command; later ones
-//   get UNAVAILABLE, as does a waiting retry whose command was rejected.
+//   derives the command's scope from the player's current claim, and a rejection leaves the ID unused, though one a
+//   subscription reserved keeps the command, input and player its first start named. A retry under an ID whose command
+//   started returns CommandStarted again without consulting the player's claim or deployment; one by another
+//   credential gets DENIED, and one that changes the command, input or player, or under an ID that ran an action or
+//   hook, gets OPERATION_MISMATCH. At most 4 retries and subscriptions wait while the backend admits the
+//   command; later ones get UNAVAILABLE, as does a waiting retry whose command was rejected. A start under an ID whose
+//   subscription closed before the command started gets STOPPED.
 // - `chunk:effect` acknowledges one effect from a `command/<op>` topic. It takes EffectArguments and no caller or
 //   operation ID, and returns EffectResult. The command's effect resolves with the acknowledgment.
 //
 // The `command/<op>` topic carries the command started under `<op>` to the gateway credential that owns it, and any
 // other credential gets DENIED. A subscription takes a CommandSubscription as its arguments and no deployment or
-// caller, and opens only for a command that started: one under an unused ID gets INVALID. One subscription follows a
-// command at a time, and a newer one ends the older with STOPPED. Every update is a snapshot without a position. Each
-// entry's key is a pending effect's sequence number in decimal and its value a CommandEffect, which waits for the
-// gateway to render it to its player and acknowledge it. At most 8 effects are pending at once; the command's later
-// ones fail until the gateway acknowledges some. A command finishes once its handler returned and the session methods
-// it called or sent settled, bounded by their deadline. Then its pending effects fail and the final snapshot holds one
-// entry, keyed `outcome`, whose value is a CommandOutcome, after which the stream ends. A subscription after the
-// command finished gets that final snapshot while core retains the outcome. The topic anchors the command's lifetime:
-// core cancels a running command once its subscription closes, as the gateway closes it at session cutover, or at
-// disconnect for a command that follows its player, or at its deadline. Cancelling stops the handler and fails its
-// pending and later effects, including session methods core hasn't called yet; a move already queued stays. A command
-// no subscription opens for within 5 seconds of starting is cancelled, as is one whose subscription ended because the
-// gateway stream it names was superseded, unless the gateway follows the command again from its new stream within 5
-// seconds. Such a stream ends with STOPPED.
+// caller. One under an unused ID reserves it for the subscribing gateway credential: it sends an empty snapshot at
+// once, then nothing until the command starts, through a later start if one is rejected. Closing a subscription before
+// its command started cancels the command, including a start waiting for admission, which gets STOPPED, and core
+// refuses a later start under the ID with STOPPED for at least 60 seconds. A subscription waiting for a start counts as
+// one of the calls that may wait for it. One subscription follows a command at a time, and a newer one ends the older
+// with STOPPED. Every update is a snapshot without a position. Each entry's key is a pending effect's sequence number
+// in decimal and its value a CommandEffect, which waits for the gateway to render it to its player and acknowledge it.
+// At most 8 effects are pending at once; the command's later ones fail until the gateway acknowledges some. A command
+// finishes once its handler returned and the session methods it called or sent settled, bounded by their deadline. Then
+// its pending effects fail and the final snapshot holds one entry, keyed `outcome`, whose value is a CommandOutcome,
+// after which the stream ends. A subscription after the command finished gets that final snapshot while core retains
+// the outcome. The topic anchors the command's lifetime: core cancels a running command once its subscription closes,
+// as the gateway closes it at session cutover, or at disconnect for a command that follows its player, or at its
+// deadline. Cancelling stops the handler and fails its pending and later effects, including session methods core hasn't
+// called yet; a move already queued stays. A command no subscription opens for within 5 seconds of starting is
+// cancelled, as is one whose subscription ended because the gateway stream it names was superseded, unless the gateway
+// follows the command again from its new stream within 5 seconds. Such a stream ends with STOPPED.
 
 // Arguments of a `command/<op>` subscription.
 message CommandSubscription {

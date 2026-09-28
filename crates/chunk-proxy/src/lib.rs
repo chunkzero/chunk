@@ -54,18 +54,15 @@ impl Default for Config {
     }
 }
 
-/// Core's endpoint and this gateway's identity in it, with the backend connection commands still use. Hooks run in
-/// `backend.deployment`.
+/// Core's endpoint, this gateway's identity in it, and the deployment whose hooks it runs.
 #[derive(Clone)]
 pub struct PlatformTarget {
     /// Core's endpoint, which serves the sync protocol.
     pub core: String,
     /// This gateway's identity in core; its credential authenticates every sync request.
     pub gateway: GatewayCredential,
-    pub backend: chunk_contract::BackendConnection,
-    /// Control's credential, which command effects present on core's endpoint to move players and call session
-    /// methods.
-    pub control_token: String,
+    /// The deployment whose domain manifest and hooks route logins.
+    pub deployment: String,
 }
 
 /// The ID core knows a gateway by, which names the claims it holds, and the credential core minted for it.
@@ -80,7 +77,7 @@ impl std::fmt::Debug for PlatformTarget {
         f.debug_struct("PlatformTarget")
             .field("core", &self.core)
             .field("gateway", &self.gateway.id)
-            .field("backend", &self.backend.endpoint)
+            .field("deployment", &self.deployment)
             .finish_non_exhaustive()
     }
 }

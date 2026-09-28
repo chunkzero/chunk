@@ -108,6 +108,17 @@ async fn output(commands: &mut Commands, public: &mut Transport<DuplexStream>) {
     let event = tokio::time::timeout(Duration::from_secs(3), commands.receive()).await.unwrap();
     commands.publish(event, public).await.unwrap();
 }
+/// A fixture whose player arrived and read their command tree, with their end and the proxy's of their connection.
+async fn arrived() -> (Fixture, Transport<DuplexStream>, Transport<DuplexStream>) {
+    let mut fixture = Fixture::new().await;
+    let (client, public) = tokio::io::duplex(16384);
+    let (mut client, mut public) = (Transport::new(client), Transport::new(public));
+    fixture.commands.tree(&CommandTree::empty()).unwrap();
+    fixture.commands.arrived();
+    output(&mut fixture.commands, &mut public).await;
+    client.read_frame(16384).await.unwrap();
+    (fixture, client, public)
+}
 async fn wait_count(count: &std::sync::atomic::AtomicUsize, expected: usize) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while count.load(Ordering::SeqCst) < expected {
@@ -164,7 +175,7 @@ async fn relay_keeps_pumping_while_owned_commands_await_and_preserves_jvm_signed
         service.release.notify_one();
         assert_eq!(VarInt::decode(&mut client.read_frame(16384).await.unwrap().as_ref()).unwrap().0, SystemMessage::ID);
         wait_count(&service.replies, 1).await;
-        assert_eq!(service.prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(service.runs.lock().unwrap().len(), 1);
         done.send(()).unwrap();
     };
     let mut settings = settings();
@@ -188,7 +199,7 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
     assert!(decode_packet::<CommandTree>(body(&hidden)).unwrap().nodes[0].children.is_empty());
     assert!(fixture.commands.input(&unsigned("echo")).unwrap());
     output(&mut fixture.commands, &mut public).await; // Pre-arrival text rejected, never sent in configuration.
-    assert_eq!(fixture.service.prepared.load(Ordering::SeqCst), 0);
+    assert!(fixture.service.runs.lock().unwrap().is_empty());
     fixture.commands.arrived();
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
@@ -196,7 +207,7 @@ async fn ownership_is_hidden_before_arrival_and_permissions_are_fresh_at_dispatc
     assert!(fixture.commands.input(&unsigned("echo")).unwrap());
     output(&mut fixture.commands, &mut public).await;
     client.read_frame(16384).await.unwrap();
-    assert_eq!(fixture.service.prepared.load(Ordering::SeqCst), 0);
+    assert!(fixture.service.runs.lock().unwrap().is_empty());
     fixture.commands.refresh();
     output(&mut fixture.commands, &mut public).await;
     let hidden = decode_packet::<CommandTree>(&client.read_frame(16384).await.unwrap()).unwrap();
@@ -242,14 +253,7 @@ async fn failed_permission_refresh_keeps_last_catalog() {
 
 #[tokio::test]
 async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_new_claim() {
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     fixture.commands.input(&unsigned("slow")).unwrap();
     fixture.commands.input(&unsigned("follow")).unwrap();
     wait_count(&fixture.service.waiting, 2).await;
@@ -262,10 +266,9 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     fixture.claim.operation_id = "moved".into();
     fixture.identity.operation_id = "moved".into();
     fixture.identity.delivery_generation = crate::server::platform::generation(&moved.generation);
-    fixture.session = "new-session".into();
     *fixture.service.claim.lock().unwrap() = moved;
     fixture.sync().await;
-    fixture.commands.bind(&fixture.claim, &fixture.identity, &fixture.session).unwrap();
+    fixture.commands.bind(&fixture.claim, &fixture.identity).unwrap();
     assert!(origin.cancellation.is_cancelled());
     assert!(fixture.commands.tasks.current(&origin, true).is_err()); // Configuration rejects effects.
     fixture.commands.tree(&CommandTree::empty()).unwrap();
@@ -281,7 +284,7 @@ async fn cutover_cancels_default_command_and_follow_text_uses_same_connections_n
     tokio::time::timeout(Duration::from_secs(3), platform.cleanup.wait()).await.unwrap();
     assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 1);
     assert!(fixture.commands.tasks.current(&origin, false).is_err());
-    assert_eq!(fixture.commands.tasks.current(&origin, true).unwrap().scope.session_id, "new-session");
+    assert_eq!(fixture.commands.tasks.current(&origin, true).unwrap().identity.operation_id, "moved");
     assert!(origin.check(&fixture.commands.tasks.platform).await.is_err());
     fixture.close().await;
 }
@@ -322,55 +325,9 @@ async fn a_call_on_a_superseded_stream_runs_again_on_its_replacement_under_the_s
 }
 
 #[tokio::test]
-async fn session_method_lost_start_polls_same_capture_and_never_retargets_after_move() {
-    let mut fixture = Fixture::new().await;
-    fixture.commands.arrived();
-    let origin = fixture.commands.origin.clone().unwrap();
-    let method =
-        || chunk_contract::EffectMethod { app: "lobby".into(), session: "default".into(), name: "population".into() };
-    let value =
-        session::invoke(&fixture.commands.tasks, &origin, method(), serde_json::json!({}), false).await.unwrap();
-    assert_eq!(value, serde_json::json!(42));
-    assert_eq!(fixture.service.starts.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.service.polls.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.service.methods.lock().unwrap()[0].claim.as_ref(), Some(&origin.identity));
-    fixture.service.claim.lock().unwrap().generation.revision += 1;
-    fixture.sync().await;
-    assert!(session::invoke(&fixture.commands.tasks, &origin, method(), serde_json::json!({}), false).await.is_err());
-    assert_eq!(fixture.service.methods.lock().unwrap().len(), 1);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn accepted_session_send_outlives_handler_return_but_retains_captured_scope_cancellation() {
-    let mut fixture = Fixture::new().await;
-    fixture.commands.arrived();
-    fixture.service.pending_method.store(true, Ordering::SeqCst);
-    let origin = fixture.commands.origin.clone().unwrap();
-    let method =
-        chunk_contract::EffectMethod { app: "lobby".into(), session: "default".into(), name: "population".into() };
-    session::invoke(&fixture.commands.tasks, &origin, method, serde_json::json!({}), true).await.unwrap();
-    assert_eq!(fixture.commands.tasks.methods.available_permits(), 7);
-    wait_count(&fixture.service.polls, 1).await;
-    assert_eq!(fixture.service.cancels.load(Ordering::SeqCst), 0);
-    fixture.commands.configuration();
-    wait_count(&fixture.service.cancels, 1).await;
-    assert_eq!(fixture.service.methods.lock().unwrap().len(), 1);
-    assert_eq!(fixture.service.starts.load(Ordering::SeqCst), 1);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn query_suggestions_use_owned_range_and_current_permission_and_platform_auth() {
+async fn query_suggestions_use_owned_range_and_current_permission() {
     use chunk_protocol::{commands::CommandSuggestions, versions::v26_2::CommandSuggestionsRequest};
-    let mut fixture = Fixture::new().await;
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    fixture.commands.tree(&CommandTree::empty()).unwrap();
-    fixture.commands.arrived();
-    output(&mut fixture.commands, &mut public).await;
-    client.read_frame(16384).await.unwrap();
+    let (mut fixture, mut client, mut public) = arrived().await;
     let request = encode_packet(&CommandSuggestionsRequest {
         transaction_id: VarInt(19),
         text: McString::new("/travel al").unwrap(),
@@ -385,60 +342,85 @@ async fn query_suggestions_use_owned_range_and_current_permission_and_platform_a
     fixture.commands.input(body(&request)).unwrap();
     output(&mut fixture.commands, &mut public).await;
     assert!(decode_packet::<CommandSuggestions>(&client.read_frame(16384).await.unwrap()).unwrap().matches.is_empty());
-    let mut platform = fixture.commands.tasks.platform.clone();
-    platform.target.backend.platform_token = Some("application".into());
-    let scope = fixture.commands.origin.as_ref().unwrap().scope.clone();
-    let response = backend::client(&platform).catalog(backend::authenticated(&platform, scope).unwrap()).await;
-    assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn concurrent_effects_complete_independently_and_accept_unique_out_of_order_sequences() {
-    let mut fixture = Fixture::new().await;
-    fixture.commands.arrived();
-    fixture.service.pending_method.store(true, Ordering::SeqCst);
-    let tasks = fixture.commands.tasks.clone();
-    let origin = fixture.commands.origin.clone().unwrap();
-    let (client, public) = tokio::io::duplex(16384);
-    let mut public = Transport::new(public);
-    let mut client = Transport::new(client);
-    // The initial catalog result does not emit a tree until the JVM publishes one.
-    output(&mut fixture.commands, &mut public).await;
-    let run = tokio::spawn(async move { run::execute(&tasks, &origin, false, "parallel").await });
-    let event = tokio::time::timeout(Duration::from_secs(3), fixture.commands.receive()).await.unwrap();
-    assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 0); // No receipt before the actual write.
-    fixture.commands.publish(event, &mut public).await.unwrap();
+async fn a_command_follows_its_topic_again_from_a_new_gateway_stream_while_its_effect_waits_to_be_written() {
+    let (mut fixture, mut client, mut public) = arrived().await;
+    fixture.commands.input(&unsigned("slow")).unwrap();
+    wait_count(&fixture.service.waiting, 1).await;
+    fixture.service.release.notify_one();
+    let effect = tokio::time::timeout(Duration::from_secs(3), fixture.commands.receive()).await.unwrap();
+    fixture.service.drop_stream();
+    wait_count(&fixture.service.follows, 2).await;
+    // Past core's grace, the command still runs.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fixture.commands.publish(effect, &mut public).await.unwrap();
     assert_eq!(VarInt::decode(&mut client.read_frame(16384).await.unwrap().as_ref()).unwrap().0, SystemMessage::ID);
     wait_count(&fixture.service.replies, 1).await;
-    assert_eq!(*fixture.service.reply_order.lock().unwrap(), [2]);
-    assert!(!run.is_finished());
-    fixture.service.pending_method.store(false, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(3), run).await.unwrap().unwrap().unwrap();
-    assert_eq!(*fixture.service.reply_order.lock().unwrap(), [2, 4]);
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    assert!(!run.cancelled());
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn accepted_sends_survive_success_but_abort_with_failed_invocation() {
-    for succeeded in [true, false] {
-        let mut fixture = Fixture::new().await;
-        fixture.commands.arrived();
-        fixture.service.pending_method.store(true, Ordering::SeqCst);
-        let origin = fixture.commands.origin.clone().unwrap();
-        let result =
-            run::execute(&fixture.commands.tasks, &origin, false, if succeeded { "send_ok" } else { "send_fail" })
-                .await;
-        assert_eq!(result.is_ok(), succeeded);
-        if succeeded {
-            wait_count(&fixture.service.polls, 1).await;
-            assert_eq!(fixture.service.cancels.load(Ordering::SeqCst), 0);
-            fixture.commands.configuration();
+async fn a_command_started_while_its_topic_reopens_from_a_new_gateway_stream_keeps_running() {
+    let (mut fixture, mut client, mut public) = arrived().await;
+    fixture.service.admission.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("echo")).unwrap();
+    wait_count(&fixture.service.queued, 1).await;
+    fixture.service.reopening.store(true, Ordering::SeqCst);
+    fixture.service.drop_stream();
+    fixture.sync().await;
+    // Once admitted, core stops the topic on the superseded stream and answers the start while the topic reopens.
+    fixture.service.admit.notify_one();
+    output(&mut fixture.commands, &mut public).await;
+    assert_eq!(VarInt::decode(&mut client.read_frame(16384).await.unwrap().as_ref()).unwrap().0, SystemMessage::ID);
+    wait_count(&fixture.service.replies, 1).await;
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    assert!(!run.cancelled());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_commands_unwritten_effect_is_dropped_once_it_finished() {
+    let (mut fixture, mut client, mut public) = arrived().await;
+    fixture.service.outstanding.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("slow")).unwrap();
+    wait_count(&fixture.service.waiting, 1).await;
+    fixture.service.release.notify_one();
+    let effect = tokio::time::timeout(Duration::from_secs(3), fixture.commands.receive()).await.unwrap();
+    // Core finishes the command while its effect waits to be written.
+    fixture.service.release.notify_one();
+    let platform = fixture.commands.tasks.platform.clone();
+    platform.cleanup.close();
+    tokio::time::timeout(Duration::from_secs(3), platform.cleanup.wait()).await.unwrap();
+    fixture.commands.publish(effect, &mut public).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(100), client.read_frame(16384)).await.is_err());
+    assert_eq!(fixture.service.replies.load(Ordering::SeqCst), 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_player_leaving_while_their_command_waits_for_admission_cancels_it() {
+    let (fixture, _client, _public) = arrived().await;
+    fixture.service.admission.store(true, Ordering::SeqCst);
+    fixture.commands.input(&unsigned("echo")).unwrap();
+    wait_count(&fixture.service.queued, 1).await;
+    fixture.commands.tasks.connection.cancel();
+    let run = fixture.service.runs.lock().unwrap().values().next().unwrap().clone();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !run.cancelled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        wait_count(&fixture.service.cancels, 1).await;
-        assert_eq!(fixture.service.methods.lock().unwrap().len(), 1);
-        fixture.close().await;
-    }
+    })
+    .await
+    .unwrap();
+    fixture.service.admit.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!run.started());
+    fixture.close().await;
 }
 
 #[tokio::test]
@@ -494,8 +476,8 @@ async fn a_login_routed_again_keeps_its_operation_until_the_connection_deadline_
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let mut target = current.platform().target;
-        target.backend.deployment = "next".into();
-        current.replace(target).unwrap();
+        target.deployment = "next".into();
+        current.replace(target);
         fail.send(()).unwrap();
     };
     // The client never finishes configuration, so the connection's own deadline ends the login.

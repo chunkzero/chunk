@@ -102,14 +102,7 @@ impl Fixture {
         let platform = Platform::new(PlatformTarget {
             core: format!("http://{}", listener.local_addr().unwrap()),
             gateway: crate::GatewayCredential { id: "proxy".into(), credential: "gateway".into() },
-            control_token: "unused".into(),
-            backend: chunk_contract::BackendConnection {
-                endpoint: "http://127.0.0.1:1".into(),
-                environment: "test".into(),
-                deployment: "candidate".into(),
-                token: "unused".into(),
-                platform_token: None,
-            },
+            deployment: "candidate".into(),
         })
         .unwrap();
         let hooks = Hooks { backend, prepared: Arc::default(), callers: Arc::default() };

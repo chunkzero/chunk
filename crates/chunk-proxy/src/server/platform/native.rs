@@ -19,7 +19,7 @@ impl Platform {
     pub(in crate::server) async fn manifest(&self) -> io::Result<Option<Arc<DomainManifest>>> {
         self.manifest
             .get_or_try_init(|| async {
-                let deployment = &self.target.backend.deployment;
+                let deployment = &self.target.deployment;
                 let message = CallRequest {
                     method: "chunk:manifest".into(),
                     deployment: deployment.clone(),

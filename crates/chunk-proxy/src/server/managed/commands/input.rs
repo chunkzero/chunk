@@ -1,6 +1,6 @@
-use super::{Commands, Output, Tasks, backend, run, scope::Origin};
+use super::{Commands, Output, Tasks, run, scope::Origin};
 use crate::server::transport::invalid_data;
-use chunk_proto::v1::{CommandSuggestionRequest, PrepareCommand};
+use chunk_proto::sync::v1::{CommandArguments, SuggestArguments};
 use chunk_protocol::{
     Decode, Packet, VarInt,
     commands::{CommandSuggestions, PlainText, SignedCommand, SystemMessage},
@@ -56,17 +56,17 @@ impl Commands {
         tasks.platform.cleanup.clone().spawn(async move {
             let _permit = permit;
             let work = async {
+                let (tasks, _invocation) = tasks.invocation();
                 tasks.current(&origin, false)?;
                 origin.check(&tasks.platform).await?;
-                let allowed = backend::catalog(&tasks.platform, &origin.scope, &descriptors).await?;
+                let allowed = tasks.allowed(&origin, &descriptors).await?;
                 if let Some(transaction_id) = suggestion {
                     let cursor = u32::try_from(input.encode_utf16().count()).map_err(invalid_data)?;
                     let plan = catalog.suggestions(&input, cursor, |id,_| allowed.contains(id)).map_err(invalid_data)?;
                     let response = if let Some(plan) = plan {
                         let values = if let Some(query) = &plan.query {
-                            backend::client(&tasks.platform).suggest(backend::authenticated(&tasks.platform, CommandSuggestionRequest {
-                                scope: Some(origin.scope.clone()), command_id: id.clone(), query: query.clone(), input: input.clone(), cursor,
-                            })?).await.map_err(io::Error::other)?.into_inner().values
+                            let arguments = SuggestArguments { command_id: id.clone(), query: query.clone(), input: input.clone(), cursor };
+                            tasks.platform.suggest(&origin.player, &arguments).await?
                         } else { Vec::new() };
                         plan.finish(transaction_id, &values).map_err(invalid_data)?
                     } else { CommandSuggestions { transaction_id, start: cursor, length: 0, matches: Vec::new() } };
@@ -76,13 +76,7 @@ impl Commands {
                 if !allowed.contains(&id) { return Err(invalid_data("command permission denied")); }
                 tasks.current(&origin, false)?;
                 origin.check(&tasks.platform).await?;
-                let prepared = backend::client(&tasks.platform).prepare(backend::authenticated(&tasks.platform, PrepareCommand {
-                    scope: Some(origin.scope.clone()), command_id: id, input,
-                })?).await.map_err(io::Error::other)?.into_inner();
-                if prepared.follow_player != follow || prepared.invocation_id.is_empty() {
-                    return Err(invalid_data("command preparation mismatch"));
-                }
-                run::execute(&tasks, &origin, follow, &prepared.invocation_id).await
+                run::execute(&tasks, &origin, follow, CommandArguments { command_id: id, input }).await
             };
             let cancellation = if follow && suggestion.is_none() { &tasks.connection } else { &origin.cancellation };
             tokio::select! {

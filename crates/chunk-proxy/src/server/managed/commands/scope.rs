@@ -2,7 +2,7 @@ use std::io;
 
 use chunk_proto::{
     sync::v1::ClaimPhase,
-    v1::{ClaimIdentity, ClaimRequest, CommandScope},
+    v1::{ClaimIdentity, ClaimRequest},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -11,35 +11,28 @@ use crate::server::{
     transport::invalid_data,
 };
 
+/// The claim a connection's commands are bound to, from binding until the next configuration.
 #[derive(Clone)]
 pub(in crate::server::managed) struct Origin {
     pub claim: ClaimRequest,
     pub identity: ClaimIdentity,
-    pub scope: CommandScope,
+    /// Names this binding.
+    pub id: String,
+    /// The player's UUID.
+    pub player: String,
+    /// The domain of the session's app.
+    pub domain: String,
     pub cancellation: CancellationToken,
 }
 impl Origin {
-    pub fn new(claim: &ClaimRequest, identity: &ClaimIdentity, session: &str, domain: String) -> io::Result<Self> {
+    pub fn new(claim: &ClaimRequest, identity: &ClaimIdentity, domain: String) -> io::Result<Self> {
         let player = claim.identity.as_ref().ok_or_else(|| invalid_data("missing command player"))?;
-        let demand = claim.demand.as_ref().ok_or_else(|| invalid_data("missing command destination"))?;
-        let (app, _) = demand.session_type.split_once('/').ok_or_else(|| invalid_data("missing command app"))?;
         Ok(Self {
             claim: claim.clone(),
-            scope: CommandScope {
-                proxy_id: claim.proxy_id.clone(),
-                player_uuid: player.uuid.clone(),
-                username: player.username.clone(),
-                session_id: session.into(),
-                app: app.into(),
-                session_type: demand.session_type.clone(),
-                domain,
-                scope_id: uuid::Uuid::new_v4().to_string(),
-                connection_id: claim.connection_id.clone(),
-                claim_operation_id: identity.operation_id.clone(),
-                membership_generation: identity.membership_generation,
-                delivery_generation: identity.delivery_generation,
-            },
             identity: identity.clone(),
+            id: uuid::Uuid::new_v4().to_string(),
+            player: player.uuid.clone(),
+            domain,
             cancellation: CancellationToken::new(),
         })
     }
@@ -54,6 +47,6 @@ impl Origin {
         }
     }
     pub fn matches(&self, other: &Self) -> bool {
-        self.scope.scope_id == other.scope.scope_id
+        self.id == other.id
     }
 }

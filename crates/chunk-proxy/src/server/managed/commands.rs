@@ -1,9 +1,7 @@
-mod backend;
 mod effects;
 mod input;
 mod run;
 mod scope;
-mod session;
 
 use super::super::{
     platform::Platform,
@@ -20,7 +18,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub(super) enum Output {
     Permissions {
@@ -29,6 +27,7 @@ pub(super) enum Output {
     },
     Packets {
         origin: Box<Origin>,
+        /// Ends once the input they answer is done; unwritten packets are then dropped.
         invocation: CancellationToken,
         follow: bool,
         packets: Vec<Vec<u8>>,
@@ -42,9 +41,8 @@ struct Tasks {
     invocation: CancellationToken,
     current: watch::Receiver<Option<Origin>>,
     output: mpsc::Sender<Output>,
+    /// Bounds the commands, suggestions and permission refreshes one connection has in flight.
     capacity: Arc<Semaphore>,
-    methods: Arc<Semaphore>,
-    effects: Arc<Semaphore>,
 }
 impl Tasks {
     fn current(&self, origin: &Origin, follow: bool) -> io::Result<Origin> {
@@ -59,6 +57,23 @@ impl Tasks {
             return Err(invalid_data("command player ownership changed"));
         }
         Ok(current)
+    }
+
+    /// A copy whose packets belong to a new invocation, which ends once the guard drops.
+    fn invocation(&self) -> (Self, DropGuard) {
+        let invocation = CancellationToken::new();
+        (Self { invocation: invocation.clone(), ..self.clone() }, invocation.drop_guard())
+    }
+
+    /// The commands `origin`'s player may run, from core's catalog for their session, which must match `descriptors`.
+    async fn allowed(&self, origin: &Origin, descriptors: &BTreeMap<String, Command>) -> io::Result<BTreeSet<String>> {
+        let catalog = self.platform.commands(&origin.player).await?;
+        let commands: BTreeMap<String, Command> =
+            serde_json::from_slice(&catalog.commands_json).map_err(invalid_data)?;
+        if &commands != descriptors || catalog.allowed.iter().any(|id| !commands.contains_key(id)) {
+            return Err(invalid_data("command catalog differs from pinned manifest"));
+        }
+        Ok(catalog.allowed.into_iter().collect())
     }
 }
 
@@ -86,8 +101,6 @@ impl Commands {
                 current,
                 output,
                 capacity: Arc::new(Semaphore::new(8)),
-                methods: Arc::new(Semaphore::new(8)),
-                effects: Arc::new(Semaphore::new(8)),
             },
             state,
             output: receiver,
@@ -100,7 +113,7 @@ impl Commands {
             refreshing: false,
         })
     }
-    pub fn bind(&mut self, claim: &ClaimRequest, identity: &ClaimIdentity, session: &str) -> io::Result<()> {
+    pub fn bind(&mut self, claim: &ClaimRequest, identity: &ClaimIdentity) -> io::Result<()> {
         self.configuration();
         let Some(manifest) = &self.manifest else {
             self.origin = None;
@@ -125,7 +138,7 @@ impl Commands {
             .collect();
         self.catalog =
             Some(CommandTreeCatalog::new(CommandTree::empty(), &self.descriptors, &domain).map_err(invalid_data)?);
-        self.origin = Some(Origin::new(claim, identity, session, domain)?);
+        self.origin = Some(Origin::new(claim, identity, domain)?);
         self.tree_received = false;
         self.allowed.clear();
         self.refreshing = false;
@@ -145,7 +158,7 @@ impl Commands {
         let Some(origin) = &self.origin else {
             return encode_packet(jvm).map_err(invalid_data);
         };
-        let catalog = match CommandTreeCatalog::new(jvm.clone(), &self.descriptors, &origin.scope.domain) {
+        let catalog = match CommandTreeCatalog::new(jvm.clone(), &self.descriptors, &origin.domain) {
             Ok(catalog) => catalog,
             Err(error) => {
                 let roots: Vec<_> = jvm.nodes[jvm.root]
@@ -189,9 +202,9 @@ impl Commands {
             let result = tokio::select! {
                 () = tasks.connection.cancelled() => return,
                 () = origin.cancellation.cancelled() => return,
-                result = async { origin.check(&tasks.platform).await?; backend::catalog(&tasks.platform, &origin.scope, &descriptors).await } => result,
+                result = async { origin.check(&tasks.platform).await?; tasks.allowed(&origin, &descriptors).await } => result,
             };
-            let _ = tasks.output.send(Output::Permissions { scope: origin.scope.scope_id, result }).await;
+            let _ = tasks.output.send(Output::Permissions { scope: origin.id, result }).await;
         });
     }
     pub async fn receive(&mut self) -> Output {
@@ -204,7 +217,7 @@ impl Commands {
     ) -> io::Result<()> {
         match output {
             Output::Permissions { scope, result } => {
-                if self.origin.as_ref().is_none_or(|origin| origin.scope.scope_id != scope) {
+                if self.origin.as_ref().is_none_or(|origin| origin.id != scope) {
                     return Ok(());
                 }
                 self.refreshing = false;
@@ -229,7 +242,7 @@ impl Commands {
             }
             Output::Packets { origin, invocation, follow, packets, acknowledgment } => {
                 let live = if invocation.is_cancelled() {
-                    Err(invalid_data("command invocation canceled"))
+                    Err(invalid_data("command invocation ended"))
                 } else {
                     self.tasks.current(&origin, follow)
                 };
