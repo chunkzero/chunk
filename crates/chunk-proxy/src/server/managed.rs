@@ -6,6 +6,8 @@ mod relay;
 pub mod benchmark;
 #[cfg(feature = "test-support")]
 pub mod testing;
+#[cfg(test)]
+mod tests;
 
 use std::{io, time::Duration};
 
@@ -18,6 +20,7 @@ use chunk_proto::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
+    sync::oneshot,
     time::{Instant, sleep, timeout},
 };
 
@@ -164,7 +167,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     current: &Retarget,
     deadline: Duration,
 ) -> io::Result<()> {
-    let login = login_claim(&authenticated.profile);
+    let login = login_claim(&authenticated.profile, current.platform().connection_id());
     let destination = claim_destination(&login, current);
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
@@ -253,10 +256,10 @@ async fn claim_destination(login: &ClaimRequest, current: &Retarget) -> io::Resu
     }
 }
 
-fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess) -> ClaimRequest {
+fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, connection_id: String) -> ClaimRequest {
     ClaimRequest {
         operation_id: uuid::Uuid::new_v4().to_string(),
-        connection_id: uuid::Uuid::new_v4().to_string(),
+        connection_id,
         identity: Some(gameplay::identity(profile)),
         ..ClaimRequest::default()
     }
@@ -302,6 +305,51 @@ async fn withdraw(source: &ClaimGuard) -> io::Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
     Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
+}
+
+/// Withdraws each claim this gateway's view shows that another process under its ID created, retrying each until core
+/// takes its withdrawal. `ready` resolves once every such claim in the first live view is withdrawing or gone; later
+/// ones, such as those of calls a replaced process made before it lost the ID, are withdrawn as they appear. Returns
+/// once the view fails, as when another process takes the ID over. Control completes a withdrawal whose JVM has yet to
+/// confirm it.
+pub(super) async fn withdraw_inherited(platform: &Platform, ready: oneshot::Sender<()>) -> io::Error {
+    let (mut ready, mut first, mut settled) = (Some(ready), None, None);
+    loop {
+        let inherited = platform.claims(|view| {
+            let inherited = view.inherited();
+            let first = first.get_or_insert_with(|| inherited.clone());
+            let waiting = ready.is_some() && first.is_disjoint(&inherited);
+            (view.passed(settled.as_ref()) && (waiting || !inherited.is_empty())).then_some(inherited)
+        });
+        let inherited = match inherited.await {
+            Ok(inherited) => inherited,
+            Err(error) => return error,
+        };
+        if first.as_ref().is_some_and(|first| first.is_disjoint(&inherited))
+            && let Some(ready) = ready.take()
+        {
+            let _ = ready.send(());
+        }
+        if !inherited.is_empty() {
+            tracing::info!(claims = inherited.len(), "withdrawing claims another gateway process left open");
+        }
+        let mut failed = false;
+        for operation in inherited {
+            match platform.call::<WithdrawResult>("withdraw", &operation, &(), RPC_TIMEOUT).await {
+                Ok((_, position)) if position.as_ref().map(generation) > settled.as_ref().map(generation) => {
+                    settled = position;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, operation, "inherited claim withdrawal unresolved; retrying");
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
 }
 
 /// Waits until the claim view shows the claim arrived.

@@ -12,7 +12,7 @@ use chunk_proto::{
 impl Fixture {
     /// Follows `gateway/<id>` as `credential`, returning the stream and its first update.
     pub(super) async fn follow(&mut self, credential: &str, id: &str) -> (Streaming<Update>, Update) {
-        let subscription = SubscribeRequest { topic: format!("gateway/{id}"), ..SubscribeRequest::default() };
+        let subscription = gateway_topic(id, "test");
         let mut updates = self.client.subscribe(authorized(subscription, credential)).await.unwrap().into_inner();
         let first = next(&mut updates).await;
         (updates, first)

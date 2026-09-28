@@ -17,7 +17,7 @@ use chunk_service::same_secret;
 use chunk_store::Revision;
 use prost::Message;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, ready},
@@ -84,28 +84,54 @@ impl StreamKey {
     }
 }
 
-/// The newest stream of each fenced topic, by topic.
+/// The newest stream of each fenced topic, and the process instances that owned it, by topic.
 #[derive(Default)]
 pub(super) struct Fences(Mutex<HashMap<String, Fence>>);
 
+#[derive(Default)]
 struct Fence {
     stream: String,
     credential: String,
     superseded: CancellationToken,
+    /// The process instance that opened the current stream.
+    instance: String,
+    /// Cancelled once another instance takes the topic over.
+    retired: CancellationToken,
+    /// Instances another took the topic over from, which never open it again.
+    retirees: HashSet<String>,
+}
+
+/// A stream's current place on its fenced topic.
+pub(super) struct Fenced {
+    /// Cancelled once a newer stream supersedes this one.
+    pub superseded: CancellationToken,
+    /// Cancelled, before `superseded` is, once another instance takes the topic over.
+    pub retired: CancellationToken,
 }
 
 impl Fences {
-    /// Makes `stream` `topic`'s current stream, superseding the earlier one, and returns the token cancelled once a
-    /// newer stream supersedes this one.
-    pub fn fence(&self, topic: &str, stream: &str, credential: &str) -> CancellationToken {
-        let superseded = CancellationToken::new();
-        let fence =
-            Fence { stream: stream.to_owned(), credential: credential.to_owned(), superseded: superseded.clone() };
+    /// Makes `stream`, which process `instance` opened, `topic`'s current stream, superseding the earlier one. An
+    /// instance new to the topic takes it over from the current one, which is retired. Fails with SUPERSEDED for an
+    /// instance already retired.
+    pub fn fence(&self, topic: &str, instance: &str, stream: &str, credential: &str) -> Result<Fenced, Error> {
         let mut fences = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(previous) = fences.insert(topic.to_owned(), fence) {
-            previous.superseded.cancel();
+        let fence = fences.entry(topic.to_owned()).or_default();
+        if fence.retirees.contains(instance) {
+            return Err(errors::error(Code::Superseded, "a later process under this gateway's ID took its topic over"));
         }
-        superseded
+        if fence.instance != instance {
+            fence.retired.cancel();
+            let retired = std::mem::replace(&mut fence.instance, instance.to_owned());
+            if !retired.is_empty() {
+                fence.retirees.insert(retired);
+            }
+            fence.retired = CancellationToken::new();
+        }
+        fence.superseded.cancel();
+        fence.superseded = CancellationToken::new();
+        stream.clone_into(&mut fence.stream);
+        credential.clone_into(&mut fence.credential);
+        Ok(Fenced { superseded: fence.superseded.clone(), retired: fence.retired.clone() })
     }
 
     /// Checks that `stream` is the current stream of a fenced topic `credential` opened.

@@ -44,7 +44,8 @@
 // JVM as a `delivery/<op>` entry, which the JVM's reports close, and each session method as a `method/<op>` entry,
 // which `chunk:method_result` acknowledges. A topic with one attached client, such as
 // `jvm/<host>`, fences it: a newer stream supersedes older ones, which end with STOPPED, and calls reporting on the
-// topic name their stream and fail with STOPPED once it's superseded. `chunk:register`, which a JVM calls before it
+// topic name their stream and fail with STOPPED once it's superseded. `gateway/<id>` also ends a superseded stream
+// with SUPERSEDED when another gateway process took the topic over. `chunk:register`, which a JVM calls before it
 // subscribes, is the exception and names no stream.
 //
 // Errors. Protocol errors are values: `CallResponse.error`, `Entry.error` for a query that failed while its
@@ -176,6 +177,10 @@ message Error {
     // An effectful operation may or may not have taken effect, and core no longer knows. Never retry it under a new
     // ID.
     CODE_OUTCOME_UNKNOWN = 9;
+    // Another process under the gateway's ID took its `gateway/<id>` topic over, as gateway.proto describes, so
+    // this process must stop. Core remembers the processes it retired only while it runs: after core restarts, a
+    // retired process may subscribe again and take the topic back.
+    CODE_SUPERSEDED = 10;
   }
   Code code = 1;
   string message = 2;

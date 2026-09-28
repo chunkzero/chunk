@@ -24,6 +24,8 @@ const CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
 pub(super) struct Connection {
     client: CoreClient<Channel>,
     gateway: GatewayCredential,
+    /// Names this process to core, which lets one process at a time own the gateway's topic.
+    instance: String,
     claims: OnceLock<(watch::Receiver<View>, DropGuard)>,
 }
 
@@ -34,17 +36,25 @@ impl Connection {
             .initial_connection_window_size(CONNECTION_WINDOW)
             .connect_lazy();
         let client = CoreClient::new(channel).max_decoding_message_size(MESSAGE_BYTES);
-        Ok(Self { client, gateway, claims: OnceLock::new() })
+        let instance = uuid::Uuid::new_v4().simple().to_string();
+        Ok(Self { client, gateway, instance, claims: OnceLock::new() })
     }
 
     pub fn gateway(&self) -> &str {
         &self.gateway.id
     }
 
+    /// A new ID for a player's connection to this process.
+    pub fn connection_id(&self) -> String {
+        claims::connection_id(&self.instance)
+    }
+
     /// Waits for a live view of this gateway's claims in which `ready` returns a value. The first call starts
     /// following the topic, until this client drops.
     pub async fn claims<T>(&self, ready: impl FnMut(&View) -> Option<T>) -> io::Result<T> {
-        let (view, _) = self.claims.get_or_init(|| claims::follow(self.client.clone(), self.gateway.clone()));
+        let (view, _) = self
+            .claims
+            .get_or_init(|| claims::follow(self.client.clone(), self.gateway.clone(), self.instance.clone()));
         claims::wait(view.clone(), ready).await
     }
 

@@ -69,6 +69,11 @@ impl Platform {
         self.sync.claims(ready).await
     }
 
+    /// A new ID for a player's connection to this process. The claims of connections it names are never inherited.
+    pub fn connection_id(&self) -> String {
+        self.sync.connection_id()
+    }
+
     /// Calls platform method `chunk:<method>` on the claim `operation` names, returning its result and control's
     /// position after it.
     pub async fn call<R: Message + Default>(

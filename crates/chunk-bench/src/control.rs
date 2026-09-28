@@ -4,8 +4,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use chunk_proto::sync::v1::{
-    ActivateResult, CallRequest, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim, GatewayLogin,
-    PlayerIdentity, SessionDemand, SubscribeRequest, Update, claim_result, core_client::CoreClient, entry::State,
+    ActivateResult, CallRequest, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayArguments, GatewayClaim,
+    GatewayLogin, PlayerIdentity, SessionDemand, SubscribeRequest, Update, claim_result, core_client::CoreClient,
+    entry::State,
 };
 use prost::Message;
 use tokio::sync::{Mutex, watch};
@@ -55,8 +56,10 @@ async fn subscribe(
     rpc: &mut CoreClient<Channel>,
     connection: &sync::Connection,
 ) -> Result<(Streaming<Update>, String, Claims)> {
-    let subscription =
-        SubscribeRequest { topic: format!("gateway/{}", connection.gateway_id), ..SubscribeRequest::default() };
+    // Every subscription names one instance, so the bench's own subscriptions never take the topic from each other.
+    let arguments = GatewayArguments { instance: "bench".into() }.encode_to_vec();
+    let topic = format!("gateway/{}", connection.gateway_id);
+    let subscription = SubscribeRequest { topic, arguments, ..SubscribeRequest::default() };
     let mut updates = rpc.subscribe(sync::request(subscription, &connection.gateway)?).await?.into_inner();
     let mut claims = Claims::new();
     let mut stream = String::new();
