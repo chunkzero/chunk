@@ -157,6 +157,25 @@ mod tests {
     }
 
     #[test]
+    fn streams_stop_at_their_share_while_calls_draw_on_the_reserve() {
+        let budget = SendBudget::new(200 * 1024 * 1024);
+        let streams = budget.streams();
+        let share = streams.available();
+        assert_eq!(share, 175 * 1024 * 1024);
+
+        let mut charge = streams.charge(share - 1).unwrap();
+        let part = charge.split(1).unwrap();
+        assert!(charge.resize(share).is_err());
+        let call = budget.charge(budget.available()).unwrap();
+        assert_eq!((budget.bytes(), budget.available(), streams.available()), (budget.total(), 0, 0));
+
+        charge.merge(part);
+        let overdrawn = streams.overdraw(10);
+        drop((charge, call, overdrawn));
+        assert_eq!((budget.bytes(), streams.available()), (0, share));
+    }
+
+    #[test]
     fn an_overdrawn_budget_refuses_charges_until_it_has_room_again() {
         let budget = SendBudget::new(100);
         let held = budget.charge(60).unwrap();

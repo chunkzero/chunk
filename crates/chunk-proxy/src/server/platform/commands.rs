@@ -157,7 +157,8 @@ impl CommandTopic {
                 let Some(State::Value(value)) = entry.state else {
                     return Err(invalid_data("command entry without a value"));
                 };
-                self.entries.insert(entry.key, value);
+                // Decoded values borrow tonic's receive buffer; a copy lets it go.
+                self.entries.insert(entry.key, Bytes::copy_from_slice(&value));
             }
             if !update.continued {
                 return self.snapshot();
