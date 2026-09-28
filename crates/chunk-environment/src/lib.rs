@@ -1,4 +1,4 @@
-//! The environment process: core, gateway and exec services, selected by `CHUNK_SERVICES`.
+//! The environment process: core and gateway services, selected by `CHUNK_SERVICES`.
 
 mod core;
 mod gateway;
@@ -67,8 +67,12 @@ impl Config {
 /// Runs the selected services until `stop` or until one of them stops, then stops the gateway before core. Under
 /// management, the gateway starts with the first deployment, and a core that management fences stops.
 /// # Errors
-/// Reports startup errors, a service that stopped on its own, a fenced core, and shutdown errors.
+/// Reports a layout without core, which is not supported yet, startup errors, a service that stopped on its own, a
+/// fenced core, and shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
+    if !config.services.contains(Service::Core) {
+        return Err(io::Error::other("CHUNK_SERVICES=gateway is not supported yet; run core,gateway or core"));
+    }
     let environment = config.core.environment.clone();
     let state = config.core.state.clone();
     let core = Core::start(config.core, |_| {}).await?;

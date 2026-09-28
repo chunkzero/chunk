@@ -23,7 +23,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot
 ARG VERSION
 ARG REVISION
 LABEL org.opencontainers.image.title="chunk-environment" \
-      org.opencontainers.image.description="Environment process running the core, gateway and exec services" \
+      org.opencontainers.image.description="Environment process running the core and gateway services" \
       org.opencontainers.image.source="https://github.com/chunkzero/chunk" \
       org.opencontainers.image.licenses="FSL-1.1-MIT" \
       org.opencontainers.image.version="${VERSION}" \
