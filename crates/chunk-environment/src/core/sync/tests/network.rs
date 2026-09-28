@@ -1,7 +1,11 @@
 //! Core's network listener and the credentials other machines present on it.
 
-use super::*;
+use super::{
+    commands::{Arrived, Gateway, decoded, failure},
+    *,
+};
 use chunk_control::MachineKind;
+use chunk_proto::sync::v1::CommandStarted;
 use tonic::transport::server::TcpConnectInfo;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -33,6 +37,33 @@ async fn a_gateway_machine_authenticates_over_the_network_until_revoked() {
     let status = client.call(authorized(read, &credential)).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
     fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoking_a_gateway_machine_stops_its_command_subscription_and_cancels_the_command() {
+    let (fixture, jvm) = runtime::with_jvm().await;
+    fixture.control.add_machine("proxy", MachineKind::Gateway).unwrap();
+    let credential = Issuer::new("test", None, &fixture.cli).machine(MachineKind::Gateway, "proxy");
+    let (updates, gateway) = Gateway::follow_own(&fixture, credential, "proxy").await;
+    let mut arrived = Arrived { fixture, updates, gateway, jvm };
+    arrived.arrive().await;
+    let gateway = arrived.gateway.clone();
+    let operation = gateway.prepare().await;
+    decoded::<CommandStarted>(&gateway.say(&operation, "say write").await);
+    let mut effects = gateway.follow(&operation).await;
+    next(&mut effects).await;
+
+    arrived.fixture.control.revoke_machine("proxy", MachineKind::Gateway).unwrap();
+    let mut last = next(&mut effects).await;
+    while last.error.is_none() {
+        last = next(&mut effects).await;
+    }
+    assert_eq!(failure(&last), Some(Code::Stopped));
+    // `say write` writes 300 ms after it starts unless it's cancelled.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let cli = arrived.fixture.cli.clone();
+    assert_eq!(arrived.fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"0".to_vec())));
+    arrived.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
