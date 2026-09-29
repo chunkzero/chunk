@@ -4,11 +4,11 @@
 Builds the images, brings up deploy/compose, deploys examples/local through management's API and plays it through the
 edge with two offline bots. It then checks that JVM machines ran the runner image and that their capacity was released,
 deletes the environment and takes the bundle down. Cleanup removes only what this run recorded creating, and checks that
-none of it remains. Logs go to a temporary directory, whose path is printed. Needs `just toolchain` first, and a compose
-provider for Podman.
+none of it remains, except the build cache: image layers and pulled base images stay for the next run. Runs on one engine
+at a time, fenced by the `chunk-managed-smoke-lock` network. Logs go to a temporary directory, whose path is printed.
+Needs `just toolchain` first, and a compose provider for Podman.
 """
 import argparse
-from contextlib import contextmanager
 import fcntl
 import hashlib
 import io
@@ -38,11 +38,18 @@ BUNDLE = ROOT / 'deploy/compose'
 PROJECT = 'chunk-staging-managed-smoke'
 PROJECT_LABEL = f'com.docker.compose.project={PROJECT}'
 NETWORK = 'chunk'
+ENGINE_LOCK = 'chunk-managed-smoke-lock'
 TAG = 'managed-smoke'
 RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
 LOCK = Path(RUNTIME_DIR if Path(RUNTIME_DIR).is_dir() else tempfile.gettempdir()) / 'chunk-managed-smoke.lock'
 # Workload.JVM, and CapacityState.READY and RELEASED, as management stores them.
 JVM, READY, RELEASED = 1, 2, 4
+LISTINGS = {
+    'container': ('ps', '-a', '-q', '--no-trunc'),
+    'volume': ('volume', 'ls', '-q'),
+    'network': ('network', 'ls', '-q', '--no-trunc'),
+}
+REMOVALS = {'container': ('rm', '-f', '-v'), 'volume': ('volume', 'rm', '-f'), 'network': ('network', 'rm')}
 # The bots log in offline, which the bundle never allows.
 OVERRIDE = """\
 services:
@@ -118,8 +125,11 @@ class Smoke:
         self.archive = None
         self.up = False
         self.ready = set()
+        self.engine_locked = False
         self.volumes_before = set()
-        self.created = {kind: set() for kind in ('container', 'volume', 'network', 'image', 'tag')}
+        self.images_before = set()
+        self.created = {kind: set() for kind in ('container', 'volume', 'network', 'tag')}
+        self.failures = []
         self.timings = {}
 
     def run(self, argv, log=None, timeout=1800, check=True, **kwargs):
@@ -136,6 +146,15 @@ class Smoke:
 
     def ids(self, *argv):
         return {line.removeprefix('sha256:') for line in self.run([self.engine, *argv], timeout=60).stdout.split()}
+
+    def attempt(self, what, work):
+        """Runs `work`, recording rather than raising its failure, so one failed step doesn't skip the rest."""
+        try:
+            return work()
+        except Exception as error:
+            self.failures.append(f'{what}: {error}')
+            print(f'{what} failed: {error}', file=sys.stderr)
+            return None
 
     def timed(self, name, work):
         start = time.monotonic()
@@ -168,6 +187,19 @@ class Smoke:
         result = self.run([self.engine, 'ps', '-a', *filters, '--format', '{{.Names}}\t{{.Image}}\t{{.State}}'])
         return [line.split('\t') for line in result.stdout.splitlines() if line]
 
+    def lock_engine(self):
+        """Fences other smoke runs on this engine, whatever user or runtime directory they run under."""
+        created = self.run([self.engine, 'network', 'create', ENGINE_LOCK], check=False, timeout=60)
+        if created.returncode != 0:
+            raise Failed(f'another managed smoke is using this engine ({created.stderr.strip()}); if none is running, '
+                         f'a crashed one left its lock behind: remove it with `{self.engine} network rm {ENGINE_LOCK}`')
+        self.engine_locked = True
+
+    def unlock_engine(self):
+        if self.engine_locked:
+            self.attempt(f'removing the {ENGINE_LOCK} network',
+                         lambda: self.run([self.engine, 'network', 'rm', ENGINE_LOCK], timeout=60))
+
     def preflight(self):
         """Refuses to run next to another install or an earlier run's leftovers, which this run must not adopt."""
         self.run([self.engine, 'compose', 'version'])
@@ -181,30 +213,31 @@ class Smoke:
         if leftover := [tag for tag in tags if f':{TAG}' in tag]:
             raise Failed(f'images tagged by an earlier run remain: {leftover}')
         self.volumes_before = self.ids('volume', 'ls', '-q')
-
-    @contextmanager
-    def recording_images(self):
-        """Records the images, including build layers and pulled bases, that appear while this runs."""
-        before = self.ids('images', '-a', '-q', '--no-trunc')
-        try:
-            yield
-        finally:
-            self.created['image'] |= self.ids('images', '-a', '-q', '--no-trunc') - before
+        self.images_before = self.ids('images', '-a', '-q', '--no-trunc')
 
     def record(self, label):
         """Records the containers and volumes labelled `label`, and the volumes those containers mount."""
-        containers = self.ids('ps', '-a', '-q', '--no-trunc', '--filter', f'label={label}')
-        volumes = self.ids('volume', 'ls', '-q', '--filter', f'label={label}')
-        for container in containers:
-            found = self.run([self.engine, 'container', 'inspect', container], check=False, timeout=60)
-            if found.returncode == 0:
-                [details] = json.loads(found.stdout)
-                volumes |= {mount['Name'] for mount in details.get('Mounts') or [] if mount.get('Type') == 'volume'}
+        containers = self.attempt(f'listing containers labelled {label}', lambda: self.ids(
+            'ps', '-a', '-q', '--no-trunc', '--filter', f'label={label}')) or set()
         self.created['container'] |= containers
+        volumes = self.attempt(f'listing volumes labelled {label}', lambda: self.ids(
+            'volume', 'ls', '-q', '--filter', f'label={label}')) or set()
+        for container in containers:
+            volumes |= self.attempt(f'inspecting container {container}', lambda: self.mounts(container)) or set()
         self.created['volume'] |= volumes - self.volumes_before
+
+    def mounts(self, container):
+        found = self.run([self.engine, 'container', 'inspect', container], check=False, timeout=60)
+        if found.returncode != 0:
+            return set()
+        [details] = json.loads(found.stdout)
+        return {mount['Name'] for mount in details.get('Mounts') or [] if mount.get('Type') == 'volume'}
 
     def record_compose(self):
         self.record(PROJECT_LABEL)
+        self.attempt(f'inspecting the {NETWORK} network', self.record_network)
+
+    def record_network(self):
         found = self.run([self.engine, 'network', 'inspect', NETWORK], check=False, timeout=60)
         if found.returncode == 0:
             [network] = json.loads(found.stdout)
@@ -238,10 +271,9 @@ class Smoke:
             step(f'building {image}')
             # Preflight saw no tag of this run's, so the tag is this run's once it exists.
             self.created['tag'].add(image)
-            with self.recording_images():
-                self.run([self.engine, 'build', '-f', dockerfile, '-t', image, '--build-arg', f'VERSION={version}',
-                          '--build-arg', f'REVISION={revision}', *extra, '.'],
-                         f'image-{image.split(":")[0]}.log', cwd=ROOT)
+            self.run([self.engine, 'build', '-f', dockerfile, '-t', image, '--build-arg', f'VERSION={version}',
+                      '--build-arg', f'REVISION={revision}', *extra, '.'],
+                     f'image-{image.split(":")[0]}.log', cwd=ROOT)
 
     def start(self):
         self.run([str(BUNDLE / 'init.sh'), str(self.env_file)])
@@ -265,9 +297,7 @@ class Smoke:
         step(f'compose up on {self.engine_socket}: players on 127.0.0.1:{self.player_port}, management at {self.url}')
         self.up = True
         try:
-            with self.recording_images():
-                self.run([*self.compose, 'up', '-d', '--wait', '--wait-timeout', '180'], 'compose-up.log',
-                         timeout=300)
+            self.run([*self.compose, 'up', '-d', '--wait', '--wait-timeout', '180'], 'compose-up.log', timeout=300)
         finally:
             self.record_compose()
 
@@ -384,80 +414,72 @@ class Smoke:
         except Exception as error:
             print(f'collecting logs failed: {error}', file=sys.stderr)
 
-    def inventory(self, kinds=('container', 'volume', 'network', 'image', 'tag')):
-        """What still exists of everything this run recorded creating."""
-        listings = {
-            'container': ('ps', '-a', '-q', '--no-trunc'),
-            'volume': ('volume', 'ls', '-q'),
-            'network': ('network', 'ls', '-q', '--no-trunc'),
-            'image': ('images', '-a', '-q', '--no-trunc'),
-        }
-        left = {}
-        for kind in kinds:
-            if kind == 'tag':
-                left[kind] = sorted(tag for tag in self.created[kind] if self.run(
-                    [self.engine, 'image', 'inspect', tag], check=False, timeout=60).returncode == 0)
-            else:
-                left[kind] = sorted(self.created[kind] & self.ids(*listings[kind]))
-        return {kind: items for kind, items in left.items() if items}
+    def present(self, kind):
+        """Which of this run's recorded items of `kind` still exist; None if listing them failed."""
+        if kind == 'tag':
+            return {tag for tag in self.created[kind] if self.attempt(f'inspecting image {tag}', lambda: self.run(
+                [self.engine, 'image', 'inspect', tag], check=False, timeout=60).returncode == 0)}
+        listed = self.attempt(f'listing {kind}s', lambda: self.ids(*LISTINGS[kind]))
+        return None if listed is None else self.created[kind] & listed
 
     def remove_leftovers(self):
         """Removes recorded containers, volumes and networks that the environment delete and compose down missed."""
-        leftovers = self.inventory(('container', 'volume', 'network'))
-        removals = {'container': ['rm', '-f', '-v'], 'volume': ['volume', 'rm', '-f'], 'network': ['network', 'rm']}
-        for kind, items in leftovers.items():
-            for item in items:
-                self.run([self.engine, *removals[kind], item], check=False, timeout=120)
+        leftovers = {}
+        for kind, removal in REMOVALS.items():
+            present = self.present(kind)
+            # Without a listing, try every recorded item; removing one that is gone fails harmlessly.
+            for item in sorted(self.created[kind] if present is None else present):
+                self.attempt(f'removing {kind} {item}', lambda: self.run(
+                    [self.engine, *removal, item], check=False, timeout=120))
+            if present:
+                leftovers[kind] = sorted(present)
         if leftovers:
-            raise Failed(f'left behind by the environment delete and compose down, now removed: {leftovers}')
+            self.failures.append(f'left behind by the environment delete and compose down, now removed: {leftovers}')
 
-    def remove_images(self):
-        for tag in sorted(self.created['tag']):
-            found = self.run([self.engine, 'image', 'inspect', '--format', '{{.Id}}', tag], check=False, timeout=60)
-            if found.returncode == 0:
-                untag = ['untag', found.stdout.strip(), tag] if self.engine == 'podman' else ['rmi', '--no-prune', tag]
-                self.run([self.engine, *untag], check=False, timeout=120)
-        # Layers depend on each other, so remove what can be removed until nothing more can.
-        while remaining := self.created['image'] & self.ids('images', '-a', '-q', '--no-trunc'):
-            removed = [image for image in sorted(remaining) if self.run(
-                [self.engine, 'rmi', '--no-prune', image], check=False, timeout=120).returncode == 0]
-            if not removed:
-                raise Failed(f'could not remove images {sorted(remaining)}')
+    def remove_tag(self, tag):
+        """Removes a smoke tag, leaving the image and its layers as build cache."""
+        found = self.run([self.engine, 'image', 'inspect', '--format', '{{.Id}}', tag], check=False, timeout=60)
+        if found.returncode != 0:
+            return
+        image = found.stdout.strip().removeprefix('sha256:')
+        if self.engine == 'podman':
+            self.run([self.engine, 'untag', image, tag], timeout=120)
+        elif image in self.images_before:
+            # Docker can't untag without deleting an image's last tag, and this image isn't the run's to delete.
+            self.created['tag'].discard(tag)
+            print(f'note: left {tag} on {image[:12]}, which predates this run; `docker image rm {tag}` removes it')
+        else:
+            self.run([self.engine, 'rmi', '--no-prune', tag], timeout=120)
 
     def remove_files(self, passed):
         # The secrets go with the install; a failed run keeps its release for a rerun by hand.
-        self.env_file.unlink(missing_ok=True)
-        self.override.unlink(missing_ok=True)
+        for path in (self.env_file, self.override):
+            self.attempt(f'removing {path}', lambda: path.unlink(missing_ok=True))
         if passed:
             shutil.rmtree(self.work / 'release', ignore_errors=True)
 
     def check_inventory(self):
-        if left := self.inventory():
-            raise Failed(f'still present: {left}')
+        left = {kind: sorted(items) for kind in (*REMOVALS, 'tag') if (items := self.present(kind))}
+        if left:
+            self.failures.append(f'still present: {left}')
 
     def cleanup(self, passed):
-        """Removes what this run recorded creating, one best-effort stage at a time, and returns what failed."""
-        failures = []
-
-        def stage(name, work):
-            try:
-                work()
-            except Exception as error:
-                failures.append(f'{name}: {error}')
-                print(f'cleanup: {name} failed: {error}', file=sys.stderr)
-
+        """Removes what this run recorded creating, each step best effort, and returns every failure of the run."""
         if self.up and self.environment:
-            stage('deleting the environment', lambda: self.delete(timeout=90))
+            self.attempt('deleting the environment', lambda: self.delete(timeout=90))
         if self.up:
-            stage('compose down', lambda: self.run([*self.compose, 'down', '-v', '--timeout', '20'],
-                                                   'compose-down.log', timeout=300))
+            self.attempt('compose down', lambda: self.run([*self.compose, 'down', '-v', '--timeout', '20'],
+                                                          'compose-down.log', timeout=300))
+            self.record_compose()
         if self.environment:
-            stage('recording machines', self.record_machines)
-        stage('removing leftover containers, volumes and networks', self.remove_leftovers)
-        stage('removing images', self.remove_images)
-        stage('removing secrets and temporary files', lambda: self.remove_files(passed))
-        stage('final inventory', self.check_inventory)
-        return failures
+            self.record_machines()
+        self.remove_leftovers()
+        for tag in sorted(self.created['tag']):
+            self.attempt(f'removing tag {tag}', lambda: self.remove_tag(tag))
+        self.remove_files(passed)
+        self.check_inventory()
+        self.unlock_engine()
+        return self.failures
 
 
 def interrupted(signum, frame):
@@ -465,7 +487,7 @@ def interrupted(signum, frame):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--engine', choices=['podman', 'docker'],
                         help='the engine to use; by default rootless Podman if its socket exists, else Docker')
     args = parser.parse_args()
@@ -480,10 +502,12 @@ def main():
     smoke = None
     try:
         smoke = Smoke(*choose_engine(args.engine))
+        smoke.lock_engine()
         smoke.preflight()
     except Failed as error:
         print(f'STOPPED: {error}; nothing was changed', file=sys.stderr)
         if smoke:
+            smoke.unlock_engine()
             shutil.rmtree(smoke.work)
         return 2
     step(f'engine {smoke.engine} on {smoke.engine_socket}; logs: {smoke.logs}')
