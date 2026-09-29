@@ -12,6 +12,7 @@
     "LICENSE.md",
     "pnpm-lock.yaml",
     "Cargo.lock",
+    "licenses/about.hbs",
     "crates/chunk-protocol/data/**"
   ]
 }

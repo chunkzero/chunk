@@ -51,8 +51,11 @@ def main():
                        env=environment, check=True)
         sdk = prefix / "share/chunk" / version
         executable = prefix / "bin/chunk"
-        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "toolchain"}, \
-            "Only the CLI, native TypeScript toolchain and license should be installed"
+        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "THIRD_PARTY_LICENSES", "toolchain"}, \
+            "Only the CLI, native TypeScript toolchain, license and third-party notices should be installed"
+        notices = (sdk / "THIRD_PARTY_LICENSES").read_text()
+        assert "https://crates.io/crates/deno_core/" in notices and "`v8` crate" in notices, \
+            "Third-party notices should cover the linked crates and V8"
         assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 
         class Repository(SimpleHTTPRequestHandler):

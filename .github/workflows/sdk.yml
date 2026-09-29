@@ -22,6 +22,7 @@ on:
       - gradlew.bat
       - Cargo.toml
       - Cargo.lock
+      - licenses/**
   workflow_dispatch:
     inputs:
       publish:
@@ -81,6 +82,10 @@ jobs:
             jdks
       - run: python3 scripts/test-publish-maven.py
       - run: pnpm install --frozen-lockfile
+      - name: Install the pinned cargo-about
+        uses: jdx/mise-action@v3
+        with:
+          install_args: github:EmbarkStudios/cargo-about
       - run: cargo build --release --locked -p chunk-cli
       - run: python3 scripts/package-sdk.py --output dist
       - uses: actions/upload-artifact@v4

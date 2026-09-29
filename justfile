@@ -27,6 +27,10 @@ lint:
     buf lint proto
     pnpm lint
 
+# Reject Rust dependencies whose licenses are not allowed in deny.toml.
+licenses:
+    cargo deny check licenses
+
 # Type-check the embedded TypeScript SDK.
 typecheck:
     pnpm install --frozen-lockfile
@@ -47,7 +51,7 @@ build: toolchain
     examples/local/gradlew assemble
 
 # Everything CI runs. Run before opening a PR.
-ready: fmt-check lint typecheck test build consumers
+ready: fmt-check lint licenses typecheck test build consumers
 
 # Run an opt-in local workload benchmark (see crates/chunk-bench/README.md).
 bench *args:
