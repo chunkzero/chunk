@@ -106,6 +106,21 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     expect(await exists(`/containers/${spec.name}/json`)).toBe(true);
   }, 60_000);
 
+  test("destroy removes the anonymous volumes an image declares", async () => {
+    // Postgres declares `VOLUME /var/lib/postgresql/data`, as the JVM runner image declares its cache.
+    const withVolume = "docker.io/library/postgres:17";
+    await (await engine("POST", `/images/create?${new URLSearchParams({ fromImage: withVolume })}`)).text();
+    const { name } = await provider.create(specFor("anonymous", { image: withVolume, volumes: [], restart: false }));
+    const inspection = (await (await engine("GET", `/containers/${name}/json`)).json()) as {
+      Mounts: { Type: string; Name?: string }[];
+    };
+    const anonymous = inspection.Mounts.filter((mount) => mount.Type === "volume").map((mount) => mount.Name ?? "");
+    expect(anonymous).toHaveLength(1);
+
+    await provider.destroy(name);
+    for (const volume of anonymous) expect(await exists(`/volumes/${volume}`)).toBe(false);
+  }, 120_000);
+
   test("destroy removes volumes left behind by an interrupted destroy", async () => {
     const spec = specFor("orphan");
     await provider.create(spec);

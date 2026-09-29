@@ -99,7 +99,7 @@ function readManifest(bytes: Uint8Array): ReleaseManifest | string {
     // fromEntries defines own properties, so a name like `__proto__` stays a plain key.
     apps.push({ id: appId, sessions: Object.fromEntries(sessions) });
   }
-  const java_version = isCount(value.java_version) ? value.java_version : undefined;
+  const java_version = isJavaVersion(value.java_version) ? value.java_version : undefined;
   return { id: value.id, java_version, apps, profiles: Object.fromEntries(profiles) };
 }
 
@@ -113,6 +113,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isName(value: unknown, pattern: RegExp): value is string {
   return typeof value === "string" && pattern.test(value);
+}
+
+/** Well past any real Java release, and within capacity requests' `integer` column. */
+function isJavaVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 1000;
 }
 
 function isCount(value: unknown): value is number {

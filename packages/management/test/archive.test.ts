@@ -39,6 +39,8 @@ test("stores releases without checking what the environment validates", async ()
     manifest: (manifest) => ({ ...manifest, java_version: "anything", assets: { missing: "0" } }),
   });
   expect(unchecked).toMatchObject({ id: "r1", java_version: undefined });
+  const unrunnable = await broken({ manifest: (manifest) => ({ ...manifest, java_version: 2 ** 31 }) });
+  expect(unrunnable.java_version).toBeUndefined();
 });
 
 test("rejects release.json management cannot read", async () => {

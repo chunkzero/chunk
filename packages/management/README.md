@@ -76,13 +76,13 @@ with `TEST_MINIO_URL=http://127.0.0.1:59000`.
 With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
 machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
 for accepted wakes and due wake alarms. Core and gateway machines run the environment image, and `CHUNK_SERVICES`
-selects what it runs: `core,gateway` on the core machine and `gateway` on an extra gateway machine, which joins core with
-its credential and routes players to core's current deployment.
+selects what it runs: `core,gateway` on the core machine and `gateway` on an extra gateway machine, which joins core
+with its credential and routes players to core's current deployment.
 
 JVM machines run the `chunk-jvm` runner image, `CHUNK_JVM_IMAGE` with `{java}` replaced by the release's `java_version`,
 for example `ghcr.io/chunkzero/chunk-jvm:{java}` (`just jvm-image <java>` builds `chunk-jvm:<java>` locally). A release
-has no JVM image when `CHUNK_JVM_IMAGE` is unset or its `release.json` has no positive integer `java_version`. `Deploy`,
-`Promote`, `Rollback` and JVM `EnsureCapacity` calls refuse such a release with `FAILED_PRECONDITION`.
+has no JVM image when `CHUNK_JVM_IMAGE` is unset or its `release.json` has no integer `java_version` from 1 to 1000.
+`Deploy`, `Promote`, `Rollback` and JVM `EnsureCapacity` calls refuse such a release with `FAILED_PRECONDITION`.
 
 Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN`, and `CHUNK_CORE_BIND` set to
 `[::]:$CHUNK_CORE_PORT`, so it accepts extra machines on every interface; core drops peers without a private address.

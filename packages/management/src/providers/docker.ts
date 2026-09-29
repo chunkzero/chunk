@@ -210,8 +210,9 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
 
     async destroy(name) {
       const inspection = refuseForeign(await named(name), name);
+      // `v` also removes the anonymous volumes the image declares, such as the JVM runner's cache.
       if (inspection) {
-        await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true`, { allow: [404] });
+        await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true&v=true`, { allow: [404] });
       }
       const filters = JSON.stringify({ label: [`${installLabel}=${installId}`, `${machineLabel}=${name}`] });
       const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
