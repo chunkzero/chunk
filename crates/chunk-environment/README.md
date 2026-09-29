@@ -1,87 +1,95 @@
-# Environment process
+# chunk-environment
 
-`chunk-environment` runs an environment's core and gateway services in one process. Core runs the backend functions
-itself. `CHUNK_SERVICES` picks the services: `core,gateway` (the default), `core`, or `gateway` alone on a gateway
-machine that joins core on another machine. A legacy `exec` is ignored with a warning.
+The environment process. It runs an environment's core (the [backend](../chunk-backend/README.md) and
+[control](../chunk-control/README.md), with the `chunk.sync.v1` `Core` service) and its
+[gateway](../chunk-proxy/README.md). `chunk dev` embeds the same `Core` and `Gateway` types; this crate's
+`chunk-environment` binary runs them on machines that [management](../../packages/management/README.md) provides.
 
-## Container image
+`CHUNK_SERVICES` picks what the process runs:
 
-`just image` builds `chunk-environment:<workspace version>` from `Dockerfile` with podman or docker. The image runs as a
-non-root user, keeps its state in the `/data` volume and exposes the gateway's player port, 25565.
+- `core,gateway` (the default): an environment's core machine.
+- `gateway`: an extra gateway machine, which joins core on another machine.
+- `core`: core without a player listener.
 
-```sh
-podman run --rm -p 25565:25565 -v chunk-data:/data -v ./bundle.json:/bundle.json:ro \
-  -e CHUNK_ENVIRONMENT_ID=dev -e CHUNK_BUNDLE=/bundle.json chunk-environment:0.1.0
-```
+## Configuration
 
-It reads these variables:
+| Variable                              | Default                                 | Meaning                                                                                            |
+| ------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `CHUNK_SERVICES`                      | `core,gateway`                          | The services to run.                                                                               |
+| `CHUNK_ENVIRONMENT_ID`                | required                                | The environment's ID; `CHUNK_ENVIRONMENT` is accepted too.                                         |
+| `CHUNK_STATE`                         | required (`/data` in the image)         | Core's directory: the store, unpacked releases, control's files and `control.json`.                |
+| `CHUNK_MANAGEMENT_URL`                | unset                                   | The management service that deploys this environment.                                              |
+| `CHUNK_ENVIRONMENT_TOKEN`             | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for management.                                                     |
+| `CHUNK_SUSPEND_AFTER_SECONDS`         | unset                                   | Seconds idle, at least 1, before core reports that it may be suspended. Never if unset.            |
+| `CHUNK_BUNDLE`                        | required without `CHUNK_MANAGEMENT_URL` | A backend deployment to serve, such as a release's `backend.json`.                                 |
+| `CHUNK_CONTROL_BIND`                  | `127.0.0.1:25567`                       | Core's loopback listener, for the gateway on this machine and for `chunk players` / `chunk nodes`. |
+| `CHUNK_CORE_BIND`                     | unset                                   | Core's listener for other machines. It drops peers whose address is not loopback or private.       |
+| `CHUNK_PRIVATE_ADDRESS`               | unset                                   | This machine's private address, where its JVMs serve players instead of loopback.                  |
+| `CHUNK_CORE_ENDPOINT`                 | required for `gateway` alone            | Core's endpoint, `http://<private address>:<port>`.                                                |
+| `CHUNK_GATEWAY_CREDENTIAL`            | required for `gateway` alone            | The machine credential core minted for this gateway.                                               |
+| `CHUNK_BIND`                          | `0.0.0.0:25565`                         | The gateway's player listener.                                                                     |
+| `CHUNK_MOTD`                          | `chunk`                                 | The gateway's server-list message.                                                                 |
+| `CHUNK_MAX_CONNECTIONS`               | `1024`                                  | The gateway's concurrent connection limit.                                                         |
+| `CHUNK_TRUSTED_EDGES`                 | unset                                   | Edge IPs or CIDRs, comma-separated, whose connections must open with a PROXY protocol v2 header.   |
+| `CHUNK_OFFLINE_LOGINS`                | unset                                   | `1` admits players without Mojang authentication, under any name. Insecure; for tests only.        |
+| `CHUNK_REPLICATION_BUCKET`            | unset                                   | An S3-compatible bucket core replicates its store to. Unset turns replication off.                 |
+| `CHUNK_REPLICATION_ACCESS_KEY_ID`     | required with a bucket                  | The bucket's credentials.                                                                          |
+| `CHUNK_REPLICATION_SECRET_ACCESS_KEY` | required with a bucket                  | The secret for the access key.                                                                     |
+| `CHUNK_REPLICATION_REGION`            | `us-east-1`                             | The bucket's region.                                                                               |
+| `CHUNK_REPLICATION_ENDPOINT`          | AWS                                     | The endpoint URL, for other S3-compatible stores; an `http://` URL allows plain HTTP.              |
+| `CHUNK_REPLICATION_PREFIX`            | unset                                   | A key prefix within the bucket.                                                                    |
+| `RUST_LOG`                            | `info`                                  | The log filter.                                                                                    |
 
-| Variable                      | Default                                 | Meaning                                                                           |
-| ----------------------------- | --------------------------------------- | --------------------------------------------------------------------------------- |
-| `CHUNK_SERVICES`              | `core,gateway`                          | The services to run.                                                              |
-| `CHUNK_ENVIRONMENT_ID`        | required                                | The environment ID; `CHUNK_ENVIRONMENT` is accepted too.                          |
-| `CHUNK_MANAGEMENT_URL`        | unset                                   | The management service that deploys the environment.                              |
-| `CHUNK_ENVIRONMENT_TOKEN`     | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for the management service.                        |
-| `CHUNK_SUSPEND_AFTER_SECONDS` | unset                                   | Seconds idle, 1 or more, before core reports it may be suspended; never if unset. |
-| `CHUNK_BUNDLE`                | required without `CHUNK_MANAGEMENT_URL` | The backend deployment (a `chunk_contract::Deployment` as JSON) served first.     |
-| `CHUNK_STATE`                 | `/data`                                 | The store, control's files, and the `control.json` record.                        |
-| `CHUNK_CORE_ENDPOINT`         | required for `gateway` alone            | Core's network endpoint, `http://<private address>:<port>`.                       |
-| `CHUNK_GATEWAY_CREDENTIAL`    | required for `gateway` alone            | The machine credential core minted for this gateway.                              |
-| `CHUNK_BIND`                  | `0.0.0.0:25565`                         | The gateway's player listener.                                                    |
-| `CHUNK_MOTD`                  | `chunk`                                 | The gateway's server list message.                                                |
-| `CHUNK_MAX_CONNECTIONS`       | `1024`                                  | The gateway's connection limit.                                                   |
-| `CHUNK_OFFLINE_LOGINS`        | unset                                   | `1` admits unauthenticated players under any name. Insecure; tests only.          |
-| `CHUNK_CONTROL_BIND`          | `127.0.0.1:25567`                       | Control's gRPC listener; it must be loopback.                                     |
-| `CHUNK_CORE_BIND`             | unset                                   | Core's listener for other machines; it drops peers that aren't private.           |
-| `CHUNK_PRIVATE_ADDRESS`       | unset                                   | This machine's private address. Its JVMs serve players there, not loopback.       |
-| `RUST_LOG`                    | `info`                                  | The log filter.                                                                   |
+chunk sends credentials between machines in the clear, so `CHUNK_CORE_BIND` belongs on a private, encrypted network,
+such as WireGuard; prefer that network's address to an unspecified one.
 
-Chunk sends credentials between machines in the clear, so `CHUNK_CORE_BIND` belongs on a private, encrypted network,
-such as WireGuard; prefer that network's address to an unspecified one. The listener serves the same `Core` service as
-the loopback control listener, and drops connections from peers that aren't loopback or private.
+With replication on, every write transaction is uploaded to the bucket in batches, with periodic snapshots. A core that
+starts without a local store restores the latest state from the bucket under a new epoch, and an older core writing to
+the same prefix is fenced and stops.
+
+## Under management
+
+With `CHUNK_MANAGEMENT_URL`, core attaches to management (`EnvironmentService.Attach`) and serves the deployment its
+desired state names. It downloads each release archive, unpacks it under `$CHUNK_STATE/releases/`, verifies it with the
+same checks as `chunk build`, makes it the backend's and control's current release, and reports the deployment `ACTIVE`.
+A release it rejects is reported `FAILED`, and the previous deployment keeps serving. The gateway starts with the first
+active deployment. Core retires the versions it no longer needs, stopping their JVMs first, and removes their unpacked
+releases. JVMs run on machines core asks management for (`EnsureCapacity`), each running
+[`chunk-jvm`](../chunk-jvm/README.md). A core that management fences stops.
+
+Core reports its status about every 15 seconds, and at once when it changes. Each report carries the server-list status
+the gateway last answered for each hostname, which the [edge](../chunk-edge/README.md) answers pings with while the
+environment sleeps. Every five seconds, core reports the clients that failed authentication (`ReportFailedAuth`), so
+management keeps them from waking the environment for a while.
+
+With `CHUNK_SUSPEND_AFTER_SECONDS`, core reports `ready_to_suspend` once nothing has been active for that long: no
+action, hook, command or job in the backend, no gateway holding connections (server-list pings and logins in progress
+included), no open claim or launching JVM in control, and no deployment loading. Replication must also have flushed, no
+job may be due within the grace period, and the backend's next due job must be handed to management as a wake alarm
+(`SetWakeAlarm`). Queries, mutations and operator calls don't count as activity. Any activity starts the grace period
+over.
 
 ## Gateway machines
 
 With `CHUNK_SERVICES=gateway`, the process runs no core and reads no `CHUNK_STATE` or `CHUNK_BUNDLE`. It joins core at
-`CHUNK_CORE_ENDPOINT` with `CHUNK_GATEWAY_CREDENTIAL`, whose scope names the environment and the gateway's ID; it stops
-at once if that environment isn't `CHUNK_ENVIRONMENT_ID`. It follows core's `deployment` topic: the player listener
-starts once a release is current, so no login is taken before then, and later players go to each new current release.
-Core's revoking the credential stops the process.
+`CHUNK_CORE_ENDPOINT` with `CHUNK_GATEWAY_CREDENTIAL`, whose scope must name `CHUNK_ENVIRONMENT_ID`. It follows core's
+current deployment: its player listener starts once a release is current, and later players go to each new one. Core
+revoking the credential stops the process.
 
-## Under management
+## Without management
 
-With `CHUNK_MANAGEMENT_URL`, core attaches to the management service (`EnvironmentService.Attach`) and serves the
-deployment its desired state names. It downloads each release archive, unpacks it under `$CHUNK_STATE/releases/` and
-verifies it with the same checks as `chunk build`, then makes it the backend's and control's current release and reports
-the deployment `ACTIVE`. A release it rejects is reported `FAILED` and the previous deployment keeps serving. A newer
-desired deployment cancels one still loading, which then never serves. The gateway starts with the first active
-deployment. A core that management fences stops.
+With `CHUNK_BUNDLE` instead of `CHUNK_MANAGEMENT_URL`, core serves that backend deployment, but control gets no release,
+so the gateway cannot place players in sessions. Use `chunk dev` to run a whole project on one machine.
 
-Once the first desired state arrives, core retires every version the backend holds except the latest desired one, the
-one control serves, and the one it replaced until management accepts the replacement as `ACTIVE`, which
-`$CHUNK_STATE/managed.json` keeps across restarts; that includes versions a restart or a rejected deployment left
-behind. Retiring stops a version's JVMs, then releases it. An unpacked release is removed once control no longer runs or
-may run its JVMs and no load uses it, and unfinished downloads and unpacks are removed at startup.
+SIGTERM or SIGINT stops the gateway, then control and its JVMs, then the backend.
 
-Core reports its status about every 15 seconds and at once when it changes. With `CHUNK_SUSPEND_AFTER_SECONDS`, it
-reports `ready_to_suspend` once nothing was active for that long under the latest desired revision: no action, hook,
-command or job running, started or finished in the backend, no gateway holding connections, no open claim or launching
-host in control, and no deployment loading or awaiting acceptance. Every gateway, on this machine or its own, reports
-how many connections it holds through `chunk:active` each second on its current stream, server-list pings and logins
-still authenticating included. A gateway that hasn't reported for about three seconds counts as active, and so does one
-whose stream ended, until a new stream of it reports or core revokes its machine credential. The log must also be
-flushed to object storage when it replicates, the wake alarm handed off, and no job due within the grace period.
-Queries, mutations and operator calls don't count: a suspend stops the environment gracefully, commits are durable, and
-a call it cuts off is retried. Any activity, even work that came and went between two looks, a new revision such as a
-wake brings, or a signal that doesn't answer within half a second ends it at once and starts the grace period over. So
-does an observation that takes over a second, gateway address discovery included; its report repeats the gateway
-addresses management last accepted. A change is reported at once even while an earlier report is in flight, which it
-replaces. A report gets five seconds, and one management didn't accept is sent again within one to four seconds until
-one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to the backend only
-once management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again and retried.
+## Container image
 
-Each report also carries the status the gateway last answered for each hostname, which edges answer server-list pings
-with while the environment sleeps. Every five seconds, core reports the clients that failed authentication at the
-gateway through `ReportFailedAuth`, so management keeps them from waking the environment for a while.
+`just image` builds `chunk-environment:<workspace version>` from `Dockerfile` with Podman or Docker. The image runs as a
+non-root user, sets `CHUNK_STATE=/data` on a volume, and exposes the gateway's port, 25565. Management starts it for
+core and gateway machines; see [`deploy/compose`](../../deploy/compose/README.md).
 
-SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.
+## Testing
+
+`cargo test -p chunk-environment` runs the crate's tests. `just jvm-e2e` checks a managed core that launches its JVM in
+the `chunk-jvm` image; see [`chunk-jvm`](../chunk-jvm/README.md#testing).

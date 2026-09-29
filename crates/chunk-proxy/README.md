@@ -1,77 +1,60 @@
-# Minecraft proxy
+# chunk-proxy
 
-Implemented listener behavior and development commands. Run commands from the repository root.
+The gateway: the listener players connect to. It answers server-list pings, authenticates players with Mojang, owns
+their connection's encryption and compression, and relays each player to a session in a gameplay JVM over a native
+Minecraft connection. It can move a player between sessions and JVMs without reconnecting them. It supports Minecraft
+Java Edition 26.2 (protocol 776), selected by the default `mc-26-2` feature; without a version feature the proxy refuses
+to start.
 
-With a `PlatformTarget` naming the backend and control connections, the proxy runs live backend status/admission/routing
-hooks and waits in configuration while control provisions gameplay. Each delivery uses a dedicated authenticated TCP
-path through the runtime to Minestom. Admission and preparation have a 45-second total limit; arrival has a 20-second
-limit while packets continue flowing.
+The gateway runs in the [environment process](../chunk-environment/README.md), next to core or alone on a gateway
+machine, which configures it through `CHUNK_BIND`, `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` and
+`CHUNK_OFFLINE_LOGINS`, and in `chunk dev`, which uses its own flags. It reaches core over the `chunk.sync.v1` `Core`
+service with the credential core minted for it.
 
-Same-proxy moves preserve authentication, encryption, compression and the public socket, including across JVMs. The
-`proxy/move` hook approves the requested route after admission. The destination reserves capacity without creating a
-player; source withdrawal must complete before native login to the destination. The proxy discards late source output,
-acknowledges the PLAY-to-CONFIGURATION boundary, retains the latest settings, and relays the full destination
-configuration. Preparation failure leaves the source playing. An unresolved cutover ends within a bounded deadline; it
-does not replay packets or promise rollback.
+## Logins
 
-```sh
-chunk players --player <uuid> move --session-type arena --key arena
-chunk players --player <uuid> drain --timeout-seconds 60
-```
+With a `Config::platform` naming core, the gateway's identity and the deployment to route with:
 
-These local operator commands call `chunk:move_player` and `chunk:drain` on core's sync protocol, presenting the
-credential in the private control connection file. A move is queued for the owning proxy; a drain retires the selected
-player's current runtime, queues replacement moves, and stops it when empty or at its persisted deadline. The CLI
-follows the `nodes` topic and reports completion only once the runtime is stopped, giving up 30 seconds past the
-deadline. Retain the printed operation ID with `--operation` when retrying an uncertain command.
+1. A server-list ping runs the project's `server.ping` hooks through core, and core reports the answer so the
+   [edge](../chunk-edge/README.md) can reuse it while the environment sleeps.
+2. A login is authenticated with Mojang over HTTPS (five-second timeout); the UUID and profile come from Mojang, never
+   from the client, and a failed check never falls back to an offline identity.
+3. The player waits in the configuration phase while the `player.login` and `player.route` hooks pick a destination and
+   control places them (`chunk:claim`, see [control](../chunk-control/README.md#placing-players)). Admission and
+   preparation get 45 seconds, and arrival in the session 20 seconds more.
+4. The gateway opens a dedicated connection to the session's JVM with the capability control returned, and relays the
+   player's packets from then on.
 
-## Environment gateway
+`Proxy::retarget` returns a handle whose `replace` routes later logins with another deployment; established connections
+keep theirs. Core's current deployment changes this way.
 
-The `chunk-environment` binary hosts the proxy as its gateway service, targeting the backend and control it runs in the
-same process (see the [environment README](../chunk-environment/README.md) for its variables):
+## Moves
 
-```sh
-CHUNK_BUNDLE=bundle.json CHUNK_ENVIRONMENT_ID=local CHUNK_STATE=.chunk/environment CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-environment
-```
+A move keeps the player's socket, authentication, encryption and compression, across JVMs too. The destination's
+`player.login` and `player.beforeMove` hooks approve it. The gateway reserves the destination, withdraws the source
+claim before logging in to the destination, discards late output from the source, takes the client back to the
+configuration phase, keeps its latest settings, and relays the destination's configuration. If preparation fails, the
+player keeps playing on the source. A cutover that can't finish ends within a bounded deadline; it doesn't replay
+packets or roll back.
 
-Library callers can omit `Config::platform` to use the waiting-world fixture, or replace the platform for later
-connections with `Proxy::retarget`; established connections keep the platform they started with. The listener supports
-Java Edition 26.2 (protocol 776), with online authentication through Mojang.
+## Limits and settings
 
-`mc-26-2` is enabled by default and forwarded from the environment to the proxy and protocol. Select it explicitly with
-`cargo run -p chunk-environment --no-default-features --features mc-26-2`.
+- `CHUNK_MAX_CONNECTIONS` (default 1024) caps live connections; further accepts are dropped.
+- Each login exchange, authentication included, has a ten-second deadline (`Config::connection_timeout`). Each
+  configuration phase has five minutes (`Config::configuration_timeout`), and clients must send their settings within
+  ten seconds. While a player waits there, keepalives go out ten seconds after the last answer, and each gets fifteen
+  seconds. Writes have a five-second deadline.
+- Compression starts at 256 bytes; `Config::compression_threshold = None` turns it off.
+- `CHUNK_TRUSTED_EDGES` lists edge IPs or CIDRs whose connections must open with a PROXY protocol v2 header; the
+  header's source becomes the player's address. Connections from other addresses are never parsed for one.
+- `CHUNK_OFFLINE_LOGINS=1` (`Config::offline_logins`) skips encryption and Mojang, as vanilla offline mode does. It is
+  insecure; use it only for local tests.
+- SIGTERM or Ctrl-C closes the listener and active connections. `RUST_LOG=debug` logs individual connection failures.
 
-Without version features, protocol primitives remain available but the proxy refuses to start. Features select releases;
-they do not translate versions.
+A library caller can leave `Config::platform` unset; the gateway then sends every player to a waiting world (an empty
+End sky over 5×5 empty chunks) and disconnects them sixty seconds after login. The tests use it.
 
-`CHUNK_MAX_CONNECTIONS` limits concurrent exchanges (default 1024). Each exchange has a ten-second deadline, including
-authentication and Login Acknowledged. Mojang requests use HTTPS with a five-second timeout and bounded responses;
-failed verification never falls back to offline identities. The authenticated UUID and profile properties come from
-Mojang, not the client's claimed UUID. Compression defaults to 256 bytes; library callers can set
-`Config::compression_threshold` to `None` to disable it. Ctrl-C or SIGTERM closes the listener and active connections.
-Set `RUST_LOG=debug` to log individual connection failures.
+## Testing
 
-`CHUNK_TRUSTED_EDGES` lists the edges (comma-separated IPs or CIDRs) whose connections must open with a PROXY protocol
-v2 header; its source address becomes the player's address. Connections from other addresses are never parsed for one.
-
-`Config::configuration_timeout` limits each configuration phase (default: five minutes). The sixty-second total limbo
-cap overrides longer phase limits; shorter configured limits still apply. Clients must send their settings within ten
-seconds. Limbo derives its registries from the pinned 26.2 snapshot, with unused enchantments and dialogs omitted and
-dimension timeline and client component tags included, then sends a 5×5 area of empty End chunks. The client must
-acknowledge configuration, the chunk batch, and teleports. Loading and teleport acknowledgments have fifteen-second
-deadlines.
-
-Connections are evicted sixty seconds after login, including time spent in configuration and loading; traffic does not
-reset this deadline. The proxy sends one keepalive at a time, waits up to fifteen seconds for the matching response, and
-sends the next ten seconds later. Writes have five-second deadlines; shutdown cancels active connections. The limbo
-destination future returns the authenticated transport and latest settings after outstanding acknowledgments are
-drained, providing the transition point for later session handoff.
-
-The listener encodes and compresses shared configuration, spawn, and title packets once per protocol version at startup
-using its configured compression threshold. Connections select these buffers by their negotiated protocol version;
-encryption remains specific to each connection.
-
-To verify with a signed-in Java 26.2 client, join `localhost:25565`, confirm the End sky renders with no terrain,
-confirm you float in place, and remain connected for about a minute to verify automatic disconnection.
-
-Packet generation and codec usage are covered in the [protocol crate documentation](../chunk-protocol/src/lib.rs).
+`cargo test -p chunk-proxy` runs the listener tests, and `cargo test -p chunk-proxy --no-default-features` checks the
+build without a version feature. Packet codecs are documented in [`chunk-protocol`](../chunk-protocol/src/lib.rs).

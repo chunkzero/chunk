@@ -1,284 +1,133 @@
-# Environment backend
+# chunk-backend
 
-`Backend::new(environment, Box<dyn Storage>)` starts one environment engine thread, one commit thread, a local job timer
-and one read engine per core (up to four). Supply a store with exclusive writer authority. `deploy` validates and
-initializes a versioned `chunk_contract::Deployment`, then atomically installs its additive schema/indexes and retains
-the bundle before enabling public functions. Bundles and contracts reload after restart. Use async `query`, `mutate`,
-`subscribe`, or `subscribe_group` from transport tasks. `server::run` embeds it in core, whose sync protocol is its only
-ingress; only core supplies caller identity. Internal functions are inaccessible through calls. Activation waits for the
-commit pipeline to drain; it returns `Busy` while work is outstanding. Queries can use existing deployments during
-activation. Schema changes advance the revision; every successful activation reevaluates existing subscriptions.
+The backend is the sync engine inside core. It runs a project's TypeScript queries, mutations, actions, hooks and
+commands on embedded V8 ([`chunk-js`](../chunk-js/README.md)) over the environment's SQLite store
+([`chunk-store`](../chunk-store/src/lib.rs)), keeps reactive subscriptions up to date, and runs scheduled jobs. Its only
+ingress is core's `chunk.sync.v1` service in the [environment process](../chunk-environment/README.md), which
+authenticates callers and supplies their identity; internal functions can't be called from there.
 
-The engine thread owns the mutation `chunk_js::Engine`, pinned storage snapshots, pending writes and subscription state.
-Queries and subscription reevaluations run on the read engines, which load deployments on first use; module-level
-JavaScript state is not shared between engines. Each mutation executes against the latest view, validates its writes
-against the snapshot's schema, and applies them to a bounded overlay. Execution and validation are serialized, so
-another mutation cannot change the read revision between them. The commit thread persists batches in order while the
-engine can continue evaluating requests.
+## Embedding
 
-Mutation responses wait for durable commits. Queries may read staged writes, and responses that depend on those writes
-wait for durability. Queries whose dependencies do not intersect pending writes return immediately at the base revision.
-Subscriptions read only acknowledged snapshots, track point misses and empty ranges, and reevaluate after relevant
-commits. Dependencies refresh even when the JSON result is unchanged. Result changes use JSON text equality; object key
-order can cause an extra update. Application errors remain reactive results, retaining reads collected before failure;
-an error-to-success transition always publishes. Subscribed queries with the same deployment, function and arguments
-share one evaluation. The caller joins that identity only after an evaluation reads `ctx.caller`; the query then splits
-so each caller gets its own. A read index finds the queries a commit affects. They rerun in batches, each against one
-durable snapshot, and commits during a batch coalesce into the next one. Foreground queries take idle read engines
-before reevaluations. Slow subscribers coalesce updates through a watch channel, so they receive the latest durable
-result rather than every intermediate revision. A group publishes once all its queries hold for one revision. Per-query
-failures occupy their original result positions, retain dependencies, and recover reactively. Transport errors close the
-stream; clients mark retained results stale until a fresh full group arrives on reconnect.
+`server::run(Config { bundle, environment, state }, ready, stop)` opens `<state>/environment.sqlite` (replicated when
+the `CHUNK_REPLICATION_*` variables are set), deploys the optional bundle, and hands back the `Backend`. To embed it
+directly, `Backend::new(environment, Box<dyn Storage>)` takes a store with exclusive writer authority and starts one
+engine thread, one commit thread, a job timer and one read engine per CPU (up to four). Construction waits for
+initialization, and dropping the last handle drains accepted commits and joins the threads, so do both from a blocking
+task in async code.
 
-Give every mutation a stable operation ID. Its fingerprint includes the function, canonical arguments and caller,
-independent of bundle and deployment identity. Duplicate requests recover the stored outcome without executing again,
-including after redeployment; reuse with a different request fails. Outcomes are kept for 24 hours after their commit
-(the default `chunk_store::Retention`); a retry after that executes again as a new operation. Outcome lookups use the
-engine's pinned base snapshot and pending operations. New operations prepare their retry context on the commit thread
-before execution. Inputs use `chunk_js::Json` (`Value::into()` or `Json::parse`) to encode and canonicalize once before
-crossing the engine boundary. Argument/result contracts and wire numbers are validated before publication.
-Deployment-specific reads project declared fields; writes must satisfy the physical schema and all resident contracts.
-Storage's signed 64-bit support does not make arbitrary integers safe JavaScript values.
+From transport tasks, use the async `query`, `mutate`, `subscribe` (one query) and `subscribe_group` (up to 16 queries
+that update together). Actions, jobs and commands have their own methods below. Dropping a request cancels queued work
+and running queries.
 
-Dropping a request cancels queued work and executing queries. Once a mutation starts, an independent execution token
-prevents one caller from interrupting a shared business operation. If every waiter has gone before staging, the mutation
-is discarded; once staged, it commits. Retry the same ID after a lost reply. A durable outcome is recovered across
-deployments, but a request without a stored outcome executes the explicitly supplied deployment: transport must retain
-the original deployment binding when retrying unresolved operations.
+## Deployments and schema
 
-A deterministic commit rejection (`Conflict`, `Invalid`, `Capacity`, or `OperationMismatch`) discards the speculative
-suffix and fails its waiters with `Error::Retry`. Queries and subscriptions continue against the durable base; new
-mutations return `Busy` until all old suffix acknowledgments drain, preventing revision reuse from admitting an old
-dependent batch. Ambiguous commit or acknowledgment failures stop the pipeline and close subscriptions. Restart with the
-same store and recover outcomes by operation ID; a failed acknowledgment may follow a durable commit. The backend never
-automatically retries a speculative suffix.
+`deploy` validates a `chunk_contract::Deployment` (the backend part of a release), installs its schema and indexes, and
+retains its bundle before its functions become callable; retained bundles reload after a restart. It returns `Busy` if
+commits are outstanding or another deployment change is in progress. At most 16 deployments are resident, and they all
+serve against the one database.
 
-Admission is bounded by queue time and memory rather than counts. New requests are refused once queued work of the same
-kind has waited over 500 ms: requests for the engine thread, queries for a read engine, mutations to commit, or actions
-for the live-action budget. Memory budgets cover admitted requests including replies waiting for durability (64 MiB,
-each charged its input plus 1 KiB and any retained result), pending mutations with their staged writes and results (32
-MiB), subscriptions with their latest results (256 MiB), and live actions at their 32 MiB engine heap limit (an eighth
-of the machine's memory or of the lowest cgroup memory limit on the process's group and its ancestors, at least 256 MiB,
-and exactly 256 MiB when either can't be read). A missing cgroup file counts as unreadable, except `memory.max` on the
-v2 root or on a group whose parent doesn't enable the memory controller. Limits on ancestors a cgroup namespace hides
-can't be observed. Actions past that budget queue, at most as many as it admits, until a live action finishes. A queued
-start that needs no new action, such as a duplicate of one that started, resolves at once, and a cancelled one releases
-its admission at once. A result, error or read set that grows past the subscription budget closes the subscriptions that
-share it. Each refusal is `Error::Overloaded` naming its `Limit`; `Error::Busy` remains for state conflicts such as a
-deployment change in progress. At most 16 deployments are resident. These are logical bounds, not an RSS limit. JS
-retains its own source, heap, capability and payload budgets. Release a deployment after its mutations and subscriptions
-drain. Release durably removes the bundle and permanently retires its identity before unloading the runtime. It cannot
-be reactivated under the same ID. Data and schema remain shared; release never drops application tables or operation
-outcomes. Uncommitted operation IDs remain bound to the retired deployment and return `OperationMismatch` if retried
-against another deployment. Clients must use new operation IDs for those requests. Committed outcomes remain recoverable
-through a retained deployment exposing the same mutation. If a retained bundle prevents startup, open the store with
-exclusive writer authority and call `Storage::release_deployment` with its ID before constructing the backend again.
+Schema changes are additive. Table names are the keys of the schema the project's `server/schema/index.ts` exports, not
+file paths. A deployment's tables are merged into the store's installed schema: new tables, optional new fields and new
+indexes are accepted; changing an existing field or index is rejected. Tables starting with `chunk_` are reserved.
 
-`Backend::send_budget` covers core's outgoing sync messages from encoding until the transport frees them. It is a
-sixteenth of the memory the live-action budget is sized from, at least 128 MiB. An overdrawing charge always succeeds,
-for messages that must not wait, and the budget then refuses other charges until usage drops back under it.
+Release a deployment once its mutations and subscriptions have drained; `release` returns `Busy` while an action still
+uses it. Releasing removes the bundle and permanently retires the ID; data, schema and operation outcomes stay. If a
+retained bundle stops the backend from starting, open the store and call `Storage::release_deployment` with its ID.
 
-The storage API decodes documents into `serde_json::Value`; snapshot reads run synchronously on the evaluating thread. A
-cumulative allowance limits each invocation to 4,096 decoded rows / 4 MiB, charging before field decoding. Exceeding it
-fails the read instead of returning a silently truncated result. `scanIndex` supports declared ascending indexes,
-equality prefixes and a half-open range on the next field, with 1–1,024 results. Both pending and invocation-local
-writes participate in ordering and limiting. Dependencies include old/new index keys and empty ranges. Commit results
-are parsed on the commit thread because `chunk_store::Commit` currently takes `Value`; query/subscription responses
-remain JSON text. Durable retries preserve the JSON value but may normalize its formatting and object key order.
+## Mutations
 
-`Backend::system` returns the native system module's `System` handle. `System::open` installs `chunk_`-prefixed system
-tables and `System::commit` writes them as one commit, blocking until it is durable. It takes a closure that the commit
-thread calls with the commit's revision, so writes can name the commit that makes them; an error or panic there rejects
-only that commit. The commit thread drains system commits first into every durable write, ahead of queued prepares and
-app commits; app commits already staged move past them, and the engine shifts their staged revisions, so each commit's
-revision stays the previous one plus one. System commits record operation IDs starting with `chunk/`, which app
-operations may not use. Deployments may not declare `chunk_` tables in any letter case, so apps can neither read nor
-write them. JavaScript never runs for a system commit. Once the pipeline fails, `System::stopped` reports it and app
-calls fail too. `System::lock_scope` holds a scope of system rows exclusively on one backend until the returned lock
-drops.
+Every mutation carries an operation ID. Its fingerprint covers the function, the canonical arguments and the caller, not
+the deployment: a retry with the same ID returns the stored outcome without running again, even after a redeploy, and
+reusing an ID for a different request fails. Outcomes are kept for 24 hours after their commit. Retry after a lost reply
+with the same ID; a request whose outcome was never stored runs on the deployment it names, so transports must keep that
+binding when retrying.
 
-Construction waits for initialization. Dropping the last backend handle drains accepted commits and joins its owned
-threads; use a blocking task for construction and final drop from async code. Persistent module state is disposable:
-handlers must derive transactional results from arguments, caller and tracked reads, as described in `chunk-js`.
+Mutations run one at a time against the latest state, including writes that are staged but not yet durable, and the
+commit thread persists them in order. A reply waits until its commit is durable. Queries whose reads don't touch pending
+writes answer at once from the durable state. If a commit is rejected (`Conflict`, `Invalid`, `Capacity`,
+`OperationMismatch`, `RolledBack`, or a full job queue), the mutations staged after it fail with `Error::Retry`. An
+ambiguous commit failure stops the pipeline and closes subscriptions; restart on the same store and recover outcomes by
+operation ID. The backend never retries on its own.
 
-Focused checks: `cargo test -p chunk-backend -p chunk-store -p chunk-js` and
-`cargo clippy -p chunk-backend -p chunk-store -p chunk-js --all-targets -- -D warnings`.
+## Subscriptions
 
-Mutation admission durably fixes the original snapshot timestamp, seed and uncommitted deployment binding before
-evaluation. Definite rejection and restart preserve these inputs; committed retries still recover the original outcome
-before execution and can cross deployment versions. New operations write their retry context in the commit thread's next
-shared durable write, together with queued commits. Concurrent prepared operations still use the ordered speculative
-pipeline. Retry contexts of operations that never committed are kept for 24 hours after preparation; an unresolved retry
-after that executes with a fresh timestamp, seed and deployment binding.
+Subscriptions read only durable snapshots. They record the documents, index ranges and misses they read, and rerun after
+commits that touch them, in batches against one snapshot. Identical subscriptions share one evaluation until one reads
+`ctx.caller`. Slow subscribers get the latest result rather than every revision. A group publishes once all its queries
+hold for the same revision. Application errors are results too: they keep their dependencies and recover when the data
+changes.
 
-## Bounded actions
+## Admission
 
-The embedded SDK declares `action` / `internalAction` separately from transactions. Its `ActionContext` contains
-`caller`, `invocationId`, `runQuery(reference, args)`, `runMutation(reference, args)`, and `sleep(milliseconds)`. It has
-no `db` capability. Generated TypeScript exports `api` and `internal` references; internal functions remain unavailable
-to public ingress. JVM transaction clients omit actions; platform code invokes them through the Rust backend API until
-an action transport is provided.
+Admission is bounded by waiting time and memory. New work is refused with `Error::Overloaded`, naming its `Limit`, once
+queued work of the same kind has waited over 500 ms, or when its memory budget is spent:
 
-Call `allocate_action_id()` before `start_action(id, call)` and keep that ID when acceptance is uncertain. Acceptance
-starts at most one invocation per ID and retains its deployment. Repeating an identical request attaches to the same
-scope and result; changing the caller, deployment, function or arguments fails. The returned `ActionHandle` exposes
-status, cancellation, and an async outcome. Dropping its last clone cancels the scope. The backend retains 32 status
-records and rejects retired IDs instead of executing them again; allocating IDs long before submitting them can result
-in retirement. A new backend incarnation makes old IDs unknown. Actions are never automatically retried.
+| Budget                                   | Size                                                                                 |
+| ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| Admitted requests and replies            | 64 MiB, each charged its input plus 1 KiB and any retained result                    |
+| Pending mutations and their writes       | 32 MiB                                                                               |
+| Subscriptions and their latest results   | 256 MiB                                                                              |
+| Live actions                             | 32 MiB each, within an eighth of the machine's or cgroup's memory (at least 256 MiB) |
+| Core's outgoing sync messages            | A sixteenth of that memory, at least 128 MiB (`Backend::send_budget`)                |
+| Action and command records, prepared IDs | 64 MiB                                                                               |
 
-Actions run in separate bounded workers with fresh V8 isolates, so sleep, transaction waits and CPU work do not occupy
-the foreground environment actor. Limits are the live-action budget above (eight actions at its 256 MiB floor), 32 MiB
-managed heap and separately 32 MiB ArrayBuffer backing storage per action, 30 seconds from acceptance (initialization
-also has the one-second module budget), 256 effects per invocation, eight pending effects per invocation, and four
-pending action transaction requests and one HTTP request per admitted action across the environment. Inputs, effect
-replies and results are each at most 1 MiB. Status records retain bounded request/result payloads. These logical limits
-exclude V8/native overhead. Shutdown cancels workers and joins them after closing their reply path.
+Each function invocation may decode at most 4,096 rows or 4 MiB across all its reads, and `scanIndex` takes a limit of 1
+to 1,024 results; exceeding a bound fails the read rather than truncating it. These are logical bounds, not an RSS
+limit.
 
-Every nested query/mutation goes through the original environment's actor against a fresh snapshot. The host captures
-the original caller and deployment; arguments cannot replace either authority. Internal references are permitted through
-this trusted path. A mutation receives the durable operation ID `action/<invocationId>/<effect-sequence>`; each effect
-has a distinct increasing sequence. No snapshot or transaction is held over a sleep. Deployment release returns `Busy`
-while an action references it.
+## Actions
 
-Cancellation, failure, backend loss or a missing reply can follow a committed mutation. They do not roll back earlier
-effects. After process loss the action outcome is explicitly unknown, while completed mutations retain their ordinary
-durable outcomes. Recover those outcomes under their derived operation IDs where necessary; do not restart the action
-with a new ID to resolve uncertainty. Durable job scheduling is a separate layer; external effects require the host
-grants described below.
+Actions (`action` / `internalAction`) run outside transactions, each on a fresh isolate in a bounded worker. Their
+context has `caller`, `invocationId`, `runQuery`, `runMutation`, `sleep`, and, where granted, `http` and `secret`; it
+has no `db`. Each nested query or mutation runs through the engine against a fresh snapshot, as the original caller and
+deployment, and a mutation gets the operation ID `action/<invocationId>/<effect sequence>`.
 
-### Scoped HTTP and secrets
+Call `allocate_action_id` and then `start_action(id, call)`, keeping the ID when acceptance is uncertain: one ID starts
+at most one invocation, and repeating the same request attaches to it. An action gets 30 seconds, 32 MiB of heap, 256
+effects with at most eight pending, and 1 MiB inputs. Cancellation, failure or a lost backend can follow a committed
+mutation; earlier effects are never rolled back, and actions are never retried automatically.
 
-`Backend::new` denies all external capabilities. An embedder can configure immutable grants with
-`Backend::with_action_effects(environment, store, effects)`:
+**HTTP and secrets.** `Backend::new` grants actions nothing. `Backend::with_action_effects` takes `ActionEffects` with
+`ActionGrants` per deployment: named HTTP bindings (`HttpBinding::new(base URL, methods)`) and named secrets, held in
+memory only and supplied again after a restart. Actions call `ctx.http("name", {path, method, body})` with a relative
+path under the binding's base, and `await ctx.secret("name")`. Redirects, proxies, retries, decompression and cookies
+are off; bodies are UTF-8 text up to 64 KiB out and 128 KiB back; the timeout is ten seconds unless lowered. An outcome
+is `completed`, `rejected` (never sent) or `unknown` (sent, result lost), with a stable `effectId`. Error messages never
+include URLs or bodies, and messages containing a secret's value are redacted. Up to 16 deployments can have grants,
+each with 16 bindings and 16 secrets of up to 8 KiB.
 
-```rust,ignore
-let grants = ActionGrants::default()
-    .with_http("billing".into(), HttpBinding::new("https://billing.example/api/", [HttpMethod::Get, HttpMethod::Post])?)?
-    .with_secret("billing-token".into(), std::env::var("BILLING_TOKEN")?)?;
-let effects = ActionEffects::new(environment.clone())?
-    .with_deployment(deployment_id, grants)?;
-```
+## Scheduled jobs
 
-Grants apply only to the exact environment and deployment. They are held in host memory, never serialized into a bundle,
-release or database. Restart requires the host to supply them again. At most 16 deployments can have grants; each has at
-most 16 HTTP bindings and 16 secrets, each secret at most 8 KiB. The embedding host resolves environment variables or
-its own secret source; JavaScript cannot enumerate environment variables or access arbitrary files.
+A mutation can call `ctx.scheduler.runAt(time, action, args)`, `cancel(jobId)` and
+`retry(jobId, time, {acknowledgePossibleEffects: true})`; the job commits with the mutation's writes, under its caller.
+The backend's timer starts due jobs, using up to a quarter of the live-action budget. A job is `pending`, `running`,
+`succeeded` (with a result up to 64 KiB), `failed`, `cancelled` or `unknown`: a job interrupted by cancellation, a
+deadline or a restart is `unknown`, is never restarted automatically, and needs an explicit `retry` that acknowledges
+possible earlier effects. Its attempts run as `job/<jobId>/attempt/<n>`. The queue holds 20,000 jobs or 64 MiB
+(`chunk_store::JobLimits`), with up to 16 intents per mutation and times at most 366 days ahead; a full queue fails the
+whole mutation. Finished jobs are kept until `forget_job` or 24 hours after their last change.
 
-Actions call `ctx.http("billing", {path: "invoices", method: "POST", body: "..."})` and
-`await ctx.secret("billing-token")`. HTTP paths must be relative and remain under the configured base path and origin.
-Path segments use unreserved ASCII characters; query parameters may use percent encoding. Absolute paths, userinfo,
-fragments, traversal, matrix parameters and encoded path escapes are rejected. Bindings grant explicit methods.
-Redirects, inherited proxies, automatic retries, automatic decompression and cookies are disabled. The API supports
-UTF-8 text bodies, up to 64 KiB for requests and 128 KiB for responses, 32 headers / 8 KiB in each direction, 2 KiB
-paths, and eight simultaneous HTTP requests across the environment. The binding timeout defaults to ten seconds and can
-be lowered; the action's overall deadline also applies. Response bodies are read incrementally within their bound.
+The timer only runs while the process does. To wake a suspended host, read `Backend::wake_handoff()`, which holds the
+earliest due time under a generation, install that alarm durably outside the process, and then call
+`acknowledge_wake(generation, due_at)`; a changed generation rejects the acknowledgement, so read again. Core does this
+with management's `SetWakeAlarm`.
 
-HTTP outcomes have `state: "completed" | "rejected" | "unknown"` and a stable `effectId` formed from the invocation ID
-and effect sequence. `completed` contains `status`, `headers` and `body`; applications still need to interpret the HTTP
-status. `rejected` means no dispatch occurred. Once dispatch begins, transport failure, response truncation, size limits
-or timeout return `unknown`, because the remote operation may already have happened. No failed request is retried.
+## Commands and hooks
 
-Cancellation or backend loss can terminate the action before JavaScript receives an HTTP outcome. Such a lost/cancelled
-action leaves its dispatched effects uncertain; it does not guarantee delivery of an `unknown` result. Reusing the
-action ID never restarts a retained or stale invocation. Reconcile with the remote service or an application idempotency
-key before deciding to issue another business request. Action status is ephemeral and does not replace a durable job
-record.
+Core runs a player's commands and the project's hooks through the Rust API; the backend serves no transport of its own.
+`command_catalog` lists the commands an app's scope declares and those the player may run, `command_suggestions` runs a
+command's suggestion query, and `start_command` starts a command under an ID from `allocate_action_id`, rechecking
+permission and parsing input against the declared command. Commands run like actions, with at most eight pending
+platform effects (messages, player moves, session method calls), which the returned `CommandEffects` hands to core to
+perform. A retry under the same ID joins the running command and never replays it.
 
-Automatic host HTTP errors contain no URL, body, headers or transport error text. Action diagnostics containing a
-granted secret value or its JSON-escaped form are replaced with a generic redacted message. Secret reads intentionally
-hand the value to authorized application code; transformed values and deliberate application publication are outside
-literal redaction. Queries and mutations retain their pure capability profile. Deployment configuration, secret rotation
-and hosted secret management remain separate platform work.
+## System tables
 
-## Durable scheduled jobs
+`Backend::system` returns a `System` for core's own state, such as [control](../chunk-control/README.md)'s.
+`System::open` installs `chunk_`-prefixed tables and `System::commit` writes to them in one durable commit, ahead of
+queued app commits. Apps can't read or write them. `System::lock_scope` holds a scope of system rows exclusively.
 
-Mutations can atomically record `ctx.scheduler.runAt(unixMilliseconds, actionReference, args)`, `cancel(jobId)`, and
-`retry(jobId, unixMilliseconds, {acknowledgePossibleEffects: true})` with their document writes and operation outcome.
-`runAt` returns a stable job ID derived from the mutation operation and intent position. Arguments and action kind are
-validated against the captured deployment before commit, including `internalAction` references. The server captures the
-full originating caller; job arguments cannot select a caller, environment or deployment. Cancellation, retry,
-`Backend::job` and `forget_job` require that same caller. Queries and actions cannot schedule directly; an action can
-call a mutation to record intent.
+## Testing
 
-`Backend` starts a local timer and dispatches due jobs automatically, checking at most every 100 milliseconds when the
-actor is available. Scheduled jobs run within the live-action memory budget, using at most a quarter of the actions it
-admits (two at its floor). Busy action capacity leaves jobs pending, or retains an already-durable claim until a worker
-is available. The commit thread durably changes `pending` to `running` before any action starts. SQLite keeps job
-metadata and wake state in private tables, separate from application schema. Other storage adapters must implement
-atomic scheduling; nonempty intents fail closed by default.
-
-A successful action records `succeeded` and a result up to 64 KiB; an oversized result or exhausted result retention
-capacity records `failed` without that result. Observed application or contract errors also record `failed`; this does
-not undo prior effects. Interrupted execution (cancellation, deadline, resource termination or backend loss) records
-`unknown`, since nested mutations or external requests may already have effects. Startup turns every recovered `running`
-attempt into `unknown` and never starts it again automatically. This also covers a crash between claim and dispatch.
-`pending` jobs resume normally. Cancelling pending work prevents dispatch; cancelling running work records `unknown` and
-expires its action scope. Effects already accepted elsewhere can still complete.
-
-`invocationId` is `job/<jobId>/attempt/<number>`. Nested mutations use that prefix plus `/<effect-sequence>`; HTTP
-outcomes use that prefix plus `/http/<effect-sequence>`. These identities survive restart and let trusted reconciliation
-recover earlier mutation outcomes or correlate remote requests. They do not make an external service idempotent. A retry
-is an explicit new attempt, allowed only for failed, unknown or cancelled jobs with acknowledgement of possible earlier
-effects. Its captured caller, arguments and originating deployment remain fixed. Earlier attempt numbers remain usable
-for reconciliation; the job record retains only the latest attempt's state and result.
-
-Pending/running jobs retain their originating bundle across restart. Terminal records remain until their owner calls
-`forget_job` or expire 24 hours after their last change; forgetting live work is rejected. Terminal records do not pin
-code: releasing their deployment makes later retries fail. The queue retains at most 20,000 jobs / 64 MiB by default
-(`JobLimits` in `chunk-store`), with 16 intents per mutation, 64 KiB per encoded intent and 64 KiB for captured caller
-data. `runAt` accepts a nonnegative safe integer no more than 366 days beyond the mutation's captured time; times
-already due become immediately eligible. Expired terminal records are removed before a new job is admitted, and a full
-queue rejects the whole mutation with `Error::Overloaded(Limit::Jobs)` (`RESOURCE_EXHAUSTED`); retry once jobs finish or
-expire. There is no recurring schedule or automatic action retry. Host HTTP/secret grants must be supplied again after
-restart; grants and secret values are never part of a job record unless application code explicitly puts such values in
-its arguments/result.
-
-### Host alarm handoff
-
-The local timer runs only while the backend process runs. It cannot wake a suspended host. A hosting adapter reads
-`Backend::wake_handoff()` to obtain durable `{generation, due_at, acknowledged, running}` state. Every scheduling change
-advances the generation and recomputes the earliest pending due time atomically. The adapter must durably install or
-clear its external alarm for that exact generation and time **before** calling `acknowledge_wake(generation, due_at)`. A
-changed generation or time rejects the acknowledgement; read and reconcile again. `acknowledged` reports persisted
-adapter handoff, not proof that a provider fired its alarm.
-
-After resume/restart, construct the backend first so interrupted attempts recover and due work can dispatch, then read
-and reconcile the latest handoff with the external alarm. Before suspension, the host must coordinate admission, drain
-foreground requests and action scopes, wait for `running` to be zero, and reconcile until the latest generation is
-acknowledged. Retain the external alarm independently of the suspended process. This API defines the durable handoff
-contract; installing an alarm and resuming a machine are the hosting adapter's job.
-
-## Platform commands
-
-Core's sync path runs commands through the Rust API; the backend serves no command transport of its own. Each call names
-the deployment, a `CommandScope` core captured from the player's arrived claim (player, connection, claim, session, app
-and generations), and the caller the permission queries and handler see. The backend verifies the app's manifest
-membership/domain. Command input cannot supply caller identity, an export or a different effect target.
-
-`command_catalog` returns inherited command descriptors, including denied roots, plus the currently allowed IDs. Keeping
-denied roots in the ownership catalog prevents accidental forwarding to a native command with the same name.
-`command_suggestions` executes only a suggestion query declared on the selected command. Permission and suggestion
-queries may be internal; neither becomes callable through public query ingress. Permission checks use a durable view and
-fail with `Busy` while commits are outstanding.
-
-`start_command` starts a command under an identity from `allocate_action_id`, through the same admission as
-`start_action`, after checking permission and reparsing input with the fixed descriptor. Its outcome stays retained for
-the credential that started it, which `command_identity` resolves the identity for as long as the retry repeats the same
-command, input and player. A retry under the same identity joins the running command and never replays its handler or
-effects; a missing identity means an unknown outcome, never permission to retry the command under a new one. The
-returned `CommandEffects` yields the platform effects the handler asks for, which the caller performs and finishes.
-
-Commands use the existing action workers, deployment HTTP/secret grants, 30-second deadline, live-action budget and 256
-total effects. Each command has at most eight pending platform effects. The backend checks the original command's
-permission again before every nested transaction and platform effect. Functions and hooks have no platform capability;
-hooks also retain their read-only rules and default denial of HTTP/secrets. `followPlayer` changes eligible proxy effect
-delivery only; it never changes the backend's original caller, permission, deployment or domain binding. Session calls
-remain bound to the original app/session and declared session-method argument/result schemas.
-
-Platform requests/replies are at most 64 KiB. Text is at most 4,096 UTF-16 units; suggestions contain at most 64 strings
-of 256 units each. Effects have stable IDs `action/<invocationId>/platform/<effect-sequence>`. Text, routing and session
-send receipts contain `{state: "accepted", operationId}`; this acknowledges downstream acceptance, not completion of
-player delivery or gameplay work. Session calls return the declared result. No handler or external effect is retried
-automatically. Cancellation, deadline or process loss can leave earlier mutations and dispatched effects completed even
-when the command outcome is unknown. Dropping the command's handle or shutdown cancels the action; an effect dropped
-without being finished fails.
+`cargo test -p chunk-backend -p chunk-store -p chunk-js`. The `bench-support` feature exposes phase timings for
+[`chunk-bench`](../chunk-bench/README.md).

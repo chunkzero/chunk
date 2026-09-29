@@ -1,7 +1,7 @@
-# Service benchmarks
+# chunk-bench
 
-Opt-in local workloads for the production proxy relay and for core (control and the environment backend) over its sync
-protocol. Use a release build; these workloads never run as part of tests or CI.
+Opt-in local benchmarks for the gateway's relay and for core (control and the backend) over its `chunk.sync.v1`
+protocol. They build in release mode and never run in tests or CI.
 
 ```sh
 just bench proxy-relay
@@ -17,142 +17,90 @@ just bench sync-queries --subscribers 200 --rate 100 --writes unrelated
 just bench sync-queries --subscribers 5000 --rate 100 --writes related --own-writes
 ```
 
-`just bench --help` lists the parameters. Defaults are 2 seconds of warmup, 10 seconds of measurement, 64
-connections/RPC lanes, two generator Tokio worker threads, and as many target worker threads as the available
-parallelism, matching `chunk-environment`'s `#[tokio::main]` runtime; `--target-threads` overrides it. No CPU affinity
-or resource quotas are applied unless you pass `--target-cpus 12-13` (runs the target under `taskset -c`; set
-`--target-threads` to match) and start the generator under `taskset` yourself; `config.json` records the arguments. Run
-benchmarks sequentially on an otherwise quiet machine and repeat each point. Use the same build, payload, duration and
-hardware when comparing results.
+`just bench --help` lists every parameter. By default a run warms up for 2 seconds and measures for 10, over 64
+connections or RPC lanes, with two generator threads and as many target threads as the machine has (`--target-threads`
+overrides it). Nothing is pinned unless you pass `--target-cpus 12-13`, which runs the target under `taskset -c` (set
+`--target-threads` to match; pin the generator yourself). Run benchmarks one at a time on a quiet machine, repeat each
+point, and compare only runs with the same build, payload, duration and hardware.
+
+The backend workloads compile the TypeScript app in `backend/`, which needs the pinned TypeScript beside the release
+build: run `node scripts/install-typescript.mjs target/release` once, or set `CHUNK_TYPESCRIPT`.
 
 ## Workloads
 
 | Workload             | One operation                                                                        | Included work                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `proxy-relay`        | Client packet → relay → synthetic gameplay response → relay → client                 | Production managed PLAY relay, framing, AES-128-CFB8 encryption and zlib compression over real TCP                     |
+| `proxy-relay`        | Client packet → relay → synthetic gameplay response → relay → client                 | The gateway's play-state relay, framing, AES-128-CFB8 encryption and zlib compression over real TCP                    |
 | `control-population` | Subscribe to `gateway/<id>` and read its snapshot of every seeded claim              | Sync authentication, stream fencing, control state reads, normal reconciliation, arrival and health tasks              |
 | `control-churn`      | `chunk:claim` → `chunk:activate` → ARRIVED on `gateway/<id>` → `chunk:depart`        | Sync authentication, fenced calls, placement, JVM reports, topic delivery, durable SQLite commits and background tasks |
 | `backend-query`      | Load one player's profile through a `by_player` index, as a sync `Call` from the CLI | Sync authentication, engine queue, JS evaluation, SQLite snapshot reads, contract validation                           |
-| `backend-mutation`   | Save one player's profile (load, patch, return save count)                           | As above, plus retry-context preparation and durable SQLite commit before the reply                                    |
+| `backend-mutation`   | Save one player's profile (load, patch, return save count)                           | As above, plus retry-context preparation and a durable SQLite commit before the reply                                  |
 | `sync-queries`       | One app mutation through sync `Call` while `queries` streams follow                  | Core's backend and control, sync authentication, position-only advances or reevaluation, and stream delivery           |
 
-Control and backend workloads run over core's sync protocol, so their numbers include sync authentication, stream
-fencing and topic delivery. Rebaseline them instead of comparing with runs from before that change.
+**`proxy-relay`** uses pre-established connections, so it excludes Mojang login, configuration, commands, admission and
+moves. Each request and response is checked byte for byte, and each connection has one round trip outstanding. Bodies
+default to 32 bytes up and 1 KiB down with mixed compressibility; `--payload repeated|mixed|random` changes that,
+`--payload chunk` sends a synthetic overworld chunk column down instead, and `--no-compression`, `--no-encryption` and
+`--compression-level` separate the costs. `--burst N` answers each request with N packets in one write. The summary's
+`response` reports body and framed sizes. These opaque packets model transport work, not a real play session: there is
+no server broadcast, slow reader or backpressure workload.
 
-The proxy uses pre-established connections. It excludes Mojang login, configuration, command handling, admission,
-movement between servers and control streams. A feature-gated adapter calls the existing packet pump; normal proxy
-listeners and authentication policy are unchanged. Each request and response is checked byte-for-byte, including its
-sequence number. Default packet bodies are 32 bytes upstream and 1 KiB downstream with mixed compressibility. Try
-`--payload repeated`, `mixed` and `random`, and `--no-compression` / `--no-encryption` to distinguish costs.
-`--payload chunk` sends a synthetic 25 KiB overworld chunk column (paletted sections, heightmaps and surface sky light,
-laid out like the real packet) downstream instead. `--compression-level` overrides the production zlib level in both
-processes, and the summary's `response` reports the body and framed (compressed, unencrypted) sizes. These opaque
-packets model transport work, not an actual Minecraft play session or representative traffic capture. Each connection
-has at most one outstanding round trip. `--burst N` makes the gameplay server answer each request with N response
-packets in one write, which exercises write batching; there is still no independent server broadcast, sustained one-way
-stream, slow reader or backpressure workload.
+**Control workloads** run core in the target with its normal background tasks and on-disk SQLite, and call it as core's
+own gateway. Synthetic JVMs, one per host, follow their `jvm/<host>` topics inside the target process, so their work
+counts toward the target; they report sessions and arrivals but launch no JVMs and simulate no ticks or failures. The
+fixture declares 128-player sessions, one session per process and at most 32 processes. `control-population` offers 100
+snapshots per second by default, each what a reconnecting gateway reads. `control-churn` reports complete player
+lifecycles per second, and `population + concurrency` may be at most 1024. Released claims are kept for five minutes, so
+shorter runs measure churn with growing history. Setup and a successful run end by checking that a fresh snapshot holds
+exactly the seeded population.
 
-Control workloads run core (`chunk_environment::Core`) in the target, with its normal background tasks and on-disk
-SQLite settings, and act as core's in-process gateway with its credential. Players are seeded through `chunk:claim` and
-`chunk:activate`, each waiting until the gateway's `gateway/<id>` topic shows the claim ARRIVED. Churn lanes share one
-`gateway/<id>` stream, which every call names. Synthetic JVMs, one per host, follow their `jvm/<host>` topics inside the
-target process through control's API rather than the sync protocol's network transport, so their work counts toward the
-target's CPU and memory. They provide independent process identities, session inventories and player arrival as soon as
-a claim activates; they do not launch JVMs or simulate game ticks, startup or network failures. The fixture declares
-128-player sessions, one session per process, and at most 32 processes. Setup and a successful run end by checking that
-a fresh snapshot holds exactly the seeded population, all ARRIVED.
+**Backend workloads** compile `backend/` with `chunk_build::compile` and serve it from core's backend on on-disk SQLite.
+Its schema has a `profiles` table, with `by_player` and `by_rank` indexes, and an `activity` table. Setup seeds
+`--population` profiles, 200 per commit. Each lane is its own connection calling as the CLI; operation IDs are unique,
+so no request recovers a stored outcome. The target builds `chunk-backend` with `bench-support`, which records phase
+timings after warmup: `queue`, `query`, `mutation`, `prepare`, `commit`, `durable`, `reevaluate` and `fanout`. Phases
+overlap; don't add or subtract their percentiles.
 
-Population defaults to 100 snapshots per second, each what a gateway reads when it subscribes to its topic again. Each
-subscription supersedes the previous stream, as a reconnecting gateway's does. This is deliberately an open-loop offered
-rate; production gateways follow one stream each and subscribe again only after a failure. Churn reports complete player
-lifecycles per second, not individual calls. Control holds at most 1,024 open claims, so the runner rejects churn
-configurations where `population + concurrency > 1024`. Released claims are retained for five minutes, so runs shorter
-than that measure churn with growing history. Every run starts with fresh state. Setup reports the player index on
-failure; target warnings and errors go to stderr. Treat capacity rejections separately from throughput saturation.
+**`sync-queries`** opens `--subscribers` (default 5,000) `queries` streams on a shared leaderboard,
+`--streams-per-connection` to a connection, and writes through sync `Call`s from `--concurrency` lanes.
+`--writes unrelated` (the default) writes to a table no query reads, so streams only advance their position, promptly
+under `--own-writes`; `--writes related` changes every stream's result. `--slow-readers` streams wait `--slow-read-ms`
+before each read, on their own connections, and `--result-padding` enlarges the result to press on core's send budget.
+The `fanout` summary reports stream updates, changed entries, encoded bytes, errors, streams ended or overloaded, and
+`reply_to_observed_us`, from a write's reply to each prompt stream observing it; pairs still unobserved two seconds
+after the last write are `unobserved_pairs`.
 
-Backend workloads compile the TypeScript app in `backend/` with `chunk_build::compile`, exactly as an app is built, and
-serve it from core's backend on on-disk SQLite. Compilation needs the pinned native TypeScript: run
-`node scripts/install-typescript.mjs target/release` or set `CHUNK_TYPESCRIPT`. The bundle has one `profiles` table (ten
-fields including an eight- to sixteen-item inventory) with `by_player` and `by_rank` indexes; `rank` is the negated best
-score because indexes are ascending. Setup seeds `--population` profiles through the bundle's own `seed` mutation, 200
-per commit. Each lane is its own connection calling as the CLI, which names no player, so the functions take the player
-as an argument. Operation IDs are unique, so no request recovers a stored outcome.
-
-`sync-queries` runs core (`chunk_environment::Core`: backend, control and the `chunk.sync.v1.Core` service) in the
-target and opens `--subscribers` (default 5,000) `Subscribe(queries)` streams on the shared leaderboard (`top`) with the
-in-process gateway's credential, `--streams-per-connection` to a connection, then waits for each snapshot. Writes are
-sync `Call`s from `--concurrency` lanes. `--writes unrelated` (default) commits to a table no query reads, so streams
-only advance their position: at most once a second while idle, or promptly after each write under `--own-writes`, which
-writes with the subscribers' credential instead of the CLI's. `--writes related` raises a player to a new leaderboard
-record, changing every stream's result in any arrival order. The last `--slow-readers` streams wait `--slow-read-ms`
-before each read, on their own connections (still `--streams-per-connection` each), so no prompt stream shares a
-connection with them. `--result-padding` adds that many bytes to the leaderboard result, so related writes press on
-core's send budget. Setup fails if a snapshot holds a query error, and the run fails if warmup saw a query error or an
-ended stream. The `fanout` summary reports stream updates, position-only updates, changed entries and encoded update
-bytes per second (excluding gRPC and HTTP/2 framing), query errors, streams that ended, those core ended with OVERLOADED
-(`streams_overloaded`), and `reply_to_observed_us`: from a measured write's reply reaching the generator until each
-prompt stream observes its position, once per write and stream (slow readers excluded). After the last write, the runner
-waits up to two seconds for those observations; pairs still missing are `unobserved_pairs`. The fan-out summary and
-resource sampling then stop at the same instant. `measured-observed.hdr` holds the lag histogram, and `target_cpu_cores`
-is core's CPU time over wall time. Each resource sample also holds core's charged send bytes (`send_charged_bytes`), and
-the summary reports their peak across samples beside peak RSS and the send budget (`send_budget_bytes`). No control
-state changes during the run, but core still checks each stream's grant before every update, so position-only fan-out
-includes that check.
-
-Backend targets build `chunk-backend` with its `bench-support` feature, which exposes phase timings from the engine and
-commit threads without changing behavior. Phases are recorded after warmup: `queue` (admission until the engine thread
-takes a query or mutation), `query` and `mutation` (evaluation and validation), `prepare` and `commit` (SQLite work on
-the commit thread), `durable` (staged until the engine handles the commit acknowledgment), `reevaluate` (one subscribed
-query; identical subscriptions share it) and `fanout` (commit acknowledgment until the batch covering it reevaluated
-every affected query; commits coalesced into one batch each report their wait). Phases overlap; do not add or subtract
-their percentiles. `target_cpu_us_per_completed` divides target CPU, including drain, by completed operations.
-
-`cargo bench -p chunk-js --bench engines -- target/bench/<run>/bundle` compares chunk-js's persistent `deno_core` engine
-with a persistent direct V8 context on the compiled bundle. Both get the same in-memory snapshot of 1,000 profiles, a 32
-MiB heap and a one-second watchdog. Each cell runs 1,000 warmup and 8,000 measured calls (below chunk-js's 10,000-call
-runtime recycling) in its own process and checks that both engines return identical results.
+`cargo bench -p chunk-js --bench engines -- target/bench/<run>/bundle` compares chunk-js's engine with a plain V8
+context on a backend workload's compiled bundle.
 
 ## Measurement and output
 
-The target runs in a child process. Clients and synthetic gameplay/runtime services run in the parent, so their CPU and
-memory are reported separately. All listeners bind ephemeral loopback ports. State is temporary, and normal completion,
-errors and Ctrl-C close the owned services and child process.
+The target runs in a child process; clients and synthetic services run in the parent, and their CPU and memory are
+reported separately. Everything binds ephemeral loopback ports and temporary state, and completion, errors and Ctrl-C
+close it all.
 
-Requests follow an absolute schedule, independent of prior replies. A free lane is chosen in FIFO order; if all lanes
-are busy, that offer is counted as `dropped_busy` rather than queued. Offers missing their deadline or the load window
-are `dropped_late`. Latency starts at the **scheduled** send time, including generator delay. An in-flight timeout is
-counted as a failure; a timed-out relay connection is discarded because its framing/cipher state cannot safely be
-reused. Accepted control operations can continue in the target after a client timeout, as they do in production. No
-synthetic histogram correction is applied.
+Requests follow an absolute schedule, independent of replies. If every lane is busy, the offer counts as `dropped_busy`;
+offers that miss their deadline or the load window are `dropped_late`. Latency starts at the scheduled send time. A
+timeout counts as a failure, and no histogram correction is applied.
+`offered = completed + failed + dropped_busy + dropped_late` always holds. CPU is process CPU time over wall time (1.0
+is one core), sampled about once a second, including drain and excluding setup and warmup. Proxy bandwidth counts
+delivered uncompressed bodies once; it is not wire bandwidth.
 
-Each run writes to `target/bench/<timestamp>-<pid>/` (gitignored):
+Each run writes to `target/bench/<timestamp>-<pid>/`:
 
-- `config.json`: all arguments, resolved rate, commit/dirty state, release mode, toolchain, CPU, OS and memory.
-- `summary.json`: warmup and measured counts, error categories, latency and scheduler-delay percentiles, throughput, and
-  roughly one-second process samples.
-- `warmup-*.hdr` / `measured-*.hdr`: mergeable HdrHistogram V2 data in microseconds, with three significant digits.
-  `latency` includes completed successes and failures; `success` contains only successful completions; `scheduler`
-  covers offers examined during the window. Unsent offers have no completion latency.
-- `measured-phase-<name>-ns.hdr` (backend target phases, nanoseconds) and `measured-observed.hdr` (sync reply to
-  observed position, microseconds).
-- `bundle/` for backend workloads: the compiled `source.mjs`, `contract.json` and `deployment.json`.
-- `failure.json` if setup, infrastructure, warmup or shutdown fails. A measured overload can still finish successfully:
-  inspect failure/drop counts, not just the command's exit status.
+- `config.json`: the arguments, commit and dirty state, toolchain, CPU, OS and memory.
+- `summary.json`: counts, error categories, latency and scheduler-delay percentiles, throughput and resource samples.
+- `warmup-*.hdr` and `measured-*.hdr`: HdrHistogram V2 data in microseconds (`latency`, `success`, `scheduler`), plus
+  `measured-phase-<name>-ns.hdr` for backend phases and `measured-observed.hdr` for `sync-queries`.
+- `bundle/`, for backend workloads: the compiled `source.mjs`, its source map, `contract.json` and `deployment.json`.
+- `failure.json`, if setup, warmup or shutdown fails. A measured overload can still exit successfully; read the failure
+  and drop counts, not just the exit status.
 
-`offered = completed + failed + dropped_busy + dropped_late` must always hold. Throughput is provided both per
-offered-load second and per elapsed second including the final drain. Proxy bandwidth counts successfully delivered
-uncompressed request + response bodies once; it is **not wire bandwidth**. CPU is cumulative process CPU time divided by
-elapsed wall time (1.0 = one full core); RSS samples can miss short peaks. Resource sampling includes drain and excludes
-setup/warmup. The generator resource numbers include fixture and sampling overhead. A growing generator delay or
-saturated generator can invalidate a target-capacity conclusion.
+These are local baselines, not hosting or player-capacity figures. The runner provisions nothing and never connects to
+existing environments.
 
-These are local implementation baselines, not hosting-size or player-capacity claims. Test the intended machine sizes,
-quotas, regions, disks and network separately before using results for hosting decisions. This runner does not provision
-infrastructure or connect to existing environments.
+## Layout
 
-## Keeping it small
-
-`load.rs` owns pacing and accounting; `metrics.rs` owns histograms; workload modules call production APIs. Synthetic
-services stay in `fixtures.rs` and `proxy.rs`; the benchmark app stays in `backend/`. Keep benchmark dependencies in
-this unpublished crate and raw results out of source control. Add workload dimensions when answering a concrete
-question; add Criterion microbenchmarks only when a measured hotspot warrants isolation.
+`load.rs` owns pacing and accounting, `metrics.rs` histograms, `fixtures.rs` and `proxy.rs` the synthetic services, and
+`backend/` the benchmark app; workload modules call production APIs. Keep benchmark dependencies in this unpublished
+crate and results out of source control.
