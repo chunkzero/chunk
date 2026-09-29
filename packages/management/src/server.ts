@@ -39,7 +39,10 @@ export interface HandlerOptions {
   authenticator?: Authenticator;
   /** Serves the dashboard's static build from here; unset serves no dashboard. */
   dashboardDir?: string | undefined;
-  /** Registers more services; a service registered again here replaces the default one. */
+  /**
+   * Registers more services; a service registered again here replaces the default one. Services new here are extension
+   * services, which only extension identities naming them may call.
+   */
   extend?: (router: ConnectRouter) => void;
 }
 
@@ -57,8 +60,9 @@ export function createHandler(
   options: HandlerOptions = {},
 ): (request: Request, server?: Server) => Promise<Response> {
   const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
+  const extensionServices = new Set<string>();
   const router = createConnectRouter({
-    interceptors: [logUnexpectedErrors, authInterceptor],
+    interceptors: [logUnexpectedErrors, authInterceptor(extensionServices)],
     readMaxBytes: maxRpcBytes,
   });
   router
@@ -70,7 +74,10 @@ export function createHandler(
     .service(EnvironmentService, environmentService(deps))
     .service(EdgeService, edgeService(deps))
     .service(LogService, logService(deps));
+  const builtIn = new Set(router.handlers.map((handler) => handler.service.typeName));
   options.extend?.(router);
+  for (const { service } of router.handlers)
+    if (!builtIn.has(service.typeName)) extensionServices.add(service.typeName);
   const dashboard = options.dashboardDir === undefined ? undefined : dashboardHandler(options.dashboardDir);
   const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
 

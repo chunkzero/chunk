@@ -20,9 +20,10 @@ import { start } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { randomToken } from "../src/crypto.ts";
 import { connect } from "../src/db.ts";
+import { AuthService } from "../src/gen/chunk/management/v1/auth_pb.ts";
 import { EdgeService } from "../src/gen/chunk/management/v1/edge_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
-import { subjectOf } from "../src/rpc/caller.ts";
+import { type Identity, subjectOf } from "../src/rpc/caller.ts";
 import { fakeProvider } from "./fake-provider.ts";
 import { codeOf, databaseUrl } from "./harness.ts";
 
@@ -102,50 +103,103 @@ describe.skipIf(!databaseUrl)("start", () => {
     expect(ended).toBe(Code.Unavailable);
   });
 
+  /** Whether every connection to the test database has closed, waiting up to five seconds. */
+  async function closed() {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const [row] = await admin<{ count: number }[]>`
+        select count(*)::int as count from pg_stat_activity where datname = ${database}`;
+      if (row?.count === 0) return true;
+      await Bun.sleep(100);
+    }
+    return false;
+  }
+
+  /** The fake provider, and a promise that settles once the reconciler, holding its leader lock, lists machines. */
+  function listedProvider() {
+    const { provider } = fakeProvider();
+    const { promise: listed, resolve } = Promise.withResolvers<void>();
+    return { listed, provider: { ...provider, list: () => (resolve(), provider.list()) } };
+  }
+
   test("serves an install's provider, migrations, services and credentials", async () => {
     const migrations = join(dataDir, "migrations");
     await Bun.write(join(migrations, "0001_init.sql"), "create table extension_greetings (text text not null);");
     await Bun.write(join(migrations, "0002_greet.sql"), "insert into extension_greetings values ('hello');");
-    const { provider } = fakeProvider();
+    const { listed, provider } = listedProvider();
+    const credentials = new Map<string, Identity>([
+      ["agent", { kind: "extension", service: WhoAmIService.typeName, subject: "agent-1" }],
+      ["other", { kind: "extension", service: "test.v1.OtherService", subject: "agent-2" }],
+      ["edge", { kind: "extension", service: EdgeService.typeName, subject: "agent-3" }],
+    ]);
+    const operatorToken = `chunk_${randomToken()}`;
     let installId = "";
-    const { promise: listed, resolve: list } = Promise.withResolvers<void>();
-    let stopped = false;
-    const app = await start(config({ CHUNK_ENVIRONMENT_IMAGE: "chunk-environment:test" }), {
-      provider(_deps, id) {
-        installId = id;
-        return { ...provider, list: () => (list(), provider.list()) };
-      },
-      migrations,
-      extend: (router, deps) =>
-        router.service(WhoAmIService, {
-          async whoAmI(_request, context) {
-            const [greeting] = await deps.sql<{ text: string }[]>`select text from extension_greetings`;
-            return { value: `${greeting?.text} ${subjectOf(context)}` };
-          },
+    let handled = 0;
+    const app = await start(
+      config({ CHUNK_ENVIRONMENT_IMAGE: "chunk-environment:test", CHUNK_OPERATOR_TOKEN: operatorToken }),
+      {
+        provider(_deps, id) {
+          installId = id;
+          return provider;
+        },
+        migrations,
+        extend: (router, deps) =>
+          router.service(WhoAmIService, {
+            async whoAmI(_request, context) {
+              handled++;
+              const [greeting] = await deps.sql<{ text: string }[]>`select text from extension_greetings`;
+              return { value: `${greeting?.text} ${subjectOf(context)}` };
+            },
+          }),
+        authenticator: (tokens) => ({
+          authenticate: async (token) => credentials.get(token) ?? tokens.authenticate(token),
         }),
-      authenticator: (tokens) => ({
-        authenticate: async (token) =>
-          token === "agent-secret"
-            ? { kind: "extension", service: WhoAmIService.typeName, subject: "agent-1" }
-            : tokens.authenticate(token),
-      }),
-      start: async () => async () => {
-        stopped = true;
+        start: async () => async () => {
+          throw new Error("stop failed");
+        },
       },
-    });
+    );
     const client = <T extends Parameters<typeof createClient>[0]>(service: T, token: string) =>
       createClient(
         service,
         createConnectTransport({ baseUrl: app.url.origin, useBinaryFormat: true, interceptors: [bearer(token)] }),
       );
+    const project = await client(ProjectService, operatorToken).createProject({
+      requestId: crypto.randomUUID(),
+      name: "extension-test",
+    });
+    const { secret: projectToken } = await client(AuthService, operatorToken).createToken({
+      requestId: crypto.randomUUID(),
+      name: "project",
+      projectId: project.project?.id ?? "",
+    });
 
-    expect(await client(WhoAmIService, "agent-secret").whoAmI({})).toMatchObject({ value: "hello agent-1" });
+    expect(await client(WhoAmIService, "agent").whoAmI({})).toMatchObject({ value: "hello agent-1" });
     expect(await codeOf(client(WhoAmIService, "wrong").whoAmI({}))).toBe(Code.Unauthenticated);
-    expect(await codeOf(client(ProjectService, "agent-secret").listProjects({}))).toBe(Code.PermissionDenied);
+    for (const token of [operatorToken, projectToken, "other"]) {
+      expect(await codeOf(client(WhoAmIService, token).whoAmI({}))).toBe(Code.PermissionDenied);
+    }
+    expect(handled).toBe(1);
+    const edge = client(EdgeService, "edge");
+    expect(await codeOf(edge.watchRoutes({})[Symbol.asyncIterator]().next())).toBe(Code.PermissionDenied);
+    expect(await codeOf(edge.wake({ environmentId: "env_missing" }))).toBe(Code.PermissionDenied);
+    expect(await codeOf(client(ProjectService, "agent").listProjects({}))).toBe(Code.PermissionDenied);
     await listed;
     expect(installId).toMatch(/.+/);
 
-    await app.stop();
-    expect(stopped).toBe(true);
+    await expect(app.stop()).rejects.toThrow("stop failed");
+    expect(await closed()).toBe(true);
+  });
+
+  test("stops what it started when a start hook fails", async () => {
+    const { listed, provider } = listedProvider();
+    const started = start(config({ CHUNK_ENVIRONMENT_IMAGE: "chunk-environment:test" }), {
+      provider: () => provider,
+      async start() {
+        await listed;
+        throw new Error("start failed");
+      },
+    });
+    await expect(started).rejects.toThrow("start failed");
+    expect(await closed()).toBe(true);
   });
 });

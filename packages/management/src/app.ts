@@ -32,67 +32,86 @@ export interface Extensions {
   start?: (deps: Deps) => Promise<() => Promise<void>>;
 }
 
-/** Migrates the database and serves the single-tenant install described by `config`, with `extensions` added. */
+/**
+ * Migrates the database and serves the single-tenant install described by `config`, with `extensions` added. When
+ * startup fails, whatever it had started is stopped again before the error is rethrown.
+ */
 export async function start(config: Config, extensions: Extensions = {}) {
   const sql = connect(config.databaseUrl);
-  await migrate(sql, extensions.migrations);
-  if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
-  if (config.edgeToken) await ensureEdgeToken(sql, config.edgeToken);
-  const keys = deriveKeys(config.secretKey);
   const shutdown = new AbortController();
-  const deps: Deps = {
-    sql,
-    keys,
-    releases: await localReleaseStore({
-      directory: join(config.dataDir, "releases"),
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  let stopExtensions: (() => Promise<void>) | undefined;
+  let reconciler: { stop(): Promise<void> } | undefined;
+  const stop = () => {
+    // Streams never end on their own, and stopping the server waits for every open request.
+    shutdown.abort();
+    return runAll([
+      () => server?.stop(),
+      () => stopExtensions?.(),
+      () => reconciler?.stop(),
+      () => sql.end({ timeout: 5 }),
+    ]);
+  };
+  try {
+    await migrate(sql, extensions.migrations);
+    if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
+    if (config.edgeToken) await ensureEdgeToken(sql, config.edgeToken);
+    const keys = deriveKeys(config.secretKey);
+    const deps: Deps = {
+      sql,
       keys,
+      releases: await localReleaseStore({
+        directory: join(config.dataDir, "releases"),
+        keys,
+        publicUrl: config.publicUrl,
+        machineUrl: config.machines?.managementUrl ?? config.publicUrl,
+      }),
+      archiveLimits: config.archiveLimits,
+      resolveTxt,
       publicUrl: config.publicUrl,
-      machineUrl: config.machines?.managementUrl ?? config.publicUrl,
-    }),
-    archiveLimits: config.archiveLimits,
-    resolveTxt,
-    publicUrl: config.publicUrl,
-    edge: config.edge,
-    logStore: config.logStore && logStoreIssuer(config.logStore),
-    jvmImage: config.machines?.jvmImage,
-    changes: await listenForChanges(sql),
-    shutdown: shutdown.signal,
-  };
-  const { machines } = config;
-  const [installation] = await sql<{ id: string }[]>`select id from installation`;
-  const installId = installation?.id ?? "";
-  const reconciler =
-    machines &&
-    startReconciler(
-      deps,
-      {
-        ...machines,
-        provider:
-          extensions.provider?.(deps, installId) ??
-          dockerProvider({ socketPath: socketPathFrom(machines.dockerHost), network: machines.network, installId }),
-      },
-      config.databaseUrl,
-    );
-  const stopExtensions = await extensions.start?.(deps);
-  const { extend, authenticator } = extensions;
-  const options: HandlerOptions = { dashboardDir: config.dashboardDir };
-  if (extend) options.extend = (router) => extend(router, deps);
-  if (authenticator) options.authenticator = authenticator(tokenAuthenticator(sql), deps);
-  const server = Bun.serve({
-    hostname: config.host,
-    port: config.port,
-    maxRequestBodySize: Number(maxArchiveBytes) + 1024 * 1024,
-    fetch: createHandler(deps, options),
-  });
-  return {
-    url: server.url,
-    async stop() {
-      // Streams never end on their own, and stopping the server waits for every open request.
-      shutdown.abort();
-      await server.stop();
-      await stopExtensions?.();
-      await reconciler?.stop();
-      await sql.end({ timeout: 5 });
-    },
-  };
+      edge: config.edge,
+      logStore: config.logStore && logStoreIssuer(config.logStore),
+      jvmImage: config.machines?.jvmImage,
+      changes: await listenForChanges(sql),
+      shutdown: shutdown.signal,
+    };
+    const { extend, authenticator } = extensions;
+    const options: HandlerOptions = { dashboardDir: config.dashboardDir };
+    if (extend) options.extend = (router) => extend(router, deps);
+    if (authenticator) options.authenticator = authenticator(tokenAuthenticator(sql), deps);
+    const handler = createHandler(deps, options);
+    const { machines } = config;
+    if (machines) {
+      const [installation] = await sql<{ id: string }[]>`select id from installation`;
+      const installId = installation?.id ?? "";
+      const provider =
+        extensions.provider?.(deps, installId) ??
+        dockerProvider({ socketPath: socketPathFrom(machines.dockerHost), network: machines.network, installId });
+      reconciler = startReconciler(deps, { ...machines, provider }, config.databaseUrl);
+    }
+    stopExtensions = await extensions.start?.(deps);
+    server = Bun.serve({
+      hostname: config.host,
+      port: config.port,
+      maxRequestBodySize: Number(maxArchiveBytes) + 1024 * 1024,
+      fetch: handler,
+    });
+    return { url: server.url, stop };
+  } catch (error) {
+    await stop().catch(() => {});
+    throw error;
+  }
+}
+
+/** Runs every step even when earlier ones fail, then throws the first failure. */
+async function runAll(steps: (() => unknown)[]): Promise<void> {
+  let failure: { error: unknown } | undefined;
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failure ??= { error };
+    }
+  }
+  if (failure) throw failure.error;
 }
