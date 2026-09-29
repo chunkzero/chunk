@@ -108,4 +108,13 @@ mod tests {
         assert!(lock(&limits.0).clients.is_empty());
         assert_eq!(lock(&limits.0).pending, 0);
     }
+
+    #[test]
+    fn counts_ipv6_clients_by_64_prefix() {
+        let limits = Limits::new(100, 2);
+        let _held =
+            ["2001:db8:0:1::1", "2001:db8:0:1:ffff::2"].map(|address| limits.admit(address.parse().unwrap()).unwrap());
+        assert!(limits.admit("2001:db8:0:1:1234::3".parse().unwrap()).is_none(), "the same /64, over its limit");
+        assert!(limits.admit("2001:db8:0:2::1".parse().unwrap()).is_some(), "another /64");
+    }
 }

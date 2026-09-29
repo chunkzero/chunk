@@ -23,6 +23,10 @@ use crate::{
 
 /// What a login may have sent in all by the time it is spliced, handshake included.
 const MAX_HELD: usize = 8192;
+const RELAY_BUFFER: usize = 8192;
+/// How long a relayed write may make no progress. Longer than vanilla's 15 s keep-alive timeout, which a client that
+/// reads nothing for that long has already missed, so only dead sessions reach it.
+const STALLED: Duration = Duration::from_secs(30);
 
 pub(crate) async fn serve(shared: Arc<Shared>, client: TcpStream, peer: SocketAddr, permit: Permit) {
     if let Err(error) = handle(&shared, client, peer, permit).await {
@@ -118,16 +122,22 @@ async fn login(
     gateway.write_all(&preamble).await?;
     drop(permit);
     _ = client.set_nodelay(true);
-    relay(&mut client, &mut gateway, shared.handshake_timeout).await
+    relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED).await
 }
 
 /// Copies both ways, passing on each side's close, until one side closes; the other direction then has `closing` to
-/// finish, so a peer that never closes can't keep the relay open.
-async fn relay(client: &mut TcpStream, gateway: &mut TcpStream, closing: Duration) -> io::Result<()> {
+/// finish, so a peer that never closes can't keep the relay open. A write that makes no progress for `stalled` ends its
+/// direction too, since a side that stops reading hides the other's close behind the data queued for it.
+async fn relay(
+    client: &mut TcpStream,
+    gateway: &mut TcpStream,
+    closing: Duration,
+    stalled: Duration,
+) -> io::Result<()> {
     let (mut client_read, mut client_write) = client.split();
     let (mut gateway_read, mut gateway_write) = gateway.split();
-    let upstream = pipe(&mut client_read, &mut gateway_write);
-    let downstream = pipe(&mut gateway_read, &mut client_write);
+    let upstream = pipe(&mut client_read, &mut gateway_write, stalled);
+    let downstream = pipe(&mut gateway_read, &mut client_write, stalled);
     tokio::pin!(upstream, downstream);
     tokio::select! {
         closed = &mut upstream => {
@@ -141,9 +151,26 @@ async fn relay(client: &mut TcpStream, gateway: &mut TcpStream, closing: Duratio
     }
 }
 
-async fn pipe(from: &mut (impl AsyncRead + Unpin), to: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
-    tokio::io::copy(from, to).await?;
-    to.shutdown().await
+async fn pipe(
+    from: &mut (impl AsyncRead + Unpin),
+    to: &mut (impl AsyncWrite + Unpin),
+    stalled: Duration,
+) -> io::Result<()> {
+    let stall = || io::Error::new(io::ErrorKind::TimedOut, "the other side stopped reading");
+    let mut buffer = vec![0; RELAY_BUFFER];
+    loop {
+        let read = from.read(&mut buffer).await?;
+        if read == 0 {
+            return timeout(stalled, to.shutdown()).await.map_err(|_| stall())?;
+        }
+        let mut written = 0;
+        while written < read {
+            match timeout(stalled, to.write(&buffer[written..read])).await.map_err(|_| stall())?? {
+                0 => return Err(io::ErrorKind::WriteZero.into()),
+                count => written += count,
+            }
+        }
+    }
 }
 
 /// Keeps what a held login sends, for replay, until it closes or sends too much.
@@ -187,14 +214,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ends_a_relay_whose_gateway_closed_while_the_client_stays_open() {
+    async fn ends_a_relay_whose_gateway_closed_while_the_client_stays_open_and_reads_nothing() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (mut player, mut client) = pair(&listener).await;
-        let (gateway, mut to_gateway) = pair(&listener).await;
-        drop(gateway);
-        let relayed = timeout(Duration::from_secs(5), relay(&mut client, &mut to_gateway, Duration::from_millis(50)));
-        relayed.await.expect("the relay ended").unwrap();
-        drop((client, to_gateway));
-        assert_eq!(player.read(&mut [0]).await.unwrap(), 0, "the player saw the close");
+        // Nothing, then more than the socket buffers on the way hold.
+        for queued in [0, 32 << 20] {
+            let (mut player, mut client) = pair(&listener).await;
+            let (mut gateway, mut to_gateway) = pair(&listener).await;
+            let sending = tokio::spawn(async move {
+                _ = gateway.write_all(&vec![0; queued]).await;
+            });
+            let closing = Duration::from_millis(50);
+            let relayed = timeout(Duration::from_secs(5), relay(&mut client, &mut to_gateway, closing, closing * 2));
+            let result = relayed.await.expect("the relay ended");
+            drop((client, to_gateway));
+            sending.await.unwrap();
+            if queued == 0 {
+                result.unwrap();
+                assert_eq!(player.read(&mut [0]).await.unwrap(), 0, "the player saw the close");
+            }
+        }
     }
 }
