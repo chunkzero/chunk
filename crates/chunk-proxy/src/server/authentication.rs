@@ -33,21 +33,22 @@ pub(super) struct Authentication {
     offline: bool,
 }
 
-/// A client that failed authentication: it closed the connection instead of answering the encryption request, as
-/// offline-mode clients do, answered it wrongly, or the session service didn't vouch for the name it claimed.
+/// A client that failed authentication: once sent the encryption request, it closed or reset the connection, as
+/// offline-mode clients close it, or sent anything but a valid Encryption Response; or the session service didn't vouch
+/// for the name it claimed.
 #[derive(Debug)]
-struct Unauthenticated(&'static str);
+struct Unauthenticated(String);
 
 impl std::fmt::Display for Unauthenticated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
 impl std::error::Error for Unauthenticated {}
 
-fn unauthenticated(reason: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, Unauthenticated(reason))
+fn unauthenticated(reason: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, Unauthenticated(reason.into()))
 }
 
 /// Whether `error` ended a login because the client failed authentication.
@@ -130,13 +131,10 @@ impl Authentication {
                 should_authenticate: true,
             })
             .await?;
-        let response = match transport.read_frame(LOGIN_FRAME_LIMIT).await {
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Err(unauthenticated("closed before answering the encryption request"));
-            }
-            frame => decode_packet::<EncryptionResponse>(&frame?).map_err(invalid_data)?,
-        };
-        let secret = self.shared_secret(&response, token)?;
+        let secret = self
+            .answer(transport, token)
+            .await
+            .map_err(|error| unauthenticated(format!("no valid answer to the encryption request: {error}")))?;
         transport.enable_encryption(&secret)?;
         let hash = server_hash(&secret, &self.public_key);
         match self.verify(username, &hash).await {
@@ -153,10 +151,21 @@ impl Authentication {
         }
     }
 
+    /// The shared secret from the client's Encryption Response. Every way this fails is the client's doing: closing,
+    /// resetting, or sending anything but a valid response.
+    async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        transport: &mut Transport<S>,
+        token: [u8; 4],
+    ) -> io::Result<Zeroizing<[u8; 16]>> {
+        let frame = transport.read_frame(LOGIN_FRAME_LIMIT).await?;
+        self.shared_secret(&decode_packet::<EncryptionResponse>(&frame).map_err(invalid_data)?, token)
+    }
+
     fn shared_secret(&self, response: &EncryptionResponse, token: [u8; 4]) -> io::Result<Zeroizing<[u8; 16]>> {
         let size = self.key.size() as usize;
         if response.shared_secret.as_slice().len() != size || response.verify_token.as_slice().len() != size {
-            return Err(unauthenticated("invalid encryption response"));
+            return Err(invalid_data("invalid encryption response"));
         }
         let mut secret = Zeroizing::new(vec![0; size]);
         let mut returned_token = vec![0; size];
@@ -166,7 +175,7 @@ impl Authentication {
             || token_len.ok() != Some(4)
             || !openssl::memcmp::eq(&returned_token[..4], &token)
         {
-            return Err(unauthenticated("invalid encryption response"));
+            return Err(invalid_data("invalid encryption response"));
         }
         Ok(Zeroizing::new(secret[..16].try_into().expect("validated AES key length")))
     }

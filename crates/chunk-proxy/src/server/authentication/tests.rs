@@ -184,17 +184,28 @@ async fn session_service_fails_closed_on_bad_status_and_oversized_bodies() {
 }
 
 #[tokio::test]
-async fn a_client_that_closes_instead_of_answering_the_encryption_request_failed() {
+async fn a_client_that_answers_the_encryption_request_with_anything_but_a_valid_response_failed() {
     let auth = Authentication::new(false).await.unwrap();
-    let (client, server) = tokio::io::duplex(8192);
-    let mut client = Transport::new(client);
-    let server = auth.login(Transport::new(server), 776, None);
-    let client = async {
-        begin_login(&mut client).await;
-        drop(client);
-    };
-    let (error, ()) = tokio::join!(server, client);
-    assert!(failed(&error.err().unwrap()));
+    // None closes instead of answering.
+    for (answer, why) in [
+        (None, "closed"),
+        (Some(&[0x01][..]), "a truncated Encryption Response"),
+        (Some(&[0x00, 0x04, b'A', b'l', b'e', b'x']), "another packet"),
+        (Some(&[0x01; 5000]), "a frame beyond the limit"),
+    ] {
+        let (client, server) = tokio::io::duplex(8192);
+        let mut client = Transport::new(client);
+        let server = auth.login(Transport::new(server), 776, None);
+        let client = async move {
+            begin_login(&mut client).await;
+            if let Some(answer) = answer {
+                client.write_body(answer).await.unwrap();
+            }
+        };
+        let (error, ()) = tokio::join!(server, client);
+        let error = error.err().unwrap();
+        assert!(failed(&error), "{why}: {error}");
+    }
 }
 
 #[tokio::test]
