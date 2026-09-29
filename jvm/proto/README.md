@@ -8,5 +8,6 @@ A gameplay JVM reaches core only over the `chunk.sync.v1` `Core` service, for it
 registration and reports, and the sessions, player deliveries and session methods core assigns it. Player traffic goes
 from the gateway straight to the JVM's Minecraft listener.
 
-These are internal contracts. Gameplay code uses the [runtime](../runtime/README.md) and the generated
-[backend client](../backend-client/README.md) instead.
+`chunk.sync.v1` is internal: gameplay code uses the [runtime](../runtime/README.md) and the generated
+[backend client](../backend-client/README.md) instead. `chunk.management.v1` is the public, versioned management API
+(see [management](../../packages/management/README.md)).
