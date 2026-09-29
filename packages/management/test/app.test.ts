@@ -27,7 +27,10 @@ import { type Identity, subjectOf } from "../src/rpc/caller.ts";
 import { fakeProvider } from "./fake-provider.ts";
 import { codeOf, databaseUrl } from "./harness.ts";
 
-/** A registry holding `test.v1.WhoAmIService` and `test.v1.PingService`, whose methods answer with a string. */
+/**
+ * A registry holding `test.v1.WhoAmIService`, `test.v1.PingService` and `test.v1.EnrollService`, whose methods answer
+ * with a string.
+ */
 const registry = createFileRegistry(
   create(FileDescriptorProtoSchema, {
     name: "test/v1/whoami.proto",
@@ -42,6 +45,13 @@ const registry = createFileRegistry(
         name: "PingService",
         method: [{ name: "Ping", inputType: ".google.protobuf.Empty", outputType: ".google.protobuf.StringValue" }],
       },
+      {
+        name: "EnrollService",
+        method: [
+          { name: "Enroll", inputType: ".google.protobuf.Empty", outputType: ".google.protobuf.StringValue" },
+          { name: "Check", inputType: ".google.protobuf.Empty", outputType: ".google.protobuf.StringValue" },
+        ],
+      },
     ],
   }),
   (name) => [file_google_protobuf_empty, file_google_protobuf_wrappers].find((file) => file.proto.name === name),
@@ -52,6 +62,10 @@ const WhoAmIService: GenService<{
 const PingService: GenService<{
   ping: { methodKind: "unary"; input: typeof EmptySchema; output: typeof StringValueSchema };
 }> = serviceDesc(registry.getFile("test/v1/whoami.proto") ?? expect.unreachable(), 1);
+const EnrollService: GenService<{
+  enroll: { methodKind: "unary"; input: typeof EmptySchema; output: typeof StringValueSchema };
+  check: { methodKind: "unary"; input: typeof EmptySchema; output: typeof StringValueSchema };
+}> = serviceDesc(registry.getFile("test/v1/whoami.proto") ?? expect.unreachable(), 2);
 
 /** A registration's own interceptors, which replace the router's. */
 const passThrough: Interceptor = (next) => (request) => next(request);
@@ -141,6 +155,7 @@ describe.skipIf(!databaseUrl)("start", () => {
       ["pinger", { kind: "extension", service: PingService.typeName, subject: "agent-4" }],
       ["other", { kind: "extension", service: "test.v1.OtherService", subject: "agent-2" }],
       ["edge", { kind: "extension", service: EdgeService.typeName, subject: "agent-3" }],
+      ["enrolled", { kind: "extension", service: EnrollService.typeName, subject: "agent-5" }],
     ]);
     const operatorToken = `chunk_${randomToken()}`;
     let installId = "";
@@ -183,7 +198,18 @@ describe.skipIf(!databaseUrl)("start", () => {
                 },
               },
               { interceptors: [passThrough] },
-            ),
+            )
+            .service(EnrollService, {
+              enroll() {
+                handled++;
+                return { value: "enrolled" };
+              },
+              check(_request, context) {
+                handled++;
+                return { value: subjectOf(context) };
+              },
+            }),
+        publicMethods: [EnrollService.method.enroll],
         authenticator: (tokens) => ({
           authenticate: async (token) => credentials.get(token) ?? tokens.authenticate(token),
         }),
@@ -213,6 +239,10 @@ describe.skipIf(!databaseUrl)("start", () => {
 
     expect(await client(WhoAmIService, "agent").whoAmI({})).toMatchObject({ value: "hello agent-1" });
     expect(await client(PingService, "pinger").ping({})).toMatchObject({ value: "agent-4" });
+    expect(await client(EnrollService).enroll({})).toMatchObject({ value: "enrolled" });
+    // Only the listed method is open; its service's other methods still need that service's credential.
+    expect(await codeOf(client(EnrollService).check({}))).toBe(Code.Unauthenticated);
+    expect(await client(EnrollService, "enrolled").check({})).toMatchObject({ value: "agent-5" });
     for (const [token, code] of [
       [undefined, Code.Unauthenticated],
       ["wrong", Code.Unauthenticated],
@@ -235,7 +265,7 @@ describe.skipIf(!databaseUrl)("start", () => {
     // Refusals answer in the client's protocol. Bun serves no HTTP/2, so plain gRPC cannot be observed here.
     const grpcWeb = createClient(WhoAmIService, createGrpcWebTransport({ baseUrl: app.url.origin }));
     expect(await codeOf(grpcWeb.whoAmI({}))).toBe(Code.Unauthenticated);
-    expect(handled).toBe(2);
+    expect(handled).toBe(4);
     await listed;
     expect(installId).toMatch(/.+/);
 
@@ -253,6 +283,12 @@ describe.skipIf(!databaseUrl)("start", () => {
       },
     });
     await expect(started).rejects.toThrow("start failed");
+    expect(await closed()).toBe(true);
+  });
+
+  test("refuses to open a built-in method to callers without a token", async () => {
+    const started = start(config(), { publicMethods: [EdgeService.method.wake] });
+    await expect(started).rejects.toThrow("chunk.management.v1.EdgeService/Wake is not an extension method");
     expect(await closed()).toBe(true);
   });
 });

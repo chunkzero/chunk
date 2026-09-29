@@ -50,28 +50,28 @@ const serviceKinds = new Map<string, Identity["kind"]>([
   [EdgeService.typeName, "edge"],
 ]);
 
-const publicMethods = new Set<string>(
-  [AuthService.method.startLogin.name, AuthService.method.pollLogin.name].map(
-    (name) => `${AuthService.typeName}/${name}`,
-  ),
-);
+/** A method's `<service type name>/<method name>`. */
+export const methodKey = (method: DescMethod) => `${method.parent.typeName}/${method.name}`;
 
-const isPublic = (method: DescMethod) => publicMethods.has(`${method.parent.typeName}/${method.name}`);
+const publicMethods = new Set([AuthService.method.startLogin, AuthService.method.pollLogin].map(methodKey));
 
 /**
  * Authenticates and authorizes a call from its headers alone, so the server can turn it away before Connect reads its
  * body or runs any interceptor or handler. Returns the context values the call runs with, or the error it is refused
  * with: a protected method needs a valid bearer token of the kind its service admits. The services named in
- * `extensionServices` admit only extension identities naming them; every other service admits none.
+ * `extensionServices` admit only extension identities naming them; every other service admits none. Methods named in
+ * `extensionPublicMethods` (by `methodKey`) need no token, and check their requests themselves.
  */
 export async function authorize(
   authenticator: Authenticator,
   method: DescMethod,
   header: Headers,
   extensionServices: ReadonlySet<string>,
+  extensionPublicMethods: ReadonlySet<string>,
 ): Promise<ContextValues | ConnectError> {
   const values = createContextValues();
-  if (isPublic(method)) return values;
+  const key = methodKey(method);
+  if (publicMethods.has(key) || extensionPublicMethods.has(key)) return values;
   const bearer = /^Bearer (\S+)$/i.exec(header.get("authorization") ?? "")?.[1];
   const identity = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
   if (!identity) return new ConnectError("a valid bearer token is required", Code.Unauthenticated);

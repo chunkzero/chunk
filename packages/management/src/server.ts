@@ -1,3 +1,4 @@
+import type { DescMethod } from "@bufbuild/protobuf";
 import {
   Code,
   ConnectError,
@@ -34,7 +35,7 @@ import { ProjectService } from "./gen/chunk/management/v1/projects_pb.ts";
 import { SecretService } from "./gen/chunk/management/v1/secrets_pb.ts";
 import { logService } from "./logs/service.ts";
 import { projectService } from "./projects/service.ts";
-import { type Authenticator, authorize } from "./rpc/caller.ts";
+import { type Authenticator, authorize, methodKey } from "./rpc/caller.ts";
 import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
@@ -46,6 +47,8 @@ export interface HandlerOptions {
    * services, which only extension identities naming them may call.
    */
   extend?: (router: ConnectRouter) => void;
+  /** Methods of extension services that anyone may call without a bearer token; each checks its request itself. */
+  publicMethods?: readonly DescMethod[];
 }
 
 /** The largest RPC message a client may send; release archives go to the release store instead. */
@@ -76,6 +79,11 @@ export function createHandler(
   options.extend?.(router);
   const services = new Map(router.handlers.map(({ service }) => [service.typeName, service]));
   const extensionServices = new Set([...services.keys()].filter((typeName) => !builtIn.has(typeName)));
+  const publicMethods = new Set(options.publicMethods?.map(methodKey));
+  for (const method of options.publicMethods ?? []) {
+    if (!extensionServices.has(method.parent.typeName))
+      throw new Error(`${methodKey(method)} is not an extension method`);
+  }
   // Answers refused calls in the client's protocol. A registration's own options cannot reach it.
   const refusals = createConnectRouter({ interceptors: [refuse] });
   for (const service of services.values()) refusals.service(service, {});
@@ -88,7 +96,7 @@ export function createHandler(
    * run, and a registration's own interceptors replace the router's.
    */
   async function serveRpc(handler: UniversalHandler, request: Request): Promise<Response> {
-    const verdict = await authorize(authenticator, handler.method, request.headers, extensionServices);
+    const verdict = await authorize(authenticator, handler.method, request.headers, extensionServices, publicMethods);
     const universal = universalServerRequestFromFetch(request, {});
     if (!(verdict instanceof ConnectError)) {
       return universalServerResponseToFetch(await handler({ ...universal, contextValues: verdict }));
