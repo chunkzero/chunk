@@ -1,0 +1,15 @@
+Assembled by hand: typedmap 0.6.0 and its upstream repository (https://github.com/kodieg/typedmap at 0168ea19785b159589adc2619bc6cac66bf9974f) contain no license file.
+
+Its Cargo.toml declares license = "MIT OR Apache-2.0" and authors = ["Konrad Gołuchowski <kodieg@gmail.com>"].
+The full text of each license appears with other crates in this file.
+
+Its README.md says:
+
+Licensed under either of
+
+ * Apache License, Version 2.0
+   ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license
+   ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.

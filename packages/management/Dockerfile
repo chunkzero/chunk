@@ -11,9 +11,14 @@ COPY packages/management/package.json packages/management/
 COPY packages/dashboard/package.json packages/dashboard/
 RUN pnpm install --frozen-lockfile --filter @chunkzero/management --filter @chunkzero/dashboard
 COPY packages packages
+COPY deny.toml ./
+COPY scripts/npm-notices.mjs scripts/spdx.mjs scripts/
+COPY licenses/npm licenses/npm
 RUN pnpm build:dashboard \
     && pnpm --filter @chunkzero/management deploy --prod --legacy /out \
     && cp -r packages/dashboard/dist /out/dashboard \
+    && node scripts/npm-notices.mjs @chunkzero/management > /out/THIRD_PARTY_LICENSES \
+    && node scripts/npm-notices.mjs @chunkzero/dashboard > /out/dashboard/THIRD_PARTY_LICENSES.txt \
     && mkdir /data
 
 FROM docker.io/oven/bun:${BUN_VERSION}-distroless

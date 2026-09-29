@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -46,6 +47,9 @@ def main():
         root.mkdir()
         shutil.copy2(executable, root / "chunk")
         shutil.copy2(repository / "LICENSE.md", root / "LICENSE.md")
+        notices = subprocess.run([sys.executable, "scripts/rust-notices.py"], cwd=repository, check=True,
+                                 stdout=subprocess.PIPE, text=True).stdout
+        (root / "THIRD_PARTY_LICENSES").write_text(notices)
         subprocess.run(["node", "scripts/install-typescript.mjs", str(root)], cwd=repository, check=True)
         subprocess.run([
             str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",

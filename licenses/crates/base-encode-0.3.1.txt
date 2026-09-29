@@ -1,0 +1,4 @@
+Assembled by hand: base-encode 0.3.1 and its upstream repository (https://github.com/janispritzkau/rust-base-encode at 41bdeb57488beec4ed63180e848ce1e99fba227d) contain no license file.
+
+Its Cargo.toml declares license = "MIT" and authors = ["Janis Pritzkau <janispritzkau@gmail.com>"].
+The full text of each license appears with other crates in this file.

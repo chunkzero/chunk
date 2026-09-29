@@ -1,0 +1,15 @@
+Assembled by hand: async-scoped 0.9.0 and its upstream repository (https://github.com/rmanoka/async-scoped at 15fa11deb2a5d26fbd00d6cf26e97f73763ce2ba) contain no license file.
+
+Its Cargo.toml declares license = "Apache-2.0/MIT" and authors = ["Rajsekar Manokaran <rajsekar@gmail.com>"].
+The full text of each license appears with other crates in this file.
+
+Its README.md says:
+
+Licensed under either of [Apache License, Version
+2.0](//www.apache.org/licenses/LICENSE-2.0) or [MIT
+license](//opensource.org/licenses/MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in this crate by you,
+as defined in the Apache-2.0 license, shall be dual licensed
+as above, without any additional terms or conditions.

@@ -55,6 +55,18 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test -p chunk-proxy --no-default-features
 
+  licenses:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the pinned Rust, just and cargo-deny
+        uses: jdx/mise-action@v3
+        with:
+          install_args: rust just cargo-deny
+      - run: just licenses
+
   jvm:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404

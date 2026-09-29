@@ -3,6 +3,10 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !packages/
+!deny.toml
+!scripts/npm-notices.mjs
+!scripts/spdx.mjs
+!licenses/npm/
 **/node_modules/
 **/dist/
 **/.env

@@ -51,8 +51,29 @@ def main():
                        env=environment, check=True)
         sdk = prefix / "share/chunk" / version
         executable = prefix / "bin/chunk"
-        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "toolchain"}, \
-            "Only the CLI, native TypeScript toolchain and license should be installed"
+        assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "THIRD_PARTY_LICENSES", "toolchain"}, \
+            "Only the CLI, native TypeScript toolchain, license and third-party notices should be installed"
+        notices = (sdk / "THIRD_PARTY_LICENSES").read_text()
+        for attribution in ("https://crates.io/crates/deno_core/", "Copyright (c) 2016 Dropbox, Inc.",
+                            "Copyright (c) 2023 Boshen", "libdeflate/COPYING", "The Apache Software Foundation",
+                            "src/unicode_tables/LICENSE-UNICODE", "rust-lang/libm as a whole", "`v8` crate",
+                            "Copyright 2014, the V8 project authors", "UNICODE LICENSE V3",
+                            # Notices carried only in source file headers.
+                            "Dmitry Vyukov", "Gotham Project Developers", "Joyent, Inc. and other Node contributors",
+                            "Domenic Denicola", "David Judd", "Daniel McCarney", "Radford M. Neal",
+                            "the Dart project authors",
+                            # Notices inside embedded code, split across comments, or with wrapped license terms.
+                            "regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc.",
+                            "Copyright (c) 2021-2022 Alexei Sibidanov.", "Copyright 2017, Twitter Inc.",
+                            # Third-party code crates embed, credited only in their documentation.
+                            "Copyright (c) 2014-present Sebastian McKenzie and other contributors",
+                            "Copyright Node.js contributors.", "by the Brotli Authors", "Alexis Deveria",
+                            # License texts that source notices refer to.
+                            "Copyright (c) 2014-present, Facebook, Inc.\n\nPermission",
+                            "// Copyright 2015 The Chromium Authors",
+                            "Copyright 2009 The Go Authors.\n\nRedistribution",
+                            "Copyright 2012, the Dart project authors.", "The BSD 2-Clause License"):
+            assert attribution in notices, f"Third-party notices are missing {attribution!r}"
         assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 
         class Repository(SimpleHTTPRequestHandler):
