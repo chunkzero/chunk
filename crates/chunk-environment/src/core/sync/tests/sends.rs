@@ -129,8 +129,10 @@ async fn streams_of_the_same_query_share_its_value_until_they_encode_it() {
     let mut streams = Vec::new();
     let mut values = Vec::new();
     for _ in 0..4 {
-        let mut stream = service.subscribe(authorized(subscription.clone(), &operator)).await.unwrap().into_inner();
-        let snapshot = tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap().unwrap();
+        let mut response = service.subscribe(authorized(subscription.clone(), &operator)).await.unwrap();
+        let updates = response.extensions_mut().remove::<transport::Updates>().unwrap();
+        let mut stream = updates.take().unwrap();
+        let (snapshot, _) = tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap();
         let Some(State::Value(value)) = snapshot.upserts.into_iter().next().and_then(|entry| entry.state) else {
             panic!("a value");
         };
