@@ -34,7 +34,8 @@ pub struct Config {
     pub management_url: String,
     /// The edge token management's `EdgeService` accepts.
     pub edge_token: String,
-    /// How long a client has, from connecting, to send its handshake, and then for each step of a status exchange.
+    /// How long a client has, from connecting, to send its handshake, and then for each step of a status exchange; also
+    /// how long a relay's other side has to close once one side has.
     pub handshake_timeout: Duration,
     /// How long a login, or a ping that wakes its environment, is held while the environment wakes.
     pub wake_timeout: Duration,

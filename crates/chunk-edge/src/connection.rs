@@ -1,13 +1,13 @@
 //! One player's connection: routed by its handshake, then either answered with a status or spliced to a gateway,
 //! waking a sleeping environment first.
 
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use chunk_management::v1::{SleepingPingMode, WakeReason};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::Instant,
+    time::{Instant, timeout},
 };
 
 use crate::{
@@ -118,8 +118,32 @@ async fn login(
     gateway.write_all(&preamble).await?;
     drop(permit);
     _ = client.set_nodelay(true);
-    tokio::io::copy_bidirectional(&mut client, &mut gateway).await?;
-    Ok(())
+    relay(&mut client, &mut gateway, shared.handshake_timeout).await
+}
+
+/// Copies both ways, passing on each side's close, until one side closes; the other direction then has `closing` to
+/// finish, so a peer that never closes can't keep the relay open.
+async fn relay(client: &mut TcpStream, gateway: &mut TcpStream, closing: Duration) -> io::Result<()> {
+    let (mut client_read, mut client_write) = client.split();
+    let (mut gateway_read, mut gateway_write) = gateway.split();
+    let upstream = pipe(&mut client_read, &mut gateway_write);
+    let downstream = pipe(&mut gateway_read, &mut client_write);
+    tokio::pin!(upstream, downstream);
+    tokio::select! {
+        closed = &mut upstream => {
+            _ = timeout(closing, downstream).await;
+            closed
+        }
+        closed = &mut downstream => {
+            _ = timeout(closing, upstream).await;
+            closed
+        }
+    }
+}
+
+async fn pipe(from: &mut (impl AsyncRead + Unpin), to: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+    tokio::io::copy(from, to).await?;
+    to.shutdown().await
 }
 
 /// Keeps what a held login sends, for replay, until it closes or sends too much.
@@ -149,4 +173,28 @@ async fn legacy_ping(shared: &Shared, mut client: TcpStream, peer: SocketAddr, h
     };
     client.write_all(&status::legacy(&answer)).await?;
     client.shutdown().await
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    async fn pair(listener: &TcpListener) -> (TcpStream, TcpStream) {
+        let (connected, accepted) = tokio::join!(TcpStream::connect(listener.local_addr().unwrap()), listener.accept());
+        (connected.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn ends_a_relay_whose_gateway_closed_while_the_client_stays_open() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (mut player, mut client) = pair(&listener).await;
+        let (gateway, mut to_gateway) = pair(&listener).await;
+        drop(gateway);
+        let relayed = timeout(Duration::from_secs(5), relay(&mut client, &mut to_gateway, Duration::from_millis(50)));
+        relayed.await.expect("the relay ended").unwrap();
+        drop((client, to_gateway));
+        assert_eq!(player.read(&mut [0]).await.unwrap(), 0, "the player saw the close");
+    }
 }

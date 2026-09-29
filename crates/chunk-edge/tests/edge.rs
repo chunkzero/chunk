@@ -59,6 +59,8 @@ struct Management {
     calls: Mutex<Vec<String>>,
     wakes: Mutex<Vec<WakeRequest>>,
     outcome: Mutex<WakeOutcome>,
+    /// How long `Wake` takes to answer.
+    delay: Mutex<Duration>,
 }
 
 async fn call(
@@ -72,6 +74,8 @@ async fn call(
     if path.ends_with("/Wake") {
         let body = request.into_body().collect().await.unwrap().to_bytes();
         management.wakes.lock().unwrap().push(WakeRequest::decode(body).unwrap());
+        let delay = *management.delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
         let outcome = *management.outcome.lock().unwrap();
         let body = WakeResponse { outcome: outcome.into() }.encode_to_vec();
         return response.header("content-type", "application/proto").body(Full::from(body).boxed()).unwrap();
@@ -180,6 +184,7 @@ impl Harness {
             calls: Mutex::default(),
             wakes: Mutex::default(),
             outcome: Mutex::new(WakeOutcome::Waking),
+            delay: Mutex::default(),
         });
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -414,6 +419,35 @@ async fn wakes_a_sleeping_environment_for_a_login_and_holds_the_player_until_a_g
     let mut received = vec![0; 28 + expected.len()];
     gateway.read_exact(&mut received).await.unwrap();
     assert_eq!(received[28..], expected);
+    harness.stop.cancel();
+}
+
+#[tokio::test]
+async fn routes_a_held_login_once_another_client_wakes_the_environment_despite_its_own_refusal() {
+    let mut harness = Harness::start().await;
+    let routes = harness.next_stream().await;
+    routes.send(true, vec![asleep("play.example.com", SleepingPingMode::Cache, &json!({}))]).await;
+    harness
+        .eventually_pings("play.example.com", |status| *status == json!({ "players": { "max": 0, "online": 0 } }))
+        .await;
+    *harness.management.outcome.lock().unwrap() = WakeOutcome::Blocked;
+    *harness.management.delay.lock().unwrap() = WAKE_TIMEOUT / 2;
+
+    let mut player = harness.login("play.example.com").await;
+    for _ in 0..100 {
+        if !harness.wakes().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(harness.wakes().len(), 1, "the login asked for a wake");
+    routes.send(false, vec![route("play.example.com", &[&harness.gateways[0]])]).await;
+    let mut byte = [0];
+    tokio::select! {
+        accepted = harness.gateways[0].accept() => drop(accepted.unwrap()),
+        read = player.read(&mut byte) => panic!("the player was turned away: {read:?}"),
+        () = tokio::time::sleep(WAKE_TIMEOUT / 4) => panic!("not routed before the blocked wake answered"),
+    }
     harness.stop.cancel();
 }
 

@@ -59,16 +59,23 @@ impl Routes {
         self.0.entries.read().unwrap_or_else(PoisonError::into_inner).get(hostname).cloned()
     }
 
-    /// Waits until the route of `hostname` lists gateways, and returns them; None once it has no route.
-    pub(crate) async fn ready(&self, hostname: &str) -> Option<Vec<SocketAddr>> {
+    /// Waits until `route`'s hostname lists gateways for the same environment, and returns them; None once it routes
+    /// elsewhere or nowhere.
+    pub(crate) async fn ready(&self, route: &Route) -> Option<Vec<SocketAddr>> {
         let mut changed = self.0.changed.subscribe();
         loop {
-            let gateways = self.get(hostname)?.gateways();
+            let gateways = self.gateways(route)?;
             if !gateways.is_empty() {
                 return Some(gateways);
             }
             changed.changed().await.ok()?;
         }
+    }
+
+    /// The gateways `route`'s hostname lists now for the same environment, or None if it routes elsewhere or nowhere.
+    pub(crate) fn gateways(&self, route: &Route) -> Option<Vec<SocketAddr>> {
+        let entry = self.get(&route.hostname)?;
+        (entry.route.environment_id == route.environment_id).then(|| entry.gateways())
     }
 
     fn apply(&self, update: WatchRoutesResponse) {

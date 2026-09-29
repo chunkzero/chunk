@@ -34,8 +34,9 @@ impl Refusal {
     }
 }
 
-/// Asks management to wake `route`'s environment for `client`, then waits until `hostname`'s route lists gateways, all
-/// before `deadline`.
+/// Asks management to wake `route`'s environment for `client`, then waits until its route lists gateways, all before
+/// `deadline`. Gateways that appear while `Wake` is in flight are used at once, and a refusal, error or timeout is
+/// overridden by gateways the route lists by then, since another client may have woken the environment meanwhile.
 pub(crate) async fn wake(
     management: &Client,
     routes: &Routes,
@@ -49,23 +50,28 @@ pub(crate) async fn wake(
         reason: reason.into(),
         client_address: client.to_canonical().to_string(),
     };
-    let outcome = match timeout_at(deadline, management.wake(&request)).await {
-        Ok(Ok(response)) => response.outcome(),
-        Ok(Err(error)) => {
-            tracing::warn!(environment = route.environment_id, %error, "wake failed");
-            return Err(Refusal::Failed);
-        }
-        Err(_) => return Err(Refusal::TimedOut),
-    };
-    match outcome {
-        WakeOutcome::Waking | WakeOutcome::Awake => {}
-        WakeOutcome::Blocked => return Err(Refusal::Blocked),
-        WakeOutcome::Throttled => return Err(Refusal::Throttled),
-        WakeOutcome::Unspecified => return Err(Refusal::Failed),
-    }
-    match timeout_at(deadline, routes.ready(&route.hostname)).await {
+    let ready = timeout_at(deadline, routes.ready(route));
+    tokio::pin!(ready);
+    let waited = |ready: Result<Option<_>, _>| match ready {
         Ok(Some(gateways)) => Ok(gateways),
         Ok(None) => Err(Refusal::Failed),
         Err(_) => Err(Refusal::TimedOut),
-    }
+    };
+    let woken = tokio::select! {
+        ready = &mut ready => waited(ready),
+        woken = timeout_at(deadline, management.wake(&request)) => match woken {
+            Ok(Ok(response)) => match response.outcome() {
+                WakeOutcome::Waking | WakeOutcome::Awake => waited(ready.await),
+                WakeOutcome::Blocked => Err(Refusal::Blocked),
+                WakeOutcome::Throttled => Err(Refusal::Throttled),
+                WakeOutcome::Unspecified => Err(Refusal::Failed),
+            },
+            Ok(Err(error)) => {
+                tracing::warn!(environment = route.environment_id, %error, "wake failed");
+                Err(Refusal::Failed)
+            }
+            Err(_) => Err(Refusal::TimedOut),
+        },
+    };
+    woken.or_else(|refusal| routes.gateways(route).filter(|gateways| !gateways.is_empty()).ok_or(refusal))
 }

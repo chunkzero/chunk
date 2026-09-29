@@ -114,10 +114,14 @@ fn handshake(mut packet: &[u8]) -> io::Result<Handshake> {
 fn legacy(message: &[u8]) -> io::Result<Option<(Option<String>, usize)>> {
     let Some(channel_length) = u16_at(message, 0) else { return Ok(None) };
     let data_at = 2 + 2 * usize::from(channel_length);
-    let Some(data_length) = u16_at(message, data_at) else { return Ok(None) };
-    let length = data_at + 2 + usize::from(data_length);
+    // Each length is checked as soon as it arrives, before anything it announces is buffered.
+    let data_length = u16_at(message, data_at);
+    let length = data_at + 2 + data_length.map_or(0, usize::from);
     if 3 + length > MAX_HANDSHAKE {
         return Err(invalid("a legacy ping beyond the handshake limit"));
+    }
+    if data_length.is_none() {
+        return Ok(None);
     }
     let Some(data) = message.get(data_at + 2..length) else { return Ok(None) };
     let hostname = (utf16(&message[2..data_at]).as_deref() == Some(PING_HOST))
@@ -251,6 +255,17 @@ mod tests {
         assert_eq!(parse(&ping).unwrap(), Some((named, ping.len())));
         let other = legacy_ping("MC|Other", "play.example.com");
         assert_eq!(parse(&other).unwrap(), Some((Hello::LegacyPing { hostname: None }, other.len())));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_legacy_ping_announcing_more_than_the_limit_before_it_arrives() {
+        let long_data = [&legacy_ping(PING_HOST, "play.example.com")[..3], b"\x00\x00\xff\xff"].concat();
+        for announced in [&b"\xfe\x01\xfa\xff\xff"[..], &long_data] {
+            let (mut client, mut edge) = tokio::io::duplex(64);
+            client.write_all(announced).await.unwrap();
+            let error = read(&mut edge, Duration::from_secs(5)).await.err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{announced:?}");
+        }
     }
 
     #[tokio::test]
