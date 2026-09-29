@@ -1,197 +1,98 @@
 # chunk
 
-A Minecraft application platform: a sync engine with embedded JavaScript, automatic gameplay-session provisioning, a
-Minestom server framework, and the toolchain and control plane that connect them.
-
-Each **environment** (`prod`, `beta`) has one authoritative backend. Multiple immutable **deployments** can share its
-database, with session clients bound to their deployment's functions. Chunk creates and places sessions automatically
-from server routing/demand policies; many sessions of the same app and machine profile can share one JVM. Apps own their
-main function and embed the generic Chunk lifecycle library plus the Minestom adapter. Control launches and monitors
-JVMs directly, without a per-server sidecar. The initial embedded runtime uses `deno_core`/V8 with language APIs and
-pure-JS packages, without Node compatibility.
-
-Apps keep `app.ts` declarations, their own Gradle builds, and Java or Kotlin gameplay. Ancestor `scope.ts` files supply
-inherited server policy. Each app JAR registers one `SessionProvider` that creates fresh session state. The build
-generates typed backend clients and packages all apps, shared dependencies, backend code and assets into one portable
-release.
+A platform for building and running Minecraft servers as applications. You write gameplay as Java or Kotlin apps on
+[Minestom](https://minestom.net) and backend logic in TypeScript: transactional queries and mutations over a built-in
+database, reactive subscriptions, actions and scheduled jobs. chunk packages both into one release, starts gameplay
+sessions on demand, and moves players between sessions without reconnecting them.
 
 ## Status
 
-The local implementation includes online authentication, live JavaScript admission/routing, automatic session placement,
-supervised Minestom JVMs, SQLite transactions and reactive subscriptions. Players move between sessions and JVMs on the
-same public connection. The `chunk-environment` binary runs the environment's services in one process. The development
-runner embeds the same services and stops the stack if one fails.
+chunk is pre-release, and its APIs, storage and configuration still change without compatibility guarantees. It supports
+Minecraft Java Edition 26.2. There is no published SDK release yet, so the way in is a checkout of this repository.
+Local development works end to end, and [self-hosting](deploy/compose/README.md) runs on one Docker or Podman host. The
+CLI does not deploy yet; releases are deployed through the management API.
 
-Run the [local example](examples/local/README.md) with `just local`. It packages an immutable deployment, starts all
-services, and demonstrates persistent coins, subscriptions, session moves and drain. Ctrl-C stops its services and
-gameplay JVMs. Domains and dependency injection, the broader event API, hosted adapters, cross-proxy transfers, world
-persistence and overlapping deployment rollouts remain deferred. Queues and matchmaking remain server-owned policy.
+## How it fits together
 
-Dashboard/management scaffolding exists separately on `feat/self-hosted-dashboard-assets`. It is not included in this
-branch; dashboard integration and asset uploads remain deferred.
+Players connect to a gateway (`chunk-proxy`), which authenticates them, owns encryption and compression, and hands each
+player to a session in a gameplay JVM over a native Minecraft connection. Each environment has one core: the backend
+(`chunk-backend`), which runs the TypeScript functions on embedded V8 over SQLite, and control (`chunk-control`), which
+places sessions and launches JVMs. Gateways, JVMs and the CLI reach core over the `chunk.sync.v1` gRPC protocol.
+`chunk dev` runs all of it on one machine. When self-hosted, the edge (`chunk-edge`) accepts every player connection and
+routes it by hostname to an environment's gateway, and the management service (`packages/management`) stores releases,
+deploys them, and reconciles each environment's machines through a provider. It can suspend idle environments, which the
+edge wakes when a player logs in.
 
 ## Repository
 
-| Path                      | Contents                                                                                 |
-| ------------------------- | ---------------------------------------------------------------------------------------- |
-| `crates/`                 | Rust proxy, protocol, platform and toolchain crates                                      |
-| `jvm/`                    | Java sessions and backend clients, optional Kotlin adapters, transport and Gradle plugin |
-| `crates/chunk-build/sdk/` | Embedded TypeScript SDK sources and internal tests                                       |
-| `proto/`                  | Sync protocol and management API contracts                                               |
-| `examples/local/`         | App modules, shared gameplay, TypeScript backend and project configuration               |
-| `examples/java/`          | Java consumer using the runtime and generated typed backend API                          |
-| `docs/architecture.md`    | Implemented boundaries and deferred platform design                                      |
+| Path                                                                | Contents                                                                                   |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `crates/chunk-cli`, `crates/chunk-build`                            | The `chunk` CLI, compiler and release packaging, and the TypeScript SDK                    |
+| `crates/chunk-environment`                                          | The environment process, running core and the gateway                                      |
+| `crates/chunk-backend`, `chunk-store`, `chunk-js`, `chunk-contract` | The backend: sync engine, storage, embedded JavaScript and contracts                       |
+| `crates/chunk-control`                                              | Session placement, capacity and JVM supervision                                            |
+| `crates/chunk-proxy`, `chunk-protocol`, `chunk-protocol-*`          | The gateway's Minecraft proxy and protocol codecs                                          |
+| `crates/chunk-edge`                                                 | The edge in front of self-hosted environments                                              |
+| `crates/chunk-jvm`                                                  | The runner on JVM machines                                                                 |
+| `crates/chunk-management`                                           | A Rust client for the management API                                                       |
+| `crates/chunk-proto`, `chunk-service`, `chunk-bench`                | Generated gRPC bindings, service helpers and workload benchmarks                           |
+| `jvm/`                                                              | Java runtime and Minestom adapter, backend clients, Kotlin adapters, and the Gradle plugin |
+| `packages/management`                                               | The management service (TypeScript on Bun and Postgres)                                    |
+| `packages/dashboard`                                                | The dashboard management serves                                                            |
+| `proto/`                                                            | The `chunk.sync.v1` and `chunk.management.v1` contracts                                    |
+| `deploy/compose/`                                                   | The self-hosting bundle                                                                    |
+| `examples/local/`, `examples/java/`                                 | A Kotlin example project and a Java one                                                    |
+| `scripts/`                                                          | SDK packaging, Maven publishing and end-to-end smoke tests                                 |
+| `docs/distribution.md`                                              | Packaging, installing and publishing the SDK                                               |
 
-Architecture decisions are GitHub issues labelled `decision`; the current direction is
-[#149](https://github.com/chunkzero/chunk/issues/149) and the roadmap is
-[#46](https://github.com/chunkzero/chunk/issues/46). The [repository architecture](docs/architecture.md) maps the
-implementation and identifies the remaining proposals.
+Design decisions are GitHub issues labelled `decision`.
 
-## Development
+## Getting started
 
-The [Gradle plugin](jvm/gradle-plugin/README.md) discovers app projects from Rust metadata and compiles shared Java
-bindings, with an explicit Kotlin facade opt in.
-
-Toolchains are pinned in `mise.toml`. Install [mise](https://mise.jdx.dev), [just](https://just.systems), OpenSSL
-development headers and `pkg-config`, then run `mise install`. Use `just --list` to find tasks and run the narrowest
-checks for a change; `just ready` runs the full CI checks before a PR.
-
-Run `pnpm install --frozen-lockfile` after installing the toolchains. `just fmt` formats the repository and
-`just fmt-check` checks the same files in CI:
-
-- Rust uses rustfmt with the 2024 style and a 120-column limit.
-- Kotlin and Gradle Kotlin scripts use ktlint's official style, with four-space indentation, trailing commas and a
-  120-column limit from `.editorconfig`.
-- Java uses [google-java-format](https://github.com/google/google-java-format) in AOSP mode: four-space indentation and
-  its fixed 100-column limit.
-- TypeScript, JavaScript, JSON, YAML, TOML and Markdown use [oxfmt](https://oxc.rs/docs/guide/usage/formatter), with
-  two-space indentation, 120-column wrapping, semicolons, double quotes and sorted imports.
-- Protobuf uses Buf, and the justfile uses `just --fmt`.
-
-Generated output, dependency lockfiles, protocol data, license text and agent instructions are excluded from the
-general-purpose formatter. `pnpm lint` runs oxlint's correctness and suspicious-code checks; `just lint` includes it
-alongside Clippy and Buf.
-
-The checked-in [Zed settings](.zed/settings.json) explicitly select these formatters on save, overriding global
-language-server formatting. Zed must be able to find `mise` on its PATH; formatter commands use `mise exec` to select
-this checkout's pinned tools. Install the [Oxc extension](https://github.com/oxc-project/oxc-zed) for inline oxlint
-diagnostics; TS/JS formatting uses the local CLI and does not require that extension. Protobuf formatting uses the Proto
-extension's Buf language server, also pinned through mise.
-
-Open the repository root in VS Code and install its workspace-recommended extensions. The shared
-[VS Code settings](.vscode/settings.json) select Oxc, ktlint 1.8.0, rust-analyzer and Buf; Java uses Custom Local
-Formatters to run the same `google-java-format --aosp` CLI as Zed. Launch with `mise exec -- code .` so extensions can
-find the pinned tools and Java.
-
-IntelliJ IDEA prompts for the plugins listed in [.idea/externalDependencies.xml](.idea/externalDependencies.xml). The
-shared settings enable ktlint 1.8.0 on save, google-java-format's AOSP style, and Oxc formatting on save using the
-workspace's npm packages. Keep the Java plugin's formatter version aligned with the CLI (1.36.1). Enable **Tools →
-Actions on Save → Reformat code** for Java and Protobuf, selecting whole-file formatting. If using the Rust plugin,
-enable **Languages & Frameworks → Rust → Rustfmt → Use rustfmt instead of built-in formatter** and **Run rustfmt on
-Save**. Those switches live in IntelliJ's local `workspace.xml`, so they must be set once per checkout. Only shared
-formatting and plugin settings are tracked under `.idea/` and `.vscode/`.
-
-Root Gradle `test` and `assemble` tasks cover the framework modules and plugin. The local example is a separate Gradle
-build. `just consumers` creates Java and Kotlin projects outside the repository, runs `codegen` and `build`, and builds
-both the Java and Kotlin examples from scratch source copies. It checks their release archives and executable app
-contents, starts no gameplay or backend services, and also runs in CI and `just ready`.
+Install [mise](https://mise.jdx.dev), OpenSSL development headers and `pkg-config`, then, from the repository root:
 
 ```sh
+mise install
 just local
 ```
 
-The proxy supports Java Edition 26.2 (protocol 776). See the [proxy documentation](crates/chunk-proxy/README.md) for
-managed delivery, timeouts, feature selection and standalone hosting.
+This builds the [local example](examples/local/README.md) and runs it. Join `localhost:25565` with a signed-in Minecraft
+Java Edition 26.2 client; Ctrl-C stops everything.
 
-## CLI and services
-
-`chunk` is the developer CLI (`crates/chunk-cli`):
-
-- `chunk create DIRECTORY [--language kotlin|java]` creates a project with a lobby app, TypeScript backend, local
-  routing and a Gradle wrapper. Kotlin is the default, and the directory must be new or empty. The CLI embeds the
-  version pins and wrapper files; Gradle resolves JVM libraries from `maven.chunkzero.com`. For framework development,
-  `--chunk-source CHECKOUT` or `CHUNK_SOURCE` explicitly uses a local checkout instead.
-- `chunk codegen PROJECT` prepares the schema-aware TypeScript SDK for editors without building or starting services.
-- `chunk inspect PROJECT` reads project and app metadata as JSON without building.
-- `chunk gen PROJECT --target java|kotlin|typescript` compiles backend code and generates selected clients.
-- `chunk build PROJECT` runs the project Gradle wrapper and packages backend code, app JARs, dependencies and assets as
-  `PROJECT/dist/<id>.tar.gz` and `PROJECT/dist/<id>/`.
-- `chunk dev PROJECT` (`chunk local`) builds a development release and runs the development stack with embedded services
-  and child JVMs. Development releases run each app from its thin JAR plus separate dependency JARs and have no archive,
-  so reloads skip rebuilding and rewriting the self-contained app JARs that `chunk build` produces. It uses the
-  Gradle-selected Java executable; `--java PATH` can override it. In a terminal it shows a startup view with animated
-  progress, elapsed times and live Gradle output. Once ready, log tabs fill the screen; the JVM tab includes selectable
-  nodes grouped by release, with player counts, health and the selected node's logs. Use ↑/↓ to select, Enter to scroll
-  logs, Esc/Tab to return to nodes, and `b` for startup details. Reload progress stays visible while the current release
-  serves players. `--plain` (automatic when stdout is not a terminal) prints one line per step and includes Gradle
-  diagnostics on failure.
-- `chunk clean PROJECT` deletes `dist/` and `.chunk/` so the next build starts fresh. It keeps local backend data in
-  `.chunk/local/backend` (and in any other `--state` directory directly under `.chunk/`) unless `--data` is set, and
-  refuses while `chunk dev` runs for the project. Gradle's `build/` directories are left to `./gradlew clean`.
-- `chunk players` moves and drains local players, and `chunk nodes` lists and shuts down local nodes. Both call the
-  operator surface of core's sync protocol with the credential in `.chunk/local/control.json`.
-- `chunk auth login` prompts for Chunk Cloud or a custom platform URL; use `--cloud` or `--url URL` for non-interactive
-  selection. `chunk login` is an alias.
-- `chunk auth status` shows the effective target and authentication implementation status.
-- `chunk deploy [PROJECT]`, `chunk upload ARTIFACT`, `chunk logs [--follow]`, `chunk deployments list`,
-  `chunk environments list`, and `chunk apps list` are explicit, non-successful stubs. Deploy, logs and listings accept
-  `--app` and `--environment` (also `CHUNK_APP` and `CHUNK_ENVIRONMENT`).
-
-Target selection is saved in `chunk/target.json` under the OS configuration folder; `CHUNK_CONFIG_DIR` overrides the
-containing directory. `CHUNK_API_URL` overrides the saved target for platform commands. Without either, the target is
-Chunk Cloud; its API endpoint is not configured yet. Custom URLs may include an API path and must use HTTP(S) without
-embedded credentials, queries or fragments.
-
-Authentication, `auth whoami`, and `auth logout` remain stubs. Login saves only the target and returns success with a
-"Login coming soon" message. No credentials are read or stored and no platform requests are made. Future authentication
-will use target-scoped OS credential storage, with `CHUNK_API_TOKEN` as a CI override; that variable is currently
-unused.
-
-Run `just toolchain` before using the build command from a checkout. `just package-cli` creates a versioned SDK archive
-under `target/dist`; see [SDK distribution](docs/distribution.md) for installation, verification and publishing.
-Consumer builds need their project Gradle wrapper and an explicit Java toolchain. `chunk.toml` and immediate
-`apps/**/app.ts` files define the project; `chunk dev` requires `[local]` settings. Local state defaults to
-`PROJECT/.chunk/local`. Explicit `--output` and `--state` paths are relative to the working directory.
-
-To package the example without starting services, run `just toolchain`, then `target/debug/chunk build examples/local`.
-Its releases appear in `examples/local/dist`; `just local` builds and runs the same project with state under
-`examples/local/.chunk/local`.
-
-To start a project with an installed SDK and its published JVM libraries:
+To start your own project from this checkout:
 
 ```sh
-chunk create my-server
-cd my-server
-chunk codegen
-chunk build
-chunk dev
+just toolchain
+target/debug/chunk create ../my-server --chunk-source .
 ```
 
-For framework development from this checkout, run `just toolchain`, then
-`target/debug/chunk create ../my-server --chunk-source .`. Creation prints exact commands using that CLI and includes
-them in the generated README. Connect with Minecraft Java Edition 26.2 at `localhost:25565`.
+It creates a Kotlin project (`--language java` for Java) and prints the commands to build and run it. `chunk --help`
+lists the CLI's commands: `dev` runs a project locally and rebuilds it on change, `build` packages a release, and
+`players` and `nodes` operate the local environment.
 
-`chunk dev` rebuilds when project sources change and starts each build as a new local deployment version; new players
-join the newest one. When only backend code changed, existing sessions stay on their version until their players leave.
-When app JARs changed, every earlier version stops once it is empty or after `--drain-seconds` (default 30),
-disconnecting remaining players. Press `r` in the UI, or type `r` and Enter in plain mode, to rebuild and restart every
-session immediately. A failed build or startup is reported and the previous version keeps serving. `--no-watch` disables
-automatic rebuilds. `--offline-logins` accepts players without Mojang authentication, as vanilla offline mode does, so
-scripted bots can join; use it only for local testing. Reloads do not preserve gameplay state. Development releases live
-in `.chunk/local/releases`; each is deleted once no running version uses it, and a new session first clears the previous
-one's control state and JVM logs.
+## Self-hosting
 
-The `chunk-environment` binary runs an environment's services in one process and calls the same libraries as
-`chunk dev`. `CHUNK_SERVICES` selects them: `core,gateway` (the default), `core`, or `gateway` alone, which joins core
-on another machine with `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` in place of `CHUNK_STATE` and a bundle.
-Core is the backend, which runs backend functions in its process, and the control that shares its store; gateway is the
-proxy's player listener. It reads environment variables and has no CLI argument parser. It requires
-`CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), `CHUNK_STATE`, and either `CHUNK_BUNDLE` or `CHUNK_MANAGEMENT_URL` with
-`CHUNK_ENVIRONMENT_TOKEN`, under which it serves the releases the management service deploys. It accepts
-`CHUNK_CONTROL_BIND` (default `127.0.0.1:25567`), and the gateway's `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MOTD`
-and `CHUNK_MAX_CONNECTIONS`. It writes control's connection record to `$CHUNK_STATE/control.json`. See the
-[control](crates/chunk-control/README.md), [proxy](crates/chunk-proxy/README.md), and [runtime](jvm/runtime/README.md)
-docs for the other service environments.
+[`deploy/compose`](deploy/compose/README.md) runs Postgres, management with its dashboard, and the edge on one Docker or
+Podman host; management starts each environment's machines there. Its README covers setup, security and deploying a
+release.
+
+## Development
+
+Toolchains are pinned in `mise.toml`, and [just](https://just.systems) runs the tasks; `just --list` shows them all. Run
+the narrowest check for a change:
+
+- `just fmt` formats everything and `just fmt-check` verifies it.
+- `just lint` runs Clippy, Buf and oxlint.
+- `just test` runs the Rust, JVM, SDK and dashboard tests. Management's tests run separately with Postgres; see its
+  [README](packages/management/README.md).
+- `just ready` runs most of CI's checks locally; run it before opening a pull request.
+
+Editor settings for Zed, VS Code and IntelliJ are checked in under `.zed/`, `.vscode/` and `.idea/`.
+
+## Security
+
+Please report vulnerabilities privately through GitHub's
+[private vulnerability reporting](https://github.com/chunkzero/chunk/security/advisories/new), not in public issues.
 
 ## License
 

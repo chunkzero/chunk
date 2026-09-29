@@ -44,10 +44,10 @@ impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
     /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
     /// `CHUNK_OFFLINE_LOGINS` (`1` admits unauthenticated players under any name; insecure, for tests only). With core,
-    /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or
-    /// `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and
-    /// `CHUNK_SUSPEND_AFTER_SECONDS` and serves what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's
-    /// connection record goes to `$CHUNK_STATE/control.json`.
+    /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS`.
+    /// With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and `CHUNK_SUSPEND_AFTER_SECONDS` and serves
+    /// what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
+    /// `$CHUNK_STATE/control.json`.
     /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
     /// Reports missing or invalid variables.
@@ -92,10 +92,7 @@ impl Config {
             state,
             control_bind: optional("CHUNK_CONTROL_BIND")?.unwrap_or(([127, 0, 0, 1], 25567).into()),
             core_bind: optional("CHUNK_CORE_BIND")?,
-            private_address: match optional("CHUNK_PRIVATE_ADDRESS")? {
-                Some(address) => Some(address),
-                None => optional("FLY_PRIVATE_IP")?,
-            },
+            private_address: optional("CHUNK_PRIVATE_ADDRESS")?,
             java: "java".into(),
             environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,

@@ -81,9 +81,8 @@ publication output; it does not require rebuilding the framework. The
 
 ## Configure publishing once
 
-1. Use the hosted service at `https://maven.chunkzero.com`, managed by
-   [maven-r2-deployment](https://github.com/chunkzero/maven-r2-deployment). Its Worker serves Maven downloads; the
-   backing R2 bucket stays private.
+1. Use the hosted service at `https://maven.chunkzero.com`, a [Maven R2](https://github.com/chunkzero/maven-r2)
+   deployment run by the chunk maintainers. Its Worker serves Maven downloads; the backing R2 bucket stays private.
 2. Ensure `default/releases` is public and mapped to the origin root so SDK consumers need no credentials.
 3. In the Maven R2 console, create a publishing token restricted to `default/releases`, the `dev/chunkzero/` artifact
    prefix, and the publishing operations it needs.

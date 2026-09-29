@@ -146,7 +146,7 @@ elapsed wall time (1.0 = one full core); RSS samples can miss short peaks. Resou
 setup/warmup. The generator resource numbers include fixture and sampling overhead. A growing generator delay or
 saturated generator can invalidate a target-capacity conclusion.
 
-These are local implementation baselines, not Fly sizing or player-capacity claims. Test the intended Fly machine sizes,
+These are local implementation baselines, not hosting-size or player-capacity claims. Test the intended machine sizes,
 quotas, regions, disks and network separately before using results for hosting decisions. This runner does not provision
 infrastructure or connect to existing environments.
 

@@ -7,51 +7,12 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Args)]
-pub(crate) struct Scope {
-    /// App name.
-    #[arg(long, env = "CHUNK_APP")]
-    app: Option<String>,
-    /// Environment name.
-    #[arg(long, env = "CHUNK_ENVIRONMENT")]
-    environment: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct Deploy {
-    #[arg(default_value = ".")]
-    project: PathBuf,
-    #[command(flatten)]
-    scope: Scope,
-}
-
-#[derive(Args)]
-pub(crate) struct Logs {
-    #[command(flatten)]
-    scope: Scope,
-    /// Follow new logs.
-    #[arg(short, long)]
-    follow: bool,
-    #[arg(long)]
-    deployment: Option<String>,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ListCommand {
-    /// List resources.
-    List(Scope),
-}
-
 #[derive(Subcommand)]
 pub(crate) enum Auth {
     /// Choose a platform (login coming soon).
     Login(Login),
     /// Show login status.
     Status,
-    /// Show your account (coming soon).
-    Whoami,
-    /// Sign out (coming soon).
-    Logout,
 }
 
 #[derive(Args)]
@@ -168,14 +129,7 @@ pub(crate) fn auth(command: Auth) -> io::Result<()> {
             cliclack::log::info("Login coming soon.")
         }
         Auth::Status => cliclack::log::info(format!("{} · Login coming soon", target()?)),
-        Auth::Whoami => unsupported("Account lookup"),
-        Auth::Logout => Err(io::Error::new(io::ErrorKind::Unsupported, "Logout is not available yet.")),
     }
-}
-
-pub(crate) fn unsupported(operation: &str) -> io::Result<()> {
-    target()?;
-    Err(io::Error::new(io::ErrorKind::Unsupported, format!("{operation} — not available yet.")))
 }
 
 #[cfg(test)]
