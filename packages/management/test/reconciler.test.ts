@@ -112,6 +112,27 @@ test("core and gateway machines get the configured edges and offline logins, and
   expect(plain).not.toHaveProperty("CHUNK_OFFLINE_LOGINS");
 });
 
+test("only core machines get the suspend time, and only when one is configured", () => {
+  const options = {
+    image: "chunk/environment:test",
+    jvmImage: "chunk-jvm:{java}",
+    managementUrl: "",
+    coreMemoryMib: 1024,
+    corePort: 7070,
+    trustedEdges: undefined,
+    offlineLogins: false,
+    suspendAfterSeconds: 300,
+  };
+  const request = { environment_id: "env_1", request_id: "cap", memory_mib: 512, java_version: 25 } as CapacityRow;
+  expect(coreMachineSpec(options, "env_1", "token").env.CHUNK_SUSPEND_AFTER_SECONDS).toBe("300");
+  for (const workload of [Workload.GATEWAY, Workload.JVM]) {
+    const spec = capacityMachineSpec(options, { ...request, workload }, { coreHost: "10.0.0.2", credential: "" });
+    expect(spec.env).not.toHaveProperty("CHUNK_SUSPEND_AFTER_SECONDS");
+  }
+  const awake = coreMachineSpec({ ...options, suspendAfterSeconds: undefined }, "env_1", "token").env;
+  expect(awake).not.toHaveProperty("CHUNK_SUSPEND_AFTER_SECONDS");
+});
+
 describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
   const { provider, machines, volumes, boots, hooks } = fakeProvider();

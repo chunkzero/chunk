@@ -33,6 +33,28 @@ pub(super) struct Authentication {
     offline: bool,
 }
 
+/// A client that failed authentication: it closed the connection instead of answering the encryption request, as
+/// offline-mode clients do, answered it wrongly, or the session service didn't vouch for the name it claimed.
+#[derive(Debug)]
+struct Unauthenticated(&'static str);
+
+impl std::fmt::Display for Unauthenticated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Unauthenticated {}
+
+fn unauthenticated(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, Unauthenticated(reason))
+}
+
+/// Whether `error` ended a login because the client failed authentication.
+pub(super) fn failed(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(<dyn std::error::Error + Send + Sync>::is::<Unauthenticated>)
+}
+
 /// An authenticated identity and its connection, after Login Acknowledged.
 pub(super) struct Authenticated<S> {
     pub protocol_version: i32,
@@ -108,8 +130,12 @@ impl Authentication {
                 should_authenticate: true,
             })
             .await?;
-        let response = decode_packet::<EncryptionResponse>(&transport.read_frame(LOGIN_FRAME_LIMIT).await?)
-            .map_err(invalid_data)?;
+        let response = match transport.read_frame(LOGIN_FRAME_LIMIT).await {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(unauthenticated("closed before answering the encryption request"));
+            }
+            frame => decode_packet::<EncryptionResponse>(&frame?).map_err(invalid_data)?,
+        };
         let secret = self.shared_secret(&response, token)?;
         transport.enable_encryption(&secret)?;
         let hash = server_hash(&secret, &self.public_key);
@@ -130,7 +156,7 @@ impl Authentication {
     fn shared_secret(&self, response: &EncryptionResponse, token: [u8; 4]) -> io::Result<Zeroizing<[u8; 16]>> {
         let size = self.key.size() as usize;
         if response.shared_secret.as_slice().len() != size || response.verify_token.as_slice().len() != size {
-            return Err(invalid_data("invalid encryption response"));
+            return Err(unauthenticated("invalid encryption response"));
         }
         let mut secret = Zeroizing::new(vec![0; size]);
         let mut returned_token = vec![0; size];
@@ -140,7 +166,7 @@ impl Authentication {
             || token_len.ok() != Some(4)
             || !openssl::memcmp::eq(&returned_token[..4], &token)
         {
-            return Err(invalid_data("invalid encryption response"));
+            return Err(unauthenticated("invalid encryption response"));
         }
         Ok(Zeroizing::new(secret[..16].try_into().expect("validated AES key length")))
     }
@@ -153,8 +179,12 @@ impl Authentication {
             .send()
             .await
             .map_err(|_| io::Error::other("session service request failed"))?;
+        // The session service answers a session it can't verify with No Content; other statuses are its own failures.
+        if response.status() == StatusCode::NO_CONTENT {
+            return Err(unauthenticated("session was not verified"));
+        }
         if response.status() != StatusCode::OK {
-            return Err(invalid_data("session was not verified"));
+            return Err(invalid_data("session service failed"));
         }
         if response.content_length().is_some_and(|length| length > PROFILE_LIMIT as u64) {
             return Err(invalid_data("session profile too large"));
@@ -209,7 +239,7 @@ fn parse_profile(bytes: &[u8], username: &str) -> io::Result<LoginSuccess> {
         || profile.id.len() != 32
         || !profile.id.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(invalid_data("session profile identity mismatch"));
+        return Err(unauthenticated("session profile identity mismatch"));
     }
     let mut uuid = [0; 16];
     for (output, pair) in uuid.iter_mut().zip(profile.id.as_bytes().as_chunks::<2>().0) {

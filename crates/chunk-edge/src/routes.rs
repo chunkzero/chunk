@@ -12,6 +12,9 @@ use chunk_management::{
     Client,
     v1::{Route, WatchRoutesRequest, WatchRoutesResponse},
 };
+use tokio::sync::watch;
+
+use crate::status;
 
 /// How long management has to start the stream, or to finish refusing it.
 const ESTABLISH: Duration = Duration::from_secs(10);
@@ -21,27 +24,68 @@ const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Routes by normalised hostname. Cloning shares the table.
-#[derive(Clone, Default)]
-pub(crate) struct Routes(Arc<RwLock<HashMap<String, Route>>>);
+#[derive(Clone)]
+pub(crate) struct Routes(Arc<Table>);
+
+struct Table {
+    entries: RwLock<HashMap<String, Entry>>,
+    /// Sent after every update.
+    changed: watch::Sender<()>,
+}
+
+/// A route, with the status cached for it while it is unchanged.
+#[derive(Clone)]
+pub(crate) struct Entry {
+    pub route: Arc<Route>,
+    pub status: Arc<status::Slot>,
+}
+
+impl Entry {
+    /// The environment's ready gateways, empty while it sleeps or starts.
+    pub(crate) fn gateways(&self) -> Vec<SocketAddr> {
+        self.route.gateway_addresses.iter().filter_map(|address| address.parse().ok()).collect()
+    }
+}
+
+impl Default for Routes {
+    fn default() -> Self {
+        Self(Arc::new(Table { entries: RwLock::default(), changed: watch::Sender::new(()) }))
+    }
+}
 
 impl Routes {
-    /// The ready gateways of the environment `hostname` routes to, empty while it sleeps or starts; None for a hostname
-    /// with no route.
-    pub(crate) fn gateways(&self, hostname: &str) -> Option<Vec<SocketAddr>> {
-        let routes = self.0.read().unwrap_or_else(PoisonError::into_inner);
-        let route = routes.get(hostname)?;
-        Some(route.gateway_addresses.iter().filter_map(|address| address.parse().ok()).collect())
+    /// The route of `hostname`, if it has one.
+    pub(crate) fn get(&self, hostname: &str) -> Option<Entry> {
+        self.0.entries.read().unwrap_or_else(PoisonError::into_inner).get(hostname).cloned()
+    }
+
+    /// Waits until the route of `hostname` lists gateways, and returns them; None once it has no route.
+    pub(crate) async fn ready(&self, hostname: &str) -> Option<Vec<SocketAddr>> {
+        let mut changed = self.0.changed.subscribe();
+        loop {
+            let gateways = self.get(hostname)?.gateways();
+            if !gateways.is_empty() {
+                return Some(gateways);
+            }
+            changed.changed().await.ok()?;
+        }
     }
 
     fn apply(&self, update: WatchRoutesResponse) {
-        let mut routes = self.0.write().unwrap_or_else(PoisonError::into_inner);
-        if update.reset {
-            routes.clear();
+        {
+            let mut entries = self.0.entries.write().unwrap_or_else(PoisonError::into_inner);
+            if update.reset {
+                entries.clear();
+            }
+            for hostname in &update.removed_hostnames {
+                entries.remove(hostname);
+            }
+            entries.extend(update.routes.into_iter().map(|route| {
+                let entry = Entry { route: Arc::new(route), status: Arc::default() };
+                (entry.route.hostname.clone(), entry)
+            }));
         }
-        for hostname in &update.removed_hostnames {
-            routes.remove(hostname);
-        }
-        routes.extend(update.routes.into_iter().map(|route| (route.hostname.clone(), route)));
+        self.0.changed.send_replace(());
     }
 }
 

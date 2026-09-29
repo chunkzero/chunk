@@ -20,6 +20,8 @@ export interface MachineOptions {
   trustedEdges: string | undefined;
   /** Passes `CHUNK_OFFLINE_LOGINS=1` to core and gateway machines, which then admit unauthenticated players. Insecure. */
   offlineLogins: boolean;
+  /** Passed to core as `CHUNK_SUSPEND_AFTER_SECONDS`, the idle time after which it may be suspended; unset, it never is. */
+  suspendAfterSeconds?: number | undefined;
 }
 
 const workloadNames: Record<number, string> = {
@@ -72,6 +74,7 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
       CHUNK_MANAGEMENT_URL: options.managementUrl,
       CHUNK_ENVIRONMENT_TOKEN: token,
       CHUNK_CORE_BIND: `[::]:${options.corePort}`,
+      ...(options.suspendAfterSeconds ? { CHUNK_SUSPEND_AFTER_SECONDS: String(options.suspendAfterSeconds) } : {}),
       ...gatewayEnv(options),
     },
     memoryMib: options.coreMemoryMib,

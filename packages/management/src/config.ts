@@ -41,6 +41,8 @@ export interface Machines {
   trustedEdges: string | undefined;
   /** Lets core and gateway machines admit unauthenticated players under any name. Insecure; for smoke tests only. */
   offlineLogins: boolean;
+  /** How long an environment stays idle before it sleeps, until a player logs in; unset, environments never sleep. */
+  suspendAfterSeconds: number | undefined;
   /** How many environments the reconciler works on at once. */
   concurrency: number;
   /** How long the reconciler waits for each provider call. */
@@ -122,6 +124,9 @@ function machinesOf(env: Env, publicUrl: string): Machines | undefined {
     corePort: positive(env, "CHUNK_CORE_PORT", 7070),
     trustedEdges: env.CHUNK_MACHINE_TRUSTED_EDGES || undefined,
     offlineLogins: env.CHUNK_MACHINE_OFFLINE_LOGINS === "1",
+    suspendAfterSeconds: env.CHUNK_MACHINE_SUSPEND_AFTER_SECONDS
+      ? positive(env, "CHUNK_MACHINE_SUSPEND_AFTER_SECONDS", 0)
+      : undefined,
     concurrency: positive(env, "CHUNK_RECONCILE_CONCURRENCY", 8),
     timeouts: {
       startMs: positive(env, "CHUNK_PROVIDER_START_TIMEOUT_SECONDS", 120) * 1000,

@@ -147,7 +147,8 @@ async fn rejected_session_receives_an_encrypted_disconnect() {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
         let server = async {
-            assert!(auth.login(Transport::new(server), 776, Some(256)).await.is_err());
+            let error = auth.login(Transport::new(server), 776, Some(256)).await.err().unwrap();
+            assert!(failed(&error), "{error}");
         };
         let client = async {
             let request = begin_login(&mut client).await;
@@ -176,9 +177,24 @@ async fn session_service_fails_closed_on_bad_status_and_oversized_bodies() {
         http_response("200 OK", "{}"),
     ] {
         let (auth, request) = mock_session(response).await;
-        assert!(auth.verify("Alex", "hash").await.is_err());
+        let error = auth.verify("Alex", "hash").await.unwrap_err();
+        assert!(!failed(&error), "the session service's own failure: {error}");
         request.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_client_that_closes_instead_of_answering_the_encryption_request_failed() {
+    let auth = Authentication::new(false).await.unwrap();
+    let (client, server) = tokio::io::duplex(8192);
+    let mut client = Transport::new(client);
+    let server = auth.login(Transport::new(server), 776, None);
+    let client = async {
+        begin_login(&mut client).await;
+        drop(client);
+    };
+    let (error, ()) = tokio::join!(server, client);
+    assert!(failed(&error.err().unwrap()));
 }
 
 #[tokio::test]

@@ -2,9 +2,10 @@ use std::{
     future::{Future, Ready, ready},
     io,
     net::SocketAddr,
+    sync::Arc,
 };
 
-use crate::{Config, PlatformTarget};
+use crate::{Config, PlatformTarget, Reports};
 
 /// No proxy can be constructed without an enabled protocol version.
 pub enum Proxy {}
@@ -38,6 +39,11 @@ impl Proxy {
 
     #[must_use]
     pub fn retarget(&self) -> Option<Retarget> {
+        match *self {}
+    }
+
+    #[must_use]
+    pub fn reports(&self) -> Arc<Reports> {
         match *self {}
     }
 
