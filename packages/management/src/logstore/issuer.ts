@@ -16,7 +16,7 @@ export interface LogStoreGrant {
 
 /**
  * Hands each environment credentials for its own log prefix. Attach calls it for every message it sends, so an
- * issuer caches and returns fresh credentials well before the old ones expire. Chunk Cloud plugs in its own.
+ * issuer caches and returns fresh credentials well before the old ones expire. A hosted install can plug in its own.
  */
 export interface LogStoreIssuer {
   grant(environmentId: string): Promise<LogStoreGrant>;

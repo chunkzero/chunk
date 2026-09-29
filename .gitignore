@@ -35,6 +35,10 @@ build/
 # Node
 node_modules/
 
+# Python
+__pycache__/
+.pytest_cache/
+
 # chunk app state (example apps, fixtures)
 .chunk/
 dist/

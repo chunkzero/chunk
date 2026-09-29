@@ -1,7 +1,7 @@
 /**
- * A hosting backend that runs machines for environments: the Docker/Podman provider here, Fly in Chunk Cloud. Only
- * the management service calls it; environments never hold provider credentials. Every method is idempotent, so a
- * reconciler can repeat a step after a crash.
+ * A hosting backend that runs machines for environments: the Docker/Podman provider here, or a hosted install's own.
+ * Only the management service calls it; environments never hold provider credentials. Every method is idempotent, so
+ * a reconciler can repeat a step after a crash.
  *
  * A provider only touches machines and volumes this install created, which it marks with ownership labels. Anything
  * else under a name it is asked about fails with `OwnershipError` and is left alone.

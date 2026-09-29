@@ -28,7 +28,7 @@ deadline. Retain the printed operation ID with `--operation` when retrying an un
 ## Environment gateway
 
 The `chunk-environment` binary hosts the proxy as its gateway service, targeting the backend and control it runs in the
-same process (see the [root README](../../README.md) for its variables):
+same process (see the [environment README](../chunk-environment/README.md) for its variables):
 
 ```sh
 CHUNK_BUNDLE=bundle.json CHUNK_ENVIRONMENT_ID=local CHUNK_STATE=.chunk/environment CHUNK_BIND=127.0.0.1:25565 cargo run -p chunk-environment
