@@ -57,7 +57,11 @@ def main():
         for attribution in ("https://crates.io/crates/deno_core/", "Copyright (c) 2016 Dropbox, Inc.",
                             "Copyright (c) 2023 Boshen", "libdeflate/COPYING", "The Apache Software Foundation",
                             "src/unicode_tables/LICENSE-UNICODE", "rust-lang/libm as a whole", "`v8` crate",
-                            "Copyright 2014, the V8 project authors", "UNICODE LICENSE V3"):
+                            "Copyright 2014, the V8 project authors", "UNICODE LICENSE V3",
+                            # Notices carried only in source file headers.
+                            "Dmitry Vyukov", "Gotham Project Developers", "Joyent, Inc. and other Node contributors",
+                            "Domenic Denicola", "David Judd", "Daniel McCarney", "Radford M. Neal",
+                            "the Dart project authors"):
             assert attribution in notices, f"Third-party notices are missing {attribution!r}"
         assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 

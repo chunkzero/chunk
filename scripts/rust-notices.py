@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Print the third-party notices for the shipped `chunk` binary, or refresh the upstream texts they vendor.
 
-The notices carry every license, copyright and NOTICE file in the source of each crate `chunk` links, followed by
-licenses/v8.txt for the V8 build the `v8` crate links. Crates published without any license file use the upstream
-text vendored at licenses/crates/<name>-<version>.txt. `--vendor` refreshes both vendored sources from git;
-printing works offline from the local Cargo registry.
+The notices carry every license, copyright and NOTICE file in the source of each crate `chunk` links, plus the
+license notices in its source file comments, followed by licenses/v8.txt for the V8 build the `v8` crate links. Crates
+published without any license file use the upstream text vendored at licenses/crates/<name>-<version>.txt.
+`--vendor` refreshes both vendored sources from git; printing works offline from the local Cargo registry.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import textwrap
 import tomllib
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -24,6 +25,16 @@ LICENSE_FILE = re.compile(r"((third[-_]party[-_])?(licen[cs]es?|notices?)|copyin
                           re.IGNORECASE)
 SOURCE_FILE = re.compile(r".*\.(rs|c|cc|h|hh|cpp|py|js|ts|json|toml)$", re.IGNORECASE)
 SKIPPED_DIRECTORIES = {"tests", "benches", "examples", "assets", "docs", "fuzz", ".github"}
+# Source files whose comments are scanned for license notices, except tests and uncompiled directories.
+SCANNED_FILE = re.compile(r".*\.(rs|js|mjs|ts|c|cc|cpp|h|hh|hpp|inc|s|asm|tq)", re.IGNORECASE)
+TEST_FILE = re.compile(r"((.*[_-])?(unit)?tests?|test_.*|.*_fuzzer|.*_benchmark)\.\w+")
+UNCOMPILED_DIRECTORIES = SKIPPED_DIRECTORIES | {"test", "testing", "testdata", "fixtures", "bench", "benchmark",
+                                                "benchmarks", "fuzzers", "fuzzing", "doc", "samples", "tools"}
+COPYRIGHT = re.compile(r"\b(Copyright|COPYRIGHT)(\s*(\(c\)|\(C\)|©|ⓒ))*\s+(?!(Notice|NOTICE|HOLDER|OWNER))[\dA-Z]|©"
+                       r"|SPDX-FileCopyrightText:")
+GRANT = re.compile(r"permission is hereby granted|redistribution and use|permission to use, copy, modify"
+                   r"|licensed under|under the terms of|governed by|SPDX-License-Identifier:\s*\w"
+                   r"|\b(MIT|BSD|ISC|Apache|zlib|Boost|MPL)\b[\w .-]{0,20}licen[cs]e", re.IGNORECASE)
 # Files that do not apply to the build: a license alternative we do not elect, or code the build leaves out.
 EXCLUDED = {
     "self_cell": ["LICENSE-GPLv2"],
@@ -56,6 +67,8 @@ V8_COMPONENTS = [
     ("Dragonbox", "third_party/dragonbox/src", ""),
     ("FP16", "third_party/fp16/src", ""),
 ]
+# The copyright holder of components whose license files name none, for telling their own source notices apart.
+V8_AUTHORS = {"Abseil": "The Abseil Authors"}
 
 
 def cargo(*args):
@@ -73,18 +86,100 @@ def shipped_crates():
                   key=lambda package: (package["name"], package["version"]))
 
 
-def license_files(package):
+def crate_files(package):
+    """Paths of the files in a crate's source outside SKIPPED_DIRECTORIES and its EXCLUDED patterns."""
     root = Path(package["manifest_path"]).parent
     excluded = EXCLUDED.get(package["name"], [])
-    found = []
     for directory, subdirectories, files in os.walk(root):
         subdirectories[:] = [name for name in subdirectories if name not in SKIPPED_DIRECTORIES]
         for name in files:
             path = Path(directory, name).relative_to(root).as_posix()
-            if LICENSE_FILE.fullmatch(name) and not SOURCE_FILE.fullmatch(name) \
-                    and not any(fnmatch.fnmatch(path, pattern) for pattern in excluded):
-                found.append(path)
+            if not any(fnmatch.fnmatch(path, pattern) for pattern in excluded):
+                yield path
+
+
+def license_files(package):
+    found = [path for path in crate_files(package)
+             if LICENSE_FILE.fullmatch(Path(path).name) and not SOURCE_FILE.fullmatch(Path(path).name)]
     return sorted(found, key=lambda path: (path.count("/"), path))
+
+
+def scanned(path):
+    *directories, name = path.split("/")
+    return SCANNED_FILE.fullmatch(name) and not TEST_FILE.fullmatch(name) \
+        and not UNCOMPILED_DIRECTORIES.intersection(directories)
+
+
+def comment_blocks(source):
+    """The text of each `/* */` comment and each run of `//`, `///` or `//!` lines that starts a line."""
+    blocks, block, kind = [], [], None
+    for line in source.splitlines() + [""]:
+        stripped = line.strip()
+        if kind == "/*":
+            content, closed, _ = line.partition("*/")
+            block.append(re.sub(r"^\s*\*(?!/) ?", "", content))
+            if not closed:
+                continue
+            kind = None
+        else:
+            marker = re.match(r"//(/(?!/)|!)?", stripped)
+            if block and (not marker or marker[0] != kind):
+                blocks.append(block)
+                block = []
+            if marker:
+                block.append(stripped.removeprefix(marker[0]).removeprefix(" "))
+                kind = marker[0]
+                continue
+            kind = None
+            if not stripped.startswith("/*"):
+                continue
+            content, closed, _ = stripped[2:].partition("*/")
+            block.append(content.lstrip("*!").strip())
+            if not closed:
+                kind = "/*"
+                continue
+        blocks.append(block)
+        block = []
+    return [textwrap.dedent("\n".join(block)).strip() for block in blocks]
+
+
+def holders(text):
+    """Normalized copyright holders named in a text, such as "brian smith" for "Copyright 2015-2016 Brian Smith."."""
+    found = set()
+    for line in text.splitlines():
+        match = COPYRIGHT.search(line)
+        if match:
+            statement = re.split(r"\.\s+(?=[A-Z])", line[match.start():])[0]
+            statement = re.sub(r"(?i)(spdx-file)?copyright(text)?|\(c\)|all rights reserved|\d{4}|[^\w\s]", " ",
+                               statement)
+            words = statement.lower().split()
+            found.add(" ".join(words[1:] if words[:1] == ["the"] else words))
+    return found - {""}
+
+
+def source_notices(sources, own):
+    """Distinct license notices in the comments of `sources`, as (text, paths) pairs.
+
+    A notice is a comment with both a copyright line and license terms. Notices whose copyright holders are all in
+    `own`, the holders the included license files and package authors name, restate those files and are left out.
+    """
+    notices = {}
+    for path, source in sources:
+        for block in comment_blocks(source):
+            if not (COPYRIGHT.search(block) and GRANT.search(block)):
+                continue
+            named = holders(block)
+            if named and named <= own:
+                continue
+            _, paths = notices.setdefault(" ".join(block.lower().split()), (block, []))
+            if path not in paths:
+                paths.append(path)
+    return sorted(notices.values(), key=lambda notice: notice[1][0])
+
+
+def notice_section(title, notices):
+    return f"{RULE}\nNotices from source files in {title}\n{RULE}\n\n" + "\n\n".join(
+        "From:\n" + "".join(f"  {path}\n" for path in paths) + f"\n{text}" for text, paths in notices)
 
 
 def vendored(package):
@@ -99,6 +194,7 @@ def notices():
         raise ValueError(f"licenses/v8.txt does not match v8 {v8}; run scripts/rust-notices.py --vendor")
     crates = []
     texts = {}
+    headers = []
     for package in shipped_crates():
         name = f'{package["name"]} {package["version"]}'
         source = f'https://crates.io/crates/{package["name"]}/{package["version"]}'
@@ -113,6 +209,13 @@ def notices():
             files = [(f"none published; {vendored(package).relative_to(REPOSITORY)}", vendored(package).read_text())]
         for path, text in files:
             texts.setdefault(text.replace("\r\n", "\n").strip(), []).append(f"{name}: {path}")
+        own = set().union(*(holders(text) for _, text in files),
+                          *(holders("Copyright " + re.sub(r"<.*?>", "", author)) for author in package["authors"]))
+        sources = ((path, (root / path).read_text(errors="replace"))
+                   for path in sorted(crate_files(package)) if scanned(path))
+        found = source_notices(sources, own)
+        if found:
+            headers.append(notice_section(name, found))
     sections = [
         "Third-party notices for the chunk CLI.",
         "The chunk binary statically links the Rust crates below. The source of each, including the Source Code "
@@ -121,6 +224,7 @@ def notices():
     ]
     for text, users in sorted(texts.items(), key=lambda item: item[1][0]):
         sections.append(f"{RULE}\nShipped with:\n" + "".join(f"  {user}\n" for user in users) + f"{RULE}\n\n{text}")
+    sections += headers
     return "\n\n".join(sections) + "\n\n\n" + v8_notices
 
 
@@ -134,13 +238,15 @@ class Upstream:
     def __init__(self, repository):
         self.repository = repository
         self.commits = {}
+        self.remotes = {}
         git(repository, "init", "--quiet", "--bare")
 
     def commit(self, url, ref):
         if (url, ref) not in self.commits:
-            remote = f"remote{len(self.commits)}"
-            git(self.repository, "remote", "add", remote, url)
-            git(self.repository, "fetch", "--quiet", "--depth", "1", "--filter=blob:none", remote, ref)
+            if url not in self.remotes:
+                self.remotes[url] = f"remote{len(self.remotes)}"
+                git(self.repository, "remote", "add", self.remotes[url], url)
+            git(self.repository, "fetch", "--quiet", "--depth", "1", "--filter=blob:none", self.remotes[url], ref)
             self.commits[url, ref] = git(self.repository, "rev-parse", "FETCH_HEAD^{commit}").strip()
         return self.commits[url, ref]
 
@@ -153,6 +259,31 @@ class Upstream:
 
     def show(self, commit, path):
         return git(self.repository, "show", f"{commit}:{path}").strip()
+
+    def sources(self, url, commit, directory, skipped):
+        """(path, text) of each scanned source file under `directory` outside uncompiled and `skipped` directories."""
+        listed = git(self.repository, "ls-tree", "-r", "-z", commit, *([f"{directory}/"] if directory else []))
+        blobs = {}
+        for entry in filter(None, listed.split("\0")):
+            info, path = entry.split("\t", 1)
+            _, kind, oid = info.split()
+            if kind == "blob" and scanned(path) and not skipped.intersection(path.split("/")[:-1]):
+                blobs[path] = oid
+        if not blobs:
+            return []
+        oids = "".join(f"{oid}\n" for oid in blobs.values()).encode()
+        subprocess.run(["git", "-C", self.repository, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--quiet",
+                        "--no-tags", "--no-write-fetch-head", "--filter=blob:none", self.remotes[url], "--stdin"],
+                       input=oids, check=True, capture_output=True)
+        batch = subprocess.run(["git", "-C", self.repository, "cat-file", "--batch"], input=oids, check=True,
+                               capture_output=True).stdout
+        sources, position = [], 0
+        for path in blobs:
+            header = batch.index(b"\n", position)
+            size = int(batch[position:header].split()[2])
+            sources.append((path, batch[header + 1:header + 1 + size].decode(errors="replace")))
+            position = header + 2 + size
+        return sources
 
 
 def section(url, commit, path, text):
@@ -222,7 +353,8 @@ def vendor_v8(upstream):
     modules.read_string(git(upstream.repository, "show", f"{tree}:.gitmodules"))
     sections = [
         f"Third-party notices for V8 as linked by the `v8` crate {version} ({RUSTY_V8}/tree/{tag}).",
-        "Generated by scripts/rust-notices.py from the license files in each component's source.",
+        "Generated by scripts/rust-notices.py from the license files and the license notices in the source files "
+        "of each component.",
     ]
     for name, submodule, directory in V8_COMPONENTS:
         url, commit = RUSTY_V8, tree
@@ -232,10 +364,16 @@ def vendor_v8(upstream):
         files = upstream.license_files(commit, directory)
         if not files:
             raise ValueError(f"No license file for {name} in {url} {directory}")
+        own = holders(f"Copyright {V8_AUTHORS[name]}") if name in V8_AUTHORS else set()
         for file in files:
             path = f"{directory}/{file}" if directory else file
-            sections.append(f"{RULE}\n{name}\nSource: {url} at {commit}, {path}\n{RULE}\n\n"
-                            f"{upstream.show(commit, path)}")
+            text = upstream.show(commit, path)
+            own |= holders(text)
+            sections.append(f"{RULE}\n{name}\nSource: {url} at {commit}, {path}\n{RULE}\n\n{text}")
+        # A repository's own third_party code is linked only where V8_COMPONENTS lists its directory.
+        found = source_notices(upstream.sources(url, commit, directory, set() if directory else {"third_party"}), own)
+        if found:
+            sections.append(notice_section(f"{name} ({url} at {commit})", found))
     (REPOSITORY / "licenses/v8.txt").write_text("\n\n".join(sections) + "\n")
 
 
