@@ -1,51 +1,56 @@
-# Local example
+# Kotlin example
 
-From the repository root, install the pinned tools with `mise install`, then:
+A playable project: a grass lobby and sandstone arenas written in Kotlin, with a TypeScript backend that keeps each
+player's coins and visits. It is what `just local` runs, and it exercises most of the platform: routing and admission
+hooks, backend commands, a session method, typed destination config, reactive watches and moving players between
+sessions.
+
+## Run it
+
+From the repository root, after `mise install`:
 
 ```sh
 just local
 ```
 
-This installs pinned JS dependencies, compiles TypeScript declarations and handlers, generates shared JVM clients before
-Kotlin compilation, resolves Java 25, packages an immutable deployment, and starts the backend, control and proxy. Join
-`localhost:25565` with a signed-in official Minecraft Java Edition 26.2 client. Status runs JavaScript without starting
-gameplay. Login runs admission/routing and automatically creates a lobby session.
+This builds the development CLI, installs the pinned TypeScript compiler, then runs `chunk dev examples/local`, which
+builds the release and starts the backend, control and the gateway in one process. Join `localhost:25565` with a
+signed-in Minecraft Java Edition 26.2 client; add `--offline-logins` (`just local --offline-logins`) to test without
+Mojang authentication. Press `q` or Ctrl-C to stop everything.
 
-To build the complete release without starting services:
+In game:
 
-```sh
-just toolchain
-target/debug/chunk build examples/local
-```
+- `/coin` is a Minestom command in the JVM. It runs the `coin` mutation, and the chat and action bar update from a watch
+  on `stats`. Joining a session also increments your visits.
+- `/hello <message>` and `/travel lobby|arena|large` are backend commands available everywhere. `/travel` moves you
+  through the same admission and capacity checks as any other move.
+- `/population`, in the lobby only, is a backend command that calls the lobby session's `population` session method.
 
-The project Gradle wrapper builds both apps and supplies its Java toolchain in
-`examples/local/.chunk/build/jvm/artifacts.json`. The CLI packages those outputs under `examples/local/dist/<id>/` and
-`examples/local/dist/<id>.tar.gz`.
+Worlds live only in the JVMs; coins and visits persist in the backend across runs.
 
-The grass lobby and sandstone arenas share persistent coins and visit counts. Use `/coin` to commit a mutation; chat and
-the action bar reflect subscriptions. A join explicitly reads saved coins and increments visits. Nothing saves world
-simulation state across JVM shutdown.
+## Project layout
 
-The backend owns `/hello <message>` and `/travel lobby|arena|large` in every scope. Travel uses the same admission and
-capacity policy as operator moves. In the lobby, `/population` calls the generated JVM method on the session captured
-when the command starts. After moving to an arena, that command disappears from the client tree. `/coin` remains a JVM
-command. Tab completion suggests the declared destinations; `/hello` sends plain-text message and title effects.
+| Path                                                     | Contents                                                                                                                                             |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`chunk.toml`](chunk.toml)                               | Local environment: 16 players per session, up to four JVMs, and machine profiles `local` (512 MiB) and `large` (1024 MiB), each hosting two sessions |
+| [`apps/scope.ts`](apps/scope.ts)                         | Root hooks (admission, server ping, routing to the lobby) and `/hello`, `/travel`                                                                    |
+| [`apps/lobby/app.ts`](apps/lobby/app.ts)                 | The `lobby` app, its `main` destination and `/population`                                                                                            |
+| [`apps/games/arena/app.ts`](apps/games/arena/app.ts)     | The `arena` app, with a `label` config and `standard` and `large` destinations                                                                       |
+| [`server/schema/index.ts`](server/schema/index.ts)       | The `profiles` and `settings` tables                                                                                                                 |
+| [`server/players.ts`](server/players.ts)                 | `stats`, `join` and `coin`, keyed by the calling player                                                                                              |
+| [`server/proxy.ts`](server/proxy.ts)                     | The status and admission queries the root hooks call                                                                                                 |
+| [`server/session-methods.ts`](server/session-methods.ts) | The `population` session method                                                                                                                      |
+| [`shared/`](shared)                                      | Gameplay shared by both apps, in a plain Gradle project                                                                                              |
+| `apps/*/src/`                                            | Each app's `main` and `@SessionType("default")` provider                                                                                             |
 
-These commands are exercised by automated protocol and dispatch checks. Display and movement with an official client
-still need the manual scenario above.
+The `large` arena destination reuses the arena's `default` implementation with a different config, 32 players and the
+`large` profile, so the arena has a single provider. [`settings.gradle.kts`](settings.gradle.kts) builds the Gradle
+plugin and JVM libraries from this checkout and points the plugin at `target/debug/chunk`.
 
-For editor setup without starting services, run:
+## Moving players
 
-```sh
-cargo run -p chunk-cli -- codegen examples/local
-```
-
-This materializes the ignored SDK under `examples/local/.chunk/`. Application modules import builders and named types
-from `#chunk`; schema modules use `#chunk/schema`. Both resolve through `examples/local/package.json`.
-
-## Moves and drain
-
-The player's UUID appears beside `player=` in the service console logs. In another terminal, substitute that UUID below:
+The terminal UI's Players tab lists connected players and shows the selected player's UUID; press `m` to move them. From
+another terminal, the same works through `just players`:
 
 ```sh
 just players --player <uuid> move --session-type arena/default --key arena
@@ -53,64 +58,28 @@ just players --player <uuid> move --session-type arena/default --key arena-large
 just players --player <uuid> drain --timeout-seconds 60
 ```
 
-The example allows two sessions per JVM. Lobby and arena use separate JVMs; two default arenas can share one arena JVM.
-The `arena-large` destination uses the same `arena/default` implementation with a different typed configuration and
-32-player capacity on a 1024 MiB JVM (`--machine-profile large`). Moves preserve the public connection. Drain stops new
-reservations on the selected runtime, moves its players, and shuts it down when empty or at the deadline. Operator
-commands print an operation ID; supply `--operation <id>` when retrying an uncertain command.
+Moves keep the player's connection. Drain stops placing players on the player's current JVM, moves its players
+elsewhere, and stops it once empty or at the deadline. Each command prints an operation ID; pass it back with
+`--operation <id>` to retry a command whose outcome is unknown. Retry promptly: a finished move is remembered for five
+minutes, and a later retry can move the player again.
+`target/debug/chunk nodes --control-file examples/local/.chunk/local/control.json list` shows each JVM with its health.
 
-## Lifecycle
+## Changing it
 
-Backend, control and proxy run as tasks in one development process. The backend retains its dedicated JavaScript and
-storage threads. Control owns each gameplay JVM directly as a child process.
+`chunk dev` watches the sources and rebuilds on change. New players go to the new release. After a backend-only change,
+players already in a session stay there until they leave; after a JVM change they are disconnected after 30 seconds
+(`--drain-seconds`). Press `r` to rebuild and restart everything at once.
 
-Ctrl-C closes player connections, drains control operations, stops owned JVMs, and joins backend workers. An unexpected
-service exit stops the local stack; there is no independent process restart in this mode. Run the `chunk-environment`
-binary when testing process failure and recovery. An abrupt dev-process crash can leave an unresolved JVM launch; the
-next run refuses to claim ownership from a stale PID. Resolve the leftover JVM before reusing that state.
+For editor support without starting anything, run `target/debug/chunk codegen examples/local`, which materializes the
+SDK under `examples/local/.chunk/`.
 
-Service logs go to the console and JVM logs stay in the runtime state directory. An unresolved shutdown is reported as
-an error.
+`examples/local/gradlew test` runs the `shared` project's test, which drives `/coin` through a real Minestom process
+against an in-process fake core, across moves and rejoins.
 
-## Files and configuration
+## Local state
 
-`chunk.toml` selects the local environment and default runtime requirements: 16 players per session, two sessions per
-512 MiB JVM, and at most four JVMs. `apps/lobby/app.ts` and `apps/games/arena/app.ts` declare stable app IDs, runtime
-requirements and destinations. Their implementations are addressed as `lobby/default` and `arena/default`; moving an app
-directory does not change its ID. `apps/scope.ts` supplies inherited hooks/commands and initial routing. Java 25 remains
-explicit in the Gradle builds. The local runner uses Gradle's selected executable, with an optional `--java PATH`
-override.
-
-`server/schema/index.ts` composes the physical schema; `server/*.ts` exports validated function descriptors. Paths in
-this paragraph are relative to `examples/local`. `examples/local/gradlew generateChunkBackend` emits the backend under
-`examples/local/.chunk/build/backend` and shared JVM bindings under `examples/local/.chunk/generated/jvm`. The
-standalone example uses the public Chunk settings and project plugins with repository composite builds for local
-framework dependencies. Its explicit `shared` project contains the common session implementation and backend boundary
-test. The discovered `:apps:lobby` and `:apps:games:arena` projects package annotated providers that create fresh
-session state. The plugin generates a local Java service registry from those annotations. The arena implements the
-generated `ArenaSessionProviders.Default` interface and receives a typed `SessionCreation` containing its fixed
-configuration and `maxPlayers`. Standard and large destinations reuse this provider; they do not need separate classes.
-Destination references come from `#chunk/apps` without importing executable app modules. Gradle retains
-dependency/toolchain settings. `chunkArtifacts` builds independent executable app JARs containing the generated backend
-client and runtime libraries. Each app supplies `application.mainClass`; its main connects to Chunk, starts Minestom,
-explicitly calls `ready()` and waits for shutdown.
-
-Shared descriptors use `shared/<file>/<export>`; app-local descriptors use `apps/<app>/<file>/<export>`. The initial
-managed caller's `app` identifies its registered app ID. Multiple session instances may belong to the same app. Session
-factories use `@SessionType("default")`; there are no handwritten service registration resources.
-
-Releases under `examples/local/dist/<id>` include JARs, the backend bundle, normalized release metadata and explicitly
-supplied assets. Each release also has a sibling `.tar.gz` archive. Content changes produce a new deployment; existing
-releases are verified before reuse. Stop and rerun after editing the example. Backend data stays under
-`examples/local/.chunk/local/backend`; placement state is separate for each deployment. This runner does not implement
-overlapping deployment rollouts.
-
-Connection records under `examples/local/.chunk/local` contain private credentials and must not be shared. Control uses
-loopback port 25567; the public listener uses 25565. The runner refuses occupied ports or a second owner of its state
-directory. `just local --state <directory> --bind <address> --control-bind <address>` selects another local environment;
-all addresses must remain loopback.
-
-Inspect nodes with `chunk nodes --control-file examples/local/.chunk/local/control.json list`. Request a node shutdown
-with the same prefix followed by `shutdown HOST --operation UUID --timeout-seconds 60`; retain the operation ID for
-retries. The response means shutdown was queued. Poll `list` for a confirmed `NODE_PHASE_STOPPED` phase. This rework
-requires rebuilding releases; old local control state is incompatible.
+Local state lives in `examples/local/.chunk/local`: backend data under `backend/`, JVM logs, and connection records that
+contain private credentials, so don't share that directory. `target/debug/chunk clean examples/local` removes build
+output and state but keeps backend data; add `--data` to reset it too. The gateway listens on `127.0.0.1:25565` and
+control on `127.0.0.1:25567`; `just local --bind ... --control-bind ... --state ...` picks other loopback addresses or
+another state directory.
