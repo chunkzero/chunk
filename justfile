@@ -86,6 +86,15 @@ image:
     "$engine" build -f crates/chunk-environment/Dockerfile -t "chunk-environment:$version" \
         --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
 
+# Build the edge image with podman or docker, tagged with the workspace version.
+edge-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=$(command -v podman || command -v docker)
+    version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+    "$engine" build -f crates/chunk-edge/Dockerfile -t "chunk-edge:$version" \
+        --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
+
 # Build the remote JVM runner image on a Java `java` runtime with podman or docker, tagged `chunk-jvm:<java>`.
 jvm-image java="25":
     #!/usr/bin/env bash

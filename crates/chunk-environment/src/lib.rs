@@ -42,10 +42,11 @@ pub enum Config {
 
 impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
-    /// `CHUNK_MOTD` and `CHUNK_MAX_CONNECTIONS`. With core, it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`,
-    /// `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads
-    /// `CHUNK_ENVIRONMENT_TOKEN` and serves what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's
-    /// connection record goes to `$CHUNK_STATE/control.json`.
+    /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS` and `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs). With core,
+    /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or
+    /// `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what
+    /// management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
+    /// `$CHUNK_STATE/control.json`.
     /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
     /// Reports missing or invalid variables.
@@ -62,6 +63,9 @@ impl Config {
         gateway.motd = optional("CHUNK_MOTD")?.unwrap_or_else(|| "chunk".into());
         if let Some(max_connections) = optional("CHUNK_MAX_CONNECTIONS")? {
             gateway.max_connections = max_connections;
+        }
+        if let Some(trusted_edges) = optional("CHUNK_TRUSTED_EDGES")? {
+            gateway.trusted_edges = trusted_edges;
         }
         if !services.contains(Service::Core) {
             let endpoint = required("CHUNK_CORE_ENDPOINT")?;

@@ -18,8 +18,10 @@ pub use server::testing;
 
 #[cfg(not(feature = "mc-26-2"))]
 mod disabled;
+mod trusted_edges;
 #[cfg(not(feature = "mc-26-2"))]
 pub use disabled::{Proxy, Retarget};
+pub use trusted_edges::TrustedEdges;
 
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -38,6 +40,8 @@ pub struct Config {
     pub configuration_timeout: Duration,
     /// Accepts logins without encryption or Mojang verification, as vanilla offline mode does. Local testing only.
     pub offline_logins: bool,
+    /// Edges whose connections name the player with a PROXY protocol v2 header.
+    pub trusted_edges: TrustedEdges,
 }
 
 impl Default for Config {
@@ -50,6 +54,7 @@ impl Default for Config {
             compression_threshold: Some(256),
             configuration_timeout: Duration::from_secs(300),
             offline_logins: false,
+            trusted_edges: TrustedEdges::default(),
         }
     }
 }

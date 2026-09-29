@@ -7,7 +7,7 @@ use crate::Running;
 use std::{io, net::SocketAddr, num::NonZeroUsize};
 use tokio_util::sync::CancellationToken;
 
-pub use chunk_proxy::PlatformTarget;
+pub use chunk_proxy::{PlatformTarget, TrustedEdges};
 
 #[derive(Clone)]
 pub struct GatewayConfig {
@@ -16,6 +16,8 @@ pub struct GatewayConfig {
     pub max_connections: NonZeroUsize,
     /// Accepts unauthenticated logins; only `chunk dev` sets this, for local testing.
     pub offline_logins: bool,
+    /// Edges whose connections name the player with a PROXY protocol v2 header.
+    pub trusted_edges: TrustedEdges,
 }
 
 impl GatewayConfig {
@@ -23,7 +25,13 @@ impl GatewayConfig {
     #[must_use]
     pub fn new(bind: SocketAddr) -> Self {
         let defaults = chunk_proxy::Config::default();
-        Self { bind, motd: defaults.motd, max_connections: defaults.max_connections, offline_logins: false }
+        Self {
+            bind,
+            motd: defaults.motd,
+            max_connections: defaults.max_connections,
+            offline_logins: false,
+            trusted_edges: defaults.trusted_edges,
+        }
     }
 }
 
@@ -45,6 +53,7 @@ impl Gateway {
                 motd: config.motd,
                 max_connections: config.max_connections,
                 offline_logins: config.offline_logins,
+                trusted_edges: config.trusted_edges,
                 ..Default::default()
             },
         )
