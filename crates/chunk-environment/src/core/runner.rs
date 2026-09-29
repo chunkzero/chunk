@@ -41,7 +41,7 @@ const RELEASED: &str = "the host was released";
 ///
 /// A confirmed release is terminal for its host ID: no machine for that ID may start afterwards, even from a launch
 /// still in flight or one an earlier core process started. The launcher owns that fence, since it owns machine
-/// creation; the management launcher of P5 implements it there.
+/// creation.
 #[tonic::async_trait]
 pub trait Launcher: Send + Sync {
     /// Starts host `id`'s machine, whose runner presents `credential`. Core calls it at most once per host, and cancels
@@ -65,6 +65,10 @@ pub struct LaunchSpec {
     /// Where the runner reaches core.
     pub core_endpoint: String,
     pub environment: String,
+    /// The release the host runs, and its app and machine profile there.
+    pub release_id: String,
+    pub app: String,
+    pub profile: String,
     /// Where the JVM serves players, when core knows it.
     pub player_address: Option<IpAddr>,
     /// The machine profile's memory.
@@ -311,6 +315,9 @@ impl RunnerHost {
         let spec = LaunchSpec {
             core_endpoint: core.endpoint.clone(),
             environment: self.environment.clone(),
+            release_id: release.release_id.clone(),
+            app: app.to_owned(),
+            profile: profile.to_owned(),
             player_address: self.config.player_address,
             memory_mib: size.memory_mib,
         };

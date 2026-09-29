@@ -1,12 +1,14 @@
 //! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
 
 mod activation;
+mod launcher;
 mod release;
 mod retire;
 
 use crate::{Core, Gateway, GatewayConfig};
 use activation::Activation;
 use chunk_management::{Client, Code, v1};
+pub(crate) use launcher::{Lease, ManagementLauncher};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -17,6 +19,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 const REATTACH: Duration = Duration::from_secs(5);
@@ -33,9 +36,17 @@ pub struct ManagementConfig {
     pub token: String,
 }
 
+impl ManagementConfig {
+    pub(crate) fn client(self) -> Client {
+        Client::new(self.url).with_token(self.token)
+    }
+}
+
 /// Core's attachment to the management service: it follows the desired state and reports deployment progress.
 pub(crate) struct Managed<'a> {
     client: Client,
+    /// Where core's hold on the environment is published, for the launcher's calls.
+    lease: watch::Sender<Lease>,
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
@@ -49,6 +60,9 @@ pub(crate) struct Managed<'a> {
     deployments: Mutex<Deployments>,
     /// The sequence of the latest report under the current lease.
     sequence: AtomicU64,
+    /// Cancelled once core shuts down. From then on no deployment activates and no gateway starts, while attaches
+    /// still publish their leases.
+    stopping: CancellationToken,
 }
 
 #[derive(Default)]
@@ -81,12 +95,14 @@ enum Interrupted {
     Retry(io::Error),
     /// This core must stop serving.
     Fatal(io::Error),
+    /// Another core superseded this one, which must stop serving.
+    Fenced(io::Error),
 }
 
 impl From<chunk_management::Error> for Interrupted {
     fn from(error: chunk_management::Error) -> Self {
         if error.code() == Code::FailedPrecondition {
-            Self::Fatal(io::Error::other(format!("management fenced this core: {error}")))
+            Self::Fenced(io::Error::other(format!("management fenced this core: {error}")))
         } else {
             Self::Retry(io::Error::other(error))
         }
@@ -112,7 +128,8 @@ impl Drop for Work<'_> {
 
 impl<'a> Managed<'a> {
     pub(crate) fn new(
-        config: ManagementConfig,
+        client: Client,
+        lease: watch::Sender<Lease>,
         environment: String,
         state: &Path,
         core: &'a Core,
@@ -120,7 +137,8 @@ impl<'a> Managed<'a> {
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
         Self {
-            client: Client::new(config.url).with_token(config.token),
+            client,
+            lease,
             instance_id: uuid::Uuid::new_v4().to_string(),
             environment,
             releases: release::Store::new(state, core.archives().clone()),
@@ -130,7 +148,13 @@ impl<'a> Managed<'a> {
             gateway_config,
             deployments: Mutex::default(),
             sequence: AtomicU64::new(0),
+            stopping: CancellationToken::new(),
         }
+    }
+
+    /// The token that tells this attachment core is shutting down.
+    pub(crate) fn stopping(&self) -> CancellationToken {
+        self.stopping.clone()
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
@@ -173,6 +197,10 @@ impl<'a> Managed<'a> {
                 Ok(()) => tracing::warn!("management ended the attach"),
                 Err(Interrupted::Retry(error)) => tracing::warn!(%error, "management attach interrupted"),
                 Err(Interrupted::Fatal(error)) => return error,
+                Err(Interrupted::Fenced(error)) => {
+                    self.lease.send_replace(Lease::Superseded);
+                    return error;
+                }
             }
             tokio::time::sleep(REATTACH).await;
         }
@@ -192,6 +220,7 @@ impl<'a> Managed<'a> {
         let (mut latest, mut applied, mut work) = (None::<v1::AttachResponse>, None, None::<Work>);
         loop {
             if work.is_none()
+                && !self.stopping.is_cancelled()
                 && let Some(desired) = latest.as_ref().filter(|desired| applied != Some(desired.revision))
             {
                 work = Some(self.start(desired.clone()));
@@ -207,6 +236,7 @@ impl<'a> Managed<'a> {
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
+                    self.lease.send_replace(Lease::Held(desired.lease));
                     lock(&self.deployments).desired = Some(desired.deployment_id.clone());
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
@@ -233,7 +263,7 @@ impl<'a> Managed<'a> {
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
         lock(&self.deployments).loading = Some(desired.deployment_id.clone());
-        let cancel = CancellationToken::new();
+        let cancel = self.stopping.child_token();
         Work {
             revision: desired.revision,
             deployment: desired.deployment_id.clone(),
@@ -319,14 +349,20 @@ impl<'a> Managed<'a> {
         Ok(true)
     }
 
-    /// Sends later player connections to `deployment`, starting the gateway for the first one.
+    /// Sends later player connections to `deployment`, starting the gateway for the first one unless core is stopping.
     async fn route(&self, deployment: &str) -> io::Result<()> {
         let mut target = self.core.target()?;
         target.deployment = deployment.into();
         if let Some(gateway) = self.gateway.get() {
             gateway.retarget(target)?;
         } else if let Some(config) = &self.gateway_config {
-            _ = self.gateway.set(Gateway::start(config.clone(), target).await?);
+            tokio::select! {
+                biased;
+                () = self.stopping.cancelled() => {}
+                started = Gateway::start(config.clone(), target) => {
+                    _ = self.gateway.set(started?);
+                }
+            }
         }
         lock(&self.deployments).serving = Some(deployment.into());
         Ok(())

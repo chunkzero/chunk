@@ -383,6 +383,20 @@ impl Core {
         self.control.as_ref().is_some_and(|control| control.task.is_finished())
     }
 
+    /// Stops the machine of every host a launcher started, retrying until each stop is confirmed or `bound` passed, and
+    /// returns whether all were. Control admits nothing afterwards.
+    pub(crate) async fn stop_machines(&self, bound: Duration) -> bool {
+        let (Some(runner), Ok(control)) = (&self.runner, self.control()) else { return true };
+        let stopping = async {
+            // Control stops the hosts it knows, and the runner the machines only launch records name.
+            while let Err(error) = control.shutdown().await.and(runner.shutdown().await) {
+                tracing::warn!(%error, "machine stop unconfirmed; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        };
+        tokio::time::timeout(bound, stopping).await.is_ok()
+    }
+
     /// Stops every JVM, then control, retrying until each JVM has confirmed its exit, however long that takes. The
     /// host and backend stay until then. `on_wait` runs once, when a first attempt fails.
     /// # Errors

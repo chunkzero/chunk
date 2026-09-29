@@ -15,8 +15,15 @@ pub use managed::ManagementConfig;
 pub use services::{Service, Services};
 
 use chunk_service::{optional, required};
-use std::{io, sync::OnceLock, time::Duration};
-use tokio::{sync::oneshot, task::JoinHandle};
+use std::{
+    io,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 const STARTUP: Duration = Duration::from_secs(30);
@@ -87,30 +94,42 @@ impl Config {
 }
 
 /// Runs the configured services until `stop` or until one of them stops. With core, the gateway stops before core;
-/// under management, the gateway starts with the first deployment, and a core that management fences stops. The
-/// gateway alone follows core's current deployment and stops once core revokes its credential.
+/// under management, the gateway starts with the first deployment, JVMs run on machines management provides, and a
+/// core that management fences stops. The gateway alone follows core's current deployment and stops once core revokes
+/// its credential.
 /// # Errors
 /// Reports startup errors, a service that stopped on its own, a fenced core, a gateway credential core rejects, and
 /// shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     match config {
-        Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop).await,
+        Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop, RELEASE_TIMEOUT).await,
         Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop, |_| {}).await,
     }
 }
 
+/// With management, machine stops still unconfirmed `release_bound` into shutdown are left to management.
 async fn run_core(
     config: CoreConfig,
     gateway_config: Option<GatewayConfig>,
     management: Option<ManagementConfig>,
     stop: CancellationToken,
+    release_bound: Duration,
 ) -> io::Result<()> {
     let environment = config.environment.clone();
     let state = config.state.clone();
-    let core = Core::start(config, || {}).await?;
+    let management = management.map(|management| {
+        let (client, lease) = (management.client(), watch::Sender::new(managed::Lease::Waiting));
+        let launcher = Arc::new(managed::ManagementLauncher::new(client.clone(), lease.subscribe()));
+        (client, lease, launcher)
+    });
+    let launcher = management.as_ref().map(|(_, _, launcher)| launcher.clone());
+    let core = match &launcher {
+        Some(launcher) => Core::start_with_launcher(config, RunnerConfig::new(launcher.clone())).await?,
+        None => Core::start(config, || {}).await?,
+    };
     let gateway = OnceLock::new();
-    let managed = if let Some(management) = management {
-        Some(managed::Managed::new(management, environment, &state, &core, &gateway, gateway_config))
+    let managed = if let Some((client, lease, _)) = management {
+        Some(managed::Managed::new(client, lease, environment, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {
             let started = match core.target() {
@@ -129,6 +148,7 @@ async fn run_core(
         }
         None
     };
+    let stopping = managed.as_ref().map(managed::Managed::stopping).unwrap_or_default();
     tracing::info!("environment ready");
     let failed = async {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -142,17 +162,45 @@ async fn run_core(
             }
         }
     };
-    let managed = async {
+    let mut managed = Box::pin(async {
         match managed {
             Some(managed) => managed.run().await,
             None => std::future::pending().await,
         }
-    };
+    });
+    let mut attached = true;
     let failure = tokio::select! {
         () = stop.cancelled() => Ok(()),
         failure = failed => Err(io::Error::other(failure)),
-        error = managed => Err(error),
+        error = &mut managed => {
+            attached = false;
+            Err(error)
+        }
     };
+    // Machines stop while the attach keeps the lease their releases carry current, though it activates nothing more and
+    // starts no gateway. Management releases the machines of a core it superseded, so once `release_bound` passes the
+    // rest are left to it.
+    if let Some(launcher) = &launcher {
+        stopping.cancel();
+        if let Some(gateway) = gateway.get() {
+            gateway.close();
+        }
+        let machines = core.stop_machines(release_bound);
+        tokio::pin!(machines);
+        let stopped = loop {
+            tokio::select! {
+                stopped = &mut machines => break stopped,
+                error = &mut managed, if attached => {
+                    tracing::warn!(%error, "management attach ended during shutdown");
+                    attached = false;
+                }
+            }
+        };
+        if !stopped {
+            launcher.abandon();
+        }
+    }
+    drop(managed);
     let mut result = match gateway.into_inner() {
         Some(gateway) => gateway.stop().await.inspect_err(|error| tracing::error!(%error, "gateway shutdown failed")),
         None => Ok(()),

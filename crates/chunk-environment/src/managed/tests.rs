@@ -1,5 +1,5 @@
 use super::release;
-use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
+use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
@@ -38,6 +38,7 @@ struct Management {
     /// ACTIVE reports for this deployment are refused as unavailable, notifying `refusal`.
     refused: Mutex<Option<String>>,
     refusal: Notify,
+    capacity: Mutex<launcher::Capacities>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -175,6 +176,7 @@ async fn handle(
                 None => response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap(),
             }
         }
+        _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body).await,
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -306,6 +308,7 @@ impl Harness {
             stalled: Notify::new(),
             refused: Mutex::default(),
             refusal: Notify::new(),
+            capacity: Mutex::default(),
         });
         let url = serve(management.clone()).await;
         Self { directory, management, url, reported, release: (release_id, fs::read(&archive).unwrap()) }
@@ -380,13 +383,19 @@ impl Harness {
     }
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let config = Config::Core {
-            core: Box::new(self.core()),
-            gateway: Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
-            management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
-        };
+        self.start_bounded(crate::RELEASE_TIMEOUT)
+    }
+
+    /// Runs core, which leaves the machine stops still unconfirmed `release_bound` into shutdown to management.
+    fn start_bounded(
+        &self,
+        release_bound: Duration,
+    ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
+        let gateway = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
+        let management = ManagementConfig { url: self.url.clone(), token: "secret".into() };
         let stop = CancellationToken::new();
-        (stop.clone(), tokio::spawn(crate::run(config, stop)))
+        let running = crate::run_core(self.core(), Some(gateway), Some(management), stop.clone(), release_bound);
+        (stop, tokio::spawn(running))
     }
 
     /// The next report, which must be under the latest lease.
@@ -613,4 +622,5 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
     assert_eq!(restart().await, (None, None));
 }
 
+mod launcher;
 mod runner_image;
