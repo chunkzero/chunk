@@ -2,6 +2,7 @@
 //! release, and supervises the JVM until it exits.
 
 mod address;
+mod aot;
 mod cache;
 mod config;
 mod fetch;
@@ -9,7 +10,7 @@ mod launch;
 mod memory;
 mod supervise;
 
-use chunk_proto::sync::v1::JvmLaunch;
+use chunk_proto::sync::v1::{JvmLaunch, jvm_launch::Aot};
 use config::Config;
 use rustix::process::Signal;
 use std::fmt::Display;
@@ -77,13 +78,19 @@ fn signals() -> std::io::Result<mpsc::UnboundedReceiver<Signal>> {
 }
 
 /// Fetches and starts the release core names for this host, and returns the JVM's exit code. SIGTERM or SIGINT before
-/// the JVM starts stops the runner cleanly.
+/// the JVM starts stops the runner cleanly. A JVM that recorded its run makes its AOT cache once it exits.
 pub(crate) async fn run(config: Config, mut signals: mpsc::UnboundedReceiver<Signal>) -> Result<i32, Failure> {
+    let core = fetch::Core::new(&config)?;
+    let boot = uuid::Uuid::new_v4().to_string();
     let mut jvm = tokio::select! {
-        jvm = prepare(&config) => jvm?,
+        jvm = prepare(&config, &core, &boot) => jvm?,
         () = stopped(&mut signals) => return Ok(0),
     };
-    supervise::run(&mut jvm.command, &mut signals, config.stop_grace).await
+    let exit = supervise::run(&mut jvm.command, &mut signals, config.stop_grace).await;
+    if let aot::Plan::Record(directory) = &jvm.aot {
+        aot::finish(&core, &boot, &jvm, directory.path(), matches!(exit, Ok(0)), &mut signals).await;
+    }
+    exit
 }
 
 /// The first SIGTERM or SIGINT.
@@ -97,16 +104,30 @@ async fn stopped(signals: &mut mpsc::UnboundedReceiver<Signal>) {
     }
 }
 
-async fn prepare(config: &Config) -> Result<launch::Jvm, Failure> {
-    let core = fetch::Core::new(config)?;
+/// Launches this host's boot `boot`. A failure once core asked for an AOT cache recording tells core no cache comes.
+async fn prepare(config: &Config, core: &fetch::Core, boot: &str) -> Result<launch::Jvm, Failure> {
     let player_address = match config.player_address {
         Some(address) => address,
         None => address::detect(config).await?,
     };
     let cache = cache::Cache::open(&config.cache)?;
-    let boot = uuid::Uuid::new_v4().to_string();
-    let launch = core.launch(&boot).await?;
-    cross_check(config, &launch)?;
+    let launch = core.launch(boot, &launch::runtime(&config.java_home)).await?;
+    let prepared = install(config, core, boot, &launch, &cache, player_address).await;
+    if prepared.is_err() && matches!(launch.aot, Some(Aot::Record(_))) {
+        aot::abandon(core, boot).await;
+    }
+    prepared
+}
+
+async fn install(
+    config: &Config,
+    core: &fetch::Core,
+    boot: &str,
+    launch: &JvmLaunch,
+    cache: &cache::Cache,
+    player_address: std::net::IpAddr,
+) -> Result<launch::Jvm, Failure> {
+    cross_check(config, launch)?;
     tracing::info!(host = %config.host, release = %launch.release_id, app = %launch.app, profile = %launch.profile, "core named the launch");
     let directory = cache.directory(&launch.release_id)?;
     let release = if let Some(release) = cache::cached(&directory, &launch.release_id)? {
@@ -114,10 +135,11 @@ async fn prepare(config: &Config) -> Result<launch::Jvm, Failure> {
     } else {
         tracing::info!(size = launch.archive_size, "downloading the release archive");
         let mut staging = cache.staging()?;
-        core.download(&boot, &launch, staging.as_file_mut()).await?;
-        cache::install(staging, &launch, &directory).await?
+        core.download(boot, launch, staging.as_file_mut()).await?;
+        cache::install(staging, launch, &directory).await?
     };
-    launch::prepare(config, &launch, &release, &directory, player_address)
+    let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root).await?;
+    launch::prepare(config, launch, &release, &directory, player_address, aot)
 }
 
 /// Rejects a launch that disagrees with what the machine's environment expects.

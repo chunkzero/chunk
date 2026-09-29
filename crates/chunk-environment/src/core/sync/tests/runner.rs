@@ -1,17 +1,22 @@
-//! A remote runner's `chunk:launch` and `chunk:archive`, and the JVM machine credential it and its JVM present.
+//! A remote runner's `chunk:launch`, `chunk:archive` and AOT cache calls, and the JVM machine credential it and its JVM
+//! present.
 
 mod host;
 
 use super::{jvm::registration, *};
 use crate::core::ReleaseArchive;
 use chunk_control::{Launch, MachineKind, Progress, Registration, RuntimeConnection};
-use chunk_proto::sync::v1::{JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, JvmRegistered, JvmRegistration};
+use chunk_proto::sync::v1::{
+    JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, JvmRegistered,
+    JvmRegistration, jvm_launch::Aot,
+};
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
 const HOST: &str = "runner-1";
 const RELEASE: &str = "release-1";
 const CHUNK: usize = 4 * 1024 * 1024 - 1024;
+const RUNTIME: &str = "Eclipse Adoptium 25.0.1+8-LTS x86_64";
 
 /// Runs `HOST` remotely, whose JVM registers with its machine credential. `JVM` is `host-1`'s process credential.
 #[derive(Default)]
@@ -87,12 +92,53 @@ impl Fixture {
     }
 
     async fn launch(&self, credential: &str, boot: &str) -> CallResponse {
-        self.runner_call(credential, "chunk:launch", &JvmBoot { boot: boot.into() }).await
+        self.runner_call(credential, "chunk:launch", &JvmBoot { boot: boot.into(), ..JvmBoot::default() }).await
     }
 
     async fn read(&self, credential: &str, boot: &str, offset: u64) -> CallResponse {
         self.runner_call(credential, "chunk:archive", &JvmArchiveRead { boot: boot.into(), offset }).await
     }
+
+    /// `host`'s machine credential, once core launches `RELEASE`'s app on it too.
+    fn another_host(&self, host: &str) -> String {
+        self.control.record_launch(host, Launch { process_id: format!("{host}-process"), ..launch() }).unwrap();
+        Issuer::new("test", None, &self.cli).machine(MachineKind::Jvm, host)
+    }
+
+    /// The AOT cache plan core gives the runner booted as `boot` with `RUNTIME`.
+    async fn plan(&self, credential: &str, boot: &str) -> Option<Aot> {
+        let arguments = JvmBoot { boot: boot.into(), runtime: RUNTIME.into() };
+        result::<JvmLaunch>(&self.runner_call(credential, "chunk:launch", &arguments).await).aot
+    }
+
+    /// Uploads `cache` as `boot`, declaring `declared` as its size and digest, in chunks of `chunk` bytes, returning
+    /// each response.
+    async fn upload(
+        &self,
+        credential: &str,
+        boot: &str,
+        cache: &[u8],
+        declared: (u64, &str),
+        chunk: usize,
+    ) -> Vec<CallResponse> {
+        let mut responses = Vec::new();
+        for (index, data) in cache.chunks(chunk).enumerate() {
+            let write = JvmAotWrite {
+                boot: boot.into(),
+                offset: u64::try_from(index * chunk).unwrap(),
+                data: data.to_vec(),
+                size: declared.0,
+                sha256: declared.1.into(),
+                abandon: false,
+            };
+            responses.push(self.runner_call(credential, "chunk:aot-write", &write).await);
+        }
+        responses
+    }
+}
+
+fn written(response: &CallResponse) -> bool {
+    matches!(&response.outcome, Some(Outcome::Result(result)) if result.is_empty())
 }
 
 fn result<T: Message + Default>(response: &CallResponse) -> T {
@@ -115,6 +161,7 @@ async fn a_runner_boots_its_host_once_and_downloads_the_bound_release() {
         profile: "small".into(),
         process_id: "process-1".into(),
         generation: 1,
+        aot: None,
     };
     assert_eq!(result::<JvmLaunch>(&launched), expected);
     // A retry after a lost response gets the same launch; a machine that booted again is refused.
@@ -233,5 +280,66 @@ async fn a_jvm_machine_credential_registers_and_follows_its_topic_until_revoked(
     fixture.control.revoke_machine(HOST, MachineKind::Jvm).unwrap();
     assert_eq!(next(&mut updates).await.error.map(|error| error.code()), Some(Code::Stopped));
     drop((foreign, updates));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_host_records_each_aot_cache_and_later_hosts_use_it_once_it_checks_out() {
+    let (fixture, credential, _) = runner().await;
+    let cache: Vec<u8> = (0..2500).map(|index| u8::try_from(index % 251).unwrap()).collect();
+    let (size, sha256) = (u64::try_from(cache.len()).unwrap(), auth::hex(&Sha256::digest(&cache)));
+    let record = Some(Aot::Record(JvmAotRecord {}));
+    assert_eq!(fixture.plan(&credential, "boot-1").await, record);
+    // A retry after a lost response records again; another host of the same release, app and runtime doesn't.
+    assert_eq!(fixture.plan(&credential, "boot-1").await, record);
+    let other = fixture.another_host("runner-2");
+    assert_eq!(fixture.plan(&other, "boot-2").await, None);
+    // Only the recording host's bound boot writes.
+    for (credential, boot) in [(&other, "boot-2"), (&credential, "boot-2")] {
+        let responses = fixture.upload(credential, boot, &cache, (size, &sha256), 1000).await;
+        assert_eq!(code(&responses[0]), Code::Denied);
+    }
+
+    // A cache that differs from its digest isn't installed, and ends the recording for good.
+    let responses = fixture.upload(&credential, "boot-1", &cache, (size, &"0".repeat(64)), 1000).await;
+    assert!(written(&responses[0]) && written(&responses[1]));
+    assert_eq!(code(&responses[2]), Code::Invalid);
+    assert_eq!(code(&fixture.upload(&credential, "boot-1", &cache, (size, &sha256), 1000).await[0]), Code::Denied);
+    assert_eq!(fixture.plan(&credential, "boot-1").await, None);
+    // The next host to launch records instead, and one over the size cap ends its recording too.
+    let third = fixture.another_host("runner-3");
+    assert_eq!(fixture.plan(&third, "boot-3").await, record);
+    let oversized = fixture.upload(&third, "boot-3", &cache, (512 * 1024 * 1024 + 1, &sha256), 1000).await;
+    assert_eq!(code(&oversized[0]), Code::Invalid);
+
+    let fourth = fixture.another_host("runner-4");
+    assert_eq!(fixture.plan(&fourth, "boot-4").await, record);
+    let (first, rest) = cache.split_at(1000);
+    assert!(written(&fixture.upload(&fourth, "boot-4", first, (size, &sha256), 1000).await[0]));
+    // A repeat of the last chunk changes nothing.
+    assert!(written(&fixture.upload(&fourth, "boot-4", first, (size, &sha256), 1000).await[0]));
+    let rest = JvmAotWrite {
+        boot: "boot-4".into(),
+        offset: 1000,
+        data: rest.to_vec(),
+        size,
+        sha256: sha256.clone(),
+        abandon: false,
+    };
+    assert!(written(&fixture.runner_call(&fourth, "chunk:aot-write", &rest).await));
+    let installed = fixture.directory.path().join("aot").join(RELEASE).join("bridge");
+    let installed = installed.join(auth::hex(&Sha256::digest(RUNTIME)));
+    assert_eq!(std::fs::read(installed).unwrap(), cache);
+
+    // Now it exists, a host that launches uses it, and reads it as it reads the archive.
+    let fifth = fixture.another_host("runner-5");
+    assert_eq!(fixture.plan(&fifth, "boot-5").await, Some(Aot::Use(JvmAotUse { size, sha256 })));
+    let read = |credential, boot| {
+        let read = JvmArchiveRead { boot: String::from(boot), offset: 0 };
+        let fixture = &fixture;
+        async move { fixture.runner_call(credential, "chunk:aot-read", &read).await }
+    };
+    assert_eq!(result::<JvmArchiveChunk>(&read(&fifth, "boot-5").await).data, cache);
+    assert_eq!(code(&read(&other, "boot-2").await), Code::Contract);
     fixture.stop().await;
 }

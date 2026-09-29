@@ -209,6 +209,8 @@ struct Fixture {
     gateways: Arc<Gateways>,
     /// The release archives core keeps.
     archives: Arc<super::super::Archives>,
+    /// The AOT caches core keeps, under `aot` in `directory`.
+    aot: Arc<super::super::AotCaches>,
 }
 
 impl Fixture {
@@ -233,6 +235,7 @@ impl Fixture {
         let gateways = Arc::new(Gateways::default());
         let gateway = gateways.mint("proxy");
         let archives = Arc::new(super::super::Archives::default());
+        let aot = Arc::new(super::super::AotCaches::new(directory.path().join("aot")));
         let config = chunk_control::server::Config {
             state: directory.path().join("control"),
             system: backend.system(),
@@ -246,6 +249,7 @@ impl Fixture {
                 backend.clone(),
                 gateways.clone(),
                 archives.clone(),
+                aot.clone(),
                 "test".into(),
                 None,
                 Some(PRIVATE),
@@ -269,6 +273,7 @@ impl Fixture {
             gateway,
             gateways,
             archives,
+            aot,
         }
     }
 

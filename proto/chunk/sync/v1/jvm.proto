@@ -222,10 +222,23 @@ message JvmHealth {
 //   boot may read. An offset at or past the archive's end is INVALID. A host reads one chunk at a time, and a read
 //   while another of its reads runs gets OVERLOADED. The runner checks the whole archive against JvmLaunch's size and
 //   digest before unpacking it.
+// - `chunk:aot-read` takes JvmArchiveRead and returns JvmArchiveChunk like `chunk:archive`, but reads the AOT cache
+//   JvmLaunch's `use` names. It shares `chunk:archive`'s one-read-at-a-time limit. A host core offered no cache, or
+//   whose cache core no longer keeps, gets CONTRACT. The runner checks the whole cache against `use`'s size and digest
+//   before passing it to Java, and runs without it if anything fails.
+// - `chunk:aot-write` takes JvmAotWrite and returns nothing: a chunk of the AOT cache a host core told to `record`
+//   made, which only its bound boot may write, once. Chunks arrive in order, one at a time; a repeat of the last one
+//   changes nothing, and a chunk while another runs gets OVERLOADED. Core installs the cache once the last chunk
+//   matches the declared size and digest. Any other chunk fails with INVALID, and ends the recording as `abandon`
+//   does. Once the recording ended, or for a host core didn't tell to record, it fails with DENIED.
 
 // Arguments of `chunk:launch` and the runner's identity: a random ID the runner makes up once per boot, 1 to 128 bytes.
 message JvmBoot {
   string boot = 1;
+  // The Java runtime the runner starts JVMs with, which an AOT cache must match, in at most 256 bytes. The runner
+  // takes it from `$JAVA_HOME/release`: its IMPLEMENTOR, JAVA_RUNTIME_VERSION and OS_ARCH. Core treats it as opaque,
+  // and only as part of the AOT cache's key; empty means no AOT cache.
+  string runtime = 2;
 }
 
 // What a host runs. The runner starts the JVM with these values.
@@ -242,7 +255,26 @@ message JvmLaunch {
   // The process ID and generation the JVM registers with.
   string process_id = 7;
   uint64 generation = 8;
+  // What the runner does about the JVM's AOT cache, kept per release, app and `JvmBoot.runtime`. Without either, it
+  // runs the JVM without one.
+  oneof aot {
+    // Fetch the cache with `chunk:aot-read` and start the JVM with it.
+    JvmAotUse use = 9;
+    // No cache exists yet, and this host makes it: the runner records the JVM's run, creates the cache once the JVM
+    // exits cleanly, and uploads it with `chunk:aot-write`. Core tells one host per cache at a time, and holds that
+    // host's release until its upload ends, for up to 90 seconds.
+    JvmAotRecord record = 10;
+  }
 }
+
+// The AOT cache core keeps for a host's release, app and runtime: its size and SHA-256 digest in lowercase hex.
+message JvmAotUse {
+  uint64 size = 1;
+  string sha256 = 2;
+}
+
+// Core asks the runner to make the AOT cache.
+message JvmAotRecord {}
 
 // Arguments of `chunk:archive`.
 message JvmArchiveRead {
@@ -255,4 +287,20 @@ message JvmArchiveRead {
 // The result of `chunk:archive`: the archive's bytes from the requested offset, at most 4 MiB less 1 KiB.
 message JvmArchiveChunk {
   bytes data = 1;
+}
+
+// Arguments of `chunk:aot-write`.
+message JvmAotWrite {
+  // The boot bound to the host.
+  string boot = 1;
+  // Where `data` starts in the cache: the bytes written so far.
+  uint64 offset = 2;
+  // At most 1 MiB less 1 KiB of the cache.
+  bytes data = 3;
+  // The whole cache's size, at most 512 MiB, and SHA-256 digest in lowercase hex, the same in every chunk.
+  uint64 size = 4;
+  string sha256 = 5;
+  // The runner made no cache, as when the JVM or Java's create step failed: core ends the recording, and takes no
+  // other field but `boot`.
+  bool abandon = 6;
 }

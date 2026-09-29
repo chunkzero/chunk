@@ -1,18 +1,25 @@
-//! Calls to core: what this host runs, and that release's archive.
+//! Calls to core: what this host runs, that release's archive, and the app's AOT cache.
 
 use crate::{Failure, config::Config};
 use chunk_proto::sync::v1::{
-    CallRequest, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, call_response::Outcome, core_client::CoreClient,
-    error::Code,
+    CallRequest, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, call_response::Outcome,
+    core_client::CoreClient, error::Code,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
-use std::{fs::File, io::Write, time::Duration};
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    path::Path,
+    time::Duration,
+};
 use tokio::time::{Instant, sleep, timeout_at};
 use tonic::{metadata::MetadataValue, transport::Channel};
 
 const FIRST_BACKOFF: Duration = Duration::from_millis(200);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// The most one AOT cache chunk carries, leaving room for its call's framing under core's 1 MiB argument limit.
+const UPLOAD_CHUNK: usize = 1024 * 1024 - 1024;
 
 /// Why one attempt failed.
 pub(crate) enum Attempt {
@@ -66,37 +73,79 @@ impl Core {
         Ok(Self { client, bearer, retry: config.retry })
     }
 
-    /// Binds this host to `boot` and returns what it runs.
-    pub async fn launch(&self, boot: &str) -> Result<JvmLaunch, Failure> {
-        self.call("chunk:launch", &JvmBoot { boot: boot.into() }).await
+    /// Binds this host to `boot`, running Java `runtime`, and returns what it runs.
+    pub async fn launch(&self, boot: &str, runtime: &str) -> Result<JvmLaunch, Failure> {
+        self.call("chunk:launch", &JvmBoot { boot: boot.into(), runtime: runtime.into() }).await
     }
 
     /// Downloads the archive `launch` names into `file`, checking its size and SHA-256 as it streams.
     pub async fn download(&self, boot: &str, launch: &JvmLaunch, file: &mut File) -> Result<(), Failure> {
-        let size = launch.archive_size;
+        let (size, sha256) = (launch.archive_size, &launch.archive_sha256);
+        self.read_file("chunk:archive", "release archive", boot, (size, sha256), file).await
+    }
+
+    /// Downloads the AOT cache `cache` names into `file`, checking its size and SHA-256 as it streams.
+    pub async fn download_aot(&self, boot: &str, cache: &JvmAotUse, file: &mut File) -> Result<(), Failure> {
+        self.read_file("chunk:aot-read", "AOT cache", boot, (cache.size, &cache.sha256), file).await
+    }
+
+    async fn read_file(
+        &self,
+        method: &str,
+        what: &str,
+        boot: &str,
+        (size, sha256): (u64, &str),
+        file: &mut File,
+    ) -> Result<(), Failure> {
         let mut digest = Sha256::new();
         let mut offset = 0;
         while offset < size {
             let read = JvmArchiveRead { boot: boot.into(), offset };
-            let chunk: JvmArchiveChunk = self.call("chunk:archive", &read).await?;
+            let chunk: JvmArchiveChunk = self.call(method, &read).await?;
             if chunk.data.is_empty() {
-                return Err(Failure::verify(format!("core sent no archive bytes at offset {offset} of {size}")));
+                return Err(Failure::verify(format!("core sent no {what} bytes at offset {offset} of {size}")));
             }
             offset += chunk.data.len() as u64;
             if offset > size {
-                return Err(Failure::verify(format!("the release archive is larger than its declared {size} bytes")));
+                return Err(Failure::verify(format!("the {what} is larger than its declared {size} bytes")));
             }
             digest.update(&chunk.data);
-            file.write_all(&chunk.data).map_err(|error| Failure::io(format!("cannot stage the archive: {error}")))?;
+            file.write_all(&chunk.data).map_err(|error| Failure::io(format!("cannot stage the {what}: {error}")))?;
         }
         let actual = format!("{:x}", digest.finalize());
-        if actual != launch.archive_sha256 {
-            return Err(Failure::verify(format!(
-                "the release archive's SHA-256 is {actual}, not {}",
-                launch.archive_sha256
-            )));
+        if actual != sha256 {
+            return Err(Failure::verify(format!("the {what}'s SHA-256 is {actual}, not {sha256}")));
         }
-        file.sync_all().map_err(|error| Failure::io(format!("cannot stage the archive: {error}")))
+        file.sync_all().map_err(|error| Failure::io(format!("cannot stage the {what}: {error}")))
+    }
+
+    /// Uploads the AOT cache at `path`, which this boot recorded, in order.
+    pub async fn upload_aot(&self, boot: &str, path: &Path) -> Result<(), Failure> {
+        let unreadable = |error: io::Error| Failure::io(format!("cannot read the AOT cache: {error}"));
+        let mut file = File::open(path).map_err(unreadable)?;
+        let size = file.metadata().map_err(unreadable)?.len();
+        let mut digest = Sha256::new();
+        io::copy(&mut file, &mut digest).map_err(unreadable)?;
+        let sha256 = format!("{:x}", digest.finalize());
+        let mut file = File::open(path).map_err(unreadable)?;
+        let mut offset = 0;
+        while offset < size {
+            let mut data = Vec::with_capacity(UPLOAD_CHUNK);
+            (&mut file).take(UPLOAD_CHUNK as u64).read_to_end(&mut data).map_err(unreadable)?;
+            if data.is_empty() {
+                return Err(Failure::io("the AOT cache shrank while it was uploaded"));
+            }
+            let length = data.len() as u64;
+            let write = JvmAotWrite { boot: boot.into(), offset, data, size, sha256: sha256.clone(), abandon: false };
+            self.call::<()>("chunk:aot-write", &write).await?;
+            offset += length;
+        }
+        Ok(())
+    }
+
+    /// Tells core this boot made no AOT cache, so another host may.
+    pub async fn abandon_aot(&self, boot: &str) -> Result<(), Failure> {
+        self.call("chunk:aot-write", &JvmAotWrite { boot: boot.into(), abandon: true, ..JvmAotWrite::default() }).await
     }
 
     async fn call<T: Message + Default>(&self, method: &str, arguments: &impl Message) -> Result<T, Failure> {

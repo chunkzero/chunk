@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{self, BufReader, Read, Seek},
     path::Path,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
@@ -116,7 +117,11 @@ fn extract(reader: impl Read, directory: &Path, limits: &UnpackLimits) -> io::Re
         }
         let path = directory.join(&name);
         fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("release archive path"))?)?;
-        io::copy(&mut entry, &mut fs::File::create_new(path)?)?;
+        let modified = UNIX_EPOCH + Duration::from_secs(entry.header().mtime()?);
+        let mut file = fs::File::create_new(path)?;
+        io::copy(&mut entry, &mut file)?;
+        // The archive's mtime, so every install of a release is alike: a JVM's AOT cache checks its JARs' mtimes.
+        file.set_modified(modified)?;
     }
     if long_name.is_some() {
         return Err(io::Error::other("release archive ends inside an entry"));

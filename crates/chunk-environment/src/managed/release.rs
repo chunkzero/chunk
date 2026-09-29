@@ -26,17 +26,24 @@ const MAX_PROCESSES: u16 = 32;
 
 /// Where loaded releases live: each unpacked at `releases/<id>`, beside the archive it was installed from at
 /// `archives/<id>.tar.gz` and the digest that archive was verified against at `archives/<id>.json`. Core's archive
-/// lookup names the kept archives.
+/// lookup names the kept archives. Remote runners' AOT caches for a release live under `aot/<id>`, and go with it.
 pub(super) struct Store {
     releases: PathBuf,
     archives: PathBuf,
+    aot: PathBuf,
     claims: Claims,
     kept: Arc<Archives>,
 }
 
 impl Store {
     pub(super) fn new(state: &Path, kept: Arc<Archives>) -> Self {
-        Self { releases: state.join("releases"), archives: state.join("archives"), claims: Claims::default(), kept }
+        Self {
+            releases: state.join("releases"),
+            archives: state.join("archives"),
+            aot: state.join("aot"),
+            claims: Claims::default(),
+            kept,
+        }
     }
 }
 
@@ -227,20 +234,22 @@ fn plain(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Removes the downloads and installs a previous run left unfinished: every entry named with a dot.
+/// Removes the downloads, installs and AOT cache uploads a previous run left unfinished: every entry named with a dot.
 pub(super) async fn sweep(store: &Store) -> io::Result<()> {
     let mut unfinished = entries(&store.releases)?;
     unfinished.extend(entries(&store.archives)?);
+    unfinished.extend(entries(&store.aot)?);
     remove(unfinished.into_iter().filter(|path| hidden(path)).collect()).await
 }
 
-/// Renames aside the installs, archives and digest records of the releases neither in `used` nor claimed, returning their new paths.
-/// Core's archive lookup forgets them first.
+/// Renames aside the installs, archives, digest records and AOT caches of the releases neither in `used` nor claimed,
+/// returning their new paths. Core's archive lookup forgets them first.
 pub(super) fn set_aside(store: &Store, mut used: BTreeSet<String>) -> Vec<PathBuf> {
     used.extend(store.claims.used());
     store.kept.retain(|release| used.contains(release));
     let mut paths = entries(&store.releases).unwrap_or_default();
     paths.extend(entries(&store.archives).unwrap_or_default());
+    paths.extend(entries(&store.aot).unwrap_or_default());
     let unused = paths.into_iter().filter(|path| {
         let name = path.file_name().and_then(|name| name.to_str());
         let release = name.map(|name| name.strip_suffix(".tar.gz").or(name.strip_suffix(".json")).unwrap_or(name));

@@ -7,7 +7,7 @@ mod command;
 #[cfg(unix)]
 pub use command::CommandLauncher;
 
-use super::sync::Issuer;
+use super::{AotCaches, aot, sync::Issuer};
 use chunk_control::{
     Control, Error, Host, JvmIdentity, Launch, MachineKind, Progress, Registration, Release, Result, RuntimeConnection,
 };
@@ -125,6 +125,7 @@ struct Attached {
     issuer: Issuer,
     /// Where runners reach core.
     endpoint: String,
+    aot: Arc<AotCaches>,
 }
 
 #[derive(Default)]
@@ -209,8 +210,9 @@ impl RunnerHost {
     }
 
     /// Runs hosts for `control`, whose issuer mints their credentials, telling runners to reach core at `endpoint`.
-    pub fn attach(&self, control: &Arc<Control>, issuer: Issuer, endpoint: String) {
-        let _ = self.core.set(Attached { control: Arc::downgrade(control), issuer, endpoint });
+    /// Their runners keep AOT caches in `aot`.
+    pub fn attach(&self, control: &Arc<Control>, issuer: Issuer, endpoint: String, aot: Arc<AotCaches>) {
+        let _ = self.core.set(Attached { control: Arc::downgrade(control), issuer, endpoint, aot });
     }
 
     fn core(&self) -> Result<(&Attached, Arc<Control>)> {
@@ -454,12 +456,21 @@ impl Host for RunnerHost {
     async fn release(&self, id: &str) -> Result<bool> {
         let control = self.core().ok().map(|(_, control)| control);
         self.fence(id)?;
+        // A host recording its AOT cache uploads it once its JVM exited, and its machine stops without grace, so the
+        // release waits for that upload while the machine credential still holds.
+        let aot = self.core.get().map(|core| core.aot.clone());
+        if let Some(aot) = &aot {
+            aot.settle(id, aot::UPLOAD_GRACE).await;
+        }
         let _turn = self.turn(id).await;
         let revoked =
             control.as_ref().map_or(Err(Error::Unresolved("control stopped")), |control| control.revoke_launch(id));
         // A revocation that didn't commit, as once the store stopped, still stops the machine.
         if !self.stop_machine(id, control.as_deref()).await? {
             return Ok(false);
+        }
+        if let Some(aot) = aot {
+            aot.forget(id);
         }
         revoked?;
         control.map_or(Ok(()), |control| control.remove_launch(id))?;

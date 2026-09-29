@@ -130,7 +130,8 @@ fn runner_host_with(machines: &Arc<Machines>, readiness: Duration, release_timeo
 
 /// Attaches `runner` to `fixture`'s core, which keeps `RELEASE`'s archive.
 fn attach(fixture: &Fixture, runner: &RunnerHost) {
-    runner.attach(&fixture.control, Issuer::new("test", None, &fixture.cli), fixture.network.clone());
+    let issuer = Issuer::new("test", None, &fixture.cli);
+    runner.attach(&fixture.control, issuer, fixture.network.clone(), fixture.aot.clone());
     let path = fixture.directory.path().join("release.tar.gz");
     std::fs::write(&path, b"archive").unwrap();
     let archive = ReleaseArchive { path, sha256: auth::hex(&Sha256::digest(b"archive")), size: 7 };
@@ -284,7 +285,7 @@ async fn release_stops_the_machine_and_revokes_its_credential() {
     assert!(fixture.control.launch(HOST).is_none());
     let message = CallRequest {
         method: "chunk:launch".into(),
-        arguments: JvmBoot { boot: "boot-1".into() }.encode_to_vec(),
+        arguments: JvmBoot { boot: "boot-1".into(), ..JvmBoot::default() }.encode_to_vec(),
         ..CallRequest::default()
     };
     let status = fixture.client.clone().call(authorized(message, &credential)).await.unwrap_err();
@@ -438,5 +439,28 @@ async fn stalled_launcher_calls_time_out_and_the_host_is_still_released() {
         matches!(machines.calls().as_slice(), [Call::Launch { .. }, first, second] if *first == release && *second == release)
     );
     assert!(runner.stopped(HOST));
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recording_hosts_release_waits_for_its_aot_cache_upload() {
+    let (fixture, runner, machines) = start(READINESS).await;
+    ensure(&runner).await;
+    let credential = credential(&fixture);
+    assert_eq!(fixture.plan(&credential, "boot-1").await, Some(Aot::Record(JvmAotRecord {})));
+    let releasing = tokio::spawn({
+        let runner = runner.clone();
+        async move { runner.release(HOST).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!releasing.is_finished());
+    assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }]));
+
+    // The upload that ends the recording lets the release stop the machine.
+    let cache = b"cache";
+    let sha256 = auth::hex(&Sha256::digest(cache));
+    assert!(written(&fixture.upload(&credential, "boot-1", cache, (5, &sha256), 5).await[0]));
+    assert!(settled(releasing).await.unwrap());
+    assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
     fixture.stop().await;
 }

@@ -1,5 +1,5 @@
-//! What a remote runner starts on its host, `chunk:launch`, and that host's release archive, `chunk:archive`. Only the
-//! host's JVM machine credential calls them.
+//! What a remote runner starts on its host, `chunk:launch`, that host's release archive, `chunk:archive`, and its AOT
+//! cache, `chunk:aot-read` and `chunk:aot-write`. Only the host's JVM machine credential calls them.
 
 use super::{
     super::{
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::core::{Archives, ReleaseArchive};
 use chunk_proto::sync::v1::{
-    CallRequest, Error, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, Position, error::Code,
+    CallRequest, Error, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, Position, error::Code,
 };
 use prost::Message;
 use std::{
@@ -29,6 +29,8 @@ const BOOT_BYTES: usize = 128;
 pub(super) enum Method {
     Launch,
     Archive,
+    AotRead,
+    AotWrite,
 }
 
 impl Method {
@@ -36,6 +38,8 @@ impl Method {
         Some(match name {
             "launch" => Self::Launch,
             "archive" => Self::Archive,
+            "aot-read" => Self::AotRead,
+            "aot-write" => Self::AotWrite,
             _ => return None,
         })
     }
@@ -56,14 +60,19 @@ pub(super) async fn call(
     if !request.deployment.is_empty() || request.caller.is_some() || !request.stream.is_empty() {
         return Err(errors::invalid("a runner method takes no deployment, caller or stream"));
     }
+    let bound = |boot: &str| {
+        let launch = service.control.launch(host).filter(|launch| launch.boot.as_deref() == Some(boot));
+        launch.ok_or_else(|| errors::denied("only the boot bound to the host reads or writes its files"))
+    };
     let result = match method {
         Method::Launch => {
-            let JvmBoot { boot } = decode(&request.arguments)?;
+            let JvmBoot { boot, runtime } = decode(&request.arguments)?;
             if boot.is_empty() || boot.len() > BOOT_BYTES {
                 return Err(errors::invalid("a boot ID is 1 to 128 bytes"));
             }
             let launch = service.control.boot_launch(host, &boot).map_err(|failure| errors::control(&failure))?;
             let archive = service.archives.archive(&launch.release)?;
+            let aot = service.aot.plan(host, &boot, &launch.release, &launch.app, &runtime).await;
             JvmLaunch {
                 deployment: launch.deployment,
                 release_id: launch.release,
@@ -73,15 +82,29 @@ pub(super) async fn call(
                 profile: launch.profile,
                 process_id: launch.process_id,
                 generation: launch.generation,
+                aot,
             }
             .encode_to_vec()
         }
         Method::Archive => {
             let read: JvmArchiveRead = decode(&request.arguments)?;
-            let launch = service.control.launch(host).filter(|launch| launch.boot.as_ref() == Some(&read.boot));
-            let launch = launch.ok_or_else(|| errors::denied("only the boot bound to the host reads its archive"))?;
+            let launch = bound(&read.boot)?;
             let archive = service.archives.archive(&launch.release)?;
             JvmArchiveChunk { data: service.archives.read(host, archive, read.offset).await? }.encode_to_vec()
+        }
+        Method::AotRead => {
+            let read: JvmArchiveRead = decode(&request.arguments)?;
+            bound(&read.boot)?;
+            let cache = service.aot.used(host, &read.boot);
+            let cache = cache.ok_or_else(|| errors::error(Code::Contract, "core offered the host no AOT cache"))?;
+            let file = ReleaseArchive { path: cache.path, sha256: cache.sha256, size: cache.size };
+            JvmArchiveChunk { data: service.archives.read(host, file, read.offset).await? }.encode_to_vec()
+        }
+        Method::AotWrite => {
+            let write: JvmAotWrite = decode(&request.arguments)?;
+            bound(&write.boot)?;
+            service.aot.write(host, &write.boot.clone(), write).await?;
+            Vec::new()
         }
     };
     Ok((None, result))
@@ -103,7 +126,8 @@ impl ArchiveReads {
         archive.ok_or_else(|| errors::error(Code::Contract, "core keeps no archive of the host's release"))
     }
 
-    /// The chunk of `archive` at `offset`, read for `host` unless another of its reads is running.
+    /// The chunk of `archive`, or of another file core checked the same way, at `offset`, read for `host` unless
+    /// another of its reads is running.
     async fn read(&self, host: &str, archive: ReleaseArchive, offset: u64) -> Result<Vec<u8>, Error> {
         if offset >= archive.size {
             return Err(errors::invalid("the offset is at or past the archive's end"));
