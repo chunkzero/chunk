@@ -38,6 +38,8 @@ pub(super) struct Observed {
     pub gateway_addresses: Vec<String>,
     pub online_players: u32,
     pub ready_to_suspend: bool,
+    /// The status the gateway last answered for each hostname, which edges answer pings with while core sleeps.
+    pub pings: Vec<v1::PingStatus>,
 }
 
 impl Observed {
@@ -183,7 +185,7 @@ impl Reporter {
                 observe_time: Some(SystemTime::now().into()),
                 gateway_addresses: observed.gateway_addresses,
                 online_players: observed.online_players,
-                pings: Vec::new(),
+                pings: observed.pings,
                 deployment: deployment.or_else(|| sent.progress.as_ref().map(|(_, progress)| progress.clone())),
                 ready_to_suspend: observed.ready_to_suspend,
                 lease: observed.lease,

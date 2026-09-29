@@ -14,74 +14,139 @@ use tokio::{
 const LEGACY_PING: u8 = 0xfe;
 const LEGACY_PING_PAYLOAD: u8 = 0x01;
 const LEGACY_PLUGIN_MESSAGE: u8 = 0xfa;
+/// The channel of a 1.6 ping's plugin message, which carries the hostname.
+const PING_HOST: &str = "MC|PingHost";
 /// Room for a handshake whose server address is at vanilla's 255-character limit.
 const MAX_HANDSHAKE: usize = 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Hello {
-    /// A modern handshake, with its hostname normalised for routing.
-    Handshake {
-        hostname: String,
+    Handshake(Handshake),
+    /// A pre-1.7 server-list ping, with the normalised hostname a 1.6 client names. Older clients name none.
+    LegacyPing {
+        hostname: Option<String>,
     },
-    LegacyPing,
 }
 
-/// Reads until `stream` has sent its handshake, returning it with every byte read, which may run past it. A client
-/// that sent only `FE` or `FE 01` when `within` runs out is a pre-1.6 ping.
-pub(crate) async fn read<S: AsyncRead + Unpin>(stream: &mut S, within: Duration) -> io::Result<(Hello, Vec<u8>)> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Handshake {
+    pub protocol: i32,
+    /// Normalised for routing.
+    pub hostname: String,
+    pub port: u16,
+    pub intent: Intent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Intent {
+    Status,
+    Login,
+    Transfer,
+}
+
+/// What a client opened with.
+pub(crate) struct Opening {
+    pub hello: Hello,
+    /// Every byte read, which may run past the handshake.
+    pub bytes: Vec<u8>,
+    /// How many of `bytes` the handshake took.
+    pub length: usize,
+}
+
+/// Reads until `stream` has sent its handshake. A client that sent only `FE` or `FE 01` when `within` runs out is a
+/// pre-1.6 ping.
+pub(crate) async fn read<S: AsyncRead + Unpin>(stream: &mut S, within: Duration) -> io::Result<Opening> {
     let deadline = Instant::now() + within;
-    let mut buffer = Vec::with_capacity(512);
+    let mut bytes = Vec::with_capacity(512);
     loop {
-        match timeout_at(deadline, stream.read_buf(&mut buffer)).await {
+        match timeout_at(deadline, stream.read_buf(&mut bytes)).await {
             Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(read) => {
                 read?;
             }
-            Err(_) if matches!(buffer[..], [LEGACY_PING] | [LEGACY_PING, LEGACY_PING_PAYLOAD]) => {
-                return Ok((Hello::LegacyPing, buffer));
+            Err(_) if matches!(bytes[..], [LEGACY_PING] | [LEGACY_PING, LEGACY_PING_PAYLOAD]) => {
+                let length = bytes.len();
+                return Ok(Opening { hello: Hello::LegacyPing { hostname: None }, bytes, length });
             }
             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "no handshake in time")),
         }
-        if let Some(hello) = parse(&buffer)? {
-            return Ok((hello, buffer));
+        if let Some((hello, length)) = parse(&bytes)? {
+            return Ok(Opening { hello, bytes, length });
         }
     }
 }
 
-/// What `buffer` opens with, or None while it holds only part of a handshake.
-fn parse(buffer: &[u8]) -> io::Result<Option<Hello>> {
-    if let [LEGACY_PING, LEGACY_PING_PAYLOAD, LEGACY_PLUGIN_MESSAGE, ..] = buffer {
-        return Ok(Some(Hello::LegacyPing));
+/// What `buffer` opens with and its length, or None while it holds only part of it.
+fn parse(buffer: &[u8]) -> io::Result<Option<(Hello, usize)>> {
+    if let [LEGACY_PING, LEGACY_PING_PAYLOAD, LEGACY_PLUGIN_MESSAGE, rest @ ..] = buffer {
+        return Ok(legacy(rest)?.map(|(hostname, length)| (Hello::LegacyPing { hostname }, 3 + length)));
     }
-    let Some(frame) = decode_frame(&mut BytesMut::from(buffer), MAX_HANDSHAKE).map_err(invalid)? else {
+    let mut input = BytesMut::from(buffer);
+    let Some(frame) = decode_frame(&mut input, MAX_HANDSHAKE).map_err(invalid)? else {
         return Ok(None);
     };
-    let hostname = hostname(&frame)?;
-    Ok(Some(Hello::Handshake { hostname }))
+    Ok(Some((Hello::Handshake(handshake(&frame)?), buffer.len() - input.len())))
 }
 
-/// The routing hostname of a whole handshake packet: its ID, protocol version, server address, port and intent, with
-/// nothing after.
-fn hostname(mut packet: &[u8]) -> io::Result<String> {
+/// A whole handshake packet: its ID, protocol version, server address, port and intent, with nothing after.
+fn handshake(mut packet: &[u8]) -> io::Result<Handshake> {
     let input = &mut packet;
     if VarInt::decode(input).map_err(invalid)?.0 != 0 {
         return Err(invalid("the first packet is not a handshake"));
     }
-    VarInt::decode(input).map_err(invalid)?;
+    let protocol = VarInt::decode(input).map_err(invalid)?.0;
     let address = McString::<255>::decode(input).map_err(invalid)?;
-    u16::decode(input).map_err(invalid)?;
-    if !(1..=3).contains(&VarInt::decode(input).map_err(invalid)?.0) {
-        return Err(invalid("an unknown handshake intent"));
-    }
+    let port = u16::decode(input).map_err(invalid)?;
+    let intent = match VarInt::decode(input).map_err(invalid)?.0 {
+        1 => Intent::Status,
+        2 => Intent::Login,
+        3 => Intent::Transfer,
+        _ => return Err(invalid("an unknown handshake intent")),
+    };
     if !input.is_empty() {
         return Err(invalid("trailing bytes in the handshake"));
     }
-    Ok(normalize(address.as_str()))
+    Ok(Handshake { protocol, hostname: normalize(address.as_str()), port, intent })
+}
+
+/// A 1.6 ping's plugin message after its `FA`, as the hostname it names and the message's length, or None while it is
+/// incomplete. A message on another channel, or whose data doesn't parse, names no hostname.
+fn legacy(message: &[u8]) -> io::Result<Option<(Option<String>, usize)>> {
+    let Some(channel_length) = u16_at(message, 0) else { return Ok(None) };
+    let data_at = 2 + 2 * usize::from(channel_length);
+    // Each length is checked as soon as it arrives, before anything it announces is buffered.
+    let data_length = u16_at(message, data_at);
+    let length = data_at + 2 + data_length.map_or(0, usize::from);
+    if 3 + length > MAX_HANDSHAKE {
+        return Err(invalid("a legacy ping beyond the handshake limit"));
+    }
+    if data_length.is_none() {
+        return Ok(None);
+    }
+    let Some(data) = message.get(data_at + 2..length) else { return Ok(None) };
+    let hostname = (utf16(&message[2..data_at]).as_deref() == Some(PING_HOST))
+        .then(|| {
+            // The protocol version, then the hostname and a 4-byte port.
+            let hostname_length = 2 * usize::from(u16_at(data, 1)?);
+            let hostname = utf16(data.get(3..3 + hostname_length)?)?;
+            (data.len() == 3 + hostname_length + 4).then(|| normalize(&hostname))
+        })
+        .flatten();
+    Ok(Some((hostname, length)))
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn utf16(bytes: &[u8]) -> Option<String> {
+    let (units, []) = bytes.as_chunks::<2>() else { return None };
+    String::from_utf16(&units.iter().map(|unit| u16::from_be_bytes(*unit)).collect::<Vec<_>>()).ok()
 }
 
 /// The hostname a handshake's server address routes by: lowercase, without anything from a NUL on (which Forge and
 /// forwarding setups append), a port or a trailing dot.
-fn normalize(address: &str) -> String {
+pub(crate) fn normalize(address: &str) -> String {
     let host = address.split('\0').next().unwrap_or_default();
     let host = match host.rsplit_once(':') {
         Some((name, port)) if !name.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
@@ -114,6 +179,25 @@ mod tests {
         frame
     }
 
+    fn utf16_string(value: &str) -> Vec<u8> {
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let mut bytes = u16::try_from(units.len()).unwrap().to_be_bytes().to_vec();
+        bytes.extend(units.iter().flat_map(|unit| unit.to_be_bytes()));
+        bytes
+    }
+
+    /// A 1.6 ping naming `hostname` on `channel`.
+    fn legacy_ping(channel: &str, hostname: &str) -> Vec<u8> {
+        let mut data = vec![78];
+        data.extend(utf16_string(hostname));
+        data.extend_from_slice(&25565_i32.to_be_bytes());
+        let mut ping = vec![LEGACY_PING, LEGACY_PING_PAYLOAD, LEGACY_PLUGIN_MESSAGE];
+        ping.extend(utf16_string(channel));
+        ping.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
+        ping.extend(data);
+        ping
+    }
+
     #[test]
     fn normalises_hostnames() {
         for (address, hostname) in [
@@ -135,16 +219,18 @@ mod tests {
         let long = format!("{}.example.com", "a".repeat(234));
         let long_handshake = handshake(&long, b"\x63\xdd\x02");
         assert_eq!(long_handshake[..3], [LEGACY_PING, LEGACY_PING_PAYLOAD, 0], "a length prefix like a legacy ping's");
-        for (handshake, hostname) in
-            [(handshake("Play.Example.com.\0", b"\x63\xdd\x02"), "play.example.com"), (long_handshake, &long)]
-        {
+        for (handshake, hostname, intent) in [
+            (handshake("Play.Example.com.\0", b"\x63\xdd\x01"), "play.example.com", Intent::Status),
+            (long_handshake, &long, Intent::Login),
+        ] {
             for end in 0..handshake.len() {
                 assert_eq!(parse(&handshake[..end]).unwrap(), None, "{end} bytes");
             }
-            let expected = Some(Hello::Handshake { hostname: hostname.to_owned() });
-            assert_eq!(parse(&handshake).unwrap(), expected);
+            let expected =
+                Hello::Handshake(Handshake { protocol: 776, hostname: hostname.into(), port: 25565, intent });
+            assert_eq!(parse(&handshake).unwrap(), Some((expected, handshake.len())));
             let pipelined = [&handshake[..], b"\x06\x00\x04Alex"].concat();
-            assert_eq!(parse(&pipelined).unwrap(), expected);
+            assert_eq!(parse(&pipelined).unwrap().unwrap().1, handshake.len());
         }
 
         for (malformed, why) in [
@@ -159,17 +245,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reads_the_hostname_a_1_6_ping_names() {
+        let ping = legacy_ping(PING_HOST, "Play.Example.com.");
+        for end in 0..ping.len() {
+            assert_eq!(parse(&ping[..end]).unwrap(), None, "{end} bytes");
+        }
+        let named = Hello::LegacyPing { hostname: Some("play.example.com".into()) };
+        assert_eq!(parse(&ping).unwrap(), Some((named, ping.len())));
+        let other = legacy_ping("MC|Other", "play.example.com");
+        assert_eq!(parse(&other).unwrap(), Some((Hello::LegacyPing { hostname: None }, other.len())));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_legacy_ping_announcing_more_than_the_limit_before_it_arrives() {
+        let long_data = [&legacy_ping(PING_HOST, "play.example.com")[..3], b"\x00\x00\xff\xff"].concat();
+        for announced in [&b"\xfe\x01\xfa\xff\xff"[..], &long_data] {
+            let (mut client, mut edge) = tokio::io::duplex(64);
+            client.write_all(announced).await.unwrap();
+            let error = read(&mut edge, Duration::from_secs(5)).await.err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{announced:?}");
+        }
+    }
+
     #[tokio::test]
     async fn tells_legacy_pings_from_modern_frames() {
-        assert_eq!(parse(b"\xfe\x01\xfa\x00\x0b").unwrap(), Some(Hello::LegacyPing));
         for (opening, legacy) in [(&b"\xfe"[..], true), (b"\xfe\x01", true), (b"\xfe\x01\x00", false)] {
             let (mut client, mut edge) = tokio::io::duplex(64);
             client.write_all(opening).await.unwrap();
             let read = read(&mut edge, Duration::from_millis(20)).await;
             if legacy {
-                assert_eq!(read.unwrap(), (Hello::LegacyPing, opening.to_vec()));
+                let opened = read.unwrap();
+                assert_eq!((opened.hello, opened.bytes), (Hello::LegacyPing { hostname: None }, opening.to_vec()));
             } else {
-                assert_eq!(read.unwrap_err().kind(), io::ErrorKind::TimedOut);
+                assert_eq!(read.err().unwrap().kind(), io::ErrorKind::TimedOut);
             }
         }
     }

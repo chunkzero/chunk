@@ -18,9 +18,11 @@ pub use server::testing;
 
 #[cfg(not(feature = "mc-26-2"))]
 mod disabled;
+mod reports;
 mod trusted_edges;
 #[cfg(not(feature = "mc-26-2"))]
 pub use disabled::{Proxy, Retarget};
+pub use reports::Reports;
 pub use trusted_edges::TrustedEdges;
 
 use std::{num::NonZeroUsize, time::Duration};

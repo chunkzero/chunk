@@ -3,12 +3,15 @@
 
 Builds the images, brings up deploy/compose, deploys examples/local through management's API and plays it through the
 edge with two offline bots. It then checks that JVM machines ran the runner image and that their capacity was released,
-deletes the environment and takes the bundle down. Cleanup removes only what this run recorded creating, and checks that
+that the idle environment goes to sleep, that the edge answers a ping from the status it reported without waking it,
+and that a login wakes it and gets in. Last, it deletes the environment and takes the bundle down. Cleanup removes only what this run recorded creating, and checks that
 none of it remains, except the build cache: image layers and pulled base images stay for the next run. Runs on one engine
 at a time, fenced by the `chunk-managed-smoke-lock` network. Logs go to a temporary directory, whose path is printed.
 Needs `just toolchain` first, and a compose provider for Podman.
 """
 import argparse
+import asyncio
+import contextlib
 import fcntl
 import hashlib
 import io
@@ -50,12 +53,15 @@ LISTINGS = {
     'network': ('network', 'ls', '-q', '--no-trunc'),
 }
 REMOVALS = {'container': ('rm', '-f', '-v'), 'volume': ('volume', 'rm', '-f'), 'network': ('network', 'rm')}
-# The bots log in offline, which the bundle never allows.
-OVERRIDE = """\
+# Longer than the release step's wait for idle JVMs to be retired, which a sleeping environment would pause instead.
+SUSPEND_AFTER_SECONDS = 300
+# The bots log in offline, which the bundle never allows, and environments sleep, which it leaves off.
+OVERRIDE = f"""\
 services:
   management:
     environment:
       CHUNK_MACHINE_OFFLINE_LOGINS: "1"
+      CHUNK_MACHINE_SUSPEND_AFTER_SECONDS: "{SUSPEND_AFTER_SECONDS}"
 """
 
 
@@ -339,7 +345,16 @@ class Smoke:
         wait_for(self.status, 'a status response through the edge', 120)
 
     def status(self):
-        """Whether the edge routes a status request for the environment's hostname to its backend."""
+        """Whether the edge answers a status request for the environment's hostname with its backend's status."""
+        response = self.status_response('status.json')
+        return bool(response) and response['version']['protocol'] == bot.PROTOCOL and self.from_backend(response)
+
+    @staticmethod
+    def from_backend(response):
+        return 'chunk typed backend' in json.dumps(response)
+
+    def status_response(self, log):
+        """The status the edge answers for the environment's hostname, also written to `log`; None if it answers none."""
         try:
             with socket.create_connection(('127.0.0.1', self.player_port), timeout=5) as sock:
                 packet = (b'\0' + bot.varint(bot.PROTOCOL) + bot.string(self.hostname)
@@ -348,13 +363,19 @@ class Smoke:
                 stream = sock.makefile('rb')
                 frame = stream.read(bot.read_varint(stream))
         except (OSError, EOFError):
-            return False
+            return None
         data = io.BytesIO(frame)
         if bot.read_varint(data) != 0:
-            return False
+            return None
         response = json.loads(data.read(bot.read_varint(data)))
-        (self.logs / 'status.json').write_text(json.dumps(response, indent=2) + '\n')
-        return response['version']['protocol'] == bot.PROTOCOL and 'chunk typed backend' in json.dumps(response)
+        (self.logs / log).write_text(json.dumps(response, indent=2) + '\n')
+        return response
+
+    def environment_state(self):
+        return self.rpc('ProjectService/GetEnvironment', {'environmentId': self.environment})['environment']['state']
+
+    def core_state(self):
+        return [state for _, _, state in self.machines('core')]
 
     def jvm_requests(self):
         return self.sql(f"select request_id, app_id, state from capacity_requests "
@@ -391,6 +412,41 @@ class Smoke:
         wait_for(released, f'JVM capacity {sorted(self.ready)} to be released', 240, interval=5)
         wait_for(lambda: not self.machines('jvm'), 'released JVM machines to be removed', 60)
         step(f'PASS: all {len(self.ready)} READY JVM requests RELEASED and their machines removed')
+
+    def sleep(self):
+        step(f'waiting for the idle environment to sleep after {SUSPEND_AFTER_SECONDS}s')
+        wait_for(lambda: self.environment_state() == 'ENVIRONMENT_STATE_SUSPENDED', 'the environment to sleep',
+                 SUSPEND_AFTER_SECONDS + 180, interval=5)
+        wait_for(lambda: self.core_state() == ['paused'], 'the core machine to be paused', 60)
+        step('PASS: the idle environment sleeps and its core machine is paused')
+
+    def cached_ping(self):
+        response = self.status_response('status-asleep.json')
+        if not response or not self.from_backend(response) or response.get('players', {}).get('online') != 0:
+            raise Failed(f'expected the status the backend reported, with 0 online, got {response}')
+        time.sleep(5)
+        if self.environment_state() != 'ENVIRONMENT_STATE_SUSPENDED' or self.core_state() != ['paused']:
+            raise Failed(f'the ping woke the environment: {self.environment_state()}, core {self.core_state()}')
+        step('PASS: the edge answers a ping from the reported status without waking the environment')
+
+    def wake(self):
+        step('logging in to the sleeping environment through the edge')
+        start = time.monotonic()
+        with (self.logs / 'wake-bot.log').open('w') as out, contextlib.redirect_stdout(out):
+            asyncio.run(self.join('SmokeBotC'))
+        self.record_machines()
+        if self.environment_state() != 'ENVIRONMENT_STATE_RUNNING':
+            raise Failed(f'the environment is {self.environment_state()} after the login got in')
+        step(f'PASS: a login woke the environment and got in within {time.monotonic() - start:.0f}s')
+
+    async def join(self, name):
+        protocol = json.loads((bot.DATA / 'protocol.json').read_text())
+        player = bot.Bot(name, (self.hostname, self.player_port), protocol)
+        try:
+            await player.connect()
+            await player.wait(lambda: player.plays > 0 and player.teleports > 0, 'play and spawn', timeout=180)
+        finally:
+            await player.close()
 
     def delete(self, timeout=180):
         self.rpc('ProjectService/DeleteEnvironment', {'environmentId': self.environment})
@@ -528,6 +584,9 @@ def main():
         step('PASS: deployed through the API; the edge routes the hostname to the backend')
         smoke.timed('bots', smoke.play)
         smoke.timed('release', smoke.release)
+        smoke.timed('sleep', smoke.sleep)
+        smoke.timed('cached ping', smoke.cached_ping)
+        smoke.timed('wake', smoke.wake)
         smoke.timed('delete', smoke.delete)
         step('PASS: environment deleted with its machines')
         passed = True

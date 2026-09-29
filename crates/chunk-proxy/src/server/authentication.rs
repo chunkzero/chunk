@@ -33,6 +33,29 @@ pub(super) struct Authentication {
     offline: bool,
 }
 
+/// A client that failed authentication: once sent the encryption request, it closed or reset the connection, as
+/// offline-mode clients close it, or sent anything but a valid Encryption Response; or the session service didn't vouch
+/// for the name it claimed.
+#[derive(Debug)]
+struct Unauthenticated(String);
+
+impl std::fmt::Display for Unauthenticated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unauthenticated {}
+
+fn unauthenticated(reason: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, Unauthenticated(reason.into()))
+}
+
+/// Whether `error` ended a login because the client failed authentication.
+pub(super) fn failed(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(<dyn std::error::Error + Send + Sync>::is::<Unauthenticated>)
+}
+
 /// An authenticated identity and its connection, after Login Acknowledged.
 pub(super) struct Authenticated<S> {
     pub protocol_version: i32,
@@ -108,9 +131,10 @@ impl Authentication {
                 should_authenticate: true,
             })
             .await?;
-        let response = decode_packet::<EncryptionResponse>(&transport.read_frame(LOGIN_FRAME_LIMIT).await?)
-            .map_err(invalid_data)?;
-        let secret = self.shared_secret(&response, token)?;
+        let secret = self
+            .answer(transport, token)
+            .await
+            .map_err(|error| unauthenticated(format!("no valid answer to the encryption request: {error}")))?;
         transport.enable_encryption(&secret)?;
         let hash = server_hash(&secret, &self.public_key);
         match self.verify(username, &hash).await {
@@ -125,6 +149,17 @@ impl Authentication {
                 Err(error)
             }
         }
+    }
+
+    /// The shared secret from the client's Encryption Response. Every way this fails is the client's doing: closing,
+    /// resetting, or sending anything but a valid response.
+    async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        transport: &mut Transport<S>,
+        token: [u8; 4],
+    ) -> io::Result<Zeroizing<[u8; 16]>> {
+        let frame = transport.read_frame(LOGIN_FRAME_LIMIT).await?;
+        self.shared_secret(&decode_packet::<EncryptionResponse>(&frame).map_err(invalid_data)?, token)
     }
 
     fn shared_secret(&self, response: &EncryptionResponse, token: [u8; 4]) -> io::Result<Zeroizing<[u8; 16]>> {
@@ -153,8 +188,12 @@ impl Authentication {
             .send()
             .await
             .map_err(|_| io::Error::other("session service request failed"))?;
+        // The session service answers a session it can't verify with No Content; other statuses are its own failures.
+        if response.status() == StatusCode::NO_CONTENT {
+            return Err(unauthenticated("session was not verified"));
+        }
         if response.status() != StatusCode::OK {
-            return Err(invalid_data("session was not verified"));
+            return Err(invalid_data("session service failed"));
         }
         if response.content_length().is_some_and(|length| length > PROFILE_LIMIT as u64) {
             return Err(invalid_data("session profile too large"));
@@ -209,7 +248,7 @@ fn parse_profile(bytes: &[u8], username: &str) -> io::Result<LoginSuccess> {
         || profile.id.len() != 32
         || !profile.id.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(invalid_data("session profile identity mismatch"));
+        return Err(unauthenticated("session profile identity mismatch"));
     }
     let mut uuid = [0; 16];
     for (output, pair) in uuid.iter_mut().zip(profile.id.as_bytes().as_chunks::<2>().0) {

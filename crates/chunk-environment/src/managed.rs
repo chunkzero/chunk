@@ -3,6 +3,7 @@
 
 mod activation;
 mod alarm;
+mod failed_auth;
 mod idle;
 mod launcher;
 mod release;
@@ -203,6 +204,7 @@ impl<'a> Managed<'a> {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
             never = self.hand_off_alarms() => match never {},
+            never = self.report_failed_auth() => match never {},
             error = self.reporter.keep_reporting(|| self.current(), |lease| self.superseded(lease)) => self.fenced(error),
         }
     }
@@ -470,7 +472,8 @@ impl<'a> Managed<'a> {
         tracing::debug!("core's status took too long to observe; it isn't ready to suspend");
         self.idle.restart(revision);
         let gateway_addresses = self.reporter.accepted_addresses();
-        status::Observed { lease, revision, gateway_addresses, online_players: 0, ready_to_suspend: false }
+        let pings = self.pings();
+        status::Observed { lease, revision, gateway_addresses, online_players: 0, ready_to_suspend: false, pings }
     }
 
     async fn observe_now(&self, lease: u64, revision: u64) -> status::Observed {
@@ -488,7 +491,14 @@ impl<'a> Managed<'a> {
                     0
                 }
             };
-        status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend }
+        status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend, pings: self.pings() }
+    }
+
+    /// The status the gateway last answered for each hostname.
+    fn pings(&self) -> Vec<v1::PingStatus> {
+        let Some(gateway) = self.gateway.get() else { return Vec::new() };
+        let pings = gateway.reports().pings().into_iter();
+        pings.map(|(hostname, status_json)| v1::PingStatus { hostname, status_json }).collect()
     }
 
     /// Whether management may suspend core under desired `revision`, as the proto's contract has it: no players remain,

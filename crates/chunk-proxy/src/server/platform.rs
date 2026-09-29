@@ -12,7 +12,7 @@ use tonic::{
 };
 
 use super::{claim::Claim, transport::invalid_data};
-use crate::PlatformTarget;
+use crate::{PlatformTarget, Reports};
 
 mod claims;
 mod commands;
@@ -34,27 +34,35 @@ pub(super) struct Platform {
     /// The domain manifest of the target's deployment, read once.
     manifest: Arc<OnceCell<Option<Arc<DomainManifest>>>>,
     sync: Arc<sync::Connection>,
+    /// Where each status answered is kept for core to report.
+    pub reports: Arc<Reports>,
 }
 
 impl Platform {
     pub fn new(target: PlatformTarget) -> io::Result<Self> {
         let sync = sync::Connection::new(&target.core, target.gateway.clone())?;
-        Ok(Self::with(target, Arc::new(sync), tokio_util::task::TaskTracker::new()))
+        Ok(Self::with(target, Arc::new(sync), tokio_util::task::TaskTracker::new(), Arc::default()))
     }
 
-    /// A platform for `target` that keeps this one's core client, claims follower and cleanup tracking, and with them
-    /// its core endpoint and gateway identity.
+    /// A platform for `target` that keeps this one's core client, claims follower, cleanup tracking and reports, and
+    /// with them its core endpoint and gateway identity.
     pub fn retarget(&self, target: PlatformTarget) -> Self {
-        Self::with(target, self.sync.clone(), self.cleanup.clone())
+        Self::with(target, self.sync.clone(), self.cleanup.clone(), self.reports.clone())
     }
 
-    fn with(target: PlatformTarget, sync: Arc<sync::Connection>, cleanup: tokio_util::task::TaskTracker) -> Self {
+    fn with(
+        target: PlatformTarget,
+        sync: Arc<sync::Connection>,
+        cleanup: tokio_util::task::TaskTracker,
+        reports: Arc<Reports>,
+    ) -> Self {
         Self {
             manifest: Arc::default(),
             cleanup,
             hooks: Arc::new(Semaphore::new(64)),
             status_hooks: Arc::new(Semaphore::new(64)),
             sync,
+            reports,
             target,
         }
     }
@@ -170,17 +178,24 @@ impl Platform {
         Ok(())
     }
 
+    /// The status packet for `host`, from the app's hooks. Each one they answer is kept for core to report.
     pub async fn status(&self, host: &str) -> io::Result<Vec<u8>> {
         let result = match self.manifest().await {
             Ok(Some(manifest)) => self.native_status(&manifest, host).await,
             Ok(None) => self.hook("status", &json!({"host": host}), None).await,
             Err(error) => Err(error),
         };
-        let status: Status = result.unwrap_or_else(|error| {
-            tracing::debug!(%error, "status hook unavailable");
-            Status { motd: "Server temporarily unavailable".into(), online: 0, max: 0 }
-        });
-        super::status_packet(&status.motd, status.online, status.max)
+        match result {
+            Ok(Status { motd, online, max }) => {
+                let status = super::status_json(&motd, online, max)?;
+                self.reports.ping(host, &status);
+                super::encode_status(status)
+            }
+            Err(error) => {
+                tracing::debug!(%error, "status hook unavailable");
+                super::encode_status(super::status_json("Server temporarily unavailable", 0, 0)?)
+            }
+        }
     }
 }
 

@@ -4,10 +4,10 @@ pub use remote::RemoteCore;
 pub(crate) use remote::run as run_remote;
 
 use crate::Running;
-use std::{io, net::SocketAddr, num::NonZeroUsize};
+use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-pub use chunk_proxy::{PlatformTarget, TrustedEdges};
+pub use chunk_proxy::{PlatformTarget, Reports, TrustedEdges};
 
 #[derive(Clone)]
 pub struct GatewayConfig {
@@ -40,6 +40,7 @@ pub struct Gateway {
     running: Running,
     retarget: Option<chunk_proxy::Retarget>,
     address: SocketAddr,
+    reports: Arc<Reports>,
 }
 
 impl Gateway {
@@ -60,19 +61,26 @@ impl Gateway {
         .await?;
         let address = proxy.local_addr()?;
         let retarget = proxy.retarget();
+        let reports = proxy.reports();
         let stop = CancellationToken::new();
         let shutdown = stop.clone();
         let task = tokio::spawn(proxy.run(async move {
             shutdown.cancelled().await;
             Ok(())
         }));
-        Ok(Self { running: Running { stop, task }, retarget, address })
+        Ok(Self { running: Running { stop, task }, retarget, address, reports })
     }
 
     /// Where the listener accepts players.
     #[must_use]
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// The statuses the listener answered and the clients that failed authentication at it.
+    #[must_use]
+    pub fn reports(&self) -> &Reports {
+        &self.reports
     }
 
     /// Sends later player connections to `target`.

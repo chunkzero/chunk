@@ -80,4 +80,8 @@ replaces. A report gets five seconds, and one management didn't accept is sent a
 one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to the backend only
 once management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again and retried.
 
+Each report also carries the status the gateway last answered for each hostname, which edges answer server-list pings
+with while the environment sleeps. Every five seconds, core reports the clients that failed authentication at the
+gateway through `ReportFailedAuth`, so management keeps them from waking the environment for a while.
+
 SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.

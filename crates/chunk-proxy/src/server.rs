@@ -35,7 +35,7 @@ use tokio::{
     time::{Instant, sleep_until, timeout},
 };
 
-use crate::{Config, PlatformTarget};
+use crate::{Config, PlatformTarget, Reports};
 
 struct Responses {
     status: Vec<u8>,
@@ -62,6 +62,11 @@ impl Responses {
 
 /// A status response advertising the newest supported version.
 fn status_packet(motd: &str, online: u32, max: u32) -> io::Result<Vec<u8>> {
+    encode_status(status_json(motd, online, max)?)
+}
+
+/// A status advertising the newest supported version, as JSON.
+fn status_json(motd: &str, online: u32, max: u32) -> io::Result<String> {
     let version = SUPPORTED.last().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "no Minecraft version enabled; enable a version feature")
     })?;
@@ -70,8 +75,11 @@ fn status_packet(motd: &str, online: u32, max: u32) -> io::Result<Vec<u8>> {
         "players": { "max": max, "online": online },
         "description": { "text": motd },
     });
-    encode_packet(&StatusResponse { json: McString::new(json.to_string()).map_err(invalid_config)? })
-        .map_err(invalid_config)
+    Ok(json.to_string())
+}
+
+fn encode_status(json: String) -> io::Result<Vec<u8>> {
+    encode_packet(&StatusResponse { json: McString::new(json).map_err(invalid_config)? }).map_err(invalid_config)
 }
 
 fn invalid_config(error: chunk_protocol::Error) -> io::Error {
@@ -85,6 +93,7 @@ pub struct Proxy {
     authentication: Arc<Authentication>,
     limbo_packets: Arc<limbo::Cache>,
     platform: Option<Arc<RwLock<platform::Platform>>>,
+    reports: Arc<Reports>,
 }
 
 /// Replaces the managed platform for later connections; established connections keep theirs.
@@ -119,8 +128,9 @@ impl Proxy {
         if config.compression_threshold.is_some_and(|threshold| threshold > chunk_protocol::MAX_FRAME_SIZE) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "compression threshold exceeds frame limit"));
         }
-        let platform =
-            config.platform.clone().map(platform::Platform::new).transpose()?.map(|p| Arc::new(RwLock::new(p)));
+        let platform = config.platform.clone().map(platform::Platform::new).transpose()?;
+        let reports = platform.as_ref().map_or_else(Arc::default, |platform| platform.reports.clone());
+        let platform = platform.map(|platform| Arc::new(RwLock::new(platform)));
         let responses = Arc::new(Responses::new(&config)?);
         if config.offline_logins {
             tracing::warn!(
@@ -131,7 +141,7 @@ impl Proxy {
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
-        Ok(Self { listener, config, responses, authentication, limbo_packets, platform })
+        Ok(Self { listener, config, responses, authentication, limbo_packets, platform, reports })
     }
 
     /// # Errors
@@ -144,6 +154,12 @@ impl Proxy {
     #[must_use]
     pub fn retarget(&self) -> Option<Retarget> {
         self.platform.clone().map(Retarget)
+    }
+
+    /// The statuses this gateway answered and the clients that failed authentication at it, for core to report.
+    #[must_use]
+    pub fn reports(&self) -> Arc<Reports> {
+        self.reports.clone()
     }
 
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
@@ -215,18 +231,9 @@ impl Proxy {
                     let current = self.retarget();
                     let platform = current.as_ref().map(Retarget::platform);
                     let trusted_edges = self.config.trusted_edges.clone();
+                    let reports = self.reports.clone();
                     connections.spawn(connected.track(async move {
-                        let peer = match timeout(deadline, proxy_header::player_address(&mut stream, peer, &trusted_edges)).await {
-                            Ok(Ok(player)) => player,
-                            Ok(Err(error)) => {
-                                tracing::debug!(%peer, %error, "edge connection closed");
-                                return;
-                            }
-                            Err(_) => {
-                                tracing::debug!(%peer, "edge connection sent no PROXY header in time");
-                                return;
-                            }
-                        };
+                        let Some(peer) = player_address(&mut stream, peer, &trusted_edges, deadline).await else { return };
                         match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
                             Ok(Some(authenticated)) => {
                                 if let Some(current) = current {
@@ -240,7 +247,12 @@ impl Proxy {
                                 }
                             }
                             Ok(None) => {}
-                            Err(error) => tracing::debug!(%peer, %error, "connection closed"),
+                            Err(error) => {
+                                if authentication::failed(&error) {
+                                    reports.failed_auth(peer.ip());
+                                }
+                                tracing::debug!(%peer, %error, "connection closed");
+                            }
                         }
                     }));
                 }
@@ -254,6 +266,27 @@ impl Proxy {
             platform.cleanup.wait().await;
         }
         result
+    }
+}
+
+/// The player's address: the peer's, or the one a trusted edge's PROXY header names. None once an edge connection fails
+/// or sends no header within `deadline`.
+async fn player_address(
+    stream: &mut tokio::net::TcpStream,
+    peer: SocketAddr,
+    trusted_edges: &crate::TrustedEdges,
+    deadline: Duration,
+) -> Option<SocketAddr> {
+    match timeout(deadline, proxy_header::player_address(stream, peer, trusted_edges)).await {
+        Ok(Ok(player)) => Some(player),
+        Ok(Err(error)) => {
+            tracing::debug!(%peer, %error, "edge connection closed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(%peer, "edge connection sent no PROXY header in time");
+            None
+        }
     }
 }
 
