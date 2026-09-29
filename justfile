@@ -116,7 +116,7 @@ compose-check:
 
 # Deploy examples/local to the compose bundle through management and play it through the edge with offline bots.
 managed-smoke *args: toolchain
-    python3 scripts/managed-smoke.py {{args}}
+    python3 scripts/managed-smoke.py {{ args }}
 
 # Build the remote JVM runner image on a Java `java` runtime with podman or docker, tagged `chunk-jvm:<java>`.
 jvm-image java="25":
