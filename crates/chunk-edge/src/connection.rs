@@ -24,9 +24,7 @@ async fn forward(
     routes: &Routes,
     handshake_timeout: Duration,
 ) -> io::Result<()> {
-    let (hello, replay) = timeout(handshake_timeout, handshake::read(&mut client))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no handshake in time"))??;
+    let (hello, replay) = handshake::read(&mut client, handshake_timeout).await?;
     let hostname = match hello {
         Hello::Handshake { hostname } => hostname,
         Hello::LegacyPing => return Err(io::Error::other("a legacy ping, which gateways do not serve")),
@@ -55,4 +53,21 @@ async fn connect(gateways: &[SocketAddr], peer: SocketAddr) -> io::Result<TcpStr
         tracing::warn!(%gateway, error = %failure, "gateway unreachable");
     }
     Err(failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fails_over_to_the_next_gateway() {
+        let refused = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateways = [refused, gateway.local_addr().unwrap()];
+        // An even port starts at the first gateway.
+        let stream = connect(&gateways, "203.0.113.7:51218".parse().unwrap()).await.unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), gateways[1]);
+    }
 }

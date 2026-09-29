@@ -13,6 +13,8 @@ use chunk_management::{
     v1::{Route, WatchRoutesRequest, WatchRoutesResponse},
 };
 
+/// How long management has to start the stream, or to finish refusing it.
+const ESTABLISH: Duration = Duration::from_secs(10);
 /// Management sends a keepalive every 30 s; a stream silent for this long is dead.
 const STALLED: Duration = Duration::from_secs(75);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
@@ -58,7 +60,10 @@ pub(crate) async fn watch(client: Client, routes: Routes) {
 }
 
 async fn follow(client: &Client, routes: &Routes, backoff: &mut Duration) -> io::Result<()> {
-    let mut stream = client.watch_routes(&WatchRoutesRequest {}).await.map_err(io::Error::other)?;
+    let mut stream = tokio::time::timeout(ESTABLISH, client.watch_routes(&WatchRoutesRequest {}))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the route stream did not start"))?
+        .map_err(io::Error::other)?;
     loop {
         let message = tokio::time::timeout(STALLED, stream.message())
             .await
@@ -70,5 +75,21 @@ async fn follow(client: &Client, routes: &Routes, backoff: &mut Duration) -> io:
             tracing::info!(routes = update.routes.len(), "routes loaded");
         }
         routes.apply(update);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn gives_up_on_a_stream_that_never_starts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
+        let _silent = tokio::spawn(async move { listener.accept().await });
+        let error = follow(&client, &Routes::default(), &mut MIN_BACKOFF.clone()).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }
