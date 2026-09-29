@@ -753,7 +753,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
       expect((await env.client.ensureCapacity(capacityRequest(env, "stops"))).capacity).toMatchObject({
         state: CapacityState.FAILED,
-        message: "the JVM machine stopped when its environment was suspended",
+        message: "the JVM machine stopped while its environment was suspended",
       });
       await pass();
       expect(machines.has(name)).toBe(false);
@@ -761,6 +761,41 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     } finally {
       behaviour.suspendStops = false;
     }
+    env.close();
+  });
+
+  test("a JVM machine found stopped while its environment sleeps fails its request, however its suspension ended", async () => {
+    const env = await running();
+    await env.client.ensureCapacity(capacityRequest(env, "cut-short"));
+    await env.client.ensureCapacity(capacityRequest(env, "paused"));
+    await pass();
+    const stopped = nameOf(env.environmentId, "cut-short");
+    const paused = nameOf(env.environmentId, "paused");
+    await env.client.reportStatus({
+      lease: env.lease,
+      sequence: 1n,
+      desiredRevision: env.revision,
+      gatewayAddresses: [`${env.coreName}:25565`],
+      readyToSuspend: true,
+    });
+    // A suspension that stopped the machine, but whose reply never arrived.
+    hooks.suspend = async (name) => {
+      if (name !== stopped) return;
+      await provider.stop(idOf(name));
+      throw new Error("connection reset");
+    };
+    await pass();
+    hooks.suspend = undefined;
+    await pass();
+    expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
+    expect((await env.client.ensureCapacity(capacityRequest(env, "cut-short"))).capacity).toMatchObject({
+      state: CapacityState.FAILED,
+      message: "the JVM machine stopped while its environment was suspended",
+    });
+    expect((await env.client.ensureCapacity(capacityRequest(env, "paused"))).capacity?.state).toBe(CapacityState.READY);
+    await pass();
+    expect(machines.has(stopped)).toBe(false);
+    expect(machines.get(paused)?.machine.state).toBe("suspended");
     env.close();
   });
 
