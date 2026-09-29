@@ -341,3 +341,36 @@ fn error(code: Code, message: impl Into<String>) -> Error {
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_upload_admitted_before_its_host_ends_never_installs() {
+        let directory = tempfile::tempdir().unwrap();
+        let caches = AotCaches::new(directory.path().to_owned());
+        assert!(matches!(caches.plan("host", "boot", "release", "app", "java").await, Some(Aot::Record(_))));
+        let (upload, path) = match lock(&caches.state).hosts.get("host") {
+            Some(Host { path, role: Role::Record(recording), .. }) => (recording.upload.clone(), path.clone()),
+            _ => panic!("expected a recording"),
+        };
+        let data = b"cache".to_vec();
+        let write = JvmAotWrite {
+            boot: "boot".into(),
+            offset: 0,
+            size: data.len() as u64,
+            sha256: hex(&Sha256::digest(&data)),
+            data,
+            abandon: false,
+        };
+        let mut guard = upload.clone().try_lock_owned().unwrap();
+        assert!(append(&mut guard, directory.path(), &write).unwrap());
+
+        caches.end("host");
+
+        assert!(install(&caches.state, "host", &upload, guard, &path).is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0, "the upload's temp file is removed");
+    }
+}

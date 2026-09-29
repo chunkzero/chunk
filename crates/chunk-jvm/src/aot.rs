@@ -22,6 +22,8 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long the upload may take, and telling core that no cache came.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long fetching a cache to use may take in all, well inside the host's readiness deadline.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) enum Plan {
     None,
@@ -43,13 +45,19 @@ impl Plan {
     ) -> Result<Self, Failure> {
         match &launch.aot {
             None => Ok(Self::None),
-            Some(Aot::Use(wanted)) => match fetch(core, boot, launch, cache, wanted).await {
-                Ok(path) => Ok(Self::Use(path)),
-                Err(failure) => {
-                    tracing::warn!(message = failure.message, "cannot fetch the AOT cache; running without it");
-                    Ok(Self::None)
+            Some(Aot::Use(wanted)) => {
+                match tokio::time::timeout(FETCH_TIMEOUT, fetch(core, boot, launch, cache, wanted)).await {
+                    Ok(Ok(path)) => Ok(Self::Use(path)),
+                    Ok(Err(failure)) => {
+                        tracing::warn!(message = failure.message, "cannot fetch the AOT cache; running without it");
+                        Ok(Self::None)
+                    }
+                    Err(_) => {
+                        tracing::warn!("fetching the AOT cache took longer than {FETCH_TIMEOUT:?}; running without it");
+                        Ok(Self::None)
+                    }
                 }
-            },
+            }
             Some(Aot::Record(_)) => {
                 let directory = tempfile::Builder::new().prefix("chunk-aot-").tempdir_in(work_root);
                 let directory =

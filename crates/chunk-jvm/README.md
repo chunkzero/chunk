@@ -17,7 +17,7 @@ what to do about it:
 
 - **Use:** the runner downloads the cache (`chunk:aot-read`), checks its size and SHA-256, keeps it at
   `$CHUNK_CACHE/aot/<release_id>/<app>.aot`, and adds `-XX:AOTCache=<file>`. A kept cache that still matches is used
-  without a download. If the download fails, the JVM runs without a cache.
+  without a download. If the download fails or takes over 20 seconds, the JVM runs without a cache.
 - **Record:** no cache exists yet, and core picked this host to make it. The JVM runs with
   `-XX:AOTMode=record -XX:AOTConfiguration=<file>`, the file in a fresh directory under `/tmp`. Once the JVM exits
   cleanly (0, or on a forwarded SIGTERM or SIGINT), the runner runs Java again with the same flags and JAR plus
