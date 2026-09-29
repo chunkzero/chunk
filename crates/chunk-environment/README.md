@@ -71,8 +71,8 @@ host in control, and no deployment loading or awaiting acceptance. Every gateway
 The log must also be flushed to object storage when it replicates, the wake alarm handed off, and no job due within the
 grace period. Any activity, even work that came and went between two looks, or a new revision such as a wake brings,
 ends it at once and starts the grace period over. A report management didn't accept is sent again within one to four
-seconds until one is.
-Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to the backend only once
-management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again and retried.
+seconds until one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to
+the backend only once management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again
+and retried.
 
 SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.
