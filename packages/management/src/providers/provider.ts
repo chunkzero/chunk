@@ -8,11 +8,16 @@
  *
  * A create can finish after the request it was for was released or its environment deleted, so the reconciler lists
  * the machines and volumes this install owns and destroys those nothing tracks by name.
+ *
+ * The reconciler bounds how long it waits for each call. One it gave up on may still finish later, even while it repeats
+ * that call or makes another for the same machine, so every method must stay correct under that overlap: one name never
+ * holds two machines, and IDs are never reused.
  */
 export interface Provider {
   /**
    * Creates a machine without starting it. A machine that already exists under `spec.name` is returned as it is when
-   * this install created it with the same labels.
+   * this install created it with the same labels. Throws `NoCapacityError`, having created nothing, when there is no
+   * room for it right now; starting a created machine never needs more room.
    */
   create(spec: MachineSpec): Promise<Machine>;
   /**
@@ -78,6 +83,17 @@ export class OwnershipError extends Error {
   constructor(what: string) {
     super(`${what} exists but was not created by this chunk install; refusing to touch it`);
     this.name = "OwnershipError";
+  }
+}
+
+/**
+ * No room for a new machine right now, such as when every host is full. The reconciler retries with backoff, and fails
+ * the request only once there has been no room for a while. The Docker provider never throws it.
+ */
+export class NoCapacityError extends Error {
+  constructor(message = "no capacity for a new machine right now") {
+    super(message);
+    this.name = "NoCapacityError";
   }
 }
 

@@ -1,3 +1,4 @@
+import type { ProviderTimeouts } from "./providers/bounded.ts";
 import type { ArchiveLimits } from "./releases/archive.ts";
 
 export interface Config {
@@ -40,6 +41,12 @@ export interface Machines {
   trustedEdges: string | undefined;
   /** Lets core and gateway machines admit unauthenticated players under any name. Insecure; for smoke tests only. */
   offlineLogins: boolean;
+  /** How many environments the reconciler works on at once. */
+  concurrency: number;
+  /** How long the reconciler waits for each provider call. */
+  timeouts: ProviderTimeouts;
+  /** How long a capacity request retries a provider with no room, or one timing out, before it fails. */
+  capacityRetryMs: number;
 }
 
 /** An S3-compatible bucket; each environment replicates below `<prefix><environment ID>/`. */
@@ -115,6 +122,12 @@ function machinesOf(env: Env, publicUrl: string): Machines | undefined {
     corePort: positive(env, "CHUNK_CORE_PORT", 7070),
     trustedEdges: env.CHUNK_MACHINE_TRUSTED_EDGES || undefined,
     offlineLogins: env.CHUNK_MACHINE_OFFLINE_LOGINS === "1",
+    concurrency: positive(env, "CHUNK_RECONCILE_CONCURRENCY", 8),
+    timeouts: {
+      startMs: positive(env, "CHUNK_PROVIDER_START_TIMEOUT_SECONDS", 120) * 1000,
+      callMs: positive(env, "CHUNK_PROVIDER_TIMEOUT_SECONDS", 60) * 1000,
+    },
+    capacityRetryMs: positive(env, "CHUNK_CAPACITY_RETRY_SECONDS", 300) * 1000,
   };
 }
 

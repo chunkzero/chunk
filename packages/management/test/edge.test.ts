@@ -13,7 +13,16 @@ import { EnvironmentService } from "../src/gen/chunk/management/v1/environment_p
 import { LogService } from "../src/gen/chunk/management/v1/logs_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { fakeProvider } from "./fake-provider.ts";
-import { codeOf, createEnvironment, databaseUrl, deployRelease, type Harness, next, startHarness } from "./harness.ts";
+import {
+  codeOf,
+  createEnvironment,
+  databaseUrl,
+  deployRelease,
+  type Harness,
+  next,
+  reconcilerLimits,
+  startHarness,
+} from "./harness.ts";
 
 describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
   let h: Harness;
@@ -36,6 +45,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
       corePort: 7070,
       trustedEdges: undefined,
       offlineLogins: false,
+      ...reconcilerLimits,
     };
   });
   afterAll(() => h.close());
