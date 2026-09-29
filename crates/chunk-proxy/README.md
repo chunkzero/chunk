@@ -51,8 +51,8 @@ Mojang, not the client's claimed UUID. Compression defaults to 256 bytes; librar
 `Config::compression_threshold` to `None` to disable it. Ctrl-C or SIGTERM closes the listener and active connections.
 Set `RUST_LOG=debug` to log individual connection failures.
 
-`CHUNK_TRUSTED_EDGES` lists the edges (comma-separated IPs or CIDRs) whose connections must open with a PROXY protocol v2
-header; its source address becomes the player's address. Connections from other addresses are never parsed for one.
+`CHUNK_TRUSTED_EDGES` lists the edges (comma-separated IPs or CIDRs) whose connections must open with a PROXY protocol
+v2 header; its source address becomes the player's address. Connections from other addresses are never parsed for one.
 
 `Config::configuration_timeout` limits each configuration phase (default: five minutes). The sixty-second total limbo
 cap overrides longer phase limits; shorter configured limits still apply. Clients must send their settings within ten
