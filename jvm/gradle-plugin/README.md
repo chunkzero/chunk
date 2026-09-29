@@ -1,15 +1,21 @@
-# Chunk Gradle integration
+# Gradle plugin
 
-`dev.chunkzero.chunk.settings` asks an installed `chunk inspect PROJECT` for the app inventory, then includes each
-`apps/<id>` Gradle project. Settings evaluation only reads metadata. Add an `app.toml` and `build.gradle.kts` under a
-new app folder to include it on the next build, including with the configuration cache. The project root requires
-`chunk.toml`; an empty file is valid.
+The Gradle plugins that build a project's apps. They ask the `chunk` CLI which apps the project has, generate the typed
+backend bindings before JVM compilation, index each app's session types, session methods and components, and describe
+the finished app JARs for `chunk build` to package into a release. This is a separate Kotlin build, included by the
+repository's root build.
 
-For a Java project after the SDK version is published (see [distribution](../../docs/distribution.md) for the local
-packaged repository):
+| Plugin                         | Apply in                        | Does                                                            |
+| ------------------------------ | ------------------------------- | --------------------------------------------------------------- |
+| `dev.chunkzero.chunk.settings` | `settings.gradle.kts`           | Runs `chunk inspect` and includes every app as a Gradle project |
+| `dev.chunkzero.chunk`          | The root build and Java modules | Shared Java bindings, app packaging and indexing                |
+| `dev.chunkzero.chunk.kotlin`   | The root build and Kotlin apps  | Everything above, plus Kotlin and the coroutine backend facade  |
+
+## Setup
+
+`chunk create` writes these files, pinned to the CLI's version. By hand, `settings.gradle.kts` looks like this:
 
 ```kotlin
-// settings.gradle.kts
 pluginManagement {
     repositories {
         maven("https://maven.chunkzero.com")
@@ -17,8 +23,13 @@ pluginManagement {
         mavenCentral()
     }
 }
-plugins { id("dev.chunkzero.chunk.settings") version "0.1.0" }
-rootProject.name = "my-game"
+
+plugins {
+    id("org.jetbrains.kotlin.jvm") version "2.4.10" apply false // Kotlin projects only
+    id("dev.chunkzero.chunk.settings") version "0.1.0"
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 dependencyResolutionManagement {
     repositories {
         maven("https://maven.chunkzero.com")
@@ -28,167 +39,128 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
+
+rootProject.name = "my-server"
 ```
 
+The root `build.gradle.kts` and each app's `build.gradle.kts` apply a project plugin and choose a Java toolchain; apps
+also name their main class:
+
 ```kotlin
-// build.gradle.kts and apps/<id>/build.gradle.kts
+// apps/lobby/build.gradle.kts
 plugins { id("dev.chunkzero.chunk") }
+
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+
+application { mainClass = "example.Lobby" }
 ```
 
-Use your normal Gradle toolchain resolver or an installed JDK. Every project must choose a Java toolchain explicitly,
-either in its own build or through a shared Gradle convention. The selected Minestom runtime requires Java 25 or newer.
-Compiler release/target settings must match the selected toolchain. Chunk does not silently select the Gradle daemon's
-JVM or replace an app's toolchain.
+- Every module that applies a Chunk plugin must set its Java toolchain explicitly, to Java 25 or newer (the Minestom
+  runtime's requirement), and compile for that same version. `validateChunkJvm` fails the build otherwise; Chunk never
+  falls back to the Gradle daemon's JVM.
+- The root applies the same plugin as the apps before they do. For Kotlin apps that is `dev.chunkzero.chunk.kotlin`, and
+  the Kotlin Gradle plugin's version must be declared in the settings `plugins` block, as above, so that Chunk's
+  settings plugin can see it. Java apps in a Kotlin project keep `dev.chunkzero.chunk`.
+- A library module (such as a `:shared` project with common gameplay code) applies a Chunk plugin too if it declares
+  `@Component` factories, so its factories are indexed.
 
-The root project compiles one `chunk-backend` JAR containing the generated Java models, references and asynchronous
-client. Apps depend on that shared JAR and the Chunk runtime. A Java app has no Kotlin runtime dependency.
+The project plugins add the Chunk libraries at the plugin's own version: the root exports
+`dev.chunkzero:backend-client`, Java apps get `runtime-minestom` and Kotlin apps `runtime-minestom-kotlin`.
 
-Each app supplies public `SessionProvider` factories with no-argument constructors and `Session create()` methods.
-Annotate them with `@SessionType("default")`. The plugin validates the compiled factories and generates
-`META-INF/services/dev.chunkzero.runtime.SessionProvider` for the JVM's local factory registry, plus a separate session
-ID catalog for release assembly. App JARs carry no Chunk deployment manifest. Placement and capacity settings belong in
-`app.toml`, with app defaults under `[runtime]` and optional overrides under `[sessions.<id>]`.
+### Settings
 
-## Typed session methods
-
-Declare a method in an app's TypeScript sources and import that authored reference from backend code:
-
-```ts
-import { sessionMethod, v } from "#chunk";
-export const announce = sessionMethod({
-  app: "lobby",
-  session: "default",
-  name: "announce",
-  args: { message: v.string() },
-  returns: v.integer(),
-});
-```
-
-Java or Kotlin gameplay implements the generated single-method interface:
-
-```java
-public final class LobbySession extends Session
-        implements SessionMethods.Lobby.Default.Announce {
-    public Long announce(SessionMethods.Lobby.Default.Announce.Args args) {
-        // Update session state synchronously and return a schema value.
-        return 0L;
-    }
-}
-```
-
-The provider must return the public concrete class (`LobbySession create()`). The compiler generates argument/result
-models and interfaces using the same schema rules as backend clients, including IDs, unions, nullable values and arrays.
-JVM-native objects, futures and Kotlin suspend functions cannot implement this synchronous wire signature. Methods from
-another app or session type are rejected during indexing.
-
-The build order is backend declarations → shared Java models/interfaces → app Java/Kotlin → bytecode index → generated
-method adapters. No generated TypeScript imports or previously compiled JVM classes are needed to bootstrap the build.
-`generateChunkSessionRegistry` writes a version-1 `META-INF/chunk/session-methods.json` and local method provider
-service; `compileChunkSessionMethods` compiles its direct-call adapters into the app JAR. The local bindings validate
-JSON inputs and outputs. The runtime runs a method from its `jvm/<host>` topic on the tick thread, through these
-adapters, only while the calling delivery's player has arrived in the session. The trusted Rust caller API is ready for
-action and command integration. The generated provider calls the existing live session instance; `SessionScope`
-continues to own its resources and cleanup. No additional component or dependency-injection framework is required for
-method dispatch.
-
-## Explicit scoped components
-
-When several gameplay objects share dependencies, declare public static factories using
-`dev.chunkzero.runtime.Component`. The exact return class identifies a component; parameters identify its dependencies:
-
-```java
-public final class LobbyComponents {
-    @Component(Component.Scope.SESSION)
-    public static BackendClient backend(BackendSession session) {
-        return new BackendClient(session);
-    }
-}
-```
-
-Gameplay obtains this client with `scope.component(BackendClient.class)` on the session tick thread. `SESSION` creates
-one instance per session; `PROCESS` shares one instance within that app runtime. Session factories may depend on
-`SessionScope`, its `BackendSession`, and other declared components. Process factories can depend only on process
-components. A missing backend rejects construction when a factory requests it. A factory must receive dependencies
-through its parameters; recursively calling `scope.component` from a factory is rejected.
-
-Kotlin uses the same annotation on public top-level functions or `@JvmStatic` factories, including companion objects.
-Factories and their parameter/return types must be accessible from generated Java. Generic signatures (including
-`List<Foo>` and type variables), primitive/array identities, field injection and constructor discovery are unsupported.
-An ordinary non-generic wrapper can give a collection a distinct component identity. Factories may return interfaces,
-but binding and lookup use that exact declared interface, without assignability-based selection or qualifiers.
-
-Every module applying the Chunk project plugin writes a bounded factory-class index after Java/Kotlin compilation. Apps
-read their dependency JAR indexes, inspect the actual annotated bytecode, reject missing/duplicate providers, cycles and
-process-to-session dependencies, then generate direct factory calls. `generateChunkComponentIndex`,
-`generateChunkComponentBindings` and `compileChunkComponents` package the index and one app-local service provider.
-Libraries containing factories must apply the plugin and declare the framework dependencies they use. Runtime startup
-loads that generated provider without scanning classpaths. Shared libraries are linked independently into each app. No
-generated source must exist before application compilation, and unused projects emit no component registration.
-
-Returned `AutoCloseable` instances are owned automatically. Failed construction closes only newly created dependencies;
-existing components and other sessions remain available. Normal session disposal closes its components in reverse
-construction order. Process shutdown closes any remaining component scopes after Minestom stops, then process
-components. Cleanup must be synchronous and tolerate shutdown after ticks stop. Component factories must not return an
-already owned resource under another identity. These checks enforce declared dependencies and managed ownership;
-arbitrary handwritten global state is outside the factory graph's guarantees.
-
-## Kotlin consumers
-
-For Kotlin, put its standard plugin declaration in the settings `plugins` block:
-
-```kotlin
-plugins {
-    id("org.jetbrains.kotlin.jvm") version "2.4.10" apply false
-    id("dev.chunkzero.chunk.settings") version "0.1.0"
-}
-```
-
-Then apply `dev.chunkzero.chunk.kotlin` in the root build and each Kotlin app. The settings placement makes Kotlin's API
-available to the same classloader as Chunk's settings plugin; declaring it only in a project build is insufficient. Java
-apps in a mixed project continue to use `dev.chunkzero.chunk`.
-
-The Kotlin opt in adds the separate `:chunk:backend-kotlin` project and its `chunk-backend-kotlin` JAR, containing only
-the generated coroutine facade. It uses the root's explicit toolchain and depends on the shared Java JAR. Kotlin apps
-also receive the coroutine runtime adapters. Java models are compiled once, even when multiple Java and Kotlin apps
-share them.
-
-The settings extension has three optional properties:
+The settings plugin adds a `chunk` extension:
 
 ```kotlin
 import dev.chunkzero.gradle.ChunkSettingsExtension
 
 extensions.configure<ChunkSettingsExtension> {
-    projectDirectory.set(settingsDir) // default
-    executable.set("chunk") // default; an installed CLI or an explicit path
-    javaPackage.set("dev.chunkzero.generated") // default
+    projectDirectory.set(settingsDir) // default; the directory with chunk.toml
+    executable.set("chunk") // default; a CLI on PATH or an absolute path
+    javaPackage.set("dev.chunkzero.generated") // default; the package of generated bindings
 }
 ```
 
-`-Pchunk.executable=/absolute/path/to/chunk` overrides the configured executable. The consumer plugin invokes the CLI
-directly; it does not build Rust tools or install Node packages. The repository's `just toolchain` builds the
-development CLI before the standalone example's settings run.
+The `chunk.executable` Gradle property overrides `executable`. `chunk create` records the creating CLI in the project's
+`gradle.properties`, and `chunk build` and `chunk dev` always pass the CLI they run as. The plugin runs that CLI; it
+never builds Rust tools or installs Node packages.
 
-`generateChunkBackend` calls `chunk gen` once per requested task graph, before compilation. The compiler owns TypeScript
-dependency resolution, so this task always invokes it; unchanged generated content still permits incremental JVM
-compilation. Backend outputs go to `.chunk/build/backend`, and JVM source outputs go to `.chunk/generated/jvm`.
+## What a build does
 
-That directory has `java/` models/references, `java-client/` asynchronous clients, and an optional `kotlin/` facade
-source root. The plugin wires those roots into their owning projects; applications depend on compiled shared artifacts.
+1. Settings evaluation runs `chunk inspect` and includes each app directory as a Gradle project: `apps/games/arena`
+   becomes `:apps:games:arena`. Adding an `app.ts` and a `build.gradle.kts` under `apps/` adds an app on the next build,
+   including with the configuration cache. It also includes a reserved `:chunk:backend-kotlin` project under
+   `.chunk/gradle/`.
+2. `generateChunkBackend`, on the root, runs `chunk gen` before any JVM compilation. The compiled backend goes to
+   `.chunk/build/backend` and JVM sources to `.chunk/generated/jvm`: `java/` (models, references, `SessionMethods`,
+   `SessionConfigs`), `java-client/` (`BackendClient`), `java-session/<app>/` (configured provider interfaces) and, for
+   Kotlin, `kotlin/` (`CoroutineBackendClient`). The task always runs, since the compiler resolves TypeScript
+   dependencies itself; unchanged output keeps JVM compilation incremental.
+3. The root compiles `java/` and `java-client/` once into the shared `chunk-backend` JAR. With the Kotlin plugin,
+   `:chunk:backend-kotlin` compiles the coroutine facade into `chunk-backend-kotlin`. Apps depend on these JARs, so a
+   Java app has no Kotlin dependency.
+4. Each app applies `application` and Shadow, compiles, and is indexed from its bytecode (below). Its `shadowJar` is an
+   executable JAR with every dependency.
+5. `chunkArtifacts`, on the root, builds every app and writes `.chunk/build/jvm/artifacts.json`: each app's JAR, session
+   types and Java version, and the Java executable of the newest toolchain. `chunk build` runs this task and packages
+   the result into a release. `chunk dev` passes `-Pchunk.dev=true`, which skips the shadow JAR and lists each app's
+   thin JAR and runtime classpath instead.
 
-`chunkArtifacts` builds every discovered app and writes `.chunk/build/jvm/artifacts.json`. The version-4 descriptor
-includes each executable app JAR, its session type IDs and Java requirement, plus the selected Java executable. Provider
-class names remain in the local service registry. Descriptor file paths are local inputs for release assembly. Every
-discovered app must apply a Chunk project plugin. `chunk dev` passes `-Pchunk.dev=true`, which skips the shadow JAR:
-each app's descriptor entry names its thin `jar` output and lists its `runtimeClasspath` JARs instead.
+## Session types
 
-`chunk build PROJECT` invokes this root task and publishes a complete release directory and archive under
-`PROJECT/dist`. It passes its own executable to Gradle, so inspection and generation use the same CLI installation. The
-release keeps Java requirements and resolved deployment settings while excluding machine-local paths and the selected
-Java executable. `chunk dev PROJECT` uses that executable locally unless `--java PATH` overrides it.
+The app's compiled classes are scanned for `@SessionType("id")`. Each annotated class must be public, concrete, have a
+public no-argument constructor and implement `SessionProvider`; an app has 1 to 128 of them, with distinct IDs, and its
+main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
+`META-INF/services/dev.chunkzero.runtime.SessionProvider`, from which the runtime loads the providers, and a catalog of
+the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's `implementations` in
+`app.ts` (by default just `default`).
 
-The [standalone example](../../examples/local/settings.gradle.kts) uses included builds for the plugin and framework
-libraries while they are developed together. Run `./gradlew -p jvm/gradle-plugin test` from the repository root to
-exercise the isolated plugin fixtures. `just consumers` builds the real [Java consumer](../../examples/java/README.md)
-and Kotlin example from source-only scratch copies, then checks their complete release archives and runtime classpaths.
-It uses the prepared development CLI and starts no Minecraft or backend services.
+An implementation with a `config` validator must implement its generated interface, for example
+`LobbySessionProviders.Default`, and receives the validated configuration in `create(SessionCreation<Config>)`; one
+without must implement plain `SessionProvider`.
+
+## Session methods
+
+For each `sessionMethod` declared in TypeScript (see the [SDK](../../crates/chunk-build/sdk/README.md#session-methods)),
+the generated `SessionMethods` class has a single-method interface with `Args` and result types. The session class
+implements it, and the provider's `create` must declare that concrete class as its return type. From the
+[Java example](../../examples/java/apps/lobby/src/main/java/example/Lobby.java):
+
+```java
+@SessionType("default")
+public final class Lobby implements LobbySessionProviders.Default {
+    @Override
+    public GreetingSession create(SessionCreation<SessionConfigs.Lobby.Default.Config> creation) {
+        return new GreetingSession(creation.config().greeting());
+    }
+
+    public static final class GreetingSession extends Session
+            implements SessionMethods.Lobby.Default.Announce {
+        @Override
+        public Long announce(SessionMethods.Lobby.Default.Announce.Args args) {
+            // Runs synchronously on the session's tick thread.
+            return 0L;
+        }
+    }
+}
+```
+
+The signature is synchronous: futures and Kotlin `suspend` functions cannot implement it. Implementing a method that
+belongs to another app or session type is a build error. `generateChunkSessionRegistry` checks the implementations and
+writes `META-INF/chunk/session-methods.json` and a method provider service; `compileChunkSessionMethods` compiles
+direct-call adapters into the app, which the runtime loads without scanning the classpath.
+
+## Components
+
+Every module applying a Chunk plugin indexes its public static `@Component` factories after compilation
+(`generateChunkComponentIndex`). Each app then reads its own index and those in its dependencies' JARs, checks the graph
+for missing or duplicate providers, cycles and process components that depend on session ones
+(`generateChunkComponentBindings`), and compiles one provider that calls the factories directly
+(`compileChunkComponents`). See the [Minestom runtime](../runtime-minestom/README.md#components) for writing components.
+
+## Testing
+
+`./gradlew -p jvm/gradle-plugin test`, from the repository root, runs Gradle TestKit fixtures against a copy of the
+plugin published to a build-local repository. `just consumers` builds the [Java example](../../examples/java/README.md)
+and the [Kotlin example](../../examples/local/README.md) from source-only scratch copies with the development CLI, then
+checks their release archives, session registries and dependency boundaries without starting any services.
