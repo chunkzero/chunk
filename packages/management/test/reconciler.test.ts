@@ -921,6 +921,55 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     }
   });
 
+  test("a full pool keeps to its limit and serves queued environments before rescheduled ones", async () => {
+    const reconciler = createReconciler(h.deps, { ...options, concurrency: 2 });
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const { projectId, environmentId } = await createEnvironment(h);
+      await deployRelease(h, projectId, environmentId, "r1");
+      ids.push(environmentId);
+    }
+    await reconciler.pass(epoch, ids);
+    const [hot0, hot1, first, second, last] = ids as [string, string, string, string, string];
+    const idByCore = new Map(ids.map((id) => [coreMachineName(id), id]));
+    // The first two queued runs hold their slots until let go, so a freed slot can only go to the next in line.
+    const gates = new Map([first, second].map((id) => [id, Promise.withResolvers<void>()]));
+    const served = new Map<string, number>();
+    const reschedules: Promise<void>[] = [];
+    let active = 0;
+    let most = 0;
+    let hotRuns = 0;
+    // Each run looks up core's machine once; the busy environments ask for another run every time they get one.
+    hooks.status = async (name) => {
+      const id = idByCore.get(name);
+      if (!id) return;
+      most = Math.max(most, ++active);
+      if (id === hot0 || id === hot1) {
+        hotRuns++;
+        if (!served.has(last) && reschedules.length < 20) reschedules.push(reconciler.pass(epoch, [id]));
+        await Bun.sleep(20);
+      } else {
+        served.set(id, hotRuns);
+        await gates.get(id)?.promise;
+      }
+      active--;
+    };
+    try {
+      const passing = reconciler.pass(epoch, ids);
+      await until(() => served.has(first) && served.has(second));
+      gates.get(first)?.resolve();
+      await until(() => served.has(last));
+      gates.get(second)?.resolve();
+      await passing;
+      await Promise.all(reschedules);
+    } finally {
+      for (const gate of gates.values()) gate.resolve();
+      hooks.status = undefined;
+    }
+    expect(most).toBe(2);
+    expect([...served.values()]).toEqual([2, 2, 2]);
+  });
+
   test("a request with no room retries with backoff, and fails once there was none for the bound", async () => {
     const reconciler = createReconciler(h.deps, { ...options, capacityRetryMs: 300 });
     const env = await running();
@@ -999,6 +1048,54 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       state: CapacityState.READY,
       machineId: idOf(name),
     });
+    env.close();
+  });
+
+  test("a JVM resume that timed out is never repeated, and its late landing is torn down with the request", async () => {
+    const reconciler = createReconciler(h.deps, {
+      ...options,
+      timeouts: { startMs: 100, callMs: 100 },
+      capacityRetryMs: 300,
+    });
+    const env = await running();
+    const pass = () => reconciler.pass(epoch, [env.environmentId]);
+    const request = capacityRequest(env, "slow-resume");
+    const release = () => env.client.releaseCapacity({ requestId: "slow-resume", lease: env.lease });
+    await env.client.ensureCapacity(request);
+    await pass();
+    const name = nameOf(env.environmentId, "slow-resume");
+    await provider.suspend(idOf(name));
+    let finish = () => {};
+    const late = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let starts = 0;
+    hooks.start = async (started) => {
+      if (started !== name) return;
+      starts++;
+      if (starts === 1) await late;
+    };
+    try {
+      await pass();
+      expect(machines.get(name)?.machine.state).toBe("suspended");
+      await Bun.sleep(350);
+      // Repeating the resume would let the first one land after the JVM exited and boot it again.
+      await pass();
+      expect(starts).toBe(1);
+      expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+        state: CapacityState.FAILED,
+        message: "the JVM machine did not resume",
+      });
+      finish();
+      await until(() => machines.get(name)?.machine.state === "running");
+      expect((await release()).capacity?.state).toBe(CapacityState.RELEASING);
+      await pass();
+    } finally {
+      hooks.start = undefined;
+    }
+    expect(machines.has(name)).toBe(false);
+    expect(boots.get(name)).toBe(1);
+    expect((await release()).capacity?.state).toBe(CapacityState.RELEASED);
     env.close();
   });
 

@@ -18,25 +18,26 @@ export class ProviderTimeoutError extends Error {
 
 /**
  * Wraps `provider` so each call fails with `ProviderTimeoutError` once it runs past its bound, or `signal` aborts. The
- * call itself carries on, since a provider cannot recall it.
+ * call itself carries on, since a provider cannot recall it; once `signal` has aborted, no new call is made.
  */
 export function boundedProvider(provider: Provider, timeouts: ProviderTimeouts, signal?: AbortSignal): Provider {
-  const bound = <T>(method: string, ms: number, call: () => Promise<T>) =>
-    new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new ProviderTimeoutError(`the provider's ${method} did not finish within ${ms} ms`)),
-        ms,
-      );
-      const aborted = () => reject(new ProviderTimeoutError(`the provider's ${method} was abandoned on shutdown`));
-      if (signal?.aborted) aborted();
-      signal?.addEventListener("abort", aborted, { once: true });
-      call()
-        .then(resolve, reject)
-        .finally(() => {
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", aborted);
-        });
-    });
+  const bound = async <T>(method: string, ms: number, call: () => Promise<T>) => {
+    const abandoned = () => new ProviderTimeoutError(`the provider's ${method} was abandoned on shutdown`);
+    if (signal?.aborted) throw abandoned();
+    const gaveUp = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => gaveUp.reject(new ProviderTimeoutError(`the provider's ${method} did not finish within ${ms} ms`)),
+      ms,
+    );
+    const aborted = () => gaveUp.reject(abandoned());
+    signal?.addEventListener("abort", aborted, { once: true });
+    try {
+      return await Promise.race([call(), gaveUp.promise]);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+    }
+  };
   const { startMs, callMs } = timeouts;
   return {
     create: (spec) => bound("create", startMs, () => provider.create(spec)),

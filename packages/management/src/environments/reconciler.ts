@@ -312,7 +312,16 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
     for (const request of active) {
       if (!request.machine_id) continue;
       const machine = await provider.status(request.machine_id);
-      if (machine.state === "running" && !(await suspendIfIdle(machine.id))) return;
+      if (machine.state !== "running") continue;
+      // Seen running, so its resume finished, and the next suspension may be resumed.
+      if (request.resuming) {
+        await fenced(
+          (tx) => tx`
+            update capacity_requests set resuming = false
+            where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}`,
+        );
+      }
+      if (!(await suspendIfIdle(machine.id))) return;
     }
     if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
     await fireDueAlarm(fenced, environment);
@@ -389,7 +398,10 @@ async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: Envi
 /**
  * Keeps an extra machine running and resumes a suspended one. A JVM machine boots at most once: its boot is recorded
  * before it starts, so a started one that stopped or went missing fails its request, and one never started is adopted
- * by name, or created again when missing. Gateway machines are stateless and are replaced, with the same credential.
+ * by name, or created again when missing. Each resume is recorded the same way until the machine is seen running, and
+ * one never seen to finish fails its request rather than being resumed again, since a resume left under way could land
+ * after the repeat and the JVM's exit, and boot it again. Failing tears the machine down, so a late start finds it gone
+ * or is undone. Gateway machines are stateless and are replaced, with the same credential.
  * Machines are started by ID, and removed only under the ID observed, so a call a superseded pass left under way, or
  * one this leader gave up on, can neither start a destroyed machine nor remove its replacement. A transient provider
  * failure leaves the request as it is, and a later run retries with backoff; any other provider error, or transient
@@ -406,26 +418,35 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
   const active = sql`
     environment_id = ${request.environment_id} and request_id = ${request.request_id}
       and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
-  const exited = (machine: Machine | undefined) =>
-    new Error(machine?.state === "stopped" ? "the JVM machine exited" : "the JVM machine went missing");
-  // Committed before the start, so a boot cut short still counts as the one boot. A release after this tears the
-  // machine down by name; a start still under way then finds its ID gone.
+  const notRunning = (machine: Machine | undefined) =>
+    new Error(
+      machine?.state === "suspended"
+        ? "the JVM machine did not resume"
+        : machine?.state === "stopped"
+          ? "the JVM machine exited"
+          : "the JVM machine went missing",
+    );
+  /** Whether a JVM machine in this state must not be started again. */
+  const spent = (row: Pick<CapacityRow, "started" | "resuming">, machine: Machine | undefined) =>
+    row.started && machine?.state !== "running" && (machine?.state !== "suspended" || row.resuming);
+  let resuming = request.resuming;
+  // Committed before the start, so a boot or resume cut short still counts as the one it was. A release after this
+  // tears the machine down by name; a start still under way then finds its ID gone.
   const mayStart = (machine: Machine) =>
     fenced(async (tx) => {
-      const [row] = await tx<{ started: boolean }[]>`
-        select started from capacity_requests where ${active} and machine_id = ${machine.id} for update`;
+      const [row] = await tx<Pick<CapacityRow, "started" | "resuming">[]>`
+        select started, resuming from capacity_requests where ${active} and machine_id = ${machine.id} for update`;
       if (!row) return false;
-      if (jvm && machine.state !== "suspended") {
-        if (row.started) throw exited(machine);
-        await tx`update capacity_requests set started = true where ${active}`;
+      if (jvm) {
+        if (spent(row, machine)) throw notRunning(machine);
+        resuming = machine.state === "suspended";
+        await tx`update capacity_requests set started = true, resuming = ${resuming} where ${active}`;
       }
       return true;
     });
   try {
     let machine = request.machine_id ? await provider.status(request.machine_id) : undefined;
-    if (jvm && request.started && machine?.state !== "running" && machine?.state !== "suspended") {
-      throw exited(machine);
-    }
+    if (jvm && spent(request, machine)) throw notRunning(machine);
     if (!machine || machine.state === "missing" || (!jvm && machine.state === "stopped")) {
       let found = await provider.find(name);
       // A stopped gateway is replaced: the one observed, or one left from an attempt whose create reply was lost.
@@ -457,12 +478,14 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
       machine = await provider.start(machine.id);
     }
     retries.clear(key);
-    if (request.state === CapacityState.READY && sameList(request.machine_addresses, machine.addresses)) return;
+    if (request.state === CapacityState.READY && !resuming && sameList(request.machine_addresses, machine.addresses)) {
+      return;
+    }
     const addresses = machine.addresses;
     await fenced(
       (tx) => tx`
         update capacity_requests
-        set state = ${CapacityState.READY}, machine_addresses = ${sql.array(addresses)}::text[]
+        set state = ${CapacityState.READY}, machine_addresses = ${sql.array(addresses)}::text[], resuming = false
         where ${active}`,
     );
   } catch (error) {

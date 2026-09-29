@@ -33,6 +33,8 @@ export interface CapacityRow {
   torn_down: boolean;
   /** Whether the reconciler ever started the request's JVM machine. */
   started: boolean;
+  /** Whether the reconciler asked the request's suspended JVM machine to resume and has not seen it running since. */
+  resuming: boolean;
   /** Sealed under `capacityCredentialContext`. */
   credential: Uint8Array;
   /** `keys.fingerprint` of the plaintext credential. */
@@ -54,8 +56,9 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
  * A release is terminal, as core's `Launcher` requires. RELEASED means the request's machine is destroyed, or was
  * created too late: it never runs, and the reconciler's sweep destroys it. The reconciler starts a machine only by ID,
  * after a transaction fenced by the leader epoch saw the request PROVISIONING or READY with that machine and, for a JVM,
- * committed its one boot; a start still under way when the machine is torn down finds its ID gone. A released request
- * ID, even one released before it was ever ensured, stays released. Superseding a core instance releases its requests.
+ * committed its one boot or the one resume after a suspension; a start still under way when the machine is torn down
+ * finds its ID gone. A released request ID, even one released before it was ever ensured, stays released. Superseding a
+ * core instance releases its requests.
  */
 export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {
   return {

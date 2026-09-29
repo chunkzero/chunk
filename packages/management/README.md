@@ -115,11 +115,12 @@ environment holds up only its own. It gives up on a provider call after its time
 observing the machines again rather than assuming the call succeeded. A provider with no room for a machine right now is
 retried with backoff; a capacity request fails once that, or timing out, has lasted `CHUNK_CAPACITY_RETRY_SECONDS`,
 while core's machine keeps retrying. Provider calls left under way, by a previous leader or after a timeout, cannot be
-recalled, so the reconciler commits a JVM machine's one boot before starting it, starts machines by ID, and removes a
-machine whose name is reused only under the ID it observed. A capacity release is terminal: RELEASED means the machine
-is destroyed, or was created too late and will never run, and the reconciler removes owned machines and volumes no
-request or environment tracks. A released request ID never gets a running machine, even when `ReleaseCapacity` arrived
-before its `EnsureCapacity`, and a JVM machine is started at most once. An attach by a new core instance releases the
+recalled, so the reconciler commits a JVM machine's one boot, and each resume, before starting it, starts machines by
+ID, and removes a machine whose name is reused only under the ID it observed. A JVM machine whose boot or resume it
+never saw finish fails its request instead of being started again. A capacity release is terminal: RELEASED means the
+machine is destroyed, or was created too late and will never run, and the reconciler removes owned machines and volumes
+no request or environment tracks. A released request ID never gets a running machine, even when `ReleaseCapacity`
+arrived before its `EnsureCapacity`, and a JVM machine boots at most once. An attach by a new core instance releases the
 previous instance's requests.
 
 ## Log replication
