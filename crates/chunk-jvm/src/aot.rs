@@ -16,10 +16,11 @@ use std::{
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
+// Together these stay under the 90 seconds core holds a recording host's release for.
 /// How long Java may take to create the cache.
-const CREATE_TIMEOUT: Duration = Duration::from_secs(60);
+const CREATE_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long the upload may take, and telling core that no cache came.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) enum Plan {

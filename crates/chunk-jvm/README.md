@@ -21,8 +21,8 @@ what to do about it:
 - **Record:** no cache exists yet, and core picked this host to make it. The JVM runs with
   `-XX:AOTMode=record -XX:AOTConfiguration=<file>`, the file in a fresh directory under `/tmp`. Once the JVM exits
   cleanly (0, or on a forwarded SIGTERM or SIGINT), the runner runs Java again with the same flags and JAR plus
-  `-XX:AOTMode=create -XX:AOTConfiguration=<file> -XX:AOTCache=<cache>`, for up to 60 seconds, and uploads the cache
-  (`chunk:aot-write`) for up to 60 seconds more. Core holds the host's release until that upload ends, for up to 90
+  `-XX:AOTMode=create -XX:AOTConfiguration=<file> -XX:AOTCache=<cache>`, for up to 45 seconds, and uploads the cache
+  (`chunk:aot-write`) for up to 30 seconds more. Core holds the host's release until that upload ends, for up to 90
   seconds. If anything fails, or a SIGTERM or SIGINT arrives meanwhile, the runner tells core that no cache came, and
   another host may record it.
 
