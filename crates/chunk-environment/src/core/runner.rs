@@ -7,7 +7,7 @@ mod command;
 #[cfg(unix)]
 pub use command::CommandLauncher;
 
-use super::sync::Issuer;
+use super::{AotCaches, sync::Issuer};
 use chunk_control::{
     Control, Error, Host, JvmIdentity, Launch, MachineKind, Progress, Registration, Release, Result, RuntimeConnection,
 };
@@ -125,6 +125,7 @@ struct Attached {
     issuer: Issuer,
     /// Where runners reach core.
     endpoint: String,
+    aot: Arc<AotCaches>,
 }
 
 #[derive(Default)]
@@ -209,8 +210,9 @@ impl RunnerHost {
     }
 
     /// Runs hosts for `control`, whose issuer mints their credentials, telling runners to reach core at `endpoint`.
-    pub fn attach(&self, control: &Arc<Control>, issuer: Issuer, endpoint: String) {
-        let _ = self.core.set(Attached { control: Arc::downgrade(control), issuer, endpoint });
+    /// Their runners keep AOT caches in `aot`.
+    pub fn attach(&self, control: &Arc<Control>, issuer: Issuer, endpoint: String, aot: Arc<AotCaches>) {
+        let _ = self.core.set(Attached { control: Arc::downgrade(control), issuer, endpoint, aot });
     }
 
     fn core(&self) -> Result<(&Attached, Arc<Control>)> {
@@ -395,8 +397,12 @@ impl RunnerHost {
             ids.extend(control.launched_hosts()?);
         }
         let mut result = Ok(());
+        let aot = self.core.get().map(|core| core.aot.clone());
         for id in ids {
             self.fence(&id)?;
+            if let Some(aot) = &aot {
+                aot.end(&id);
+            }
             let _turn = self.turn(&id).await;
             match self.stop_machine(&id, control.as_deref()).await {
                 Ok(true) => {}
@@ -454,6 +460,11 @@ impl Host for RunnerHost {
     async fn release(&self, id: &str) -> Result<bool> {
         let control = self.core().ok().map(|(_, control)| control);
         self.fence(id)?;
+        // A host recording its AOT cache uploads it once its JVM exited, and its machine stops without grace, so the
+        // release waits a bounded time for that upload while the machine credential still holds.
+        if let Some(core) = self.core.get() {
+            core.aot.settle(id).await;
+        }
         let _turn = self.turn(id).await;
         let revoked =
             control.as_ref().map_or(Err(Error::Unresolved("control stopped")), |control| control.revoke_launch(id));

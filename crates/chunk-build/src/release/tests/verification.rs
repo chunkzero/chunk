@@ -19,6 +19,16 @@ fn unpacked_releases_verify_and_reject_tampering() {
     let fixture = Fixture::new();
     let (release, directory) = unpacked(&fixture);
     assert_eq!(verify_release(&directory).unwrap().id, release.id);
+    // Every file keeps the archive's zero mtime, so installs on different machines are alike.
+    let mut pending = vec![directory.clone()];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().path()));
+        } else {
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            assert_eq!(modified, std::time::UNIX_EPOCH, "{}", path.display());
+        }
+    }
 
     let asset = directory.join("apps/lobby/assets/map.txt");
     fs::write(&asset, b"tampered").unwrap();

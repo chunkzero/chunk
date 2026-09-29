@@ -1,10 +1,11 @@
-//! The `chunk-jvm` image end to end: a managed core launches its JVM there with podman. Run it with `just jvm-e2e`,
-//! which sets `CHUNK_E2E_IMAGE` to the image and `CHUNK_E2E_RELEASE` to a release archive of `examples/local`.
+//! The `chunk-jvm` image end to end: a managed core launches its JVM there with podman. The first JVM records the app's
+//! AOT cache, and a second one starts with it. Run it with `just jvm-e2e`, which sets `CHUNK_E2E_IMAGE` to the image and
+//! `CHUNK_E2E_RELEASE` to a release archive of `examples/local`.
 
 use super::*;
 use crate::{CommandLauncher, Core, RunnerConfig, managed::Managed};
 use chunk_proto::{
-    control::v1::{ClaimRequest, Identity, SessionDemand},
+    control::v1::{ClaimRequest, Identity, SessionDemand, ShutdownNodeRequest},
     sync::v1::NodePhase,
 };
 use std::{
@@ -52,14 +53,15 @@ fn processes(container: &str) -> Vec<(u32, u32, String, String)> {
     listed.lines().filter_map(parse).collect()
 }
 
-fn login() -> ClaimRequest {
+/// Player `player`'s login, a claim with the same operation ID.
+fn login(player: u8) -> ClaimRequest {
     ClaimRequest {
-        operation_id: "login".into(),
+        operation_id: format!("login-{player}"),
         proxy_id: "proxy".into(),
-        connection_id: "connection".into(),
+        connection_id: format!("connection-{player}"),
         identity: Some(Identity {
-            uuid: "00000000-0000-0000-0000-000000000001".into(),
-            username: "player".into(),
+            uuid: format!("00000000-0000-0000-0000-{player:012}"),
+            username: format!("player{player}"),
             properties: vec![],
         }),
         demand: Some(SessionDemand {
@@ -70,6 +72,46 @@ fn login() -> ClaimRequest {
         source: None,
         deployment: String::new(),
     }
+}
+
+/// Claims `player`'s login until it is placed, returning how long that took; each attempt waits 35 seconds for a JVM.
+async fn placed(control: &chunk_control::Control, player: u8) -> (SocketAddr, Duration) {
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(180);
+    let assignment = loop {
+        match control.claim(login(player)).await {
+            Ok(assignment) => break assignment,
+            Err(error) => assert!(tokio::time::Instant::now() < deadline, "the claim failed: {error}"),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    (assignment.preparation.unwrap().endpoint.parse().unwrap(), started.elapsed())
+}
+
+/// The one host whose node is online.
+async fn online(control: &chunk_control::Control) -> String {
+    let online = async {
+        loop {
+            let nodes = control.nodes().unwrap();
+            let mut online = nodes.iter().filter(|node| node.phase == NodePhase::Online);
+            if let (Some(node), None) = (online.next(), online.next()) {
+                break node.host.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), online).await.expect("one host is online")
+}
+
+/// Waits for `container` to exit, returning its exit code. Started while the container runs, since a removed container
+/// can't be waited for.
+fn exited(container: &str) -> tokio::process::Child {
+    tokio::process::Command::new("podman").args(["wait", container]).stdout(Stdio::piped()).spawn().unwrap()
+}
+
+async fn exit_code(exit: tokio::process::Child) -> String {
+    let exit = tokio::time::timeout(Duration::from_secs(120), exit.wait_with_output()).await.unwrap().unwrap();
+    String::from_utf8_lossy(&exit.stdout).trim().to_owned()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -91,12 +133,19 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
     let free = std::net::TcpListener::bind((address, 0)).unwrap().local_addr().unwrap();
     let config = CoreConfig { core_bind: Some(free), ..harness.core() };
     let sh = |script: &str| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned(), image.clone()];
+    // Java logs its AOT cache use, and each container's log is kept once the release removes it.
+    let logs = harness.directory.path().join("logs");
+    fs::create_dir_all(&logs).unwrap();
     let launcher = CommandLauncher {
         launch: sh(&format!(
             r#"exec podman run -d --rm --network host --name "{prefix}$CHUNK_HOST_ID" -e CHUNK_CORE_ENDPOINT \
-            -e CHUNK_JVM_CREDENTIAL -e CHUNK_ENVIRONMENT_ID "$0" >/dev/null"#
+            -e CHUNK_JVM_CREDENTIAL -e CHUNK_ENVIRONMENT_ID -e JAVA_TOOL_OPTIONS=-Xlog:aot=info "$0" >/dev/null"#
         )),
-        release: sh(&format!(r#"exec podman rm -f -t 20 --ignore "{prefix}$CHUNK_HOST_ID" >/dev/null"#)),
+        release: sh(&format!(
+            r#"podman logs "{prefix}$CHUNK_HOST_ID" > "{logs}/$CHUNK_HOST_ID.log" 2>&1
+            exec podman rm -f -t 20 --ignore "{prefix}$CHUNK_HOST_ID" >/dev/null"#,
+            logs = logs.display()
+        )),
     };
     let core = Core::start_with_launcher(config, RunnerConfig::new(Arc::new(launcher))).await.unwrap();
     let gateway = OnceLock::new();
@@ -109,35 +158,14 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
         harness.expect(1, "dep_a", DeploymentState::Active).await;
         let activated = started.elapsed();
 
-        // The claim places a lobby session, whose host core launches; each attempt waits 35 seconds for its JVM.
+        // The claim places a lobby session, whose host core launches.
         let control = core.control().unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
-        let assignment = loop {
-            match control.claim(login()).await {
-                Ok(assignment) => break assignment,
-                Err(error) => assert!(tokio::time::Instant::now() < deadline, "the claim failed: {error}"),
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        };
-        let ready = started.elapsed();
-        let endpoint: SocketAddr = assignment.preparation.unwrap().endpoint.parse().unwrap();
+        let (endpoint, recorded) = placed(&control, 1).await;
         assert_eq!(endpoint.ip(), address);
         tokio::net::TcpStream::connect(endpoint).await.expect("the JVM serves players at its endpoint");
-        let online = async {
-            loop {
-                let nodes = control.nodes().unwrap();
-                if let [node] = nodes.as_slice()
-                    && node.phase == NodePhase::Online
-                {
-                    break node.host.clone();
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        };
-        let host = tokio::time::timeout(Duration::from_secs(30), online).await.expect("one host is online");
+        let host = online(&control).await;
         let container = format!("{prefix}{host}");
-        // Started while the container runs, since a removed container can't be waited for.
-        let exit = tokio::process::Command::new("podman").args(["wait", &container]).stdout(Stdio::piped()).spawn();
+        let exit = exited(&container);
 
         // An orphan in the container is reparented to the runner, which reaps it once it exits.
         podman(&["exec", &container, "sh", "-c", "sleep 3 >/dev/null 2>&1 &"]);
@@ -148,17 +176,38 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
         assert!(processes.iter().any(|(pid, _, _, command)| *pid == 1 && command == "chunk-jvm"), "{processes:?}");
         assert!(processes.iter().all(|(_, _, state, command)| state != "Z" && command != "sleep"), "{processes:?}");
 
-        (container, exit.unwrap(), activated, ready)
+        // Stopping the first node lets its runner create and upload the AOT cache before its container goes.
+        let shutdown = ShutdownNodeRequest { operation_id: "first".into(), host_id: host.clone(), timeout_seconds: 0 };
+        control.shutdown_node(&shutdown).unwrap();
+        assert_eq!(exit_code(exit).await, "0", "the recording runner exits cleanly");
+        let log = fs::read_to_string(logs.join(format!("{host}.log"))).unwrap();
+        assert!(log.contains("uploaded the AOT cache"), "{log}");
+        let kept = harness.state().join("aot").join(&release_id).join("lobby");
+        assert_eq!(fs::read_dir(kept).unwrap().count(), 1);
+
+        // The next host of the release fetches it, and Java starts with it.
+        let (_, cached) = placed(&control, 2).await;
+        let host = online(&control).await;
+        let container = format!("{prefix}{host}");
+        let log = Command::new("podman").args(["logs", &container]).output().unwrap();
+        let log = format!("{}{}", String::from_utf8_lossy(&log.stdout), String::from_utf8_lossy(&log.stderr));
+        assert!(log.contains("downloading the AOT cache"), "{log}");
+        assert!(log.contains("Using AOT-linked classes: true"), "{log}");
+        assert!(!log.contains("[warning][aot]") && !log.contains("[error  ][aot]"), "{log}");
+        let exit = exited(&container);
+        (container, exit, activated, recorded, cached)
     };
-    let (container, exit, activated, ready) = tokio::select! {
+    let (container, exit, activated, recorded, cached) = tokio::select! {
         error = managed.run() => panic!("management stopped: {error}"),
         checks = checks => checks,
     };
     let stopping = tokio::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(60), core.stop(|| {})).await.expect("core stops").unwrap();
     let stopped = stopping.elapsed();
-    let exit = tokio::time::timeout(Duration::from_secs(30), exit.wait_with_output()).await.unwrap().unwrap();
-    assert_eq!(String::from_utf8_lossy(&exit.stdout).trim(), "0", "the runner exits cleanly");
+    assert_eq!(exit_code(exit).await, "0", "the runner exits cleanly");
     assert!(!Command::new("podman").args(["container", "exists", &container]).status().unwrap().success());
-    println!("activated after {activated:?}, JVM ready after {ready:?}, stopped in {stopped:?}");
+    println!(
+        "activated after {activated:?}; recording JVM placed after {recorded:?}, cached JVM after {cached:?}; stopped in \
+         {stopped:?}"
+    );
 }

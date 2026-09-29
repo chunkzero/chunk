@@ -1,7 +1,9 @@
+mod aot;
 mod archives;
 mod runner;
 mod sync;
 
+pub(crate) use aot::AotCaches;
 pub(crate) use archives::Archives;
 pub use archives::ReleaseArchive;
 #[cfg(unix)]
@@ -71,6 +73,8 @@ pub struct Core {
     issuer: Option<sync::Issuer>,
     /// The archives of the releases loaded from management.
     archives: Arc<Archives>,
+    /// The AOT caches remote runners make, under `aot/` in the state directory.
+    aot: Option<Arc<AotCaches>>,
     private_address: Option<IpAddr>,
 }
 
@@ -105,7 +109,8 @@ impl Core {
         if let Some(address) = config.private_address.filter(|address| !chunk_service::net::private(*address)) {
             return Err(io::Error::other(format!("{address} is not a private address")));
         }
-        let mut core = Self { private_address: config.private_address, ..self };
+        let aot = Some(Arc::new(AotCaches::new(config.state.join("aot"))));
+        let mut core = Self { private_address: config.private_address, aot, ..self };
         let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
@@ -165,8 +170,11 @@ impl Core {
             host
         };
         self.serve_control(config, listener, network, config.control_record.clone(), host).await?;
-        if let (Some(runner), Some(ready), Some(issuer)) = (&self.runner, &self.authority, &self.issuer) {
-            runner.attach(&ready.control, issuer.clone(), runner_endpoint(ready, config.private_address));
+        if let (Some(runner), Some(ready), Some(issuer), Some(aot)) =
+            (&self.runner, &self.authority, &self.issuer, &self.aot)
+        {
+            let endpoint = runner_endpoint(ready, config.private_address);
+            runner.attach(&ready.control, issuer.clone(), endpoint, aot.clone());
         }
         Ok(())
     }
@@ -239,6 +247,7 @@ impl Core {
         host: Arc<dyn chunk_control::Host>,
     ) -> io::Result<()> {
         let backend = self.handle.clone().ok_or_else(|| io::Error::other("backend is not running"))?;
+        let aot = self.aot.clone().ok_or_else(|| io::Error::other("core is not started"))?;
         let stop = CancellationToken::new();
         let (ready, started) = oneshot::channel();
         let control = chunk_control::server::Config {
@@ -254,6 +263,7 @@ impl Core {
                 backend,
                 self.gateways.clone(),
                 self.archives.clone(),
+                aot,
                 config.environment.clone(),
                 config.environment_token.clone(),
                 config.private_address,
@@ -393,6 +403,7 @@ impl Core {
     /// returns whether all were. Control admits nothing afterwards.
     pub(crate) async fn stop_machines(&self, bound: Duration) -> bool {
         let (Some(runner), Ok(control)) = (&self.runner, self.control()) else { return true };
+        self.end_recordings();
         let stopping = async {
             // Control stops the hosts it knows, and the runner the machines only launch records name.
             while let Err(error) = control.shutdown().await.and(runner.shutdown().await) {
@@ -403,12 +414,20 @@ impl Core {
         tokio::time::timeout(bound, stopping).await.is_ok()
     }
 
+    /// Ends every AOT cache recording, so no release while core stops waits for an upload.
+    fn end_recordings(&self) {
+        if let Some(aot) = &self.aot {
+            aot.close();
+        }
+    }
+
     /// Stops every JVM, then control, retrying until each JVM has confirmed its exit, however long that takes. The
     /// host and backend stay until then. `on_wait` runs once, when a first attempt fails.
     /// # Errors
     /// Reports control shutdown errors.
     pub async fn stop_control(&mut self, on_wait: impl Fn()) -> io::Result<()> {
         let mut waiting = false;
+        self.end_recordings();
         // Kept until remote machines have stopped, since only control's launch records name some of them.
         let control = self.control().ok();
         if let Some(control) = &control {

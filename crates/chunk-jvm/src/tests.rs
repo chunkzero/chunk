@@ -1,7 +1,7 @@
 use super::*;
 use chunk_proto::sync::v1::{
-    CallRequest, CallResponse, Error, JvmArchiveChunk, JvmArchiveRead, SubscribeRequest, Update, call_response,
-    core_server, error::Code,
+    CallRequest, CallResponse, Error, JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead,
+    SubscribeRequest, Update, call_response, core_server, error::Code,
 };
 use config::Expected;
 use prost::Message;
@@ -14,8 +14,8 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc, LazyLock,
-        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -79,12 +79,21 @@ struct Script {
     sha256: Option<String>,
     /// Archive reads are never answered.
     stall: bool,
+    /// What the launch says about the AOT cache.
+    aot: Option<Aot>,
 }
+
+/// The AOT cache the fake core keeps.
+const AOT_CACHE: &[u8] = b"an AOT cache";
 
 struct FakeCore {
     script: Script,
     launches: AtomicUsize,
     reads: AtomicUsize,
+    aot_reads: AtomicUsize,
+    /// The AOT cache the runner uploaded, as it declared it, and whether it abandoned its recording.
+    uploaded: Mutex<(Vec<u8>, u64, String)>,
+    abandoned: AtomicBool,
 }
 
 impl FakeCore {
@@ -99,6 +108,7 @@ impl FakeCore {
             profile: "small".into(),
             process_id: "process-1".into(),
             generation: 3,
+            aot: self.script.aot.clone(),
         }
     }
 }
@@ -148,6 +158,24 @@ impl core_server::Core for Served {
                 let data = archive[start..archive.len().min(start + CHUNK)].to_vec();
                 JvmArchiveChunk { data }.encode_to_vec()
             }
+            "chunk:aot-read" => {
+                core.aot_reads.fetch_add(1, Ordering::SeqCst);
+                let read = JvmArchiveRead::decode(request.arguments.as_slice()).unwrap();
+                let start = usize::try_from(read.offset).unwrap();
+                JvmArchiveChunk { data: AOT_CACHE[start..AOT_CACHE.len().min(start + 5)].to_vec() }.encode_to_vec()
+            }
+            "chunk:aot-write" => {
+                let write = JvmAotWrite::decode(request.arguments.as_slice()).unwrap();
+                if write.abandon {
+                    core.abandoned.store(true, Ordering::SeqCst);
+                } else {
+                    let mut uploaded = core.uploaded.lock().unwrap();
+                    assert_eq!(write.offset, uploaded.0.len() as u64);
+                    uploaded.0.extend(write.data);
+                    (uploaded.1, uploaded.2) = (write.size, write.sha256);
+                }
+                Vec::new()
+            }
             _ => return Ok(error(Code::Invalid)),
         };
         Ok(Response::new(CallResponse { outcome: Some(call_response::Outcome::Result(result)), ..Default::default() }))
@@ -172,8 +200,19 @@ impl Machine {
         fs::create_dir_all(java_home.join("bin")).unwrap();
         fs::write(java_home.join("release"), "IMPLEMENTOR=\"Test\"\nJAVA_VERSION=\"25.0.1\"\n").unwrap();
         let java = java_home.join("bin/java");
-        fs::write(&java, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nenv > \"$0.env\"\npwd > \"$0.pwd\"\n")
-            .unwrap();
+        // Java's AOT create step records its arguments apart and writes a cache, unless `java.fail` exists.
+        let script = r#"#!/bin/sh
+case "$*" in *-XX:AOTMode=create*)
+    printf '%s\n' "$@" > "$0.create"
+    [ -e "$0.fail" ] && exit 1
+    for arg; do case "$arg" in -XX:AOTCache=*) printf created > "${arg#-XX:AOTCache=}";; esac; done
+    exit 0;;
+esac
+printf '%s\n' "$@" > "$0.args"
+env > "$0.env"
+pwd > "$0.pwd"
+"#;
+        fs::write(&java, script).unwrap();
         fs::set_permissions(&java, fs::Permissions::from_mode(0o700)).unwrap();
         let proc = directory.path().join("proc/self");
         fs::create_dir_all(&proc).unwrap();
@@ -215,7 +254,14 @@ impl Machine {
 
     /// Like `run`, retrying calls to core for up to `retry`.
     async fn run_within(&self, script: Script, retry: Duration) -> (Result<i32, u8>, Arc<FakeCore>) {
-        let core = Arc::new(FakeCore { script, launches: AtomicUsize::new(0), reads: AtomicUsize::new(0) });
+        let core = Arc::new(FakeCore {
+            script,
+            launches: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            aot_reads: AtomicUsize::new(0),
+            uploaded: Mutex::default(),
+            abandoned: AtomicBool::new(false),
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server =
@@ -229,6 +275,12 @@ impl Machine {
     }
 
     /// The entries of the release cache.
+    /// The lines of what the fake Java recorded in `java/bin/java.<name>`.
+    fn java(&self, name: &str) -> Vec<String> {
+        let recorded = fs::read_to_string(self.path(&format!("java/bin/java.{name}"))).unwrap();
+        recorded.lines().map(str::to_owned).collect()
+    }
+
     fn cached(&self) -> Vec<String> {
         let entries = fs::read_dir(self.path("cache/releases")).unwrap();
         let mut names: Vec<_> = entries.map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
@@ -335,4 +387,58 @@ async fn a_release_newer_than_the_images_java_is_refused() {
     let (exit, _) = machine.run(Script::default()).await;
     assert_eq!(exit, Err(78));
     assert!(!machine.path("java/bin/java.args").exists());
+}
+
+#[tokio::test]
+async fn a_recording_run_creates_and_uploads_the_aot_cache_once_the_jvm_exits_cleanly() {
+    let machine = Machine::new();
+    let record = || Script { aot: Some(Aot::Record(JvmAotRecord {})), ..Script::default() };
+    let (exit, core) = machine.run(record()).await;
+    assert_eq!(exit, Ok(0));
+    let args = machine.java("args");
+    let configuration = args[4].strip_prefix("-XX:AOTConfiguration=").unwrap();
+    assert_eq!(args[3], "-XX:AOTMode=record");
+    assert!(Path::new(configuration).starts_with(machine.path("work")));
+    // Creating the cache repeats the run's Java flags and JAR.
+    let create = machine.java("create");
+    assert_eq!((&create[..3], create[3].as_str()), (&args[..3], "-XX:AOTMode=create"));
+    assert_eq!(create[4], format!("-XX:AOTConfiguration={configuration}"));
+    assert!(create[5].starts_with("-XX:AOTCache="));
+    assert_eq!(create[6..], args[5..]);
+    let uploaded = core.uploaded.lock().unwrap().clone();
+    assert_eq!(uploaded, (b"created".to_vec(), 7, format!("{:x}", Sha256::digest(b"created"))));
+    assert!(!core.abandoned.load(Ordering::SeqCst));
+    assert!(!Path::new(configuration).parent().unwrap().exists());
+
+    // A create step that fails uploads nothing, and the runner still exits as the JVM did.
+    fs::write(machine.path("java/bin/java.fail"), "").unwrap();
+    let (exit, core) = machine.run(record()).await;
+    assert_eq!(exit, Ok(0));
+    assert!(core.uploaded.lock().unwrap().0.is_empty() && core.abandoned.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn the_jvm_starts_with_a_fetched_aot_cache_or_without_one_that_fails_its_digest() {
+    let machine = Machine::new();
+    let sha256 = format!("{:x}", Sha256::digest(AOT_CACHE));
+    let using = |sha256: &str| Script {
+        aot: Some(Aot::Use(JvmAotUse { size: AOT_CACHE.len() as u64, sha256: sha256.into() })),
+        ..Script::default()
+    };
+    let (exit, core) = machine.run(using(&sha256)).await;
+    assert_eq!(exit, Ok(0));
+    assert!(core.aot_reads.load(Ordering::SeqCst) > 1);
+    let args = machine.java("args");
+    let cache = args[3].strip_prefix("-XX:AOTCache=").unwrap();
+    assert_eq!(Path::new(cache), machine.path("cache/aot").join(&RELEASE.1).join("lobby.aot"));
+    assert_eq!(fs::read(cache).unwrap(), AOT_CACHE);
+    assert_eq!(args[4], "-jar");
+    // A kept cache that still matches is used again without a download.
+    let (exit, core) = machine.run(using(&sha256)).await;
+    assert_eq!((exit, core.aot_reads.load(Ordering::SeqCst)), (Ok(0), 0));
+    assert!(machine.java("args")[3].starts_with("-XX:AOTCache="));
+
+    let (exit, _) = machine.run(using(&"0".repeat(64))).await;
+    assert_eq!(exit, Ok(0));
+    assert_eq!(machine.java("args")[3], "-jar");
 }

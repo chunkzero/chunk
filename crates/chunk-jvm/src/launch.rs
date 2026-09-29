@@ -1,13 +1,13 @@
 //! The Java command that runs a verified release's app.
 
-use crate::{Failure, config::Config, memory};
+use crate::{Failure, aot, config::Config, memory};
 use chunk_build::VerifiedRelease;
 use chunk_proto::sync::v1::JvmLaunch;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     net::IpAddr,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 use tempfile::TempDir;
@@ -19,17 +19,45 @@ const MIN_HEAP_MIB: u64 = 64;
 
 pub(crate) struct Jvm {
     pub command: Command,
+    /// What the JVM does about its AOT cache.
+    pub aot: aot::Plan,
+    /// Java, and the flags and JAR it runs the app with, which creating an AOT cache repeats.
+    java: PathBuf,
+    flags: Vec<String>,
+    jar: PathBuf,
     /// The JVM's working directory, removed once dropped.
-    _directory: TempDir,
+    directory: TempDir,
 }
 
-/// Checks that the image can run `launch`'s app from `release`, installed at `directory`, and builds its command.
+impl Jvm {
+    /// The Java command that creates the AOT cache `cache` from the configuration a recording run wrote to
+    /// `configuration`.
+    pub fn create(&self, configuration: &Path, cache: &Path) -> Command {
+        let mut command = Command::new(&self.java);
+        command
+            .args(&self.flags)
+            .args([
+                "-XX:AOTMode=create".into(),
+                aot::flag("-XX:AOTConfiguration=", configuration),
+                aot::flag("-XX:AOTCache=", cache),
+            ])
+            .arg("-jar")
+            .arg(&self.jar)
+            .current_dir(self.directory.path())
+            .stdin(Stdio::null());
+        command
+    }
+}
+
+/// Checks that the image can run `launch`'s app from `release`, installed at `directory`, and builds its command,
+/// which follows `aot`.
 pub(crate) fn prepare(
     config: &Config,
     launch: &JvmLaunch,
     release: &VerifiedRelease,
     directory: &Path,
     player_address: IpAddr,
+    aot: aot::Plan,
 ) -> Result<Jvm, Failure> {
     let app = release
         .apps
@@ -50,11 +78,14 @@ pub(crate) fn prepare(
         .prefix("chunk-jvm-")
         .tempdir_in(&config.work_root)
         .map_err(|error| Failure::io(format!("cannot create the JVM's working directory: {error}")))?;
-    let mut command = Command::new(config.java_home.join("bin/java"));
+    let java = config.java_home.join("bin/java");
+    let flags = vec![format!("-Xmx{heap}m"), "-XX:+UseG1GC".into(), "-XX:+ExitOnOutOfMemoryError".into()];
+    let mut command = Command::new(&java);
     command
-        .arg(format!("-Xmx{heap}m"))
-        .args(["-XX:+UseG1GC", "-XX:+ExitOnOutOfMemoryError", "-jar"])
-        .arg(jar)
+        .args(&flags)
+        .args(aot.flags())
+        .arg("-jar")
+        .arg(&jar)
         .current_dir(working.path())
         .env("CHUNK_PROCESS_TOKEN", &config.credential)
         .env("CHUNK_DEPLOYMENT", &launch.deployment)
@@ -66,12 +97,12 @@ pub(crate) fn prepare(
         .env("CHUNK_ARTIFACT_DIGEST", &app.sha256)
         .env("CHUNK_PLAYER_ADDRESS", player_address.to_string())
         .stdin(Stdio::null());
-    tracing::info!(heap_mib = heap, java = image, "starting the JVM");
-    Ok(Jvm { command, _directory: working })
+    tracing::info!(heap_mib = heap, java = image, aot = aot.name(), "starting the JVM");
+    Ok(Jvm { command, aot, java, flags, jar, directory: working })
 }
 
 /// The app JAR at `jar` within `directory`, once its contents hash to `sha256`.
-fn checked_jar(directory: &Path, jar: &str, sha256: &str) -> Result<std::path::PathBuf, Failure> {
+fn checked_jar(directory: &Path, jar: &str, sha256: &str) -> Result<PathBuf, Failure> {
     let unreadable = |error: std::io::Error| Failure::verify(format!("cannot read the app JAR {jar}: {error}"));
     let root = directory.canonicalize().map_err(unreadable)?;
     let path = directory.join(jar).canonicalize().map_err(unreadable)?;
@@ -87,16 +118,30 @@ fn java_major(java_home: &Path) -> Result<u32, Failure> {
     let path = java_home.join("release");
     let unknown = |reason: String| Failure::java(format!("cannot tell this image's Java version: {reason}"));
     let release = fs::read_to_string(&path).map_err(|error| unknown(format!("{}: {error}", path.display())))?;
-    release
-        .lines()
-        .find_map(|line| line.strip_prefix("JAVA_VERSION="))
+    value(&release, "JAVA_VERSION")
         .and_then(parse_major)
         .ok_or_else(|| unknown(format!("{} names no JAVA_VERSION", path.display())))
 }
 
-/// The major version in a `JAVA_VERSION` value such as `"25"`, `"21.0.4"` or `"1.8.0_392"`.
+/// The image's Java runtime as `$JAVA_HOME/release` names it, which an AOT cache must match: its `IMPLEMENTOR`,
+/// `JAVA_RUNTIME_VERSION` and `OS_ARCH`. Empty when it names no runtime version.
+pub(crate) fn runtime(java_home: &Path) -> String {
+    let release = fs::read_to_string(java_home.join("release")).unwrap_or_default();
+    if value(&release, "JAVA_RUNTIME_VERSION").is_none_or(str::is_empty) {
+        return String::new();
+    }
+    let values = ["IMPLEMENTOR", "JAVA_RUNTIME_VERSION", "OS_ARCH"].map(|key| value(&release, key).unwrap_or(""));
+    values.join(" ").chars().take(256).collect()
+}
+
+/// The value of `key` in a `release` file, without its quotes.
+fn value<'a>(release: &'a str, key: &str) -> Option<&'a str> {
+    let value = release.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix('='))?;
+    Some(value.trim().trim_matches('"'))
+}
+
+/// The major version in a `JAVA_VERSION` value such as `25`, `21.0.4` or `1.8.0_392`.
 fn parse_major(value: &str) -> Option<u32> {
-    let value = value.trim().trim_matches('"');
     let value = value.strip_prefix("1.").unwrap_or(value);
     let digits = value.find(|c: char| !c.is_ascii_digit()).unwrap_or(value.len());
     value[..digits].parse().ok()
@@ -123,11 +168,11 @@ mod tests {
 
     #[test]
     fn java_versions_parse_to_their_major() {
-        for (value, major) in [("\"25\"", Some(25)), ("\"21.0.4\"", Some(21)), ("\"1.8.0_392\"", Some(8))] {
+        for (value, major) in [("25", Some(25)), ("21.0.4", Some(21)), ("1.8.0_392", Some(8))] {
             assert_eq!(parse_major(value), major, "{value}");
         }
-        assert_eq!(parse_major("\"26-ea\""), Some(26));
-        assert_eq!(parse_major("\"\""), None);
+        assert_eq!(parse_major("26-ea"), Some(26));
+        assert_eq!(parse_major(""), None);
     }
 
     #[test]

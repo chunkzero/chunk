@@ -643,11 +643,18 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
     assert_eq!((kept.sha256.as_str(), kept.size), (second.sha256.as_str(), second.size_bytes));
     assert_eq!(format!("{:x}", Sha256::digest(fs::read(&kept.path).unwrap())), second.sha256);
 
+    let aot = harness.state().join("aot");
+    for release in [&first.release_id, &second.release_id] {
+        fs::create_dir_all(aot.join(release).join("lobby")).unwrap();
+        fs::write(aot.join(release).join("lobby/runtime"), b"cache").unwrap();
+    }
     let aside = release::set_aside(&store, BTreeSet::from([second.release_id.clone()]));
     release::remove(aside).await.unwrap();
     assert!(lookup.get(&first.release_id).is_none() && !harness.archive(&first.release_id).exists());
     let releases = harness.state().join("releases");
     assert!(!releases.join(&first.release_id).exists() && releases.join(&second.release_id).exists());
+    // A release's AOT caches go with it.
+    assert!(!aot.join(&first.release_id).exists() && aot.join(&second.release_id).join("lobby/runtime").exists());
     assert_eq!(lookup.get(&second.release_id).as_ref(), Some(&kept));
 
     // Restarted, core looks the retained release's archive up again only while it matches the recorded digest.

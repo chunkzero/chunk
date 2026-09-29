@@ -40,11 +40,12 @@ pub(crate) use auth::{Gateways, Issuer};
 /// the credential `gateways` minted for it, and gateway machines theirs, which an [`Issuer`] for `environment` and
 /// `environment_token` derives. The CLI presents control's credential from a loopback peer, management the operator
 /// credential, and each JVM its process or machine credential. Remote runners download release archives from
-/// `archives`. JVMs on this machine may serve players at `private_address`.
+/// `archives`, and use and upload the AOT caches in `aot`. JVMs on this machine may serve players at `private_address`.
 pub(crate) fn services(
     backend: Backend,
     gateways: Arc<Gateways>,
     archives: Arc<super::Archives>,
+    aot: Arc<super::AotCaches>,
     environment: String,
     environment_token: Option<String>,
     private_address: Option<IpAddr>,
@@ -64,6 +65,7 @@ pub(crate) fn services(
             fences: streams::Fences::default(),
             runs: Arc::default(),
             archives: platform::ArchiveReads::new(archives),
+            aot: aot.clone(),
             private_address,
             stop,
             operations,
@@ -85,6 +87,8 @@ pub(crate) struct SyncService {
     runs: Arc<runs::Runs>,
     /// The release archives remote runners download.
     archives: platform::ArchiveReads,
+    /// The AOT caches remote runners use and upload.
+    aot: Arc<super::AotCaches>,
     /// The store's epoch, fixed while the backend runs.
     epoch: u64,
     /// This machine's address on the environment's private network.
