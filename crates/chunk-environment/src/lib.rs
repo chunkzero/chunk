@@ -102,16 +102,18 @@ impl Config {
 /// shutdown errors.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     match config {
-        Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop).await,
+        Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop, RELEASE_TIMEOUT).await,
         Config::Gateway { gateway, core } => gateway::run_remote(core, gateway, stop, |_| {}).await,
     }
 }
 
+/// With management, machine stops still unconfirmed `release_bound` into shutdown are left to management.
 async fn run_core(
     config: CoreConfig,
     gateway_config: Option<GatewayConfig>,
     management: Option<ManagementConfig>,
     stop: CancellationToken,
+    release_bound: Duration,
 ) -> io::Result<()> {
     let environment = config.environment.clone();
     let state = config.state.clone();
@@ -146,6 +148,7 @@ async fn run_core(
         }
         None
     };
+    let stopping = managed.as_ref().map(managed::Managed::stopping).unwrap_or_default();
     tracing::info!("environment ready");
     let failed = async {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -174,17 +177,19 @@ async fn run_core(
             Err(error)
         }
     };
-    // Machines stop while the attach keeps the lease their releases carry current. Management releases the machines
-    // of a core it superseded, so once `RELEASE_TIMEOUT` passes the rest are left to it.
+    // Machines stop while the attach keeps the lease their releases carry current, though it activates nothing more and
+    // starts no gateway. Management releases the machines of a core it superseded, so once `release_bound` passes the
+    // rest are left to it.
     if let Some(launcher) = &launcher {
+        stopping.cancel();
         if let Some(gateway) = gateway.get() {
             gateway.close();
         }
-        let stopping = core.stop_machines(RELEASE_TIMEOUT);
-        tokio::pin!(stopping);
+        let machines = core.stop_machines(release_bound);
+        tokio::pin!(machines);
         let stopped = loop {
             tokio::select! {
-                stopped = &mut stopping => break stopped,
+                stopped = &mut machines => break stopped,
                 error = &mut managed, if attached => {
                     tracing::warn!(%error, "management attach ended during shutdown");
                     attached = false;

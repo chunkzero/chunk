@@ -60,6 +60,9 @@ pub(crate) struct Managed<'a> {
     deployments: Mutex<Deployments>,
     /// The sequence of the latest report under the current lease.
     sequence: AtomicU64,
+    /// Cancelled once core shuts down. From then on no deployment activates and no gateway starts, while attaches
+    /// still publish their leases.
+    stopping: CancellationToken,
 }
 
 #[derive(Default)]
@@ -145,7 +148,13 @@ impl<'a> Managed<'a> {
             gateway_config,
             deployments: Mutex::default(),
             sequence: AtomicU64::new(0),
+            stopping: CancellationToken::new(),
         }
+    }
+
+    /// The token that tells this attachment core is shutting down.
+    pub(crate) fn stopping(&self) -> CancellationToken {
+        self.stopping.clone()
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
@@ -211,6 +220,7 @@ impl<'a> Managed<'a> {
         let (mut latest, mut applied, mut work) = (None::<v1::AttachResponse>, None, None::<Work>);
         loop {
             if work.is_none()
+                && !self.stopping.is_cancelled()
                 && let Some(desired) = latest.as_ref().filter(|desired| applied != Some(desired.revision))
             {
                 work = Some(self.start(desired.clone()));
@@ -253,7 +263,7 @@ impl<'a> Managed<'a> {
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
         lock(&self.deployments).loading = Some(desired.deployment_id.clone());
-        let cancel = CancellationToken::new();
+        let cancel = self.stopping.child_token();
         Work {
             revision: desired.revision,
             deployment: desired.deployment_id.clone(),
@@ -339,14 +349,20 @@ impl<'a> Managed<'a> {
         Ok(true)
     }
 
-    /// Sends later player connections to `deployment`, starting the gateway for the first one.
+    /// Sends later player connections to `deployment`, starting the gateway for the first one unless core is stopping.
     async fn route(&self, deployment: &str) -> io::Result<()> {
         let mut target = self.core.target()?;
         target.deployment = deployment.into();
         if let Some(gateway) = self.gateway.get() {
             gateway.retarget(target)?;
         } else if let Some(config) = &self.gateway_config {
-            _ = self.gateway.set(Gateway::start(config.clone(), target).await?);
+            tokio::select! {
+                biased;
+                () = self.stopping.cancelled() => {}
+                started = Gateway::start(config.clone(), target) => {
+                    _ = self.gateway.set(started?);
+                }
+            }
         }
         lock(&self.deployments).serving = Some(deployment.into());
         Ok(())

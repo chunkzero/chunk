@@ -21,6 +21,8 @@ pub(super) struct Capacities {
     lost: usize,
     /// Holds the next `EnsureCapacity` call, once recorded, until notified; management then handles it.
     held: Option<Arc<Notify>>,
+    /// Refuses the next release of this request for a stale lease, as when management granted a lease core never learns.
+    stale: Option<String>,
 }
 
 struct Request {
@@ -67,10 +69,11 @@ pub(super) async fn serve(management: &Management, path: &str, body: &[u8]) -> h
         EnsureCapacityResponse { capacity: Some(capacity) }.encode_to_vec()
     } else {
         let release = ReleaseCapacityRequest::decode(body).unwrap();
-        if release.lease != *management.lease.borrow() {
+        let mut capacities = management.capacity.lock().unwrap();
+        let refused = capacities.stale.take_if(|id| *id == release.request_id).is_some();
+        if refused || release.lease != *management.lease.borrow() {
             return respond(400, "application/json", FENCED.into());
         }
-        let mut capacities = management.capacity.lock().unwrap();
         let state = capacities.requests.get_mut(&release.request_id).map_or(CapacityState::Released, |request| {
             if matches!(request.state, CapacityState::Provisioning | CapacityState::Ready | CapacityState::Failed) {
                 request.state = if request.torn_down { CapacityState::Released } else { CapacityState::Releasing };
@@ -176,7 +179,7 @@ async fn recorded(harness: &Harness, host: &str) {
         release: "release-1".into(),
         app: "lobby".into(),
         profile: "small".into(),
-        process_id: "process-1".into(),
+        process_id: format!("process-{host}"),
         generation: 1,
         boot: None,
     };
@@ -330,4 +333,32 @@ async fn shutdown_releases_machines_through_management_and_a_fenced_core_still_s
     harness.management.lease.send_modify(|lease| *lease += 1);
     let error = tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap_err();
     assert!(error.to_string().contains("fenced"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_leaves_unconfirmed_releases_to_management_once_bounded_and_activates_nothing_meanwhile() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.stalled());
+    recorded(&harness, "remote-1").await;
+    recorded(&harness, "remote-2").await;
+    // remote-1 stays releasing, and remote-2's release waits for a lease that never comes.
+    harness.management.requested("remote-1", false);
+    harness.management.capacity.lock().unwrap().stale = Some("remote-2".into());
+    let (stop, running) = harness.start_bounded(Duration::from_secs(2));
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.management.stalled.notified().await;
+    assert!(harness.management.capacity.lock().unwrap().stale.is_some());
+    stop.cancel();
+    let refused = async {
+        while harness.management.capacity.lock().unwrap().stale.is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), refused).await.expect("remote-2's release was refused");
+
+    // Desired once shutdown began, dep_b neither starts nor activates.
+    harness.deploy("dep_b", harness.valid());
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    assert_eq!(harness.management.state("remote-1"), CapacityState::Releasing);
+    assert!(harness.reported.try_recv().is_err());
 }

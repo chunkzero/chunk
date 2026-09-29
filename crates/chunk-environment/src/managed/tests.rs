@@ -1,5 +1,5 @@
 use super::release;
-use crate::{Config, CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
+use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
@@ -383,13 +383,19 @@ impl Harness {
     }
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let config = Config::Core {
-            core: Box::new(self.core()),
-            gateway: Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
-            management: Some(ManagementConfig { url: self.url.clone(), token: "secret".into() }),
-        };
+        self.start_bounded(crate::RELEASE_TIMEOUT)
+    }
+
+    /// Runs core, which leaves the machine stops still unconfirmed `release_bound` into shutdown to management.
+    fn start_bounded(
+        &self,
+        release_bound: Duration,
+    ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
+        let gateway = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
+        let management = ManagementConfig { url: self.url.clone(), token: "secret".into() };
         let stop = CancellationToken::new();
-        (stop.clone(), tokio::spawn(crate::run(config, stop)))
+        let running = crate::run_core(self.core(), Some(gateway), Some(management), stop.clone(), release_bound);
+        (stop, tokio::spawn(running))
     }
 
     /// The next report, which must be under the latest lease.
