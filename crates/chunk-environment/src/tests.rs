@@ -138,6 +138,33 @@ fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
     assert!(gateway.contains(Service::Gateway) && !gateway.contains(Service::Core));
 }
 
+#[test]
+fn offline_logins_reach_the_gateway_only_when_enabled() {
+    // Reads the environment in a child process, since setting variables in this one needs `unsafe`.
+    const CHILD: &str = "CHUNK_OFFLINE_LOGINS_TEST_EXPECTED";
+    if let Ok(expected) = std::env::var(CHILD) {
+        let Config::Gateway { gateway, .. } = Config::from_env().unwrap() else { panic!("expected a gateway") };
+        assert_eq!(gateway.offline_logins.to_string(), expected);
+        return;
+    }
+    for (value, expected) in [(Some("1"), true), (Some("true"), false), (None, false)] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "tests::offline_logins_reach_the_gateway_only_when_enabled"])
+            .env(CHILD, expected.to_string())
+            .env("CHUNK_SERVICES", "gateway")
+            .env("CHUNK_ENVIRONMENT_ID", "test")
+            .env("CHUNK_CORE_ENDPOINT", "http://127.0.0.1:7070")
+            .env("CHUNK_GATEWAY_CREDENTIAL", "credential")
+            .env_remove("CHUNK_OFFLINE_LOGINS")
+            .stdout(std::process::Stdio::null());
+        if let Some(value) = value {
+            child.env("CHUNK_OFFLINE_LOGINS", value);
+        }
+        assert!(child.status().unwrap().success(), "CHUNK_OFFLINE_LOGINS={value:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_gateway_bind_releases_core() {
     let directory = tempfile::tempdir().unwrap();

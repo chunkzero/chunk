@@ -42,7 +42,8 @@ pub enum Config {
 
 impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
-    /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS` and `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs). With core,
+    /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
+    /// `CHUNK_OFFLINE_LOGINS` (`1` admits unauthenticated players under any name; insecure, for tests only). With core,
     /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or
     /// `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what
     /// management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
@@ -67,6 +68,7 @@ impl Config {
         if let Some(trusted_edges) = optional("CHUNK_TRUSTED_EDGES")? {
             gateway.trusted_edges = trusted_edges;
         }
+        gateway.offline_logins = optional::<String>("CHUNK_OFFLINE_LOGINS")?.as_deref() == Some("1");
         if !services.contains(Service::Core) {
             let endpoint = required("CHUNK_CORE_ENDPOINT")?;
             let credential = required("CHUNK_GATEWAY_CREDENTIAL")?;
