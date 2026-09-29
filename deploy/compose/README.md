@@ -71,6 +71,35 @@ curl -sS http://localhost:8080/chunk.management.v1.ProjectService/ListProjects \
 
 To reach it from elsewhere, put a TLS reverse proxy in front and set `CHUNK_PUBLIC_URL` to its URL.
 
+## Deploying
+
+Build a release with `chunk build`, which prints the archive's path, `dist/<release id>.tar.gz`. Then create a project
+and an environment, upload the release and deploy it. With `token` from above and `jq`:
+
+```sh
+rpc() {
+  curl -fsS "http://localhost:8080/chunk.management.v1.$1" \
+    -H "authorization: Bearer $token" -H 'content-type: application/json' -d "$2"
+}
+project=$(rpc ProjectService/CreateProject "{\"requestId\":\"$(uuidgen)\",\"name\":\"my-server\"}" | jq -r .project.id)
+environment=$(rpc ProjectService/CreateEnvironment \
+  "{\"requestId\":\"$(uuidgen)\",\"projectId\":\"$project\",\"name\":\"prod\"}" | jq -r .environment.id)
+
+archive=path/to/dist/RELEASE.tar.gz  # the path chunk build printed
+release=$(basename "$archive" .tar.gz)
+upload=$(rpc DeploymentService/UploadRelease "{\"projectId\":\"$project\",\"releaseId\":\"$release\",
+  \"archiveSha256\":\"$(sha256sum "$archive" | cut -d' ' -f1)\",\"archiveSizeBytes\":\"$(wc -c <"$archive" | tr -d ' ')\"}")
+curl -fsS -X PUT -H 'content-type: application/gzip' --data-binary @"$archive" "$(echo "$upload" | jq -r .upload.url)"
+rpc DeploymentService/CompleteReleaseUpload "{\"projectId\":\"$project\",\"releaseId\":\"$release\"}"
+rpc DeploymentService/Deploy \
+  "{\"requestId\":\"$(uuidgen)\",\"environmentId\":\"$environment\",\"releaseId\":\"$release\"}"
+```
+
+`UploadRelease` returns no `upload` when the project already holds the release; skip the `PUT` then. The deployment
+becomes `DEPLOYMENT_STATE_ACTIVE` once the environment serves it; follow it in the dashboard or with
+`DeploymentService/GetDeployment`. Players join at the environment's `hostname`. Deploy later releases to the same
+environment the same way.
+
 ## Stopping
 
 Delete environments before `compose down`: their machines are not part of the Compose project and keep the `chunk`

@@ -2,6 +2,7 @@ import { useParams } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/confirm-dialog.tsx";
+import { DeployGuideLink } from "../../components/deploy-guide.tsx";
 import { ErrorText } from "../../components/page.tsx";
 import { Panel, PanelNote } from "../../components/panel.tsx";
 import { ReleaseId } from "../../components/release.tsx";
@@ -42,7 +43,10 @@ export function Deployments() {
     >
       <ErrorText error={deployments.error ? errorMessage(deployments.error) : undefined} className="px-5 py-4" />
       {deployments.data?.length === 0 ? (
-        <PanelNote>Nothing deployed yet. Deploy a release with the chunk CLI.</PanelNote>
+        <PanelNote>
+          Nothing deployed yet. Upload and deploy a release through the management API, as the <DeployGuideLink />{" "}
+          shows.
+        </PanelNote>
       ) : (
         <ul className="divide-y">
           {deployments.data?.map((deployment) => (

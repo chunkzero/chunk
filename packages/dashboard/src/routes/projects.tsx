@@ -1,3 +1,4 @@
+import { DeployGuideLink } from "../components/deploy-guide.tsx";
 import { ListLink } from "../components/list-link.tsx";
 import { EmptyState, ErrorText, Page } from "../components/page.tsx";
 import { errorMessage } from "../lib/client.ts";
@@ -11,7 +12,9 @@ export function Projects() {
     <Page>
       <h1 className="text-xl font-semibold tracking-tight">Projects</h1>
       {projects.data?.length === 0 ? (
-        <EmptyState>No projects yet. Deploying with the chunk CLI creates one.</EmptyState>
+        <EmptyState>
+          No projects yet. Create one through the management API, as the <DeployGuideLink /> shows.
+        </EmptyState>
       ) : (
         <ul className="divide-y overflow-hidden rounded-lg border bg-card">
           {projects.data?.map((project) => (
