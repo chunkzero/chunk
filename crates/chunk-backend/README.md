@@ -71,8 +71,9 @@ queued work of the same kind has waited over 500 ms, or when its memory budget i
 | Core's outgoing sync messages            | A sixteenth of that memory, at least 128 MiB (`Backend::send_budget`)                |
 | Action and command records, prepared IDs | 64 MiB                                                                               |
 
-Each read in a function may decode at most 4,096 rows or 4 MiB in total, and `scanIndex` returns 1 to 1,024 results;
-exceeding a bound fails the read rather than truncating it. These are logical bounds, not an RSS limit.
+Each function invocation may decode at most 4,096 rows or 4 MiB across all its reads, and `scanIndex` takes a limit of 1
+to 1,024 results; exceeding a bound fails the read rather than truncating it. These are logical bounds, not an RSS
+limit.
 
 ## Actions
 

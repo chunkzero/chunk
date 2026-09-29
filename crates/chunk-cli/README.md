@@ -18,7 +18,7 @@ covers the packaged SDK.
 | `chunk codegen [PROJECT]`         | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build. |
 | `chunk build [PROJECT]`           | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                |
 | `chunk dev [PROJECT]`             | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.    |
-| `chunk clean [PROJECT]`           | Deletes `dist/` and `.chunk/` output, keeping local backend data unless `--data` is passed. |
+| `chunk clean [PROJECT]`           | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.     |
 | `chunk gen [PROJECT] --target T`  | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.        |
 | `chunk inspect [PROJECT]`         | Prints the project and app manifests as JSON, without building.                             |
 | `chunk players --player UUID ...` | Moves a player to another session, or drains the JVM they are on, in a running `chunk dev`. |
@@ -26,7 +26,7 @@ covers the packaged SDK.
 | `chunk auth login`, `chunk login` | Records which platform later commands will use. Logging in itself is not implemented yet.   |
 | `chunk auth status`               | Shows the recorded platform.                                                                |
 
-`PROJECT` defaults to the current directory. Every command except `create` and `codegen` needs the project's
+`PROJECT` defaults to the current directory. The commands that take `PROJECT`, except `create` and `codegen`, need its
 `chunk.toml`.
 
 ### `create`
@@ -78,8 +78,10 @@ second Ctrl-C exits at once, and the next `chunk dev` stops any JVM left running
 
 ### `clean`
 
-`chunk clean` deletes `dist/` and everything under `.chunk/` except the local backend data of each `chunk dev` state
-directory; `--data` deletes that too. It refuses while `chunk dev` runs for the project, and never follows a symlink.
+`chunk clean` deletes `dist/` and everything under `.chunk/` except the backend data of `chunk dev` state directories
+directly under `.chunk/` (such as the default `.chunk/local`); `--data` deletes that too. A `--state` directory anywhere
+else is not recognized, so its data is deleted if it lies under `.chunk/` or `dist/`. It refuses while `chunk dev` runs
+for the project, and never follows a symlink.
 
 ### `gen`, `codegen` and `inspect`
 
@@ -108,7 +110,8 @@ chunk nodes shutdown <host> --timeout-seconds 60
 ID from `nodes list`, 0 to 120 seconds) stop new placement on a JVM, move its players off, and stop it once it is empty
 or at the deadline; zero seconds stops it at once. `drain` waits until the JVM has stopped, giving up 30 seconds past
 the deadline; `nodes shutdown` prints the node and returns. Each prints its operation ID; pass it back with
-`--operation ID` (before the subcommand) when retrying a command whose outcome is unknown, so it is not applied twice.
+`--operation ID` (before the subcommand for `players`, after it for `nodes shutdown`) when retrying a command whose
+outcome is unknown, so it is not applied twice.
 
 ### `auth`
 

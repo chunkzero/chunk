@@ -101,8 +101,9 @@ sealed and never returned. Traffic between machines is plaintext, so they must s
 
 Every container and volume carries `chunk.install`, `chunk.environment`, `chunk.request` and `chunk.workload` labels,
 and the provider refuses to touch anything under a name it uses that lacks this install's labels. Core restarts with the
-engine; other machines are stateless, and the reconciler replaces one that exits under the same request and credential.
-A JVM machine boots at most once, and a released request never gets a running machine.
+engine. A gateway machine that exits is replaced under the same request and credential. A JVM machine boots at most
+once: if it exits or disappears, its request fails and core asks for new capacity. A released request never gets a
+running machine.
 
 When core reports that it may be suspended, the reconciler suspends the environment's machines (the Docker provider
 pauses them, keeping their memory). An accepted `EdgeService.Wake` or a due wake alarm resumes them. A JVM request whose

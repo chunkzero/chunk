@@ -116,7 +116,7 @@ the release and matches its hash.
 TypeScript compiler and licenses, plus the JVM publications in `target/dist/maven/`; see
 [`docs/distribution.md`](../../docs/distribution.md). Two helper binaries serve the repository's own builds:
 `chunk-compile PROJECT OUTPUT` compiles a backend without generating clients, and
-`chunk-codegen java|kotlin|typescript CONTRACT OUTPUT [JAVA_PACKAGE]` generates a client from an existing contract, as
-the JVM libraries' builds do.
+`chunk-codegen java|kotlin CONTRACT OUTPUT JAVA_PACKAGE` or `chunk-codegen typescript CONTRACT OUTPUT` generates a
+client from an existing contract, as the JVM libraries' builds do.
 
 `cargo test -p chunk-build` runs the tests; `just typecheck` covers the SDK's type tests.
