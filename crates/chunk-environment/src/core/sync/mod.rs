@@ -74,6 +74,8 @@ pub(crate) fn services(
     })
 }
 
+/// Served only through [`services`]: its [`transport::ChargeBodies`] sends each subscription's updates, which
+/// `subscribe` hands over in a response extension.
 pub(crate) struct SyncService {
     credentials: Arc<auth::Credentials>,
     control: Arc<Control>,

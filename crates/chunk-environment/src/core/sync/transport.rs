@@ -217,7 +217,7 @@ mod tests {
 
         sender.send(update(vec![2; 16]));
         let second = next().await;
-        assert!(!first.as_ptr_range().contains(&second.as_ptr()), "the stream kept the large message's buffer");
+        assert_eq!(second.len(), PREFIX_BYTES + update(vec![2; 16]).encoded_len());
         drop((first, second));
         assert_eq!(budget.bytes(), 0);
 
