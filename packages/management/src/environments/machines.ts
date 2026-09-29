@@ -16,6 +16,8 @@ export interface MachineOptions {
   coreMemoryMib: number;
   /** The port core's network listener binds on every interface, and extra machines reach it on. */
   corePort: number;
+  /** Passed to core and gateway machines as `CHUNK_TRUSTED_EDGES`, the edges whose PROXY headers they accept. */
+  trustedEdges: string | undefined;
 }
 
 const workloadNames: Record<number, string> = {
@@ -49,6 +51,10 @@ export function capacityMachineName(request: Pick<CapacityRow, "environment_id" 
   return `${namePrefix(request.environment_id)}-${workload}-${sha256(request.request_id).toString("hex").slice(0, 12)}`;
 }
 
+function trustedEdgesEnv(options: MachineOptions): Record<string, string> {
+  return options.trustedEdges ? { CHUNK_TRUSTED_EDGES: options.trustedEdges } : {};
+}
+
 /** Core keeps its data volume and is restarted by the host. */
 export function coreMachineSpec(options: MachineOptions, environmentId: string, token: string): MachineSpec {
   return {
@@ -60,6 +66,7 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
       CHUNK_MANAGEMENT_URL: options.managementUrl,
       CHUNK_ENVIRONMENT_TOKEN: token,
       CHUNK_CORE_BIND: `[::]:${options.corePort}`,
+      ...trustedEdgesEnv(options),
     },
     memoryMib: options.coreMemoryMib,
     cpus: cpusFor(options.coreMemoryMib),
@@ -98,6 +105,7 @@ export function capacityMachineSpec(
         CHUNK_SERVICES: workload,
         CHUNK_CAPACITY_REQUEST_ID: request.request_id,
         CHUNK_GATEWAY_CREDENTIAL: credential,
+        ...trustedEdgesEnv(options),
       };
   return {
     name: capacityMachineName(request),

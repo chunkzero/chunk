@@ -34,6 +34,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
       managementUrl: h.url,
       coreMemoryMib: 1024,
       corePort: 7070,
+      trustedEdges: undefined,
     };
   });
   afterAll(() => h.close());

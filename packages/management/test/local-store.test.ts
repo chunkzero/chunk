@@ -26,7 +26,12 @@ test("a start syncs the whole store path after an interrupted one, and an upload
   try {
     const root = join(base, "data", "releases");
     const start = () =>
-      localReleaseStore({ directory: root, keys: deriveKeys(randomBytes(32)), publicUrl: "http://x" });
+      localReleaseStore({
+        directory: root,
+        keys: deriveKeys(randomBytes(32)),
+        publicUrl: "http://x",
+        machineUrl: "http://x",
+      });
     failSync = true;
     await expect(start()).rejects.toThrow("interrupted");
     failSync = false;
@@ -52,5 +57,24 @@ test("a start syncs the whole store path after an interrupted one, and an upload
   } finally {
     opening.mockRestore();
     await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test("uploads use the public URL and downloads the URL machines reach this service at", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "chunk-local-store-"));
+  try {
+    const store = await localReleaseStore({
+      directory: root,
+      keys: deriveKeys(randomBytes(32)),
+      publicUrl: "http://localhost:8080",
+      machineUrl: "http://management:8080",
+    });
+    const key = releaseKey("p", "r", "0".repeat(64));
+    const expireTime = new Date(Date.now() + 60_000);
+    const target = await store.uploadTarget(key, { sha256: "0".repeat(64), sizeBytes: 1n }, expireTime);
+    expect(target.url).toStartWith("http://localhost:8080/");
+    expect(await store.downloadUrl(key, expireTime)).toStartWith("http://management:8080/");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

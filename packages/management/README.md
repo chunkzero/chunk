@@ -43,6 +43,7 @@ bun src/main.ts
 | `CHUNK_MACHINE_MANAGEMENT_URL`       | `$CHUNK_PUBLIC_URL`         | How machines reach this service.                                                                   |
 | `CHUNK_CORE_MEMORY_MIB`              | `1024`                      | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.                      |
 | `CHUNK_CORE_PORT`                    | `7070`                      | The port core's network listener binds, and extra machines reach core on.                          |
+| `CHUNK_MACHINE_TRUSTED_EDGES`        | unset                       | Edge IPs or CIDRs (comma-separated) core and gateway machines accept PROXY headers from.           |
 
 Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, using
 the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,
@@ -91,8 +92,10 @@ core's first IP address, with IPv6 bracketed; until core has one, no extra machi
 `CHUNK_ENVIRONMENT_ID`, the credential core minted for the machine and sent in `EnsureCapacity`
 (`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`), and the request's `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and
 `CHUNK_MACHINE_PROFILE`, which the JVM runner checks core's launch against. Gateway machines also get `CHUNK_SERVICES`
-and `CHUNK_CAPACITY_REQUEST_ID`. The credential is stored sealed, with a keyed digest that retries are matched on, and
-is never returned. Traffic between machines is plaintext, so machines must share a private, encrypted network.
+and `CHUNK_CAPACITY_REQUEST_ID`. With `CHUNK_MACHINE_TRUSTED_EDGES` set, core and gateway machines get it as
+`CHUNK_TRUSTED_EDGES`; JVM machines never do. The credential is stored sealed, with a keyed digest that retries are
+matched on, and is never returned. Traffic between machines is plaintext, so machines must share a private, encrypted
+network.
 
 Every container and volume carries ownership labels with this install's ID (from the `installation` table), the
 environment and the capacity request. The provider refuses to adopt, start, stop or remove anything under a name it uses

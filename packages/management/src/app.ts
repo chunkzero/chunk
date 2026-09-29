@@ -29,6 +29,7 @@ export async function start(config: Config) {
       directory: join(config.dataDir, "releases"),
       keys,
       publicUrl: config.publicUrl,
+      machineUrl: config.machines?.managementUrl ?? config.publicUrl,
     }),
     archiveLimits: config.archiveLimits,
     resolveTxt,

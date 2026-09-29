@@ -1,0 +1,90 @@
+# Self-hosts chunk on one Docker or Podman host: Postgres, management and the edge. Management runs each environment's
+# machines on the `chunk` network through the engine socket. Run ./init.sh first; see README.md.
+name: chunk
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chunk
+      POSTGRES_DB: chunk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./init.sh first}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks: [chunk]
+    healthcheck:
+      test: [CMD, pg_isready, -U, chunk, -d, chunk]
+      interval: 5s
+      retries: 20
+
+  management:
+    image: ${CHUNK_MANAGEMENT_IMAGE:-chunk-management:0.1.0}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://chunk:${POSTGRES_PASSWORD}@postgres:5432/chunk
+      CHUNK_SECRET_KEY: ${CHUNK_SECRET_KEY:?run ./init.sh first}
+      CHUNK_OPERATOR_TOKEN: ${CHUNK_OPERATOR_TOKEN:?run ./init.sh first}
+      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?run ./init.sh first}
+      CHUNK_PUBLIC_URL: ${CHUNK_PUBLIC_URL:-http://localhost:8080}
+      CHUNK_EDGE_DOMAIN: ${CHUNK_EDGE_DOMAIN:-localhost}
+      CHUNK_EDGE_PORT: ${CHUNK_PLAYER_PORT:-25565}
+      CHUNK_ENVIRONMENT_IMAGE: ${CHUNK_ENVIRONMENT_IMAGE:-chunk-environment:0.1.0}
+      CHUNK_JVM_IMAGE: ${CHUNK_JVM_IMAGE:-chunk-jvm:{java}}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      CHUNK_MACHINE_NETWORK: chunk
+      CHUNK_MACHINE_MANAGEMENT_URL: http://management:8080
+      # The edge alone, so no machine on the network can claim a player's address.
+      CHUNK_MACHINE_TRUSTED_EDGES: 10.231.0.2
+    volumes:
+      - ${CHUNK_ENGINE_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - management:/data
+    # The socket's group inside the container: the host's `docker` group, or 0 under rootless Podman.
+    group_add: ["${CHUNK_ENGINE_GID:-0}"]
+    security_opt: [label=disable]
+    ports:
+      - ${CHUNK_MANAGEMENT_PUBLISH:-127.0.0.1:8080}:8080
+    networks: [chunk]
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 5s
+      retries: 20
+
+  edge:
+    image: ${CHUNK_EDGE_IMAGE:-chunk-edge:0.1.0}
+    restart: unless-stopped
+    depends_on:
+      management:
+        condition: service_healthy
+    environment:
+      CHUNK_MANAGEMENT_URL: http://management:8080
+      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?run ./init.sh first}
+      CHUNK_BIND: 0.0.0.0:25565
+    ports:
+      # IPv4 only: Docker's userland proxy would hide IPv6 players' addresses behind the bridge.
+      - ${CHUNK_PLAYER_BIND:-0.0.0.0}:${CHUNK_PLAYER_PORT:-25565}:25565
+    networks:
+      chunk:
+        ipv4_address: 10.231.0.2
+
+networks:
+  chunk:
+    # Fixed, so the machines management creates join the same network.
+    name: chunk
+    ipam:
+      config:
+        # Dynamic addresses come from the upper half, leaving the edge's static address free.
+        - subnet: 10.231.0.0/16
+          ip_range: 10.231.128.0/17
+          gateway: 10.231.0.1
+
+volumes:
+  postgres:
+  management:

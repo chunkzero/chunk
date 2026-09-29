@@ -95,6 +95,25 @@ edge-image:
     "$engine" build -f crates/chunk-edge/Dockerfile -t "chunk-edge:$version" \
         --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
 
+# Build the management image, dashboard included, with podman or docker, tagged with the workspace version.
+management-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=$(command -v podman || command -v docker)
+    version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+    "$engine" build -f packages/management/Dockerfile -t "chunk-management:$version" \
+        --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
+
+# Validate the self-hosting compose bundle against a throwaway `init.sh` environment.
+compose-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env_dir=$(mktemp -d)
+    trap 'rm -rf "$env_dir"' EXIT
+    deploy/compose/init.sh "$env_dir/.env" >/dev/null
+    if command -v docker >/dev/null; then compose=(docker compose); else compose=(podman compose); fi
+    "${compose[@]}" --env-file "$env_dir/.env" -f deploy/compose/compose.yaml config --quiet
+
 # Build the remote JVM runner image on a Java `java` runtime with podman or docker, tagged `chunk-jvm:<java>`.
 jvm-image java="25":
     #!/usr/bin/env bash
