@@ -15,7 +15,7 @@ use chunk_backend::{Backend, Call, Update as Outcome};
 use chunk_control::Control;
 use chunk_js::{DeploymentId, Json};
 use chunk_proto::sync::v1::{
-    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, call_response,
+    CallRequest, CallResponse, Caller, Error, Position, SubscribeRequest, Update, call_response,
     core_server::{Core, CoreServer},
 };
 use chunk_store::Revision;
@@ -74,6 +74,8 @@ pub(crate) fn services(
     })
 }
 
+/// Served only through [`services`]: its [`transport::ChargeBodies`] sends each subscription's updates, which
+/// `subscribe` hands over in a response extension.
 pub(crate) struct SyncService {
     credentials: Arc<auth::Credentials>,
     control: Arc<Control>,
@@ -193,8 +195,9 @@ impl Core for SyncService {
         Ok(response)
     }
 
-    type SubscribeStream = streams::Stream;
+    type SubscribeStream = tokio_stream::Empty<Result<Update, Status>>;
 
+    /// Hands the stream to [`transport::ChargeBodies`], which sends its updates before tonic's body ends the response.
     async fn subscribe(&self, request: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let principal = self.credentials.authenticate(&request)?;
         let request = request.into_inner();
@@ -203,9 +206,8 @@ impl Core for SyncService {
             Ok(topic) => drop(tokio::spawn(topic.run(sender, self.stop.clone()))),
             Err(error) => sender.fail(error),
         }
-        let ledger = stream.ledger();
-        let mut response = Response::new(stream);
-        response.extensions_mut().insert(ledger);
+        let mut response = Response::new(tokio_stream::empty());
+        response.extensions_mut().insert(transport::Updates::new(stream));
         Ok(response)
     }
 }

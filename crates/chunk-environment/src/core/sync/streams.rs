@@ -1,7 +1,7 @@
 //! Subscription streams: their IDs, a sender that coalesces what a slow client has yet to take, message splitting, and
 //! nudges after a credential's own writes. Entry values are shared, so streams of the same results hold each value once
 //! until they encode it. Each message is charged its encoded bytes against the send budget's [stream share] before the
-//! client takes it, and the charge moves through the stream's [`Ledger`] into the response frame that carries it.
+//! client takes it, and the charge moves with it into the response frame that carries it.
 //! While the share has no room, changes keep coalescing, newer ones merging into the refused message, and the charge
 //! is retried every [`RETRY`]; a stream still refused after [`DEADLINE`] ends with OVERLOADED. A stream's final
 //! update overdraws the budget rather than wait, so each stream holds at most one such message beyond it.
@@ -17,7 +17,7 @@ mod parts;
 use super::{
     auth::{hex, hmac},
     errors,
-    transport::{Ledger, PREFIX_BYTES},
+    transport::PREFIX_BYTES,
 };
 use chunk_backend::{SendBudget, SendCharge};
 use chunk_proto::sync::v1::{Entry, Error, Position, SubscribeRequest, Update, error::Code};
@@ -37,7 +37,6 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
 
 /// The hex nonce that starts every stream ID.
 const NONCE_BYTES: usize = 32;
@@ -183,30 +182,17 @@ impl Nudges {
     }
 }
 
-/// A stream's consuming side, which moves the charge of each update it yields into its ledger.
+/// A stream's consuming side, which yields each update with its charge.
 pub(crate) struct Stream {
     parts: mpsc::Receiver<Part>,
-    ledger: Ledger,
-}
-
-impl Stream {
-    /// The ledger the response body takes the charges of encoded updates from.
-    pub(super) fn ledger(&self) -> Ledger {
-        self.ledger.clone()
-    }
 }
 
 impl tokio_stream::Stream for Stream {
-    type Item = Result<Update, Status>;
+    type Item = (Update, Option<SendCharge>);
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(Part { update, charge }) = ready!(self.parts.poll_recv(context)) else {
-            return Poll::Ready(None);
-        };
-        if let Some(charge) = charge {
-            self.ledger.push(charge);
-        }
-        Poll::Ready(Some(Ok(update)))
+        let part = ready!(self.parts.poll_recv(context));
+        Poll::Ready(part.map(|Part { update, charge }| (update, charge)))
     }
 }
 
@@ -223,7 +209,7 @@ pub(super) fn channel(budget: SendBudget) -> (Sender, Stream) {
     let slot = Arc::<Slot>::default();
     let closed = CancellationToken::new();
     drop(tokio::spawn(write(slot.clone(), sender, closed.clone(), budget)));
-    (Sender { slot, closed }, Stream { parts, ledger: Ledger::default() })
+    (Sender { slot, closed }, Stream { parts })
 }
 
 impl Sender {
