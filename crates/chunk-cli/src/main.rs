@@ -40,26 +40,11 @@ enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
-    /// Upload assets (coming soon).
-    Upload { artifact: PathBuf },
     /// Manage authentication.
     #[command(subcommand)]
     Auth(platform::Auth),
     /// Alias for auth login.
     Login(platform::Login),
-    /// Deploy an app (coming soon).
-    Deploy(platform::Deploy),
-    /// View logs (coming soon).
-    Logs(platform::Logs),
-    /// List deployments (coming soon).
-    #[command(subcommand)]
-    Deployments(platform::ListCommand),
-    /// List environments (coming soon).
-    #[command(subcommand)]
-    Environments(platform::ListCommand),
-    /// List apps (coming soon).
-    #[command(subcommand)]
-    Apps(platform::ListCommand),
     /// Move players or drain runtimes.
     Players(players::Options),
     /// Inspect nodes and request shutdown.
@@ -107,14 +92,8 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
-        Command::Upload { .. } => platform::unsupported("Asset uploads"),
         Command::Auth(auth) => platform::auth(auth),
         Command::Login(options) => platform::auth(platform::Auth::Login(options)),
-        Command::Deploy(_) => platform::unsupported("Deployments"),
-        Command::Logs(_) => platform::unsupported("Logs"),
-        Command::Deployments(_) => platform::unsupported("Deployment listing"),
-        Command::Environments(_) => platform::unsupported("Environment listing"),
-        Command::Apps(_) => platform::unsupported("App listing"),
         Command::Players(options) => players::run(options).await,
         Command::Nodes(options) => nodes::run(options).await,
     }
