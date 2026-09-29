@@ -1,6 +1,7 @@
 import { resolveTxt } from "node:dns/promises";
 import { join } from "node:path";
 
+import type { DescMethod } from "@bufbuild/protobuf";
 import type { ConnectRouter } from "@connectrpc/connect";
 
 import { ensureEdgeToken, ensureOperatorToken, tokenAuthenticator } from "./auth/tokens.ts";
@@ -26,6 +27,8 @@ export interface Extensions {
   migrations?: string;
   /** Registers more services; a service registered again here replaces the default one. */
   extend?: (router: ConnectRouter, deps: Deps) => void;
+  /** Methods of the services `extend` registers that anyone may call without a bearer token; each checks its request. */
+  publicMethods?: readonly DescMethod[];
   /** Replaces the authenticator; `tokens` is chunk's own, for the bearers the install does not recognize itself. */
   authenticator?: (tokens: Authenticator, deps: Deps) => Authenticator;
   /** Starts background work once the service is set up; the returned function stops it before the database closes. */
@@ -75,9 +78,10 @@ export async function start(config: Config, extensions: Extensions = {}) {
       changes: await listenForChanges(sql),
       shutdown: shutdown.signal,
     };
-    const { extend, authenticator } = extensions;
+    const { extend, authenticator, publicMethods } = extensions;
     const options: HandlerOptions = { dashboardDir: config.dashboardDir };
     if (extend) options.extend = (router) => extend(router, deps);
+    if (publicMethods) options.publicMethods = publicMethods;
     if (authenticator) options.authenticator = authenticator(tokenAuthenticator(sql), deps);
     const handler = createHandler(deps, options);
     const { machines } = config;
