@@ -6,7 +6,7 @@ import { ensureEdgeToken } from "../src/auth/tokens.ts";
 import { randomToken } from "../src/crypto.ts";
 import { wakesPerMinute } from "../src/edge/service.ts";
 import { coreMachineName } from "../src/environments/machines.ts";
-import { reconcile, type ReconcilerOptions } from "../src/environments/reconciler.ts";
+import { reconcile, type ReconcilerOptions, takeLeadership } from "../src/environments/reconciler.ts";
 import { LogSeverity, LogSource, SleepingPingMode } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { EdgeService, WakeOutcome, WakeReason } from "../src/gen/chunk/management/v1/edge_pb.ts";
 import { EnvironmentService } from "../src/gen/chunk/management/v1/environment_pb.ts";
@@ -20,8 +20,10 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
   let edge: ReturnType<typeof h.client<typeof EdgeService>>;
   const { provider } = fakeProvider();
   let options: ReconcilerOptions;
+  let epoch = 0n;
   beforeAll(async () => {
     h = await startHarness();
+    epoch = await takeLeadership(h.sql);
     const token = `chunk_${randomToken()}`;
     await ensureEdgeToken(h.sql, token);
     edge = h.client(EdgeService, token);
@@ -40,7 +42,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
   async function running() {
     const { projectId, environmentId } = await createEnvironment(h);
     await deployRelease(h, projectId, environmentId, "r1");
-    await reconcile(h.deps, options);
+    await reconcile(h.deps, options, epoch);
     const core = await provider.status(coreMachineName(environmentId));
     const [row] = await h.sql<{ hostname: string }[]>`select hostname from environments where id = ${environmentId}`;
     const token = (
@@ -126,7 +128,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
 
     const env = await running();
     await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`], readyToSuspend: true });
-    await reconcile(h.deps, options);
+    await reconcile(h.deps, options, epoch);
     const state = async () =>
       (await h.client(ProjectService).getEnvironment({ environmentId: env.environmentId })).environment?.state;
     expect(await state()).toBe(EnvironmentState.SUSPENDED);
@@ -140,7 +142,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     expect((await wake(env.environmentId)).outcome).toBe(WakeOutcome.WAKING);
     expect((await wake(env.environmentId)).outcome).toBe(WakeOutcome.WAKING);
     expect(await env.revision()).toBe(before + 1n);
-    await reconcile(h.deps, options);
+    await reconcile(h.deps, options, epoch);
     expect(await state()).toBe(EnvironmentState.STARTING);
 
     await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`] });

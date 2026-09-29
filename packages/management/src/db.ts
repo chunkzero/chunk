@@ -35,11 +35,11 @@ export async function migrate(sql: Sql): Promise<void> {
 }
 
 /**
- * Advisory lock `key`, held by a session of its own: a client with one connection, so losing that connection frees the
- * lock, and the next `hold` reconnects and tries again.
+ * Advisory lock `key`, held by a session of its own: a client with one connection that is never retired, so the lock is
+ * freed only when that connection is lost, and the next `hold` reconnects and tries again.
  */
 export function advisoryLock(url: string, key: number) {
-  const session = postgres(url, { max: 1, onnotice: () => {} });
+  const session = postgres(url, { max: 1, idle_timeout: 0, max_lifetime: null, onnotice: () => {} });
   return {
     /** Whether the session holds the lock, taking it when no other session does. */
     async hold(): Promise<boolean> {

@@ -5,6 +5,9 @@
  *
  * A provider only touches machines and volumes this install created, which it marks with ownership labels. Anything
  * else under a name it is asked about fails with `OwnershipError` and is left alone.
+ *
+ * A create can finish after the request it was for was released or its environment deleted, so the reconciler lists
+ * the machines this install owns and destroys those nothing tracks by name.
  */
 export interface Provider {
   /**
@@ -27,6 +30,8 @@ export interface Provider {
    * volumes are removed even when the machine is already gone, so a retry finishes an interrupted removal.
    */
   destroy(name: string): Promise<void>;
+  /** Every machine this install created, with the name it was created under. */
+  list(): Promise<Machine[]>;
 }
 
 export interface MachineSpec {

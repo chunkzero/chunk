@@ -5,7 +5,13 @@ import { Code } from "@connectrpc/connect";
 import { notify } from "../src/changes.ts";
 import { capacityCredentialContext, type CapacityRow } from "../src/environments/capacity.ts";
 import { capacityMachineName, capacityMachineSpec, coreHostOf, coreMachineName } from "../src/environments/machines.ts";
-import { reconcile, type ReconcilerOptions, startReconciler } from "../src/environments/reconciler.ts";
+import {
+  reconcile,
+  type ReconcilerOptions,
+  startReconciler,
+  Superseded,
+  takeLeadership,
+} from "../src/environments/reconciler.ts";
 import { CapacityState, EnvironmentService, Workload } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { fakeProvider } from "./fake-provider.ts";
@@ -74,8 +80,10 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
   const { provider, machines, hooks } = fakeProvider();
   let options: ReconcilerOptions;
+  let epoch = 0n;
   beforeAll(async () => {
     h = await startHarness();
+    epoch = await takeLeadership(h.sql);
     options = {
       provider,
       image: "chunk/environment:test",
@@ -87,7 +95,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   });
   afterAll(() => h.close());
 
-  const pass = () => reconcile(h.deps, options);
+  const pass = () => reconcile(h.deps, options, epoch);
 
   /** A deployed environment whose core machine the reconciler created, attached as core. */
   async function running() {
@@ -408,6 +416,115 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       await Promise.all(reconcilers.map((reconciler) => reconciler.stop()));
       await other.close();
     }
+  });
+
+  test("a leader superseded mid-pass saves and starts nothing, so its JVM machine boots once", async () => {
+    const env = await running();
+    const request = capacityRequest(env, "cap-stale");
+    await env.client.ensureCapacity(request);
+    const name = nameOf(env.environmentId, "cap-stale");
+    let boots = 0;
+    hooks.start = (id) => {
+      if (id === name) boots++;
+    };
+    // Once the stale pass created the machine, a new leader adopts and starts it, and it exits.
+    hooks.create = async (id) => {
+      if (id !== name) return;
+      hooks.create = undefined;
+      epoch = await takeLeadership(h.sql);
+      await pass();
+      await provider.stop(name);
+    };
+    const stale = epoch;
+    try {
+      await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
+      await pass();
+    } finally {
+      hooks.start = undefined;
+      hooks.create = undefined;
+    }
+    expect(boots).toBe(1);
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.FAILED,
+      message: "the JVM machine exited",
+    });
+    env.close();
+  });
+
+  test("a create that finishes after its request was released never starts, and a later pass sweeps it", async () => {
+    const env = await running();
+    const release = (requestId: string) => env.client.releaseCapacity({ requestId, lease: env.lease });
+    const started: string[] = [];
+    hooks.start = (id) => {
+      started.push(id);
+    };
+    /** Releases the request and tears it down while its machine's create is under way. */
+    const releasedDuringCreate = async (requestId: string, newLeader: boolean) => {
+      await env.client.ensureCapacity(capacityRequest(env, requestId));
+      const name = nameOf(env.environmentId, requestId);
+      hooks.creating = async (id) => {
+        if (id !== name) return;
+        hooks.creating = undefined;
+        await release(requestId);
+        if (newLeader) epoch = await takeLeadership(h.sql);
+        await pass();
+      };
+      return name;
+    };
+    try {
+      // Under a new leader, and the stale create's reply is lost.
+      const lost = await releasedDuringCreate("late-lost", true);
+      hooks.create = (id) => {
+        if (id === lost) throw new Error("connection reset");
+      };
+      const stale = epoch;
+      await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
+      expect(machines.get(lost)?.machine.state).toBe("stopped");
+      expect((await release("late-lost")).capacity?.state).toBe(CapacityState.RELEASED);
+
+      // Under the same leader, whose destroy of the machine it could not save fails.
+      const unsaved = await releasedDuringCreate("late-unsaved", false);
+      hooks.destroy = (name) => {
+        if (name === unsaved && machines.has(name)) throw new Error("engine unavailable");
+      };
+      await pass();
+      expect(machines.has(lost)).toBe(false);
+      expect(machines.get(unsaved)?.machine.state).toBe("stopped");
+      expect((await release("late-unsaved")).capacity?.state).toBe(CapacityState.RELEASED);
+      hooks.destroy = undefined;
+      await pass();
+      expect(machines.has(unsaved)).toBe(false);
+      expect(started.filter((id) => id === lost || id === unsaved)).toEqual([]);
+    } finally {
+      hooks.start = undefined;
+      hooks.creating = undefined;
+      hooks.create = undefined;
+      hooks.destroy = undefined;
+    }
+    env.close();
+  });
+
+  test("a core create that finishes after its environment was deleted is swept", async () => {
+    const { projectId, environmentId } = await createEnvironment(h);
+    await deployRelease(h, projectId, environmentId, "r1");
+    const name = coreMachineName(environmentId);
+    hooks.creating = async (id) => {
+      if (id !== name) return;
+      hooks.creating = undefined;
+      await h.client(ProjectService).deleteEnvironment({ environmentId });
+      epoch = await takeLeadership(h.sql);
+      await pass();
+    };
+    const stale = epoch;
+    try {
+      await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
+    } finally {
+      hooks.creating = undefined;
+    }
+    expect(machines.has(name)).toBe(true);
+    expect(await codeOf(h.client(ProjectService).getEnvironment({ environmentId }))).toBe(Code.NotFound);
+    await pass();
+    expect(machines.has(name)).toBe(false);
   });
 
   test("a create whose reply was lost fails the request and its machine is removed by name", async () => {

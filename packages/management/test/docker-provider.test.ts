@@ -63,6 +63,7 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     expect(created).toMatchObject({ name: spec.name, state: "stopped" });
     expect((await provider.create(spec)).id).toBe(created.id);
     expect((await provider.find(spec.name))?.id).toBe(created.id);
+    expect(await provider.list()).toContainEqual(created);
 
     const running = await provider.start(created.id);
     expect(running.state).toBe("running");
@@ -99,6 +100,8 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     const other = dockerProvider({ socketPath, network: prefix, installId: `${prefix}-other` });
     const spec = specFor("other", { volumes: [] });
     await other.create(spec);
+    expect((await other.list()).map((machine) => machine.name)).toEqual([spec.name]);
+    expect((await provider.list()).map((machine) => machine.name)).not.toContain(spec.name);
     await expect(provider.create(spec)).rejects.toThrow(OwnershipError);
     await expect(provider.find(spec.name)).rejects.toThrow(OwnershipError);
     await expect(provider.destroy(spec.name)).rejects.toThrow(OwnershipError);

@@ -31,6 +31,8 @@ export interface CapacityRow {
   machine_id: string;
   machine_addresses: string[];
   torn_down: boolean;
+  /** Whether the reconciler ever started the request's JVM machine. */
+  started: boolean;
   /** Sealed under `capacityCredentialContext`. */
   credential: Uint8Array;
   /** `keys.fingerprint` of the plaintext credential. */
@@ -49,11 +51,11 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
 /**
  * Records capacity intents for the reconciler; neither call waits for the provider.
  *
- * A release is terminal, as core's `Launcher` requires. RELEASED means the request's machine is destroyed, and no path
- * starts a machine for a request that isn't PROVISIONING or READY: the reconciler starts one only under a lock on the
- * request's row that sees it in one of those states, and saves a machine for it under the same condition, destroying
- * one it could not save. Only the reconciler holding the leader lock creates machines. A released request ID, even one
- * released before it was ever ensured, stays released. Superseding a core instance releases its requests.
+ * A release is terminal, as core's `Launcher` requires. RELEASED means the request's machine is destroyed, or was
+ * created too late: it never runs, and the reconciler's sweep destroys it. The reconciler starts a machine only under a
+ * lock on the request's row that sees it PROVISIONING or READY, in a transaction fenced by the leader epoch, so a
+ * reconciler that lost leadership starts nothing; a JVM request's machine is started at most once. A released request
+ * ID, even one released before it was ever ensured, stays released. Superseding a core instance releases its requests.
  */
 export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {
   return {

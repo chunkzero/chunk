@@ -1,11 +1,12 @@
 import type { Machine, MachineSpec, Provider } from "../src/providers/provider.ts";
 
-type Method = "create" | "start" | "suspend" | "status";
+type Method = "creating" | "create" | "start" | "suspend" | "status" | "destroy";
 
 /**
  * An in-memory provider. Machine IDs are their names; like Docker, a machine only gets an IP when it starts, and a
- * new one each time. `hooks` runs before a method, and throwing from it fails the call; the `create` hook runs once
- * the machine exists, so throwing from it models a lost reply.
+ * new one each time. `hooks` runs before a method, and throwing from it fails the call. `creating` runs before a new
+ * machine exists, which models a slow create; the `create` hook runs once it exists, so throwing from it models a lost
+ * reply.
  */
 export function fakeProvider() {
   const machines = new Map<string, { spec: MachineSpec; machine: Machine }>();
@@ -25,6 +26,7 @@ export function fakeProvider() {
     async create(spec) {
       const existing = machines.get(spec.name);
       if (existing) return existing.machine;
+      await hooks.creating?.(spec.name);
       const machine: Machine = { id: spec.name, name: spec.name, state: "stopped", addresses: [spec.name] };
       machines.set(spec.name, { spec, machine });
       await hooks.create?.(spec.name);
@@ -48,8 +50,10 @@ export function fakeProvider() {
     },
     find: async (name) => machines.get(name)?.machine,
     async destroy(name) {
+      await hooks.destroy?.(name);
       machines.delete(name);
     },
+    list: async () => [...machines.values()].map(({ machine }) => machine),
   };
   return { provider, machines, hooks };
 }

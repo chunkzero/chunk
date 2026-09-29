@@ -1,6 +1,6 @@
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
-import { advisoryLock } from "../db.ts";
+import { advisoryLock, type Db, type Sql } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
@@ -39,14 +39,30 @@ interface EnvironmentRow {
 }
 
 const intervalMs = 5000;
-/** The advisory lock only the acting reconciler holds. */
+/** The advisory lock the leading reconciler holds. */
 const leaderLock = 0x63686e6b;
+
+/** A newer leader epoch refused one of a pass's transactions; the pass stops at once. */
+export class Superseded extends Error {
+  constructor() {
+    super("another reconciler took over");
+    this.name = "Superseded";
+  }
+}
+
+/**
+ * Runs `body` in a transaction that first checks the pass's leader epoch is current and keeps a shared lock on it, so
+ * a newer leader's bump waits for the transaction to end. Every write a pass makes, and every provider call other than
+ * reads and creates, runs in one.
+ */
+type Fence = <T>(body: (tx: Db) => Promise<T>) => Promise<T>;
 
 /**
  * Drives the provider toward what the database asks for, on every change and every few seconds. Only the process
- * holding the leader lock, on a session of its own at `databaseUrl`, acts; others retry taking it on the same
- * schedule. Each pass compares the machines' observed state with the desired one, so a step that failed or was cut
- * short is retried until they agree.
+ * holding the leader lock, on a session of its own at `databaseUrl`, leads; others retry taking it on the same
+ * schedule. Leading means holding the current leader epoch, which fences out passes of a previous leader still under
+ * way. Each pass compares the machines' observed state with the desired one, so a step that failed or was cut short is
+ * retried until they agree.
  */
 export function startReconciler(
   deps: Deps,
@@ -56,10 +72,18 @@ export function startReconciler(
   const abort = new AbortController();
   const subscription = deps.changes.subscribe((change) => change.kind === "environment");
   const leader = advisoryLock(databaseUrl, leaderLock);
+  let epoch: bigint | undefined;
   const running = (async () => {
     while (!abort.signal.aborted) {
       try {
-        if (await leader.hold()) await reconcile(deps, options);
+        if (await leader.hold()) {
+          // Only the lock holder bumps, so another epoch means this process lost the lock since it last bumped.
+          const [current] = await deps.sql<{ epoch: bigint }[]>`select epoch from reconciler_leader`;
+          if (epoch === undefined || current?.epoch !== epoch) epoch = await takeLeadership(deps.sql);
+          await reconcile(deps, options, epoch);
+        } else {
+          epoch = undefined;
+        }
       } catch (error) {
         console.error("reconciling failed:", error);
       }
@@ -76,8 +100,26 @@ export function startReconciler(
   };
 }
 
-/** One pass over every environment; a failing environment does not hold up the others. */
-export async function reconcile(deps: Deps, options: ReconcilerOptions): Promise<void> {
+/** Starts a new leader epoch and returns it. */
+export async function takeLeadership(sql: Sql): Promise<bigint> {
+  const [row] = await sql<{ epoch: bigint }[]>`update reconciler_leader set epoch = epoch + 1 returning epoch`;
+  if (!row) throw new Error("reconciler_leader has no row");
+  return row.epoch;
+}
+
+/**
+ * One pass over every environment under leader epoch `epoch`, then a sweep of untracked machines. A failing
+ * environment does not hold up the others; a superseded pass throws `Superseded`.
+ */
+export async function reconcile(deps: Deps, options: ReconcilerOptions, epoch: bigint): Promise<void> {
+  const fenced: Fence = async (body) => {
+    const { result } = await deps.sql.begin(async (tx) => {
+      const [current] = await tx`select 1 from reconciler_leader where epoch = ${epoch} for share`;
+      if (!current) throw new Superseded();
+      return { result: await body(tx) };
+    });
+    return result;
+  };
   const environments = await deps.sql<EnvironmentRow[]>`
     select id, state, revision, lease, ready_to_suspend, report_desired_revision, machine_id, machine_addresses,
       machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired
@@ -85,14 +127,21 @@ export async function reconcile(deps: Deps, options: ReconcilerOptions): Promise
     order by seq`;
   for (const environment of environments) {
     try {
-      await reconcileEnvironment(deps, options, environment);
+      await reconcileEnvironment(deps, options, fenced, environment);
     } catch (error) {
+      if (error instanceof Superseded) throw error;
       console.error(`reconciling environment ${environment.id} failed:`, error);
     }
   }
+  await sweep(deps, options, fenced);
 }
 
-async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, environment: EnvironmentRow) {
+async function reconcileEnvironment(
+  deps: Deps,
+  options: ReconcilerOptions,
+  fenced: Fence,
+  environment: EnvironmentRow,
+) {
   const { sql } = deps;
   const { provider } = options;
   const id = environment.id;
@@ -100,20 +149,22 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
     select * from capacity_requests where environment_id = ${id} and not torn_down order by create_time`;
 
   if (environment.state === EnvironmentState.DELETING) {
-    for (const request of capacity) await provider.destroy(capacityMachineName(request));
-    await provider.destroy(coreMachineName(id));
-    await sql`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`;
+    await fenced(async (tx) => {
+      for (const request of capacity) await provider.destroy(capacityMachineName(request));
+      await provider.destroy(coreMachineName(id));
+      await tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`;
+    });
     return;
   }
   for (const request of capacity) {
     if (request.state === CapacityState.FAILED || request.state === CapacityState.RELEASING) {
-      await tearDown(deps, options, request);
+      await tearDown(options, fenced, request);
     }
   }
   if (!(await desiredDeployment(sql, id))) return;
 
   const observed = environment.machine_id ? await provider.status(environment.machine_id) : undefined;
-  let core = observed && observed.state !== "missing" ? observed : await createCore(deps, options, environment);
+  let core = observed && observed.state !== "missing" ? observed : await createCore(deps, options, fenced, environment);
   if (!core) return;
   const active = capacity.filter(
     (request) => request.state === CapacityState.PROVISIONING || request.state === CapacityState.READY,
@@ -126,16 +177,18 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
   if (idle) {
     // Checked against the latest accepted report on every pass, retries included, since core may have reported
     // activity or accepted a wake after this pass read the environment. A later change resumes it next pass.
-    const [marked] = await sql<{ changed: boolean }[]>`
-      update environments set state = ${EnvironmentState.SUSPENDED}
-      where id = ${id} and revision = ${environment.revision} and lease > 0 and ready_to_suspend
-        and report_desired_revision = revision and state <> ${EnvironmentState.DELETING}
-      returning ${environment.state !== EnvironmentState.SUSPENDED} as changed`;
+    const [marked] = await fenced(
+      (tx) => tx<{ changed: boolean }[]>`
+        update environments set state = ${EnvironmentState.SUSPENDED}
+        where id = ${id} and revision = ${environment.revision} and lease > 0 and ready_to_suspend
+          and report_desired_revision = revision and state <> ${EnvironmentState.DELETING}
+        returning ${environment.state !== EnvironmentState.SUSPENDED} as changed`,
+    );
     if (!marked) return;
     if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
     // Reports, wakes and attaches lock the row too, so none can land between this recheck and the suspension.
     const suspendIfIdle = (machineId: string) =>
-      sql.begin(async (tx) => {
+      fenced(async (tx) => {
         const [still] = await tx`
           select 1 as idle from environments
           where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
@@ -150,28 +203,36 @@ async function reconcileEnvironment(deps: Deps, options: ReconcilerOptions, envi
       if (machine.state === "running" && !(await suspendIfIdle(machine.id))) return;
     }
     if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
-    await fireDueAlarm(deps, environment);
+    await fireDueAlarm(fenced, environment);
     return;
   }
 
-  if (core.state !== "running") core = await provider.start(core.id);
-  await saveCoreAddresses(deps, environment, core);
+  if (core.state !== "running") {
+    const coreId = core.id;
+    core = await fenced(() => provider.start(coreId));
+  }
+  await saveCoreAddresses(deps, fenced, environment, core);
   if (environment.state === EnvironmentState.PENDING || environment.state === EnvironmentState.SUSPENDED) {
-    await sql`
-      update environments set state = ${EnvironmentState.STARTING}
-      where id = ${id} and state = ${environment.state}`;
+    await fenced(
+      (tx) => tx`
+        update environments set state = ${EnvironmentState.STARTING}
+        where id = ${id} and state = ${environment.state}`,
+    );
     await notify(sql, { kind: "environment", environmentId: id });
   }
-  for (const request of active) await keepRunning(deps, options, core, request);
+  for (const request of active) await keepRunning(deps, options, fenced, core, request);
 }
 
-/** Creates core's machine with the environment's token, issuing one first. Returns the machine once saved. */
-async function createCore(deps: Deps, options: ReconcilerOptions, environment: EnvironmentRow) {
-  const { sql, keys } = deps;
+/**
+ * Creates core's machine with the environment's token, issuing one first. Returns the machine once saved; one the
+ * environment's deletion outran is destroyed, or swept when that fails.
+ */
+async function createCore(deps: Deps, options: ReconcilerOptions, fenced: Fence, environment: EnvironmentRow) {
+  const { keys } = deps;
   const context = `machine-token/${environment.id}`;
   // The token is saved before the machine exists, so a retry after a crash builds the same machine, and in the same
   // transaction as the row lock deletion takes, so a deleted or deleting environment never gets a machine.
-  const { sealed } = await sql.begin(async (tx) => {
+  const { sealed } = await fenced(async (tx) => {
     const [row] = await tx<{ machine_token: Uint8Array | null }[]>`
       select machine_token from environments
       where id = ${environment.id} and state <> ${EnvironmentState.DELETING}
@@ -185,51 +246,69 @@ async function createCore(deps: Deps, options: ReconcilerOptions, environment: E
   if (!sealed) return undefined;
   const token = new TextDecoder().decode(await keys.cipher.open(sealed, context));
   const machine = await options.provider.create(coreMachineSpec(options, environment.id, token));
-  const saved = await sql`
-    update environments set machine_id = ${machine.id}
-    where id = ${environment.id} and state <> ${EnvironmentState.DELETING}`;
+  const saved = await fenced(
+    (tx) => tx`
+      update environments set machine_id = ${machine.id}
+      where id = ${environment.id} and state <> ${EnvironmentState.DELETING}`,
+  );
   if (saved.count === 0) {
-    await options.provider.destroy(machine.name);
+    await fenced(() => options.provider.destroy(machine.name));
     return undefined;
   }
   return machine;
 }
 
 /** Addresses can change whenever a machine starts, and routes only list gateways on the current ones. */
-async function saveCoreAddresses({ sql }: Deps, environment: EnvironmentRow, core: Machine) {
+async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: EnvironmentRow, core: Machine) {
   if (sameList(environment.machine_addresses, core.addresses)) return;
-  await sql`
-    update environments set machine_addresses = ${sql.array(core.addresses)}::text[]
-    where id = ${environment.id}`;
+  await fenced(
+    (tx) => tx`
+      update environments set machine_addresses = ${sql.array(core.addresses)}::text[]
+      where id = ${environment.id}`,
+  );
   await notify(sql, { kind: "environment", environmentId: environment.id });
 }
 
 /**
- * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime: its ID is saved before its
- * first start, so a saved one that is stopped or missing may have run, and fails its request. One whose ID was never
- * saved never started, so it is adopted by name. Gateway machines are stateless and are replaced, with the same
- * credential. A provider error fails the request for good; core retries with a new request ID.
+ * Keeps an extra machine running and resumes a suspended one. A JVM machine boots at most once: a started one that
+ * stopped or went missing fails its request, and one never started is adopted by name, or created again when missing.
+ * Gateway machines are stateless and are replaced, with the same credential. A provider error fails the request for
+ * good; core retries with a new request ID.
  */
-async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine, request: CapacityRow) {
+async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence, core: Machine, request: CapacityRow) {
   const { sql, keys } = deps;
   const { provider } = options;
   const jvm = request.workload === Workload.JVM;
+  const name = capacityMachineName(request);
   const active = sql`
     environment_id = ${request.environment_id} and request_id = ${request.request_id}
       and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
-  // A release waits on this row lock, so its next pass destroys any machine started here.
-  const startIfActive = (id: string) =>
-    sql.begin(async (tx) => {
-      const [still] = await tx`select 1 from capacity_requests where ${active} for update`;
-      return still ? provider.start(id) : undefined;
+  const exited = (machine: Machine | undefined) =>
+    new Error(machine?.state === "stopped" ? "the JVM machine exited" : "the JVM machine went missing");
+  // A release waits on this row lock, so its next pass destroys any machine started here. `started` is saved even when
+  // the start fails, since the machine may have booted anyway.
+  const startIfActive = async (machine: Machine) => {
+    const outcome = await fenced(async (tx) => {
+      const [row] = await tx<{ started: boolean }[]>`select started from capacity_requests where ${active} for update`;
+      if (!row) return undefined;
+      if (jvm && machine.state !== "suspended") {
+        if (row.started) throw exited(machine);
+        await tx`update capacity_requests set started = true where ${active}`;
+      }
+      return provider.start(machine.id).then(
+        (started) => ({ started }),
+        (error: unknown) => ({ error }),
+      );
     });
+    if (outcome && "error" in outcome) throw outcome.error;
+    return outcome?.started;
+  };
   try {
     let machine = request.machine_id ? await provider.status(request.machine_id) : undefined;
-    if (jvm && machine && machine.state !== "running" && machine.state !== "suspended") {
-      throw new Error(machine.state === "missing" ? "the JVM machine went missing" : "the JVM machine exited");
+    if (jvm && request.started && machine?.state !== "running" && machine?.state !== "suspended") {
+      throw exited(machine);
     }
-    if (!machine || machine.state === "missing" || machine.state === "stopped") {
-      const name = capacityMachineName(request);
+    if (!machine || machine.state === "missing" || (!jvm && machine.state === "stopped")) {
       let found = jvm ? await provider.find(name) : undefined;
       if (!found) {
         const coreHost = coreHostOf(core.addresses);
@@ -237,26 +316,33 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine
         const context = capacityCredentialContext(request.environment_id, request.request_id);
         const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));
         // A gateway left over from an earlier attempt, perhaps one whose create reply was lost, holds the name.
-        if (!jvm) await provider.destroy(name);
+        if (!jvm) await fenced(() => provider.destroy(name));
         found = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
       }
-      const saved = await sql`update capacity_requests set machine_id = ${found.id} where ${active}`;
-      if (saved.count === 0) return provider.destroy(name);
+      const id = found.id;
+      const saved = await fenced((tx) => tx`update capacity_requests set machine_id = ${id} where ${active}`);
+      if (saved.count === 0) return fenced(() => provider.destroy(name));
       machine = found;
     }
-    if (machine.state !== "running") machine = await startIfActive(machine.id);
+    if (machine.state !== "running") machine = await startIfActive(machine);
     if (!machine) return;
     if (request.state === CapacityState.READY && sameList(request.machine_addresses, machine.addresses)) return;
-    await sql`
-      update capacity_requests
-      set state = ${CapacityState.READY}, machine_addresses = ${sql.array(machine.addresses)}::text[]
-      where ${active}`;
+    const addresses = machine.addresses;
+    await fenced(
+      (tx) => tx`
+        update capacity_requests
+        set state = ${CapacityState.READY}, machine_addresses = ${sql.array(addresses)}::text[]
+        where ${active}`,
+    );
   } catch (error) {
+    if (error instanceof Superseded) throw error;
     console.error(`running capacity ${request.request_id} failed:`, error);
-    await sql`
-      update capacity_requests
-      set state = ${CapacityState.FAILED}, message = ${error instanceof Error ? error.message : String(error)}
-      where ${active}`;
+    await fenced(
+      (tx) => tx`
+        update capacity_requests
+        set state = ${CapacityState.FAILED}, message = ${error instanceof Error ? error.message : String(error)}
+        where ${active}`,
+    );
   }
   await notify(sql, { kind: "environment", environmentId: request.environment_id });
 }
@@ -265,24 +351,53 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine
  * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved. A releasing
  * request is released once its machine is gone.
  */
-async function tearDown({ sql }: Deps, { provider }: ReconcilerOptions, request: CapacityRow) {
-  await provider.destroy(capacityMachineName(request));
-  await sql`
-    update capacity_requests
-    set torn_down = true,
-      state = case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end
-    where environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
+async function tearDown({ provider }: ReconcilerOptions, fenced: Fence, request: CapacityRow) {
+  await fenced(async (tx) => {
+    await provider.destroy(capacityMachineName(request));
+    await tx`
+      update capacity_requests
+      set torn_down = true,
+        state = case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end
+      where environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
+  });
+}
+
+/**
+ * Destroys the machines this install owns that nothing tracks: those of torn-down requests, and those whose request or
+ * environment no longer exists. A create that finished after its request was torn down or its environment deleted
+ * leaves one. A request not yet torn down keeps its machine, since a create for it may still be under way.
+ */
+async function sweep({ sql }: Deps, { provider }: ReconcilerOptions, fenced: Fence) {
+  const machines = await provider.list();
+  // Read after listing: a request only ever becomes torn down and an environment only goes away, so a listed machine
+  // untracked now stays untracked.
+  const environments = await sql<{ id: string }[]>`select id from environments`;
+  const requests = await sql<Pick<CapacityRow, "environment_id" | "request_id" | "workload">[]>`
+    select environment_id, request_id, workload from capacity_requests where not torn_down`;
+  const tracked = new Set([
+    ...environments.map(({ id }) => coreMachineName(id)),
+    ...requests.map((request) => capacityMachineName(request)),
+  ]);
+  for (const { name } of machines) {
+    if (tracked.has(name)) continue;
+    try {
+      await fenced(() => provider.destroy(name));
+    } catch (error) {
+      if (error instanceof Superseded) throw error;
+      console.error(`removing untracked machine ${name} failed:`, error);
+    }
+  }
 }
 
 /**
  * Wakes a suspended environment once its alarm is due, by invalidating the idle report it suspended on. Only the
  * alarm read at the start of the pass is fired; a replacement stored since then is left for its own due time.
  */
-async function fireDueAlarm({ sql }: Deps, environment: EnvironmentRow) {
+async function fireDueAlarm(fenced: Fence, environment: EnvironmentRow) {
   const { alarm_due_seconds: seconds, alarm_due_nanos: nanos } = environment;
   if (seconds === null || environment.alarm_fired) return;
   if (Number(seconds) * 1000 + (nanos ?? 0) / 1e6 > Date.now()) return;
-  await sql.begin(async (tx) => {
+  await fenced(async (tx) => {
     const fired = await tx`
       update environments set alarm_fired = true
       where id = ${environment.id} and not alarm_fired
