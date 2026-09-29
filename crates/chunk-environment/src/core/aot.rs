@@ -1,11 +1,12 @@
 //! The Leyden AOT caches remote runners make and use. Each belongs to a release, an app and the Java runtime a runner
 //! reports, and lives at `<state>/aot/<release>/<app>/<runtime key>`, the key being the SHA-256 of that runtime. One host
-//! at a time records the cache a key lacks, and its release waits for its upload.
+//! at a time records the cache a key lacks, and its release waits a bounded time for its upload. A released or stopped
+//! host is ended for good: it never plans, writes or installs a cache again.
 
 use chunk_proto::sync::v1::{Error, JvmAotRecord, JvmAotUse, JvmAotWrite, error::Code, jvm_launch::Aot};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs::{self, File},
     io::{self, Write as _},
@@ -13,14 +14,17 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
-use tokio::sync::{OwnedMutexGuard, watch};
+use tokio::{
+    sync::{OwnedMutexGuard, watch},
+    time::Instant,
+};
 
 /// The largest cache core accepts.
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// The longest runtime a runner may report.
 const RUNTIME_BYTES: usize = 256;
-/// How long a recording host's release waits for its upload to end.
-pub(crate) const UPLOAD_GRACE: Duration = Duration::from_secs(90);
+/// How long a recording host's releases wait in all for its upload to end.
+const UPLOAD_GRACE: Duration = Duration::from_secs(90);
 
 pub(crate) struct AotCaches {
     root: PathBuf,
@@ -31,8 +35,12 @@ pub(crate) struct AotCaches {
 struct State {
     /// The size and digest of each installed cache core has hashed, by path.
     digests: BTreeMap<PathBuf, Cache>,
-    /// What each host that launched does about its cache.
+    /// What each live host that launched does about its cache.
     hosts: BTreeMap<String, Host>,
+    /// Hosts released or stopped, which never plan, write or install again.
+    ended: BTreeSet<String>,
+    /// Set once core stops, after which no host records.
+    closed: bool,
 }
 
 /// An installed cache's size and SHA-256 digest in lowercase hex.
@@ -61,6 +69,8 @@ struct Recording {
     upload: Arc<tokio::sync::Mutex<Option<Upload>>>,
     /// Dropped, which wakes every subscriber, once the recording ends.
     ended: watch::Sender<()>,
+    /// When the host's releases stop waiting for the upload, fixed by the first release that waits.
+    deadline: Option<Instant>,
 }
 
 /// A cache being uploaded into a hidden file under the root, removed once dropped unless it was installed.
@@ -95,6 +105,9 @@ impl AotCaches {
         let path = self.root.join(release).join(app).join(hex(&Sha256::digest(runtime)));
         let cache = self.installed(&path).await;
         let mut state = lock(&self.state);
+        if state.ended.contains(host) {
+            return None;
+        }
         let recorded = match state.hosts.get(host) {
             Some(entry) if entry.boot != boot || entry.path != path => return None,
             Some(Host { role: Role::Record(_), .. }) => return Some(Aot::Record(JvmAotRecord {})),
@@ -108,11 +121,11 @@ impl AotCaches {
             return Some(plan);
         }
         let recording = |entry: &Host| entry.path == path && matches!(entry.role, Role::Record(_));
-        if recorded || state.hosts.values().any(recording) {
+        if state.closed || recorded || state.hosts.values().any(recording) {
             return None;
         }
         tracing::info!(host, "no AOT cache yet; the host records it");
-        let recording = Recording { upload: Arc::default(), ended: watch::channel(()).0 };
+        let recording = Recording { upload: Arc::default(), ended: watch::channel(()).0, deadline: None };
         state.hosts.insert(host, Host { boot, path, role: Role::Record(recording) });
         Some(Aot::Record(JvmAotRecord {}))
     }
@@ -136,7 +149,7 @@ impl AotCaches {
         };
         if write.abandon {
             tracing::info!(host, "the runner made no AOT cache");
-            end(&self.state, host, &upload);
+            end_recording(&self.state, host, &upload);
             return Ok(());
         }
         let Ok(guard) = upload.clone().try_lock_owned() else {
@@ -151,7 +164,7 @@ impl AotCaches {
                 Ok(true) => install(&state, &host, &upload, guard, &path),
                 Err(message) => {
                     tracing::warn!(host, message, "AOT cache upload failed");
-                    end(&state, &host, &upload);
+                    end_recording(&state, &host, &upload);
                     Err(error(Code::Invalid, message))
                 }
             }
@@ -159,27 +172,42 @@ impl AotCaches {
         written.await.unwrap_or_else(|_| Err(error(Code::Unavailable, "writing the AOT cache failed")))
     }
 
-    /// Waits until `host`'s recording, if it has one, ends, for up to `bound`, then ends it.
-    pub async fn settle(&self, host: &str, bound: Duration) {
-        let mut ended = match lock(&self.state).hosts.get(host) {
-            Some(Host { role: Role::Record(recording), .. }) => recording.ended.subscribe(),
-            _ => return,
+    /// Waits while `host` records until its upload ends, or until [`UPLOAD_GRACE`] after the first release that waited
+    /// began, so a cancelled wait never extends the next; then ends `host` for good.
+    pub async fn settle(&self, host: &str) {
+        let waiting = match lock(&self.state).hosts.get_mut(host) {
+            Some(Host { role: Role::Record(recording), .. }) => {
+                let deadline = *recording.deadline.get_or_insert_with(|| Instant::now() + UPLOAD_GRACE);
+                Some((recording.ended.subscribe(), deadline))
+            }
+            _ => None,
         };
-        tracing::info!(host, "waiting for the host's AOT cache upload before releasing it");
-        // Only the sender dropping, as the recording ends, wakes this.
-        if tokio::time::timeout(bound, ended.changed()).await.is_err() {
-            tracing::warn!(host, ?bound, "the host's AOT cache upload did not end in time; releasing it");
-            if let Some(entry) = lock(&self.state).hosts.get_mut(host)
-                && matches!(entry.role, Role::Record(_))
-            {
+        if let Some((mut ended, deadline)) = waiting {
+            tracing::info!(host, "waiting for the host's AOT cache upload before releasing it");
+            // Only the sender dropping, as the recording ends, wakes this.
+            if tokio::time::timeout_at(deadline, ended.changed()).await.is_err() {
+                tracing::warn!(host, "the host's AOT cache upload did not end in time; releasing it");
+            }
+        }
+        self.end(host);
+    }
+
+    /// Ends `host` for good, and its recording with it: it never plans, writes or installs again.
+    pub fn end(&self, host: &str) {
+        let mut state = lock(&self.state);
+        state.hosts.remove(host);
+        state.ended.insert(host.to_owned());
+    }
+
+    /// Ends every recording without waiting for its upload, as core stops, and starts none afterwards.
+    pub fn close(&self) {
+        let mut state = lock(&self.state);
+        state.closed = true;
+        for entry in state.hosts.values_mut() {
+            if matches!(entry.role, Role::Record(_)) {
                 entry.role = Role::Recorded;
             }
         }
-    }
-
-    /// Forgets `host`, released for good.
-    pub fn forget(&self, host: &str) {
-        lock(&self.state).hosts.remove(host);
     }
 
     /// The cache at `path`, hashed once while core runs.
@@ -278,7 +306,7 @@ fn install(
 }
 
 /// Ends `host`'s recording, if `upload` is still its upload.
-fn end(state: &Mutex<State>, host: &str, upload: &Arc<tokio::sync::Mutex<Option<Upload>>>) {
+fn end_recording(state: &Mutex<State>, host: &str, upload: &Arc<tokio::sync::Mutex<Option<Upload>>>) {
     if let Some(entry) = lock(state).hosts.get_mut(host).filter(|entry| recording(entry, upload)) {
         entry.role = Role::Recorded;
     }

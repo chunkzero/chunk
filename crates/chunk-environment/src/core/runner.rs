@@ -7,7 +7,7 @@ mod command;
 #[cfg(unix)]
 pub use command::CommandLauncher;
 
-use super::{AotCaches, aot, sync::Issuer};
+use super::{AotCaches, sync::Issuer};
 use chunk_control::{
     Control, Error, Host, JvmIdentity, Launch, MachineKind, Progress, Registration, Release, Result, RuntimeConnection,
 };
@@ -397,8 +397,12 @@ impl RunnerHost {
             ids.extend(control.launched_hosts()?);
         }
         let mut result = Ok(());
+        let aot = self.core.get().map(|core| core.aot.clone());
         for id in ids {
             self.fence(&id)?;
+            if let Some(aot) = &aot {
+                aot.end(&id);
+            }
             let _turn = self.turn(&id).await;
             match self.stop_machine(&id, control.as_deref()).await {
                 Ok(true) => {}
@@ -457,10 +461,9 @@ impl Host for RunnerHost {
         let control = self.core().ok().map(|(_, control)| control);
         self.fence(id)?;
         // A host recording its AOT cache uploads it once its JVM exited, and its machine stops without grace, so the
-        // release waits for that upload while the machine credential still holds.
-        let aot = self.core.get().map(|core| core.aot.clone());
-        if let Some(aot) = &aot {
-            aot.settle(id, aot::UPLOAD_GRACE).await;
+        // release waits a bounded time for that upload while the machine credential still holds.
+        if let Some(core) = self.core.get() {
+            core.aot.settle(id).await;
         }
         let _turn = self.turn(id).await;
         let revoked =
@@ -468,9 +471,6 @@ impl Host for RunnerHost {
         // A revocation that didn't commit, as once the store stopped, still stops the machine.
         if !self.stop_machine(id, control.as_deref()).await? {
             return Ok(false);
-        }
-        if let Some(aot) = aot {
-            aot.forget(id);
         }
         revoked?;
         control.map_or(Ok(()), |control| control.remove_launch(id))?;

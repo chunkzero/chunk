@@ -464,3 +464,48 @@ async fn a_recording_hosts_release_waits_for_its_aot_cache_upload() {
     assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
     fixture.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_or_stopped_host_never_records_or_installs_an_aot_cache_again() {
+    let (fixture, runner, _) = start(READINESS).await;
+    ensure(&runner).await;
+    // A `chunk:launch` past its boot check whose plan comes only once its host was released records nothing, and
+    // leaves the key to the next host.
+    assert!(runner.release(HOST).await.unwrap());
+    assert_eq!(fixture.aot.plan(HOST, "boot-1", RELEASE, "bridge", RUNTIME).await, None);
+    let other = fixture.another_host(OTHER);
+    assert_eq!(fixture.plan(&other, "boot-2").await, Some(Aot::Record(JvmAotRecord {})));
+
+    // Stopping that host ends its recording midway, so a chunk past its boot check is refused and nothing is installed.
+    let cache = b"cache";
+    let sha256 = auth::hex(&Sha256::digest(cache));
+    assert!(written(&fixture.upload(&other, "boot-2", &cache[..2], (5, &sha256), 2).await[0]));
+    runner.shutdown().await.unwrap();
+    let rest =
+        JvmAotWrite { boot: "boot-2".into(), offset: 2, data: cache[2..].to_vec(), size: 5, sha256, abandon: false };
+    assert_eq!(fixture.aot.write(OTHER, "boot-2", rest).await.unwrap_err().code(), Code::Denied);
+    assert_eq!(std::fs::read_dir(fixture.directory.path().join("aot")).unwrap().count(), 0);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_stopping_ends_a_silent_recording_without_waiting_for_it() {
+    let (fixture, runner, machines) = start(READINESS).await;
+    ensure(&runner).await;
+    let credential = credential(&fixture);
+    assert_eq!(fixture.plan(&credential, "boot-1").await, Some(Aot::Record(JvmAotRecord {})));
+    let releasing = tokio::spawn({
+        let runner = runner.clone();
+        async move { runner.release(HOST).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!releasing.is_finished());
+
+    // The runner never uploads, and core stopping stops the machine without waiting for it, recording nothing more.
+    fixture.aot.close();
+    assert!(settled(releasing).await.unwrap());
+    assert!(matches!(machines.calls().as_slice(), [Call::Launch { .. }, Call::Release(host)] if host == HOST));
+    let other = fixture.another_host(OTHER);
+    assert_eq!(fixture.plan(&other, "boot-2").await, None);
+    fixture.stop().await;
+}

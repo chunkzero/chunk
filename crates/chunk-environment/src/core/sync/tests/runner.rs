@@ -343,3 +343,19 @@ async fn one_host_records_each_aot_cache_and_later_hosts_use_it_once_it_checks_o
     assert_eq!(code(&read(&other, "boot-2").await), Code::Contract);
     fixture.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_release_wait_never_extends_the_next() {
+    let directory = tempfile::tempdir().unwrap();
+    let aot = crate::core::AotCaches::new(directory.path().to_owned());
+    let record = Some(Aot::Record(JvmAotRecord {}));
+    assert_eq!(aot.plan(HOST, "boot-1", RELEASE, "bridge", RUNTIME).await, record);
+    // A release cancelled a minute into its wait for an upload that never comes, then tried again, waits only the rest.
+    let start = tokio::time::Instant::now();
+    assert!(tokio::time::timeout(Duration::from_secs(60), aot.settle(HOST)).await.is_err());
+    aot.settle(HOST).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(90));
+    // The released host never records again, and leaves the key to the next host.
+    assert_eq!(aot.plan(HOST, "boot-1", RELEASE, "bridge", RUNTIME).await, None);
+    assert_eq!(aot.plan("runner-2", "boot-2", RELEASE, "bridge", RUNTIME).await, record);
+}

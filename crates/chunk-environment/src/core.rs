@@ -403,6 +403,7 @@ impl Core {
     /// returns whether all were. Control admits nothing afterwards.
     pub(crate) async fn stop_machines(&self, bound: Duration) -> bool {
         let (Some(runner), Ok(control)) = (&self.runner, self.control()) else { return true };
+        self.end_recordings();
         let stopping = async {
             // Control stops the hosts it knows, and the runner the machines only launch records name.
             while let Err(error) = control.shutdown().await.and(runner.shutdown().await) {
@@ -413,12 +414,20 @@ impl Core {
         tokio::time::timeout(bound, stopping).await.is_ok()
     }
 
+    /// Ends every AOT cache recording, so no release while core stops waits for an upload.
+    fn end_recordings(&self) {
+        if let Some(aot) = &self.aot {
+            aot.close();
+        }
+    }
+
     /// Stops every JVM, then control, retrying until each JVM has confirmed its exit, however long that takes. The
     /// host and backend stay until then. `on_wait` runs once, when a first attempt fails.
     /// # Errors
     /// Reports control shutdown errors.
     pub async fn stop_control(&mut self, on_wait: impl Fn()) -> io::Result<()> {
         let mut waiting = false;
+        self.end_recordings();
         // Kept until remote machines have stopped, since only control's launch records name some of them.
         let control = self.control().ok();
         if let Some(control) = &control {
