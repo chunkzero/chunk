@@ -22,6 +22,13 @@ import { releaseArchive } from "./fixtures.ts";
 /** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
 export const databaseUrl = process.env.TEST_DATABASE_URL;
 
+/** The reconciler's production defaults. */
+export const reconcilerLimits = {
+  concurrency: 8,
+  timeouts: { startMs: 120_000, callMs: 60_000 },
+  capacityRetryMs: 300_000,
+};
+
 export interface Harness {
   sql: Sql;
   keys: Keys;

@@ -12,6 +12,7 @@ import {
   coreMachineSpec,
 } from "../src/environments/machines.ts";
 import {
+  createReconciler,
   reconcile,
   type ReconcilerOptions,
   startReconciler,
@@ -20,6 +21,7 @@ import {
 } from "../src/environments/reconciler.ts";
 import { CapacityState, EnvironmentService, Workload } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
+import { NoCapacityError } from "../src/providers/provider.ts";
 import { fakeProvider } from "./fake-provider.ts";
 import { releaseArchive } from "./fixtures.ts";
 import {
@@ -29,6 +31,7 @@ import {
   deployRelease,
   type Harness,
   next,
+  reconcilerLimits,
   startHarness,
   uploadRelease,
 } from "./harness.ts";
@@ -126,6 +129,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       corePort: 7070,
       trustedEdges: undefined,
       offlineLogins: false,
+      ...reconcilerLimits,
     };
   });
   afterAll(() => h.close());
@@ -854,6 +858,147 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(env.core()?.state).toBe("running");
     await pass();
     expect(await env.state()).toBe(EnvironmentState.STARTING);
+    env.close();
+  });
+
+  test("a slow environment does not hold up another's progress", async () => {
+    const reconciler = createReconciler(h.deps, options);
+    const envs = [await createEnvironment(h), await createEnvironment(h)];
+    for (const { projectId, environmentId } of envs) await deployRelease(h, projectId, environmentId, "r1");
+    const [slow, quick] = envs.map(({ environmentId }) => coreMachineName(environmentId));
+    let unblock = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    hooks.creating = async (name) => {
+      if (name === slow) await blocked;
+    };
+    try {
+      const passing = reconciler.pass(
+        epoch,
+        envs.map(({ environmentId }) => environmentId),
+      );
+      await until(() => machines.get(quick ?? "")?.machine.state === "running");
+      expect(machines.get(quick ?? "")?.machine.state).toBe("running");
+      expect(machines.has(slow ?? "")).toBe(false);
+      unblock();
+      await passing;
+    } finally {
+      hooks.creating = undefined;
+    }
+    expect(machines.get(slow ?? "")?.machine.state).toBe("running");
+  });
+
+  test("an environment never has two operations in flight, while others run alongside it", async () => {
+    const reconciler = createReconciler(h.deps, options);
+    const envs = [await running(), await running()];
+    for (const env of envs) await env.client.ensureCapacity(capacityRequest(env, "overlap"));
+    const prefixes = envs.map(({ coreName }) => coreName.replace(/core$/, ""));
+    const inFlight = new Map<string, number>();
+    let most = 0;
+    let alongside = 0;
+    const track = async (name: string) => {
+      const prefix = prefixes.find((prefix) => name.startsWith(prefix));
+      if (!prefix) return;
+      inFlight.set(prefix, (inFlight.get(prefix) ?? 0) + 1);
+      most = Math.max(most, ...inFlight.values());
+      alongside = Math.max(alongside, [...inFlight.values()].filter((count) => count > 0).length);
+      await Bun.sleep(20);
+      inFlight.set(prefix, (inFlight.get(prefix) ?? 0) - 1);
+    };
+    hooks.status = hooks.creating = hooks.start = track;
+    try {
+      const ids = envs.map(({ environmentId }) => environmentId);
+      await Promise.all([reconciler.pass(epoch, ids), reconciler.pass(epoch, ids), reconciler.pass(epoch)]);
+    } finally {
+      hooks.status = hooks.creating = hooks.start = undefined;
+    }
+    expect(most).toBe(1);
+    expect(alongside).toBe(2);
+    for (const env of envs) {
+      expect(machines.get(nameOf(env.environmentId, "overlap"))?.machine.state).toBe("running");
+      env.close();
+    }
+  });
+
+  test("a request with no room retries with backoff, and fails once there was none for the bound", async () => {
+    const reconciler = createReconciler(h.deps, { ...options, capacityRetryMs: 300 });
+    const env = await running();
+    const pass = () => reconciler.pass(epoch, [env.environmentId]);
+    const capacity = async (requestId: string) =>
+      (await env.client.ensureCapacity(capacityRequest(env, requestId))).capacity;
+    const full = nameOf(env.environmentId, "no-room");
+    const later = nameOf(env.environmentId, "room-later");
+    await capacity("no-room");
+    await capacity("room-later");
+    const attempts = new Map<string, number>();
+    const room = new Set<string>();
+    hooks.creating = (name) => {
+      attempts.set(name, (attempts.get(name) ?? 0) + 1);
+      if ((name === full || name === later) && !room.has(name)) throw new NoCapacityError();
+    };
+    try {
+      await pass();
+      expect(await capacity("no-room")).toMatchObject({ state: CapacityState.PROVISIONING });
+      // Backing off: no attempt until the retry is due.
+      await pass();
+      expect(attempts.get(full)).toBe(1);
+      room.add(later);
+      await Bun.sleep(350);
+      await pass();
+    } finally {
+      hooks.creating = undefined;
+    }
+    expect(attempts.get(full)).toBe(2);
+    expect(await capacity("no-room")).toMatchObject({
+      state: CapacityState.FAILED,
+      message: new NoCapacityError().message,
+    });
+    expect(await capacity("room-later")).toMatchObject({ state: CapacityState.READY, machineId: idOf(later) });
+    expect(machines.has(full)).toBe(false);
+    env.close();
+  });
+
+  test("a create that timed out is retried, and one finishing late makes no second machine", async () => {
+    const reconciler = createReconciler(h.deps, {
+      ...options,
+      timeouts: { startMs: 100, callMs: 100 },
+      capacityRetryMs: 500,
+    });
+    const env = await running();
+    const pass = () => reconciler.pass(epoch, [env.environmentId]);
+    const request = capacityRequest(env, "slow-create");
+    await env.client.ensureCapacity(request);
+    const name = nameOf(env.environmentId, "slow-create");
+    let finish = () => {};
+    const late = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let creates = 0;
+    hooks.creating = async (created) => {
+      if (created !== name) return;
+      creates++;
+      if (creates === 1) await late;
+    };
+    try {
+      await pass();
+      expect((await env.client.ensureCapacity(request)).capacity?.state).toBe(CapacityState.PROVISIONING);
+      expect(machines.has(name)).toBe(false);
+      await Bun.sleep(550);
+      // The retry creates the machine while the first create is still under way, which then finds it.
+      await pass();
+      finish();
+      await Bun.sleep(10);
+      await pass();
+    } finally {
+      hooks.creating = undefined;
+    }
+    expect(creates).toBe(2);
+    expect(boots.get(name)).toBe(1);
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.READY,
+      machineId: idOf(name),
+    });
     env.close();
   });
 

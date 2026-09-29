@@ -4,7 +4,8 @@ import { advisoryLock, type Db, type Sql } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
-import type { Machine, Provider } from "../providers/provider.ts";
+import { boundedProvider, type ProviderTimeouts, ProviderTimeoutError } from "../providers/bounded.ts";
+import { type Machine, NoCapacityError, type Provider } from "../providers/provider.ts";
 import { type CapacityRow, capacityCredentialContext } from "./capacity.ts";
 import { desiredDeployment } from "./desired.ts";
 import {
@@ -15,10 +16,17 @@ import {
   coreMachineSpec,
   type MachineOptions,
 } from "./machines.ts";
+import { keyedPool, type RetryBackoff, retryBackoff } from "./scheduling.ts";
 import { advanceRevision } from "./store.ts";
 
 export interface ReconcilerOptions extends MachineOptions {
   provider: Provider;
+  /** How many environments the leader works on at once. */
+  concurrency: number;
+  /** How long each provider call may take before it counts as a transient failure. */
+  timeouts: ProviderTimeouts;
+  /** How long a capacity request retries transient provider failures before it fails. */
+  capacityRetryMs: number;
 }
 
 interface EnvironmentRow {
@@ -52,19 +60,33 @@ export class Superseded extends Error {
 
 /**
  * Runs `body` in a transaction that first checks the pass's leader epoch is current and keeps a shared lock on it, so
- * a newer leader's bump waits for the transaction to end. Every write a pass makes runs in one. Provider calls other
- * than suspensions, which need the environment's row lock, run outside them, since a lost connection frees the lock
- * without stopping a call under way: intent is committed before the call instead, and calls address machines by ID
- * wherever a name can be reused.
+ * a newer leader's bump waits for the transaction to end. Every write a pass makes runs in one. Provider calls run
+ * outside them, since neither a lost connection nor a timeout stops a call under way: intent is committed before the
+ * call instead, and calls address machines by ID wherever a name can be reused.
  */
 type Fence = <T>(body: (tx: Db) => Promise<T>) => Promise<T>;
 
+/** What one environment's run works with. */
+interface Run {
+  deps: Deps;
+  /** With the provider's calls bounded. */
+  options: ReconcilerOptions;
+  fenced: Fence;
+  retries: RetryBackoff;
+}
+
+/** A timeout or no room: the call may be retried, and the step backs off until it succeeds or the bound passes. */
+function isTransient(error: unknown): error is Error {
+  return error instanceof ProviderTimeoutError || error instanceof NoCapacityError;
+}
+
 /**
- * Drives the provider toward what the database asks for, on every change and every few seconds. Only the process
- * holding the leader lock, on a session of its own at `databaseUrl`, leads; others retry taking it on the same
- * schedule. Leading means holding the current leader epoch, which fences out the writes of a previous leader's pass
- * still under way. Each pass compares the machines' observed state with the desired one, so a step that failed or was
- * cut short is retried until they agree.
+ * Drives the provider toward what the database asks for: every environment every few seconds, and a changed one at
+ * once. Only the process holding the leader lock, on a session of its own at `databaseUrl`, leads; others retry taking
+ * it on the same schedule. Leading means holding the current leader epoch, which fences out the writes of a previous
+ * leader's pass still under way. Each run compares the machines' observed state with the desired one, so a step that
+ * failed or was cut short is retried until they agree. Passes are not awaited, so a slow environment holds up only its
+ * own runs.
  */
 export function startReconciler(
   deps: Deps,
@@ -72,25 +94,46 @@ export function startReconciler(
   databaseUrl: string,
 ): { stop(): Promise<void> } {
   const abort = new AbortController();
-  const subscription = deps.changes.subscribe((change) => change.kind === "environment");
+  const changed = new Set<string>();
+  const subscription = deps.changes.subscribe((change) => {
+    if (change.kind !== "environment") return false;
+    changed.add(change.environmentId);
+    return true;
+  });
   const leader = advisoryLock(databaseUrl, leaderLock);
+  const reconciler = createReconciler(deps, options, abort.signal);
   let epoch: bigint | undefined;
+  let lastFullPass = 0;
   const running = (async () => {
     while (!abort.signal.aborted) {
+      const environmentIds = [...changed];
+      changed.clear();
+      let waitMs = intervalMs;
       try {
         if (await leader.hold()) {
           // Only the lock holder bumps, so another epoch means this process lost the lock since it last bumped.
           const [current] = await deps.sql<{ epoch: bigint }[]>`select epoch from reconciler_leader`;
-          if (epoch === undefined || current?.epoch !== epoch) epoch = await takeLeadership(deps.sql);
-          await reconcile(deps, options, epoch);
+          if (epoch === undefined || current?.epoch !== epoch) {
+            epoch = await takeLeadership(deps.sql);
+            lastFullPass = 0;
+          }
+          const full = Date.now() - lastFullPass >= intervalMs;
+          if (full) lastFullPass = Date.now();
+          if (full || environmentIds.length > 0) {
+            reconciler.pass(epoch, full ? undefined : environmentIds).catch((error: unknown) => {
+              if (!(error instanceof Superseded)) console.error("reconciling failed:", error);
+            });
+          }
+          waitMs = lastFullPass + intervalMs - Date.now();
         } else {
           epoch = undefined;
         }
       } catch (error) {
         console.error("reconciling failed:", error);
       }
-      await subscription.next(intervalMs, abort.signal);
+      await subscription.next(waitMs, abort.signal);
     }
+    await reconciler.idle();
     await leader.close();
   })();
   return {
@@ -109,44 +152,86 @@ export async function takeLeadership(sql: Sql): Promise<bigint> {
   return row.epoch;
 }
 
+export interface Reconciler {
+  /**
+   * Schedules a run under leader epoch `epoch` for each of `environmentIds`, or for every environment and a sweep of
+   * untracked machines when omitted, and resolves once they have all settled. Runs share a pool of
+   * `options.concurrency`, and an environment never has two at once, so a slow or failing environment holds up only its
+   * own. Rejects with `Superseded` when a run was superseded.
+   */
+  pass(epoch: bigint, environmentIds?: string[]): Promise<void>;
+  /** Resolves once no run is scheduled or under way. */
+  idle(): Promise<void>;
+}
+
 /**
- * One pass over every environment under leader epoch `epoch`, then a sweep of untracked machines. A failing
- * environment does not hold up the others; a superseded pass throws `Superseded`.
+ * A reconciler whose provider calls are bounded by `options.timeouts`, and abandoned when `signal` aborts. A call it
+ * gave up on is a transient failure, retried by a later run, and never taken to have succeeded: the next run observes
+ * the machines again.
  */
-export async function reconcile(deps: Deps, options: ReconcilerOptions, epoch: bigint): Promise<void> {
-  const fenced: Fence = async (body) => {
-    const { result } = await deps.sql.begin(async (tx) => {
+export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?: AbortSignal): Reconciler {
+  const bounded = { ...options, provider: boundedProvider(options.provider, options.timeouts, signal) };
+  const pool = keyedPool(options.concurrency);
+  const retries = retryBackoff(options.capacityRetryMs);
+  const guarded = (what: string, work: () => Promise<void>) => async () => {
+    if (signal?.aborted) return;
+    try {
+      await work();
+    } catch (error) {
+      if (error instanceof Superseded) throw error;
+      console.error(`${what} failed:`, error);
+    }
+  };
+  return {
+    async pass(epoch, environmentIds) {
+      const run: Run = { deps, options: bounded, fenced: fence(deps.sql, epoch), retries };
+      const ids =
+        environmentIds ??
+        (await deps.sql<{ id: string }[]>`select id from environments order by seq`).map(({ id }) => id);
+      const runs = ids.map((id) =>
+        pool.schedule(
+          `environment/${id}`,
+          guarded(`reconciling environment ${id}`, () => reconcileEnvironment(run, id)),
+        ),
+      );
+      if (!environmentIds) {
+        const sweeping = guarded("sweeping", () => sweep(run));
+        runs.push(pool.schedule("sweep", sweeping));
+      }
+      const failed = (await Promise.allSettled(runs)).find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
+    },
+    idle: pool.idle,
+  };
+}
+
+/** One pass over every environment under leader epoch `epoch`, with a reconciler of its own. */
+export function reconcile(deps: Deps, options: ReconcilerOptions, epoch: bigint): Promise<void> {
+  return createReconciler(deps, options).pass(epoch);
+}
+
+function fence(sql: Sql, epoch: bigint): Fence {
+  return async (body) => {
+    const { result } = await sql.begin(async (tx) => {
       const [current] = await tx`select 1 from reconciler_leader where epoch = ${epoch} for share`;
       if (!current) throw new Superseded();
       return { result: await body(tx) };
     });
     return result;
   };
-  const environments = await deps.sql<EnvironmentRow[]>`
+}
+
+async function reconcileEnvironment(run: Run, id: string) {
+  const { deps, options, fenced, retries } = run;
+  const { sql } = deps;
+  const { provider } = options;
+  // Read when the run starts, not when it was scheduled, since it may have waited for the pool.
+  const [environment] = await sql<EnvironmentRow[]>`
     select id, state, revision, lease, ready_to_suspend, report_desired_revision, machine_id, machine_addresses,
       machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired
     from environments
-    order by seq`;
-  for (const environment of environments) {
-    try {
-      await reconcileEnvironment(deps, options, fenced, environment);
-    } catch (error) {
-      if (error instanceof Superseded) throw error;
-      console.error(`reconciling environment ${environment.id} failed:`, error);
-    }
-  }
-  await sweep(deps, options);
-}
-
-async function reconcileEnvironment(
-  deps: Deps,
-  options: ReconcilerOptions,
-  fenced: Fence,
-  environment: EnvironmentRow,
-) {
-  const { sql } = deps;
-  const { provider } = options;
-  const id = environment.id;
+    where id = ${id}`;
+  if (!environment) return;
   const capacity = await sql<CapacityRow[]>`
     select * from capacity_requests where environment_id = ${id} and not torn_down order by create_time`;
 
@@ -155,21 +240,45 @@ async function reconcileEnvironment(
     for (const request of capacity) await provider.destroy(capacityMachineName(request));
     await provider.destroy(coreMachineName(id));
     await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
+    for (const request of capacity) retries.clear(capacityKey(request));
+    retries.clear(coreKey(id));
     return;
   }
   for (const request of capacity) {
     if (request.state === CapacityState.FAILED || request.state === CapacityState.RELEASING) {
-      await tearDown(options, fenced, request);
+      await tearDown(run, request);
     }
   }
   if (!(await desiredDeployment(sql, id))) return;
 
+  // Core has no state to fail into, so it retries for as long as it takes, backing off while calls fail transiently.
+  const key = coreKey(id);
+  if (retries.waiting(key)) return;
+  try {
+    await runCore(
+      run,
+      environment,
+      capacity.filter(
+        (request) => request.state === CapacityState.PROVISIONING || request.state === CapacityState.READY,
+      ),
+    );
+    retries.clear(key);
+  } catch (error) {
+    if (!isTransient(error)) throw error;
+    const overdue = retries.failed(key);
+    (overdue ? console.error : console.warn)(`environment ${id}'s core machine is waiting: ${error.message}`);
+  }
+}
+
+/** Runs core's machine, suspending it and the extra machines while idle, and the extra machines otherwise. */
+async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRow[]) {
+  const { deps, options, fenced } = run;
+  const { sql } = deps;
+  const { provider } = options;
+  const id = environment.id;
   const observed = environment.machine_id ? await provider.status(environment.machine_id) : undefined;
   let core = observed && observed.state !== "missing" ? observed : await createCore(deps, options, fenced, environment);
   if (!core) return;
-  const active = capacity.filter(
-    (request) => request.state === CapacityState.PROVISIONING || request.state === CapacityState.READY,
-  );
 
   const idle =
     environment.lease > 0n &&
@@ -187,18 +296,19 @@ async function reconcileEnvironment(
     );
     if (!marked) return;
     if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
-    // Reports, wakes and attaches lock the row too, so none can land between this recheck and the suspension. One that
-    // lands after a lost connection freed the lock is caught up on by the next pass, which resumes.
-    const suspendIfIdle = (machineId: string) =>
-      fenced(async (tx) => {
-        const [still] = await tx`
+    // Rechecked before each suspension, outside the transaction like every provider call. A report or wake that lands
+    // between the recheck and the suspension notifies, which runs the environment again once this run ends, and that
+    // run resumes the machine; so does a later one, for a suspension that finishes after it gave up on the call.
+    const suspendIfIdle = async (machineId: string) => {
+      const [still] = await fenced(
+        (tx) => tx`
           select 1 as idle from environments
           where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
-            and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision
-          for update`;
-        if (still) await provider.suspend(machineId);
-        return Boolean(still);
-      });
+            and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision`,
+      );
+      if (still) await provider.suspend(machineId);
+      return Boolean(still);
+    };
     for (const request of active) {
       if (!request.machine_id) continue;
       const machine = await provider.status(request.machine_id);
@@ -219,7 +329,15 @@ async function reconcileEnvironment(
     );
     await notify(sql, { kind: "environment", environmentId: id });
   }
-  for (const request of active) await keepRunning(deps, options, fenced, core, request);
+  for (const request of active) await keepRunning(run, core, request);
+}
+
+function coreKey(environmentId: string): string {
+  return `core/${environmentId}`;
+}
+
+function capacityKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
+  return `capacity/${request.environment_id}/${request.request_id}`;
 }
 
 /**
@@ -272,13 +390,17 @@ async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: Envi
  * Keeps an extra machine running and resumes a suspended one. A JVM machine boots at most once: its boot is recorded
  * before it starts, so a started one that stopped or went missing fails its request, and one never started is adopted
  * by name, or created again when missing. Gateway machines are stateless and are replaced, with the same credential.
- * Machines are started by ID, and removed only under the ID observed, so a call a superseded pass left under way can
- * neither start a destroyed machine nor remove its replacement. A provider error fails the request for good; core
- * retries with a new request ID.
+ * Machines are started by ID, and removed only under the ID observed, so a call a superseded pass left under way, or
+ * one this leader gave up on, can neither start a destroyed machine nor remove its replacement. A transient provider
+ * failure leaves the request as it is, and a later run retries with backoff; any other provider error, or transient
+ * failures lasting `capacityRetryMs`, fail the request for good, and core retries with a new request ID.
  */
-async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence, core: Machine, request: CapacityRow) {
+async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
+  const { deps, options, fenced, retries } = run;
   const { sql, keys } = deps;
   const { provider } = options;
+  const key = capacityKey(request);
+  if (retries.waiting(key)) return;
   const jvm = request.workload === Workload.JVM;
   const name = capacityMachineName(request);
   const active = sql`
@@ -321,15 +443,20 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence
       const id = found.id;
       const saved = await fenced((tx) => tx`update capacity_requests set machine_id = ${id} where ${active}`);
       if (saved.count === 0) {
+        retries.clear(key);
         await provider.destroy(name, { id });
         return;
       }
       machine = found;
     }
     if (machine.state !== "running") {
-      if (!(await mayStart(machine))) return;
+      if (!(await mayStart(machine))) {
+        retries.clear(key);
+        return;
+      }
       machine = await provider.start(machine.id);
     }
+    retries.clear(key);
     if (request.state === CapacityState.READY && sameList(request.machine_addresses, machine.addresses)) return;
     const addresses = machine.addresses;
     await fenced(
@@ -340,6 +467,11 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence
     );
   } catch (error) {
     if (error instanceof Superseded) throw error;
+    if (isTransient(error) && !retries.failed(key)) {
+      console.warn(`capacity ${request.request_id} is waiting: ${error.message}`);
+      return;
+    }
+    retries.clear(key);
     console.error(`running capacity ${request.request_id} failed:`, error);
     await fenced(
       (tx) => tx`
@@ -355,7 +487,8 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence
  * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved; the request
  * never runs a machine again, so nothing reuses the name. A releasing request is released once its machine is gone.
  */
-async function tearDown({ provider }: ReconcilerOptions, fenced: Fence, request: CapacityRow) {
+async function tearDown({ options: { provider }, fenced, retries }: Run, request: CapacityRow) {
+  retries.clear(capacityKey(request));
   await provider.destroy(capacityMachineName(request));
   await fenced(
     (tx) => tx`
@@ -372,7 +505,7 @@ async function tearDown({ provider }: ReconcilerOptions, fenced: Fence, request:
  * its environment deleted leaves them. A request not yet torn down keeps its machine, since a create for it may still
  * be under way.
  */
-async function sweep({ sql }: Deps, { provider }: ReconcilerOptions) {
+async function sweep({ deps: { sql }, options: { provider } }: Run) {
   const machines = await provider.list();
   // Read after listing: a request only ever becomes torn down and an environment only goes away, so a listed machine
   // untracked now stays untracked, and its name is never used again.

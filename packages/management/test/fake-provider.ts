@@ -4,10 +4,10 @@ type Method = "creating" | "create" | "start" | "suspend" | "status" | "destroy"
 
 /**
  * An in-memory provider. Every machine gets a new ID, `<name>@<n>`; like Docker, a machine only gets an IP when it
- * starts, and a new one each time. `hooks` runs before a method with the machine's name, and throwing from it fails the
- * call. `creating` runs once a new machine's volumes exist but before the machine does, which models a slow create; the
- * `create` hook runs once it exists, so throwing from it models a lost reply. `boots` counts, per name, starts of a
- * stopped machine.
+ * starts, and a new one each time, and a name holds at most one machine. `hooks` runs before a method with the
+ * machine's name, and throwing from it fails the call. `creating` runs once a new machine's volumes exist but before the
+ * machine does, which models a slow create; the `create` hook runs once it exists, so throwing from it models a lost
+ * reply. `boots` counts, per name, starts of a stopped machine.
  */
 export function fakeProvider() {
   const machines = new Map<string, { spec: MachineSpec; machine: Machine }>();
@@ -42,6 +42,9 @@ export function fakeProvider() {
           spec.volumes.map(({ name }) => name),
         );
       await hooks.creating?.(spec.name);
+      // Another create for the name finished while this one was under way.
+      const raced = machines.get(spec.name);
+      if (raced) return raced.machine;
       const machine: Machine = {
         id: `${spec.name}@${nextId++}`,
         name: spec.name,
