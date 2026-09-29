@@ -1,7 +1,11 @@
 # @chunkzero/management
 
-The single-tenant management service: serves `chunk.management.v1` (see `proto/chunk/management/v1`) with Connect on
-Bun, backed by Postgres. Migrations in `migrations/` apply on start.
+The self-hosted control plane. Management stores projects, environments and release archives, deploys releases, and
+reconciles each environment's machines through a provider. It serves the `chunk.management.v1` API
+([`proto/chunk/management/v1`](../../proto/chunk/management/v1)) and the [dashboard](../dashboard) on Bun, backed by
+Postgres, and applies the migrations in `migrations/` on start. It ships a Docker/Podman provider;
+[`deploy/compose`](../../deploy/compose/README.md) runs it with Postgres and the
+[edge](../../crates/chunk-edge/README.md) on one host.
 
 ## Running
 
@@ -12,55 +16,129 @@ CHUNK_OPERATOR_TOKEN=chunk_$(head -c 32 /dev/urandom | base64 | tr -d '/+=') \
 bun src/main.ts
 ```
 
-| Variable                               | Default                     | Purpose                                                                                            |
-| -------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                         | required                    | Postgres connection URL.                                                                           |
-| `CHUNK_SECRET_KEY`                     | required                    | 32 bytes, base64. Encrypts secrets and signs upload URLs; keep it stable.                          |
-| `CHUNK_OPERATOR_TOKEN`                 | unset                       | An API token for the operator, recorded on start. At least 32 characters.                          |
-| `CHUNK_PUBLIC_URL`                     | `http://localhost:$PORT`    | How clients reach this service; used in upload and login URLs.                                     |
-| `HOST` / `PORT`                        | `0.0.0.0` / `8080`          | Listen address.                                                                                    |
-| `CHUNK_DATA_DIR`                       | `data`                      | Release archives are stored under `releases/` here.                                                |
-| `CHUNK_DASHBOARD_DIR`                  | unset                       | The dashboard's build (`pnpm build:dashboard` writes `packages/dashboard/dist`), served at `/`.    |
-| `CHUNK_MAX_RELEASE_EXPANDED_BYTES`     | `8589934592`                | How far a release archive may expand while it is verified.                                         |
-| `CHUNK_MAX_RELEASE_ENTRIES`            | `100000`                    | How many tar entries a release archive may hold.                                                   |
-| `CHUNK_EDGE_DOMAIN`                    | unset                       | Environments get `env-<id>.<domain>` hostnames; point `*.<domain>` at the edge.                    |
-| `CHUNK_EDGE_PORT`                      | `25565`                     | The edge's player port, used in custom domains' SRV records.                                       |
-| `CHUNK_EDGE_TOKEN`                     | unset                       | The token edges call `EdgeService` with, recorded on start. At least 32 characters.                |
-| `CHUNK_LOG_STORE_BUCKET`               | unset                       | An S3-compatible bucket environments replicate their logs to. Unset turns replication off.         |
-| `CHUNK_LOG_STORE_ENDPOINT`             | required with a bucket      | The bucket's endpoint URL.                                                                         |
-| `CHUNK_LOG_STORE_REGION`               | `us-east-1`                 | The bucket's region, also used to sign STS requests.                                               |
-| `CHUNK_LOG_STORE_PREFIX`               | `environments/`             | Each environment replicates below `<prefix><environment ID>/`.                                     |
-| `CHUNK_LOG_STORE_ACCESS_KEY_ID`        | required with a bucket      | The operator's credentials, used to request each environment's own.                                |
-| `CHUNK_LOG_STORE_SECRET_ACCESS_KEY`    | required with a bucket      | The secret for `CHUNK_LOG_STORE_ACCESS_KEY_ID`.                                                    |
-| `CHUNK_LOG_STORE_ROLE_ARN`             | required with a bucket      | The role STS AssumeRole issues environment credentials under.                                      |
-| `CHUNK_LOG_STORE_STS_ENDPOINT`         | `$CHUNK_LOG_STORE_ENDPOINT` | The STS endpoint; MinIO serves it on the S3 endpoint, AWS at `https://sts.<region>.amazonaws.com`. |
-| `CHUNK_LOG_STORE_CREDENTIAL_SECONDS`   | `3600`                      | How long issued environment credentials last.                                                      |
-| `CHUNK_LOG_STORE_SHARED_CREDENTIALS`   | unset                       | `1` hands every environment the operator's credentials instead; see below.                         |
-| `CHUNK_ENVIRONMENT_IMAGE`              | unset                       | The environment image. Unset, no machines are provisioned.                                         |
-| `CHUNK_JVM_IMAGE`                      | unset                       | The JVM runner image, with `{java}` for the release's Java version. Unset, no release deploys.     |
-| `DOCKER_HOST`                          | `/var/run/docker.sock`      | The Docker or Podman API socket machines run on, as `unix://<path>`.                               |
-| `CHUNK_MACHINE_NETWORK`                | `chunk`                     | The container network machines join; created when missing.                                         |
-| `CHUNK_MACHINE_MANAGEMENT_URL`         | `$CHUNK_PUBLIC_URL`         | How machines reach this service.                                                                   |
-| `CHUNK_CORE_MEMORY_MIB`                | `1024`                      | Memory for each environment's core machine; CPUs are 1 per 2 GiB, at least 1.                      |
-| `CHUNK_CORE_PORT`                      | `7070`                      | The port core's network listener binds, and extra machines reach core on.                          |
-| `CHUNK_MACHINE_TRUSTED_EDGES`          | unset                       | Edge IPs or CIDRs (comma-separated) core and gateway machines accept PROXY headers from.           |
-| `CHUNK_MACHINE_OFFLINE_LOGINS`         | unset                       | `1` lets any player join under any name, unauthenticated. Insecure; for smoke tests only.          |
-| `CHUNK_MACHINE_SUSPEND_AFTER_SECONDS`  | unset                       | Seconds idle before an environment sleeps until a player logs in through the edge; never if unset. |
-| `CHUNK_RECONCILE_CONCURRENCY`          | `8`                         | How many environments the reconciler works on at once.                                             |
-| `CHUNK_PROVIDER_START_TIMEOUT_SECONDS` | `120`                       | How long the reconciler waits for a machine's create or start.                                     |
-| `CHUNK_PROVIDER_TIMEOUT_SECONDS`       | `60`                        | How long the reconciler waits for every other provider call.                                       |
-| `CHUNK_CAPACITY_RETRY_SECONDS`         | `300`                       | How long a capacity request waits out a provider with no room, or timing out, before it fails.     |
+`just management-image` builds the `chunk-management:<workspace version>` image, dashboard included.
 
-Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, using
-the Connect protocol (`application/proto` or `application/json`) or gRPC-Web over HTTP/1.1. Bun does not serve HTTP/2,
-so plain gRPC clients do not work.
+| Variable                               | Default                       | Meaning                                                                                                     |
+| -------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                         | required                      | The Postgres connection URL.                                                                                |
+| `CHUNK_SECRET_KEY`                     | required                      | 32 random bytes, base64. Encrypts stored secrets and signs upload URLs; keep it for the database's life.    |
+| `CHUNK_OPERATOR_TOKEN`                 | unset                         | An API token for the operator, at least 32 characters, recorded on start.                                   |
+| `CHUNK_PUBLIC_URL`                     | `http://localhost:$PORT`      | How clients reach this service; used in upload and login URLs.                                              |
+| `HOST` / `PORT`                        | `0.0.0.0` / `8080`            | The listen address.                                                                                         |
+| `CHUNK_DATA_DIR`                       | `data`                        | Release archives are stored under `releases/` here.                                                         |
+| `CHUNK_DASHBOARD_DIR`                  | unset                         | The dashboard's build (`pnpm build:dashboard` writes `packages/dashboard/dist`), served at `/`.             |
+| `CHUNK_MAX_RELEASE_EXPANDED_BYTES`     | `8589934592`                  | How far a release archive may expand while it is verified.                                                  |
+| `CHUNK_MAX_RELEASE_ENTRIES`            | `100000`                      | How many entries a release archive may hold.                                                                |
+| `CHUNK_EDGE_DOMAIN`                    | unset                         | New environments get the hostname `env-<24 hex digits>.<domain>`; point `*.<domain>` at the edge.           |
+| `CHUNK_EDGE_PORT`                      | `25565`                       | The edge's player port, used in custom domains' SRV records.                                                |
+| `CHUNK_EDGE_TOKEN`                     | unset                         | The token edges call `EdgeService` with, at least 32 characters, recorded on start.                         |
+| `CHUNK_ENVIRONMENT_IMAGE`              | unset                         | The image core and gateway machines run. Unset, no machines run and nothing can be deployed.                |
+| `CHUNK_JVM_IMAGE`                      | unset                         | The JVM runner image, containing `{java}`, which is replaced by the release's Java version.                 |
+| `DOCKER_HOST`                          | `unix:///var/run/docker.sock` | The Docker or Podman API socket machines run on; only `unix://` works.                                      |
+| `CHUNK_MACHINE_NETWORK`                | `chunk`                       | The container network machines join; created when missing.                                                  |
+| `CHUNK_MACHINE_MANAGEMENT_URL`         | `$CHUNK_PUBLIC_URL`           | How machines reach this service, including release downloads.                                               |
+| `CHUNK_CORE_MEMORY_MIB`                | `1024`                        | Memory for each core machine; it gets one CPU per 2 GiB, at least one.                                      |
+| `CHUNK_CORE_PORT`                      | `7070`                        | The port core listens on for the environment's other machines.                                              |
+| `CHUNK_MACHINE_TRUSTED_EDGES`          | unset                         | Edge IPs or CIDRs, comma-separated, that core and gateway machines accept PROXY headers from.               |
+| `CHUNK_MACHINE_OFFLINE_LOGINS`         | unset                         | `1` lets anyone join under any name, unauthenticated. Insecure; for tests only.                             |
+| `CHUNK_MACHINE_SUSPEND_AFTER_SECONDS`  | unset                         | Seconds idle before an environment sleeps; it wakes when a player logs in through the edge. Never if unset. |
+| `CHUNK_RECONCILE_CONCURRENCY`          | `8`                           | How many environments the reconciler works on at once.                                                      |
+| `CHUNK_PROVIDER_START_TIMEOUT_SECONDS` | `120`                         | How long the reconciler waits for a machine's create or start.                                              |
+| `CHUNK_PROVIDER_TIMEOUT_SECONDS`       | `60`                          | How long it waits for every other provider call.                                                            |
+| `CHUNK_CAPACITY_RETRY_SECONDS`         | `300`                         | How long a JVM or gateway request keeps retrying a provider with no room, or timing out, before it fails.   |
+| `CHUNK_LOG_STORE_*`                    | unset                         | Log storage; see [Log storage](#log-storage).                                                               |
+
+The machine and reconciler variables apply only when `CHUNK_ENVIRONMENT_IMAGE` is set.
+
+## API
+
+Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` with `Authorization: Bearer <token>`, over
+the Connect protocol (`application/json` or `application/proto`) or gRPC-Web. Bun serves HTTP/1.1 only, so plain gRPC
+clients don't work. `GET /healthz` answers `ok`.
+
+| Service                                                                               | Callers                                                              |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `ProjectService`, `DeploymentService`, `SecretService`, `DomainService`, `LogService` | The operator's tokens                                                |
+| `AuthService`                                                                         | The operator's tokens; `StartLogin` and `PollLogin` need none        |
+| `EnvironmentService`                                                                  | Each environment's core, with the token management gives its machine |
+| `EdgeService`                                                                         | Edges, with `CHUNK_EDGE_TOKEN`                                       |
+
+The operator signs in to the dashboard with a token. More tokens, optionally limited to one project or given an expiry,
+come from `AuthService.CreateToken`, or from a device-style login: `StartLogin` returns a URL whose `/login` page the
+operator approves in the dashboard, and `PollLogin` then hands the new token to the client that started it.
 
 ## Releases
 
-Management is a registry for release archives. A READY release means the archive is stored and intact: it matches the
-declared size and SHA-256, it is a well-formed tar within the expansion and entry limits, and `release.json` names the
-release and declares the apps, sessions and machine profiles management reads. Management does not validate the backend
-contract or the rest of the release. The environment decides whether a release is deployable when it loads it.
+A release is uploaded in three steps. `DeploymentService.UploadRelease` declares its ID, SHA-256 and size and returns an
+`upload` target: a `PUT` URL under `/releases/upload/`, signed with `CHUNK_SECRET_KEY` and valid for an hour, with its
+headers. When the project already holds the release intact, it returns no `upload`. After the `PUT`,
+`CompleteReleaseUpload` verifies the archive and marks the release `RELEASE_STATE_READY`: it matches the declared size
+and digest, it is a well-formed gzip tar within the expansion and entry limits, and its `release.json` names the release
+and declares its apps, sessions and machine profiles. Management doesn't check the backend contract; the environment
+decides whether it can serve a release when it loads it.
+
+`Deploy` makes a ready release an environment's desired deployment, which the environment's core loads and reports as
+`DEPLOYMENT_STATE_ACTIVE` or `DEPLOYMENT_STATE_FAILED`. `Deploy`, `Promote`, `Rollback` and JVM capacity requests refuse
+a release with `FAILED_PRECONDITION` when there is no JVM image for it: `CHUNK_JVM_IMAGE` is unset, or `release.json`
+has no integer `java_version` from 1 to 1000.
+
+## Machines
+
+The reconciler gives each environment with a deployment a core machine running `CHUNK_ENVIRONMENT_IMAGE`
+([`chunk-environment`](../../crates/chunk-environment/README.md)) with `CHUNK_SERVICES=core,gateway`. Core asks for JVM
+machines with `EnvironmentService.EnsureCapacity`, which run `CHUNK_JVM_IMAGE`
+([`chunk-jvm`](../../crates/chunk-jvm/README.md)); `EnsureCapacity` also accepts extra gateway machines, which run the
+environment image with `CHUNK_SERVICES=gateway`.
+
+Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN` and
+`CHUNK_CORE_BIND=[::]:$CHUNK_CORE_PORT`. The other machines never call management: they get `CHUNK_CORE_ENDPOINT`
+(core's first IP address and `CHUNK_CORE_PORT`), `CHUNK_ENVIRONMENT_ID`, the credential core minted for them
+(`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`), and the request's `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and
+`CHUNK_MACHINE_PROFILE`, which the JVM runner checks core's launch against. `CHUNK_MACHINE_TRUSTED_EDGES`,
+`CHUNK_MACHINE_OFFLINE_LOGINS` and `CHUNK_MACHINE_SUSPEND_AFTER_SECONDS` reach core and gateway machines as
+`CHUNK_TRUSTED_EDGES`, `CHUNK_OFFLINE_LOGINS` and (core only) `CHUNK_SUSPEND_AFTER_SECONDS`. Credentials are stored
+sealed and never returned. Traffic between machines is plaintext, so they must share a private, encrypted network.
+
+Every container and volume carries `chunk.install`, `chunk.environment`, `chunk.request` and `chunk.workload` labels,
+and the provider refuses to touch anything under a name it uses that lacks this install's labels. Core restarts with the
+engine; other machines are stateless, and the reconciler replaces one that exits under the same request and credential.
+A JVM machine boots at most once, and a released request never gets a running machine.
+
+When core reports that it may be suspended, the reconciler suspends the environment's machines (the Docker provider
+pauses them, keeping their memory). An accepted `EdgeService.Wake` or a due wake alarm resumes them. A JVM request whose
+machine stopped instead of pausing fails, and core asks for new capacity once it wakes.
+
+Several management processes may share a database; the one holding the reconciler's advisory lock leads, and a new
+leader fences the old one's writes. The leader works on up to `CHUNK_RECONCILE_CONCURRENCY` environments at once, one
+operation per environment, gives up on a provider call after its timeout and observes the machines again on the next
+pass.
+
+**Providers.** The package exports `start(config, extensions)` from `src/index.ts`. An install can plug in its own
+provider, extra Connect services and migrations, and its own authentication through `Extensions`, instead of the
+Docker/Podman provider `src/main.ts` uses.
+
+## Log storage
+
+With `CHUNK_LOG_STORE_BUCKET` set, management hands each environment credentials for its own prefix,
+`<prefix><environment ID>/`, in `Attach`: temporary ones from STS `AssumeRole` with an inline policy that allows only
+that prefix, refreshed before they expire. This works with AWS S3 and MinIO. The environment process doesn't use these
+credentials yet; it replicates only with its own `CHUNK_REPLICATION_*` variables.
+
+| Variable                             | Default                | Meaning                                                                                            |
+| ------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `CHUNK_LOG_STORE_BUCKET`             | unset                  | The S3-compatible bucket. Unset turns log storage off.                                             |
+| `CHUNK_LOG_STORE_ENDPOINT`           | required with a bucket | The bucket's endpoint URL.                                                                         |
+| `CHUNK_LOG_STORE_REGION`             | `us-east-1`            | The bucket's region, also used to sign STS requests.                                               |
+| `CHUNK_LOG_STORE_PREFIX`             | `environments/`        | The prefix environments' prefixes go under.                                                        |
+| `CHUNK_LOG_STORE_ACCESS_KEY_ID`      | required with a bucket | The operator's credentials, used to request each environment's own.                                |
+| `CHUNK_LOG_STORE_SECRET_ACCESS_KEY`  | required with a bucket | The secret for the access key.                                                                     |
+| `CHUNK_LOG_STORE_ROLE_ARN`           | required with a bucket | The role STS issues environment credentials under; not needed with shared credentials.             |
+| `CHUNK_LOG_STORE_STS_ENDPOINT`       | the endpoint           | The STS endpoint; MinIO serves it on the S3 endpoint, AWS at `https://sts.<region>.amazonaws.com`. |
+| `CHUNK_LOG_STORE_CREDENTIAL_SECONDS` | `3600`                 | How long issued credentials last.                                                                  |
+| `CHUNK_LOG_STORE_SHARED_CREDENTIALS` | unset                  | `1` hands every environment the operator's credentials instead.                                    |
+
+Shared credentials trust every environment's code with every other environment's logs; use them only when all
+environments run code you trust.
 
 ## Development
 
@@ -72,63 +150,8 @@ podman run -d --rm --name chunk-test-postgres -e POSTGRES_PASSWORD=test -p 127.0
 TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres pnpm --filter @chunkzero/management test
 ```
 
-Tests that need Postgres skip when `TEST_DATABASE_URL` is unset. Each test file uses its own schema. The provider tests
-use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists. The STS log store test runs against MinIO
-when `TEST_MINIO_URL` is set, for example
+Tests that need Postgres skip when `TEST_DATABASE_URL` is unset; each test file uses its own schema. The provider tests
+use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists. The STS test runs against MinIO when
+`TEST_MINIO_URL` is set, for example
 `podman run --rm -p 127.0.0.1:59000:9000 -e MINIO_ROOT_USER=chunkroot -e MINIO_ROOT_PASSWORD=chunkrootsecret cgr.dev/chainguard/minio server /data`
-with `TEST_MINIO_URL=http://127.0.0.1:59000`.
-
-## Machines
-
-With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
-machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
-for accepted wakes and due wake alarms. Core and gateway machines run the environment image, and `CHUNK_SERVICES`
-selects what it runs: `core,gateway` on the core machine and `gateway` on an extra gateway machine, which joins core
-with its credential and routes players to core's current deployment.
-
-JVM machines run the `chunk-jvm` runner image, `CHUNK_JVM_IMAGE` with `{java}` replaced by the release's `java_version`,
-for example `ghcr.io/chunkzero/chunk-jvm:{java}` (`just jvm-image <java>` builds `chunk-jvm:<java>` locally). A release
-has no JVM image when `CHUNK_JVM_IMAGE` is unset or its `release.json` has no integer `java_version` from 1 to 1000.
-`Deploy`, `Promote`, `Rollback` and JVM `EnsureCapacity` calls refuse such a release with `FAILED_PRECONDITION`.
-
-Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN`, and `CHUNK_CORE_BIND` set to
-`[::]:$CHUNK_CORE_PORT`, so it accepts extra machines on every interface; core drops peers without a private address.
-Extra machines never call this service. They get `CHUNK_CORE_ENDPOINT`, `http://<core's address>:$CHUNK_CORE_PORT` at
-core's first IP address, with IPv6 bracketed; until core has one, no extra machine is created. They also get
-`CHUNK_ENVIRONMENT_ID`, the credential core minted for the machine and sent in `EnsureCapacity`
-(`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`), and the request's `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and
-`CHUNK_MACHINE_PROFILE`, which the JVM runner checks core's launch against. Gateway machines also get `CHUNK_SERVICES`
-and `CHUNK_CAPACITY_REQUEST_ID`. With `CHUNK_MACHINE_TRUSTED_EDGES` set, core and gateway machines get it as
-`CHUNK_TRUSTED_EDGES`; JVM machines never do. Likewise, with `CHUNK_MACHINE_OFFLINE_LOGINS=1` they get
-`CHUNK_OFFLINE_LOGINS=1` and admit players without authenticating them, which only a test install should do. With
-`CHUNK_MACHINE_SUSPEND_AFTER_SECONDS` set, core machines get it as `CHUNK_SUSPEND_AFTER_SECONDS`. The credential is
-stored sealed, with a keyed digest that retries are matched on, and is never returned. Traffic between machines is
-plaintext, so machines must share a private, encrypted network.
-
-Every container and volume carries ownership labels with this install's ID (from the `installation` table), the
-environment and the capacity request. The provider refuses to adopt, start, stop or remove anything under a name it uses
-that lacks them. Core is restarted by the engine. Extra machines are stateless and are not: the reconciler replaces one
-that exits or disappears, under the same request, with the same credential.
-
-Management processes may share a database, but only the one holding the reconciler's advisory lock leads; another takes
-over once its connection ends, and bumps a leader epoch that refuses every later write of the previous leader's passes.
-The leader works on up to `CHUNK_RECONCILE_CONCURRENCY` environments at once, never two operations on one, so a slow
-environment holds up only its own. It gives up on a provider call after its timeout and retries on a later pass,
-observing the machines again rather than assuming the call succeeded. A provider with no room for a machine right now is
-retried with backoff; a capacity request fails once that, or timing out, has lasted `CHUNK_CAPACITY_RETRY_SECONDS`,
-while core's machine keeps retrying. Provider calls left under way, by a previous leader or after a timeout, cannot be
-recalled, so the reconciler commits a JVM machine's one boot, and each resume, before starting it, starts machines by
-ID, and removes a machine whose name is reused only under the ID it observed. A JVM machine whose boot or resume it
-never saw finish fails its request instead of being started again. A capacity release is terminal: RELEASED means the
-machine is destroyed, or was created too late and will never run, and the reconciler removes owned machines and volumes
-no request or environment tracks. A released request ID never gets a running machine, even when `ReleaseCapacity`
-arrived before its `EnsureCapacity`, and a JVM machine boots at most once. An attach by a new core instance releases the
-previous instance's requests.
-
-## Log replication
-
-Each environment gets credentials for its own prefix, `<prefix><environment ID>/`, through `Attach`: temporary ones from
-STS AssumeRole with an inline session policy that allows only that prefix, refreshed before they expire. This works with
-AWS S3 and MinIO. `CHUNK_LOG_STORE_SHARED_CREDENTIALS=1` instead hands every environment the operator's static
-credentials. That trusts every environment's code with every other environment's logs, so use it only when all
-environments run code you trust.
+with `TEST_MINIO_URL=http://127.0.0.1:59000`. `just managed-smoke` runs the whole self-hosted path end to end.

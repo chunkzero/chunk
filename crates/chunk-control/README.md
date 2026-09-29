@@ -1,137 +1,86 @@
-# Local control
+# chunk-control
 
-`chunk_control::server::run` serves control in the same process as the environment backend, writing through the
-backend's `System` handle; `chunk dev` and the `chunk-environment` binary embed it. It has no binary of its own, because
-control shares the backend's store. `server::Config.state` holds the credential and the host's local files.
+Control is core's placement side. It reserves capacity, places sessions on hosts, starts and supervises their JVMs, and
+owns which player is delivered to which session. It runs inside core, next to the [backend](../chunk-backend/README.md),
+in the [environment process](../chunk-environment/README.md) and in `chunk dev`; it has no binary of its own. Gateways,
+JVMs and the CLI reach it through core's `chunk.sync.v1` `Core` service.
 
-`chunk dev` uses `ProcessHost` to launch each app with `java -jar`. It owns the child handle and waits for exit; there
-is no per-server sidecar. External app manifests supply session type IDs, placement and capacity requirements, and JAR
-hashes. Control verifies the selected artifact and sends the JVM session creation instructions; the JVM resolves
-factories locally and enforces the supplied capacity. Future container/machine providers implement the same `Host`
-boundary.
+## Model
 
-The private `.chunk/local/control.json` connection file carries control's credential, which the `chunk` CLI presents to
-core's sync protocol as the `cli` operator class; under `chunk dev` it names the environment's core. A gateway's
-`chunk:claim` accepts authenticated identity, proxy incarnation, connection identity and a session demand
-key/type/profile. It reserves capacity, starts an app JVM if needed, waits for session readiness, and returns
-configuration plus a single-use TCP capability. The gateway records admission intent with `chunk:activate` and opens the
-native Minecraft connection using the capability; `chunk:withdraw` withdraws the claim before releasing the reservation.
-Runtime credentials remain inside control.
+- A **release** is a deployment version's apps, session types, machine profiles and limits. `Control::activate_release`
+  records one and makes it current; `Control::retire_release` stops placing on an earlier one and stops its hosts.
+- A **host** is one capacity request and one JVM lifetime, never relaunched. A JVM belongs to one environment, release,
+  app and machine profile, and can run several sessions. Control creates hosts through the `Host` trait: `ProcessHost`
+  runs each JVM as a local child process (`chunk dev`), and the environment's runner host asks management for a machine
+  running [`chunk-jvm`](../chunk-jvm/README.md). Each host follows its own `jvm/<host>` topic.
+- A **session** runs one of an app's session types on a host. Compatible demand shares a session up to its declared
+  capacity. An app ends a session through its session scope; control then retires it.
+- A **claim** is a player's reservation of a slot in a session, and later the player's ownership of it.
 
-Concurrent demand shares compatible sessions up to declared capacity. JVM placement matches both app and machine
-profile. A prepared slot is a reservation, not a second attached player. A claim's generation is the `(epoch, revision)`
-of the commit that created it: the system lane hands control that commit's revision before control computes its writes,
-even when app commits share the log. Its membership generation is that of the login it continues. Generations compare as
-pairs, because a restore starts a new epoch and may reuse revisions. The sync protocol carries a pair as a `Position`;
-the persisted `chunk.control.v1` claim messages pack it into one `uint64`, the epoch above 40 revision bits. The session
-and process have their own incarnations. Duplicate login is rejected while an earlier owner remains unresolved. An old
-cancellation cannot release a newer connection. Unactivated reservations expire after 60 seconds; active membership
-never expires solely because a control channel becomes unavailable.
+Control keeps its state in `chunk_`-prefixed system tables in the backend's store (`chunk_claims`, `chunk_hosts`,
+`chunk_sessions` and others), so an environment has one log. Each update is one commit through the backend's system
+lane, ahead of queued app commits, and an in-memory copy serves reads. Apps can't read or write `chunk_` tables. One
+control runs per environment and holds its state exclusively; when the backend's commit pipeline stops, as after another
+store fences this one, control stops too.
 
-Control keeps its state as system tables (`chunk_releases`, `chunk_hosts`, `chunk_sessions`, `chunk_players`,
-`chunk_claims`, `chunk_moves`, `chunk_drains`, `chunk_rosters`, `chunk_machines` and the `chunk_control` rows) in the
-environment backend's store, so an environment has one log. Each update is one commit through the backend's system lane,
-which takes it into the next durable write ahead of queued app commits; an in-memory copy serves reads and is rebuilt
-from the tables on open. Apps cannot declare, read or write `chunk_` tables. One control authority runs per environment
-and holds it exclusively, so a second control on one backend fails to open until the first drops. A new `chunk dev`
-session drops every row as its control opens. When the backend's commit pipeline fails or stops, as after another store
-fences this one, control stops too.
+## Placing players
 
-Control runs every release that still has hosts. `Control::activate_release` records a deployment version's apps,
-profiles and limits, and makes it current. A login is placed on the release its proxy routed it with, or the current one
-if it names none; a login routed with a retired release is rejected as unavailable, and the proxy routes it again.
-Moves, existing sessions and recovery stay on the release of the host they run on, and each release launches JVMs of its
-own apps. `Control::retire_release` stops placing on a release other than the current one and stops its hosts at once. A
-release other than the current one is forgotten once none of its hosts remain. While recovery is pending, or a launch
-whose JVM may still run has no host row, neither retirement nor forgetting is confirmed, since that JVM may run any
-release. `chunk dev` registers each reload that changes the release as current, and retires earlier releases as they
-empty or reach their drain deadline. On exit it retries stopping every JVM until each confirms its exit before releasing
-backend versions. The tables retain requests, reservations and activation intent before external effects. A lost
-activation reply is reconciled against the runtime's inventory. Configuration packets travel over the native Minecraft
-connection; control carries destination metadata. A player row exists only while it owns a claim. Released claims, and
-moves that only reference them, are forgotten five minutes after release. `Control::changes_after` lists claim and move
-changes after a log position, and `Control::subscribe` announces new positions.
+A gateway admits a player with `chunk:claim`, naming the player, its connection, the release it routed the login with,
+and a session demand (session type, key and machine profile). Control reserves capacity, starts a JVM if needed, waits
+until the session is ready, and returns the session's endpoint and a single-use capability for a native Minecraft
+connection to it. The gateway then records its intent to deliver with `chunk:activate` and connects; `chunk:withdraw`
+gives the claim back, and `chunk:depart` ends it when the player leaves. Unactivated reservations expire after 60
+seconds. Active ownership never expires just because a gateway's stream is unavailable, and a duplicate login is refused
+while an earlier owner is unresolved.
 
-`Control::move_roster` moves a group to one destination session: it reserves every slot and queues every member's move
-in one commit, or changes nothing. Members are admitted together once all of them have asked to activate. Before that,
-any member's claim ending, or `Control::cancel_roster`, fails every member's move. Session capacity is the only hard
-limit. Until the group is complete, `chunk:activate` reports that it is waiting, and gateways retry it within their
-connection timeout.
+A login is placed on the release its gateway routed it with, or the current one. A login routed with a retired release
+is refused, and the gateway routes it again. Moves and existing sessions stay on their host's release.
 
-The operator's `nodes` topic reports starting, online, unhealthy, unreachable, draining, stopping and confirmed stopped
-states, including the last observed JVM health metrics and observation timestamp. Health is polled every five seconds;
-missing or stalled engine progress blocks new placement and three consecutive failures request termination.
-`chunk:drain` binds an operation ID to a node, or a player's node, and a deadline, retires its capacity, queues player
-moves, and stops the JVM when empty or at the deadline. Zero seconds requests immediate termination.
-`chunk nodes --control-file PATH list` emits JSON; `shutdown HOST --operation ID --timeout-seconds 60` queues an
-idempotent shutdown. A queued request is not an exit acknowledgment.
+Each claim carries a generation, the `(epoch, revision)` of the commit that created it. Generations compare as pairs,
+because a restore starts a new epoch and may reuse revisions. They fence stale work: an old cancellation can't release a
+newer connection, and a JVM's deliveries are checked against them.
 
-Graceful control shutdown stops owned JVMs, and reports their exit unconfirmed while any launch it does not own may
-still run. After an abrupt control-process failure, local child handles cannot be recovered: durable launch markers
-retain unresolved ownership and prevent duplicate launches, and such nodes report unreachable until their JVM
-re-attaches. Before spawning a JVM, the host atomically publishes a launch marker with its process identity and the
-SHA-256 digest of its credential, and locks it exclusively. The JVM inherits that lock as file descriptor 3, which no
-Java stream uses, and control closes its own handle once the spawn returns. Closing descriptor 3 from app code, for
-example through JNI, is unsupported. A JVM keeps repeating its registration; control accepts it only when the host's
-marker matches that credential and identity and the JVM still runs the host's app. Nothing adopts a process by PID. A
-launch without a child handle, re-attached or not, is confirmed exited only when control can take its marker's lock,
-which means the JVM is no longer running. Any other outcome leaves the exit unconfirmed. Hosted providers will need
-durable provider identities to confirm termination across control restarts.
+**Moves.** A move (`chunk:move_player` from the operator, or a player command) reserves the destination without creating
+a second player; the gateway withdraws the source claim before activating the destination, so a player is never
+delivered twice. `Control::move_roster` moves a group into one session: it reserves every slot and queues every member's
+move in one commit, or changes nothing, and admits the members together once all have asked to activate.
 
-After control opens, and again whenever a JVM re-attaches, new claims fail as busy until every surviving launch is
-fenced or confirmed exited. Fencing withdraws the JVM's deliveries whose generations no open claim in the log matches,
-using the generation the JVM holds. Operations the log does not know, such as those a restore lost, become released
-tombstones that reject retries. Sessions the JVM runs on a logged host without a log row are recorded as retired and
-count against the host's capacity; admission waits until the JVM confirms they ended. A JVM whose host names a release
-the log lost re-attaches by its launch record alone and is only ever stopped. No timeout reopens admission: while a
-launch stays unresolved, control logs a warning every 30 seconds. JVM failure loses transient worlds; no packets or
-worlds are replayed. State from the previous shared-classpath runtime is incompatible with this release.
+**Nodes and drains.** The operator's `nodes` topic reports each host as starting, online, unhealthy, unreachable,
+draining, stopping or stopped, with the JVM's last health report. Health is checked every five seconds: a stalled tick
+loop blocks new placement, and three failed checks in a row stop the JVM. `chunk:drain` takes a host, or a player's
+host, and a deadline: it stops new placement there, moves its players off, and stops the JVM once it is empty or at the
+deadline. A host with no unfinished session is stopped after the release's idle timeout (default 60 seconds).
 
-Local bounds: 32 processes at most, 16 sessions per process at most, 128 declared slots per process and 256 retained
-sessions. Claims and moves are bounded only by the store's capacity. At most 1024 claim, activation and cancellation
-operations are in flight; beyond that, new work fails as `OVERLOADED` ("control busy") and should be retried. These
-conservative limits are admission bounds, not a measured memory/tick packing policy. Cross-proxy transfers, hosted
-providers, deployment rollout and directory replication remain outside this local implementation.
+## Recovery
 
-Focused tests: `cargo test -p chunk-control`.
+Control records reservations, activation intent and ownership before any external effect, and keeps a claim whose
+cleanup it can't confirm. Before spawning a JVM, `ProcessHost` publishes a launch marker with the process's identity and
+the digest of its credential, locked exclusively; the JVM inherits the lock as file descriptor 3. A JVM keeps repeating
+its registration, and control accepts it again only if the marker matches. A launch whose JVM may still run is confirmed
+exited only once control can take the marker's lock.
 
-## Captured session methods
+After control opens, and whenever a JVM re-attaches, new claims fail as busy until every surviving JVM is fenced or
+confirmed exited. Fencing withdraws the deliveries no open claim matches. A JVM whose release the log lost is only ever
+stopped. While a launch stays unresolved, control logs a warning every 30 seconds. A lost JVM loses its live worlds;
+nothing replays packets to restore them.
 
-`capture_session` accepts an exact arrived `ClaimIdentity`. `prepare_session_method` checks control's pinned optional
-`session_methods` contract and freezes the target, arguments, deadline and a new operation ID. `call_session_method`
-puts that prepared operation on the JVM's `jvm/<host>` topic as a `method/<op>` entry, which stays until the JVM reports
-its result with `chunk:method_result`. These are trusted Rust APIs; an authored TypeScript method reference supplies no
-player authority.
+## Limits
 
-The operation sequence is allocated durably by control. Retries must reuse the same `PreparedSessionMethod`; preparing
-again creates a new operation. Control keeps a result for five minutes for retries, and holds at most 256 methods and 8
-MiB for one JVM, pending or answered; a pending method reserves room for its result. Control remembers up to 65,536
-retired operations per JVM, so a retired operation ID doesn't run again. Process identity and generation fence restarts.
+A release allows at most 32 processes. A machine profile allows 1 to 16 sessions per process, a session type 1 to 128
+players, and a host at most 128 players across its sessions. Control retains up to 256 sessions. At most 1024 claim,
+activation and cancellation operations are in flight; beyond that, calls fail with `OVERLOADED` and should be retried.
+Released claims are forgotten five minutes after release.
 
-Arguments and results each have a 48 KiB UTF-8 JSON limit. The existing wire rules bound nesting to 32 levels, require
-finite numbers and limit integral values to ±9,007,199,254,740,991. Deadlines range from 1 ms to 30 seconds. At most 128
-method tasks may occupy the tick queue, including canceled work waiting for that queue to drain. Calls recheck exact
-session and player membership before executing; departure, finish or cancellation prevents queued gameplay from
-starting.
+## Session methods
 
-| Result    | Meaning                                                                                       |
-| --------- | --------------------------------------------------------------------------------------------- |
-| Accepted  | Queued; gameplay may not have started.                                                        |
-| Completed | The validated result is available.                                                            |
-| Cancelled | Gameplay definitively did not start.                                                          |
-| Failed    | Gameplay threw or returned an invalid result; it may have changed state.                      |
-| Unknown   | Execution or its result cannot be confirmed. Retry the same prepared operation to learn more. |
+A command can call a method on the session it started in. `Control::capture_session` binds an arrived claim,
+`prepare_session_method` checks the method against the release's declared session methods and freezes its target,
+arguments, deadline and a new operation ID, and `call_session_method` puts it on the JVM's topic and waits for the
+result. Retries must reuse the same prepared operation. Arguments and results are JSON of at most 48 KiB, and deadlines
+range from 1 ms to 30 seconds. Control keeps each result for five minutes, at most 256 methods and 8 MiB per JVM, and
+remembers 65,536 finished operation IDs per JVM so none runs twice. An outcome is completed, cancelled (gameplay did not
+start), failed (gameplay threw or returned an invalid result) or unknown; neither failure nor unknown implies rollback.
 
-A synchronous method already running on the tick thread cannot be forcibly interrupted safely. Cancellation or a missed
-deadline then returns unknown, and a later poll may retrieve the completed result. Neither failure nor unknown implies
-rollback. These calls are transient gameplay effects. A durable job integration will need a persisted invocation record
-and recovery for outcomes that remain unknown; the current prepared-operation API is in memory.
+## Testing
 
-Core prepares the methods an app command calls on the session the command started in. The pinned declaration must name
-the method for that session's app and session. `chunk dev` projects these declarations from the published,
-content-addressed backend contract into control config.
-
-Proxy-initiated moves also provide the expected source claim and public connection ID together. Control checks both
-against the exact current arrived owner in the same durable update that accepts or returns the move. Trusted
-administrative moves may omit both fields. Replacing a public connection prevents old captured effects from moving its
-new owner.
+`cargo test -p chunk-control`.
