@@ -1,7 +1,9 @@
 import {
+  Code,
   ConnectError,
   type ConnectRouter,
   createConnectRouter,
+  createContextKey,
   createContextValues,
   type Interceptor,
 } from "@connectrpc/connect";
@@ -32,7 +34,7 @@ import { ProjectService } from "./gen/chunk/management/v1/projects_pb.ts";
 import { SecretService } from "./gen/chunk/management/v1/secrets_pb.ts";
 import { logService } from "./logs/service.ts";
 import { projectService } from "./projects/service.ts";
-import { authenticate, type Authenticator, authInterceptor } from "./rpc/caller.ts";
+import { type Authenticator, authorize } from "./rpc/caller.ts";
 import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
@@ -60,11 +62,7 @@ export function createHandler(
   options: HandlerOptions = {},
 ): (request: Request, server?: Server) => Promise<Response> {
   const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
-  const extensionServices = new Set<string>();
-  const router = createConnectRouter({
-    interceptors: [logUnexpectedErrors, authInterceptor(extensionServices)],
-    readMaxBytes: maxRpcBytes,
-  });
+  const router = createConnectRouter({ interceptors: [logUnexpectedErrors], readMaxBytes: maxRpcBytes });
   router
     .service(AuthService, authService(deps))
     .service(ProjectService, projectService(deps))
@@ -76,19 +74,29 @@ export function createHandler(
     .service(LogService, logService(deps));
   const builtIn = new Set(router.handlers.map((handler) => handler.service.typeName));
   options.extend?.(router);
-  for (const { service } of router.handlers)
-    if (!builtIn.has(service.typeName)) extensionServices.add(service.typeName);
+  const services = new Map(router.handlers.map(({ service }) => [service.typeName, service]));
+  const extensionServices = new Set([...services.keys()].filter((typeName) => !builtIn.has(typeName)));
+  // Answers refused calls in the client's protocol. A registration's own options cannot reach it.
+  const refusals = createConnectRouter({ interceptors: [refuse] });
+  for (const service of services.values()) refusals.service(service, {});
+  const refusalsByPath = new Map(refusals.handlers.map((handler) => [handler.requestPath, handler]));
   const dashboard = options.dashboardDir === undefined ? undefined : dashboardHandler(options.dashboardDir);
   const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
 
-  /** Connect reads a unary request's whole body before interceptors run, so authentication comes first. */
+  /**
+   * Every RPC passes here, and runs only once authorized: Connect reads a unary request's whole body before interceptors
+   * run, and a registration's own interceptors replace the router's.
+   */
   async function serveRpc(handler: UniversalHandler, request: Request): Promise<Response> {
-    const contextValues = await authenticate(authenticator, handler.method, request.headers);
+    const verdict = await authorize(authenticator, handler.method, request.headers, extensionServices);
     const universal = universalServerRequestFromFetch(request, {});
-    const call = contextValues
-      ? { ...universal, contextValues }
-      : { ...emptyMessage(universal), contextValues: createContextValues() };
-    return universalServerResponseToFetch(await handler(call));
+    if (!(verdict instanceof ConnectError)) {
+      return universalServerResponseToFetch(await handler({ ...universal, contextValues: verdict }));
+    }
+    const refusal = refusalsByPath.get(handler.requestPath);
+    if (!refusal) throw verdict;
+    const contextValues = createContextValues().set(refusalKey, verdict);
+    return universalServerResponseToFetch(await refusal({ ...emptyMessage(universal), contextValues }));
   }
 
   return async (request, server) => {
@@ -118,10 +126,14 @@ const logUnexpectedErrors: Interceptor = (next) => async (request) => {
   }
 };
 
-/**
- * The request with an empty message in place of the client's body, which is never read. `authInterceptor` then
- * answers it in the client's protocol.
- */
+const refusalKey = createContextKey<ConnectError | undefined>(undefined, { description: "refusal" });
+
+/** Throws the error a refused call carries, before any implementation runs. */
+const refuse: Interceptor = () => (request) => {
+  throw request.contextValues.get(refusalKey) ?? new ConnectError("the call was refused", Code.PermissionDenied);
+};
+
+/** The request with an empty message in place of the client's body, which is never read. `refuse` then answers it. */
 function emptyMessage(request: UniversalServerRequest): UniversalServerRequest {
   const header = new Headers(request.header);
   for (const name of ["content-length", "content-encoding", "connect-content-encoding", "grpc-encoding"])

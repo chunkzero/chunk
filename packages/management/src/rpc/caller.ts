@@ -6,7 +6,6 @@ import {
   createContextKey,
   createContextValues,
   type HandlerContext,
-  type Interceptor,
 } from "@connectrpc/connect";
 
 import { AuthService } from "../gen/chunk/management/v1/auth_pb.ts";
@@ -41,7 +40,6 @@ export interface Authenticator {
   authenticate(bearer: string): Promise<Identity | undefined>;
 }
 
-const identityKey = createContextKey<Identity | undefined>(undefined, { description: "identity" });
 const callerKey = createContextKey<Caller | undefined>(undefined, { description: "caller" });
 const environmentKey = createContextKey<string | undefined>(undefined, { description: "environment" });
 const subjectKey = createContextKey<string | undefined>(undefined, { description: "subject" });
@@ -61,47 +59,34 @@ const publicMethods = new Set<string>(
 const isPublic = (method: DescMethod) => publicMethods.has(`${method.parent.typeName}/${method.name}`);
 
 /**
- * Authenticates a call from its headers alone, so the server can turn it away before Connect reads its body. Returns
- * the context values the call runs with, or undefined when a protected method has no valid bearer token.
+ * Authenticates and authorizes a call from its headers alone, so the server can turn it away before Connect reads its
+ * body or runs any interceptor or handler. Returns the context values the call runs with, or the error it is refused
+ * with: a protected method needs a valid bearer token of the kind its service admits. The services named in
+ * `extensionServices` admit only extension identities naming them; every other service admits none.
  */
-export async function authenticate(
+export async function authorize(
   authenticator: Authenticator,
   method: DescMethod,
   header: Headers,
-): Promise<ContextValues | undefined> {
+  extensionServices: ReadonlySet<string>,
+): Promise<ContextValues | ConnectError> {
   const values = createContextValues();
   if (isPublic(method)) return values;
   const bearer = /^Bearer (\S+)$/i.exec(header.get("authorization") ?? "")?.[1];
   const identity = bearer === undefined ? undefined : await authenticator.authenticate(bearer);
-  if (!identity) return undefined;
-  values.set(identityKey, identity);
+  if (!identity) return new ConnectError("a valid bearer token is required", Code.Unauthenticated);
+  const service = method.parent.typeName;
+  const admitted = extensionServices.has(service)
+    ? identity.kind === "extension" && identity.service === service
+    : identity.kind === (serviceKinds.get(service) ?? "person");
+  if (!admitted) {
+    return new ConnectError(`an ${identity.kind} token cannot call ${method.parent.name}`, Code.PermissionDenied);
+  }
+  if (identity.kind === "person") values.set(callerKey, identity.caller);
+  if (identity.kind === "environment") values.set(environmentKey, identity.environmentId);
+  if (identity.kind === "extension") values.set(subjectKey, identity.subject);
   return values;
 }
-
-/**
- * Rejects protected calls that `authenticate` did not admit, and tokens of the wrong kind for the service. The services
- * named in `extensionServices` admit only extension identities naming them; every other service admits none.
- */
-export const authInterceptor =
-  (extensionServices: ReadonlySet<string>): Interceptor =>
-  (next) =>
-  async (request) => {
-    if (!isPublic(request.method)) {
-      const identity = request.contextValues.get(identityKey);
-      if (!identity) throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
-      const service = request.service.typeName;
-      const admitted = extensionServices.has(service)
-        ? identity.kind === "extension" && identity.service === service
-        : identity.kind === (serviceKinds.get(service) ?? "person");
-      if (!admitted) {
-        throw new ConnectError(`an ${identity.kind} token cannot call ${request.service.name}`, Code.PermissionDenied);
-      }
-      if (identity.kind === "person") request.contextValues.set(callerKey, identity.caller);
-      if (identity.kind === "environment") request.contextValues.set(environmentKey, identity.environmentId);
-      if (identity.kind === "extension") request.contextValues.set(subjectKey, identity.subject);
-    }
-    return next(request);
-  };
 
 export function callerOf(context: HandlerContext): Caller {
   const caller = context.values.get(callerKey);

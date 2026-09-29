@@ -14,7 +14,7 @@ import {
   type StringValueSchema,
 } from "@bufbuild/protobuf/wkt";
 import { Code, createClient, type Interceptor } from "@connectrpc/connect";
-import { createConnectTransport } from "@connectrpc/connect-web";
+import { createConnectTransport, createGrpcWebTransport } from "@connectrpc/connect-web";
 
 import { start } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
@@ -27,7 +27,7 @@ import { type Identity, subjectOf } from "../src/rpc/caller.ts";
 import { fakeProvider } from "./fake-provider.ts";
 import { codeOf, databaseUrl } from "./harness.ts";
 
-/** A registry holding `test.v1.WhoAmIService`, whose `WhoAmI` answers with a string. */
+/** A registry holding `test.v1.WhoAmIService` and `test.v1.PingService`, whose methods answer with a string. */
 const registry = createFileRegistry(
   create(FileDescriptorProtoSchema, {
     name: "test/v1/whoami.proto",
@@ -38,6 +38,10 @@ const registry = createFileRegistry(
         name: "WhoAmIService",
         method: [{ name: "WhoAmI", inputType: ".google.protobuf.Empty", outputType: ".google.protobuf.StringValue" }],
       },
+      {
+        name: "PingService",
+        method: [{ name: "Ping", inputType: ".google.protobuf.Empty", outputType: ".google.protobuf.StringValue" }],
+      },
     ],
   }),
   (name) => [file_google_protobuf_empty, file_google_protobuf_wrappers].find((file) => file.proto.name === name),
@@ -45,6 +49,12 @@ const registry = createFileRegistry(
 const WhoAmIService: GenService<{
   whoAmI: { methodKind: "unary"; input: typeof EmptySchema; output: typeof StringValueSchema };
 }> = serviceDesc(registry.getFile("test/v1/whoami.proto") ?? expect.unreachable(), 0);
+const PingService: GenService<{
+  ping: { methodKind: "unary"; input: typeof EmptySchema; output: typeof StringValueSchema };
+}> = serviceDesc(registry.getFile("test/v1/whoami.proto") ?? expect.unreachable(), 1);
+
+/** A registration's own interceptors, which replace the router's. */
+const passThrough: Interceptor = (next) => (request) => next(request);
 
 const bearer =
   (token: string): Interceptor =>
@@ -128,6 +138,7 @@ describe.skipIf(!databaseUrl)("start", () => {
     const { listed, provider } = listedProvider();
     const credentials = new Map<string, Identity>([
       ["agent", { kind: "extension", service: WhoAmIService.typeName, subject: "agent-1" }],
+      ["pinger", { kind: "extension", service: PingService.typeName, subject: "agent-4" }],
       ["other", { kind: "extension", service: "test.v1.OtherService", subject: "agent-2" }],
       ["edge", { kind: "extension", service: EdgeService.typeName, subject: "agent-3" }],
     ]);
@@ -143,13 +154,36 @@ describe.skipIf(!databaseUrl)("start", () => {
         },
         migrations,
         extend: (router, deps) =>
-          router.service(WhoAmIService, {
-            async whoAmI(_request, context) {
-              handled++;
-              const [greeting] = await deps.sql<{ text: string }[]>`select text from extension_greetings`;
-              return { value: `${greeting?.text} ${subjectOf(context)}` };
-            },
-          }),
+          router
+            .service(
+              WhoAmIService,
+              {
+                async whoAmI(_request, context) {
+                  handled++;
+                  const [greeting] = await deps.sql<{ text: string }[]>`select text from extension_greetings`;
+                  return { value: `${greeting?.text} ${subjectOf(context)}` };
+                },
+              },
+              { interceptors: [passThrough] },
+            )
+            .rpc(
+              PingService.method.ping,
+              (_request, context) => {
+                handled++;
+                return { value: subjectOf(context) };
+              },
+              { interceptors: [passThrough] },
+            )
+            .service(
+              EdgeService,
+              {
+                wake() {
+                  handled++;
+                  return {};
+                },
+              },
+              { interceptors: [passThrough] },
+            ),
         authenticator: (tokens) => ({
           authenticate: async (token) => credentials.get(token) ?? tokens.authenticate(token),
         }),
@@ -158,10 +192,14 @@ describe.skipIf(!databaseUrl)("start", () => {
         },
       },
     );
-    const client = <T extends Parameters<typeof createClient>[0]>(service: T, token: string) =>
+    const client = <T extends Parameters<typeof createClient>[0]>(service: T, token?: string) =>
       createClient(
         service,
-        createConnectTransport({ baseUrl: app.url.origin, useBinaryFormat: true, interceptors: [bearer(token)] }),
+        createConnectTransport({
+          baseUrl: app.url.origin,
+          useBinaryFormat: true,
+          interceptors: token === undefined ? [] : [bearer(token)],
+        }),
       );
     const project = await client(ProjectService, operatorToken).createProject({
       requestId: crypto.randomUUID(),
@@ -174,15 +212,30 @@ describe.skipIf(!databaseUrl)("start", () => {
     });
 
     expect(await client(WhoAmIService, "agent").whoAmI({})).toMatchObject({ value: "hello agent-1" });
-    expect(await codeOf(client(WhoAmIService, "wrong").whoAmI({}))).toBe(Code.Unauthenticated);
-    for (const token of [operatorToken, projectToken, "other"]) {
-      expect(await codeOf(client(WhoAmIService, token).whoAmI({}))).toBe(Code.PermissionDenied);
+    expect(await client(PingService, "pinger").ping({})).toMatchObject({ value: "agent-4" });
+    for (const [token, code] of [
+      [undefined, Code.Unauthenticated],
+      ["wrong", Code.Unauthenticated],
+      [operatorToken, Code.PermissionDenied],
+      [projectToken, Code.PermissionDenied],
+      ["other", Code.PermissionDenied],
+    ] as const) {
+      expect(await codeOf(client(WhoAmIService, token).whoAmI({}))).toBe(code);
+      expect(await codeOf(client(PingService, token).ping({}))).toBe(code);
     }
-    expect(handled).toBe(1);
-    const edge = client(EdgeService, "edge");
-    expect(await codeOf(edge.watchRoutes({})[Symbol.asyncIterator]().next())).toBe(Code.PermissionDenied);
-    expect(await codeOf(edge.wake({ environmentId: "env_missing" }))).toBe(Code.PermissionDenied);
+    for (const [token, code] of [
+      [undefined, Code.Unauthenticated],
+      ["edge", Code.PermissionDenied],
+    ] as const) {
+      const edge = client(EdgeService, token);
+      expect(await codeOf(edge.watchRoutes({})[Symbol.asyncIterator]().next())).toBe(code);
+      expect(await codeOf(edge.wake({ environmentId: "env_missing" }))).toBe(code);
+    }
     expect(await codeOf(client(ProjectService, "agent").listProjects({}))).toBe(Code.PermissionDenied);
+    // Refusals answer in the client's protocol. Bun serves no HTTP/2, so plain gRPC cannot be observed here.
+    const grpcWeb = createClient(WhoAmIService, createGrpcWebTransport({ baseUrl: app.url.origin }));
+    expect(await codeOf(grpcWeb.whoAmI({}))).toBe(Code.Unauthenticated);
+    expect(handled).toBe(2);
     await listed;
     expect(installId).toMatch(/.+/);
 
