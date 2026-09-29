@@ -15,7 +15,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Mutex, MutexGuard, OnceLock, PoisonError},
+    sync::{
+        Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::watch;
@@ -47,6 +50,9 @@ pub(crate) struct Managed<'a> {
     client: Client,
     /// Where core's hold on the environment is published, for the launcher's calls.
     lease: watch::Sender<Lease>,
+    /// Set from sending an attach until its first desired state publishes its lease. Meanwhile management may have
+    /// granted this core a lease it hasn't seen, so a report fenced under the published one may be this core's own doing.
+    attaching: AtomicBool,
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
@@ -139,12 +145,13 @@ impl<'a> Managed<'a> {
         gateway: &'a OnceLock<Gateway>,
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
-        let client = management.client();
+        let (client, stopping) = (management.client(), CancellationToken::new());
         Self {
-            reporter: status::Reporter::new(client.clone()),
+            reporter: status::Reporter::new(client.clone(), stopping.clone()),
             private_address: status::PrivateAddress::new(core.private_address(), &management.url),
             client,
             lease,
+            attaching: AtomicBool::new(false),
             instance_id: uuid::Uuid::new_v4().to_string(),
             environment,
             releases: release::Store::new(state, core.archives().clone()),
@@ -153,7 +160,7 @@ impl<'a> Managed<'a> {
             gateway,
             gateway_config,
             deployments: Mutex::default(),
-            stopping: CancellationToken::new(),
+            stopping,
         }
     }
 
@@ -181,8 +188,20 @@ impl<'a> Managed<'a> {
         tokio::select! {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
-            never = self.reporter.keep_reporting(|| self.current()) => match never {},
+            error = self.reporter.keep_reporting(|| self.current(), |lease| self.superseded(lease)) => self.fenced(error),
         }
+    }
+
+    /// Whether management fencing `lease` means another core superseded this one: `lease` is the one core holds, and
+    /// no attach since may have replaced it.
+    fn superseded(&self, lease: u64) -> bool {
+        !self.attaching.load(Ordering::SeqCst) && *self.lease.borrow() == Lease::Held(lease)
+    }
+
+    /// Publishes that another core superseded this one, which must stop serving.
+    fn fenced(&self, error: io::Error) -> io::Error {
+        self.lease.send_replace(Lease::Superseded);
+        error
     }
 
     /// Protects an activation an earlier run recorded until management accepts it, if control made it current.
@@ -203,10 +222,7 @@ impl<'a> Managed<'a> {
                 Ok(()) => tracing::warn!("management ended the attach"),
                 Err(Interrupted::Retry(error)) => tracing::warn!(%error, "management attach interrupted"),
                 Err(Interrupted::Fatal(error)) => return error,
-                Err(Interrupted::Fenced(error)) => {
-                    self.lease.send_replace(Lease::Superseded);
-                    return error;
-                }
+                Err(Interrupted::Fenced(error)) => return self.fenced(error),
             }
             tokio::time::sleep(REATTACH).await;
         }
@@ -221,6 +237,7 @@ impl<'a> Managed<'a> {
             core: true,
             epoch: self.core.epoch().map_err(Interrupted::Fatal)?,
         };
+        self.attaching.store(true, Ordering::SeqCst);
         let mut stream = deadline(REQUEST_TIMEOUT, self.client.attach(&request)).await?;
         let (mut latest, mut applied, mut work) = (None::<v1::AttachResponse>, None, None::<Work>);
         loop {
@@ -242,6 +259,7 @@ impl<'a> Managed<'a> {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
                     self.lease.send_replace(Lease::Held(desired.lease));
+                    self.attaching.store(false, Ordering::SeqCst);
                     {
                         let mut deployments = lock(&self.deployments);
                         deployments.revision = desired.revision;
@@ -377,8 +395,8 @@ impl<'a> Managed<'a> {
         Ok(())
     }
 
-    /// Reports status under `desired`'s lease. Once management accepts an activation, the deployment served before it
-    /// may retire.
+    /// Reports status under `desired`'s lease unless core is stopping. Once management accepts an activation, the
+    /// deployment served before it may retire.
     async fn report(
         &self,
         desired: &v1::AttachResponse,
@@ -389,7 +407,9 @@ impl<'a> Managed<'a> {
             .filter(|progress| progress.state() == v1::DeploymentState::Active)
             .map(|progress| progress.deployment_id.clone());
         let observed = self.observe(desired.lease, desired.revision).await;
-        self.reporter.send(observed, deployment).await?;
+        if !self.reporter.send(observed, deployment).await? {
+            return Ok(());
+        }
         let mut deployments = lock(&self.deployments);
         if let Some(active) = active
             && deployments.unacknowledged.as_ref().is_some_and(|pending| pending.activated == active)
@@ -412,15 +432,12 @@ impl<'a> Managed<'a> {
         Some(self.observe(lease, revision).await)
     }
 
-    /// Core's status under `lease` and `revision`. A gateway bound to every interface is reported at the machine's
-    /// private address.
+    /// Core's status under `lease` and `revision`.
     async fn observe(&self, lease: u64, revision: u64) -> status::Observed {
         let mut gateway_addresses = Vec::new();
         if let Some(gateway) = self.gateway.get() {
-            let bound = gateway.address();
-            let address =
-                if bound.ip().is_unspecified() { self.private_address.find().await } else { Some(bound.ip()) };
-            gateway_addresses.extend(address.map(|address| SocketAddr::new(address, bound.port()).to_string()));
+            let address = self.private_address.gateway(gateway.address()).await;
+            gateway_addresses.extend(address.as_ref().map(SocketAddr::to_string));
         }
         let online_players =
             match self.core.control().and_then(|control| control.online_players().map_err(io::Error::other)) {

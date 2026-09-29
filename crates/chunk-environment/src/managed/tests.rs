@@ -30,7 +30,12 @@ struct Management {
     desired: watch::Sender<AttachResponse>,
     /// The lease of the latest core attach, which fences every core attached before it.
     lease: watch::Sender<u64>,
+    /// The reports management applied.
     reports: mpsc::UnboundedSender<ReportStatusRequest>,
+    /// The lease and sequence of the latest applied report. A report that isn't later is ignored.
+    accepted: Mutex<(u64, u64)>,
+    /// How long reports of deployment progress wait before management handles them.
+    progress_delay: Mutex<Duration>,
     archives: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Notified when a download of an archive whose path names it `stalled` starts. That download sends half of the
     /// archive, then nothing.
@@ -154,6 +159,10 @@ async fn handle(
         }
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             let report = ReportStatusRequest::decode(body).unwrap();
+            let delay = *management.progress_delay.lock().unwrap();
+            if report.deployment.is_some() && !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let progress = report.deployment.clone().unwrap_or_default();
             let refused = progress.state() == DeploymentState::Active
                 && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
@@ -163,8 +172,12 @@ async fn handle(
                 management.refusal.notify_one();
                 Some((503, UNAVAILABLE))
             } else {
-                management.record(&progress);
-                management.reports.send(report).unwrap();
+                let mut accepted = management.accepted.lock().unwrap();
+                if (report.lease, report.sequence) > *accepted {
+                    *accepted = (report.lease, report.sequence);
+                    management.record(&progress);
+                    management.reports.send(report).unwrap();
+                }
                 None
             };
             match error {
@@ -304,6 +317,8 @@ impl Harness {
             desired: watch::Sender::new(AttachResponse::default()),
             lease: watch::Sender::new(0),
             reports,
+            accepted: Mutex::default(),
+            progress_delay: Mutex::default(),
             archives: Mutex::default(),
             stalled: Notify::new(),
             refused: Mutex::default(),

@@ -3,7 +3,6 @@
 use super::{Interrupted, REQUEST_TIMEOUT, deadline};
 use chunk_management::{Client, v1};
 use std::{
-    convert::Infallible,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::atomic::{AtomicBool, Ordering},
@@ -13,6 +12,7 @@ use tokio::{
     sync::{Mutex, OnceCell},
     time::{Instant, MissedTickBehavior},
 };
+use tokio_util::sync::CancellationToken;
 
 /// How often core reports while nothing changes.
 pub(super) const INTERVAL: Duration = Duration::from_secs(15);
@@ -36,6 +36,8 @@ pub(super) struct Reporter {
     client: Client,
     /// Held while a report is sent.
     sent: Mutex<Sent>,
+    /// Cancelled once core shuts down, after which no report starts.
+    stopping: CancellationToken,
 }
 
 /// The latest report.
@@ -48,18 +50,21 @@ struct Sent {
 }
 
 impl Reporter {
-    pub(super) fn new(client: Client) -> Self {
-        Self { client, sent: Mutex::default() }
+    pub(super) fn new(client: Client, stopping: CancellationToken) -> Self {
+        Self { client, sent: Mutex::default(), stopping }
     }
 
     /// Reports `observed` and `deployment`'s progress under the next sequence of `observed.lease`, which starts over
-    /// with each lease.
+    /// with each lease. Returns whether it reported, which it doesn't once core is stopping.
     pub(super) async fn send(
         &self,
         observed: Observed,
         deployment: Option<v1::DeploymentProgress>,
-    ) -> Result<(), Interrupted> {
+    ) -> Result<bool, Interrupted> {
         let mut sent = self.sent.lock().await;
+        if self.stopping.is_cancelled() {
+            return Ok(false);
+        }
         if observed.lease > sent.lease {
             *sent = Sent { lease: observed.lease, ..Sent::default() };
         }
@@ -78,12 +83,13 @@ impl Reporter {
             desired_revision: observed.revision,
         };
         deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses differ from
-    /// the latest report's. `observe` finds nothing while core must not report.
-    pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F) -> Infallible
+    /// the latest report's. `observe` finds nothing while core must not report. Returns once management fences a
+    /// lease `superseded` says another core superseded.
+    pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F, superseded: impl Fn(u64) -> bool) -> io::Error
     where
         F: Future<Output = Option<Observed>>,
     {
@@ -97,11 +103,16 @@ impl Reporter {
                 sent.gateway_addresses != observed.gateway_addresses
                     || sent.at.is_none_or(|at| at.elapsed() >= INTERVAL)
             };
-            if due
-                && let Err(Interrupted::Retry(error) | Interrupted::Fatal(error) | Interrupted::Fenced(error)) =
-                    self.send(observed, None).await
-            {
-                tracing::warn!(%error, "status report failed");
+            if !due {
+                continue;
+            }
+            let lease = observed.lease;
+            match self.send(observed, None).await {
+                Ok(_) => {}
+                Err(Interrupted::Fenced(error)) if superseded(lease) => return error,
+                Err(Interrupted::Retry(error) | Interrupted::Fatal(error) | Interrupted::Fenced(error)) => {
+                    tracing::warn!(%error, "status report failed");
+                }
             }
         }
     }
@@ -126,14 +137,24 @@ impl PrivateAddress {
         }
     }
 
-    /// The address, unless it is unknown or not private, which is warned about once.
-    pub(super) async fn find(&self) -> Option<IpAddr> {
+    /// Where edges reach a gateway listening on `bound`. One listening on every interface is reached at this
+    /// machine's private address, if it accepts that address's family: `0.0.0.0` accepts IPv4 only, and `[::]` is
+    /// taken to accept IPv6 only, since whether it also accepts IPv4 depends on the host. Why no such address is found
+    /// is warned about once.
+    pub(super) async fn gateway(&self, bound: SocketAddr) -> Option<SocketAddr> {
+        let listener = bound.ip().to_canonical();
+        if !listener.is_unspecified() {
+            return Some(SocketAddr::new(listener, bound.port()));
+        }
         let found = match self.configured {
             Some(address) => Ok(address),
             None => self.route().await,
         };
-        let problem = match found {
-            Ok(address) if chunk_service::net::private(address) => return Some(address),
+        let problem = match found.map(|address| address.to_canonical()) {
+            Ok(address) if address.is_ipv4() != listener.is_ipv4() => {
+                format!("the gateway listening on {listener} does not accept {address}")
+            }
+            Ok(address) if chunk_service::net::private(address) => return Some(SocketAddr::new(address, bound.port())),
             Ok(address) => format!("{address} is not private"),
             Err(error) => error.to_string(),
         };
@@ -155,7 +176,7 @@ impl PrivateAddress {
         };
         let socket = UdpSocket::bind((unspecified, 0))?;
         socket.connect(management)?;
-        Ok(socket.local_addr()?.ip().to_canonical())
+        Ok(socket.local_addr()?.ip())
     }
 }
 
