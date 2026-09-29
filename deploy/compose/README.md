@@ -125,9 +125,18 @@ and removes everything it created; it refuses to run while another install uses 
 Delete environments before `compose down`: their machines are not part of the Compose project and keep the `chunk`
 network in use.
 
+Deletion finishes in the background, so wait until the environment is gone and none of its containers or volumes remain
+before stopping management:
+
 ```sh
 rpc ProjectService/DeleteEnvironment "{\"environmentId\":\"$environment\"}"
-docker compose down   # add -v to delete the database and stored releases too
+until ! rpc ProjectService/GetEnvironment "{\"environmentId\":\"$environment\"}" >/dev/null 2>&1 &&
+  [ -z "$(docker ps -aq --filter "label=chunk.environment=$environment")" ] &&
+  [ -z "$(docker volume ls -q --filter "label=chunk.environment=$environment")" ]; do
+  sleep 2
+done
+docker compose down
 ```
 
-The environment's machines and volumes are gone once `ListEnvironments` no longer shows it.
+Add `-v` to `compose down` only once no environment remains: it deletes the database and stored releases, including the
+install ID that management uses to recognize and clean up its own machines.
