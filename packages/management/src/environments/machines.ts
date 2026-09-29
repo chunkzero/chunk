@@ -18,6 +18,8 @@ export interface MachineOptions {
   corePort: number;
   /** Passed to core and gateway machines as `CHUNK_TRUSTED_EDGES`, the edges whose PROXY headers they accept. */
   trustedEdges: string | undefined;
+  /** Passes `CHUNK_OFFLINE_LOGINS=1` to core and gateway machines, which then admit unauthenticated players. Insecure. */
+  offlineLogins: boolean;
 }
 
 const workloadNames: Record<number, string> = {
@@ -51,8 +53,12 @@ export function capacityMachineName(request: Pick<CapacityRow, "environment_id" 
   return `${namePrefix(request.environment_id)}-${workload}-${sha256(request.request_id).toString("hex").slice(0, 12)}`;
 }
 
-function trustedEdgesEnv(options: MachineOptions): Record<string, string> {
-  return options.trustedEdges ? { CHUNK_TRUSTED_EDGES: options.trustedEdges } : {};
+/** What core and gateway machines, which admit players, get beyond their role's own variables. */
+function gatewayEnv(options: MachineOptions): Record<string, string> {
+  return {
+    ...(options.trustedEdges ? { CHUNK_TRUSTED_EDGES: options.trustedEdges } : {}),
+    ...(options.offlineLogins ? { CHUNK_OFFLINE_LOGINS: "1" } : {}),
+  };
 }
 
 /** Core keeps its data volume and is restarted by the host. */
@@ -66,7 +72,7 @@ export function coreMachineSpec(options: MachineOptions, environmentId: string, 
       CHUNK_MANAGEMENT_URL: options.managementUrl,
       CHUNK_ENVIRONMENT_TOKEN: token,
       CHUNK_CORE_BIND: `[::]:${options.corePort}`,
-      ...trustedEdgesEnv(options),
+      ...gatewayEnv(options),
     },
     memoryMib: options.coreMemoryMib,
     cpus: cpusFor(options.coreMemoryMib),
@@ -105,7 +111,7 @@ export function capacityMachineSpec(
         CHUNK_SERVICES: workload,
         CHUNK_CAPACITY_REQUEST_ID: request.request_id,
         CHUNK_GATEWAY_CREDENTIAL: credential,
-        ...trustedEdgesEnv(options),
+        ...gatewayEnv(options),
       };
   return {
     name: capacityMachineName(request),

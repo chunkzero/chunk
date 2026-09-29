@@ -14,7 +14,7 @@ pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub motd: String,
     pub max_connections: NonZeroUsize,
-    /// Accepts unauthenticated logins; only `chunk dev` sets this, for local testing.
+    /// Accepts unauthenticated logins, for local testing and smoke tests only.
     pub offline_logins: bool,
     /// Edges whose connections name the player with a PROXY protocol v2 header.
     pub trusted_edges: TrustedEdges,

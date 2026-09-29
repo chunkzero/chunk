@@ -41,6 +41,7 @@ test("JVM machines run the runner for their Java and gateways the environment im
     coreMemoryMib: 2048,
     corePort: 7070,
     trustedEdges: undefined,
+    offlineLogins: false,
   };
   const request = {
     environment_id: "env_1",
@@ -83,7 +84,7 @@ test("JVM machines run the runner for their Java and gateways the environment im
   });
 });
 
-test("core and gateway machines trust the configured edges, and JVM machines never see them", () => {
+test("core and gateway machines get the configured edges and offline logins, and JVM machines neither", () => {
   const options = {
     image: "chunk/environment:test",
     jvmImage: "chunk-jvm:{java}",
@@ -91,6 +92,7 @@ test("core and gateway machines trust the configured edges, and JVM machines nev
     coreMemoryMib: 1024,
     corePort: 7070,
     trustedEdges: "10.231.0.2",
+    offlineLogins: true,
   };
   const request = { environment_id: "env_1", request_id: "cap", memory_mib: 512, java_version: 25 } as CapacityRow;
   const spec = (workload: Workload) =>
@@ -99,9 +101,12 @@ test("core and gateway machines trust the configured edges, and JVM machines nev
   expect(coreMachineSpec(options, "env_1", "token").env.CHUNK_TRUSTED_EDGES).toBe("10.231.0.2");
   expect(spec(Workload.GATEWAY).env.CHUNK_TRUSTED_EDGES).toBe("10.231.0.2");
   expect(spec(Workload.JVM).env).not.toHaveProperty("CHUNK_TRUSTED_EDGES");
-  expect(coreMachineSpec({ ...options, trustedEdges: undefined }, "env_1", "token").env).not.toHaveProperty(
-    "CHUNK_TRUSTED_EDGES",
-  );
+  expect(coreMachineSpec(options, "env_1", "token").env.CHUNK_OFFLINE_LOGINS).toBe("1");
+  expect(spec(Workload.GATEWAY).env.CHUNK_OFFLINE_LOGINS).toBe("1");
+  expect(spec(Workload.JVM).env).not.toHaveProperty("CHUNK_OFFLINE_LOGINS");
+  const plain = coreMachineSpec({ ...options, trustedEdges: undefined, offlineLogins: false }, "env_1", "token").env;
+  expect(plain).not.toHaveProperty("CHUNK_TRUSTED_EDGES");
+  expect(plain).not.toHaveProperty("CHUNK_OFFLINE_LOGINS");
 });
 
 describe.skipIf(!databaseUrl)("reconciler", () => {
@@ -120,6 +125,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       coreMemoryMib: 2048,
       corePort: 7070,
       trustedEdges: undefined,
+      offlineLogins: false,
     };
   });
   afterAll(() => h.close());

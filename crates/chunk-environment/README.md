@@ -29,6 +29,7 @@ It reads these variables:
 | `CHUNK_BIND`               | `0.0.0.0:25565`                         | The gateway's player listener.                                                |
 | `CHUNK_MOTD`               | `chunk`                                 | The gateway's server list message.                                            |
 | `CHUNK_MAX_CONNECTIONS`    | `1024`                                  | The gateway's connection limit.                                               |
+| `CHUNK_OFFLINE_LOGINS`     | unset                                   | `1` admits unauthenticated players under any name. Insecure; tests only.      |
 | `CHUNK_CONTROL_BIND`       | `127.0.0.1:25567`                       | Control's gRPC listener; it must be loopback.                                 |
 | `CHUNK_CORE_BIND`          | unset                                   | Core's listener for other machines; it drops peers that aren't private.       |
 | `CHUNK_PRIVATE_ADDRESS`    | `FLY_PRIVATE_IP`                        | This machine's private address. Its JVMs serve players there, not loopback.   |

@@ -38,6 +38,8 @@ export interface Machines {
   corePort: number;
   /** The edges core and gateway machines accept PROXY headers from, as comma-separated IPs or CIDRs. */
   trustedEdges: string | undefined;
+  /** Lets core and gateway machines admit unauthenticated players under any name. Insecure; for smoke tests only. */
+  offlineLogins: boolean;
 }
 
 /** An S3-compatible bucket; each environment replicates below `<prefix><environment ID>/`. */
@@ -112,6 +114,7 @@ function machinesOf(env: Env, publicUrl: string): Machines | undefined {
     coreMemoryMib: positive(env, "CHUNK_CORE_MEMORY_MIB", 1024),
     corePort: positive(env, "CHUNK_CORE_PORT", 7070),
     trustedEdges: env.CHUNK_MACHINE_TRUSTED_EDGES || undefined,
+    offlineLogins: env.CHUNK_MACHINE_OFFLINE_LOGINS === "1",
   };
 }
 
