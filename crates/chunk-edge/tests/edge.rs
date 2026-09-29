@@ -28,7 +28,14 @@ struct RouteStream(mpsc::Sender<Result<Frame<Bytes>, Infallible>>);
 
 impl RouteStream {
     async fn send(&self, reset: bool, routes: Vec<Route>) {
-        let update = WatchRoutesResponse { reset, routes, ..Default::default() };
+        self.update(WatchRoutesResponse { reset, routes, ..Default::default() }).await;
+    }
+
+    async fn remove(&self, hostname: &str) {
+        self.update(WatchRoutesResponse { removed_hostnames: vec![hostname.into()], ..Default::default() }).await;
+    }
+
+    async fn update(&self, update: WatchRoutesResponse) {
         let mut frame = vec![0];
         frame.extend_from_slice(&u32::try_from(update.encoded_len()).unwrap().to_be_bytes());
         frame.extend_from_slice(&update.encode_to_vec());
@@ -208,6 +215,8 @@ async fn follows_route_changes_and_closes_unrouted_players_without_a_wake() {
 
     routes.send(false, vec![route("play.example.com", &[&harness.gateways[1]])]).await;
     harness.eventually_routes("play.example.com", Some(1)).await;
+    routes.remove("old.example.com").await;
+    harness.eventually_routes("old.example.com", None).await;
 
     drop(routes);
     let routes = harness.next_stream().await;
