@@ -1,0 +1,10 @@
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!packages/
+**/node_modules/
+**/dist/
+packages/management/data/
+packages/management/test/
+packages/management/Dockerfile*

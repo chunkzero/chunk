@@ -36,6 +36,8 @@ export interface Machines {
   managementUrl: string;
   coreMemoryMib: number;
   corePort: number;
+  /** The edges core and gateway machines accept PROXY headers from, as comma-separated IPs or CIDRs. */
+  trustedEdges: string | undefined;
 }
 
 /** An S3-compatible bucket; each environment replicates below `<prefix><environment ID>/`. */
@@ -109,6 +111,7 @@ function machinesOf(env: Env, publicUrl: string): Machines | undefined {
     managementUrl: env.CHUNK_MACHINE_MANAGEMENT_URL ?? publicUrl,
     coreMemoryMib: positive(env, "CHUNK_CORE_MEMORY_MIB", 1024),
     corePort: positive(env, "CHUNK_CORE_PORT", 7070),
+    trustedEdges: env.CHUNK_MACHINE_TRUSTED_EDGES || undefined,
   };
 }
 

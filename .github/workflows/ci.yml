@@ -152,6 +152,18 @@ jobs:
           install_args: just
       - run: just image
 
+  compose:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the pinned just
+        uses: jdx/mise-action@v3
+        with:
+          install_args: just
+      - run: just compose-check
+
   jvm-image:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: blacksmith-2vcpu-ubuntu-2404

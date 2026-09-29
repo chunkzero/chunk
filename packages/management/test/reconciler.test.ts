@@ -40,6 +40,7 @@ test("JVM machines run the runner for their Java and gateways the environment im
     managementUrl: "",
     coreMemoryMib: 2048,
     corePort: 7070,
+    trustedEdges: undefined,
   };
   const request = {
     environment_id: "env_1",
@@ -82,6 +83,27 @@ test("JVM machines run the runner for their Java and gateways the environment im
   });
 });
 
+test("core and gateway machines trust the configured edges, and JVM machines never see them", () => {
+  const options = {
+    image: "chunk/environment:test",
+    jvmImage: "chunk-jvm:{java}",
+    managementUrl: "",
+    coreMemoryMib: 1024,
+    corePort: 7070,
+    trustedEdges: "10.231.0.2",
+  };
+  const request = { environment_id: "env_1", request_id: "cap", memory_mib: 512, java_version: 25 } as CapacityRow;
+  const spec = (workload: Workload) =>
+    capacityMachineSpec(options, { ...request, workload }, { coreHost: "10.0.0.2", credential: "secret" });
+
+  expect(coreMachineSpec(options, "env_1", "token").env.CHUNK_TRUSTED_EDGES).toBe("10.231.0.2");
+  expect(spec(Workload.GATEWAY).env.CHUNK_TRUSTED_EDGES).toBe("10.231.0.2");
+  expect(spec(Workload.JVM).env).not.toHaveProperty("CHUNK_TRUSTED_EDGES");
+  expect(coreMachineSpec({ ...options, trustedEdges: undefined }, "env_1", "token").env).not.toHaveProperty(
+    "CHUNK_TRUSTED_EDGES",
+  );
+});
+
 describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
   const { provider, machines, volumes, boots, hooks } = fakeProvider();
@@ -97,6 +119,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       managementUrl: h.url,
       coreMemoryMib: 2048,
       corePort: 7070,
+      trustedEdges: undefined,
     };
   });
   afterAll(() => h.close());
