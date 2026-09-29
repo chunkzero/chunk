@@ -14,7 +14,9 @@ use super::{
     errors, position,
 };
 use chunk_js::DeploymentId;
-use chunk_proto::sync::v1::{CallRequest, Error, ManifestResult, Position, PrepareResult, error::Code};
+use chunk_proto::sync::v1::{
+    ActiveArguments, CallRequest, Error, ManifestResult, Position, PrepareResult, error::Code,
+};
 use chunk_store::Revision;
 use prost::Message;
 
@@ -93,19 +95,21 @@ async fn prepare(service: &SyncService, request: &CallRequest) -> Result<Prepare
     Ok(PrepareResult { operation_id: format!("{}{id}", app::PREPARED) })
 }
 
-/// Records that a gateway holds connections, which keeps core from counting as idle.
+/// Records what a gateway, naming its current stream, reports about its connections. Any keeps core from counting as
+/// idle.
 fn active(service: &SyncService, principal: &Principal, request: &CallRequest) -> Result<(), Error> {
     if !matches!(principal.class, Class::Gateway { .. }) {
         return Err(errors::denied("only a gateway reports that it's active"));
     }
-    if !request.operation_id.is_empty()
-        || !request.arguments.is_empty()
-        || !request.deployment.is_empty()
-        || request.caller.is_some()
-    {
-        return Err(errors::invalid("chunk:active takes no operation ID, arguments, deployment or caller"));
+    if !request.operation_id.is_empty() || !request.deployment.is_empty() || request.caller.is_some() {
+        return Err(errors::invalid("chunk:active takes no operation ID, deployment or caller"));
     }
-    service.app.backend().activity().touch();
+    let arguments: ActiveArguments = decode(&request.arguments)?;
+    service.fences.check(&request.stream, &principal.credential)?;
+    if arguments.connections > 0 {
+        service.app.backend().activity().touch();
+    }
+    service.credentials.gateways.liveness.heard(&request.stream, arguments.connections);
     Ok(())
 }
 

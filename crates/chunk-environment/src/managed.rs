@@ -33,16 +33,16 @@ const ATTACH_IDLE: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a deployment failed, as reported, is cut to this many bytes.
 const MAX_MESSAGE_BYTES: usize = 1024;
-/// The shortest idle period after which core may report that management may suspend it.
-pub(crate) const MIN_SUSPEND_AFTER: Duration = Duration::from_secs(10);
+/// How long core waits for one signal of whether it may be suspended before it counts that signal as unknown.
+const READ_WAIT: Duration = Duration::from_millis(500);
 
 pub struct ManagementConfig {
     /// The management service's base URL.
     pub url: String,
     /// The environment's bearer token.
     pub token: String,
-    /// How long core stays idle before it reports that management may suspend it; unset, it never does. At least
-    /// [`MIN_SUSPEND_AFTER`], well past the second between a gateway's reports that it holds connections.
+    /// How long core stays idle before it reports that management may suspend it; unset, it never does. Positive, so
+    /// work that came and went between two looks at it still counts.
     pub suspend_after: Option<Duration>,
 }
 
@@ -477,18 +477,23 @@ impl<'a> Managed<'a> {
         status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend }
     }
 
-    /// Whether management may suspend core under desired `revision`: nothing has been active for the grace period, the
-    /// log is flushed and the wake alarm is handed off with no job due within the grace period. Active means backend
-    /// work running, starting or finishing (actions, hooks, commands and jobs), a gateway reporting connections, an open
-    /// claim or a launching host in control, a claimed job, or a deployment loading or not yet accepted. What can't be
-    /// read counts as active.
+    /// Whether management may suspend core under desired `revision`, as the proto's contract has it: no players remain,
+    /// the log is flushed and the wake alarm is handed off, with no job due within the grace period, and nothing was
+    /// active for the grace period. Active means backend work running, starting or finishing (actions, hooks, commands
+    /// and jobs), a gateway that reports connections or that core can't hear from, an open claim or a launching host in
+    /// control, a claimed job, or a deployment loading or not yet accepted. What can't be read within [`READ_WAIT`]
+    /// counts as active.
+    ///
+    /// Queries, mutations and operator calls aren't counted: suspending stops or pauses the environment gracefully,
+    /// every commit is durable before it's acknowledged, and a call a suspend cuts off fails as it would in a crash and
+    /// is retried.
     async fn ready_to_suspend(&self, revision: u64) -> bool {
         if !self.idle.sleeps() {
             return false;
         }
         let backend = self.core.backend();
         let handoff = match &backend {
-            Some(backend) => backend.wake_handoff().await.ok(),
+            Some(backend) => read_within(backend.wake_handoff()).await,
             None => None,
         };
         let work = backend.as_ref().map(|backend| backend.activity().observe());
@@ -499,6 +504,7 @@ impl<'a> Managed<'a> {
         };
         let active = deploying
             || work.is_none_or(|work| work.in_flight > 0)
+            || self.core.gateways_active()
             || !matches!(in_use, Ok(false))
             || handoff.as_ref().is_none_or(|handoff| handoff.running > 0);
         let handed = match (self.core.epoch(), &handoff) {
@@ -513,6 +519,11 @@ impl<'a> Managed<'a> {
         };
         self.idle.ready(revision, &observed)
     }
+}
+
+/// What `read` answers within [`READ_WAIT`], or nothing once it fails or takes longer.
+async fn read_within<T, E>(read: impl std::future::Future<Output = Result<T, E>>) -> Option<T> {
+    tokio::time::timeout(READ_WAIT, read).await.ok()?.ok()
 }
 
 /// `call`'s result, or a retryable interruption once `limit` passes.

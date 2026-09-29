@@ -1,15 +1,19 @@
 //! Core's status reports to management, which route players to the gateway addresses they carry.
 
-use super::{Interrupted, REQUEST_TIMEOUT, deadline};
+use super::{Interrupted, deadline};
 use chunk_management::{Client, v1};
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    sync::atomic::{AtomicBool, Ordering},
+    pin::Pin,
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 use tokio::{
-    sync::{Mutex, OnceCell},
+    sync::OnceCell,
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
@@ -18,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 pub(super) const INTERVAL: Duration = Duration::from_secs(15);
 /// How often core looks for a change to report at once.
 pub(super) const OBSERVE: Duration = Duration::from_secs(1);
+/// How long one report may take before it counts as failed.
+pub(super) const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest wait before a failed report is sent again.
 const RETRY_LIMIT: Duration = Duration::from_secs(4);
 
@@ -34,10 +40,24 @@ pub(super) struct Observed {
     pub ready_to_suspend: bool,
 }
 
-/// Sends reports one at a time, so each lease's sequence reaches management in order.
+impl Observed {
+    fn said(&self) -> Said {
+        Said { gateway_addresses: self.gateway_addresses.clone(), ready_to_suspend: self.ready_to_suspend }
+    }
+}
+
+/// What a change is reported at once for.
+#[derive(Clone, PartialEq, Eq)]
+struct Said {
+    gateway_addresses: Vec<String>,
+    ready_to_suspend: bool,
+}
+
+/// Sends reports under increasing sequences, never waiting for one to finish before sending the next. Management
+/// ignores a report once it took a later one, so the latest report started wins.
 pub(super) struct Reporter {
     client: Client,
-    /// Held while a report is sent.
+    /// Never held across a request.
     sent: Mutex<Sent>,
     /// Cancelled once core shuts down, after which no report starts.
     stopping: CancellationToken,
@@ -48,39 +68,82 @@ pub(super) struct Reporter {
 struct Sent {
     lease: u64,
     sequence: u64,
+    /// What the latest report started said.
+    latest: Option<Said>,
     /// The latest report management accepted.
     accepted: Option<Accepted>,
-    /// Set once a report fails, whose outcome management may or may not have applied, until one is accepted.
+    /// Set once a report fails, whose outcome management may or may not have applied, until a later one is accepted.
     failed: Option<Failed>,
+    /// The deployment progress of a report in flight, and its sequence. Every report started meanwhile carries it too,
+    /// so one management takes after it can't drop it.
+    progress: Option<(u64, v1::DeploymentProgress)>,
 }
 
 struct Accepted {
-    gateway_addresses: Vec<String>,
-    ready_to_suspend: bool,
+    sequence: u64,
     /// When it was sent.
     at: Instant,
 }
 
 struct Failed {
+    sequence: u64,
     /// Failures in a row.
     count: u32,
     retry_at: Instant,
 }
 
 impl Sent {
-    /// Whether `observed` is to be reported now: once a failed report's retry is due, and otherwise once it differs from
-    /// the accepted report or that one is [`INTERVAL`] old.
-    fn due(&self, observed: &Observed) -> bool {
+    /// Whether `said` differs from the latest report started.
+    fn changed(&self, said: &Said) -> bool {
+        self.latest.as_ref() != Some(said)
+    }
+
+    /// Whether `said` is to be reported now: at once when it changed, once a failed report's retry is due, and
+    /// otherwise once the accepted report is [`INTERVAL`] old.
+    fn due(&self, said: &Said) -> bool {
+        if self.changed(said) {
+            return true;
+        }
         if let Some(failed) = &self.failed {
             return Instant::now() >= failed.retry_at;
         }
-        self.accepted.as_ref().is_none_or(|accepted| {
-            accepted.gateway_addresses != observed.gateway_addresses
-                || accepted.ready_to_suspend != observed.ready_to_suspend
-                || accepted.at.elapsed() >= INTERVAL
-        })
+        self.accepted.as_ref().is_none_or(|accepted| accepted.at.elapsed() >= INTERVAL)
+    }
+
+    /// Records how report `sequence`, sent `at`, ended.
+    fn finished(&mut self, sequence: u64, at: Instant, accepted: bool) {
+        let later = self.accepted.as_ref().is_none_or(|accepted| sequence > accepted.sequence);
+        if accepted {
+            if later {
+                self.accepted = Some(Accepted { sequence, at });
+            }
+            if self.failed.as_ref().is_some_and(|failed| failed.sequence <= sequence) {
+                self.failed = None;
+            }
+        } else if later {
+            let count = self.failed.as_ref().map_or(1, |failed| failed.count.saturating_add(1));
+            let wait = OBSERVE.saturating_mul(2_u32.saturating_pow(count - 1)).min(RETRY_LIMIT);
+            self.failed = Some(Failed { sequence, count, retry_at: at + wait });
+        }
     }
 }
+
+/// Stops carrying a report's deployment progress once that report ends, however it ends.
+struct Carried<'a> {
+    sent: &'a Mutex<Sent>,
+    sequence: u64,
+}
+
+impl Drop for Carried<'_> {
+    fn drop(&mut self) {
+        let mut sent = lock(self.sent);
+        if sent.progress.as_ref().is_some_and(|(sequence, _)| *sequence == self.sequence) {
+            sent.progress = None;
+        }
+    }
+}
+
+type Report<'a> = Pin<Box<dyn Future<Output = Result<bool, Interrupted>> + Send + 'a>>;
 
 impl Reporter {
     pub(super) fn new(client: Client, stopping: CancellationToken) -> Self {
@@ -88,73 +151,96 @@ impl Reporter {
     }
 
     /// Reports `observed` and `deployment`'s progress under the next sequence of `observed.lease`, which starts over
-    /// with each lease. Returns whether it reported, which it doesn't once core is stopping.
+    /// with each lease, within [`REPORT_TIMEOUT`]. Without `deployment`, it carries the progress of a report still in
+    /// flight. Returns whether it reported, which it doesn't once core is stopping.
     pub(super) async fn send(
         &self,
         observed: Observed,
         deployment: Option<v1::DeploymentProgress>,
     ) -> Result<bool, Interrupted> {
-        let mut sent = self.sent.lock().await;
-        if self.stopping.is_cancelled() {
-            return Ok(false);
-        }
-        if observed.lease > sent.lease {
-            *sent = Sent { lease: observed.lease, ..Sent::default() };
-        }
-        sent.sequence += 1;
-        let request = v1::ReportStatusRequest {
-            observe_time: Some(SystemTime::now().into()),
-            gateway_addresses: observed.gateway_addresses,
-            online_players: observed.online_players,
-            pings: Vec::new(),
-            deployment,
-            ready_to_suspend: observed.ready_to_suspend,
-            lease: observed.lease,
-            sequence: sent.sequence,
-            desired_revision: observed.revision,
+        let (request, _carried) = {
+            let mut sent = lock(&self.sent);
+            if self.stopping.is_cancelled() {
+                return Ok(false);
+            }
+            if observed.lease > sent.lease {
+                *sent = Sent { lease: observed.lease, ..Sent::default() };
+            }
+            sent.sequence += 1;
+            let sequence = sent.sequence;
+            let carried = deployment.as_ref().map(|progress| {
+                sent.progress = Some((sequence, progress.clone()));
+                Carried { sent: &self.sent, sequence }
+            });
+            if observed.lease == sent.lease {
+                sent.latest = Some(observed.said());
+            }
+            let request = v1::ReportStatusRequest {
+                observe_time: Some(SystemTime::now().into()),
+                gateway_addresses: observed.gateway_addresses,
+                online_players: observed.online_players,
+                pings: Vec::new(),
+                deployment: deployment.or_else(|| sent.progress.as_ref().map(|(_, progress)| progress.clone())),
+                ready_to_suspend: observed.ready_to_suspend,
+                lease: observed.lease,
+                sequence,
+                desired_revision: observed.revision,
+            };
+            (request, carried)
         };
         let sent_at = Instant::now();
-        let result = deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await;
-        if observed.lease == sent.lease {
-            if result.is_ok() {
-                let v1::ReportStatusRequest { gateway_addresses, ready_to_suspend, .. } = request;
-                sent.accepted = Some(Accepted { gateway_addresses, ready_to_suspend, at: sent_at });
-                sent.failed = None;
-            } else {
-                let count = sent.failed.as_ref().map_or(1, |failed| failed.count.saturating_add(1));
-                let wait = OBSERVE.saturating_mul(2_u32.saturating_pow(count - 1)).min(RETRY_LIMIT);
-                sent.failed = Some(Failed { count, retry_at: sent_at + wait });
-            }
+        let result = deadline(REPORT_TIMEOUT, self.client.report_status(&request)).await;
+        let mut sent = lock(&self.sent);
+        if request.lease == sent.lease {
+            sent.finished(request.sequence, sent_at, result.is_ok());
         }
         result.map(|_| true)
     }
 
     /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
-    /// to suspend differ from the latest report management accepted. After a failed report, whose outcome is unknown,
-    /// it reports again after a backoff of one to four seconds until one is accepted. `observe` finds nothing while core
-    /// must not report. Returns once management fences a lease `superseded` says another core superseded.
+    /// to suspend change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
+    /// sequence. After a failed report, whose outcome is unknown, it reports again after a backoff of one to four
+    /// seconds until one is accepted. `observe` finds nothing while core must not report. Returns once management
+    /// fences a lease `superseded` says another core superseded.
     pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F, superseded: impl Fn(u64) -> bool) -> io::Error
     where
         F: Future<Output = Option<Observed>>,
     {
         let mut tick = tokio::time::interval(OBSERVE);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut in_flight: Option<(u64, Report<'_>)> = None;
         loop {
-            tick.tick().await;
-            let Some(observed) = observe().await else { continue };
-            if !self.sent.lock().await.due(&observed) {
-                continue;
-            }
-            let lease = observed.lease;
-            match self.send(observed, None).await {
-                Ok(_) => {}
-                Err(Interrupted::Fenced(error)) if superseded(lease) => return error,
-                Err(Interrupted::Retry(error) | Interrupted::Fatal(error) | Interrupted::Fenced(error)) => {
-                    tracing::warn!(%error, "status report failed");
+            tokio::select! {
+                result = async { in_flight.as_mut().expect("a report is in flight").1.as_mut().await },
+                    if in_flight.is_some() =>
+                {
+                    let lease = in_flight.take().map_or(0, |(lease, _)| lease);
+                    match result {
+                        Ok(_) => {}
+                        Err(Interrupted::Fenced(error)) if superseded(lease) => return error,
+                        Err(Interrupted::Retry(error) | Interrupted::Fatal(error) | Interrupted::Fenced(error)) => {
+                            tracing::warn!(%error, "status report failed");
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    let Some(observed) = observe().await else { continue };
+                    let said = observed.said();
+                    let (changed, due) = {
+                        let sent = lock(&self.sent);
+                        (sent.changed(&said), sent.due(&said))
+                    };
+                    if changed || (due && in_flight.is_none()) {
+                        in_flight = Some((observed.lease, Box::pin(self.send(observed, None))));
+                    }
                 }
             }
         }
     }
+}
+
+fn lock(sent: &Mutex<Sent>) -> MutexGuard<'_, Sent> {
+    sent.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// This machine's private address, where edges reach its gateway: the configured one, or else the local address of a

@@ -16,25 +16,25 @@ podman run --rm -p 25565:25565 -v chunk-data:/data -v ./bundle.json:/bundle.json
 
 It reads these variables:
 
-| Variable                      | Default                                 | Meaning                                                                            |
-| ----------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------- |
-| `CHUNK_SERVICES`              | `core,gateway`                          | The services to run.                                                               |
-| `CHUNK_ENVIRONMENT_ID`        | required                                | The environment ID; `CHUNK_ENVIRONMENT` is accepted too.                           |
-| `CHUNK_MANAGEMENT_URL`        | unset                                   | The management service that deploys the environment.                               |
-| `CHUNK_ENVIRONMENT_TOKEN`     | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for the management service.                         |
-| `CHUNK_SUSPEND_AFTER_SECONDS` | unset                                   | Seconds idle, 10 or more, before core reports it may be suspended; never if unset. |
-| `CHUNK_BUNDLE`                | required without `CHUNK_MANAGEMENT_URL` | The backend deployment (a `chunk_contract::Deployment` as JSON) served first.      |
-| `CHUNK_STATE`                 | `/data`                                 | The store, control's files, and the `control.json` record.                         |
-| `CHUNK_CORE_ENDPOINT`         | required for `gateway` alone            | Core's network endpoint, `http://<private address>:<port>`.                        |
-| `CHUNK_GATEWAY_CREDENTIAL`    | required for `gateway` alone            | The machine credential core minted for this gateway.                               |
-| `CHUNK_BIND`                  | `0.0.0.0:25565`                         | The gateway's player listener.                                                     |
-| `CHUNK_MOTD`                  | `chunk`                                 | The gateway's server list message.                                                 |
-| `CHUNK_MAX_CONNECTIONS`       | `1024`                                  | The gateway's connection limit.                                                    |
-| `CHUNK_OFFLINE_LOGINS`        | unset                                   | `1` admits unauthenticated players under any name. Insecure; tests only.           |
-| `CHUNK_CONTROL_BIND`          | `127.0.0.1:25567`                       | Control's gRPC listener; it must be loopback.                                      |
-| `CHUNK_CORE_BIND`             | unset                                   | Core's listener for other machines; it drops peers that aren't private.            |
-| `CHUNK_PRIVATE_ADDRESS`       | `FLY_PRIVATE_IP`                        | This machine's private address. Its JVMs serve players there, not loopback.        |
-| `RUST_LOG`                    | `info`                                  | The log filter.                                                                    |
+| Variable                      | Default                                 | Meaning                                                                           |
+| ----------------------------- | --------------------------------------- | --------------------------------------------------------------------------------- |
+| `CHUNK_SERVICES`              | `core,gateway`                          | The services to run.                                                              |
+| `CHUNK_ENVIRONMENT_ID`        | required                                | The environment ID; `CHUNK_ENVIRONMENT` is accepted too.                          |
+| `CHUNK_MANAGEMENT_URL`        | unset                                   | The management service that deploys the environment.                              |
+| `CHUNK_ENVIRONMENT_TOKEN`     | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for the management service.                        |
+| `CHUNK_SUSPEND_AFTER_SECONDS` | unset                                   | Seconds idle, 1 or more, before core reports it may be suspended; never if unset. |
+| `CHUNK_BUNDLE`                | required without `CHUNK_MANAGEMENT_URL` | The backend deployment (a `chunk_contract::Deployment` as JSON) served first.     |
+| `CHUNK_STATE`                 | `/data`                                 | The store, control's files, and the `control.json` record.                        |
+| `CHUNK_CORE_ENDPOINT`         | required for `gateway` alone            | Core's network endpoint, `http://<private address>:<port>`.                       |
+| `CHUNK_GATEWAY_CREDENTIAL`    | required for `gateway` alone            | The machine credential core minted for this gateway.                              |
+| `CHUNK_BIND`                  | `0.0.0.0:25565`                         | The gateway's player listener.                                                    |
+| `CHUNK_MOTD`                  | `chunk`                                 | The gateway's server list message.                                                |
+| `CHUNK_MAX_CONNECTIONS`       | `1024`                                  | The gateway's connection limit.                                                   |
+| `CHUNK_OFFLINE_LOGINS`        | unset                                   | `1` admits unauthenticated players under any name. Insecure; tests only.          |
+| `CHUNK_CONTROL_BIND`          | `127.0.0.1:25567`                       | Control's gRPC listener; it must be loopback.                                     |
+| `CHUNK_CORE_BIND`             | unset                                   | Core's listener for other machines; it drops peers that aren't private.           |
+| `CHUNK_PRIVATE_ADDRESS`       | `FLY_PRIVATE_IP`                        | This machine's private address. Its JVMs serve players there, not loopback.       |
+| `RUST_LOG`                    | `info`                                  | The log filter.                                                                   |
 
 Chunk sends credentials between machines in the clear, so `CHUNK_CORE_BIND` belongs on a private, encrypted network,
 such as WireGuard or Fly's 6PN; prefer that network's address to an unspecified one. The listener serves the same `Core`
@@ -65,14 +65,18 @@ may run its JVMs and no load uses it, and unfinished downloads and unpacks are r
 
 Core reports its status about every 15 seconds and at once when it changes. With `CHUNK_SUSPEND_AFTER_SECONDS`, it
 reports `ready_to_suspend` once nothing was active for that long under the latest desired revision: no action, hook,
-command or job running, started or finished in the backend, no gateway reporting connections, no open claim or launching
-host in control, and no deployment loading or awaiting acceptance. Every gateway, on this machine or its own, calls
-`chunk:active` each second while it holds any connection, server-list pings and logins still authenticating included.
-The log must also be flushed to object storage when it replicates, the wake alarm handed off, and no job due within the
-grace period. Any activity, even work that came and went between two looks, or a new revision such as a wake brings,
-ends it at once and starts the grace period over. A report management didn't accept is sent again within one to four
-seconds until one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to
-the backend only once management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again
-and retried.
+command or job running, started or finished in the backend, no gateway holding connections, no open claim or launching
+host in control, and no deployment loading or awaiting acceptance. Every gateway, on this machine or its own, reports
+how many connections it holds through `chunk:active` each second on its current stream, server-list pings and logins
+still authenticating included. A gateway whose stream is live but hasn't reported for about three seconds counts as
+active; once its stream ends, it no longer counts. The log must also be flushed to object storage when it replicates,
+the wake alarm handed off, and no job due within the grace period. Queries, mutations and operator calls don't count: a
+suspend stops the environment gracefully, commits are durable, and a call it cuts off is retried. Any activity, even
+work that came and went between two looks, a new revision such as a wake brings, or a signal that doesn't answer within
+half a second ends it at once and starts the grace period over. A change is reported at once even while an earlier
+report is in flight, which it replaces. A report gets five seconds, and one management didn't accept is sent again
+within one to four seconds until one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and
+acknowledges it to the backend only once management stores that exact alarm. A stale lease or an alarm that moved
+meanwhile is read again and retried.
 
 SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.

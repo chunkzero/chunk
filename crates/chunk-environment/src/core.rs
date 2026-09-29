@@ -307,6 +307,12 @@ impl Core {
         self.replication.as_ref().is_none_or(chunk_store::ReplicationProgress::flushed)
     }
 
+    /// Whether a gateway may hold connections: one reports some, or its stream is live but core hasn't heard from it
+    /// lately.
+    pub(crate) fn gateways_active(&self) -> bool {
+        self.gateways.liveness.active()
+    }
+
     /// This machine's configured address on the environment's private network.
     pub(crate) fn private_address(&self) -> Option<IpAddr> {
         self.private_address

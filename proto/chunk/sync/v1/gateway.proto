@@ -78,10 +78,19 @@ message GatewayDeployment {
   string deployment = 1;
 }
 
-// Activity. `chunk:active` takes no operation ID, arguments, deployment or caller, and returns nothing. A gateway calls
-// it about every second while it holds any connection, server-list pings and logins still authenticating included,
-// and once after a connection came and went between two calls. Core counts each call as activity, which keeps the
-// environment from being suspended.
+// Activity. A gateway calls `chunk:active` about every second while it follows its `gateway/<id>` topic, with
+// ActiveArguments and no operation ID, deployment or caller, and it returns nothing. Like the methods below, it names
+// the gateway's current stream in `CallRequest.stream` and fails with STOPPED once that stream is superseded or if it
+// names another. Core counts a gateway as active, which keeps the environment from being suspended, while its latest
+// report counts connections, and while its stream is live but its latest report is over about three seconds old or
+// hasn't come yet. Once the stream ends, the gateway no longer counts.
+
+// Arguments of `chunk:active`.
+message ActiveArguments {
+  // The connections the gateway holds, server-list pings and logins still authenticating included; at least 1 when
+  // one came and went since core last took a report.
+  uint32 connections = 1;
+}
 
 // Methods a gateway calls to admit players and move them, with its own credential only; core takes the gateway's ID
 // from that credential. Each call names the gateway's current `gateway/<id>` stream in `CallRequest.stream`, and

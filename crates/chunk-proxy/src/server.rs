@@ -148,8 +148,8 @@ impl Proxy {
 
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
     /// claims other processes under this gateway's ID left open, and accepts no connection until those in its first
-    /// view of the gateway's claims are withdrawing or gone, and tells core while it holds connections, so core stays
-    /// awake for them. It stops once a later process under that ID takes it over.
+    /// view of the gateway's claims are withdrawing or gone, and tells core every second how many connections it holds,
+    /// so core stays awake for them. It stops once a later process under that ID takes it over.
     ///
     /// # Errors
     /// Returns shutdown-signal errors and replacement by a later process. Accept errors are retried with backoff.

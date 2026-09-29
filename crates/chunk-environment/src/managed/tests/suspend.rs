@@ -4,9 +4,10 @@ use super::status::{advance_for, hold_time};
 use super::{launcher::respond, *};
 use crate::{
     Core,
-    managed::{Lease, Managed, alarm::Alarm},
+    managed::{Lease, Managed, READ_WAIT, alarm::Alarm, read_within},
 };
 use chunk_management::v1::{SetWakeAlarmRequest, SetWakeAlarmResponse};
+use chunk_proto::sync::v1::{ActiveArguments, GatewayArguments, SubscribeRequest};
 use std::{
     pin::Pin,
     sync::OnceLock,
@@ -133,6 +134,120 @@ async fn core_is_ready_to_suspend_only_after_the_grace_period_and_a_login_or_a_w
     drop((running, time));
     tokio::time::resume();
     core.stop(|| {}).await.unwrap();
+}
+
+/// A gateway on its own machine, which follows its topic and reports its connections over the sync protocol.
+struct RemoteGateway {
+    client: CoreClient<tonic::transport::Channel>,
+    credential: String,
+}
+
+impl RemoteGateway {
+    fn authorized<T>(&self, message: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        let bearer = format!("Bearer {}", self.credential).parse().unwrap();
+        request.metadata_mut().insert("authorization", bearer);
+        request
+    }
+
+    /// Reports `connections` on `stream`, returning the error core answered with, if any.
+    async fn active(&mut self, stream: &str, connections: u32) -> Option<Code> {
+        let message = CallRequest {
+            method: "chunk:active".into(),
+            arguments: ActiveArguments { connections }.encode_to_vec(),
+            stream: stream.into(),
+            ..CallRequest::default()
+        };
+        match self.client.call(self.authorized(message)).await.unwrap().into_inner().outcome {
+            Some(Outcome::Error(error)) => Some(error.code()),
+            _ => None,
+        }
+    }
+
+    /// Reports `connections` on `stream` every second for `limit`, returning whether each report management applied
+    /// meanwhile was ready to suspend.
+    async fn report_for(
+        &mut self,
+        running: &mut Pin<Box<impl Future<Output = std::io::Error>>>,
+        reported: &mut mpsc::UnboundedReceiver<ReportStatusRequest>,
+        stream: &str,
+        connections: u32,
+        limit: Duration,
+    ) -> Vec<bool> {
+        let mut ready = Vec::new();
+        for _ in 0..limit.as_secs() {
+            self.active(stream, connections).await;
+            tokio::select! {
+                error = running.as_mut() => panic!("{error}"),
+                () = advance_for(Duration::from_secs(1)) => {}
+            }
+            ready.extend(std::iter::from_fn(|| reported.try_recv().ok()).map(|report| report.ready_to_suspend));
+        }
+        ready
+    }
+}
+
+#[tokio::test]
+async fn a_gateway_core_stops_hearing_from_keeps_it_awake_until_the_gateway_s_stream_ends() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let config = ManagementConfig { suspend_after: Some(GRACE), ..harness.management_config() };
+    let managed = Managed::new(&config, lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let mut running = Box::pin(managed.run());
+    let deployed = async {
+        harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+        harness.expect(1, "dep_a", DeploymentState::Active).await
+    };
+    tokio::select! {
+        error = &mut running => panic!("{error}"),
+        _ = deployed => {}
+    }
+    let target = core.target().unwrap();
+    let client = CoreClient::connect(target.core.clone()).await.unwrap();
+    let mut remote = RemoteGateway { client, credential: target.gateway.credential.clone() };
+    let subscription = SubscribeRequest {
+        topic: format!("gateway/{}", target.gateway.id),
+        arguments: GatewayArguments { instance: "remote".into() }.encode_to_vec(),
+        ..SubscribeRequest::default()
+    };
+    let mut updates = remote.client.subscribe(remote.authorized(subscription)).await.unwrap().into_inner();
+    let stream = updates.message().await.unwrap().unwrap().stream;
+
+    tokio::time::pause();
+    let time = hold_time();
+    let reported = &mut harness.reported;
+    // Heard reporting no connections, the gateway lets core become ready.
+    let ready = remote.report_for(&mut running, reported, &stream, 0, GRACE + SLACK * 2).await;
+    assert_eq!(ready.last(), Some(&true), "{ready:?}");
+
+    // Then a player connects, but every report of it fails: core stops hearing from the gateway, which counts as
+    // active from then on, however long the grace period passes.
+    let ready = remote.report_for(&mut running, reported, "unknown", 1, GRACE * 2).await;
+    let revoked = ready.iter().position(|ready| !ready).expect("readiness was revoked");
+    assert!(revoked <= 5 && !ready[revoked..].contains(&true), "{ready:?}");
+    assert_eq!(remote.active("unknown", 1).await, Some(Code::Stopped));
+
+    // Once its stream ends, the gateway no longer counts, and the grace period runs out.
+    drop(updates);
+    assert!(until_ready(&mut running, reported, 1, true).await + SLACK >= GRACE);
+
+    drop((running, time));
+    tokio::time::resume();
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_signal_read_that_is_held_counts_as_unknown_once_its_wait_runs_out() {
+    let (answer, held) = tokio::sync::oneshot::channel::<u64>();
+    let start = Instant::now();
+    assert_eq!(read_within(held).await, None);
+    assert_eq!(start.elapsed(), READ_WAIT);
+    drop(answer);
+    let (answer, answered) = tokio::sync::oneshot::channel::<u64>();
+    answer.send(1).unwrap();
+    assert_eq!(read_within(answered).await, Some(1));
 }
 
 /// A backend whose `schedule` mutation schedules a job at the Unix millisecond it's given.

@@ -78,8 +78,8 @@ impl Config {
         let management = match optional("CHUNK_MANAGEMENT_URL")? {
             Some(url) => {
                 let suspend_after = optional("CHUNK_SUSPEND_AFTER_SECONDS")?.map(Duration::from_secs);
-                if suspend_after.is_some_and(|after| after < managed::MIN_SUSPEND_AFTER) {
-                    return Err(io::Error::other("CHUNK_SUSPEND_AFTER_SECONDS must be at least 10"));
+                if suspend_after.is_some_and(|after| after.is_zero()) {
+                    return Err(io::Error::other("CHUNK_SUSPEND_AFTER_SECONDS must be at least 1"));
                 }
                 Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")?, suspend_after })
             }

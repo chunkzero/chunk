@@ -33,7 +33,7 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
-/// How often a gateway tells core it holds connections.
+/// How often a gateway tells core how many connections it holds.
 const ACTIVE_EVERY: Duration = Duration::from_secs(1);
 
 struct ClaimGuard {
@@ -282,7 +282,7 @@ async fn withdraw(source: &ClaimGuard) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
 }
 
-/// This gateway's connections, which core hears of while any are open.
+/// This gateway's connections, which core hears of every [`ACTIVE_EVERY`].
 #[derive(Default)]
 pub(super) struct Connected {
     activity: chunk_service::Activity,
@@ -300,21 +300,26 @@ impl Connected {
         }
     }
 
-    /// Tells core that this gateway is active as soon as a connection arrives, then every [`ACTIVE_EVERY`] while one
-    /// is open or one came and went since core last heard. A failed call is repeated then too.
+    /// Tells core how many connections this gateway holds every [`ACTIVE_EVERY`], and at once when one arrives after
+    /// a report of none. Until core takes a report, one that came and went since the last report it took counts too.
     async fn report(&self, platform: &Platform) -> ! {
-        let mut reported = 0;
+        let (mut reported, mut idle) = (0, false);
         loop {
             let observed = self.activity.observe();
-            if observed.in_flight == 0 && observed.changes == reported {
-                self.arrived.notified().await;
-                continue;
+            let open = u32::try_from(observed.in_flight).unwrap_or(u32::MAX);
+            let connections = open.max(u32::from(observed.changes != reported));
+            match platform.active(connections).await {
+                Ok(()) => (reported, idle) = (observed.changes, connections == 0),
+                Err(error) => tracing::debug!(%error, "core didn't hear how many connections this gateway holds"),
             }
-            match platform.active().await {
-                Ok(()) => reported = observed.changes,
-                Err(error) => tracing::debug!(%error, "core didn't hear that this gateway is active"),
+            if idle {
+                tokio::select! {
+                    () = sleep(ACTIVE_EVERY) => {}
+                    () = self.arrived.notified() => {}
+                }
+            } else {
+                sleep(ACTIVE_EVERY).await;
             }
-            sleep(ACTIVE_EVERY).await;
         }
     }
 }
