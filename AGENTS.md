@@ -77,8 +77,8 @@ See `README.md` for how the pieces fit together.
 
 - **Project**: a directory with `chunk.toml`, its apps under `apps/`, its
   TypeScript backend under `server/`, and assets.
-- **App**: one `apps/<id>/` directory, declared by its `app.ts`, with its own
-  Gradle build and executable JAR. Its JVMs run its session types.
+- **App**: a directory under `apps/` whose `app.ts` declares it and its ID,
+  with its own Gradle build and executable JAR. Its JVMs run its session types.
 - **Session**: one gameplay instance of an app's session type, created by the
   app's `SessionProvider`. A JVM can run several.
 - **Release**: the immutable archive `chunk build` produces

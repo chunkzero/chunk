@@ -13,7 +13,9 @@ export function Projects() {
       <h1 className="text-xl font-semibold tracking-tight">Projects</h1>
       {projects.data?.length === 0 ? (
         <EmptyState>
-          No projects yet. Create one through the management API, as the <DeployGuideLink /> shows.
+          <p>
+            No projects yet. Create one through the management API, as the <DeployGuideLink /> shows.
+          </p>
         </EmptyState>
       ) : (
         <ul className="divide-y overflow-hidden rounded-lg border bg-card">
