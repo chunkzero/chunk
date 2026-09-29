@@ -138,7 +138,8 @@ async fn install(
         core.download(boot, launch, staging.as_file_mut()).await?;
         cache::install(staging, launch, &directory).await?
     };
-    let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root).await?;
+    let visible = memory::visible_mib(&config.proc);
+    let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root, visible).await?;
     launch::prepare(config, launch, &release, &directory, player_address, aot)
 }
 

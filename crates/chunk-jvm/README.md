@@ -24,7 +24,8 @@ what to do about it:
   `-XX:AOTMode=create -XX:AOTConfiguration=<file> -XX:AOTCache=<cache>`, for up to 45 seconds, and uploads the cache
   (`chunk:aot-write`) for up to 30 seconds more. Core holds the host's release until that upload ends, for up to 90
   seconds. If anything fails, or a SIGTERM or SIGINT arrives meanwhile, the runner tells core that no cache came, and
-  another host may record it.
+  another host may record it. A machine with less than 768 MiB of memory declines to record at once, since finishing a
+  recording takes a few hundred MiB beyond the heap; it still uses a cache a larger machine made.
 
 The cache never changes the runner's exit code. Java checks the JAR's path, size and mtime against the cache and runs
 without one that doesn't fit; the unpacked release keeps the archive's zero mtimes and the default `CHUNK_CACHE`, so a

@@ -418,6 +418,16 @@ async fn a_recording_run_creates_and_uploads_the_aot_cache_once_the_jvm_exits_cl
 }
 
 #[tokio::test]
+async fn a_machine_too_small_to_record_runs_without_recording_and_tells_core() {
+    let machine = Machine::new();
+    fs::write(machine.path("cgroup/memory.max"), format!("{}\n", 512 * 1024 * 1024)).unwrap();
+    let (exit, core) = machine.run(Script { aot: Some(Aot::Record(JvmAotRecord {})), ..Script::default() }).await;
+    assert_eq!(exit, Ok(0));
+    assert!(!machine.java("args").iter().any(|arg| arg.starts_with("-XX:AOTMode")));
+    assert!(core.uploaded.lock().unwrap().0.is_empty() && core.abandoned.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn the_jvm_starts_with_a_fetched_aot_cache_or_without_one_that_fails_its_digest() {
     let machine = Machine::new();
     let sha256 = format!("{:x}", Sha256::digest(AOT_CACHE));

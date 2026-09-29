@@ -24,6 +24,8 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long fetching a cache to use may take in all, well inside the host's readiness deadline.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// The least memory a machine needs to record: finishing a recording takes a few hundred MiB beyond the heap.
+const RECORD_MIN_MIB: u64 = 768;
 
 pub(crate) enum Plan {
     None,
@@ -35,13 +37,15 @@ pub(crate) enum Plan {
 
 impl Plan {
     /// Makes `launch`'s plan ready: fetches the cache to use into `cache`, or makes the directory a recording writes to
-    /// in `work_root`. A cache that can't be fetched is logged and left out.
+    /// in `work_root`. A cache that can't be fetched is logged and left out, and a machine with less than
+    /// [`RECORD_MIN_MIB`] of `visible_mib` tells core it won't record.
     pub async fn prepare(
         core: &fetch::Core,
         boot: &str,
         launch: &JvmLaunch,
         cache: &Cache,
         work_root: &Path,
+        visible_mib: Option<u64>,
     ) -> Result<Self, Failure> {
         match &launch.aot {
             None => Ok(Self::None),
@@ -57,6 +61,14 @@ impl Plan {
                         Ok(Self::None)
                     }
                 }
+            }
+            Some(Aot::Record(_)) if visible_mib.is_some_and(|memory| memory < RECORD_MIN_MIB) => {
+                tracing::info!(
+                    memory_mib = visible_mib,
+                    "too little memory to record the AOT cache; running without it"
+                );
+                abandon(core, boot).await;
+                Ok(Self::None)
             }
             Some(Aot::Record(_)) => {
                 let directory = tempfile::Builder::new().prefix("chunk-aot-").tempdir_in(work_root);
