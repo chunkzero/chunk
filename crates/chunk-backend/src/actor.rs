@@ -395,6 +395,10 @@ impl Actor {
         evaluate(&mut self.js, target, mode, view, cancellation, context)
     }
 
+    pub fn activity(&self) -> chunk_service::Activity {
+        self.actions.activity.clone()
+    }
+
     pub fn lane(&self) -> Arc<crate::system::Lane> {
         self.committer.lane()
     }

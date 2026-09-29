@@ -124,6 +124,12 @@ impl Platform {
         Ok(PrepareResult::decode(result.as_slice()).map_err(invalid_data)?.operation_id)
     }
 
+    /// Tells core this gateway holds connections, so core isn't idle.
+    pub async fn active(&self) -> io::Result<()> {
+        let message = CallRequest { method: "chunk:active".into(), ..CallRequest::default() };
+        self.sync.unfenced(message).await.map(drop)
+    }
+
     /// Queries the app's legacy `shared/proxy/<phase>` hook.
     async fn hook<T: DeserializeOwned>(&self, phase: &str, arguments: &Value, player: Option<&str>) -> io::Result<T> {
         let hooks = if phase == "status" { &self.status_hooks } else { &self.hooks };

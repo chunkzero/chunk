@@ -1,8 +1,10 @@
 //! Small process adapters shared by standalone service binaries.
 
+mod activity;
 mod connections;
 pub mod net;
 
+pub use activity::{Activity, Busy, Observed};
 pub use connections::{Closable, Connections, GRACE};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{

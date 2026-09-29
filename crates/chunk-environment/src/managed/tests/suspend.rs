@@ -22,16 +22,21 @@ pub(super) struct Alarms {
     stored: SetWakeAlarmResponse,
     /// Holds the next call, once recorded, until notified; management then handles it.
     held: Option<Arc<Notify>>,
+    /// While set, every call is answered with this alarm, and none is stored.
+    echo: Option<SetWakeAlarmResponse>,
 }
 
 /// Answers a `SetWakeAlarm` call.
 pub(super) async fn serve(management: &Management, body: &[u8]) -> hyper::Response<Body> {
     let request = SetWakeAlarmRequest::decode(body).unwrap();
-    let held = {
+    let (held, echo) = {
         let mut alarms = management.alarm.lock().unwrap();
         alarms.calls.push(request);
-        alarms.held.take()
+        (alarms.held.take(), alarms.echo)
     };
+    if let Some(echo) = echo {
+        return respond(200, "application/proto", echo.encode_to_vec());
+    }
     if let Some(held) = held {
         held.notified().await;
     }
@@ -108,6 +113,16 @@ async fn core_is_ready_to_suspend_only_after_the_grace_period_and_a_login_or_a_w
     let login = tokio::net::TcpStream::connect(gateway.get().unwrap().address()).await.unwrap();
     assert!(until_ready(&mut running, reported, 1, false).await <= SLACK);
     drop(login);
+    assert!(until_ready(&mut running, reported, 1, true).await + SLACK >= GRACE);
+
+    // So does backend work, which holds it off however long it runs; the grace period starts over once it ends.
+    let work = core.backend().unwrap().activity().begin();
+    assert!(until_ready(&mut running, reported, 1, false).await <= SLACK);
+    tokio::select! {
+        error = running.as_mut() => panic!("{error}"),
+        () = advance_for(GRACE + SLACK) => {}
+    }
+    drop(work);
     assert!(until_ready(&mut running, reported, 1, true).await + SLACK >= GRACE);
 
     // A wake's new revision invalidates the report at once, and the grace period starts over under it.
@@ -234,6 +249,58 @@ async fn a_stale_lease_or_generation_is_read_again_before_the_alarm_is_acknowled
     };
     tokio::select! {
         never = handing => match never {},
+        () = checks => {}
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_an_exact_echo_acknowledges_an_alarm_and_a_restored_acknowledgement_is_handed_off_again() {
+    let harness = Harness::new().await;
+    let directory = tempfile::tempdir().unwrap();
+    let backend = scheduling_backend(directory.path()).await;
+    let epoch = backend.system().epoch().0;
+    let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap() + 3_600_000;
+    let generation = schedule(&backend, at).await;
+    let lease = *harness.management.lease.borrow();
+    let alarms = &harness.management.alarm;
+    let calls = || alarms.lock().unwrap().calls.clone();
+    let (alarm, restored) =
+        (Alarm::new(harness.management_config().client()), Alarm::new(harness.management_config().client()));
+    let settled = async |alarm: &Alarm, epoch| alarm.settled(epoch, &backend.wake_handoff().await.unwrap());
+    let checks = async {
+        // Management answers with an alarm that differs in its epoch, generation or due time, which is never acknowledged.
+        let exact = SetWakeAlarmResponse { generation, due_time: Some(due(at).into()), epoch };
+        for echo in [
+            SetWakeAlarmResponse { epoch: epoch + 1, ..exact },
+            SetWakeAlarmResponse { generation: generation + 1, ..exact },
+            SetWakeAlarmResponse { due_time: Some(due(at + 1).into()), ..exact },
+        ] {
+            alarms.lock().unwrap().echo = Some(echo);
+            let before = calls().len();
+            eventually(async || calls().len() >= before + 2).await;
+            assert!(!backend.wake_handoff().await.unwrap().acknowledged);
+            assert!(!settled(&alarm, epoch).await);
+        }
+        alarms.lock().unwrap().echo = None;
+        eventually(async || settled(&alarm, epoch).await).await;
+
+        // Restored into an epoch management hasn't seen, the backend still says its alarm was acknowledged, but a new
+        // process hands it off under that epoch anyway.
+        let restored_epoch = epoch + 1;
+        assert!(backend.wake_handoff().await.unwrap().acknowledged && !settled(&restored, restored_epoch).await);
+        let handed = async {
+            eventually(async || settled(&restored, restored_epoch).await).await;
+        };
+        tokio::select! {
+            never = restored.keep_handing_off(&backend, restored_epoch, || Some(lease)) => match never {},
+            () = handed => {}
+        }
+        let last = calls().last().copied().unwrap();
+        assert_eq!((last.epoch, last.generation, last.due_time), (restored_epoch, generation, Some(due(at).into())));
+        assert_eq!(alarms.lock().unwrap().stored.epoch, restored_epoch);
+    };
+    tokio::select! {
+        never = alarm.keep_handing_off(&backend, epoch, || Some(lease)) => match never {},
         () = checks => {}
     }
 }

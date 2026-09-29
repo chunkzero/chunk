@@ -39,7 +39,6 @@ impl GatewayConfig {
 pub struct Gateway {
     running: Running,
     retarget: Option<chunk_proxy::Retarget>,
-    connections: chunk_proxy::Connections,
     address: SocketAddr,
 }
 
@@ -61,25 +60,19 @@ impl Gateway {
         .await?;
         let address = proxy.local_addr()?;
         let retarget = proxy.retarget();
-        let connections = proxy.connections();
         let stop = CancellationToken::new();
         let shutdown = stop.clone();
         let task = tokio::spawn(proxy.run(async move {
             shutdown.cancelled().await;
             Ok(())
         }));
-        Ok(Self { running: Running { stop, task }, retarget, connections, address })
+        Ok(Self { running: Running { stop, task }, retarget, address })
     }
 
     /// Where the listener accepts players.
     #[must_use]
     pub fn address(&self) -> SocketAddr {
         self.address
-    }
-
-    /// How many connections the listener holds open, players and server-list pings alike.
-    pub(crate) fn connections(&self) -> usize {
-        self.connections.open()
     }
 
     /// Sends later player connections to `target`.

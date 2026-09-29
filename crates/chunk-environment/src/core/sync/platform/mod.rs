@@ -33,6 +33,7 @@ pub(super) async fn call(
     match method {
         "prepare" => return Ok((None, prepare(service, request).await?.encode_to_vec())),
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
+        "active" => return active(service, principal, request).map(|()| (None, Vec::new())),
         _ => {}
     }
     if let Some(method) = jvm::Method::parse(method) {
@@ -90,6 +91,22 @@ async fn prepare(service: &SyncService, request: &CallRequest) -> Result<Prepare
     }
     let id = service.app.backend().allocate_action_id().await.map_err(|failure| errors::backend(&failure))?;
     Ok(PrepareResult { operation_id: format!("{}{id}", app::PREPARED) })
+}
+
+/// Records that a gateway holds connections, which keeps core from counting as idle.
+fn active(service: &SyncService, principal: &Principal, request: &CallRequest) -> Result<(), Error> {
+    if !matches!(principal.class, Class::Gateway { .. }) {
+        return Err(errors::denied("only a gateway reports that it's active"));
+    }
+    if !request.operation_id.is_empty()
+        || !request.arguments.is_empty()
+        || !request.deployment.is_empty()
+        || request.caller.is_some()
+    {
+        return Err(errors::invalid("chunk:active takes no operation ID, arguments, deployment or caller"));
+    }
+    service.app.backend().activity().touch();
+    Ok(())
 }
 
 /// The domain manifest of the deployment `request` names, or of the current release's.

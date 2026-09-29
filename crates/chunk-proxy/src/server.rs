@@ -35,7 +35,7 @@ use tokio::{
     time::{Instant, sleep_until, timeout},
 };
 
-use crate::{Config, Connections, PlatformTarget};
+use crate::{Config, PlatformTarget};
 
 struct Responses {
     status: Vec<u8>,
@@ -85,7 +85,6 @@ pub struct Proxy {
     authentication: Arc<Authentication>,
     limbo_packets: Arc<limbo::Cache>,
     platform: Option<Arc<RwLock<platform::Platform>>>,
-    connections: Connections,
 }
 
 /// Replaces the managed platform for later connections; established connections keep theirs.
@@ -132,8 +131,7 @@ impl Proxy {
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
-        let connections = Connections::default();
-        Ok(Self { listener, config, responses, authentication, limbo_packets, platform, connections })
+        Ok(Self { listener, config, responses, authentication, limbo_packets, platform })
     }
 
     /// # Errors
@@ -148,15 +146,10 @@ impl Proxy {
         self.platform.clone().map(Retarget)
     }
 
-    /// A count of the connections this proxy holds open while it runs.
-    #[must_use]
-    pub fn connections(&self) -> Connections {
-        self.connections.clone()
-    }
-
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
     /// claims other processes under this gateway's ID left open, and accepts no connection until those in its first
-    /// view of the gateway's claims are withdrawing or gone. It stops once a later process under that ID takes it over.
+    /// view of the gateway's claims are withdrawing or gone, and tells core while it holds connections, so core stays
+    /// awake for them. It stops once a later process under that ID takes it over.
     ///
     /// # Errors
     /// Returns shutdown-signal errors and replacement by a later process. Accept errors are retried with backoff.
@@ -165,9 +158,10 @@ impl Proxy {
         tokio::pin!(shutdown);
         let platform = self.retarget().as_ref().map(Retarget::platform);
         let (ready, withdrawn) = tokio::sync::oneshot::channel();
+        let connected = managed::Connected::default();
         let inherited = async {
             match &platform {
-                Some(platform) => managed::withdraw_inherited(platform, ready).await,
+                Some(platform) => managed::follow(platform, ready, &connected).await,
                 None => std::future::pending().await,
             }
         };
@@ -183,7 +177,6 @@ impl Proxy {
         let mut connections = JoinSet::new();
         let mut accept_after = Instant::now();
         let result = loop {
-            self.connections.set(connections.len());
             tokio::select! {
                 biased;
                 result = &mut shutdown => break result,
@@ -222,7 +215,7 @@ impl Proxy {
                     let current = self.retarget();
                     let platform = current.as_ref().map(Retarget::platform);
                     let trusted_edges = self.config.trusted_edges.clone();
-                    connections.spawn(async move {
+                    connections.spawn(connected.track(async move {
                         let peer = match timeout(deadline, proxy_header::player_address(&mut stream, peer, &trusted_edges)).await {
                             Ok(Ok(player)) => player,
                             Ok(Err(error)) => {
@@ -249,7 +242,7 @@ impl Proxy {
                             Ok(None) => {}
                             Err(error) => tracing::debug!(%peer, %error, "connection closed"),
                         }
-                    });
+                    }));
                 }
             }
         };

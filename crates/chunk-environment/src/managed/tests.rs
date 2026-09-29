@@ -40,6 +40,8 @@ struct Management {
     accepted: Mutex<(u64, u64)>,
     /// How long reports of deployment progress wait before management handles them.
     progress_delay: Mutex<Duration>,
+    /// How many of the next reports are refused as unavailable.
+    unavailable_reports: Mutex<u32>,
     archives: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Notified when a download of an archive whose path names it `stalled` starts. That download sends half of the
     /// archive, then nothing.
@@ -174,10 +176,16 @@ async fn handle(
             let progress = report.deployment.clone().unwrap_or_default();
             let refused = progress.state() == DeploymentState::Active
                 && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
+            let unavailable = {
+                let mut remaining = management.unavailable_reports.lock().unwrap();
+                let unavailable = *remaining > 0;
+                *remaining = remaining.saturating_sub(1);
+                unavailable
+            };
             let error = if report.lease < *management.lease.borrow() {
                 management.fencing.notify_one();
                 Some((400, FENCED))
-            } else if refused {
+            } else if refused || unavailable {
                 management.refusal.notify_one();
                 Some((503, UNAVAILABLE))
             } else {
@@ -331,6 +339,7 @@ impl Harness {
             reports,
             accepted: Mutex::default(),
             progress_delay: Mutex::default(),
+            unavailable_reports: Mutex::default(),
             archives: Mutex::default(),
             stalled: Notify::new(),
             refused: Mutex::default(),

@@ -33,13 +33,16 @@ const ATTACH_IDLE: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a deployment failed, as reported, is cut to this many bytes.
 const MAX_MESSAGE_BYTES: usize = 1024;
+/// The shortest idle period after which core may report that management may suspend it.
+pub(crate) const MIN_SUSPEND_AFTER: Duration = Duration::from_secs(10);
 
 pub struct ManagementConfig {
     /// The management service's base URL.
     pub url: String,
     /// The environment's bearer token.
     pub token: String,
-    /// How long core stays idle before it reports that management may suspend it; unset, it never does.
+    /// How long core stays idle before it reports that management may suspend it; unset, it never does. At least
+    /// [`MIN_SUSPEND_AFTER`], well past the second between a gateway's reports that it holds connections.
     pub suspend_after: Option<Duration>,
 }
 
@@ -475,24 +478,27 @@ impl<'a> Managed<'a> {
     }
 
     /// Whether management may suspend core under desired `revision`: nothing has been active for the grace period, the
-    /// log is flushed and the wake alarm is handed off with no job due within the grace period. Active means a
-    /// connection to the gateway, an open claim or a launching host in control, a running job, or a deployment loading
-    /// or not yet accepted. What can't be read counts as active.
+    /// log is flushed and the wake alarm is handed off with no job due within the grace period. Active means backend
+    /// work running, starting or finishing (actions, hooks, commands and jobs), a gateway reporting connections, an open
+    /// claim or a launching host in control, a claimed job, or a deployment loading or not yet accepted. What can't be
+    /// read counts as active.
     async fn ready_to_suspend(&self, revision: u64) -> bool {
         if !self.idle.sleeps() {
             return false;
         }
-        let handoff = match self.core.backend() {
+        let backend = self.core.backend();
+        let handoff = match &backend {
             Some(backend) => backend.wake_handoff().await.ok(),
             None => None,
         };
+        let work = backend.as_ref().map(|backend| backend.activity().observe());
         let in_use = self.core.control().and_then(|control| control.in_use().map_err(io::Error::other));
         let deploying = {
             let deployments = lock(&self.deployments);
             deployments.loading.is_some() || deployments.unacknowledged.is_some()
         };
         let active = deploying
-            || self.gateway.get().is_some_and(|gateway| gateway.connections() > 0)
+            || work.is_none_or(|work| work.in_flight > 0)
             || !matches!(in_use, Ok(false))
             || handoff.as_ref().is_none_or(|handoff| handoff.running > 0);
         let handed = match (self.core.epoch(), &handoff) {
@@ -501,6 +507,7 @@ impl<'a> Managed<'a> {
         };
         let observed = idle::Observation {
             active,
+            changes: work.map_or(0, |work| work.changes),
             settled: handed && self.core.flushed(),
             due_at: handoff.and_then(|handoff| handoff.due_at),
         };

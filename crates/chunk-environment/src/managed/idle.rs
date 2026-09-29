@@ -9,14 +9,23 @@ use tokio::time::Instant;
 pub(super) struct Idle {
     /// How long core stays idle before it may be suspended; unset, it never may.
     grace: Option<Duration>,
-    /// The desired revision core last observed, and since when nothing was active under it.
-    since: Mutex<Option<(u64, Instant)>>,
+    /// Since when nothing was active under the latest observation's desired revision.
+    since: Mutex<Option<Since>>,
+}
+
+struct Since {
+    revision: u64,
+    /// The activity count then.
+    changes: u64,
+    at: Instant,
 }
 
 /// What core observed that decides whether it may be suspended.
 pub(super) struct Observation {
-    /// Players are online or on their way, a host is launching, a job runs or a deployment is unfinished.
+    /// Work is running, players are online or on their way, a host is launching or a deployment is unfinished.
     pub active: bool,
+    /// Moves whenever work starts or finishes, so work that came and went since the last observation is seen.
+    pub changes: u64,
     /// The log is flushed and the wake alarm handed off.
     pub settled: bool,
     /// When the next job is due, in Unix milliseconds.
@@ -35,17 +44,19 @@ impl Idle {
 
     /// Records `observed` under desired `revision` and returns whether core may be suspended: nothing was active for
     /// the grace period under this revision, the observation is settled, and no job is due within the grace period.
-    /// Activity, or a newer revision such as a wake brings, starts the grace period over. An observation under an
-    /// older revision is never ready.
+    /// Activity, including work that started or finished since the last observation, or a newer revision such as a
+    /// wake brings, starts the grace period over. An observation under an older revision is never ready.
     pub(super) fn ready(&self, revision: u64, observed: &Observation) -> bool {
         let Some(grace) = self.grace else { return false };
         let now = Instant::now();
         let mut since = self.since.lock().unwrap_or_else(PoisonError::into_inner);
-        let idle = match *since {
-            Some((latest, _)) if revision < latest => return false,
-            Some((latest, idle)) if revision == latest && !observed.active => idle,
+        let idle = match &*since {
+            Some(latest) if revision < latest.revision => return false,
+            Some(latest) if revision == latest.revision && !observed.active && observed.changes == latest.changes => {
+                latest.at
+            }
             _ => {
-                *since = Some((revision, now));
+                *since = Some(Since { revision, changes: observed.changes, at: now });
                 now
             }
         };
@@ -65,7 +76,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn activity_a_new_revision_and_a_due_job_hold_core_awake() {
         let idle = Idle::new(Some(Duration::from_secs(60)));
-        let quiet = Observation { active: false, settled: true, due_at: None };
+        let quiet = Observation { active: false, changes: 0, settled: true, due_at: None };
         assert!(!idle.ready(1, &quiet));
         tokio::time::advance(Duration::from_secs(59)).await;
         assert!(!idle.ready(1, &quiet));
@@ -84,6 +95,15 @@ mod tests {
         assert!(!idle.ready(1, &quiet));
         tokio::time::advance(Duration::from_secs(60)).await;
         assert!(idle.ready(1, &quiet));
+
+        // Work that started and finished between two observations starts it over too.
+        let after_burst = Observation { changes: 2, ..quiet };
+        assert!(!idle.ready(1, &after_burst));
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(!idle.ready(1, &after_burst));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(idle.ready(1, &after_burst));
+        let quiet = after_burst;
 
         // A wake's revision starts the grace period over, and an older revision's observation is never ready.
         assert!(!idle.ready(2, &quiet));

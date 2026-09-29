@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 pub(super) const INTERVAL: Duration = Duration::from_secs(15);
 /// How often core looks for a change to report at once.
 pub(super) const OBSERVE: Duration = Duration::from_secs(1);
+/// The longest wait before a failed report is sent again.
+const RETRY_LIMIT: Duration = Duration::from_secs(4);
 
 /// What a report says besides deployment progress.
 #[derive(Clone, Default)]
@@ -41,14 +43,43 @@ pub(super) struct Reporter {
     stopping: CancellationToken,
 }
 
-/// The latest report.
+/// The reports under one lease.
 #[derive(Default)]
 struct Sent {
     lease: u64,
     sequence: u64,
+    /// The latest report management accepted.
+    accepted: Option<Accepted>,
+    /// Set once a report fails, whose outcome management may or may not have applied, until one is accepted.
+    failed: Option<Failed>,
+}
+
+struct Accepted {
     gateway_addresses: Vec<String>,
     ready_to_suspend: bool,
-    at: Option<Instant>,
+    /// When it was sent.
+    at: Instant,
+}
+
+struct Failed {
+    /// Failures in a row.
+    count: u32,
+    retry_at: Instant,
+}
+
+impl Sent {
+    /// Whether `observed` is to be reported now: once a failed report's retry is due, and otherwise once it differs from
+    /// the accepted report or that one is [`INTERVAL`] old.
+    fn due(&self, observed: &Observed) -> bool {
+        if let Some(failed) = &self.failed {
+            return Instant::now() >= failed.retry_at;
+        }
+        self.accepted.as_ref().is_none_or(|accepted| {
+            accepted.gateway_addresses != observed.gateway_addresses
+                || accepted.ready_to_suspend != observed.ready_to_suspend
+                || accepted.at.elapsed() >= INTERVAL
+        })
+    }
 }
 
 impl Reporter {
@@ -71,9 +102,6 @@ impl Reporter {
             *sent = Sent { lease: observed.lease, ..Sent::default() };
         }
         sent.sequence += 1;
-        sent.gateway_addresses.clone_from(&observed.gateway_addresses);
-        sent.ready_to_suspend = observed.ready_to_suspend;
-        sent.at = Some(Instant::now());
         let request = v1::ReportStatusRequest {
             observe_time: Some(SystemTime::now().into()),
             gateway_addresses: observed.gateway_addresses,
@@ -85,13 +113,26 @@ impl Reporter {
             sequence: sent.sequence,
             desired_revision: observed.revision,
         };
-        deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
-        Ok(true)
+        let sent_at = Instant::now();
+        let result = deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await;
+        if observed.lease == sent.lease {
+            if result.is_ok() {
+                let v1::ReportStatusRequest { gateway_addresses, ready_to_suspend, .. } = request;
+                sent.accepted = Some(Accepted { gateway_addresses, ready_to_suspend, at: sent_at });
+                sent.failed = None;
+            } else {
+                let count = sent.failed.as_ref().map_or(1, |failed| failed.count.saturating_add(1));
+                let wait = OBSERVE.saturating_mul(2_u32.saturating_pow(count - 1)).min(RETRY_LIMIT);
+                sent.failed = Some(Failed { count, retry_at: sent_at + wait });
+            }
+        }
+        result.map(|_| true)
     }
 
     /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
-    /// to suspend differ from the latest report's. `observe` finds nothing while core must not report. Returns once
-    /// management fences a lease `superseded` says another core superseded.
+    /// to suspend differ from the latest report management accepted. After a failed report, whose outcome is unknown,
+    /// it reports again after a backoff of one to four seconds until one is accepted. `observe` finds nothing while core
+    /// must not report. Returns once management fences a lease `superseded` says another core superseded.
     pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F, superseded: impl Fn(u64) -> bool) -> io::Error
     where
         F: Future<Output = Option<Observed>>,
@@ -101,13 +142,7 @@ impl Reporter {
         loop {
             tick.tick().await;
             let Some(observed) = observe().await else { continue };
-            let due = {
-                let sent = self.sent.lock().await;
-                sent.gateway_addresses != observed.gateway_addresses
-                    || sent.ready_to_suspend != observed.ready_to_suspend
-                    || sent.at.is_none_or(|at| at.elapsed() >= INTERVAL)
-            };
-            if !due {
+            if !self.sent.lock().await.due(&observed) {
                 continue;
             }
             let lease = observed.lease;

@@ -76,11 +76,13 @@ impl Config {
         }
         let state: std::path::PathBuf = required("CHUNK_STATE")?;
         let management = match optional("CHUNK_MANAGEMENT_URL")? {
-            Some(url) => Some(ManagementConfig {
-                url,
-                token: required("CHUNK_ENVIRONMENT_TOKEN")?,
-                suspend_after: optional("CHUNK_SUSPEND_AFTER_SECONDS")?.map(Duration::from_secs),
-            }),
+            Some(url) => {
+                let suspend_after = optional("CHUNK_SUSPEND_AFTER_SECONDS")?.map(Duration::from_secs);
+                if suspend_after.is_some_and(|after| after < managed::MIN_SUSPEND_AFTER) {
+                    return Err(io::Error::other("CHUNK_SUSPEND_AFTER_SECONDS must be at least 10"));
+                }
+                Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")?, suspend_after })
+            }
             None => None,
         };
         let core = CoreConfig {

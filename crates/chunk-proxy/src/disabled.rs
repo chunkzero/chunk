@@ -41,11 +41,6 @@ impl Proxy {
         match *self {}
     }
 
-    #[must_use]
-    pub fn connections(&self) -> crate::Connections {
-        match *self {}
-    }
-
     /// # Errors
     /// Unreachable: a proxy cannot be constructed without a version.
     pub fn run(self, _: impl Future<Output = io::Result<()>>) -> Ready<io::Result<()>> {

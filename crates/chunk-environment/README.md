@@ -22,7 +22,7 @@ It reads these variables:
 | `CHUNK_ENVIRONMENT_ID`        | required                                | The environment ID; `CHUNK_ENVIRONMENT` is accepted too.                           |
 | `CHUNK_MANAGEMENT_URL`        | unset                                   | The management service that deploys the environment.                               |
 | `CHUNK_ENVIRONMENT_TOKEN`     | required with `CHUNK_MANAGEMENT_URL`    | The environment's bearer token for the management service.                         |
-| `CHUNK_SUSPEND_AFTER_SECONDS` | unset                                   | How long an idle core waits before it reports it may be suspended; never if unset. |
+| `CHUNK_SUSPEND_AFTER_SECONDS` | unset                                   | Seconds idle, 10 or more, before core reports it may be suspended; never if unset. |
 | `CHUNK_BUNDLE`                | required without `CHUNK_MANAGEMENT_URL` | The backend deployment (a `chunk_contract::Deployment` as JSON) served first.      |
 | `CHUNK_STATE`                 | `/data`                                 | The store, control's files, and the `control.json` record.                         |
 | `CHUNK_CORE_ENDPOINT`         | required for `gateway` alone            | Core's network endpoint, `http://<private address>:<port>`.                        |
@@ -64,10 +64,14 @@ behind. Retiring stops a version's JVMs, then releases it. An unpacked release i
 may run its JVMs and no load uses it, and unfinished downloads and unpacks are removed at startup.
 
 Core reports its status about every 15 seconds and at once when it changes. With `CHUNK_SUSPEND_AFTER_SECONDS`, it
-reports `ready_to_suspend` once nothing was active for that long under the latest desired revision: no connection to the
-gateway, no open claim or launching host in control, no running job, and no deployment loading or awaiting acceptance.
+reports `ready_to_suspend` once nothing was active for that long under the latest desired revision: no action, hook,
+command or job running, started or finished in the backend, no gateway reporting connections, no open claim or launching
+host in control, and no deployment loading or awaiting acceptance. Every gateway, on this machine or its own, calls
+`chunk:active` each second while it holds any connection, server-list pings and logins still authenticating included.
 The log must also be flushed to object storage when it replicates, the wake alarm handed off, and no job due within the
-grace period. Any activity, or a new revision such as a wake brings, ends it at once and starts the grace period over.
+grace period. Any activity, even work that came and went between two looks, or a new revision such as a wake brings,
+ends it at once and starts the grace period over. A report management didn't accept is sent again within one to four
+seconds until one is.
 Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to the backend only once
 management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again and retried.
 
