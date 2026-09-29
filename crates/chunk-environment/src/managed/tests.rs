@@ -333,6 +333,10 @@ impl Harness {
         self.management.deploy(deployment, release);
     }
 
+    fn management_config(&self) -> ManagementConfig {
+        ManagementConfig { url: self.url.clone(), token: "secret".into() }
+    }
+
     fn state(&self) -> std::path::PathBuf {
         self.directory.path().join("state")
     }
@@ -391,20 +395,33 @@ impl Harness {
         &self,
         release_bound: Duration,
     ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let gateway = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
-        let management = ManagementConfig { url: self.url.clone(), token: "secret".into() };
+        self.start_with(GatewayConfig::new("127.0.0.1:0".parse().unwrap()), release_bound)
+    }
+
+    fn start_with(
+        &self,
+        gateway: GatewayConfig,
+        release_bound: Duration,
+    ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
         let stop = CancellationToken::new();
-        let running = crate::run_core(self.core(), Some(gateway), Some(management), stop.clone(), release_bound);
+        let management = Some(self.management_config());
+        let running = crate::run_core(self.core(), Some(gateway), management, stop.clone(), release_bound);
         (stop, tokio::spawn(running))
     }
 
-    /// The next report, which must be under the latest lease.
-    async fn expect(&mut self, revision: u64, deployment: &str, state: DeploymentState) -> (u64, DeploymentProgress) {
-        let report = tokio::time::timeout(Duration::from_secs(60), self.reported.recv()).await.unwrap().unwrap();
+    /// The next report of deployment progress, which must be under the latest lease. Reports without progress are
+    /// skipped.
+    async fn expect(&mut self, revision: u64, deployment: &str, state: DeploymentState) -> ReportStatusRequest {
+        let report = loop {
+            let report = tokio::time::timeout(Duration::from_secs(60), self.reported.recv()).await.unwrap().unwrap();
+            if report.deployment.is_some() {
+                break report;
+            }
+        };
         assert_eq!((report.lease, report.desired_revision), (*self.management.lease.borrow(), revision));
-        let progress = report.deployment.unwrap();
+        let progress = report.deployment.as_ref().unwrap();
         assert_eq!((progress.deployment_id.as_str(), progress.state()), (deployment, state));
-        (report.sequence, progress)
+        report
     }
 
     /// Waits until management refuses an ACTIVE report.
@@ -432,8 +449,8 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     let mut harness = Harness::new().await;
     harness.deploy("dep_a", harness.valid());
     let (stop, running) = harness.start();
-    let (first, _) = harness.expect(1, "dep_a", DeploymentState::InProgress).await;
-    let (second, _) = harness.expect(1, "dep_a", DeploymentState::Active).await;
+    let first = harness.expect(1, "dep_a", DeploymentState::InProgress).await.sequence;
+    let second = harness.expect(1, "dep_a", DeploymentState::Active).await.sequence;
     assert!(first < second);
     let kept = fs::read(harness.archive(&harness.release.0)).unwrap();
     assert_eq!(Sha256::digest(&kept), Sha256::digest(&harness.release.1));
@@ -451,7 +468,7 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     // Attached again, the core reports dep_b before it starts on dep_c.
     harness.expect(3, "dep_b", DeploymentState::Active).await;
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
-    let (_, DeploymentProgress { message, .. }) = harness.expect(3, "dep_c", DeploymentState::Failed).await;
+    let message = harness.expect(3, "dep_c", DeploymentState::Failed).await.deployment.unwrap().message;
     assert!(
         message.starts_with("release rejected fails verification") && message.len() <= super::MAX_MESSAGE_BYTES,
         "{message}"
@@ -624,3 +641,4 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
 
 mod launcher;
 mod runner_image;
+mod status;

@@ -71,6 +71,7 @@ pub struct Core {
     issuer: Option<sync::Issuer>,
     /// The archives of the releases loaded from management.
     archives: Arc<Archives>,
+    private_address: Option<IpAddr>,
 }
 
 impl Core {
@@ -104,7 +105,7 @@ impl Core {
         if let Some(address) = config.private_address.filter(|address| !chunk_service::net::private(*address)) {
             return Err(io::Error::other(format!("{address} is not a private address")));
         }
-        let mut core = self;
+        let mut core = Self { private_address: config.private_address, ..self };
         let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
@@ -285,6 +286,11 @@ impl Core {
     /// Reports a stopped backend.
     pub fn epoch(&self) -> io::Result<u64> {
         Ok(self.system()?.epoch().0)
+    }
+
+    /// This machine's configured address on the environment's private network.
+    pub(crate) fn private_address(&self) -> Option<IpAddr> {
+        self.private_address
     }
 
     fn authority(&self) -> io::Result<&chunk_control::server::Ready> {

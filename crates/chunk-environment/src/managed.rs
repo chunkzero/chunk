@@ -4,6 +4,7 @@ mod activation;
 mod launcher;
 mod release;
 mod retire;
+mod status;
 
 use crate::{Core, Gateway, GatewayConfig};
 use activation::Activation;
@@ -11,12 +12,10 @@ use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
 use std::{
     io,
+    net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Mutex, MutexGuard, OnceLock, PoisonError},
     time::Duration,
 };
 use tokio::sync::watch;
@@ -37,12 +36,13 @@ pub struct ManagementConfig {
 }
 
 impl ManagementConfig {
-    pub(crate) fn client(self) -> Client {
-        Client::new(self.url).with_token(self.token)
+    pub(crate) fn client(&self) -> Client {
+        Client::new(&self.url).with_token(&self.token)
     }
 }
 
-/// Core's attachment to the management service: it follows the desired state and reports deployment progress.
+/// Core's attachment to the management service: it follows the desired state and reports its status, including
+/// deployment progress.
 pub(crate) struct Managed<'a> {
     client: Client,
     /// Where core's hold on the environment is published, for the launcher's calls.
@@ -58,15 +58,18 @@ pub(crate) struct Managed<'a> {
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
-    /// The sequence of the latest report under the current lease.
-    sequence: AtomicU64,
-    /// Cancelled once core shuts down. From then on no deployment activates and no gateway starts, while attaches
-    /// still publish their leases.
+    reporter: status::Reporter,
+    /// Where edges reach the gateway.
+    private_address: status::PrivateAddress,
+    /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
+    /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
 }
 
 #[derive(Default)]
 struct Deployments {
+    /// The revision of the latest desired state this process received.
+    revision: u64,
     /// The deployment of the latest desired state this process received; unset until the first one arrives.
     desired: Option<String>,
     /// The deployment players are routed to.
@@ -128,7 +131,7 @@ impl Drop for Work<'_> {
 
 impl<'a> Managed<'a> {
     pub(crate) fn new(
-        client: Client,
+        management: &ManagementConfig,
         lease: watch::Sender<Lease>,
         environment: String,
         state: &Path,
@@ -136,7 +139,10 @@ impl<'a> Managed<'a> {
         gateway: &'a OnceLock<Gateway>,
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
+        let client = management.client();
         Self {
+            reporter: status::Reporter::new(client.clone()),
+            private_address: status::PrivateAddress::new(core.private_address(), &management.url),
             client,
             lease,
             instance_id: uuid::Uuid::new_v4().to_string(),
@@ -147,7 +153,6 @@ impl<'a> Managed<'a> {
             gateway,
             gateway_config,
             deployments: Mutex::default(),
-            sequence: AtomicU64::new(0),
             stopping: CancellationToken::new(),
         }
     }
@@ -158,7 +163,7 @@ impl<'a> Managed<'a> {
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
-    /// Meanwhile, it retires the deployments it no longer serves.
+    /// Meanwhile, it retires the deployments it no longer serves and reports its status.
     pub(crate) async fn run(self) -> io::Error {
         if let Err(error) = self.recover() {
             return error;
@@ -176,6 +181,7 @@ impl<'a> Managed<'a> {
         tokio::select! {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
+            never = self.reporter.keep_reporting(|| self.current()) => match never {},
         }
     }
 
@@ -216,7 +222,6 @@ impl<'a> Managed<'a> {
             epoch: self.core.epoch().map_err(Interrupted::Fatal)?,
         };
         let mut stream = deadline(REQUEST_TIMEOUT, self.client.attach(&request)).await?;
-        self.sequence.store(0, Ordering::Relaxed);
         let (mut latest, mut applied, mut work) = (None::<v1::AttachResponse>, None, None::<Work>);
         loop {
             if work.is_none()
@@ -237,7 +242,11 @@ impl<'a> Managed<'a> {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
                     self.lease.send_replace(Lease::Held(desired.lease));
-                    lock(&self.deployments).desired = Some(desired.deployment_id.clone());
+                    {
+                        let mut deployments = lock(&self.deployments);
+                        deployments.revision = desired.revision;
+                        deployments.desired = Some(desired.deployment_id.clone());
+                    }
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
                     }
@@ -379,15 +388,8 @@ impl<'a> Managed<'a> {
             .as_ref()
             .filter(|progress| progress.state() == v1::DeploymentState::Active)
             .map(|progress| progress.deployment_id.clone());
-        let request = v1::ReportStatusRequest {
-            observe_time: Some(std::time::SystemTime::now().into()),
-            deployment,
-            lease: desired.lease,
-            sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
-            desired_revision: desired.revision,
-            ..Default::default()
-        };
-        deadline(REQUEST_TIMEOUT, self.client.report_status(&request)).await?;
+        let observed = self.observe(desired.lease, desired.revision).await;
+        self.reporter.send(observed, deployment).await?;
         let mut deployments = lock(&self.deployments);
         if let Some(active) = active
             && deployments.unacknowledged.as_ref().is_some_and(|pending| pending.activated == active)
@@ -398,6 +400,37 @@ impl<'a> Managed<'a> {
             deployments.unacknowledged = None;
         }
         Ok(())
+    }
+
+    /// What to report periodically under the latest attach's lease, unless core is stopping or was superseded.
+    async fn current(&self) -> Option<status::Observed> {
+        if self.stopping.is_cancelled() {
+            return None;
+        }
+        let Lease::Held(lease) = *self.lease.borrow() else { return None };
+        let revision = lock(&self.deployments).revision;
+        Some(self.observe(lease, revision).await)
+    }
+
+    /// Core's status under `lease` and `revision`. A gateway bound to every interface is reported at the machine's
+    /// private address.
+    async fn observe(&self, lease: u64, revision: u64) -> status::Observed {
+        let mut gateway_addresses = Vec::new();
+        if let Some(gateway) = self.gateway.get() {
+            let bound = gateway.address();
+            let address =
+                if bound.ip().is_unspecified() { self.private_address.find().await } else { Some(bound.ip()) };
+            gateway_addresses.extend(address.map(|address| SocketAddr::new(address, bound.port()).to_string()));
+        }
+        let online_players =
+            match self.core.control().and_then(|control| control.online_players().map_err(io::Error::other)) {
+                Ok(online) => u32::try_from(online).unwrap_or(u32::MAX),
+                Err(error) => {
+                    tracing::warn!(%error, "online players unknown");
+                    0
+                }
+            };
+        status::Observed { lease, revision, gateway_addresses, online_players }
     }
 }
 

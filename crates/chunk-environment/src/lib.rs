@@ -122,9 +122,9 @@ async fn run_core(
     let environment = config.environment.clone();
     let state = config.state.clone();
     let management = management.map(|management| {
-        let (client, lease) = (management.client(), watch::Sender::new(managed::Lease::Waiting));
-        let launcher = Arc::new(managed::ManagementLauncher::new(client.clone(), lease.subscribe()));
-        (client, lease, launcher)
+        let lease = watch::Sender::new(managed::Lease::Waiting);
+        let launcher = Arc::new(managed::ManagementLauncher::new(management.client(), lease.subscribe()));
+        (management, lease, launcher)
     });
     let launcher = management.as_ref().map(|(_, _, launcher)| launcher.clone());
     let core = match &launcher {
@@ -132,8 +132,8 @@ async fn run_core(
         None => Core::start(config, || {}).await?,
     };
     let gateway = OnceLock::new();
-    let managed = if let Some((client, lease, _)) = management {
-        Some(managed::Managed::new(client, lease, environment, &state, &core, &gateway, gateway_config))
+    let managed = if let Some((management, lease, _)) = management {
+        Some(managed::Managed::new(&management, lease, environment, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {
             let started = match core.target() {
