@@ -20,6 +20,15 @@ use crate::{
 };
 
 impl Control {
+    /// How many players hold a current claim, as the `players` topic lists them.
+    /// # Errors
+    /// Reports unreadable control state.
+    pub fn online_players(&self) -> Result<usize> {
+        let state = self.state()?;
+        let online = state.players.values().filter_map(|player| player.current.as_ref());
+        Ok(online.filter(|operation| state.claims.contains_key(*operation)).count())
+    }
+
     /// Queues a move of `arguments`' player under the operator's `operation`, which becomes the destination claim's
     /// operation ID. A retry queues nothing more.
     /// # Errors

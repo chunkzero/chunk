@@ -148,7 +148,7 @@ fn spec() -> LaunchSpec {
 }
 
 fn client(harness: &Harness) -> chunk_management::Client {
-    ManagementConfig { url: harness.url.clone(), token: "secret".into() }.client()
+    harness.management_config().client()
 }
 
 /// A launcher whose calls carry `lease`, and the cell it reads that from.
@@ -295,7 +295,8 @@ async fn a_launch_waits_for_the_first_attach_and_a_release_keeps_its_lease_after
 
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let gateway = OnceLock::new();
-    let managed = Managed::new(client(&harness), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed =
+        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
     let ready = async {
         harness.management.ensured(1).await;
         harness.management.provision("host-1", CapacityState::Ready, "");
@@ -360,5 +361,5 @@ async fn shutdown_leaves_unconfirmed_releases_to_management_once_bounded_and_act
     harness.deploy("dep_b", harness.valid());
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
     assert_eq!(harness.management.state("remote-1"), CapacityState::Releasing);
-    assert!(harness.reported.try_recv().is_err());
+    assert!(std::iter::from_fn(|| harness.reported.try_recv().ok()).all(|report| report.deployment.is_none()));
 }

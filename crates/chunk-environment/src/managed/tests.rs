@@ -30,7 +30,16 @@ struct Management {
     desired: watch::Sender<AttachResponse>,
     /// The lease of the latest core attach, which fences every core attached before it.
     lease: watch::Sender<u64>,
+    /// While set, attach streams deliver nothing, not even a fence, though each new attach still takes a lease.
+    attach_held: watch::Sender<bool>,
+    /// Notified when management fences a report.
+    fencing: Notify,
+    /// The reports management applied.
     reports: mpsc::UnboundedSender<ReportStatusRequest>,
+    /// The lease and sequence of the latest applied report. A report that isn't later is ignored.
+    accepted: Mutex<(u64, u64)>,
+    /// How long reports of deployment progress wait before management handles them.
+    progress_delay: Mutex<Duration>,
     archives: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Notified when a download of an archive whose path names it `stalled` starts. That download sends half of the
     /// archive, then nothing.
@@ -134,8 +143,10 @@ async fn handle(
             management.lease.send_modify(|lease| *lease += 1);
             let lease = *management.lease.borrow();
             let (mut desired, mut leases) = (management.desired.subscribe(), management.lease.subscribe());
+            let mut held = management.attach_held.subscribe();
             tokio::spawn(async move {
                 loop {
+                    _ = held.wait_for(|held| !*held).await;
                     let message = AttachResponse { lease, ..desired.borrow_and_update().clone() };
                     if sender.send(Ok(Frame::data(envelope(0, &message.encode_to_vec())))).await.is_err() {
                         return;
@@ -143,6 +154,7 @@ async fn handle(
                     tokio::select! {
                         changed = desired.changed() => if changed.is_err() { return },
                         _ = async { leases.wait_for(|latest| *latest > lease).await.map(|_| ()) } => {
+                            _ = held.wait_for(|held| !*held).await;
                             let end = format!(r#"{{"error":{FENCED}}}"#);
                             _ = sender.send(Ok(Frame::data(envelope(2, end.as_bytes())))).await;
                             return;
@@ -154,17 +166,26 @@ async fn handle(
         }
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             let report = ReportStatusRequest::decode(body).unwrap();
+            let delay = *management.progress_delay.lock().unwrap();
+            if report.deployment.is_some() && !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let progress = report.deployment.clone().unwrap_or_default();
             let refused = progress.state() == DeploymentState::Active
                 && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
             let error = if report.lease < *management.lease.borrow() {
+                management.fencing.notify_one();
                 Some((400, FENCED))
             } else if refused {
                 management.refusal.notify_one();
                 Some((503, UNAVAILABLE))
             } else {
-                management.record(&progress);
-                management.reports.send(report).unwrap();
+                let mut accepted = management.accepted.lock().unwrap();
+                if (report.lease, report.sequence) > *accepted {
+                    *accepted = (report.lease, report.sequence);
+                    management.record(&progress);
+                    management.reports.send(report).unwrap();
+                }
                 None
             };
             match error {
@@ -303,7 +324,11 @@ impl Harness {
             records: Mutex::default(),
             desired: watch::Sender::new(AttachResponse::default()),
             lease: watch::Sender::new(0),
+            attach_held: watch::Sender::new(false),
+            fencing: Notify::new(),
             reports,
+            accepted: Mutex::default(),
+            progress_delay: Mutex::default(),
             archives: Mutex::default(),
             stalled: Notify::new(),
             refused: Mutex::default(),
@@ -331,6 +356,10 @@ impl Harness {
 
     fn deploy(&self, deployment: &str, release: ReleaseArtifact) {
         self.management.deploy(deployment, release);
+    }
+
+    fn management_config(&self) -> ManagementConfig {
+        ManagementConfig { url: self.url.clone(), token: "secret".into() }
     }
 
     fn state(&self) -> std::path::PathBuf {
@@ -391,20 +420,33 @@ impl Harness {
         &self,
         release_bound: Duration,
     ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let gateway = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
-        let management = ManagementConfig { url: self.url.clone(), token: "secret".into() };
+        self.start_with(GatewayConfig::new("127.0.0.1:0".parse().unwrap()), release_bound)
+    }
+
+    fn start_with(
+        &self,
+        gateway: GatewayConfig,
+        release_bound: Duration,
+    ) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
         let stop = CancellationToken::new();
-        let running = crate::run_core(self.core(), Some(gateway), Some(management), stop.clone(), release_bound);
+        let management = Some(self.management_config());
+        let running = crate::run_core(self.core(), Some(gateway), management, stop.clone(), release_bound);
         (stop, tokio::spawn(running))
     }
 
-    /// The next report, which must be under the latest lease.
-    async fn expect(&mut self, revision: u64, deployment: &str, state: DeploymentState) -> (u64, DeploymentProgress) {
-        let report = tokio::time::timeout(Duration::from_secs(60), self.reported.recv()).await.unwrap().unwrap();
+    /// The next report of deployment progress, which must be under the latest lease. Reports without progress are
+    /// skipped.
+    async fn expect(&mut self, revision: u64, deployment: &str, state: DeploymentState) -> ReportStatusRequest {
+        let report = loop {
+            let report = tokio::time::timeout(Duration::from_secs(60), self.reported.recv()).await.unwrap().unwrap();
+            if report.deployment.is_some() {
+                break report;
+            }
+        };
         assert_eq!((report.lease, report.desired_revision), (*self.management.lease.borrow(), revision));
-        let progress = report.deployment.unwrap();
+        let progress = report.deployment.as_ref().unwrap();
         assert_eq!((progress.deployment_id.as_str(), progress.state()), (deployment, state));
-        (report.sequence, progress)
+        report
     }
 
     /// Waits until management refuses an ACTIVE report.
@@ -432,8 +474,8 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     let mut harness = Harness::new().await;
     harness.deploy("dep_a", harness.valid());
     let (stop, running) = harness.start();
-    let (first, _) = harness.expect(1, "dep_a", DeploymentState::InProgress).await;
-    let (second, _) = harness.expect(1, "dep_a", DeploymentState::Active).await;
+    let first = harness.expect(1, "dep_a", DeploymentState::InProgress).await.sequence;
+    let second = harness.expect(1, "dep_a", DeploymentState::Active).await.sequence;
     assert!(first < second);
     let kept = fs::read(harness.archive(&harness.release.0)).unwrap();
     assert_eq!(Sha256::digest(&kept), Sha256::digest(&harness.release.1));
@@ -451,7 +493,7 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     // Attached again, the core reports dep_b before it starts on dep_c.
     harness.expect(3, "dep_b", DeploymentState::Active).await;
     harness.expect(3, "dep_c", DeploymentState::InProgress).await;
-    let (_, DeploymentProgress { message, .. }) = harness.expect(3, "dep_c", DeploymentState::Failed).await;
+    let message = harness.expect(3, "dep_c", DeploymentState::Failed).await.deployment.unwrap().message;
     assert!(
         message.starts_with("release rejected fails verification") && message.len() <= super::MAX_MESSAGE_BYTES,
         "{message}"
@@ -624,3 +666,4 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
 
 mod launcher;
 mod runner_image;
+mod status;

@@ -33,6 +33,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = "0.14.6"
 tracing = "0.1"
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
