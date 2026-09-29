@@ -114,7 +114,8 @@ var playerBackend =
 ```
 
 Mutations need an `OperationId`. `scope.operationId(player, "coin-" + sequence)` gives one that stays the same for that
-action during the player's current delivery; retry an uncertain mutation with the same ID and arguments.
+action during the player's current delivery; retry an uncertain mutation with the same ID and arguments, within the 24
+hours the backend retains its outcome.
 
 ## Components
 

@@ -8,10 +8,13 @@ lives in `jvm/backend-client-kotlin`.
 
 Sessions get their `BackendSession` from `scope.getBackend()` (see the
 [Minestom runtime](../runtime-minestom/README.md)) and wrap it in the generated `BackendClient`, which follows the
-backend's function paths:
+backend's function paths. Functions that read `caller.player` need a child session that names the player, owned by the
+scope for as long as the player stays:
 
 ```java
-var backend = new BackendClient(scope.getBackend());
+var backend =
+        new BackendClient(
+                scope.own(player, scope.getBackend().forPlayer(new PlayerId(player.getUuid().toString()))));
 CompletableFuture<StatsResult> stats = backend.shared().players().stats();
 backend.shared().players().coin(scope.operationId(player, "coin-1"));
 AutoCloseable watch = backend.shared().players().watchStats(state -> { ... });
@@ -25,8 +28,9 @@ AutoCloseable watch = backend.shared().players().watchStats(state -> { ... });
 - Queries and mutations return a `CompletableFuture`. Functions whose arguments are an empty object also have
   argument-free overloads.
 - Mutations take an `OperationId`. Keep it with the request and reuse it with the same arguments to retry after an
-  unknown outcome; the backend applies an operation once. Calls never retry by themselves, and cancelling the future or
-  losing the reply does not mean the mutation failed.
+  unknown outcome. The backend applies an operation once while it retains the outcome, 24 hours by default, so retry
+  within that window. Calls never retry by themselves, and cancelling the future or losing the reply does not mean the
+  mutation failed.
 - Errors complete the future with a `StatusRuntimeException` carrying the matching gRPC code.
 - `forPlayer(playerId)` returns a child `BackendSession` that names that player as the caller. Closing a session cancels
   its calls, watches and player children; closing a child affects only the child.

@@ -60,7 +60,8 @@ just players --player <uuid> drain --timeout-seconds 60
 
 Moves keep the player's connection. Drain stops placing players on the player's current JVM, moves its players
 elsewhere, and stops it once empty or at the deadline. Each command prints an operation ID; pass it back with
-`--operation <id>` to retry a command whose outcome is unknown.
+`--operation <id>` to retry a command whose outcome is unknown. Retry promptly: a finished move is remembered for five
+minutes, and a later retry can move the player again.
 `target/debug/chunk nodes --control-file examples/local/.chunk/local/control.json list` shows each JVM with its health.
 
 ## Changing it

@@ -136,6 +136,12 @@ public final class Lobby implements LobbySessionProviders.Default {
 
     public static final class GreetingSession extends Session
             implements SessionMethods.Lobby.Default.Announce {
+        private final String greeting;
+
+        public GreetingSession(String greeting) {
+            this.greeting = greeting;
+        }
+
         @Override
         public Long announce(SessionMethods.Lobby.Default.Announce.Args args) {
             // Runs synchronously on the session's tick thread.
