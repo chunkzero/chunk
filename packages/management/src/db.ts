@@ -17,9 +17,13 @@ export function connect(url: string, options: { searchPath?: string } = {}): Sql
   });
 }
 
-/** Applies the `migrations/*.sql` files not yet recorded, in name order, in one transaction. */
-export async function migrate(sql: Sql): Promise<void> {
-  const names = (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort();
+/**
+ * Applies the `migrations/*.sql` files not yet recorded, in name order, then those in `extensionDir`, in one
+ * transaction. An extension's migrations are recorded as `extension/<name>`, so their names never collide with chunk's.
+ */
+export async function migrate(sql: Sql, extensionDir?: string): Promise<void> {
+  const sources = [{ directory: migrations, prefix: "" }];
+  if (extensionDir !== undefined) sources.push({ directory: extensionDir, prefix: "extension/" });
   await sql.begin(async (tx) => {
     await tx`select pg_advisory_xact_lock(hashtext('chunk.management.migrate'))`;
     await tx`create table if not exists schema_migrations (
@@ -27,9 +31,12 @@ export async function migrate(sql: Sql): Promise<void> {
       apply_time timestamptz not null default now()
     )`;
     const applied = new Set((await tx<{ name: string }[]>`select name from schema_migrations`).map((row) => row.name));
-    for (const name of names.filter((name) => !applied.has(name))) {
-      await tx.file(join(migrations, name));
-      await tx`insert into schema_migrations (name) values (${name})`;
+    for (const { directory, prefix } of sources) {
+      const names = (await readdir(directory)).filter((name) => name.endsWith(".sql")).sort();
+      for (const name of names.filter((name) => !applied.has(prefix + name))) {
+        await tx.file(join(directory, name));
+        await tx`insert into schema_migrations (name) values (${prefix + name})`;
+      }
     }
   });
 }

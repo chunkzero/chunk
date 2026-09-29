@@ -26,11 +26,15 @@ export interface Caller {
   projectId: string | undefined;
 }
 
-/** What a bearer token authenticates: a person or CI job, one environment's processes, or an edge. */
+/**
+ * What a bearer token authenticates: a person or CI job, one environment's processes, an edge, or a subject of an
+ * install's own authenticator that may call only the extension service named by its `service` type name.
+ */
 export type Identity =
   | { kind: "person"; caller: Caller }
   | { kind: "environment"; environmentId: string; tokenId: string }
-  | { kind: "edge"; tokenId: string };
+  | { kind: "edge"; tokenId: string }
+  | { kind: "extension"; service: string; subject: string };
 
 /** Resolves a bearer token to an identity; undefined rejects the request. */
 export interface Authenticator {
@@ -40,6 +44,7 @@ export interface Authenticator {
 const identityKey = createContextKey<Identity | undefined>(undefined, { description: "identity" });
 const callerKey = createContextKey<Caller | undefined>(undefined, { description: "caller" });
 const environmentKey = createContextKey<string | undefined>(undefined, { description: "environment" });
+const subjectKey = createContextKey<string | undefined>(undefined, { description: "subject" });
 
 /** Services that only one kind of token may call; every other service is for people. */
 const serviceKinds = new Map<string, Identity["kind"]>([
@@ -78,11 +83,16 @@ export const authInterceptor: Interceptor = (next) => async (request) => {
   if (!isPublic(request.method)) {
     const identity = request.contextValues.get(identityKey);
     if (!identity) throw new ConnectError("a valid bearer token is required", Code.Unauthenticated);
-    if (identity.kind !== (serviceKinds.get(request.service.typeName) ?? "person")) {
+    const admitted =
+      identity.kind === "extension"
+        ? identity.service === request.service.typeName
+        : identity.kind === (serviceKinds.get(request.service.typeName) ?? "person");
+    if (!admitted) {
       throw new ConnectError(`an ${identity.kind} token cannot call ${request.service.name}`, Code.PermissionDenied);
     }
     if (identity.kind === "person") request.contextValues.set(callerKey, identity.caller);
     if (identity.kind === "environment") request.contextValues.set(environmentKey, identity.environmentId);
+    if (identity.kind === "extension") request.contextValues.set(subjectKey, identity.subject);
   }
   return next(request);
 };
@@ -98,6 +108,16 @@ export function environmentOf(context: HandlerContext): string {
   const environmentId = context.values.get(environmentKey);
   if (!environmentId) throw new ConnectError("an environment token is required", Code.Unauthenticated);
   return environmentId;
+}
+
+/**
+ * The subject of the extension identity that made the request. People's tokens also reach extension services, so a
+ * service only such identities may call reads this first.
+ */
+export function subjectOf(context: HandlerContext): string {
+  const subject = context.values.get(subjectKey);
+  if (subject === undefined) throw new ConnectError("this service's own credential is required", Code.PermissionDenied);
+  return subject;
 }
 
 export function checkProjectAccess(caller: Caller, projectId: string): void {
