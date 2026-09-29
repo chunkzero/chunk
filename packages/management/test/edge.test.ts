@@ -43,7 +43,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     const { projectId, environmentId } = await createEnvironment(h);
     await deployRelease(h, projectId, environmentId, "r1");
     await reconcile(h.deps, options, epoch);
-    const core = await provider.status(coreMachineName(environmentId));
+    const core = await provider.find(coreMachineName(environmentId));
     const [row] = await h.sql<{ hostname: string }[]>`select hostname from environments where id = ${environmentId}`;
     const token = (
       await h.keys.cipher.open(await machineToken(environmentId), `machine-token/${environmentId}`)
@@ -72,7 +72,7 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
       projectId,
       environmentId,
       hostname: row?.hostname ?? "",
-      coreAddress: core.addresses[0] ?? "",
+      coreAddress: core?.addresses[0] ?? "",
       client,
       report,
       revision,

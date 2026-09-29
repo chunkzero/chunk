@@ -52,9 +52,9 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
  * Records capacity intents for the reconciler; neither call waits for the provider.
  *
  * A release is terminal, as core's `Launcher` requires. RELEASED means the request's machine is destroyed, or was
- * created too late: it never runs, and the reconciler's sweep destroys it. The reconciler starts a machine only under a
- * lock on the request's row that sees it PROVISIONING or READY, in a transaction fenced by the leader epoch, so a
- * reconciler that lost leadership starts nothing; a JVM request's machine is started at most once. A released request
+ * created too late: it never runs, and the reconciler's sweep destroys it. The reconciler starts a machine only by ID,
+ * after a transaction fenced by the leader epoch saw the request PROVISIONING or READY with that machine and, for a JVM,
+ * committed its one boot; a start still under way when the machine is torn down finds its ID gone. A released request
  * ID, even one released before it was ever ensured, stays released. Superseding a core instance releases its requests.
  */
 export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {

@@ -134,6 +134,28 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     expect(await exists(`/volumes/${spec.name}-data`)).toBe(false);
   }, 60_000);
 
+  test("destroy under an ID leaves a replacement, and list shows names only volumes are left under", async () => {
+    const spec = specFor("scoped");
+    const volume = `/volumes/${spec.name}-data`;
+    const first = await provider.create(spec);
+    await provider.destroy(spec.name, { id: first.id });
+    expect(await provider.find(spec.name)).toBeUndefined();
+    expect(await exists(volume)).toBe(false);
+
+    const replacement = await provider.create(spec);
+    await provider.destroy(spec.name, { id: first.id });
+    expect((await provider.find(spec.name))?.id).toBe(replacement.id);
+    expect(await exists(volume)).toBe(true);
+
+    await engine("DELETE", `/containers/${spec.name}?force=true`);
+    expect(await provider.list()).toContainEqual({ id: "", name: spec.name, state: "missing", addresses: [] });
+    await provider.destroy(spec.name, { id: replacement.id });
+    expect(await exists(volume)).toBe(true);
+    await provider.destroy(spec.name);
+    expect(await exists(volume)).toBe(false);
+    expect((await provider.list()).map(({ name }) => name)).not.toContain(spec.name);
+  }, 60_000);
+
   test("maps restart to the container's restart policy", async () => {
     const policyOf = async (restart: boolean) => {
       const { name } = await provider.create(specFor(`restart-${restart}`, { restart, volumes: [] }));

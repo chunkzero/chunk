@@ -100,11 +100,13 @@ that lacks them. Core is restarted by the engine. Extra machines are stateless a
 that exits or disappears, under the same request, with the same credential.
 
 Management processes may share a database, but only the one holding the reconciler's advisory lock leads; another takes
-over once its connection ends, and bumps a leader epoch that refuses every later write and provider action of the
-previous leader's passes. A capacity release is terminal: RELEASED means the machine is destroyed, or was created too
-late and will never run, and the reconciler removes owned machines no request or environment tracks. A released request
-ID never gets a running machine, even when `ReleaseCapacity` arrived before its `EnsureCapacity`, and a JVM machine is
-started at most once. An attach by a new core instance releases the previous instance's requests.
+over once its connection ends, and bumps a leader epoch that refuses every later write of the previous leader's passes.
+Provider calls it left under way cannot be recalled, so the reconciler commits a JVM machine's one boot before starting
+it, starts machines by ID, and removes a machine whose name is reused only under the ID it observed. A capacity release
+is terminal: RELEASED means the machine is destroyed, or was created too late and will never run, and the reconciler
+removes owned machines and volumes no request or environment tracks. A released request ID never gets a running machine,
+even when `ReleaseCapacity` arrived before its `EnsureCapacity`, and a JVM machine is started at most once. An attach by
+a new core instance releases the previous instance's requests.
 
 ## Log replication
 

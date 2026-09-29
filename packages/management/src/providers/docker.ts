@@ -127,6 +127,20 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
     return machineFrom(inspection);
   };
 
+  /** The volumes this install created, only those for machine `name` when given. */
+  const volumes = async (name?: string) => {
+    const filters = JSON.stringify({
+      label: [`${installLabel}=${installId}`, ...(name === undefined ? [] : [`${machineLabel}=${name}`])],
+    });
+    const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
+    const { Volumes } = (await response.json()) as { Volumes?: Volume[] | null };
+    return (Volumes ?? []).filter((volume) =>
+      name === undefined
+        ? owned(volume.Labels) && Boolean(volume.Labels?.[machineLabel])
+        : ownedFor(volume.Labels, name),
+    );
+  };
+
   const containerAction = (id: string, action: string, query = "") =>
     call("POST", `/containers/${encodeURIComponent(id)}/${action}${query}`, { allow: [304] });
 
@@ -218,19 +232,15 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
       return inspection && machineFrom(inspection);
     },
 
-    async destroy(name) {
+    async destroy(name, options) {
       const inspection = refuseForeign(await named(name), name);
+      if (options && inspection?.Id !== options.id) return;
       // `v` also removes the anonymous volumes the image declares, such as the JVM runner's cache.
       if (inspection) {
         await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true&v=true`, { allow: [404] });
       }
-      const filters = JSON.stringify({ label: [`${installLabel}=${installId}`, `${machineLabel}=${name}`] });
-      const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
-      const { Volumes } = (await response.json()) as { Volumes?: Volume[] | null };
-      for (const volume of Volumes ?? []) {
-        if (ownedFor(volume.Labels, name)) {
-          await call("DELETE", `/volumes/${encodeURIComponent(volume.Name)}`, { allow: [404] });
-        }
+      for (const volume of await volumes(name)) {
+        await call("DELETE", `/volumes/${encodeURIComponent(volume.Name)}`, { allow: [404] });
       }
     },
 
@@ -238,7 +248,7 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
       const filters = JSON.stringify({ label: [`${installLabel}=${installId}`] });
       const response = await call("GET", `/containers/json?${new URLSearchParams({ all: "true", filters })}`);
       const containers = (await response.json()) as Summary[];
-      return containers
+      const machines = containers
         .filter((container) => owned(container.Labels))
         .map((container) =>
           machine(
@@ -248,6 +258,14 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
             container.NetworkSettings,
           ),
         );
+      const names = new Set(machines.map(({ name }) => name));
+      for (const volume of await volumes()) {
+        const name = volume.Labels?.[machineLabel] ?? "";
+        if (names.has(name)) continue;
+        names.add(name);
+        machines.push({ id: "", name, state: "missing", addresses: [] });
+      }
+      return machines;
     },
   };
 }

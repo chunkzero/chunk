@@ -4,7 +4,13 @@ import { Code } from "@connectrpc/connect";
 
 import { notify } from "../src/changes.ts";
 import { capacityCredentialContext, type CapacityRow } from "../src/environments/capacity.ts";
-import { capacityMachineName, capacityMachineSpec, coreHostOf, coreMachineName } from "../src/environments/machines.ts";
+import {
+  capacityMachineName,
+  capacityMachineSpec,
+  coreHostOf,
+  coreMachineName,
+  coreMachineSpec,
+} from "../src/environments/machines.ts";
 import {
   reconcile,
   type ReconcilerOptions,
@@ -78,7 +84,7 @@ test("JVM machines run the runner for their Java and gateways the environment im
 
 describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
-  const { provider, machines, hooks } = fakeProvider();
+  const { provider, machines, volumes, boots, hooks } = fakeProvider();
   let options: ReconcilerOptions;
   let epoch = 0n;
   beforeAll(async () => {
@@ -140,6 +146,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
 
   const nameOf = (environmentId: string, requestId: string, workload = Workload.JVM) =>
     capacityMachineName({ environment_id: environmentId, request_id: requestId, workload } as never);
+  const idOf = (name: string) => machines.get(name)?.machine.id ?? "";
 
   /** Waits until some query is blocked on a lock; false when none was within two seconds. */
   async function lockWaited() {
@@ -154,6 +161,16 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
 
   async function until(condition: () => boolean) {
     for (let tries = 0; tries < 200 && !condition(); tries++) await Bun.sleep(50);
+  }
+
+  /** Runs a pass under the current epoch that `takeOver` supersedes, expecting it to stop at its next write. */
+  async function supersededPass() {
+    const stale = epoch;
+    await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
+  }
+  async function takeOver() {
+    epoch = await takeLeadership(h.sql);
+    await pass();
   }
 
   test("core gets a machine with its own token, and the addresses it has once started", async () => {
@@ -211,7 +228,9 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     await pass();
     const ready = (await env.client.ensureCapacity(request)).capacity;
     expect(ready?.state).toBe(CapacityState.READY);
-    const machine = machines.get(ready?.machineId ?? "");
+    const name = nameOf(env.environmentId, "cap-1");
+    expect(ready?.machineId).toBe(idOf(name));
+    const machine = machines.get(name);
     expect(machine?.spec).toMatchObject({
       image: "chunk-jvm:25",
       restart: false,
@@ -230,7 +249,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const released = await env.client.releaseCapacity({ requestId: "cap-1", lease: env.lease });
     expect(released.capacity?.state).toBe(CapacityState.RELEASING);
     await pass();
-    expect(machines.has(ready?.machineId ?? "")).toBe(false);
+    expect(machines.has(name)).toBe(false);
     expect((await env.client.ensureCapacity(request)).capacity?.state).toBe(CapacityState.RELEASED);
 
     // An ensure delayed past the release of its ID finds it released.
@@ -239,7 +258,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const late = { ...capacityRequest(env, "never"), credential: "late" };
     expect((await env.client.ensureCapacity(late)).capacity?.state).toBe(CapacityState.RELEASED);
     await pass();
-    expect(machines.has(ready?.machineId ?? "")).toBe(false);
+    expect(machines.has(name)).toBe(false);
     expect(machines.has(nameOf(env.environmentId, "never"))).toBe(false);
     env.close();
   });
@@ -251,7 +270,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const name = nameOf(env.environmentId, "cap-3", Workload.GATEWAY);
     const first = machines.get(name)?.spec;
     expect(first?.env.CHUNK_GATEWAY_CREDENTIAL).toBe(capacityRequest(env, "cap-3").credential);
-    await provider.stop(name);
+    await provider.stop(idOf(name));
     await pass();
     const replaced = machines.get(name);
     expect(replaced?.spec).not.toBe(first);
@@ -267,7 +286,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     await pass();
     const name = nameOf(env.environmentId, "cap-jvm");
     const first = machines.get(name)?.spec;
-    await provider.stop(name);
+    await provider.stop(idOf(name));
     await pass();
     expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
       state: CapacityState.FAILED,
@@ -285,14 +304,14 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("a release racing a pass's start leaves no running machine once RELEASED", async () => {
+  test("a release racing a pass's start leaves no machine once RELEASED", async () => {
     const env = await running();
     const release = (requestId: string) => env.client.releaseCapacity({ requestId, lease: env.lease });
     // Released once the pass read the suspended machine, before it resumes it.
     await env.client.ensureCapacity(capacityRequest(env, "suspended"));
     await pass();
     const suspended = nameOf(env.environmentId, "suspended");
-    await provider.suspend(suspended);
+    await provider.suspend(idOf(suspended));
     hooks.status = async (id) => {
       if (id === suspended) await release("suspended");
     };
@@ -302,15 +321,11 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     hooks.create = async (id) => {
       if (id === created) await release("created");
     };
-    // Released while the pass starts the machine, so the release waits for the start.
+    // Released once the pass recorded the boot, while the start is under way.
     await env.client.ensureCapacity(capacityRequest(env, "starting"));
     const starting = nameOf(env.environmentId, "starting");
-    let releasing: ReturnType<typeof release> | undefined;
-    let waited = false;
-    hooks.start = async (id) => {
-      if (id !== starting) return;
-      releasing = release("starting");
-      waited = await lockWaited();
+    hooks.start = async (name) => {
+      if (name === starting) expect((await release("starting")).capacity?.state).toBe(CapacityState.RELEASING);
     };
     try {
       await pass();
@@ -321,8 +336,6 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     }
     expect(machines.get(suspended)?.machine.state).toBe("suspended");
     expect(machines.has(created)).toBe(false);
-    expect(waited).toBe(true);
-    expect((await releasing)?.capacity?.state).toBe(CapacityState.RELEASING);
     await pass();
     for (const requestId of ["suspended", "created", "starting"]) {
       expect(machines.has(nameOf(env.environmentId, requestId))).toBe(false);
@@ -358,7 +371,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(boots).toBe(1);
     expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
       state: CapacityState.READY,
-      machineId: name,
+      machineId: idOf(name),
     });
     env.close();
   });
@@ -431,13 +444,11 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     hooks.create = async (id) => {
       if (id !== name) return;
       hooks.create = undefined;
-      epoch = await takeLeadership(h.sql);
-      await pass();
-      await provider.stop(name);
+      await takeOver();
+      await provider.stop(idOf(name));
     };
-    const stale = epoch;
     try {
-      await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
+      await supersededPass();
       await pass();
     } finally {
       hooks.start = undefined;
@@ -449,6 +460,104 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       message: "the JVM machine exited",
     });
     env.close();
+  });
+
+  test("a JVM boot recorded before its leader was superseded is the only one", async () => {
+    const env = await running();
+    const request = capacityRequest(env, "boot-once");
+    await env.client.ensureCapacity(request);
+    const name = nameOf(env.environmentId, "boot-once");
+    // The boot is committed and the start under way when a new leader takes over and finds the machine not running.
+    hooks.start = async (started) => {
+      if (started !== name) return;
+      hooks.start = undefined;
+      await takeOver();
+    };
+    try {
+      await supersededPass();
+    } finally {
+      hooks.start = undefined;
+    }
+    expect(boots.get(name)).toBe(1);
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.FAILED,
+      message: "the JVM machine exited",
+    });
+    await pass();
+    expect(boots.get(name)).toBe(1);
+    expect(machines.has(name)).toBe(false);
+    env.close();
+  });
+
+  test("a start under way when its released machine is torn down boots nothing", async () => {
+    const env = await running();
+    await env.client.ensureCapacity(capacityRequest(env, "start-late"));
+    const name = nameOf(env.environmentId, "start-late");
+    hooks.start = async (started) => {
+      if (started !== name) return;
+      hooks.start = undefined;
+      await env.client.releaseCapacity({ requestId: "start-late", lease: env.lease });
+      await takeOver();
+    };
+    try {
+      await supersededPass();
+    } finally {
+      hooks.start = undefined;
+    }
+    expect(machines.has(name)).toBe(false);
+    expect(boots.get(name)).toBeUndefined();
+    const released = await env.client.releaseCapacity({ requestId: "start-late", lease: env.lease });
+    expect(released.capacity?.state).toBe(CapacityState.RELEASED);
+    env.close();
+  });
+
+  test("a superseded pass replacing a stopped gateway leaves the new leader's replacement running", async () => {
+    const env = await running();
+    const request = { ...capacityRequest(env, "gateway-stale"), workload: Workload.GATEWAY, appId: "" };
+    await env.client.ensureCapacity(request);
+    await pass();
+    const name = nameOf(env.environmentId, "gateway-stale", Workload.GATEWAY);
+    const first = idOf(name);
+    await provider.stop(first);
+    // The new leader replaces the stopped gateway while the stale pass's removal of it is under way.
+    hooks.destroy = async (destroyed) => {
+      if (destroyed !== name) return;
+      hooks.destroy = undefined;
+      await takeOver();
+    };
+    try {
+      await supersededPass();
+    } finally {
+      hooks.destroy = undefined;
+    }
+    const replacement = machines.get(name)?.machine;
+    expect(replacement?.id).not.toBe(first);
+    expect(replacement?.state).toBe("running");
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.READY,
+      machineId: replacement?.id,
+    });
+    env.close();
+  });
+
+  test("a core volume left by a create cut short after its environment was deleted is swept", async () => {
+    const { environmentId } = await createEnvironment(h);
+    await h.client(ProjectService).deleteEnvironment({ environmentId });
+    await pass();
+    const name = coreMachineName(environmentId);
+    // A stale create resumes, creates the volume, and crashes before the machine exists.
+    hooks.creating = () => {
+      throw new Error("crashed");
+    };
+    try {
+      await expect(provider.create(coreMachineSpec(options, environmentId, "token"))).rejects.toThrow("crashed");
+    } finally {
+      hooks.creating = undefined;
+    }
+    expect(volumes.has(name)).toBe(true);
+    expect(machines.has(name)).toBe(false);
+    await pass();
+    expect(volumes.has(name)).toBe(false);
   });
 
   test("a create that finishes after its request was released never starts, and a later pass sweeps it", async () => {

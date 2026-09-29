@@ -7,7 +7,7 @@
  * else under a name it is asked about fails with `OwnershipError` and is left alone.
  *
  * A create can finish after the request it was for was released or its environment deleted, so the reconciler lists
- * the machines this install owns and destroys those nothing tracks by name.
+ * the machines and volumes this install owns and destroys those nothing tracks by name.
  */
 export interface Provider {
   /**
@@ -15,7 +15,10 @@ export interface Provider {
    * this install created it with the same labels.
    */
   create(spec: MachineSpec): Promise<Machine>;
-  /** Starts or resumes the machine; a running machine stays running. */
+  /**
+   * Starts or resumes the machine; a running machine stays running. IDs are never reused, so a start aimed at a
+   * destroyed machine fails and starts nothing.
+   */
   start(id: string): Promise<Machine>;
   /** Suspends the machine, keeping its memory where the host can; a suspended machine stays suspended. */
   suspend(id: string): Promise<Machine>;
@@ -28,9 +31,15 @@ export interface Provider {
   /**
    * Removes the machine created under `name` and every volume created for it. Missing ones are not an error, and
    * volumes are removed even when the machine is already gone, so a retry finishes an interrupted removal.
+   *
+   * With `id`, removes them only when the machine now under `name` has that ID, and nothing otherwise, so a stale
+   * caller cannot remove a replacement created under the same name since.
    */
-  destroy(name: string): Promise<void>;
-  /** Every machine this install created, with the name it was created under. */
+  destroy(name: string, options?: { id: string }): Promise<void>;
+  /**
+   * Every machine this install created, with the name it was created under. A name only volumes are left under, such as
+   * one whose create was cut short before its machine existed, is listed as a `missing` machine with no ID.
+   */
   list(): Promise<Machine[]>;
 }
 

@@ -52,17 +52,19 @@ export class Superseded extends Error {
 
 /**
  * Runs `body` in a transaction that first checks the pass's leader epoch is current and keeps a shared lock on it, so
- * a newer leader's bump waits for the transaction to end. Every write a pass makes, and every provider call other than
- * reads and creates, runs in one.
+ * a newer leader's bump waits for the transaction to end. Every write a pass makes runs in one. Provider calls other
+ * than suspensions, which need the environment's row lock, run outside them, since a lost connection frees the lock
+ * without stopping a call under way: intent is committed before the call instead, and calls address machines by ID
+ * wherever a name can be reused.
  */
 type Fence = <T>(body: (tx: Db) => Promise<T>) => Promise<T>;
 
 /**
  * Drives the provider toward what the database asks for, on every change and every few seconds. Only the process
  * holding the leader lock, on a session of its own at `databaseUrl`, leads; others retry taking it on the same
- * schedule. Leading means holding the current leader epoch, which fences out passes of a previous leader still under
- * way. Each pass compares the machines' observed state with the desired one, so a step that failed or was cut short is
- * retried until they agree.
+ * schedule. Leading means holding the current leader epoch, which fences out the writes of a previous leader's pass
+ * still under way. Each pass compares the machines' observed state with the desired one, so a step that failed or was
+ * cut short is retried until they agree.
  */
 export function startReconciler(
   deps: Deps,
@@ -133,7 +135,7 @@ export async function reconcile(deps: Deps, options: ReconcilerOptions, epoch: b
       console.error(`reconciling environment ${environment.id} failed:`, error);
     }
   }
-  await sweep(deps, options, fenced);
+  await sweep(deps, options);
 }
 
 async function reconcileEnvironment(
@@ -149,11 +151,10 @@ async function reconcileEnvironment(
     select * from capacity_requests where environment_id = ${id} and not torn_down order by create_time`;
 
   if (environment.state === EnvironmentState.DELETING) {
-    await fenced(async (tx) => {
-      for (const request of capacity) await provider.destroy(capacityMachineName(request));
-      await provider.destroy(coreMachineName(id));
-      await tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`;
-    });
+    // By name: a deleting environment's machine names are never used again.
+    for (const request of capacity) await provider.destroy(capacityMachineName(request));
+    await provider.destroy(coreMachineName(id));
+    await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
     return;
   }
   for (const request of capacity) {
@@ -186,7 +187,8 @@ async function reconcileEnvironment(
     );
     if (!marked) return;
     if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
-    // Reports, wakes and attaches lock the row too, so none can land between this recheck and the suspension.
+    // Reports, wakes and attaches lock the row too, so none can land between this recheck and the suspension. One that
+    // lands after a lost connection freed the lock is caught up on by the next pass, which resumes.
     const suspendIfIdle = (machineId: string) =>
       fenced(async (tx) => {
         const [still] = await tx`
@@ -207,10 +209,7 @@ async function reconcileEnvironment(
     return;
   }
 
-  if (core.state !== "running") {
-    const coreId = core.id;
-    core = await fenced(() => provider.start(coreId));
-  }
+  if (core.state !== "running") core = await provider.start(core.id);
   await saveCoreAddresses(deps, fenced, environment, core);
   if (environment.state === EnvironmentState.PENDING || environment.state === EnvironmentState.SUSPENDED) {
     await fenced(
@@ -252,7 +251,7 @@ async function createCore(deps: Deps, options: ReconcilerOptions, fenced: Fence,
       where id = ${environment.id} and state <> ${EnvironmentState.DELETING}`,
   );
   if (saved.count === 0) {
-    await fenced(() => options.provider.destroy(machine.name));
+    await options.provider.destroy(machine.name, { id: machine.id });
     return undefined;
   }
   return machine;
@@ -270,10 +269,12 @@ async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: Envi
 }
 
 /**
- * Keeps an extra machine running and resumes a suspended one. A JVM machine boots at most once: a started one that
- * stopped or went missing fails its request, and one never started is adopted by name, or created again when missing.
- * Gateway machines are stateless and are replaced, with the same credential. A provider error fails the request for
- * good; core retries with a new request ID.
+ * Keeps an extra machine running and resumes a suspended one. A JVM machine boots at most once: its boot is recorded
+ * before it starts, so a started one that stopped or went missing fails its request, and one never started is adopted
+ * by name, or created again when missing. Gateway machines are stateless and are replaced, with the same credential.
+ * Machines are started by ID, and removed only under the ID observed, so a call a superseded pass left under way can
+ * neither start a destroyed machine nor remove its replacement. A provider error fails the request for good; core
+ * retries with a new request ID.
  */
 async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence, core: Machine, request: CapacityRow) {
   const { sql, keys } = deps;
@@ -285,47 +286,50 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence
       and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
   const exited = (machine: Machine | undefined) =>
     new Error(machine?.state === "stopped" ? "the JVM machine exited" : "the JVM machine went missing");
-  // A release waits on this row lock, so its next pass destroys any machine started here. `started` is saved even when
-  // the start fails, since the machine may have booted anyway.
-  const startIfActive = async (machine: Machine) => {
-    const outcome = await fenced(async (tx) => {
-      const [row] = await tx<{ started: boolean }[]>`select started from capacity_requests where ${active} for update`;
-      if (!row) return undefined;
+  // Committed before the start, so a boot cut short still counts as the one boot. A release after this tears the
+  // machine down by name; a start still under way then finds its ID gone.
+  const mayStart = (machine: Machine) =>
+    fenced(async (tx) => {
+      const [row] = await tx<{ started: boolean }[]>`
+        select started from capacity_requests where ${active} and machine_id = ${machine.id} for update`;
+      if (!row) return false;
       if (jvm && machine.state !== "suspended") {
         if (row.started) throw exited(machine);
         await tx`update capacity_requests set started = true where ${active}`;
       }
-      return provider.start(machine.id).then(
-        (started) => ({ started }),
-        (error: unknown) => ({ error }),
-      );
+      return true;
     });
-    if (outcome && "error" in outcome) throw outcome.error;
-    return outcome?.started;
-  };
   try {
     let machine = request.machine_id ? await provider.status(request.machine_id) : undefined;
     if (jvm && request.started && machine?.state !== "running" && machine?.state !== "suspended") {
       throw exited(machine);
     }
     if (!machine || machine.state === "missing" || (!jvm && machine.state === "stopped")) {
-      let found = jvm ? await provider.find(name) : undefined;
+      let found = await provider.find(name);
+      // A stopped gateway is replaced: the one observed, or one left from an attempt whose create reply was lost.
+      if (!jvm && found?.state === "stopped") {
+        await provider.destroy(name, { id: found.id });
+        found = undefined;
+      }
       if (!found) {
         const coreHost = coreHostOf(core.addresses);
         if (!coreHost) return;
         const context = capacityCredentialContext(request.environment_id, request.request_id);
         const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));
-        // A gateway left over from an earlier attempt, perhaps one whose create reply was lost, holds the name.
-        if (!jvm) await fenced(() => provider.destroy(name));
         found = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
       }
       const id = found.id;
       const saved = await fenced((tx) => tx`update capacity_requests set machine_id = ${id} where ${active}`);
-      if (saved.count === 0) return fenced(() => provider.destroy(name));
+      if (saved.count === 0) {
+        await provider.destroy(name, { id });
+        return;
+      }
       machine = found;
     }
-    if (machine.state !== "running") machine = await startIfActive(machine);
-    if (!machine) return;
+    if (machine.state !== "running") {
+      if (!(await mayStart(machine))) return;
+      machine = await provider.start(machine.id);
+    }
     if (request.state === CapacityState.READY && sameList(request.machine_addresses, machine.addresses)) return;
     const addresses = machine.addresses;
     await fenced(
@@ -348,29 +352,30 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, fenced: Fence
 }
 
 /**
- * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved. A releasing
- * request is released once its machine is gone.
+ * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved; the request
+ * never runs a machine again, so nothing reuses the name. A releasing request is released once its machine is gone.
  */
 async function tearDown({ provider }: ReconcilerOptions, fenced: Fence, request: CapacityRow) {
-  await fenced(async (tx) => {
-    await provider.destroy(capacityMachineName(request));
-    await tx`
+  await provider.destroy(capacityMachineName(request));
+  await fenced(
+    (tx) => tx`
       update capacity_requests
       set torn_down = true,
         state = case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end
-      where environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
-  });
+      where environment_id = ${request.environment_id} and request_id = ${request.request_id}`,
+  );
 }
 
 /**
- * Destroys the machines this install owns that nothing tracks: those of torn-down requests, and those whose request or
- * environment no longer exists. A create that finished after its request was torn down or its environment deleted
- * leaves one. A request not yet torn down keeps its machine, since a create for it may still be under way.
+ * Destroys the machines and volumes this install owns that nothing tracks: those of torn-down requests, and those whose
+ * request or environment no longer exists. A create that finished, or was cut short, after its request was torn down or
+ * its environment deleted leaves them. A request not yet torn down keeps its machine, since a create for it may still
+ * be under way.
  */
-async function sweep({ sql }: Deps, { provider }: ReconcilerOptions, fenced: Fence) {
+async function sweep({ sql }: Deps, { provider }: ReconcilerOptions) {
   const machines = await provider.list();
   // Read after listing: a request only ever becomes torn down and an environment only goes away, so a listed machine
-  // untracked now stays untracked.
+  // untracked now stays untracked, and its name is never used again.
   const environments = await sql<{ id: string }[]>`select id from environments`;
   const requests = await sql<Pick<CapacityRow, "environment_id" | "request_id" | "workload">[]>`
     select environment_id, request_id, workload from capacity_requests where not torn_down`;
@@ -381,9 +386,8 @@ async function sweep({ sql }: Deps, { provider }: ReconcilerOptions, fenced: Fen
   for (const { name } of machines) {
     if (tracked.has(name)) continue;
     try {
-      await fenced(() => provider.destroy(name));
+      await provider.destroy(name);
     } catch (error) {
-      if (error instanceof Superseded) throw error;
       console.error(`removing untracked machine ${name} failed:`, error);
     }
   }
