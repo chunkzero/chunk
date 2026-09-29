@@ -1,5 +1,6 @@
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
+import { advisoryLock } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
@@ -38,20 +39,33 @@ interface EnvironmentRow {
 }
 
 const intervalMs = 5000;
+/** The advisory lock only the acting reconciler holds. */
+const leaderLock = 0x63686e6b;
 
 /**
- * Drives the provider toward what the database asks for, on every change and every few seconds. One process runs
- * it. Each pass compares the machines' observed state with the desired one, so a step that failed or was cut short
- * is retried until they agree.
+ * Drives the provider toward what the database asks for, on every change and every few seconds. Only the process
+ * holding the leader lock, on a session of its own at `databaseUrl`, acts; others retry taking it on the same
+ * schedule. Each pass compares the machines' observed state with the desired one, so a step that failed or was cut
+ * short is retried until they agree.
  */
-export function startReconciler(deps: Deps, options: ReconcilerOptions): { stop(): Promise<void> } {
+export function startReconciler(
+  deps: Deps,
+  options: ReconcilerOptions,
+  databaseUrl: string,
+): { stop(): Promise<void> } {
   const abort = new AbortController();
   const subscription = deps.changes.subscribe((change) => change.kind === "environment");
+  const leader = advisoryLock(databaseUrl, leaderLock);
   const running = (async () => {
     while (!abort.signal.aborted) {
-      await reconcile(deps, options).catch((error: unknown) => console.error("reconciling failed:", error));
+      try {
+        if (await leader.hold()) await reconcile(deps, options);
+      } catch (error) {
+        console.error("reconciling failed:", error);
+      }
       await subscription.next(intervalMs, abort.signal);
     }
+    await leader.close();
   })();
   return {
     async stop() {
@@ -191,43 +205,58 @@ async function saveCoreAddresses({ sql }: Deps, environment: EnvironmentRow, cor
 }
 
 /**
- * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime, so one that exited or
- * went missing fails its request; gateway machines are stateless and are replaced, with the same credential.
- * A provider error fails the request for good; core retries with a new request ID.
+ * Keeps an extra machine running and resumes a suspended one. A JVM machine is one lifetime: its ID is saved before its
+ * first start, so a saved one that is stopped or missing may have run, and fails its request. One whose ID was never
+ * saved never started, so it is adopted by name. Gateway machines are stateless and are replaced, with the same
+ * credential. A provider error fails the request for good; core retries with a new request ID.
  */
 async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine, request: CapacityRow) {
   const { sql, keys } = deps;
   const { provider } = options;
-  const where = sql`environment_id = ${request.environment_id} and request_id = ${request.request_id}`;
+  const jvm = request.workload === Workload.JVM;
+  const active = sql`
+    environment_id = ${request.environment_id} and request_id = ${request.request_id}
+      and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
+  // A release waits on this row lock, so its next pass destroys any machine started here.
+  const startIfActive = (id: string) =>
+    sql.begin(async (tx) => {
+      const [still] = await tx`select 1 from capacity_requests where ${active} for update`;
+      return still ? provider.start(id) : undefined;
+    });
   try {
     let machine = request.machine_id ? await provider.status(request.machine_id) : undefined;
-    if (machine?.state === "suspended") machine = await provider.start(machine.id);
-    if (machine && machine.state !== "running" && request.workload === Workload.JVM) {
+    if (jvm && machine && machine.state !== "running" && machine.state !== "suspended") {
       throw new Error(machine.state === "missing" ? "the JVM machine went missing" : "the JVM machine exited");
     }
-    if (machine?.state !== "running") {
-      const coreHost = coreHostOf(core.addresses);
-      if (!coreHost) return;
-      const context = capacityCredentialContext(request.environment_id, request.request_id);
-      const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));
-      // A leftover from an earlier attempt, perhaps one whose create reply was lost, holds the name.
-      await provider.destroy(capacityMachineName(request));
-      const created = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
-      const saved = await sql`update capacity_requests set machine_id = ${created.id} where ${where}`;
-      if (saved.count === 0) return provider.destroy(created.name);
-      machine = await provider.start(created.id);
+    if (!machine || machine.state === "missing" || machine.state === "stopped") {
+      const name = capacityMachineName(request);
+      let found = jvm ? await provider.find(name) : undefined;
+      if (!found) {
+        const coreHost = coreHostOf(core.addresses);
+        if (!coreHost) return;
+        const context = capacityCredentialContext(request.environment_id, request.request_id);
+        const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));
+        // A gateway left over from an earlier attempt, perhaps one whose create reply was lost, holds the name.
+        if (!jvm) await provider.destroy(name);
+        found = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
+      }
+      const saved = await sql`update capacity_requests set machine_id = ${found.id} where ${active}`;
+      if (saved.count === 0) return provider.destroy(name);
+      machine = found;
     }
+    if (machine.state !== "running") machine = await startIfActive(machine.id);
+    if (!machine) return;
     if (request.state === CapacityState.READY && sameList(request.machine_addresses, machine.addresses)) return;
     await sql`
       update capacity_requests
       set state = ${CapacityState.READY}, machine_addresses = ${sql.array(machine.addresses)}::text[]
-      where ${where} and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
+      where ${active}`;
   } catch (error) {
     console.error(`running capacity ${request.request_id} failed:`, error);
     await sql`
       update capacity_requests
       set state = ${CapacityState.FAILED}, message = ${error instanceof Error ? error.message : String(error)}
-      where ${where} and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
+      where ${active}`;
   }
   await notify(sql, { kind: "environment", environmentId: request.environment_id });
 }

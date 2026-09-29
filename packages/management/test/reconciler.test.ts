@@ -2,9 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
+import { notify } from "../src/changes.ts";
 import { capacityCredentialContext, type CapacityRow } from "../src/environments/capacity.ts";
 import { capacityMachineName, capacityMachineSpec, coreHostOf, coreMachineName } from "../src/environments/machines.ts";
-import { reconcile, type ReconcilerOptions } from "../src/environments/reconciler.ts";
+import { reconcile, type ReconcilerOptions, startReconciler } from "../src/environments/reconciler.ts";
 import { CapacityState, EnvironmentService, Workload } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { fakeProvider } from "./fake-provider.ts";
@@ -97,7 +98,8 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const token = machines.get(coreName)?.spec.env.CHUNK_ENVIRONMENT_TOKEN ?? "";
     const client = h.client(EnvironmentService, token);
     const abort = new AbortController();
-    const stream = client.attach({ instanceId: crypto.randomUUID(), core: true, epoch: 1n }, { signal: abort.signal });
+    const instanceId = crypto.randomUUID();
+    const stream = client.attach({ instanceId, core: true, epoch: 1n }, { signal: abort.signal });
     const { lease, revision } = await next(stream[Symbol.asyncIterator]());
     const state = async () => (await h.client(ProjectService).getEnvironment({ environmentId })).environment?.state;
     const core = () => machines.get(coreName)?.machine;
@@ -108,6 +110,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       core,
       token,
       client,
+      instanceId,
       lease,
       revision,
       state,
@@ -129,6 +132,21 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
 
   const nameOf = (environmentId: string, requestId: string, workload = Workload.JVM) =>
     capacityMachineName({ environment_id: environmentId, request_id: requestId, workload } as never);
+
+  /** Waits until some query is blocked on a lock; false when none was within two seconds. */
+  async function lockWaited() {
+    for (let tries = 0; tries < 100; tries++) {
+      const [waiting] = await h.sql<{ count: bigint }[]>`
+        select count(*) from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`;
+      if ((waiting?.count ?? 0n) > 0n) return true;
+      await Bun.sleep(20);
+    }
+    return false;
+  }
+
+  async function until(condition: () => boolean) {
+    for (let tries = 0; tries < 200 && !condition(); tries++) await Bun.sleep(50);
+  }
 
   test("core gets a machine with its own token, and the addresses it has once started", async () => {
     const env = await running();
@@ -205,8 +223,16 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(released.capacity?.state).toBe(CapacityState.RELEASING);
     await pass();
     expect(machines.has(ready?.machineId ?? "")).toBe(false);
+    expect((await env.client.ensureCapacity(request)).capacity?.state).toBe(CapacityState.RELEASED);
+
+    // An ensure delayed past the release of its ID finds it released.
     const unknown = await env.client.releaseCapacity({ requestId: "never", lease: env.lease });
     expect(unknown.capacity?.state).toBe(CapacityState.RELEASED);
+    const late = { ...capacityRequest(env, "never"), credential: "late" };
+    expect((await env.client.ensureCapacity(late)).capacity?.state).toBe(CapacityState.RELEASED);
+    await pass();
+    expect(machines.has(ready?.machineId ?? "")).toBe(false);
+    expect(machines.has(nameOf(env.environmentId, "never"))).toBe(false);
     env.close();
   });
 
@@ -249,6 +275,139 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(machines.has(name)).toBe(false);
     expect((await release()).capacity?.state).toBe(CapacityState.RELEASED);
     env.close();
+  });
+
+  test("a release racing a pass's start leaves no running machine once RELEASED", async () => {
+    const env = await running();
+    const release = (requestId: string) => env.client.releaseCapacity({ requestId, lease: env.lease });
+    // Released once the pass read the suspended machine, before it resumes it.
+    await env.client.ensureCapacity(capacityRequest(env, "suspended"));
+    await pass();
+    const suspended = nameOf(env.environmentId, "suspended");
+    await provider.suspend(suspended);
+    hooks.status = async (id) => {
+      if (id === suspended) await release("suspended");
+    };
+    // Released once the pass created the machine, before it saved and started it.
+    await env.client.ensureCapacity(capacityRequest(env, "created"));
+    const created = nameOf(env.environmentId, "created");
+    hooks.create = async (id) => {
+      if (id === created) await release("created");
+    };
+    // Released while the pass starts the machine, so the release waits for the start.
+    await env.client.ensureCapacity(capacityRequest(env, "starting"));
+    const starting = nameOf(env.environmentId, "starting");
+    let releasing: ReturnType<typeof release> | undefined;
+    let waited = false;
+    hooks.start = async (id) => {
+      if (id !== starting) return;
+      releasing = release("starting");
+      waited = await lockWaited();
+    };
+    try {
+      await pass();
+    } finally {
+      hooks.status = undefined;
+      hooks.create = undefined;
+      hooks.start = undefined;
+    }
+    expect(machines.get(suspended)?.machine.state).toBe("suspended");
+    expect(machines.has(created)).toBe(false);
+    expect(waited).toBe(true);
+    expect((await releasing)?.capacity?.state).toBe(CapacityState.RELEASING);
+    await pass();
+    for (const requestId of ["suspended", "created", "starting"]) {
+      expect(machines.has(nameOf(env.environmentId, requestId))).toBe(false);
+      expect((await release(requestId)).capacity?.state).toBe(CapacityState.RELEASED);
+    }
+    env.close();
+  });
+
+  test("a JVM machine created before a crash is adopted and boots once", async () => {
+    const env = await running();
+    const request = capacityRequest(env, "cap-crash");
+    await env.client.ensureCapacity(request);
+    // What a pass that crashed between creating the machine and saving its ID leaves behind.
+    const [row] = await h.sql<CapacityRow[]>`
+      select * from capacity_requests where environment_id = ${env.environmentId} and request_id = 'cap-crash'`;
+    const coreHost = coreHostOf(env.core()?.addresses ?? []) ?? "";
+    await provider.create(
+      capacityMachineSpec(options, row as CapacityRow, { coreHost, credential: request.credential }),
+    );
+    const name = nameOf(env.environmentId, "cap-crash");
+    const created = machines.get(name)?.spec;
+    let boots = 0;
+    hooks.start = (id) => {
+      if (id === name) boots++;
+    };
+    try {
+      await pass();
+      await pass();
+    } finally {
+      hooks.start = undefined;
+    }
+    expect(machines.get(name)?.spec).toBe(created);
+    expect(boots).toBe(1);
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.READY,
+      machineId: name,
+    });
+    env.close();
+  });
+
+  test("a new core instance releases the previous one's requests, but a re-attach does not", async () => {
+    const env = await running();
+    await env.client.ensureCapacity(capacityRequest(env, "cap-owned"));
+    await pass();
+    const name = nameOf(env.environmentId, "cap-owned");
+    const attach = async (instanceId: string) => {
+      const abort = new AbortController();
+      const stream = env.client.attach({ instanceId, core: true, epoch: 1n }, { signal: abort.signal });
+      await next(stream[Symbol.asyncIterator]());
+      abort.abort();
+    };
+    const state = async () => {
+      const [row] = await h.sql<{ state: CapacityState }[]>`
+        select state from capacity_requests where environment_id = ${env.environmentId} and request_id = 'cap-owned'`;
+      return row?.state;
+    };
+
+    await attach(env.instanceId);
+    await pass();
+    expect(await state()).toBe(CapacityState.READY);
+    expect(machines.get(name)?.machine.state).toBe("running");
+
+    await attach(crypto.randomUUID());
+    expect(await state()).toBe(CapacityState.RELEASING);
+    await pass();
+    expect(await state()).toBe(CapacityState.RELEASED);
+    expect(machines.has(name)).toBe(false);
+    env.close();
+  });
+
+  test("only the reconciler holding the leader lock acts, and another takes over once it stops", async () => {
+    const other = await startHarness();
+    const fakes = [fakeProvider(), fakeProvider()];
+    const reconcilers = fakes.map(({ provider }) =>
+      startReconciler(other.deps, { ...options, provider, managementUrl: other.url }, databaseUrl ?? ""),
+    );
+    try {
+      const { projectId, environmentId } = await createEnvironment(other);
+      await deployRelease(other, projectId, environmentId, "r1");
+      const name = coreMachineName(environmentId);
+      const acted = () => fakes.map(({ machines }) => machines.has(name));
+      await until(() => acted().some(Boolean));
+      await Bun.sleep(100);
+      expect(acted().filter(Boolean)).toHaveLength(1);
+
+      await reconcilers[acted().indexOf(true)]?.stop();
+      await notify(other.sql, { kind: "environment", environmentId });
+      await until(() => acted().every(Boolean));
+      expect(acted()).toEqual([true, true]);
+    } finally {
+      await Promise.all(reconcilers.map((reconciler) => reconciler.stop()));
+      await other.close();
+    }
   });
 
   test("a create whose reply was lost fails the request and its machine is removed by name", async () => {
@@ -360,13 +519,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       // This lock lets a token be issued for the environment but holds back saving it on the row.
       await tx`select 1 from environments where id = ${environmentId} for no key update`;
       passing = pass();
-      // Wait until the pass is blocked on this row.
-      for (let tries = 0; tries < 100; tries++) {
-        const [waiting] = await h.sql<{ count: bigint }[]>`
-          select count(*) from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`;
-        if ((waiting?.count ?? 0n) > 0n) break;
-        await Bun.sleep(20);
-      }
+      await lockWaited();
       await tx`delete from environments where id = ${environmentId}`;
     });
     await passing;

@@ -1,5 +1,6 @@
 import { notify } from "../changes.ts";
 import type { Db, Sql } from "../db.ts";
+import { CapacityState } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { failedPrecondition, notFound } from "../rpc/validate.ts";
 
@@ -12,7 +13,8 @@ export async function advanceRevision(db: Db, environmentId: string): Promise<vo
 /**
  * Makes a core instance the environment's owner under a new, higher lease. Refuses instances another core's attach
  * superseded and epochs lower than the environment's. The previous owner, if another instance, is superseded for
- * good. A new lease starts with no accepted status report.
+ * good, and its capacity requests are released as `ReleaseCapacity` would. A new lease starts with no accepted status
+ * report.
  */
 export async function claimLease(sql: Sql, environmentId: string, instanceId: string, epoch: bigint) {
   const { lease } = await sql.begin(async (tx) => {
@@ -30,6 +32,11 @@ export async function claimLease(sql: Sql, environmentId: string, instanceId: st
         insert into superseded_instances (environment_id, instance_id)
         values (${environmentId}, ${environment.owner_instance_id})
         on conflict do nothing`;
+      await tx`
+        update capacity_requests
+        set state = case when torn_down then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end
+        where environment_id = ${environmentId} and owner_instance_id = ${environment.owner_instance_id}
+          and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY}, ${CapacityState.FAILED})`;
     }
     const [claimed] = await tx<{ lease: bigint }[]>`
       update environments

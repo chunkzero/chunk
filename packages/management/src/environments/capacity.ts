@@ -35,6 +35,8 @@ export interface CapacityRow {
   credential: Uint8Array;
   /** `keys.fingerprint` of the plaintext credential. */
   credential_digest: Uint8Array;
+  /** The core instance that owned the environment when the request was recorded. */
+  owner_instance_id: string;
 }
 
 type CapacityServices = Pick<ServiceImpl<typeof EnvironmentService>, "ensureCapacity" | "releaseCapacity">;
@@ -44,7 +46,15 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
   return `capacity-credential/${environmentId}/${requestId}`;
 }
 
-/** Records capacity intents for the reconciler; neither call waits for the provider. */
+/**
+ * Records capacity intents for the reconciler; neither call waits for the provider.
+ *
+ * A release is terminal, as core's `Launcher` requires. RELEASED means the request's machine is destroyed, and no path
+ * starts a machine for a request that isn't PROVISIONING or READY: the reconciler starts one only under a lock on the
+ * request's row that sees it in one of those states, and saves a machine for it under the same condition, destroying
+ * one it could not save. Only the reconciler holding the leader lock creates machines. A released request ID, even one
+ * released before it was ever ensured, stays released. Superseding a core instance releases its requests.
+ */
 export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {
   return {
     async ensureCapacity(request, context) {
@@ -60,13 +70,14 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
       const digest = keys.fingerprint(plaintext);
 
       const { row } = await sql.begin(async (tx) => {
-        const [environment] = await tx<{ lease: bigint; project_id: string }[]>`
-          select lease, project_id from environments where id = ${environmentId} for update`;
+        const [environment] = await tx<{ lease: bigint; project_id: string; owner_instance_id: string }[]>`
+          select lease, project_id, owner_instance_id from environments where id = ${environmentId} for update`;
         if (!environment) throw notFound("environment");
         fenceLease(environment.lease, request.lease);
         const [existing] = await tx<CapacityRow[]>`
           select * from capacity_requests where environment_id = ${environmentId} and request_id = ${requestId}`;
         if (existing) {
+          if (existing.workload === Workload.UNSPECIFIED) return { row: existing };
           const same =
             existing.workload === workload &&
             existing.machine_profile === machineProfile &&
@@ -94,10 +105,10 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
         const [inserted] = await tx<CapacityRow[]>`
           insert into capacity_requests
             (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, java_version, state,
-              credential, credential_digest)
+              credential, credential_digest, owner_instance_id)
           values (${environmentId}, ${requestId}, ${workload}, ${machineProfile}, ${releaseId}, ${appId},
             ${profile.memory_mib}, ${jvm ? (release.manifest.java_version ?? null) : null}, ${CapacityState.PROVISIONING},
-            ${sealed}, ${digest})
+            ${sealed}, ${digest}, ${environment.owner_instance_id})
           returning *`;
         await notify(tx, { kind: "environment", environmentId });
         return { row: inserted };
@@ -109,8 +120,8 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
       const environmentId = environmentOf(context);
       const requestId = required(request.requestId, "request_id");
       const { row } = await sql.begin(async (tx) => {
-        const [environment] = await tx<{ lease: bigint }[]>`
-          select lease from environments where id = ${environmentId} for update`;
+        const [environment] = await tx<{ lease: bigint; owner_instance_id: string }[]>`
+          select lease, owner_instance_id from environments where id = ${environmentId} for update`;
         if (!environment) throw notFound("environment");
         fenceLease(environment.lease, request.lease);
         // RELEASED once the machine is gone: a failed request's machine may already be torn down, otherwise the
@@ -121,18 +132,25 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
           where environment_id = ${environmentId} and request_id = ${requestId}
             and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY}, ${CapacityState.FAILED})
           returning *`;
-        if (released) await notify(tx, { kind: "environment", environmentId });
-        const [existing] = released
-          ? [released]
-          : await tx<CapacityRow[]>`
-              select * from capacity_requests where environment_id = ${environmentId} and request_id = ${requestId}`;
-        return { row: existing };
+        if (released) {
+          await notify(tx, { kind: "environment", environmentId });
+          return { row: released };
+        }
+        const [existing] = await tx<CapacityRow[]>`
+          select * from capacity_requests where environment_id = ${environmentId} and request_id = ${requestId}`;
+        if (existing) return { row: existing };
+        // A tombstone, so an ensure arriving after this release finds the ID released. It has no workload, which is
+        // how ensures recognize it, and no machine or credential.
+        const [tombstone] = await tx<CapacityRow[]>`
+          insert into capacity_requests
+            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, state, torn_down,
+              credential, credential_digest, owner_instance_id)
+          values (${environmentId}, ${requestId}, ${Workload.UNSPECIFIED}, '', '', '', 0, ${CapacityState.RELEASED}, true,
+            '', '', ${environment.owner_instance_id})
+          returning *`;
+        return { row: tombstone };
       });
-      return {
-        capacity: row
-          ? toCapacity(row)
-          : create(CapacitySchema, { requestId: request.requestId, state: CapacityState.RELEASED }),
-      };
+      return { capacity: row && toCapacity(row) };
     },
   };
 }
