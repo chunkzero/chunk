@@ -8,7 +8,10 @@ export interface ProviderTimeouts {
   callMs: number;
 }
 
-/** A provider call was given up on; it may still finish later, so nothing about its outcome is known. */
+/**
+ * A provider call was given up on, by the reconciler's bound or by a provider's own wait; it may still finish later, so
+ * nothing about its outcome is known. The reconciler retries it like a transient failure.
+ */
 export class ProviderTimeoutError extends Error {
   constructor(message: string) {
     super(message);
