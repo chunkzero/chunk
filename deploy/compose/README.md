@@ -135,8 +135,8 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' "$url/chunk.management.v1.Proj
   -d "{\"environmentId\":\"$environment\"}")" = 404 ]; do
   sleep 2
 done
-docker compose stop
-containers=$(docker ps -aq --filter "label=chunk.environment=$environment") &&
+docker compose stop &&
+  containers=$(docker ps -aq --filter "label=chunk.environment=$environment") &&
   volumes=$(docker volume ls -q --filter "label=chunk.environment=$environment") &&
   { [ -z "$containers" ] || docker rm -fv $containers; } &&
   { [ -z "$volumes" ] || docker volume rm $volumes; } &&
