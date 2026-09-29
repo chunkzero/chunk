@@ -61,7 +61,11 @@ def main():
                             # Notices carried only in source file headers.
                             "Dmitry Vyukov", "Gotham Project Developers", "Joyent, Inc. and other Node contributors",
                             "Domenic Denicola", "David Judd", "Daniel McCarney", "Radford M. Neal",
-                            "the Dart project authors"):
+                            "the Dart project authors",
+                            # License texts that source notices refer to.
+                            "// Copyright 2015 The Chromium Authors",
+                            "Copyright 2009 The Go Authors.\n\nRedistribution",
+                            "Copyright 2012, the Dart project authors.", "The BSD 2-Clause License"):
             assert attribution in notices, f"Third-party notices are missing {attribution!r}"
         assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 

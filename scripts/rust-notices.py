@@ -3,8 +3,9 @@
 
 The notices carry every license, copyright and NOTICE file in the source of each crate `chunk` links, plus the
 license notices in its source file comments, followed by licenses/v8.txt for the V8 build the `v8` crate links. Crates
-published without any license file use the upstream text vendored at licenses/crates/<name>-<version>.txt.
-`--vendor` refreshes both vendored sources from git; printing works offline from the local Cargo registry.
+published without any license file use the upstream text vendored at licenses/crates/<name>-<version>.txt, and
+license texts that source notices refer to are vendored under licenses/referenced. `--vendor` refreshes all vendored
+texts and licenses/v8.txt from git; printing works offline from the local Cargo registry.
 """
 
 import argparse
@@ -69,6 +70,16 @@ V8_COMPONENTS = [
 ]
 # The copyright holder of components whose license files name none, for telling their own source notices apart.
 V8_AUTHORS = {"Abseil": "The Abseil Authors"}
+# License texts that source notices point to without their source shipping them: (holder, name, repository, ref, path).
+# They are vendored at licenses/referenced/<name>.txt and printed after the notices that name the holder.
+REFERENCED_LICENSES = [
+    ("The Chromium Authors", "chromium", "https://chromium.googlesource.com/chromium/src", "refs/tags/150.0.7871.0",
+     "LICENSE"),
+    ("The Go Authors", "go", "https://github.com/golang/go", "refs/tags/go1.27.1", "LICENSE"),
+    ("the Dart project authors", "dart", "https://github.com/dart-lang/sdk", "refs/tags/3.13.5", "LICENSE"),
+    ("Domenic Denicola", "webidl-conversions", "https://github.com/jsdom/webidl-conversions", "refs/tags/v8.0.1",
+     "LICENSE.md"),
+]
 
 
 def cargo(*args):
@@ -178,8 +189,16 @@ def source_notices(sources, own):
 
 
 def notice_section(title, notices):
-    return f"{RULE}\nNotices from source files in {title}\n{RULE}\n\n" + "\n\n".join(
-        "From:\n" + "".join(f"  {path}\n" for path in paths) + f"\n{text}" for text, paths in notices)
+    """The notices, followed by the vendored license texts they point to."""
+    parts = ["From:\n" + "".join(f"  {path}\n" for path in paths) + f"\n{text}" for text, paths in notices]
+    for holder, name, *_ in REFERENCED_LICENSES:
+        if any(holder.lower() in text.lower() for text, _ in notices):
+            referenced = REPOSITORY / "licenses/referenced" / f"{name}.txt"
+            if not referenced.exists():
+                raise ValueError(f"licenses/referenced/{name}.txt is missing; run scripts/rust-notices.py --vendor")
+            parts.append(f"{'-' * 80}\nThe license the notices above refer to for {holder}\n{'-' * 80}\n\n"
+                         f"{referenced.read_text().strip()}")
+    return f"{RULE}\nNotices from source files in {title}\n{RULE}\n\n" + "\n\n".join(parts)
 
 
 def vendored(package):
@@ -344,6 +363,16 @@ def vendor_crates(upstream):
         raise ValueError("Assemble these crates' license texts by hand in licenses/crates:\n" + "\n".join(unresolved))
 
 
+def vendor_referenced(upstream):
+    directory = REPOSITORY / "licenses/referenced"
+    directory.mkdir(exist_ok=True)
+    for stale in directory.iterdir():
+        stale.unlink()
+    for _, name, url, ref, path in REFERENCED_LICENSES:
+        commit = upstream.commit(url, ref)
+        (directory / f"{name}.txt").write_text(section(url, commit, path, upstream.show(commit, path)) + "\n")
+
+
 def vendor_v8(upstream):
     lock = tomllib.loads((REPOSITORY / "Cargo.lock").read_text())
     [version] = [package["version"] for package in lock["package"] if package["name"] == "v8"]
@@ -384,6 +413,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="rust-notices-") as repository:
             upstream = Upstream(repository)
             vendor_crates(upstream)
+            vendor_referenced(upstream)
             vendor_v8(upstream)
     else:
         print(notices(), end="")
