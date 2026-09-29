@@ -1,8 +1,32 @@
 //! Status reports against the fake management.
 
 use super::*;
-use crate::managed::status::{INTERVAL, OBSERVE, Observed, PrivateAddress, Reporter};
-use std::net::{IpAddr, SocketAddr};
+use crate::{
+    Core,
+    managed::{
+        ATTACH_IDLE, Lease, Managed, REATTACH,
+        status::{INTERVAL, OBSERVE, Observed, PrivateAddress, Reporter},
+    },
+};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::OnceLock,
+};
+
+/// Keeps paused time from advancing on its own while the returned sender lives, however long real work takes.
+fn hold_time() -> std::sync::mpsc::Sender<()> {
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    tokio::task::spawn_blocking(move || held.recv());
+    release
+}
+
+/// Advances held time a second at a time for `limit`, letting real work settle between steps.
+async fn advance_for(limit: Duration) {
+    for _ in 0..limit.as_secs() {
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(20))).await.unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gateway_is_reported_at_the_address_management_is_reached_from_once_it_starts() {
@@ -56,9 +80,7 @@ async fn tick(
 #[tokio::test(start_paused = true)]
 async fn reports_repeat_under_one_lease_a_changed_address_reports_at_once_and_a_new_lease_starts_over() {
     let mut harness = Harness::new().await;
-    // While a blocking task runs, paused time advances only through `tick`, however long a report takes.
-    let (_release, held) = std::sync::mpsc::channel::<()>();
-    tokio::task::spawn_blocking(move || held.recv());
+    let _time = hold_time();
     let reporter = Reporter::new(harness.management_config().client(), CancellationToken::new());
     let observed = Mutex::new(Some(Observed { lease: 0, revision: 1, ..Observed::default() }));
     let (observing, mut observations) = mpsc::unbounded_channel();
@@ -115,4 +137,108 @@ async fn a_heartbeat_sent_while_a_slow_active_report_is_in_flight_follows_it() {
         .map(|report| (report.sequence, report.deployment.map(|progress| progress.state())))
         .collect();
     assert_eq!(applied, [(1, Some(DeploymentState::Active)), (2, None)]);
+}
+
+#[tokio::test]
+async fn no_report_queued_behind_one_in_flight_is_sent_once_core_is_stopping() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    *harness.management.progress_delay.lock().unwrap() = Duration::from_millis(200);
+    let stopping = CancellationToken::new();
+    let reporter = Reporter::new(harness.management_config().client(), stopping.clone());
+    let observed = Observed { lease: 0, revision: 1, ..Observed::default() };
+    let progress = |state| super::super::progress("dep_a", state, String::new());
+    let sent = tokio::join!(
+        reporter.send(observed.clone(), Some(progress(DeploymentState::InProgress))),
+        reporter.send(observed.clone(), None),
+        reporter.send(observed, Some(progress(DeploymentState::Active))),
+        async { stopping.cancel() },
+    );
+    assert!(matches!(sent, (Ok(true), Ok(false), Ok(false), ())));
+    let applied: Vec<_> =
+        std::iter::from_fn(|| harness.reported.try_recv().ok()).map(|report| report.sequence).collect();
+    assert_eq!(applied, [1]);
+}
+
+#[tokio::test]
+async fn a_report_fenced_under_the_held_lease_stops_core_while_its_attach_delivers_nothing() {
+    let mut harness = Harness::new().await;
+    harness.management.publish(&mut harness.management.records.lock().unwrap());
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let published = lease.subscribe();
+    let managed =
+        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let mut running = Box::pin(managed.run());
+    tokio::select! {
+        error = &mut running => panic!("{error}"),
+        report = harness.reported.recv() => assert_eq!(report.unwrap().lease, 1),
+    }
+
+    tokio::time::pause();
+    let time = hold_time();
+    // Another core attaches, and this core's attach never hears of it.
+    harness.management.attach_held.send_replace(true);
+    harness.management.lease.send_replace(2);
+    let error = tokio::select! {
+        error = &mut running => error,
+        () = advance_for(INTERVAL * 2) => panic!("core kept serving"),
+    };
+    assert!(error.to_string().contains("fenced"), "{error}");
+    assert_eq!(*published.borrow(), Lease::Superseded);
+
+    drop((running, time));
+    tokio::time::resume();
+    core.stop(|| {}).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_report_fenced_while_core_attaches_again_leaves_it_serving_under_the_new_lease() {
+    let mut harness = Harness::new().await;
+    harness.management.publish(&mut harness.management.records.lock().unwrap());
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let published = lease.subscribe();
+    let managed =
+        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let mut running = Box::pin(managed.run());
+    tokio::select! {
+        error = &mut running => panic!("{error}"),
+        report = harness.reported.recv() => assert_eq!(report.unwrap().lease, 1),
+    }
+
+    tokio::time::pause();
+    let time = hold_time();
+    // The attach stalls, so core attaches again, and management grants lease 2 but holds its answer back while a
+    // report under lease 1 is fenced.
+    harness.management.attach_held.send_replace(true);
+    let fenced = async {
+        harness.management.lease.subscribe().wait_for(|lease| *lease == 2).await.unwrap();
+        harness.management.fencing.notified().await;
+    };
+    tokio::select! {
+        error = &mut running => panic!("{error}"),
+        () = fenced => {}
+        () = advance_for(ATTACH_IDLE + REATTACH + INTERVAL * 2) => panic!("no report was fenced"),
+    }
+    assert_eq!(*published.borrow(), Lease::Held(1));
+
+    harness.management.attach_held.send_replace(false);
+    let report = loop {
+        tokio::select! {
+            error = &mut running => panic!("{error}"),
+            report = harness.reported.recv() => {
+                let report = report.unwrap();
+                if report.lease != 1 {
+                    break report;
+                }
+            }
+        }
+    };
+    assert_eq!((report.lease, report.sequence), (2, 1));
+    assert_eq!(*published.borrow(), Lease::Held(2));
+
+    drop((running, time));
+    tokio::time::resume();
+    core.stop(|| {}).await.unwrap();
 }

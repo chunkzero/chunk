@@ -30,6 +30,10 @@ struct Management {
     desired: watch::Sender<AttachResponse>,
     /// The lease of the latest core attach, which fences every core attached before it.
     lease: watch::Sender<u64>,
+    /// While set, attach streams deliver nothing, not even a fence, though each new attach still takes a lease.
+    attach_held: watch::Sender<bool>,
+    /// Notified when management fences a report.
+    fencing: Notify,
     /// The reports management applied.
     reports: mpsc::UnboundedSender<ReportStatusRequest>,
     /// The lease and sequence of the latest applied report. A report that isn't later is ignored.
@@ -139,8 +143,10 @@ async fn handle(
             management.lease.send_modify(|lease| *lease += 1);
             let lease = *management.lease.borrow();
             let (mut desired, mut leases) = (management.desired.subscribe(), management.lease.subscribe());
+            let mut held = management.attach_held.subscribe();
             tokio::spawn(async move {
                 loop {
+                    _ = held.wait_for(|held| !*held).await;
                     let message = AttachResponse { lease, ..desired.borrow_and_update().clone() };
                     if sender.send(Ok(Frame::data(envelope(0, &message.encode_to_vec())))).await.is_err() {
                         return;
@@ -148,6 +154,7 @@ async fn handle(
                     tokio::select! {
                         changed = desired.changed() => if changed.is_err() { return },
                         _ = async { leases.wait_for(|latest| *latest > lease).await.map(|_| ()) } => {
+                            _ = held.wait_for(|held| !*held).await;
                             let end = format!(r#"{{"error":{FENCED}}}"#);
                             _ = sender.send(Ok(Frame::data(envelope(2, end.as_bytes())))).await;
                             return;
@@ -167,6 +174,7 @@ async fn handle(
             let refused = progress.state() == DeploymentState::Active
                 && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
             let error = if report.lease < *management.lease.borrow() {
+                management.fencing.notify_one();
                 Some((400, FENCED))
             } else if refused {
                 management.refusal.notify_one();
@@ -316,6 +324,8 @@ impl Harness {
             records: Mutex::default(),
             desired: watch::Sender::new(AttachResponse::default()),
             lease: watch::Sender::new(0),
+            attach_held: watch::Sender::new(false),
+            fencing: Notify::new(),
             reports,
             accepted: Mutex::default(),
             progress_delay: Mutex::default(),
