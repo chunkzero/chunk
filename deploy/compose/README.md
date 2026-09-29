@@ -14,6 +14,10 @@ edge that players connect to. Management starts each environment's machines itse
 - Gateways accept PROXY headers, which carry players' addresses, from the edge's static address (`10.231.0.2`) only. The
   network uses `10.231.0.0/16`; if that collides with a network the host reaches, change the subnet, the edge's address
   and `CHUNK_MACHINE_TRUSTED_EDGES` together.
+- **Players' addresses need rootful Docker or rootful Podman.** The edge passes on the address it sees. Rootful engines
+  forward the published IPv4 port with NAT and keep the player's address. Rootless Podman forwards through
+  `rootlessport`, so every player arrives from the bridge's address: per-player address limits and logs see one address.
+  The player port is published on IPv4 only, since Docker's userland proxy hides IPv6 players the same way.
 
 ## Running
 
@@ -40,6 +44,7 @@ These settings can be added to `.env`:
 | Variable                   | Default                   | Purpose                                                                |
 | -------------------------- | ------------------------- | ---------------------------------------------------------------------- |
 | `CHUNK_PLAYER_PORT`        | `25565`                   | The host port players connect to.                                      |
+| `CHUNK_PLAYER_BIND`        | `0.0.0.0`                 | The host IPv4 address the player port is published on.                 |
 | `CHUNK_EDGE_DOMAIN`        | `localhost`               | Environments get `env-<id>.<domain>`; point `*.<domain>` at this host. |
 | `CHUNK_MANAGEMENT_PUBLISH` | `127.0.0.1:8080`          | Where the host publishes management's API and dashboard.               |
 | `CHUNK_PUBLIC_URL`         | `http://localhost:8080`   | How clients reach management, used in upload and login URLs.           |
