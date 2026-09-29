@@ -60,7 +60,7 @@ export async function startHarness(): Promise<Harness> {
   let handler: ReturnType<typeof createHandler> = async () => new Response(null, { status: 503 });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request, bun) => handler(request, bun) });
   const url = server.url.origin;
-  const releases = await localReleaseStore({ directory, keys, publicUrl: url });
+  const releases = await localReleaseStore({ directory, keys, publicUrl: url, machineUrl: url });
   const deps: Deps = {
     sql,
     keys,

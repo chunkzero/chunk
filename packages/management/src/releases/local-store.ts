@@ -31,10 +31,13 @@ export async function localReleaseStore({
   directory,
   keys,
   publicUrl,
+  machineUrl,
 }: {
   directory: string;
   keys: Keys;
   publicUrl: string;
+  /** Where machines reach this service; download URLs only go to machines. */
+  machineUrl: string;
 }): Promise<ReleaseStore> {
   const root = resolve(directory);
   await mkdir(root, { recursive: true });
@@ -78,7 +81,7 @@ export async function localReleaseStore({
     async downloadUrl(key, expireTime) {
       const expires = Math.floor(expireTime.getTime() / 1000).toString();
       const signature = keys.sign(["download", key, expires].join("\n"));
-      return `${publicUrl}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
+      return `${machineUrl}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
     },
 
     async read(key) {

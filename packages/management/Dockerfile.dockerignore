@@ -5,6 +5,8 @@
 !packages/
 **/node_modules/
 **/dist/
+**/.env
+**/.env.*
 packages/management/data/
 packages/management/test/
 packages/management/Dockerfile*
