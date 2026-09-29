@@ -95,6 +95,9 @@ mod tests {
         let spec = LaunchSpec {
             core_endpoint: "http://10.0.0.2:4000".into(),
             environment: "test".into(),
+            release_id: "release-1".into(),
+            app: "lobby".into(),
+            profile: "small".into(),
             player_address: Some("10.0.0.3".parse().unwrap()),
             memory_mib: 512,
         };
@@ -116,6 +119,9 @@ mod tests {
         let spec = LaunchSpec {
             core_endpoint: "http://10.0.0.2:4000".into(),
             environment: "test".into(),
+            release_id: "release-1".into(),
+            app: "lobby".into(),
+            profile: "small".into(),
             player_address: None,
             memory_mib: 512,
         };

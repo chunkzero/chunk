@@ -191,6 +191,9 @@ async fn ensure_launches_one_machine_whose_jvm_registers_and_becomes_ready() {
     let spec = LaunchSpec {
         core_endpoint: fixture.network.clone(),
         environment: "test".into(),
+        release_id: RELEASE.into(),
+        app: "bridge".into(),
+        profile: "small".into(),
         player_address: None,
         memory_mib: 512,
     };

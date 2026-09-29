@@ -38,6 +38,7 @@ struct Management {
     /// ACTIVE reports for this deployment are refused as unavailable, notifying `refusal`.
     refused: Mutex<Option<String>>,
     refusal: Notify,
+    capacity: Mutex<launcher::Capacities>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -175,6 +176,7 @@ async fn handle(
                 None => response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap(),
             }
         }
+        _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body),
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -306,6 +308,7 @@ impl Harness {
             stalled: Notify::new(),
             refused: Mutex::default(),
             refusal: Notify::new(),
+            capacity: Mutex::default(),
         });
         let url = serve(management.clone()).await;
         Self { directory, management, url, reported, release: (release_id, fs::read(&archive).unwrap()) }
@@ -613,4 +616,5 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
     assert_eq!(restart().await, (None, None));
 }
 
+mod launcher;
 mod runner_image;

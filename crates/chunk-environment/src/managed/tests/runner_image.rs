@@ -100,8 +100,9 @@ async fn a_managed_core_runs_its_jvm_in_the_chunk_jvm_image() {
     };
     let core = Core::start_with_launcher(config, RunnerConfig::new(Arc::new(launcher))).await.unwrap();
     let gateway = OnceLock::new();
-    let management = ManagementConfig { url: harness.url.clone(), token: "secret".into() };
-    let managed = Managed::new(management, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let client = ManagementConfig { url: harness.url.clone(), token: "secret".into() }.client();
+    let lease = watch::Sender::new(None);
+    let managed = Managed::new(client, lease, "env_test".into(), &harness.state(), &core, &gateway, None);
 
     let checks = async {
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;

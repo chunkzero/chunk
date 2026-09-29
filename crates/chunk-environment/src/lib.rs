@@ -15,8 +15,15 @@ pub use managed::ManagementConfig;
 pub use services::{Service, Services};
 
 use chunk_service::{optional, required};
-use std::{io, sync::OnceLock, time::Duration};
-use tokio::{sync::oneshot, task::JoinHandle};
+use std::{
+    io,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 const STARTUP: Duration = Duration::from_secs(30);
@@ -87,8 +94,9 @@ impl Config {
 }
 
 /// Runs the configured services until `stop` or until one of them stops. With core, the gateway stops before core;
-/// under management, the gateway starts with the first deployment, and a core that management fences stops. The
-/// gateway alone follows core's current deployment and stops once core revokes its credential.
+/// under management, the gateway starts with the first deployment, JVMs run on machines management provides, and a
+/// core that management fences stops. The gateway alone follows core's current deployment and stops once core revokes
+/// its credential.
 /// # Errors
 /// Reports startup errors, a service that stopped on its own, a fenced core, a gateway credential core rejects, and
 /// shutdown errors.
@@ -107,10 +115,17 @@ async fn run_core(
 ) -> io::Result<()> {
     let environment = config.environment.clone();
     let state = config.state.clone();
-    let core = Core::start(config, || {}).await?;
+    let management = management.map(|management| (management.client(), watch::Sender::new(None)));
+    let core = match &management {
+        Some((client, lease)) => {
+            let launcher = managed::ManagementLauncher::new(client.clone(), lease.subscribe());
+            Core::start_with_launcher(config, RunnerConfig::new(Arc::new(launcher))).await?
+        }
+        None => Core::start(config, || {}).await?,
+    };
     let gateway = OnceLock::new();
-    let managed = if let Some(management) = management {
-        Some(managed::Managed::new(management, environment, &state, &core, &gateway, gateway_config))
+    let managed = if let Some((client, lease)) = management {
+        Some(managed::Managed::new(client, lease, environment, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {
             let started = match core.target() {

@@ -1,12 +1,14 @@
 //! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
 
 mod activation;
+mod launcher;
 mod release;
 mod retire;
 
 use crate::{Core, Gateway, GatewayConfig};
 use activation::Activation;
 use chunk_management::{Client, Code, v1};
+pub(crate) use launcher::ManagementLauncher;
 use std::{
     io,
     path::{Path, PathBuf},
@@ -17,6 +19,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 const REATTACH: Duration = Duration::from_secs(5);
@@ -33,9 +36,17 @@ pub struct ManagementConfig {
     pub token: String,
 }
 
+impl ManagementConfig {
+    pub(crate) fn client(self) -> Client {
+        Client::new(self.url).with_token(self.token)
+    }
+}
+
 /// Core's attachment to the management service: it follows the desired state and reports deployment progress.
 pub(crate) struct Managed<'a> {
     client: Client,
+    /// Where the lease of each attach is published, for the launcher's calls.
+    lease: watch::Sender<Option<u64>>,
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
@@ -112,7 +123,8 @@ impl Drop for Work<'_> {
 
 impl<'a> Managed<'a> {
     pub(crate) fn new(
-        config: ManagementConfig,
+        client: Client,
+        lease: watch::Sender<Option<u64>>,
         environment: String,
         state: &Path,
         core: &'a Core,
@@ -120,7 +132,8 @@ impl<'a> Managed<'a> {
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
         Self {
-            client: Client::new(config.url).with_token(config.token),
+            client,
+            lease,
             instance_id: uuid::Uuid::new_v4().to_string(),
             environment,
             releases: release::Store::new(state, core.archives().clone()),
@@ -207,6 +220,7 @@ impl<'a> Managed<'a> {
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
+                    self.lease.send_if_modified(|lease| lease.replace(desired.lease) != Some(desired.lease));
                     lock(&self.deployments).desired = Some(desired.deployment_id.clone());
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
