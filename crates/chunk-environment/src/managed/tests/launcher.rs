@@ -86,7 +86,7 @@ pub(super) async fn serve(management: &Management, path: &str, body: &[u8]) -> h
     respond(200, "application/proto", capacity)
 }
 
-fn respond(status: u16, content_type: &str, body: Vec<u8>) -> hyper::Response<Body> {
+pub(super) fn respond(status: u16, content_type: &str, body: Vec<u8>) -> hyper::Response<Body> {
     let response = hyper::Response::builder().status(status).header("content-type", content_type);
     response.body(Full::new(body.into()).boxed()).unwrap()
 }
@@ -361,5 +361,10 @@ async fn shutdown_leaves_unconfirmed_releases_to_management_once_bounded_and_act
     harness.deploy("dep_b", harness.valid());
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
     assert_eq!(harness.management.state("remote-1"), CapacityState::Releasing);
-    assert!(std::iter::from_fn(|| harness.reported.try_recv().ok()).all(|report| report.deployment.is_none()));
+    // Reports started while dep_a's progress was in flight carry it, and may land after it.
+    let loading = |progress: &DeploymentProgress| {
+        (progress.deployment_id.as_str(), progress.state()) == ("dep_a", DeploymentState::InProgress)
+    };
+    let mut reports = std::iter::from_fn(|| harness.reported.try_recv().ok());
+    assert!(reports.all(|report| report.deployment.as_ref().is_none_or(loading)));
 }

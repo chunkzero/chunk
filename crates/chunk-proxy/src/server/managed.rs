@@ -17,7 +17,7 @@ use chunk_proto::sync::v1::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::oneshot,
+    sync::{Notify, oneshot},
     time::{Instant, sleep, timeout},
 };
 
@@ -33,6 +33,8 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often a gateway tells core how many connections it holds.
+const ACTIVE_EVERY: Duration = Duration::from_secs(1);
 
 struct ClaimGuard {
     platform: Platform,
@@ -280,12 +282,62 @@ async fn withdraw(source: &ClaimGuard) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::TimedOut, "source withdrawal unresolved"))
 }
 
+/// This gateway's connections, which core hears of every [`ACTIVE_EVERY`].
+#[derive(Default)]
+pub(super) struct Connected {
+    activity: chunk_service::Activity,
+    arrived: Notify,
+}
+
+impl Connected {
+    /// Runs `connection` as one of these connections.
+    pub fn track<F: Future>(&self, connection: F) -> impl Future<Output = F::Output> + use<F> {
+        let busy = self.activity.begin();
+        self.arrived.notify_one();
+        async move {
+            let _busy = busy;
+            connection.await
+        }
+    }
+
+    /// Tells core how many connections this gateway holds every [`ACTIVE_EVERY`], and at once when one arrives after
+    /// a report of none. Until core takes a report, one that came and went since the last report it took counts too.
+    async fn report(&self, platform: &Platform) -> ! {
+        let (mut reported, mut idle) = (0, false);
+        loop {
+            let observed = self.activity.observe();
+            let open = u32::try_from(observed.in_flight).unwrap_or(u32::MAX);
+            let connections = open.max(u32::from(observed.changes != reported));
+            match platform.active(connections).await {
+                Ok(()) => (reported, idle) = (observed.changes, connections == 0),
+                Err(error) => tracing::debug!(%error, "core didn't hear how many connections this gateway holds"),
+            }
+            if idle {
+                tokio::select! {
+                    () = sleep(ACTIVE_EVERY) => {}
+                    () = self.arrived.notified() => {}
+                }
+            } else {
+                sleep(ACTIVE_EVERY).await;
+            }
+        }
+    }
+}
+
+/// Withdraws the claims other processes left open, as [`withdraw_inherited`] does, while telling core of `connected`.
+pub(super) async fn follow(platform: &Platform, ready: oneshot::Sender<()>, connected: &Connected) -> io::Error {
+    tokio::select! {
+        error = withdraw_inherited(platform, ready) => error,
+        never = connected.report(platform) => match never {},
+    }
+}
+
 /// Withdraws each claim this gateway's view shows that another process under its ID created, retrying each until core
 /// takes its withdrawal. `ready` resolves once every such claim in the first live view is withdrawing or gone; later
 /// ones, such as those of calls a replaced process made before it lost the ID, are withdrawn as they appear. Returns
 /// once the view fails, as when another process takes the ID over. Control completes a withdrawal whose JVM has yet to
 /// confirm it.
-pub(super) async fn withdraw_inherited(platform: &Platform, ready: oneshot::Sender<()>) -> io::Error {
+async fn withdraw_inherited(platform: &Platform, ready: oneshot::Sender<()>) -> io::Error {
     let (mut ready, mut first, mut settled) = (Some(ready), None, None);
     loop {
         let inherited = platform.claims(|view| {

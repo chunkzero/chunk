@@ -56,6 +56,8 @@ pub struct CoreConfig {
 pub struct Core {
     backend: Option<Running>,
     handle: Option<chunk_backend::Backend>,
+    /// How far the log's replication got; unset when replication is off.
+    replication: Option<chunk_store::ReplicationProgress>,
     /// The deployment the backend served first, or empty without one.
     deployment: Option<String>,
     control: Option<Running>,
@@ -139,6 +141,7 @@ impl Core {
             Some(Running { task: tokio::spawn(chunk_backend::server::run(backend, ready, stop.clone())), stop });
         let ready = Running::ready(&mut self.backend, started, "backend").await?;
         self.handle = Some(ready.backend);
+        self.replication = ready.replication;
         self.deployment = Some(ready.deployment);
         Ok(())
     }
@@ -298,6 +301,18 @@ impl Core {
         Ok(self.system()?.epoch().0)
     }
 
+    /// Whether every commit to the log is durable where the environment keeps it: in object storage when the log
+    /// replicates, and otherwise on local disk, where each commit is synced before it is acknowledged.
+    pub(crate) fn flushed(&self) -> bool {
+        self.replication.as_ref().is_none_or(chunk_store::ReplicationProgress::flushed)
+    }
+
+    /// Whether a gateway may hold connections: one reports some, or core hasn't heard from it lately, including one
+    /// whose stream ended that neither came back nor was revoked.
+    pub(crate) fn gateways_active(&self) -> bool {
+        self.gateways.liveness.active()
+    }
+
     /// This machine's configured address on the environment's private network.
     pub(crate) fn private_address(&self) -> Option<IpAddr> {
         self.private_address
@@ -346,11 +361,14 @@ impl Core {
         Ok(issuer.machine(chunk_control::MachineKind::Gateway, id))
     }
 
-    /// Revokes gateway `id`'s machine credential for good, which ends the streams it opened with `STOPPED`.
+    /// Revokes gateway `id`'s machine credential for good, which ends the streams it opened with `STOPPED`. Core then
+    /// takes the gateway's machine to be gone, so it no longer keeps core awake: revoke it once the machine stopped.
     /// # Errors
     /// Reports a stopped control or store, and rejects an unknown gateway.
     pub fn revoke_gateway(&self, id: &str) -> io::Result<()> {
-        self.control()?.revoke_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)
+        self.control()?.revoke_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)?;
+        self.gateways.liveness.release(id);
+        Ok(())
     }
 
     /// Core's endpoint and the in-process gateway's credential, with the backend deployment it routes players

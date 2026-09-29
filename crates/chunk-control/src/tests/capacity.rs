@@ -17,6 +17,7 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
     assert_eq!(state.hosts[&host].capacity, Capacity::Requested);
     assert!(fixture.host.ids.lock().unwrap().is_empty());
     assert!(!claim.is_finished());
+    assert!(control.in_use().unwrap());
     claim.abort();
     assert!(claim.await.unwrap_err().is_cancelled());
 
@@ -30,6 +31,8 @@ async fn placement_commits_capacity_before_any_host_call_and_cancel_never_launch
     eventually(|| control.state().unwrap().hosts[&host].capacity == Capacity::Ready).await;
     assert_eq!(*fixture.host.ids.lock().unwrap(), BTreeSet::from([host]));
     eventually(|| control.state().unwrap().claims["waiting"].phase == Phase::Released).await;
+    // A ready host with no open claim keeps nothing in use.
+    assert!(!control.in_use().unwrap());
     executor.stop().await;
     jvm.cancel();
     follower.await.unwrap();

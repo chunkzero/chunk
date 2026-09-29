@@ -3,7 +3,10 @@
 //! owns the topic, as gateway.proto describes.
 
 use super::{
-    super::{SyncService, auth::Class, auth::Principal, caller::Grant, errors, streams::Fenced, streams::Sender},
+    super::{
+        SyncService, auth::Class, auth::Principal, caller::Grant, errors, liveness::Live, streams::Fenced,
+        streams::Sender,
+    },
     changed, send,
 };
 use chunk_control::{Control, Generation, gateway::Topic};
@@ -20,6 +23,8 @@ pub(in super::super) struct Gateway {
     positions: watch::Receiver<Generation>,
     grant: Grant,
     fenced: Fenced,
+    /// Counts the stream as live until it ends.
+    live: Live,
 }
 
 /// Opens the gateway topic `request` names under a new stream ID, resuming after its cursor when that names a stream
@@ -45,6 +50,7 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
         .map(|position| Generation { epoch: position.epoch, revision: position.revision });
     let positions = service.control.subscribe();
     let (topic, first) = Topic::open(&service.control, id, after).map_err(|failure| errors::control(&failure))?;
+    let live = service.credentials.gateways.liveness.open(id);
     Ok(Gateway {
         topic,
         first: Update { stream, ..first },
@@ -52,6 +58,7 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
         positions,
         grant: Grant::new(service.credentials.clone(), principal, "", None),
         fenced,
+        live,
     })
 }
 
@@ -59,7 +66,7 @@ impl Gateway {
     /// Sends the first update, then one for each control commit, until the client leaves, core stops, the credential
     /// lapses, as when it's revoked, or a newer stream supersedes this one.
     pub async fn run(self, sender: Sender, stop: CancellationToken) {
-        let Self { mut topic, first, control, mut positions, grant, fenced } = self;
+        let Self { mut topic, first, control, mut positions, grant, fenced, live: _live } = self;
         if !send(&grant, &sender, first) {
             return;
         }

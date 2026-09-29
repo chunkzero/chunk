@@ -92,16 +92,21 @@ impl Credentials {
     }
 }
 
-/// The credential core minted for each gateway serving in its process, by gateway ID. Only digests are kept.
+/// The credential core minted for each gateway serving in its process, and what every gateway's live stream last said
+/// about its connections.
 #[derive(Default)]
-pub(crate) struct Gateways(RwLock<BTreeMap<String, String>>);
+pub(crate) struct Gateways {
+    /// Each credential's digest, by gateway ID.
+    credentials: RwLock<BTreeMap<String, String>>,
+    pub liveness: super::liveness::Liveness,
+}
 
 impl Gateways {
     /// Mints `id`'s credential, which replaces any earlier one and is the gateway's authority for its topic and
     /// callers.
     pub fn mint(&self, id: &str) -> String {
         let credential = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let mut gateways = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let mut gateways = self.credentials.write().unwrap_or_else(PoisonError::into_inner);
         gateways.insert(id.to_owned(), hex(&Sha256::digest(&credential)));
         credential
     }
@@ -109,7 +114,7 @@ impl Gateways {
     /// The gateway `credential` was minted for, comparing it against every gateway's in constant time.
     fn gateway(&self, credential: &str) -> Option<String> {
         let presented = hex(&Sha256::digest(credential));
-        let gateways = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let gateways = self.credentials.read().unwrap_or_else(PoisonError::into_inner);
         let matches = gateways.iter().filter(|(_, expected)| same_secret(&presented, expected));
         matches.fold(None, |_, (id, _)| Some(id.clone()))
     }

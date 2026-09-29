@@ -148,7 +148,8 @@ impl Proxy {
 
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
     /// claims other processes under this gateway's ID left open, and accepts no connection until those in its first
-    /// view of the gateway's claims are withdrawing or gone. It stops once a later process under that ID takes it over.
+    /// view of the gateway's claims are withdrawing or gone, and tells core every second how many connections it holds,
+    /// so core stays awake for them. It stops once a later process under that ID takes it over.
     ///
     /// # Errors
     /// Returns shutdown-signal errors and replacement by a later process. Accept errors are retried with backoff.
@@ -157,9 +158,10 @@ impl Proxy {
         tokio::pin!(shutdown);
         let platform = self.retarget().as_ref().map(Retarget::platform);
         let (ready, withdrawn) = tokio::sync::oneshot::channel();
+        let connected = managed::Connected::default();
         let inherited = async {
             match &platform {
-                Some(platform) => managed::withdraw_inherited(platform, ready).await,
+                Some(platform) => managed::follow(platform, ready, &connected).await,
                 None => std::future::pending().await,
             }
         };
@@ -213,7 +215,7 @@ impl Proxy {
                     let current = self.retarget();
                     let platform = current.as_ref().map(Retarget::platform);
                     let trusted_edges = self.config.trusted_edges.clone();
-                    connections.spawn(async move {
+                    connections.spawn(connected.track(async move {
                         let peer = match timeout(deadline, proxy_header::player_address(&mut stream, peer, &trusted_edges)).await {
                             Ok(Ok(player)) => player,
                             Ok(Err(error)) => {
@@ -240,7 +242,7 @@ impl Proxy {
                             Ok(None) => {}
                             Err(error) => tracing::debug!(%peer, %error, "connection closed"),
                         }
-                    });
+                    }));
                 }
             }
         };

@@ -70,6 +70,8 @@ pub(super) struct Actions {
     slots: Arc<Semaphore>,
     external_slots: Arc<Semaphore>,
     effects: crate::ActionEffects,
+    /// Every live action is in flight here, from launch until its worker ends.
+    pub activity: chunk_service::Activity,
 }
 
 impl Actions {
@@ -89,6 +91,7 @@ impl Actions {
             slots: Arc::new(Semaphore::new(4 * limit)),
             external_slots: Arc::new(Semaphore::new(limit)),
             effects,
+            activity: chunk_service::Activity::default(),
         }
     }
 
@@ -379,6 +382,7 @@ impl Actor {
         };
         let worker_id = id.clone();
         let worker_cancellation = cancellation.clone();
+        let busy = self.actions.activity.begin();
         let worker = std::thread::Builder::new().name("chunk-action".into()).spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Arc<str>> {
                     let mut engine = Engine::new()?;
@@ -402,6 +406,7 @@ impl Actor {
                     _ => error,
                 });
                 worker_cancellation.cancel();
+                drop(busy);
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });
             })
             .inspect_err(|_| self.actions.retained -= bytes)?;

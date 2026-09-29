@@ -1,6 +1,9 @@
-//! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
+//! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`,
+//! and handing the backend's next due job to `SetWakeAlarm`.
 
 mod activation;
+mod alarm;
+mod idle;
 mod launcher;
 mod release;
 mod retire;
@@ -30,12 +33,19 @@ const ATTACH_IDLE: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a deployment failed, as reported, is cut to this many bytes.
 const MAX_MESSAGE_BYTES: usize = 1024;
+/// How long core waits for one signal of whether it may be suspended before it counts that signal as unknown.
+const READ_WAIT: Duration = Duration::from_millis(500);
+/// How long one observation of core's status may take, gateway address discovery included.
+const OBSERVE_WAIT: Duration = Duration::from_secs(1);
 
 pub struct ManagementConfig {
     /// The management service's base URL.
     pub url: String,
     /// The environment's bearer token.
     pub token: String,
+    /// How long core stays idle before it reports that management may suspend it; unset, it never does. Positive, so
+    /// work that came and went between two looks at it still counts.
+    pub suspend_after: Option<Duration>,
 }
 
 impl ManagementConfig {
@@ -65,6 +75,8 @@ pub(crate) struct Managed<'a> {
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
     reporter: status::Reporter,
+    alarm: alarm::Alarm,
+    idle: idle::Idle,
     /// Where edges reach the gateway.
     private_address: status::PrivateAddress,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
@@ -148,6 +160,8 @@ impl<'a> Managed<'a> {
         let (client, stopping) = (management.client(), CancellationToken::new());
         Self {
             reporter: status::Reporter::new(client.clone(), stopping.clone()),
+            alarm: alarm::Alarm::new(client.clone()),
+            idle: idle::Idle::new(management.suspend_after),
             private_address: status::PrivateAddress::new(core.private_address(), &management.url),
             client,
             lease,
@@ -170,8 +184,8 @@ impl<'a> Managed<'a> {
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
-    /// Meanwhile, it retires the deployments it no longer serves and reports its status.
-    pub(crate) async fn run(self) -> io::Error {
+    /// Meanwhile, it retires the deployments it no longer serves, reports its status and hands off its wake alarm.
+    pub(crate) async fn run(&self) -> io::Error {
         if let Err(error) = self.recover() {
             return error;
         }
@@ -188,7 +202,24 @@ impl<'a> Managed<'a> {
         tokio::select! {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
+            never = self.hand_off_alarms() => match never {},
             error = self.reporter.keep_reporting(|| self.current(), |lease| self.superseded(lease)) => self.fenced(error),
+        }
+    }
+
+    /// Hands off each new wake alarm of the backend under the lease core holds, unless core is stopping.
+    async fn hand_off_alarms(&self) -> ! {
+        match (self.core.backend(), self.core.epoch()) {
+            (Some(backend), Ok(epoch)) => self.alarm.keep_handing_off(&backend, epoch, || self.held()).await,
+            _ => std::future::pending().await,
+        }
+    }
+
+    /// The lease of the latest attach, unless core is stopping or was superseded.
+    fn held(&self) -> Option<u64> {
+        match *self.lease.borrow() {
+            Lease::Held(lease) if !self.stopping.is_cancelled() => Some(lease),
+            _ => None,
         }
     }
 
@@ -424,21 +455,31 @@ impl<'a> Managed<'a> {
 
     /// What to report periodically under the latest attach's lease, unless core is stopping or was superseded.
     async fn current(&self) -> Option<status::Observed> {
-        if self.stopping.is_cancelled() {
-            return None;
-        }
-        let Lease::Held(lease) = *self.lease.borrow() else { return None };
+        let lease = self.held()?;
         let revision = lock(&self.deployments).revision;
         Some(self.observe(lease, revision).await)
     }
 
-    /// Core's status under `lease` and `revision`.
+    /// Core's status under `lease` and `revision`. An observation that takes longer than [`OBSERVE_WAIT`] says core
+    /// may not be suspended, which starts the grace period over, and repeats the gateway addresses management last
+    /// accepted rather than any it hasn't verified.
     async fn observe(&self, lease: u64, revision: u64) -> status::Observed {
-        let mut gateway_addresses = Vec::new();
-        if let Some(gateway) = self.gateway.get() {
-            let address = self.private_address.gateway(gateway.address()).await;
-            gateway_addresses.extend(address.as_ref().map(SocketAddr::to_string));
+        if let Ok(observed) = tokio::time::timeout(OBSERVE_WAIT, self.observe_now(lease, revision)).await {
+            return observed;
         }
+        tracing::debug!("core's status took too long to observe; it isn't ready to suspend");
+        self.idle.restart(revision);
+        let gateway_addresses = self.reporter.accepted_addresses();
+        status::Observed { lease, revision, gateway_addresses, online_players: 0, ready_to_suspend: false }
+    }
+
+    async fn observe_now(&self, lease: u64, revision: u64) -> status::Observed {
+        let address = async {
+            let gateway = self.gateway.get()?;
+            self.private_address.gateway(gateway.address()).await
+        };
+        let (address, ready_to_suspend) = tokio::join!(address, self.ready_to_suspend(revision));
+        let gateway_addresses = address.as_ref().map(SocketAddr::to_string).into_iter().collect();
         let online_players =
             match self.core.control().and_then(|control| control.online_players().map_err(io::Error::other)) {
                 Ok(online) => u32::try_from(online).unwrap_or(u32::MAX),
@@ -447,8 +488,56 @@ impl<'a> Managed<'a> {
                     0
                 }
             };
-        status::Observed { lease, revision, gateway_addresses, online_players }
+        status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend }
     }
+
+    /// Whether management may suspend core under desired `revision`, as the proto's contract has it: no players remain,
+    /// the log is flushed and the wake alarm is handed off, with no job due within the grace period, and nothing was
+    /// active for the grace period. Active means backend work running, starting or finishing (actions, hooks, commands
+    /// and jobs), a gateway that reports connections or that core can't hear from, an open claim or a launching host in
+    /// control, a claimed job, or a deployment loading or not yet accepted. What can't be read within [`READ_WAIT`]
+    /// counts as active.
+    ///
+    /// Queries, mutations and operator calls aren't counted: suspending stops or pauses the environment gracefully,
+    /// every commit is durable before it's acknowledged, and a call a suspend cuts off fails as it would in a crash and
+    /// is retried.
+    async fn ready_to_suspend(&self, revision: u64) -> bool {
+        if !self.idle.sleeps() {
+            return false;
+        }
+        let backend = self.core.backend();
+        let handoff = match &backend {
+            Some(backend) => read_within(backend.wake_handoff()).await,
+            None => None,
+        };
+        let work = backend.as_ref().map(|backend| backend.activity().observe());
+        let in_use = self.core.control().and_then(|control| control.in_use().map_err(io::Error::other));
+        let deploying = {
+            let deployments = lock(&self.deployments);
+            deployments.loading.is_some() || deployments.unacknowledged.is_some()
+        };
+        let active = deploying
+            || work.is_none_or(|work| work.in_flight > 0)
+            || self.core.gateways_active()
+            || !matches!(in_use, Ok(false))
+            || handoff.as_ref().is_none_or(|handoff| handoff.running > 0);
+        let handed = match (self.core.epoch(), &handoff) {
+            (Ok(epoch), Some(handoff)) => self.alarm.settled(epoch, handoff),
+            _ => false,
+        };
+        let observed = idle::Observation {
+            active,
+            changes: work.map_or(0, |work| work.changes),
+            settled: handed && self.core.flushed(),
+            due_at: handoff.and_then(|handoff| handoff.due_at),
+        };
+        self.idle.ready(revision, &observed)
+    }
+}
+
+/// What `read` answers within [`READ_WAIT`], or nothing once it fails or takes longer.
+async fn read_within<T, E>(read: impl std::future::Future<Output = Result<T, E>>) -> Option<T> {
+    tokio::time::timeout(READ_WAIT, read).await.ok()?.ok()
 }
 
 /// `call`'s result, or a retryable interruption once `limit` passes.

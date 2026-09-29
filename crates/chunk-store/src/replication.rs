@@ -217,6 +217,25 @@ impl Replicator {
     pub fn fenced(&self) -> bool {
         self.shared.fenced()
     }
+
+    /// A view of the upload progress for callers that don't own the uploader.
+    #[must_use]
+    pub fn progress(&self) -> ReplicationProgress {
+        ReplicationProgress(self.shared.clone())
+    }
+}
+
+/// How far the uploader got, without waiting for it.
+#[derive(Clone)]
+pub struct ReplicationProgress(Arc<Shared>);
+
+impl ReplicationProgress {
+    /// Whether every transaction committed so far is in object storage. A fenced store's never are.
+    #[must_use]
+    pub fn flushed(&self) -> bool {
+        let state = self.0.lock();
+        state.ended != Some(Ended::Fenced) && state.uploaded >= state.committed
+    }
 }
 
 impl Drop for Replicator {

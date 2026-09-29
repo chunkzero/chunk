@@ -14,7 +14,9 @@ use super::{
     errors, position,
 };
 use chunk_js::DeploymentId;
-use chunk_proto::sync::v1::{CallRequest, Error, ManifestResult, Position, PrepareResult, error::Code};
+use chunk_proto::sync::v1::{
+    ActiveArguments, CallRequest, Error, ManifestResult, Position, PrepareResult, error::Code,
+};
 use chunk_store::Revision;
 use prost::Message;
 
@@ -33,6 +35,7 @@ pub(super) async fn call(
     match method {
         "prepare" => return Ok((None, prepare(service, request).await?.encode_to_vec())),
         "manifest" => return Ok((None, manifest(service, principal, request).await?.encode_to_vec())),
+        "active" => return active(service, principal, request).map(|()| (None, Vec::new())),
         _ => {}
     }
     if let Some(method) = jvm::Method::parse(method) {
@@ -90,6 +93,24 @@ async fn prepare(service: &SyncService, request: &CallRequest) -> Result<Prepare
     }
     let id = service.app.backend().allocate_action_id().await.map_err(|failure| errors::backend(&failure))?;
     Ok(PrepareResult { operation_id: format!("{}{id}", app::PREPARED) })
+}
+
+/// Records what a gateway, naming its current stream, reports about its connections. Any keeps core from counting as
+/// idle.
+fn active(service: &SyncService, principal: &Principal, request: &CallRequest) -> Result<(), Error> {
+    let Class::Gateway { id } = &principal.class else {
+        return Err(errors::denied("only a gateway reports that it's active"));
+    };
+    if !request.operation_id.is_empty() || !request.deployment.is_empty() || request.caller.is_some() {
+        return Err(errors::invalid("chunk:active takes no operation ID, deployment or caller"));
+    }
+    let arguments: ActiveArguments = decode(&request.arguments)?;
+    service.fences.check(&request.stream, &principal.credential)?;
+    if arguments.connections > 0 {
+        service.app.backend().activity().touch();
+    }
+    service.credentials.gateways.liveness.heard(id, arguments.connections);
+    Ok(())
 }
 
 /// The domain manifest of the deployment `request` names, or of the current release's.

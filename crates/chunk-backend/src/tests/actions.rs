@@ -118,6 +118,23 @@ async fn release(backend: &Backend, player: &str) {
 }
 
 #[tokio::test]
+async fn an_action_is_in_flight_from_its_start_until_its_outcome() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = backend(&directory);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let before = backend.activity().observe();
+    let mut held = hold(&backend, "a").await;
+    let running = backend.activity().observe();
+    assert_eq!(running.in_flight, before.in_flight + 1);
+    assert!(running.changes > before.changes);
+    release(&backend, "a").await;
+    held.outcome().await.unwrap();
+    let finished = backend.activity().observe();
+    assert_eq!(finished.in_flight, before.in_flight);
+    assert!(finished.changes > running.changes);
+}
+
+#[tokio::test]
 async fn actions_are_refused_once_queued_ones_wait_too_long_for_the_budget() {
     let directory = tempfile::tempdir().unwrap();
     let backend = budgeted(&directory, 2 * chunk_js::Limits::default().heap_bytes);

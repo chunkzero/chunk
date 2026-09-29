@@ -4,7 +4,7 @@ use super::{runtime::with_jvm, *};
 use chunk_control::{Control, MoveRequest};
 use chunk_proto::{
     control::v1::{ClaimRequest, Identity},
-    sync::v1::{ClaimPhase, GatewayClaim},
+    sync::v1::{ActiveArguments, ClaimPhase, GatewayClaim},
 };
 
 /// Subscribes to `gateway/proxy` as process `instance`, after `after`'s stream and position when set, returning the
@@ -78,6 +78,52 @@ async fn a_gateway_process_owns_its_topic_until_another_takes_it_over() {
         assert_eq!(failure(&subscribe(&fixture, &owner, None).await.1), Some(Code::Superseded));
         owner = replacement;
     }
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_owning_process_s_stream_decides_whether_its_gateway_keeps_core_awake() {
+    let mut fixture = Fixture::start().await;
+    let (gateway, cli) = (fixture.gateway.clone(), fixture.cli.clone());
+    let liveness = |fixture: &Fixture| fixture.gateways.liveness.active();
+    let active = |connections| ActiveArguments { connections };
+    let (mut first, a) = subscribe(&fixture, "a", None).await;
+    // A live stream core hasn't heard from yet counts as active; heard holding no connections, it doesn't.
+    assert!(liveness(&fixture));
+    let heard = fixture.platform(&gateway, &a.stream, "", "chunk:active", &active(0)).await;
+    assert!(matches!(heard.outcome, Some(Outcome::Result(_))));
+    assert!(!liveness(&fixture));
+
+    // Process B takes the topic over, and A's reports are stopped rather than counted.
+    let (second, b) = subscribe(&fixture, "b", None).await;
+    assert_eq!(ended(&mut first).await, Some(Code::Superseded));
+    fixture.platform(&gateway, &b.stream, "", "chunk:active", &active(0)).await;
+    let refused =
+        [(&gateway, a.stream.as_str(), Code::Stopped), (&gateway, "", Code::Stopped), (&cli, &b.stream, Code::Denied)];
+    for (credential, stream, refusal) in refused {
+        let response = fixture.platform(credential, stream, "", "chunk:active", &active(1)).await;
+        assert_eq!(code(&response), refusal);
+    }
+    assert!(!liveness(&fixture));
+
+    // B's connections count while it reports them.
+    fixture.platform(&gateway, &b.stream, "", "chunk:active", &active(2)).await;
+    assert!(liveness(&fixture));
+    fixture.platform(&gateway, &b.stream, "", "chunk:active", &active(0)).await;
+    assert!(!liveness(&fixture));
+
+    // Once B's stream ends, B may still hold connections, so the gateway counts until B's next stream reports none.
+    drop(second);
+    let ended = async {
+        while !liveness(&fixture) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the ended stream made the gateway unknown");
+    let (_third, c) = subscribe(&fixture, "b", None).await;
+    assert!(liveness(&fixture));
+    fixture.platform(&gateway, &c.stream, "", "chunk:active", &active(0)).await;
+    assert!(!liveness(&fixture));
     fixture.stop().await;
 }
 

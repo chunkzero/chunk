@@ -403,6 +403,20 @@ fn restore_keeps_the_database_private() {
 }
 
 #[test]
+fn progress_is_flushed_only_while_every_commit_is_uploaded() {
+    let storage = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("data.db"), manual(&storage));
+    replicator.flush().unwrap();
+    let progress = replicator.progress();
+    assert!(progress.flushed());
+    store.apply_schema(&schema()).unwrap();
+    assert!(!progress.flushed());
+    replicator.flush().unwrap();
+    assert!(progress.flushed());
+}
+
+#[test]
 fn uploads_follow_commits_and_an_idle_store_uploads_nothing() {
     let storage = Arc::new(Memory::default());
     let directory = tempfile::tempdir().unwrap();

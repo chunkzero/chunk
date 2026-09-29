@@ -5,6 +5,7 @@ mod app;
 mod auth;
 mod caller;
 mod errors;
+mod liveness;
 mod platform;
 mod runs;
 mod streams;

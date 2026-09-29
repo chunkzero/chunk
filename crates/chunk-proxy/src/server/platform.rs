@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use chunk_contract::DomainManifest;
-use chunk_proto::sync::v1::{CallRequest, Caller, Position, PrepareResult, SessionDemand};
+use chunk_proto::sync::v1::{ActiveArguments, CallRequest, Caller, Position, PrepareResult, SessionDemand};
 use prost::Message;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -122,6 +122,16 @@ impl Platform {
         let message = CallRequest { method: "chunk:prepare".into(), ..CallRequest::default() };
         let result = self.sync.unfenced(message).await?;
         Ok(PrepareResult::decode(result.as_slice()).map_err(invalid_data)?.operation_id)
+    }
+
+    /// Tells core, on the gateway's current stream, how many connections this gateway holds.
+    pub async fn active(&self, connections: u32) -> io::Result<()> {
+        let message = CallRequest {
+            method: "chunk:active".into(),
+            arguments: ActiveArguments { connections }.encode_to_vec(),
+            ..CallRequest::default()
+        };
+        self.sync.fenced(message, RPC_TIMEOUT).await.map(drop)
     }
 
     /// Queries the app's legacy `shared/proxy/<phase>` hook.

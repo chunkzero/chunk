@@ -310,6 +310,7 @@ struct Owner {
     send: SendBudget,
     queue: Arc<EngineQueue>,
     lane: Arc<crate::system::Lane>,
+    activity: chunk_service::Activity,
     stopped: Arc<AtomicBool>,
     thread: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -356,6 +357,7 @@ impl Backend {
             send: SendBudget::new(send_bytes()),
             queue: Arc::default(),
             lane: Arc::default(),
+            activity: chunk_service::Activity::default(),
             stopped: Arc::default(),
             thread: std::sync::Mutex::new(None),
         }));
@@ -426,7 +428,7 @@ impl Backend {
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
             match Actor::new(store, outgoing, effects, action_bytes, readers, dequeued, retained) {
                 Ok(actor) => {
-                    if ready.send(Ok(actor.lane())).is_ok() {
+                    if ready.send(Ok((actor.lane(), actor.activity()))).is_ok() {
                         actor.run(incoming, &stop);
                     }
                 }
@@ -435,8 +437,8 @@ impl Backend {
                 }
             }
         })?;
-        let lane = match initialized.recv().map_err(|_| Error::Closed).and_then(|lane| lane) {
-            Ok(lane) => lane,
+        let (lane, activity) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
+            Ok(ready) => ready,
             Err(error) => {
                 let _ = thread.join();
                 return Err(error);
@@ -449,6 +451,7 @@ impl Backend {
             send: SendBudget::new(send_bytes()),
             queue: engine_queue,
             lane,
+            activity,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
         })))
@@ -459,6 +462,13 @@ impl Backend {
     /// [`Error::Closed`]. Blocks, so call it from a blocking task in async code.
     pub fn stop(&self) {
         self.0.stop();
+    }
+
+    /// Work that keeps the environment awake: each action, hook, command and job from launch until its worker ends, and
+    /// what embedders record, such as a gateway reporting connections.
+    #[must_use]
+    pub fn activity(&self) -> &chunk_service::Activity {
+        &self.0.activity
     }
 
     #[must_use]

@@ -10,6 +10,8 @@ pub struct Ready {
     pub backend: Backend,
     /// The deployment served first, or empty without one.
     pub deployment: String,
+    /// How far the log's replication got; unset when replication is off.
+    pub replication: Option<chunk_store::ReplicationProgress>,
 }
 
 pub struct Config {
@@ -52,7 +54,8 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         if let Some(bundle) = bundle {
             backend.deploy(bundle).await.map_err(io::Error::other)?;
         }
-        let _ = ready.send(Ready { backend: backend.clone(), deployment });
+        let replication = replicator.as_ref().map(chunk_store::Replicator::progress);
+        let _ = ready.send(Ready { backend: backend.clone(), deployment, replication });
         tracing::info!("backend ready");
         stopped(&stop, replicator.as_ref()).await;
         Ok(())

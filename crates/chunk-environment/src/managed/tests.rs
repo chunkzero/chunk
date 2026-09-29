@@ -40,6 +40,10 @@ struct Management {
     accepted: Mutex<(u64, u64)>,
     /// How long reports of deployment progress wait before management handles them.
     progress_delay: Mutex<Duration>,
+    /// How many of the next reports are refused as unavailable.
+    unavailable_reports: Mutex<u32>,
+    /// While set, reports are handled, but their responses never come.
+    stall_reports: Mutex<bool>,
     archives: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Notified when a download of an archive whose path names it `stalled` starts. That download sends half of the
     /// archive, then nothing.
@@ -48,6 +52,7 @@ struct Management {
     refused: Mutex<Option<String>>,
     refusal: Notify,
     capacity: Mutex<launcher::Capacities>,
+    alarm: Mutex<suspend::Alarms>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -166,6 +171,7 @@ async fn handle(
         }
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             let report = ReportStatusRequest::decode(body).unwrap();
+            let stall = *management.stall_reports.lock().unwrap();
             let delay = *management.progress_delay.lock().unwrap();
             if report.deployment.is_some() && !delay.is_zero() {
                 tokio::time::sleep(delay).await;
@@ -173,10 +179,16 @@ async fn handle(
             let progress = report.deployment.clone().unwrap_or_default();
             let refused = progress.state() == DeploymentState::Active
                 && management.refused.lock().unwrap().as_ref() == Some(&progress.deployment_id);
+            let unavailable = {
+                let mut remaining = management.unavailable_reports.lock().unwrap();
+                let unavailable = *remaining > 0;
+                *remaining = remaining.saturating_sub(1);
+                unavailable
+            };
             let error = if report.lease < *management.lease.borrow() {
                 management.fencing.notify_one();
                 Some((400, FENCED))
-            } else if refused {
+            } else if refused || unavailable {
                 management.refusal.notify_one();
                 Some((503, UNAVAILABLE))
             } else {
@@ -188,6 +200,9 @@ async fn handle(
                 }
                 None
             };
+            if stall {
+                std::future::pending::<()>().await;
+            }
             match error {
                 Some((status, error)) => response
                     .status(status)
@@ -198,6 +213,7 @@ async fn handle(
             }
         }
         _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body).await,
+        "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => suspend::serve(&management, &body).await,
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -311,6 +327,8 @@ struct Harness {
     management: Arc<Management>,
     url: String,
     reported: mpsc::UnboundedReceiver<ReportStatusRequest>,
+    /// The lease, revision and progress of the report [`Harness::expect`] returned last.
+    expected: Option<(u64, u64, DeploymentProgress)>,
     release: (String, Vec<u8>),
 }
 
@@ -329,14 +347,18 @@ impl Harness {
             reports,
             accepted: Mutex::default(),
             progress_delay: Mutex::default(),
+            unavailable_reports: Mutex::default(),
+            stall_reports: Mutex::default(),
             archives: Mutex::default(),
             stalled: Notify::new(),
             refused: Mutex::default(),
             refusal: Notify::new(),
             capacity: Mutex::default(),
+            alarm: Mutex::default(),
         });
         let url = serve(management.clone()).await;
-        Self { directory, management, url, reported, release: (release_id, fs::read(&archive).unwrap()) }
+        let release = (release_id, fs::read(&archive).unwrap());
+        Self { directory, management, url, reported, expected: None, release }
     }
 
     fn valid(&self) -> ReleaseArtifact {
@@ -359,7 +381,7 @@ impl Harness {
     }
 
     fn management_config(&self) -> ManagementConfig {
-        ManagementConfig { url: self.url.clone(), token: "secret".into() }
+        ManagementConfig { url: self.url.clone(), token: "secret".into(), suspend_after: None }
     }
 
     fn state(&self) -> std::path::PathBuf {
@@ -435,11 +457,14 @@ impl Harness {
     }
 
     /// The next report of deployment progress, which must be under the latest lease. Reports without progress are
-    /// skipped.
+    /// skipped, as are heartbeats that carried the progress of the report returned last while it was in flight.
     async fn expect(&mut self, revision: u64, deployment: &str, state: DeploymentState) -> ReportStatusRequest {
         let report = loop {
             let report = tokio::time::timeout(Duration::from_secs(60), self.reported.recv()).await.unwrap().unwrap();
-            if report.deployment.is_some() {
+            let Some(progress) = &report.deployment else { continue };
+            let seen = (report.lease, report.desired_revision, progress.clone());
+            if self.expected.as_ref() != Some(&seen) {
+                self.expected = Some(seen);
                 break report;
             }
         };
@@ -674,3 +699,4 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
 mod launcher;
 mod runner_image;
 mod status;
+mod suspend;
