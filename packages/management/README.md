@@ -99,7 +99,8 @@ Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT
 `CHUNK_TRUSTED_EDGES`, `CHUNK_OFFLINE_LOGINS` and (core only) `CHUNK_SUSPEND_AFTER_SECONDS`. Credentials are stored
 sealed and never returned. Traffic between machines is plaintext, so they must share a private, encrypted network.
 
-Every container and volume carries `chunk.install`, `chunk.environment`, `chunk.request` and `chunk.workload` labels,
+Every container and named volume the provider creates carries `chunk.install`, `chunk.environment`, `chunk.request` and
+`chunk.workload` labels (anonymous volumes an image declares, such as the JVM runner's cache, go with their container),
 and the provider refuses to touch anything under a name it uses that lacks this install's labels. Core restarts with the
 engine. A gateway machine that exits is replaced under the same request and credential. A JVM machine boots at most
 once: if it exits or disappears, its request fails and core asks for new capacity. A released request never gets a

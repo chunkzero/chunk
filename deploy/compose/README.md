@@ -125,17 +125,22 @@ and removes everything it created; it refuses to run while another install uses 
 Delete environments before `compose down`: their machines are not part of the Compose project and keep the `chunk`
 network in use.
 
-Deletion finishes in the background, so wait until the environment is gone and none of its containers or volumes remain
-before stopping management:
+Deletion finishes in the background. Wait until management reports the environment gone, stop management so it starts
+nothing new, remove anything a provider call still in flight left behind, then take the stack down:
 
 ```sh
 rpc ProjectService/DeleteEnvironment "{\"environmentId\":\"$environment\"}"
-until ! rpc ProjectService/GetEnvironment "{\"environmentId\":\"$environment\"}" >/dev/null 2>&1 &&
-  [ -z "$(docker ps -aq --filter "label=chunk.environment=$environment")" ] &&
-  [ -z "$(docker volume ls -q --filter "label=chunk.environment=$environment")" ]; do
+until [ "$(curl -s -o /dev/null -w '%{http_code}' "$url/chunk.management.v1.ProjectService/GetEnvironment" \
+  -H "authorization: Bearer $token" -H 'content-type: application/json' \
+  -d "{\"environmentId\":\"$environment\"}")" = 404 ]; do
   sleep 2
 done
-docker compose down
+docker compose stop
+containers=$(docker ps -aq --filter "label=chunk.environment=$environment") &&
+  volumes=$(docker volume ls -q --filter "label=chunk.environment=$environment") &&
+  { [ -z "$containers" ] || docker rm -fv $containers; } &&
+  { [ -z "$volumes" ] || docker volume rm $volumes; } &&
+  docker compose down
 ```
 
 Add `-v` to `compose down` only once no environment remains: it deletes the database and stored releases, including the
