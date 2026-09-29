@@ -82,8 +82,9 @@ message GatewayDeployment {
 // ActiveArguments and no operation ID, deployment or caller, and it returns nothing. Like the methods below, it names
 // the gateway's current stream in `CallRequest.stream` and fails with STOPPED once that stream is superseded or if it
 // names another. Core counts a gateway as active, which keeps the environment from being suspended, while its latest
-// report counts connections, and while its stream is live but its latest report is over about three seconds old or
-// hasn't come yet. Once the stream ends, the gateway no longer counts.
+// report counts connections, and while its latest report is over about three seconds old or hasn't come yet. A
+// gateway whose stream ended stays active, since it may still hold players, until a new stream of the same gateway
+// reports or its machine credential is revoked; revoke a gateway's credential once its machine has stopped.
 
 // Arguments of `chunk:active`.
 message ActiveArguments {
