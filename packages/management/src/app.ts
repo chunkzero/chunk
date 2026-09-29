@@ -35,6 +35,7 @@ export async function start(config: Config) {
     publicUrl: config.publicUrl,
     edge: config.edge,
     logStore: config.logStore && logStoreIssuer(config.logStore),
+    jvmImage: config.machines?.jvmImage,
     changes: await listenForChanges(sql),
     shutdown: shutdown.signal,
   };

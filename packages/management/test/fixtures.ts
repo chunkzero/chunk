@@ -70,7 +70,7 @@ export function releaseArchive(
       id: app.id,
       jar: `apps/${app.id}/${digest}.jar`,
       sha256: digest,
-      java_version: 21,
+      java_version: 25,
       sessions: Object.fromEntries(
         app.sessions.map((session) => [session, { machine_profile: "default", capacity: 16 }]),
       ),
@@ -89,7 +89,7 @@ export function releaseArchive(
   const manifest = {
     id,
     version: 3,
-    java_version: 21,
+    java_version: 25,
     apps: artifacts,
     profiles: { default: { memory_mib: 1024, max_sessions: 16 } },
     assets: { [assetPath]: sha256(asset) },

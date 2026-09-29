@@ -31,6 +31,8 @@ export interface Machines {
   /** The container network machines share. */
   network: string;
   image: string;
+  /** The image JVM machines run, with `{java}` standing for the release's Java version; unset, no JVM can run. */
+  jvmImage: string | undefined;
   managementUrl: string;
   coreMemoryMib: number;
   corePort: number;
@@ -95,10 +97,15 @@ export function loadConfig(env: Env = process.env): Config {
 function machinesOf(env: Env, publicUrl: string): Machines | undefined {
   const image = env.CHUNK_ENVIRONMENT_IMAGE;
   if (!image) return undefined;
+  const jvmImage = env.CHUNK_JVM_IMAGE || undefined;
+  if (jvmImage !== undefined && !jvmImage.includes("{java}")) {
+    throw new Error("CHUNK_JVM_IMAGE must contain {java}, which stands for a release's Java version");
+  }
   return {
     dockerHost: env.DOCKER_HOST ?? "unix:///var/run/docker.sock",
     network: env.CHUNK_MACHINE_NETWORK ?? "chunk",
     image,
+    jvmImage,
     managementUrl: env.CHUNK_MACHINE_MANAGEMENT_URL ?? publicUrl,
     coreMemoryMib: positive(env, "CHUNK_CORE_MEMORY_MIB", 1024),
     corePort: positive(env, "CHUNK_CORE_PORT", 7070),

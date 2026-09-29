@@ -3,21 +3,70 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Code } from "@connectrpc/connect";
 
 import { capacityCredentialContext, type CapacityRow } from "../src/environments/capacity.ts";
-import { capacityMachineName, capacityMachineSpec, coreMachineName } from "../src/environments/machines.ts";
+import { capacityMachineName, capacityMachineSpec, coreHostOf, coreMachineName } from "../src/environments/machines.ts";
 import { reconcile, type ReconcilerOptions } from "../src/environments/reconciler.ts";
 import { CapacityState, EnvironmentService, Workload } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState, ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { fakeProvider } from "./fake-provider.ts";
-import { codeOf, createEnvironment, databaseUrl, deployRelease, type Harness, next, startHarness } from "./harness.ts";
+import { releaseArchive } from "./fixtures.ts";
+import {
+  codeOf,
+  createEnvironment,
+  databaseUrl,
+  deployRelease,
+  type Harness,
+  next,
+  startHarness,
+  uploadRelease,
+} from "./harness.ts";
 
-test("an extra machine reaches core at an endpoint with IPv6 hosts bracketed", () => {
-  const options = { image: "chunk/environment:test", managementUrl: "", coreMemoryMib: 2048, corePort: 7070 };
-  const request = { environment_id: "env_1", request_id: "cap", workload: Workload.GATEWAY, memory_mib: 512 };
-  const endpoint = (coreHost: string) =>
-    capacityMachineSpec(options, request as CapacityRow, { coreHost, credential: "secret" }).env.CHUNK_CORE_ENDPOINT;
-  expect(endpoint("fdaa::1")).toBe("http://[fdaa::1]:7070");
-  expect(endpoint("10.0.0.2")).toBe("http://10.0.0.2:7070");
-  expect(endpoint("chunk-env-1-core")).toBe("http://chunk-env-1-core:7070");
+test("JVM machines run the runner for their Java and gateways the environment image, at core's first IP", () => {
+  const options = {
+    image: "chunk/environment:test",
+    jvmImage: "ghcr.io/chunkzero/chunk-jvm:{java}",
+    managementUrl: "",
+    coreMemoryMib: 2048,
+    corePort: 7070,
+  };
+  const request = {
+    environment_id: "env_1",
+    request_id: "cap",
+    workload: Workload.JVM,
+    machine_profile: "default",
+    release_id: "r1",
+    app_id: "lobby",
+    memory_mib: 512,
+    java_version: 25,
+  } as CapacityRow;
+  expect(coreHostOf(["chunk-env-1-core", "10.0.0.2", "fdaa::1"])).toBe("10.0.0.2");
+  expect(coreHostOf(["chunk-env-1-core"])).toBeUndefined();
+  const spec = (request: CapacityRow, coreHost = coreHostOf(["chunk-env-1-core", "fdaa::1"]) ?? "") =>
+    capacityMachineSpec(options, request, { coreHost, credential: "secret" });
+
+  expect(spec(request)).toMatchObject({
+    image: "ghcr.io/chunkzero/chunk-jvm:25",
+    env: {
+      CHUNK_CORE_ENDPOINT: "http://[fdaa::1]:7070",
+      CHUNK_JVM_CREDENTIAL: "secret",
+      CHUNK_ENVIRONMENT_ID: "env_1",
+      CHUNK_RELEASE_ID: "r1",
+      CHUNK_APP_ID: "lobby",
+      CHUNK_MACHINE_PROFILE: "default",
+    },
+  });
+  expect(Object.keys(spec(request).env)).toHaveLength(6);
+  expect(() => spec({ ...request, java_version: null })).toThrow("no JVM image");
+  expect(() =>
+    capacityMachineSpec({ ...options, jvmImage: undefined }, request, { coreHost: "10.0.0.2", credential: "" }),
+  ).toThrow("no JVM image");
+
+  const gateway = spec({ ...request, workload: Workload.GATEWAY, app_id: "", java_version: null }, "10.0.0.2");
+  expect(gateway.image).toBe("chunk/environment:test");
+  expect(gateway.env).toMatchObject({
+    CHUNK_SERVICES: "gateway",
+    CHUNK_CORE_ENDPOINT: "http://10.0.0.2:7070",
+    CHUNK_GATEWAY_CREDENTIAL: "secret",
+  });
 });
 
 describe.skipIf(!databaseUrl)("reconciler", () => {
@@ -26,7 +75,14 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   let options: ReconcilerOptions;
   beforeAll(async () => {
     h = await startHarness();
-    options = { provider, image: "chunk/environment:test", managementUrl: h.url, coreMemoryMib: 2048, corePort: 7070 };
+    options = {
+      provider,
+      image: "chunk/environment:test",
+      jvmImage: "chunk-jvm:{java}",
+      managementUrl: h.url,
+      coreMemoryMib: 2048,
+      corePort: 7070,
+    };
   });
   afterAll(() => h.close());
 
@@ -45,7 +101,18 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     const { lease, revision } = await next(stream[Symbol.asyncIterator]());
     const state = async () => (await h.client(ProjectService).getEnvironment({ environmentId })).environment?.state;
     const core = () => machines.get(coreName)?.machine;
-    return { environmentId, coreName, core, token, client, lease, revision, state, close: () => abort.abort() };
+    return {
+      projectId,
+      environmentId,
+      coreName,
+      core,
+      token,
+      client,
+      lease,
+      revision,
+      state,
+      close: () => abort.abort(),
+    };
   }
 
   function capacityRequest(env: Awaited<ReturnType<typeof running>>, requestId: string) {
@@ -97,18 +164,32 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(
       await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", workload: 3 as Workload, appId: "" })),
     ).toBe(Code.InvalidArgument);
+    await uploadRelease(
+      h,
+      env.projectId,
+      "r-java",
+      releaseArchive("r-java", undefined, { manifest: (m) => ({ ...m, java_version: 25.5 }) }),
+    );
+    expect(await codeOf(env.client.ensureCapacity({ ...request, requestId: "cap-2", releaseId: "r-java" }))).toBe(
+      Code.FailedPrecondition,
+    );
+
+    // Extra machines wait while core has no IP address.
+    const core = machines.get(env.coreName);
+    const coreIp = core?.machine.addresses[1] ?? "";
+    if (core) core.machine = { ...core.machine, addresses: [env.coreName] };
+    await pass();
+    expect(machines.has(nameOf(env.environmentId, "cap-1"))).toBe(false);
+    if (core) core.machine = { ...core.machine, addresses: [env.coreName, coreIp] };
 
     await pass();
     const ready = (await env.client.ensureCapacity(request)).capacity;
     expect(ready?.state).toBe(CapacityState.READY);
     const machine = machines.get(ready?.machineId ?? "");
     expect(machine?.spec).toMatchObject({
+      image: "chunk-jvm:25",
       restart: false,
-      env: {
-        CHUNK_SERVICES: "jvm",
-        CHUNK_CORE_ENDPOINT: `http://${env.coreName}:7070`,
-        CHUNK_JVM_CREDENTIAL: request.credential,
-      },
+      env: { CHUNK_CORE_ENDPOINT: `http://${coreIp}:7070`, CHUNK_JVM_CREDENTIAL: request.credential },
     });
 
     const [stored] = await h.sql<{ credential: Uint8Array }[]>`

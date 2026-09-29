@@ -18,6 +18,7 @@ test("reads the apps and profiles chunk build writes", async () => {
   const manifest = await verify(releaseArchive("r1", [{ id: "lobby", sessions: ["default", "duel"] }]));
   expect(manifest).toEqual({
     id: "r1",
+    java_version: 25,
     apps: [
       {
         id: "lobby",
@@ -32,12 +33,12 @@ test("reads the apps and profiles chunk build writes", async () => {
 });
 
 test("stores releases without checking what the environment validates", async () => {
-  const unchecked = broken({
+  const unchecked = await broken({
     omit: (path) => path.startsWith("apps/"),
     replace: { "backend.json": "not JSON", "contract.json": '{"contract_version":2.0}' },
     manifest: (manifest) => ({ ...manifest, java_version: "anything", assets: { missing: "0" } }),
   });
-  expect((await unchecked).id).toBe("r1");
+  expect(unchecked).toMatchObject({ id: "r1", java_version: undefined });
 });
 
 test("rejects release.json management cannot read", async () => {

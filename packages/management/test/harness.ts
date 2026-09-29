@@ -80,6 +80,7 @@ export async function startHarness(): Promise<Harness> {
     publicUrl: url,
     edge: { domain: "play.example.net", port: 25565 },
     logStore: undefined,
+    jvmImage: "chunk-jvm:{java}",
     changes,
     shutdown: new AbortController().signal,
   };
@@ -148,10 +149,14 @@ export async function createEnvironment(h: Harness, name = "main") {
   return { projectId, environmentId: created.environment?.id ?? "" };
 }
 
-/** Uploads a fixture release and deploys it; returns the deployment ID. */
-export async function deployRelease(h: Harness, projectId: string, environmentId: string, releaseId: string) {
+/** Uploads a release, a fixture one by default, and completes the upload. */
+export async function uploadRelease(
+  h: Harness,
+  projectId: string,
+  releaseId: string,
+  archive = releaseArchive(releaseId),
+) {
   const deployments = h.client(DeploymentService);
-  const archive = releaseArchive(releaseId);
   const started = await deployments.uploadRelease({
     projectId,
     releaseId,
@@ -160,7 +165,14 @@ export async function deployRelease(h: Harness, projectId: string, environmentId
   });
   await fetch(started.upload?.url ?? "", { method: "PUT", body: archive.bytes });
   await deployments.completeReleaseUpload({ projectId, releaseId });
-  const deployed = await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
+}
+
+/** Uploads a fixture release and deploys it; returns the deployment ID. */
+export async function deployRelease(h: Harness, projectId: string, environmentId: string, releaseId: string) {
+  await uploadRelease(h, projectId, releaseId);
+  const deployed = await h
+    .client(DeploymentService)
+    .deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
   return deployed.deployment?.id ?? "";
 }
 

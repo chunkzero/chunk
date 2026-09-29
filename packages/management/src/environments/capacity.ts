@@ -2,7 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 
 import { notify } from "../changes.ts";
-import { findRelease } from "../deployments/store.ts";
+import { findRelease, requireJvmImage } from "../deployments/store.ts";
 import type { Deps } from "../deps.ts";
 import { ReleaseState } from "../gen/chunk/management/v1/deployments_pb.ts";
 import {
@@ -24,6 +24,8 @@ export interface CapacityRow {
   release_id: string;
   app_id: string;
   memory_mib: number;
+  /** The release's Java version for JVM requests; null for gateways. */
+  java_version: number | null;
   state: CapacityState;
   message: string;
   machine_id: string;
@@ -43,7 +45,7 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
 }
 
 /** Records capacity intents for the reconciler; neither call waits for the provider. */
-export function capacityServices({ sql, keys }: Deps): CapacityServices {
+export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {
   return {
     async ensureCapacity(request, context) {
       const environmentId = environmentOf(context);
@@ -83,16 +85,19 @@ export function capacityServices({ sql, keys }: Deps): CapacityServices {
         const { profiles } = release.manifest;
         const profile = Object.hasOwn(profiles, machineProfile) ? profiles[machineProfile] : undefined;
         if (!profile) throw invalid(`release ${releaseId} has no machine profile ${JSON.stringify(machineProfile)}`);
-        if (workload === Workload.JVM && !release.manifest.apps.some((app) => app.id === appId)) {
+        const jvm = workload === Workload.JVM;
+        if (jvm && !release.manifest.apps.some((app) => app.id === appId)) {
           throw invalid(`release ${releaseId} has no app ${JSON.stringify(appId)}`);
         }
+        if (jvm) requireJvmImage(release.manifest, jvmImage);
         const sealed = await keys.cipher.seal(plaintext, capacityCredentialContext(environmentId, requestId));
         const [inserted] = await tx<CapacityRow[]>`
           insert into capacity_requests
-            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, state, credential,
-              credential_digest)
+            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, java_version, state,
+              credential, credential_digest)
           values (${environmentId}, ${requestId}, ${workload}, ${machineProfile}, ${releaseId}, ${appId},
-            ${profile.memory_mib}, ${CapacityState.PROVISIONING}, ${sealed}, ${digest})
+            ${profile.memory_mib}, ${jvm ? (release.manifest.java_version ?? null) : null}, ${CapacityState.PROVISIONING},
+            ${sealed}, ${digest})
           returning *`;
         await notify(tx, { kind: "environment", environmentId });
         return { row: inserted };

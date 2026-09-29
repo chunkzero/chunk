@@ -8,6 +8,8 @@ import { type ArchiveLimits, scanArchive } from "./archive.ts";
  */
 export interface ReleaseManifest {
   id: string;
+  /** The Java version every app in the release runs on; undefined when release.json declares none management can use. */
+  java_version: number | undefined;
   apps: { id: string; sessions: Record<string, { machine_profile: string; capacity: number }> }[];
   profiles: Record<string, { memory_mib: number; max_sessions: number }>;
 }
@@ -97,7 +99,8 @@ function readManifest(bytes: Uint8Array): ReleaseManifest | string {
     // fromEntries defines own properties, so a name like `__proto__` stays a plain key.
     apps.push({ id: appId, sessions: Object.fromEntries(sessions) });
   }
-  return { id: value.id, apps, profiles: Object.fromEntries(profiles) };
+  const java_version = isCount(value.java_version) ? value.java_version : undefined;
+  return { id: value.id, java_version, apps, profiles: Object.fromEntries(profiles) };
 }
 
 /** chunk_contract's app and session names. */

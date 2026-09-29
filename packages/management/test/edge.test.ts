@@ -25,7 +25,14 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     const token = `chunk_${randomToken()}`;
     await ensureEdgeToken(h.sql, token);
     edge = h.client(EdgeService, token);
-    options = { provider, image: "chunk/environment:test", managementUrl: h.url, coreMemoryMib: 1024, corePort: 7070 };
+    options = {
+      provider,
+      image: "chunk/environment:test",
+      jvmImage: "chunk-jvm:{java}",
+      managementUrl: h.url,
+      coreMemoryMib: 1024,
+      corePort: 7070,
+    };
   });
   afterAll(() => h.close());
 
