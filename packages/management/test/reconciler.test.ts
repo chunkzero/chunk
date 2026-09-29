@@ -1099,6 +1099,72 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
+  test("a resume that lands after timing out is seen running, so the next suspension resumes as usual", async () => {
+    const reconciler = createReconciler(h.deps, {
+      ...options,
+      timeouts: { startMs: 100, callMs: 100 },
+      capacityRetryMs: 300,
+    });
+    const env = await running();
+    const pass = () => reconciler.pass(epoch, [env.environmentId]);
+    const request = capacityRequest(env, "late-resume");
+    const state = async () => (await env.client.ensureCapacity(request)).capacity?.state;
+    await env.client.ensureCapacity(request);
+    await pass();
+    const name = nameOf(env.environmentId, "late-resume");
+    const machine = () => machines.get(name)?.machine;
+    let held: Promise<void> | undefined;
+    hooks.start = async (started) => {
+      if (started !== name || !held) return;
+      const landing = held;
+      held = undefined;
+      await landing;
+    };
+    /** Suspends the machine, times out its resume, then lets that resume land once the backoff has passed. */
+    const resumeLate = async () => {
+      await provider.suspend(machine()?.id ?? "");
+      const landing = Promise.withResolvers<void>();
+      held = landing.promise;
+      await pass();
+      expect(machine()?.state).toBe("suspended");
+      landing.resolve();
+      await until(() => machine()?.state === "running");
+      await Bun.sleep(350);
+    };
+    const report = (sequence: bigint, readyToSuspend: boolean) =>
+      env.client.reportStatus({
+        lease: env.lease,
+        sequence,
+        desiredRevision: env.revision,
+        gatewayAddresses: [`${env.coreName}:25565`],
+        readyToSuspend,
+        onlinePlayers: readyToSuspend ? 0 : 1,
+      });
+    try {
+      // Seen running by a normal run.
+      await resumeLate();
+      await pass();
+      await provider.suspend(machine()?.id ?? "");
+      await pass();
+      expect(machine()?.state).toBe("running");
+      expect(await state()).toBe(CapacityState.READY);
+
+      // Seen running right before an idle suspension.
+      await resumeLate();
+      await report(1n, true);
+      await pass();
+      expect(machine()?.state).toBe("suspended");
+      await report(2n, false);
+      await pass();
+    } finally {
+      hooks.start = undefined;
+    }
+    expect(machine()?.state).toBe("running");
+    expect(await state()).toBe(CapacityState.READY);
+    expect(boots.get(name)).toBe(1);
+    env.close();
+  });
+
   test("deleting an environment revokes its token and removes its machines", async () => {
     const env = await running();
     env.close();
