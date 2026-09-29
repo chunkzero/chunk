@@ -48,6 +48,7 @@ struct Management {
     refused: Mutex<Option<String>>,
     refusal: Notify,
     capacity: Mutex<launcher::Capacities>,
+    alarm: Mutex<suspend::Alarms>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -198,6 +199,7 @@ async fn handle(
             }
         }
         _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body).await,
+        "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => suspend::serve(&management, &body).await,
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -334,6 +336,7 @@ impl Harness {
             refused: Mutex::default(),
             refusal: Notify::new(),
             capacity: Mutex::default(),
+            alarm: Mutex::default(),
         });
         let url = serve(management.clone()).await;
         Self { directory, management, url, reported, release: (release_id, fs::read(&archive).unwrap()) }
@@ -359,7 +362,7 @@ impl Harness {
     }
 
     fn management_config(&self) -> ManagementConfig {
-        ManagementConfig { url: self.url.clone(), token: "secret".into() }
+        ManagementConfig { url: self.url.clone(), token: "secret".into(), suspend_after: None }
     }
 
     fn state(&self) -> std::path::PathBuf {
@@ -674,3 +677,4 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
 mod launcher;
 mod runner_image;
 mod status;
+mod suspend;

@@ -35,7 +35,7 @@ use tokio::{
     time::{Instant, sleep_until, timeout},
 };
 
-use crate::{Config, PlatformTarget};
+use crate::{Config, Connections, PlatformTarget};
 
 struct Responses {
     status: Vec<u8>,
@@ -85,6 +85,7 @@ pub struct Proxy {
     authentication: Arc<Authentication>,
     limbo_packets: Arc<limbo::Cache>,
     platform: Option<Arc<RwLock<platform::Platform>>>,
+    connections: Connections,
 }
 
 /// Replaces the managed platform for later connections; established connections keep theirs.
@@ -131,7 +132,8 @@ impl Proxy {
         let limbo_packets = Arc::new(limbo::Cache::new(config.compression_threshold)?);
         let listener = TcpListener::bind(address).await?;
         tracing::info!(address = %listener.local_addr()?, "Minecraft listener ready");
-        Ok(Self { listener, config, responses, authentication, limbo_packets, platform })
+        let connections = Connections::default();
+        Ok(Self { listener, config, responses, authentication, limbo_packets, platform, connections })
     }
 
     /// # Errors
@@ -144,6 +146,12 @@ impl Proxy {
     #[must_use]
     pub fn retarget(&self) -> Option<Retarget> {
         self.platform.clone().map(Retarget)
+    }
+
+    /// A count of the connections this proxy holds open while it runs.
+    #[must_use]
+    pub fn connections(&self) -> Connections {
+        self.connections.clone()
     }
 
     /// Serves until shutdown, then closes all player sockets and joins tasks. With a managed platform, it withdraws the
@@ -175,6 +183,7 @@ impl Proxy {
         let mut connections = JoinSet::new();
         let mut accept_after = Instant::now();
         let result = loop {
+            self.connections.set(connections.len());
             tokio::select! {
                 biased;
                 result = &mut shutdown => break result,

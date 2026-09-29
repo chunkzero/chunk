@@ -29,6 +29,7 @@ pub(super) struct Observed {
     /// Where edges reach this core's gateway, as `ip:port`.
     pub gateway_addresses: Vec<String>,
     pub online_players: u32,
+    pub ready_to_suspend: bool,
 }
 
 /// Sends reports one at a time, so each lease's sequence reaches management in order.
@@ -46,6 +47,7 @@ struct Sent {
     lease: u64,
     sequence: u64,
     gateway_addresses: Vec<String>,
+    ready_to_suspend: bool,
     at: Option<Instant>,
 }
 
@@ -70,6 +72,7 @@ impl Reporter {
         }
         sent.sequence += 1;
         sent.gateway_addresses.clone_from(&observed.gateway_addresses);
+        sent.ready_to_suspend = observed.ready_to_suspend;
         sent.at = Some(Instant::now());
         let request = v1::ReportStatusRequest {
             observe_time: Some(SystemTime::now().into()),
@@ -77,7 +80,7 @@ impl Reporter {
             online_players: observed.online_players,
             pings: Vec::new(),
             deployment,
-            ready_to_suspend: false,
+            ready_to_suspend: observed.ready_to_suspend,
             lease: observed.lease,
             sequence: sent.sequence,
             desired_revision: observed.revision,
@@ -86,9 +89,9 @@ impl Reporter {
         Ok(true)
     }
 
-    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses differ from
-    /// the latest report's. `observe` finds nothing while core must not report. Returns once management fences a
-    /// lease `superseded` says another core superseded.
+    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
+    /// to suspend differ from the latest report's. `observe` finds nothing while core must not report. Returns once
+    /// management fences a lease `superseded` says another core superseded.
     pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F, superseded: impl Fn(u64) -> bool) -> io::Error
     where
         F: Future<Output = Option<Observed>>,
@@ -101,6 +104,7 @@ impl Reporter {
             let due = {
                 let sent = self.sent.lock().await;
                 sent.gateway_addresses != observed.gateway_addresses
+                    || sent.ready_to_suspend != observed.ready_to_suspend
                     || sent.at.is_none_or(|at| at.elapsed() >= INTERVAL)
             };
             if !due {

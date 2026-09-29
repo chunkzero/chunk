@@ -147,7 +147,7 @@ async fn stop_closes_subscriptions_joins_the_backend_and_releases_its_database()
         };
         let task = tokio::spawn(crate::server::run(config, ready, stop.clone()));
         // The embedder keeps its readiness handle past shutdown.
-        let crate::server::Ready { backend, deployment } =
+        let crate::server::Ready { backend, deployment, .. } =
             tokio::time::timeout(Duration::from_secs(10), started).await.unwrap().unwrap();
         assert_eq!(deployment, "a");
         let mut group = backend.subscribe_group(vec![call("get", Value::Null)]).await.unwrap();

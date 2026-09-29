@@ -86,7 +86,7 @@ pub(super) async fn serve(management: &Management, path: &str, body: &[u8]) -> h
     respond(200, "application/proto", capacity)
 }
 
-fn respond(status: u16, content_type: &str, body: Vec<u8>) -> hyper::Response<Body> {
+pub(super) fn respond(status: u16, content_type: &str, body: Vec<u8>) -> hyper::Response<Body> {
     let response = hyper::Response::builder().status(status).header("content-type", content_type);
     response.body(Full::new(body.into()).boxed()).unwrap()
 }

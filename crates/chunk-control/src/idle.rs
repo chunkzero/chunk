@@ -14,6 +14,16 @@ use crate::{
 const RELEASED_RETENTION_MS: u64 = 300_000;
 
 impl Control {
+    /// Whether players are online or on their way in, or a host is launching: a claim is open, or a host's capacity is
+    /// requested and not yet ready.
+    /// # Errors
+    /// Reports unreadable control state.
+    pub fn in_use(&self) -> Result<bool> {
+        let state = self.state()?;
+        Ok(state.claims.values().any(|claim| claim.phase != Phase::Released)
+            || state.hosts.values().any(|host| host.capacity == Capacity::Requested))
+    }
+
     /// Drains hosts that have had no unfinished session or open claim for their release's idle timeout, and forgets
     /// finished sessions, released hosts, its own drains, old released claims, the operator's forgotten moves and
     /// releases other than the current one once nothing references them and every launch is attributed to its host.

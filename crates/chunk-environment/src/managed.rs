@@ -1,6 +1,9 @@
-//! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`.
+//! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`,
+//! and handing the backend's next due job to `SetWakeAlarm`.
 
 mod activation;
+mod alarm;
+mod idle;
 mod launcher;
 mod release;
 mod retire;
@@ -36,6 +39,8 @@ pub struct ManagementConfig {
     pub url: String,
     /// The environment's bearer token.
     pub token: String,
+    /// How long core stays idle before it reports that management may suspend it; unset, it never does.
+    pub suspend_after: Option<Duration>,
 }
 
 impl ManagementConfig {
@@ -65,6 +70,8 @@ pub(crate) struct Managed<'a> {
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
     reporter: status::Reporter,
+    alarm: alarm::Alarm,
+    idle: idle::Idle,
     /// Where edges reach the gateway.
     private_address: status::PrivateAddress,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
@@ -148,6 +155,8 @@ impl<'a> Managed<'a> {
         let (client, stopping) = (management.client(), CancellationToken::new());
         Self {
             reporter: status::Reporter::new(client.clone(), stopping.clone()),
+            alarm: alarm::Alarm::new(client.clone()),
+            idle: idle::Idle::new(management.suspend_after),
             private_address: status::PrivateAddress::new(core.private_address(), &management.url),
             client,
             lease,
@@ -170,7 +179,7 @@ impl<'a> Managed<'a> {
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
-    /// Meanwhile, it retires the deployments it no longer serves and reports its status.
+    /// Meanwhile, it retires the deployments it no longer serves, reports its status and hands off its wake alarm.
     pub(crate) async fn run(self) -> io::Error {
         if let Err(error) = self.recover() {
             return error;
@@ -188,7 +197,24 @@ impl<'a> Managed<'a> {
         tokio::select! {
             error = self.follow() => error,
             never = self.reclaim() => match never {},
+            never = self.hand_off_alarms() => match never {},
             error = self.reporter.keep_reporting(|| self.current(), |lease| self.superseded(lease)) => self.fenced(error),
+        }
+    }
+
+    /// Hands off each new wake alarm of the backend under the lease core holds, unless core is stopping.
+    async fn hand_off_alarms(&self) -> ! {
+        match (self.core.backend(), self.core.epoch()) {
+            (Some(backend), Ok(epoch)) => self.alarm.keep_handing_off(&backend, epoch, || self.held()).await,
+            _ => std::future::pending().await,
+        }
+    }
+
+    /// The lease of the latest attach, unless core is stopping or was superseded.
+    fn held(&self) -> Option<u64> {
+        match *self.lease.borrow() {
+            Lease::Held(lease) if !self.stopping.is_cancelled() => Some(lease),
+            _ => None,
         }
     }
 
@@ -424,10 +450,7 @@ impl<'a> Managed<'a> {
 
     /// What to report periodically under the latest attach's lease, unless core is stopping or was superseded.
     async fn current(&self) -> Option<status::Observed> {
-        if self.stopping.is_cancelled() {
-            return None;
-        }
-        let Lease::Held(lease) = *self.lease.borrow() else { return None };
+        let lease = self.held()?;
         let revision = lock(&self.deployments).revision;
         Some(self.observe(lease, revision).await)
     }
@@ -447,7 +470,41 @@ impl<'a> Managed<'a> {
                     0
                 }
             };
-        status::Observed { lease, revision, gateway_addresses, online_players }
+        let ready_to_suspend = self.ready_to_suspend(revision).await;
+        status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend }
+    }
+
+    /// Whether management may suspend core under desired `revision`: nothing has been active for the grace period, the
+    /// log is flushed and the wake alarm is handed off with no job due within the grace period. Active means a
+    /// connection to the gateway, an open claim or a launching host in control, a running job, or a deployment loading
+    /// or not yet accepted. What can't be read counts as active.
+    async fn ready_to_suspend(&self, revision: u64) -> bool {
+        if !self.idle.sleeps() {
+            return false;
+        }
+        let handoff = match self.core.backend() {
+            Some(backend) => backend.wake_handoff().await.ok(),
+            None => None,
+        };
+        let in_use = self.core.control().and_then(|control| control.in_use().map_err(io::Error::other));
+        let deploying = {
+            let deployments = lock(&self.deployments);
+            deployments.loading.is_some() || deployments.unacknowledged.is_some()
+        };
+        let active = deploying
+            || self.gateway.get().is_some_and(|gateway| gateway.connections() > 0)
+            || !matches!(in_use, Ok(false))
+            || handoff.as_ref().is_none_or(|handoff| handoff.running > 0);
+        let handed = match (self.core.epoch(), &handoff) {
+            (Ok(epoch), Some(handoff)) => self.alarm.settled(epoch, handoff),
+            _ => false,
+        };
+        let observed = idle::Observation {
+            active,
+            settled: handed && self.core.flushed(),
+            due_at: handoff.and_then(|handoff| handoff.due_at),
+        };
+        self.idle.ready(revision, &observed)
     }
 }
 

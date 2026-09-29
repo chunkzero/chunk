@@ -45,9 +45,9 @@ impl Config {
     /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
     /// `CHUNK_OFFLINE_LOGINS` (`1` admits unauthenticated players under any name; insecure, for tests only). With core,
     /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS` (or
-    /// `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and serves what
-    /// management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
-    /// `$CHUNK_STATE/control.json`.
+    /// `FLY_PRIVATE_IP`). With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and
+    /// `CHUNK_SUSPEND_AFTER_SECONDS` and serves what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's
+    /// connection record goes to `$CHUNK_STATE/control.json`.
     /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
     /// Reports missing or invalid variables.
@@ -76,7 +76,11 @@ impl Config {
         }
         let state: std::path::PathBuf = required("CHUNK_STATE")?;
         let management = match optional("CHUNK_MANAGEMENT_URL")? {
-            Some(url) => Some(ManagementConfig { url, token: required("CHUNK_ENVIRONMENT_TOKEN")? }),
+            Some(url) => Some(ManagementConfig {
+                url,
+                token: required("CHUNK_ENVIRONMENT_TOKEN")?,
+                suspend_after: optional("CHUNK_SUSPEND_AFTER_SECONDS")?.map(Duration::from_secs),
+            }),
             None => None,
         };
         let core = CoreConfig {

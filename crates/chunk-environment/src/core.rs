@@ -56,6 +56,8 @@ pub struct CoreConfig {
 pub struct Core {
     backend: Option<Running>,
     handle: Option<chunk_backend::Backend>,
+    /// How far the log's replication got; unset when replication is off.
+    replication: Option<chunk_store::ReplicationProgress>,
     /// The deployment the backend served first, or empty without one.
     deployment: Option<String>,
     control: Option<Running>,
@@ -139,6 +141,7 @@ impl Core {
             Some(Running { task: tokio::spawn(chunk_backend::server::run(backend, ready, stop.clone())), stop });
         let ready = Running::ready(&mut self.backend, started, "backend").await?;
         self.handle = Some(ready.backend);
+        self.replication = ready.replication;
         self.deployment = Some(ready.deployment);
         Ok(())
     }
@@ -296,6 +299,12 @@ impl Core {
     /// Reports a stopped backend.
     pub fn epoch(&self) -> io::Result<u64> {
         Ok(self.system()?.epoch().0)
+    }
+
+    /// Whether every commit to the log is durable where the environment keeps it: in object storage when the log
+    /// replicates, and otherwise on local disk, where each commit is synced before it is acknowledged.
+    pub(crate) fn flushed(&self) -> bool {
+        self.replication.as_ref().is_none_or(chunk_store::ReplicationProgress::flushed)
     }
 
     /// This machine's configured address on the environment's private network.

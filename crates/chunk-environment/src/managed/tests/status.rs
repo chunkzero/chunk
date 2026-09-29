@@ -14,14 +14,14 @@ use std::{
 };
 
 /// Keeps paused time from advancing on its own while the returned sender lives, however long real work takes.
-fn hold_time() -> std::sync::mpsc::Sender<()> {
+pub(super) fn hold_time() -> std::sync::mpsc::Sender<()> {
     let (release, held) = std::sync::mpsc::channel::<()>();
     tokio::task::spawn_blocking(move || held.recv());
     release
 }
 
 /// Advances held time a second at a time for `limit`, letting real work settle between steps.
-async fn advance_for(limit: Duration) {
+pub(super) async fn advance_for(limit: Duration) {
     for _ in 0..limit.as_secs() {
         tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(20))).await.unwrap();
         tokio::time::advance(Duration::from_secs(1)).await;

@@ -23,7 +23,30 @@ mod trusted_edges;
 pub use disabled::{Proxy, Retarget};
 pub use trusted_edges::TrustedEdges;
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+/// How many connections a proxy holds open, players and server-list pings alike.
+#[derive(Clone, Debug, Default)]
+pub struct Connections(Arc<AtomicUsize>);
+
+impl Connections {
+    #[must_use]
+    pub fn open(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    #[cfg_attr(not(feature = "mc-26-2"), allow(dead_code))]
+    fn set(&self, open: usize) {
+        self.0.store(open, Ordering::Relaxed);
+    }
+}
 
 /// Limits for login and configuration, and the server-list response.
 #[derive(Debug, Clone)]
