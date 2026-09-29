@@ -11,8 +11,9 @@ COPY packages/management/package.json packages/management/
 COPY packages/dashboard/package.json packages/dashboard/
 RUN pnpm install --frozen-lockfile --filter @chunkzero/management --filter @chunkzero/dashboard
 COPY packages packages
-COPY scripts/npm-notices.mjs scripts/
-COPY licenses/spdx licenses/spdx
+COPY deny.toml ./
+COPY scripts/npm-notices.mjs scripts/spdx.mjs scripts/
+COPY licenses/npm licenses/npm
 RUN pnpm build:dashboard \
     && pnpm --filter @chunkzero/management deploy --prod --legacy /out \
     && cp -r packages/dashboard/dist /out/dashboard \

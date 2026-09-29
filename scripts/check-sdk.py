@@ -54,8 +54,11 @@ def main():
         assert {path.name for path in sdk.iterdir()} == {"chunk", "LICENSE.md", "THIRD_PARTY_LICENSES", "toolchain"}, \
             "Only the CLI, native TypeScript toolchain, license and third-party notices should be installed"
         notices = (sdk / "THIRD_PARTY_LICENSES").read_text()
-        assert "https://crates.io/crates/deno_core/" in notices and "`v8` crate" in notices, \
-            "Third-party notices should cover the linked crates and V8"
+        for attribution in ("https://crates.io/crates/deno_core/", "Copyright (c) 2016 Dropbox, Inc.",
+                            "Copyright (c) 2023 Boshen", "libdeflate/COPYING", "The Apache Software Foundation",
+                            "src/unicode_tables/LICENSE-UNICODE", "rust-lang/libm as a whole", "`v8` crate",
+                            "Copyright 2014, the V8 project authors", "UNICODE LICENSE V3"):
+            assert attribution in notices, f"Third-party notices are missing {attribution!r}"
         assert not list(sdk.rglob("*.jar")), "JVM libraries must be resolved from Maven"
 
         class Repository(SimpleHTTPRequestHandler):

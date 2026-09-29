@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -46,7 +47,9 @@ def main():
         root.mkdir()
         shutil.copy2(executable, root / "chunk")
         shutil.copy2(repository / "LICENSE.md", root / "LICENSE.md")
-        (root / "THIRD_PARTY_LICENSES").write_text(third_party_licenses(repository))
+        notices = subprocess.run([sys.executable, "scripts/rust-notices.py"], cwd=repository, check=True,
+                                 stdout=subprocess.PIPE, text=True).stdout
+        (root / "THIRD_PARTY_LICENSES").write_text(notices)
         subprocess.run(["node", "scripts/install-typescript.mjs", str(root)], cwd=repository, check=True)
         subprocess.run([
             str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",
@@ -72,21 +75,6 @@ def main():
         checksum = hashlib.file_digest(source, "sha256").hexdigest()
     archive.with_suffix(archive.suffix + ".sha256").write_text(f"{checksum}  {archive.name}\n")
     print(archive, flush=True)
-
-
-def third_party_licenses(repository):
-    """Notices for the crates linked into `chunk`, followed by those of the V8 build the `v8` crate links."""
-    lock = tomllib.loads((repository / "Cargo.lock").read_text())
-    [v8] = [package["version"] for package in lock["package"] if package["name"] == "v8"]
-    v8_notices = (repository / "licenses/v8.txt").read_text()
-    if f"`v8` crate {v8} (" not in v8_notices.partition("\n")[0]:
-        raise ValueError(f"licenses/v8.txt does not match v8 {v8}; run scripts/v8-notices.py")
-    subprocess.run(["cargo", "fetch", "--locked"], cwd=repository, check=True)
-    crates = subprocess.run([
-        "cargo", "about", "generate", "--frozen", "--fail", "--manifest-path", "crates/chunk-cli/Cargo.toml",
-        "--config", "licenses/about.toml", "licenses/about.hbs",
-    ], cwd=repository, check=True, stdout=subprocess.PIPE, text=True).stdout
-    return f"{crates.rstrip()}\n\n\n{v8_notices}"
 
 
 if __name__ == "__main__":
