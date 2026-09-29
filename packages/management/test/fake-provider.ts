@@ -7,9 +7,11 @@ type Method = "creating" | "create" | "start" | "suspend" | "status" | "destroy"
  * starts, and a new one each time, and a name holds at most one machine. `hooks` runs before a method with the
  * machine's name, and throwing from it fails the call. `creating` runs once a new machine's volumes exist but before the
  * machine does, which models a slow create; the `create` hook runs once it exists, so throwing from it models a lost
- * reply. `boots` counts, per name, starts of a stopped machine.
+ * reply. `boots` counts, per name, starts of a stopped machine. With `behaviour.suspendStops`, suspending stops a
+ * machine, as a provider that cannot keep a machine's memory does.
  */
 export function fakeProvider() {
+  const behaviour = { suspendStops: false };
   const machines = new Map<string, { spec: MachineSpec; machine: Machine }>();
   /** Volume names by the machine name they were created for. */
   const volumes = new Map<string, string[]>();
@@ -65,7 +67,8 @@ export function fakeProvider() {
     },
     async suspend(id) {
       await hooks.suspend?.(nameOf(id));
-      return get(id).machine.state === "running" ? set(id, "suspended") : get(id).machine;
+      if (get(id).machine.state !== "running") return get(id).machine;
+      return behaviour.suspendStops ? set(id, "stopped", [get(id).machine.name]) : set(id, "suspended");
     },
     stop: async (id) => set(id, "stopped", [get(id).machine.name]),
     async status(id) {
@@ -86,5 +89,5 @@ export function fakeProvider() {
         .map((name): Machine => ({ id: "", name, state: "missing", addresses: [] })),
     ],
   };
-  return { provider, machines, volumes, boots, hooks };
+  return { provider, machines, volumes, boots, hooks, behaviour };
 }

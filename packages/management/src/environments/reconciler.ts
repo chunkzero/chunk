@@ -306,8 +306,7 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
           where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
             and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision`,
       );
-      if (still) await provider.suspend(machineId);
-      return Boolean(still);
+      return still ? provider.suspend(machineId) : undefined;
     };
     for (const request of active) {
       if (!request.machine_id) continue;
@@ -321,7 +320,20 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
             where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}`,
         );
       }
-      if (!(await suspendIfIdle(machine.id))) return;
+      const suspended = await suspendIfIdle(machine.id);
+      if (!suspended) return;
+      // A provider that stops machines rather than keeping their memory has ended the JVM's session, so its request
+      // fails now and its machine is torn down while the environment sleeps; core asks for new capacity once woken.
+      if (request.workload === Workload.JVM && suspended.state === "stopped") {
+        await fenced(
+          (tx) => tx`
+            update capacity_requests
+            set state = ${CapacityState.FAILED}, message = 'the JVM machine stopped when its environment was suspended'
+            where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}
+              and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`,
+        );
+        await notify(sql, { kind: "environment", environmentId: id });
+      }
     }
     if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
     await fireDueAlarm(fenced, environment);

@@ -135,7 +135,7 @@ test("only core machines get the suspend time, and only when one is configured",
 
 describe.skipIf(!databaseUrl)("reconciler", () => {
   let h: Harness;
-  const { provider, machines, volumes, boots, hooks } = fakeProvider();
+  const { provider, machines, volumes, boots, hooks, behaviour } = fakeProvider();
   let options: ReconcilerOptions;
   let epoch = 0n;
   beforeAll(async () => {
@@ -731,6 +731,36 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(env.core()?.state).toBe("running");
     await pass();
     expect(env.core()?.state).toBe("suspended");
+    env.close();
+  });
+
+  test("a provider that stops machines on suspend fails their JVM requests, which are torn down while asleep", async () => {
+    const env = await running();
+    await env.client.ensureCapacity(capacityRequest(env, "stops"));
+    await pass();
+    const name = nameOf(env.environmentId, "stops");
+    expect(machines.get(name)?.machine.state).toBe("running");
+    await env.client.reportStatus({
+      lease: env.lease,
+      sequence: 1n,
+      desiredRevision: env.revision,
+      gatewayAddresses: [`${env.coreName}:25565`],
+      readyToSuspend: true,
+    });
+    behaviour.suspendStops = true;
+    try {
+      await pass();
+      expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
+      expect((await env.client.ensureCapacity(capacityRequest(env, "stops"))).capacity).toMatchObject({
+        state: CapacityState.FAILED,
+        message: "the JVM machine stopped when its environment was suspended",
+      });
+      await pass();
+      expect(machines.has(name)).toBe(false);
+      expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
+    } finally {
+      behaviour.suspendStops = false;
+    }
     env.close();
   });
 
