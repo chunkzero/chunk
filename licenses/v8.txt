@@ -176,7 +176,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-Notices from source files in V8 (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
+Notices from the source of V8 (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
 ================================================================================
 
 From:
@@ -372,6 +372,26 @@ Copyright(c) 2010 - 2017,
     "AS IS".REGENTS HAS NO OBLIGATION TO PROVIDE MAINTENANCE,
     SUPPORT, UPDATES, ENHANCEMENTS,
     OR MODIFICATIONS.
+
+From:
+  src/execution/riscv/simulator-riscv.cc
+
+RVV
+The following code about RVV was based from:
+  https://github.com/riscv/riscv-isa-sim
+Copyright (c) 2010-2017, The Regents of the University of California
+(Regents).  All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the Regents nor the
+   names of its contributors may be used to endorse or promote products
+   derived from this software without specific prior written permission.
 
 From:
   src/inspector/injected-script.cc
@@ -621,7 +641,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 --------------------------------------------------------------------------------
-The license the notices above refer to for The Chromium Authors
+The license referred to above, from https://chromium.googlesource.com/chromium/src
 --------------------------------------------------------------------------------
 
 Source: https://chromium.googlesource.com/chromium/src at 5c930fd51cc6d6e3bbac31f5f64be4131e74f17d, LICENSE
@@ -655,7 +675,7 @@ Source: https://chromium.googlesource.com/chromium/src at 5c930fd51cc6d6e3bbac31
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
-The license the notices above refer to for The Go Authors
+The license referred to above, from https://github.com/golang/go
 --------------------------------------------------------------------------------
 
 Source: https://github.com/golang/go at 862c888e612ac346c7c4d99c9392bdfd265f33b0, LICENSE
@@ -689,7 +709,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
-The license the notices above refer to for the Dart project authors
+The license referred to above, from https://github.com/dart-lang/sdk
 --------------------------------------------------------------------------------
 
 Source: https://github.com/dart-lang/sdk at 04bcd1036cdc799ac6564988f159ee454d42c822, LICENSE
@@ -1230,7 +1250,7 @@ necessary.  Here is a sample; alter the names:
 That's all there is to it!
 
 ================================================================================
-Notices from source files in V8: glibc trigonometric functions (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
+Notices from the source of V8: glibc trigonometric functions (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
 ================================================================================
 
 From:
@@ -1242,7 +1262,7 @@ Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 
 --------------------------------------------------------------------------------
-The license the notices above refer to for The Chromium Authors
+The license referred to above, from https://chromium.googlesource.com/chromium/src
 --------------------------------------------------------------------------------
 
 Source: https://chromium.googlesource.com/chromium/src at 5c930fd51cc6d6e3bbac31f5f64be4131e74f17d, LICENSE
@@ -1309,7 +1329,7 @@ Source: https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-Notices from source files in V8: inspector protocol (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
+Notices from the source of V8: inspector protocol (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
 ================================================================================
 
 From:
@@ -1767,7 +1787,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
 OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ================================================================================
-Notices from source files in V8: array sort builtins (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
+Notices from the source of V8: array sort builtins (https://github.com/denoland/v8.git at ac1e23989121713ca642f6650b34deff7b686896)
 ================================================================================
 
 From:
@@ -2610,7 +2630,7 @@ Apache License
    limitations under the License.
 
 ================================================================================
-Notices from source files in Abseil (https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git at d16e32215c3ab90ba57c2e904a5344d85c7353e4)
+Notices from the source of Abseil (https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git at d16e32215c3ab90ba57c2e904a5344d85c7353e4)
 ================================================================================
 
 From:
@@ -3003,7 +3023,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ================================================================================
-Notices from source files in libc++ (https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git at 5abc7f839700f0f17338434e1c1c6a8c87c00c11)
+Notices from the source of libc++ (https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git at 5abc7f839700f0f17338434e1c1c6a8c87c00c11)
 ================================================================================
 
 From:
@@ -3077,6 +3097,25 @@ From:
 
 Copyright (c) Microsoft Corporation.
 SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+From:
+  src/include/ryu/common.h
+  src/include/ryu/d2fixed.h
+  src/include/ryu/d2fixed_full_table.h
+  src/include/ryu/d2s.h
+  src/include/ryu/d2s_full_table.h
+  src/include/ryu/d2s_intrinsics.h
+  src/include/ryu/digit_table.h
+  src/include/ryu/f2s.h
+  src/include/ryu/ryu.h
+  src/ryu/d2fixed.cpp
+  src/ryu/d2s.cpp
+  src/ryu/f2s.cpp
+
+Copyright 2018 Ulf Adams
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Boost Software License - Version 1.0 - August 17th, 2003
 
 ================================================================================
 libc++abi
@@ -3704,7 +3743,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-Notices from source files in simdutf (https://chromium.googlesource.com/chromium/src/third_party/simdutf at f7356eed293f8208c40b3c1b344a50bd70971983)
+Notices from the source of simdutf (https://chromium.googlesource.com/chromium/src/third_party/simdutf at f7356eed293f8208c40b3c1b344a50bd70971983)
 ================================================================================
 
 From:
@@ -4132,20 +4171,14 @@ express Statement of Purpose.
     this CC0 or use of the Work.
 
 ================================================================================
-Notices from source files in Highway (https://chromium.googlesource.com/external/github.com/google/highway.git at 2607d3b5b0113992fe84d3848859eae13b3b52c1)
+Notices from the source of Highway (https://chromium.googlesource.com/external/github.com/google/highway.git at 2607d3b5b0113992fe84d3848859eae13b3b52c1)
 ================================================================================
 
 From:
   hwy/abort.cc
-
-Copyright 2019 Google LLC
-Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
-SPDX-License-Identifier: Apache-2.0
-SPDX-License-Identifier: BSD-3-Clause
-
-From:
   hwy/abort.h
 
+Copyright 2019 Google LLC
 Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
 SPDX-License-Identifier: Apache-2.0
 SPDX-License-Identifier: BSD-3-Clause
@@ -5101,7 +5134,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-Notices from source files in Dragonbox (https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git at beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44)
+Notices from the source of Dragonbox (https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git at beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44)
 ================================================================================
 
 From:
@@ -5128,6 +5161,15 @@ KIND, either express or implied.
 
 From:
   subproject/3rdparty/grisu_exact/fp_to_chars.cpp
+  subproject/3rdparty/ryu/ryu/common.h
+  subproject/3rdparty/ryu/ryu/d2s.c
+  subproject/3rdparty/ryu/ryu/d2s_full_table.h
+  subproject/3rdparty/ryu/ryu/d2s_intrinsics.h
+  subproject/3rdparty/ryu/ryu/digit_table.h
+  subproject/3rdparty/ryu/ryu/f2s.c
+  subproject/3rdparty/ryu/ryu/f2s_full_table.h
+  subproject/3rdparty/ryu/ryu/f2s_intrinsics.h
+  subproject/3rdparty/ryu/ryu/ryu.h
 
 The contents of this file is based on contents of:
 
@@ -5179,34 +5221,6 @@ the Apache License v2.0 with LLVM Exceptions.
 
    (See accompanying file LICENSE-Apache or copy at
     https://llvm.org/foundation/relicensing/LICENSE.txt)
-
-Alternatively, the contents of this file may be used under the terms of
-the Boost Software License, Version 1.0.
-   (See accompanying file LICENSE-Boost or copy at
-    https://www.boost.org/LICENSE_1_0.txt)
-
-Unless required by applicable law or agreed to in writing, this software
-is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-KIND, either express or implied.
-
-From:
-  subproject/3rdparty/ryu/ryu/common.h
-  subproject/3rdparty/ryu/ryu/d2s.c
-  subproject/3rdparty/ryu/ryu/d2s_full_table.h
-  subproject/3rdparty/ryu/ryu/d2s_intrinsics.h
-  subproject/3rdparty/ryu/ryu/digit_table.h
-  subproject/3rdparty/ryu/ryu/f2s.c
-  subproject/3rdparty/ryu/ryu/f2s_full_table.h
-  subproject/3rdparty/ryu/ryu/f2s_intrinsics.h
-  subproject/3rdparty/ryu/ryu/ryu.h
-
-Copyright 2018 Ulf Adams
-
-The contents of this file may be used under the terms of the Apache License,
-Version 2.0.
-
-   (See accompanying file LICENSE-Apache or copy at
-    http://www.apache.org/licenses/LICENSE-2.0)
 
 Alternatively, the contents of this file may be used under the terms of
 the Boost Software License, Version 1.0.
@@ -5332,7 +5346,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-Notices from source files in FP16 (https://github.com/Maratyszcza/FP16.git at 3d2de1816307bac63c16a297e8c4dc501b4076df)
+Notices from the source of FP16 (https://github.com/Maratyszcza/FP16.git at 3d2de1816307bac63c16a297e8c4dc501b4076df)
 ================================================================================
 
 From:

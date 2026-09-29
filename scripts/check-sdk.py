@@ -62,7 +62,14 @@ def main():
                             "Dmitry Vyukov", "Gotham Project Developers", "Joyent, Inc. and other Node contributors",
                             "Domenic Denicola", "David Judd", "Daniel McCarney", "Radford M. Neal",
                             "the Dart project authors",
+                            # Notices inside embedded code, split across comments, or with wrapped license terms.
+                            "regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc.",
+                            "Copyright (c) 2021-2022 Alexei Sibidanov.", "Copyright 2017, Twitter Inc.",
+                            # Third-party code crates embed, credited only in their documentation.
+                            "Copyright (c) 2014-present Sebastian McKenzie and other contributors",
+                            "Copyright Node.js contributors.", "by the Brotli Authors", "Alexis Deveria",
                             # License texts that source notices refer to.
+                            "Copyright (c) 2014-present, Facebook, Inc.\n\nPermission",
                             "// Copyright 2015 The Chromium Authors",
                             "Copyright 2009 The Go Authors.\n\nRedistribution",
                             "Copyright 2012, the Dart project authors.", "The BSD 2-Clause License"):

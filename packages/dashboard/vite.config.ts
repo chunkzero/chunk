@@ -8,6 +8,8 @@ const management = process.env.CHUNK_MANAGEMENT_URL ?? "http://127.0.0.1:8080";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Every supported browser has modulepreload, and the polyfill would ship es-module-shims code in the bundle.
+  build: { modulePreload: { polyfill: false } },
   server: { strictPort: true, headers, proxy: { "^/chunk\\.management\\.v1\\.": management } },
   preview: { headers },
 });

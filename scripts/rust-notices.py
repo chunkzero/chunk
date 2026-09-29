@@ -2,23 +2,27 @@
 """Print the third-party notices for the shipped `chunk` binary, or refresh the upstream texts they vendor.
 
 The notices carry every license, copyright and NOTICE file in the source of each crate `chunk` links, plus the
-license notices in its source file comments, followed by licenses/v8.txt for the V8 build the `v8` crate links. Crates
-published without any license file use the upstream text vendored at licenses/crates/<name>-<version>.txt, and
-license texts that source notices refer to are vendored under licenses/referenced. `--vendor` refreshes all vendored
-texts and licenses/v8.txt from git; printing works offline from the local Cargo registry.
+license notices in its source file comments and the licenses of third-party code it embeds, followed by
+licenses/v8.txt for the V8 build the `v8` crate links. Crates published without any license file use the upstream text
+vendored at licenses/crates/<name>-<version>.txt, and license texts that source notices or embedded code refer to are
+vendored under licenses/referenced. `--vendor` refreshes all vendored
+texts and licenses/v8.txt from upstream; printing works offline from the local Cargo registry.
 """
 
 import argparse
 import configparser
 import fnmatch
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 import tempfile
 import textwrap
 import tomllib
+import urllib.request
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-gnu"
@@ -31,11 +35,13 @@ SCANNED_FILE = re.compile(r".*\.(rs|js|mjs|ts|c|cc|cpp|h|hh|hpp|inc|s|asm|tq)", 
 TEST_FILE = re.compile(r"((.*[_-])?(unit)?tests?|test_.*|.*_fuzzer|.*_benchmark)\.\w+")
 UNCOMPILED_DIRECTORIES = SKIPPED_DIRECTORIES | {"test", "testing", "testdata", "fixtures", "bench", "benchmark",
                                                 "benchmarks", "fuzzers", "fuzzing", "doc", "samples", "tools"}
+COMMENT_START = re.compile(r"/\*|(?<![:/\\])//(/(?!/)|!)?")
 COPYRIGHT = re.compile(r"\b(Copyright|COPYRIGHT)(\s*(\(c\)|\(C\)|©|ⓒ))*\s+(?!(Notice|NOTICE|HOLDER|OWNER))[\dA-Z]|©"
                        r"|SPDX-FileCopyrightText:")
 GRANT = re.compile(r"permission is hereby granted|redistribution and use|permission to use, copy, modify"
                    r"|licensed under|under the terms of|governed by|SPDX-License-Identifier:\s*\w"
-                   r"|\b(MIT|BSD|ISC|Apache|zlib|Boost|MPL)\b[\w .-]{0,20}licen[cs]e", re.IGNORECASE)
+                   r"|\b(MIT|BSD|ISC|Apache|zlib|Boost|MPL)\b[\w\s.-]{0,20}licen[cs]e"
+                   r"|licen[cs]e\W{1,3}(MIT|BSD|ISC|Apache|zlib|Boost|MPL)\b", re.IGNORECASE)
 # Files that do not apply to the build: a license alternative we do not elect, or code the build leaves out.
 EXCLUDED = {
     "self_cell": ["LICENSE-GPLv2"],
@@ -70,8 +76,10 @@ V8_COMPONENTS = [
 ]
 # The copyright holder of components whose license files name none, for telling their own source notices apart.
 V8_AUTHORS = {"Abseil": "The Abseil Authors"}
-# License texts that source notices point to without their source shipping them: (holder, name, repository, ref, path).
-# They are vendored at licenses/referenced/<name>.txt and printed after the notices that name the holder.
+# License texts that source notices or embedded code refer to without their source shipping them: (marker, name,
+# repository, ref, path), or (marker, name, archive URL, None, path in it) for upstreams no longer in a public
+# repository. They are vendored at licenses/referenced/<name>.txt and printed after the notices that contain their
+# marker, or after the EMBEDDED statements that name them.
 REFERENCED_LICENSES = [
     ("The Chromium Authors", "chromium", "https://chromium.googlesource.com/chromium/src", "refs/tags/150.0.7871.0",
      "LICENSE"),
@@ -79,8 +87,86 @@ REFERENCED_LICENSES = [
     ("the Dart project authors", "dart", "https://github.com/dart-lang/sdk", "refs/tags/3.13.5", "LICENSE"),
     ("Domenic Denicola", "webidl-conversions", "https://github.com/jsdom/webidl-conversions", "refs/tags/v8.0.1",
      "LICENSE.md"),
+    ("facebook/regenerator", "regenerator", "https://github.com/facebook/regenerator", "refs/tags/v0.14.1", "LICENSE"),
+    ("Finagle", "finagle", "https://github.com/twitter/finagle", "9cc08d15216497bb03a1cafda96b7266cfbbcff1", "NOTICE"),
+    # The Babel release oxc's sources cite.
+    (None, "babel", "https://github.com/babel/babel", "refs/tags/v7.26.2", "LICENSE"),
+    (None, "babel-plugin-styled-components", "https://github.com/styled-components/babel-plugin-styled-components",
+     "refs/tags/v2.3.0", "LICENSE.md"),
+    (None, "brotli", "https://github.com/google/brotli", "refs/tags/v1.1.0", "LICENSE"),
+    (None, "browserslist", "https://github.com/browserslist/browserslist", "refs/tags/4.28.8", "LICENSE"),
+    (None, "bumpalo", "https://github.com/fitzgen/bumpalo", "a47f6d6b7b5fee9c99a285f0de80257a0a982ef3", "LICENSE-MIT"),
+    (None, "caniuse-lite", "https://github.com/browserslist/caniuse-lite", "refs/tags/1.0.30001809", "LICENSE"),
+    (None, "coloriz", "https://crates.io/api/v1/crates/coloriz/0.2.0/download", None, "coloriz-0.2.0/LICENSE"),
+    (None, "compat-table", "https://github.com/compat-table/compat-table", "a970fc00cc33b58d0b84d4b290ea46a185c8fcf1",
+     "LICENSE"),
+    (None, "electron-to-chromium", "https://github.com/Kilian/electron-to-chromium", "refs/tags/v1.5.403", "LICENSE"),
+    (None, "enhanced-resolve", "https://github.com/webpack/enhanced-resolve", "refs/tags/v5.26.0", "LICENSE"),
+    (None, "mime_more", "https://github.com/7086cmd/mime_more", "f9aed559f695331db7a0bbd200501424c804c1a7", "LICENSE"),
+    (None, "node", "https://github.com/nodejs/node", "refs/tags/v24.9.0", "LICENSE"),
+    (None, "node-releases", "https://github.com/chicoxyzzy/node-releases", "refs/tags/v2.0.53", "LICENSE"),
+    (None, "parcel", "https://github.com/parcel-bundler/parcel", "refs/tags/v2.16.4", "LICENSE"),
+    (None, "protobuf", "https://github.com/protocolbuffers/protobuf", "refs/tags/v25.8", "LICENSE"),
+    (None, "rust_urlencoding", "https://github.com/kornelski/rust_urlencoding",
+     "a617c89d16f390e3ab4281ea68c514660b111301", "LICENSE"),
+    (None, "tsconfck", "https://registry.npmjs.org/tsconfck/-/tsconfck-3.1.6.tgz", None, "package/LICENSE"),
+    (None, "tsconfig-paths", "https://github.com/dividab/tsconfig-paths", "refs/tags/v4.2.0", "LICENSE"),
+    (None, "tz-rs", "https://github.com/x-hgg-x/tz-rs", "refs/tags/v0.6.14", "LICENSE-MIT"),
+    (None, "zmij", "https://github.com/vitaut/zmij", "refs/tags/v1.2", "LICENSE"),
 ]
-
+# Where a vendored text is cut, before the parts that do not apply, such as Node.js's list of its bundled libraries.
+EXCERPTS = {"node": "The externally maintained libraries used by Node.js are:"}
+# Third-party code that crates embed with the attribution only in documentation: "<name> <version>" -> statements of
+# what it embeds, each with the REFERENCED_LICENSES text that covers it.
+EMBEDDED = {
+    "brotli 6.0.0": [("Its README calls it a direct port of Google's C brotli compressor.", "brotli")],
+    "brotli-decompressor 4.0.3": [("Its README calls it a direct port of Google's C brotli decompressor.", "brotli")],
+    "chrono 0.4.45": [("src/offset/local/tz_info is forked from the tz-rs crate.", "tz-rs")],
+    "deno_core 0.411.0": [
+        ("02_timers.js copies Node.js's internal linked list and priority queue, and 01_core.js mirrors its task "
+         "queues.", "node"),
+    ],
+    "nu-ansi-term 0.50.3": [("src/rgb.rs is borrowed from the coloriz crate.", "coloriz")],
+    "oxc-browserslist 5.0.1": [
+        ("src/generated embeds browser usage and support data from caniuse-lite 1.0.30001809, the caniuse.com data by "
+         "Alexis Deveria, licensed under CC BY 4.0.", "caniuse-lite"),
+        ("src/generated embeds Electron release data from electron-to-chromium 1.5.403.", "electron-to-chromium"),
+        ("src/generated embeds Node.js release data from node-releases 2.0.53.", "node-releases"),
+        ("Its README calls it a Rust port of Browserslist, at 4.28.8 for this release.", "browserslist"),
+    ],
+    "oxc_allocator 0.149.0": [("src/arena and src/vec2 are derived from bumpalo.", "bumpalo")],
+    "oxc_compat 0.149.0": [
+        ("src/es_features.rs is generated from compat-table data by scripts adapted from Babel's babel-compat-data.",
+         "compat-table"),
+        ("src/es_features.rs is generated by scripts adapted from Babel's babel-compat-data.", "babel"),
+    ],
+    "oxc_ecmascript 0.149.0": [
+        ("src/constant_evaluation/url_encoding is based on the rust_urlencoding crate.", "rust_urlencoding"),
+    ],
+    "oxc_minifier 0.149.0": [("src/traverse_context/uid.rs is based on Babel's scope.generateUid.", "babel")],
+    "oxc_resolver 11.24.3": [
+        ("Its README says it partially copies code from webpack/enhanced-resolve.", "enhanced-resolve"),
+        ("Its README says it partially copies code from dividab/tsconfig-paths.", "tsconfig-paths"),
+        ("Its README says it partially copies code from parcel-bundler/parcel.", "parcel"),
+        ("Its README says it partially copies code from dominikg/tsconfck.", "tsconfck"),
+    ],
+    "oxc_transformer 0.149.0": [
+        ("Its transforms are based on Babel's plugins, as their module documentation says.", "babel"),
+        ("src/plugins/styled_components.rs is a port of the styled-components Babel plugin.",
+         "babel-plugin-styled-components"),
+    ],
+    "oxc_traverse 0.149.0": [("src/ast_operations/gather_node_parts.rs is ported from @babel/traverse.", "babel")],
+    "prost-types 0.14.4": [
+        ("src/protobuf.rs is generated from the Protocol Buffers well-known types, which its README says are included "
+         "under their original BSD license.", "protobuf"),
+    ],
+    "rolldown_plugin_oxc_runtime 1.2.8": [
+        ("src/generated/embedded_helpers.rs embeds the helpers of @oxc-project/runtime 0.149.0, whose README says they "
+         "are copied from @babel/runtime.", "babel"),
+    ],
+    "rolldown_utils 1.2.8": [("src/light_guess.rs is ported from the mime_more crate.", "mime_more")],
+    "zmij 1.0.23": [("It is a line-by-line port of Victor Zverovich's C++ zmij.", "zmij")],
+}
 
 def cargo(*args):
     return subprocess.run(["cargo", *args, "--locked"], cwd=REPOSITORY, check=True, capture_output=True,
@@ -122,36 +208,62 @@ def scanned(path):
 
 
 def comment_blocks(source):
-    """The text of each `/* */` comment and each run of `//`, `///` or `//!` lines that starts a line."""
-    blocks, block, kind = [], [], None
-    for line in source.splitlines() + [""]:
-        stripped = line.strip()
+    """The text of each `/* */` comment and each run of `//`, `///` or `//!` comments, wherever they start in a line.
+
+    String literals are not skipped, so comments in code embedded as text are found too. A line comment that starts a
+    line continues a run of the same kind from the line above. Each block comes with whether only whitespace separates
+    it from the one before.
+    """
+    blocks, block, kind, adjacent, code = [], [], None, False, True
+
+    def flush():
+        nonlocal block, kind
+        if block:
+            blocks.append((block, adjacent))
+        block, kind = [], None
+
+    def start():
+        nonlocal adjacent, code
+        if not block:
+            adjacent, code = not code, False
+
+    for line in source.splitlines():
+        rest, leading = line, True
         if kind == "/*":
-            content, closed, _ = line.partition("*/")
+            content, closed, rest = line.partition("*/")
             block.append(re.sub(r"^\s*\*(?!/) ?", "", content))
             if not closed:
                 continue
-            kind = None
-        else:
-            marker = re.match(r"//(/(?!/)|!)?", stripped)
-            if block and (not marker or marker[0] != kind):
-                blocks.append(block)
-                block = []
-            if marker:
-                block.append(stripped.removeprefix(marker[0]).removeprefix(" "))
-                kind = marker[0]
-                continue
-            kind = None
-            if not stripped.startswith("/*"):
-                continue
-            content, closed, _ = stripped[2:].partition("*/")
+            flush()
+            leading = False
+        while match := COMMENT_START.search(rest):
+            content = rest[match.end():]
+            if rest[:match.start()].strip():
+                code = True
+            if match[0] != "/*":
+                if not (leading and kind == match[0] and not rest[:match.start()].strip()):
+                    flush()
+                start()
+                block.append(content.removeprefix(" "))
+                kind = match[0]
+                break
+            flush()
+            start()
+            content, closed, rest = content.partition("*/")
             block.append(content.lstrip("*!").strip())
             if not closed:
                 kind = "/*"
-                continue
-        blocks.append(block)
-        block = []
-    return [textwrap.dedent("\n".join(block)).strip() for block in blocks]
+                break
+            flush()
+            leading = False
+        else:
+            if rest.strip():
+                code = True
+            flush()
+    if kind != "/*":
+        flush()
+    return [(textwrap.dedent("\n".join(line.rstrip() for line in block)).strip(), adjacent)
+            for block, adjacent in blocks]
 
 
 def holders(text):
@@ -168,6 +280,20 @@ def holders(text):
     return found - {""}
 
 
+def notice_blocks(blocks):
+    """The comment blocks with both a copyright line and license terms, pairing adjacent blocks that each have one."""
+    def complete(text):
+        return bool(COPYRIGHT.search(text) and GRANT.search(text))
+
+    found = []
+    for index, (text, adjacent) in enumerate(blocks):
+        if complete(text):
+            found.append(text)
+        elif adjacent and not complete(blocks[index - 1][0]) and complete(f"{blocks[index - 1][0]}\n\n{text}"):
+            found.append(f"{blocks[index - 1][0]}\n\n{text}")
+    return found
+
+
 def source_notices(sources, own):
     """Distinct license notices in the comments of `sources`, as (text, paths) pairs.
 
@@ -176,29 +302,34 @@ def source_notices(sources, own):
     """
     notices = {}
     for path, source in sources:
-        for block in comment_blocks(source):
-            if not (COPYRIGHT.search(block) and GRANT.search(block)):
-                continue
+        for block in notice_blocks(comment_blocks(source)):
             named = holders(block)
             if named and named <= own:
                 continue
             _, paths = notices.setdefault(" ".join(block.lower().split()), (block, []))
             if path not in paths:
                 paths.append(path)
+    # A notice that another one quotes in full is left to that one.
+    for key in [key for key in notices if any(key != other and key in other for other in notices)]:
+        _, paths = notices.pop(key)
+        container = next(other for other in notices if key in other)
+        notices[container][1].extend(path for path in paths if path not in notices[container][1])
     return sorted(notices.values(), key=lambda notice: notice[1][0])
 
 
-def notice_section(title, notices):
-    """The notices, followed by the vendored license texts they point to."""
+def notice_section(title, notices, embedded=()):
+    """The notices and EMBEDDED statements, followed by the vendored license texts they refer to."""
     parts = ["From:\n" + "".join(f"  {path}\n" for path in paths) + f"\n{text}" for text, paths in notices]
-    for holder, name, *_ in REFERENCED_LICENSES:
-        if any(holder.lower() in text.lower() for text, _ in notices):
+    parts += [statement for statement, _ in embedded]
+    named = {name for _, name in embedded}
+    for marker, name, url, *_ in REFERENCED_LICENSES:
+        if name in named or marker and any(marker.lower() in text.lower() for text, _ in notices):
             referenced = REPOSITORY / "licenses/referenced" / f"{name}.txt"
             if not referenced.exists():
                 raise ValueError(f"licenses/referenced/{name}.txt is missing; run scripts/rust-notices.py --vendor")
-            parts.append(f"{'-' * 80}\nThe license the notices above refer to for {holder}\n{'-' * 80}\n\n"
+            parts.append(f"{'-' * 80}\nThe license referred to above, from {url}\n{'-' * 80}\n\n"
                          f"{referenced.read_text().strip()}")
-    return f"{RULE}\nNotices from source files in {title}\n{RULE}\n\n" + "\n\n".join(parts)
+    return f"{RULE}\nNotices from the source of {title}\n{RULE}\n\n" + "\n\n".join(parts)
 
 
 def vendored(package):
@@ -214,7 +345,8 @@ def notices():
     crates = []
     texts = {}
     headers = []
-    for package in shipped_crates():
+    packages = shipped_crates()
+    for package in packages:
         name = f'{package["name"]} {package["version"]}'
         source = f'https://crates.io/crates/{package["name"]}/{package["version"]}'
         if package["repository"]:
@@ -233,8 +365,12 @@ def notices():
         sources = ((path, (root / path).read_text(errors="replace"))
                    for path in sorted(crate_files(package)) if scanned(path))
         found = source_notices(sources, own)
-        if found:
-            headers.append(notice_section(name, found))
+        embedded = EMBEDDED.get(name, [])
+        if found or embedded:
+            headers.append(notice_section(name, found, embedded))
+    stale = set(EMBEDDED) - {f'{package["name"]} {package["version"]}' for package in packages}
+    if stale:
+        raise ValueError(f"EMBEDDED names crates chunk no longer links; recheck what they embed: {sorted(stale)}")
     sections = [
         "Third-party notices for the chunk CLI.",
         "The chunk binary statically links the Rust crates below. The source of each, including the Source Code "
@@ -258,6 +394,7 @@ class Upstream:
         self.repository = repository
         self.commits = {}
         self.remotes = {}
+        self.origins = {}
         git(repository, "init", "--quiet", "--bare")
 
     def commit(self, url, ref):
@@ -267,7 +404,14 @@ class Upstream:
                 git(self.repository, "remote", "add", self.remotes[url], url)
             git(self.repository, "fetch", "--quiet", "--depth", "1", "--filter=blob:none", self.remotes[url], ref)
             self.commits[url, ref] = git(self.repository, "rev-parse", "FETCH_HEAD^{commit}").strip()
+            self.origins[self.commits[url, ref]] = self.remotes[url]
         return self.commits[url, ref]
+
+    def fetch_blobs(self, commit, oids):
+        """Fetch blobs from the remote `commit` came from; git's own lazy fetches may ask another remote and hang."""
+        subprocess.run(["git", "-C", self.repository, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--quiet",
+                        "--no-tags", "--no-write-fetch-head", "--filter=blob:none", self.origins[commit], "--stdin"],
+                       input="".join(f"{oid}\n" for oid in oids).encode(), check=True, capture_output=True)
 
     def license_files(self, commit, directory):
         listed = git(self.repository, "ls-tree", "--name-only", commit, *([f"{directory}/"] if directory else []))
@@ -277,9 +421,11 @@ class Upstream:
                       and not name.lower().endswith(".html"))
 
     def show(self, commit, path):
-        return git(self.repository, "show", f"{commit}:{path}").strip()
+        oid = git(self.repository, "rev-parse", f"{commit}:{path}").strip()
+        self.fetch_blobs(commit, [oid])
+        return git(self.repository, "cat-file", "blob", oid).strip()
 
-    def sources(self, url, commit, directory, skipped):
+    def sources(self, commit, directory, skipped):
         """(path, text) of each scanned source file under `directory` outside uncompiled and `skipped` directories."""
         listed = git(self.repository, "ls-tree", "-r", "-z", commit, *([f"{directory}/"] if directory else []))
         blobs = {}
@@ -290,10 +436,8 @@ class Upstream:
                 blobs[path] = oid
         if not blobs:
             return []
+        self.fetch_blobs(commit, blobs.values())
         oids = "".join(f"{oid}\n" for oid in blobs.values()).encode()
-        subprocess.run(["git", "-C", self.repository, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--quiet",
-                        "--no-tags", "--no-write-fetch-head", "--filter=blob:none", self.remotes[url], "--stdin"],
-                       input=oids, check=True, capture_output=True)
         batch = subprocess.run(["git", "-C", self.repository, "cat-file", "--batch"], input=oids, check=True,
                                capture_output=True).stdout
         sources, position = [], 0
@@ -369,8 +513,16 @@ def vendor_referenced(upstream):
     for stale in directory.iterdir():
         stale.unlink()
     for _, name, url, ref, path in REFERENCED_LICENSES:
-        commit = upstream.commit(url, ref)
-        (directory / f"{name}.txt").write_text(section(url, commit, path, upstream.show(commit, path)) + "\n")
+        if ref:
+            commit = upstream.commit(url, ref)
+            text = section(url, commit, path, upstream.show(commit, path))
+        else:
+            with urllib.request.urlopen(url) as response, \
+                    tarfile.open(fileobj=io.BytesIO(response.read())) as archive:
+                text = f"Source: {url}, {path}\n\n{archive.extractfile(path).read().decode().strip()}"
+        if name in EXCERPTS:
+            text = text.partition(EXCERPTS[name])[0].strip()
+        (directory / f"{name}.txt").write_text("".join(f"{line.rstrip()}\n" for line in text.splitlines()))
 
 
 def vendor_v8(upstream):
@@ -400,7 +552,7 @@ def vendor_v8(upstream):
             own |= holders(text)
             sections.append(f"{RULE}\n{name}\nSource: {url} at {commit}, {path}\n{RULE}\n\n{text}")
         # A repository's own third_party code is linked only where V8_COMPONENTS lists its directory.
-        found = source_notices(upstream.sources(url, commit, directory, set() if directory else {"third_party"}), own)
+        found = source_notices(upstream.sources(commit, directory, set() if directory else {"third_party"}), own)
         if found:
             sections.append(notice_section(f"{name} ({url} at {commit})", found))
     (REPOSITORY / "licenses/v8.txt").write_text("\n\n".join(sections) + "\n")
