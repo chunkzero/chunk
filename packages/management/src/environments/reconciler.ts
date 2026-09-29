@@ -306,12 +306,29 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
           where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
             and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision`,
       );
-      if (still) await provider.suspend(machineId);
-      return Boolean(still);
+      return still ? provider.suspend(machineId) : undefined;
+    };
+    // A provider that stops machines rather than keeping their memory ends a JVM's session, so its request fails and
+    // its machine is torn down while the environment sleeps; core asks for new capacity once woken. Judged from the
+    // machine's state, not the suspension's reply, so one cut short is failed on a later pass.
+    const failStopped = async (request: CapacityRow, machineId: string) => {
+      await fenced(
+        (tx) => tx`
+          update capacity_requests
+          set state = ${CapacityState.FAILED}, message = 'the JVM machine stopped while its environment was suspended'
+          where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machineId}
+            and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`,
+      );
+      await notify(sql, { kind: "environment", environmentId: id });
     };
     for (const request of active) {
       if (!request.machine_id) continue;
+      const jvm = request.workload === Workload.JVM;
       const machine = await provider.status(request.machine_id);
+      if (jvm && request.started && machine.state === "stopped") {
+        await failStopped(request, machine.id);
+        continue;
+      }
       if (machine.state !== "running") continue;
       // Seen running, so its resume finished, and the next suspension may be resumed.
       if (request.resuming) {
@@ -321,7 +338,9 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
             where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}`,
         );
       }
-      if (!(await suspendIfIdle(machine.id))) return;
+      const suspended = await suspendIfIdle(machine.id);
+      if (!suspended) return;
+      if (jvm && suspended.state === "stopped") await failStopped(request, machine.id);
     }
     if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
     await fireDueAlarm(fenced, environment);
