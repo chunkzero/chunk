@@ -20,6 +20,8 @@ export interface Deps {
   edge: Edge | undefined;
   /** Where environments replicate their logs; unset turns replication off. */
   logStore: LogStoreIssuer | undefined;
+  /** The image template JVM machines run (see `Machines.jvmImage`); unset, releases can't be deployed. */
+  jvmImage: string | undefined;
   changes: Changes;
   /** Aborts when the service shuts down; open streams end then. */
   shutdown: AbortSignal;

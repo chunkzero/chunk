@@ -37,6 +37,7 @@ bun src/main.ts
 | `CHUNK_LOG_STORE_CREDENTIAL_SECONDS` | `3600`                      | How long issued environment credentials last.                                                      |
 | `CHUNK_LOG_STORE_SHARED_CREDENTIALS` | unset                       | `1` hands every environment the operator's credentials instead; see below.                         |
 | `CHUNK_ENVIRONMENT_IMAGE`            | unset                       | The environment image. Unset, no machines are provisioned.                                         |
+| `CHUNK_JVM_IMAGE`                    | unset                       | The JVM runner image, with `{java}` for the release's Java version. Unset, no release deploys.     |
 | `DOCKER_HOST`                        | `/var/run/docker.sock`      | The Docker or Podman API socket machines run on, as `unix://<path>`.                               |
 | `CHUNK_MACHINE_NETWORK`              | `chunk`                     | The container network machines join; created when missing.                                         |
 | `CHUNK_MACHINE_MANAGEMENT_URL`       | `$CHUNK_PUBLIC_URL`         | How machines reach this service.                                                                   |
@@ -74,19 +75,24 @@ with `TEST_MINIO_URL=http://127.0.0.1:59000`.
 
 With `CHUNK_ENVIRONMENT_IMAGE` set, a reconciler gives each environment with a deployment a core machine, runs the
 machines `EnvironmentService.EnsureCapacity` asks for, suspends environments on a current idle report, and resumes them
-for accepted wakes and due wake alarms. Every machine runs the environment image, and `CHUNK_SERVICES` selects what it
-runs: `core,gateway` on the core machine, and `jvm` or `gateway` on an extra machine. A `gateway` machine joins core
-with its credential and routes players to core's current deployment. The environment binary doesn't run `jvm` yet, so
-JVM machines exit at startup.
+for accepted wakes and due wake alarms. Core and gateway machines run the environment image, and `CHUNK_SERVICES`
+selects what it runs: `core,gateway` on the core machine and `gateway` on an extra gateway machine, which joins core
+with its credential and routes players to core's current deployment.
+
+JVM machines run the `chunk-jvm` runner image, `CHUNK_JVM_IMAGE` with `{java}` replaced by the release's `java_version`,
+for example `ghcr.io/chunkzero/chunk-jvm:{java}` (`just jvm-image <java>` builds `chunk-jvm:<java>` locally). A release
+has no JVM image when `CHUNK_JVM_IMAGE` is unset or its `release.json` has no integer `java_version` from 1 to 1000.
+`Deploy`, `Promote`, `Rollback` and JVM `EnsureCapacity` calls refuse such a release with `FAILED_PRECONDITION`.
 
 Core gets `CHUNK_MANAGEMENT_URL`, `CHUNK_ENVIRONMENT_ID`, its `CHUNK_ENVIRONMENT_TOKEN`, and `CHUNK_CORE_BIND` set to
 `[::]:$CHUNK_CORE_PORT`, so it accepts extra machines on every interface; core drops peers without a private address.
-Extra machines never call this service. They get `CHUNK_CORE_ENDPOINT`, `http://<core's address>:$CHUNK_CORE_PORT` with
-IPv6 addresses bracketed, and the credential core minted for the machine and sent in `EnsureCapacity`:
-`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`. They also get the request's `CHUNK_CAPACITY_REQUEST_ID`,
-`CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and `CHUNK_MACHINE_PROFILE`. The credential is stored sealed, with a keyed digest
-that retries are matched on, and is never returned. Traffic between machines is plaintext, so machines must share a
-private, encrypted network.
+Extra machines never call this service. They get `CHUNK_CORE_ENDPOINT`, `http://<core's address>:$CHUNK_CORE_PORT` at
+core's first IP address, with IPv6 bracketed; until core has one, no extra machine is created. They also get
+`CHUNK_ENVIRONMENT_ID`, the credential core minted for the machine and sent in `EnsureCapacity`
+(`CHUNK_GATEWAY_CREDENTIAL` or `CHUNK_JVM_CREDENTIAL`), and the request's `CHUNK_RELEASE_ID`, `CHUNK_APP_ID` and
+`CHUNK_MACHINE_PROFILE`, which the JVM runner checks core's launch against. Gateway machines also get `CHUNK_SERVICES`
+and `CHUNK_CAPACITY_REQUEST_ID`. The credential is stored sealed, with a keyed digest that retries are matched on, and
+is never returned. Traffic between machines is plaintext, so machines must share a private, encrypted network.
 
 Every container and volume carries ownership labels with this install's ID (from the `installation` table), the
 environment and the capacity request. The provider refuses to adopt, start, stop or remove anything under a name it uses

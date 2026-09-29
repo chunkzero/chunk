@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 
 import { newId } from "../crypto.ts";
 import type { Db } from "../db.ts";
+import { jvmImage } from "../environments/machines.ts";
 import { advanceRevision } from "../environments/store.ts";
 import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
 import {
@@ -68,21 +69,34 @@ export async function findRelease(db: Db, projectId: string, id: string): Promis
   return row;
 }
 
+/** Refuses a release whose Java version no JVM image runs. */
+export function requireJvmImage(manifest: ReleaseManifest, template: string | undefined): void {
+  if (jvmImage(template, manifest.java_version)) return;
+  throw failedPrecondition(
+    `no JVM image is configured for release ${manifest.id}'s Java version (${manifest.java_version ?? "none"})`,
+  );
+}
+
 const unfinished = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS];
 
 /**
  * Makes a READY release of the environment's project its desired state, superseding unfinished deployments. The
- * active deployment keeps serving until the new one activates. Call with the environment row locked.
+ * active deployment keeps serving until the new one activates. A release no JVM image runs is refused. Call with the
+ * environment row locked.
  */
 export async function createDeployment(
   db: Db,
   environment: EnvironmentRow,
   releaseId: string,
   trigger: DeploymentTrigger,
+  jvmImageTemplate: string | undefined,
 ): Promise<Deployment> {
   const release = await findRelease(db, environment.project_id, releaseId);
   if (!release) throw notFound("release");
-  if (release.state !== ReleaseState.READY) throw failedPrecondition("the release has not finished uploading");
+  if (release.state !== ReleaseState.READY || !release.manifest) {
+    throw failedPrecondition("the release has not finished uploading");
+  }
+  requireJvmImage(release.manifest, jvmImageTemplate);
   await db`
     update deployments set state = ${DeploymentState.SUPERSEDED}, update_time = now()
     where environment_id = ${environment.id} and state in ${db(unfinished)}`;

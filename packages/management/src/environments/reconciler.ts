@@ -9,6 +9,7 @@ import { desiredDeployment } from "./desired.ts";
 import {
   capacityMachineName,
   capacityMachineSpec,
+  coreHostOf,
   coreMachineName,
   coreMachineSpec,
   type MachineOptions,
@@ -205,7 +206,7 @@ async function keepRunning(deps: Deps, options: ReconcilerOptions, core: Machine
       throw new Error(machine.state === "missing" ? "the JVM machine went missing" : "the JVM machine exited");
     }
     if (machine?.state !== "running") {
-      const coreHost = core.addresses[0];
+      const coreHost = coreHostOf(core.addresses);
       if (!coreHost) return;
       const context = capacityCredentialContext(request.environment_id, request.request_id);
       const credential = new TextDecoder().decode(await keys.cipher.open(request.credential, context));

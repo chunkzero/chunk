@@ -26,7 +26,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
       const releaseId = required(request.releaseId, "release_id");
       return idempotent({ sql, keys, caller, method: DeploymentService.method.deploy, request }, async (tx) => {
         const environment = await loadEnvironment(tx, caller, request.environmentId, { lock: true });
-        const deployment = await createDeployment(tx, environment, releaseId, DeploymentTrigger.DEPLOY);
+        const deployment = await createDeployment(tx, environment, releaseId, DeploymentTrigger.DEPLOY, deps.jvmImage);
         return create(DeployResponseSchema, { deployment });
       });
     },
@@ -48,7 +48,13 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
         const [active] = await tx<{ release_id: string }[]>`
           select release_id from deployments where id = ${source.active_deployment_id}`;
         if (!active) throw failedPrecondition("the source environment has no active deployment");
-        const deployment = await createDeployment(tx, target, active.release_id, DeploymentTrigger.PROMOTE);
+        const deployment = await createDeployment(
+          tx,
+          target,
+          active.release_id,
+          DeploymentTrigger.PROMOTE,
+          deps.jvmImage,
+        );
         return create(PromoteResponseSchema, { deployment });
       });
     },
@@ -71,7 +77,13 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
         if (!earlier) {
           throw request.deploymentId ? notFound("deployment") : failedPrecondition("no earlier deployment was active");
         }
-        const deployment = await createDeployment(tx, environment, earlier.release_id, DeploymentTrigger.ROLLBACK);
+        const deployment = await createDeployment(
+          tx,
+          environment,
+          earlier.release_id,
+          DeploymentTrigger.ROLLBACK,
+          deps.jvmImage,
+        );
         return create(RollbackResponseSchema, { deployment });
       });
     },

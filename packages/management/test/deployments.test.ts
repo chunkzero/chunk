@@ -180,6 +180,12 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
     expect((await desiredDeployment(h.sql, environmentId))?.id).toBe(b);
   });
 
+  test("a release whose Java version has no JVM image is refused at deploy", async () => {
+    await upload("r-java", releaseArchive("r-java", undefined, { manifest: (m) => ({ ...m, java_version: "25" }) }));
+    const deploy = { requestId: crypto.randomUUID(), environmentId: staging, releaseId: "r-java" };
+    expect(await codeOf(h.client(DeploymentService).deploy(deploy))).toBe(Code.FailedPrecondition);
+  });
+
   test("deploy, promote and rollback move releases between environments", async () => {
     const deployments = h.client(DeploymentService);
     await upload("r2");
