@@ -67,6 +67,8 @@ pub(super) struct Reporter {
 #[derive(Default)]
 struct Sent {
     lease: u64,
+    /// The gateway addresses of the latest report management accepted, under this lease or an earlier one.
+    addresses: Vec<String>,
     sequence: u64,
     /// What the latest report started said.
     latest: Option<Said>,
@@ -110,12 +112,13 @@ impl Sent {
         self.accepted.as_ref().is_none_or(|accepted| accepted.at.elapsed() >= INTERVAL)
     }
 
-    /// Records how report `sequence`, sent `at`, ended.
-    fn finished(&mut self, sequence: u64, at: Instant, accepted: bool) {
+    /// Records how report `sequence`, sent `at`, ended: accepted with its gateway addresses, or not.
+    fn finished(&mut self, sequence: u64, at: Instant, accepted: Option<Vec<String>>) {
         let later = self.accepted.as_ref().is_none_or(|accepted| sequence > accepted.sequence);
-        if accepted {
+        if let Some(addresses) = accepted {
             if later {
                 self.accepted = Some(Accepted { sequence, at });
+                self.addresses = addresses;
             }
             if self.failed.as_ref().is_some_and(|failed| failed.sequence <= sequence) {
                 self.failed = None;
@@ -164,7 +167,8 @@ impl Reporter {
                 return Ok(false);
             }
             if observed.lease > sent.lease {
-                *sent = Sent { lease: observed.lease, ..Sent::default() };
+                *sent =
+                    Sent { lease: observed.lease, addresses: std::mem::take(&mut sent.addresses), ..Sent::default() };
             }
             sent.sequence += 1;
             let sequence = sent.sequence;
@@ -192,16 +196,22 @@ impl Reporter {
         let result = deadline(REPORT_TIMEOUT, self.client.report_status(&request)).await;
         let mut sent = lock(&self.sent);
         if request.lease == sent.lease {
-            sent.finished(request.sequence, sent_at, result.is_ok());
+            sent.finished(request.sequence, sent_at, result.is_ok().then_some(request.gateway_addresses));
         }
         result.map(|_| true)
+    }
+
+    /// The gateway addresses of the latest report management accepted.
+    pub(super) fn accepted_addresses(&self) -> Vec<String> {
+        lock(&self.sent).addresses.clone()
     }
 
     /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
     /// to suspend change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
     /// sequence. After a failed report, whose outcome is unknown, it reports again after a backoff of one to four
-    /// seconds until one is accepted. `observe` finds nothing while core must not report. Returns once management
-    /// fences a lease `superseded` says another core superseded.
+    /// seconds until one is accepted. `observe` finds nothing while core must not report. Observations run beside the
+    /// report in flight, so a slow one never holds up that report's timeout. Returns once management fences a lease
+    /// `superseded` says another core superseded.
     pub(super) async fn keep_reporting<F>(&self, observe: impl Fn() -> F, superseded: impl Fn(u64) -> bool) -> io::Error
     where
         F: Future<Output = Option<Observed>>,
@@ -209,6 +219,7 @@ impl Reporter {
         let mut tick = tokio::time::interval(OBSERVE);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut in_flight: Option<(u64, Report<'_>)> = None;
+        let mut observing: Option<Pin<Box<F>>> = None;
         loop {
             tokio::select! {
                 result = async { in_flight.as_mut().expect("a report is in flight").1.as_mut().await },
@@ -223,8 +234,11 @@ impl Reporter {
                         }
                     }
                 }
-                _ = tick.tick() => {
-                    let Some(observed) = observe().await else { continue };
+                observed = async { observing.as_mut().expect("an observation is running").as_mut().await },
+                    if observing.is_some() =>
+                {
+                    observing = None;
+                    let Some(observed) = observed else { continue };
                     let said = observed.said();
                     let (changed, due) = {
                         let sent = lock(&self.sent);
@@ -234,6 +248,7 @@ impl Reporter {
                         in_flight = Some((observed.lease, Box::pin(self.send(observed, None))));
                     }
                 }
+                _ = tick.tick(), if observing.is_none() => observing = Some(Box::pin(observe())),
             }
         }
     }
@@ -248,7 +263,8 @@ fn lock(sent: &Mutex<Sent>) -> MutexGuard<'_, Sent> {
 pub(super) struct PrivateAddress {
     configured: Option<IpAddr>,
     management_url: String,
-    management: OnceCell<SocketAddr>,
+    /// Where management is reached, once looked up.
+    pub(super) management: OnceCell<SocketAddr>,
     warned: AtomicBool,
 }
 

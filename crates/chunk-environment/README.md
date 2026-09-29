@@ -68,15 +68,16 @@ reports `ready_to_suspend` once nothing was active for that long under the lates
 command or job running, started or finished in the backend, no gateway holding connections, no open claim or launching
 host in control, and no deployment loading or awaiting acceptance. Every gateway, on this machine or its own, reports
 how many connections it holds through `chunk:active` each second on its current stream, server-list pings and logins
-still authenticating included. A gateway whose stream is live but hasn't reported for about three seconds counts as
-active; once its stream ends, it no longer counts. The log must also be flushed to object storage when it replicates,
-the wake alarm handed off, and no job due within the grace period. Queries, mutations and operator calls don't count: a
-suspend stops the environment gracefully, commits are durable, and a call it cuts off is retried. Any activity, even
-work that came and went between two looks, a new revision such as a wake brings, or a signal that doesn't answer within
-half a second ends it at once and starts the grace period over. A change is reported at once even while an earlier
-report is in flight, which it replaces. A report gets five seconds, and one management didn't accept is sent again
-within one to four seconds until one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and
-acknowledges it to the backend only once management stores that exact alarm. A stale lease or an alarm that moved
-meanwhile is read again and retried.
+still authenticating included. A gateway that hasn't reported for about three seconds counts as active, and so does one
+whose stream ended, until a new stream of it reports or core revokes its machine credential. The log must also be
+flushed to object storage when it replicates, the wake alarm handed off, and no job due within the grace period.
+Queries, mutations and operator calls don't count: a suspend stops the environment gracefully, commits are durable, and
+a call it cuts off is retried. Any activity, even work that came and went between two looks, a new revision such as a
+wake brings, or a signal that doesn't answer within half a second ends it at once and starts the grace period over. So
+does an observation that takes over a second, gateway address discovery included; its report repeats the gateway
+addresses management last accepted. A change is reported at once even while an earlier report is in flight, which it
+replaces. A report gets five seconds, and one management didn't accept is sent again within one to four seconds until
+one is. Core hands the backend's next due job to `SetWakeAlarm` under its lease, and acknowledges it to the backend only
+once management stores that exact alarm. A stale lease or an alarm that moved meanwhile is read again and retried.
 
 SIGTERM or SIGINT stops the gateway, then every JVM and control, then the backend.

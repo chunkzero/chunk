@@ -50,7 +50,7 @@ pub(super) fn open(service: &SyncService, principal: Principal, request: &Subscr
         .map(|position| Generation { epoch: position.epoch, revision: position.revision });
     let positions = service.control.subscribe();
     let (topic, first) = Topic::open(&service.control, id, after).map_err(|failure| errors::control(&failure))?;
-    let live = service.credentials.gateways.liveness.open(&stream);
+    let live = service.credentials.gateways.liveness.open(id);
     Ok(Gateway {
         topic,
         first: Update { stream, ..first },

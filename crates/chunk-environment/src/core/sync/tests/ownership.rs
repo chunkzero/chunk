@@ -82,7 +82,7 @@ async fn a_gateway_process_owns_its_topic_until_another_takes_it_over() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn only_the_owning_process_s_live_stream_keeps_core_awake() {
+async fn only_the_owning_process_s_stream_decides_whether_its_gateway_keeps_core_awake() {
     let mut fixture = Fixture::start().await;
     let (gateway, cli) = (fixture.gateway.clone(), fixture.cli.clone());
     let liveness = |fixture: &Fixture| fixture.gateways.liveness.active();
@@ -106,16 +106,24 @@ async fn only_the_owning_process_s_live_stream_keeps_core_awake() {
     }
     assert!(!liveness(&fixture));
 
-    // B's connections count until its stream ends.
+    // B's connections count while it reports them.
     fixture.platform(&gateway, &b.stream, "", "chunk:active", &active(2)).await;
     assert!(liveness(&fixture));
+    fixture.platform(&gateway, &b.stream, "", "chunk:active", &active(0)).await;
+    assert!(!liveness(&fixture));
+
+    // Once B's stream ends, B may still hold connections, so the gateway counts until B's next stream reports none.
     drop(second);
     let ended = async {
-        while liveness(&fixture) {
+        while !liveness(&fixture) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the ended stream stopped counting");
+    tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the ended stream made the gateway unknown");
+    let (_third, c) = subscribe(&fixture, "b", None).await;
+    assert!(liveness(&fixture));
+    fixture.platform(&gateway, &c.stream, "", "chunk:active", &active(0)).await;
+    assert!(!liveness(&fixture));
     fixture.stop().await;
 }
 

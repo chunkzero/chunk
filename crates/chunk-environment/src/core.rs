@@ -307,8 +307,8 @@ impl Core {
         self.replication.as_ref().is_none_or(chunk_store::ReplicationProgress::flushed)
     }
 
-    /// Whether a gateway may hold connections: one reports some, or its stream is live but core hasn't heard from it
-    /// lately.
+    /// Whether a gateway may hold connections: one reports some, or core hasn't heard from it lately, including one
+    /// whose stream ended that neither came back nor was revoked.
     pub(crate) fn gateways_active(&self) -> bool {
         self.gateways.liveness.active()
     }
@@ -361,11 +361,14 @@ impl Core {
         Ok(issuer.machine(chunk_control::MachineKind::Gateway, id))
     }
 
-    /// Revokes gateway `id`'s machine credential for good, which ends the streams it opened with `STOPPED`.
+    /// Revokes gateway `id`'s machine credential for good, which ends the streams it opened with `STOPPED`. Core then
+    /// takes the gateway's machine to be gone, so it no longer keeps core awake: revoke it once the machine stopped.
     /// # Errors
     /// Reports a stopped control or store, and rejects an unknown gateway.
     pub fn revoke_gateway(&self, id: &str) -> io::Result<()> {
-        self.control()?.revoke_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)
+        self.control()?.revoke_machine(id, chunk_control::MachineKind::Gateway).map_err(io::Error::other)?;
+        self.gateways.liveness.release(id);
+        Ok(())
     }
 
     /// Core's endpoint and the in-process gateway's credential, with the backend deployment it routes players

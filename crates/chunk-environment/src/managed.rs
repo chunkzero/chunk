@@ -35,6 +35,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MESSAGE_BYTES: usize = 1024;
 /// How long core waits for one signal of whether it may be suspended before it counts that signal as unknown.
 const READ_WAIT: Duration = Duration::from_millis(500);
+/// How long one observation of core's status may take, gateway address discovery included.
+const OBSERVE_WAIT: Duration = Duration::from_secs(1);
 
 pub struct ManagementConfig {
     /// The management service's base URL.
@@ -183,7 +185,7 @@ impl<'a> Managed<'a> {
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
     /// Meanwhile, it retires the deployments it no longer serves, reports its status and hands off its wake alarm.
-    pub(crate) async fn run(self) -> io::Error {
+    pub(crate) async fn run(&self) -> io::Error {
         if let Err(error) = self.recover() {
             return error;
         }
@@ -458,13 +460,26 @@ impl<'a> Managed<'a> {
         Some(self.observe(lease, revision).await)
     }
 
-    /// Core's status under `lease` and `revision`.
+    /// Core's status under `lease` and `revision`. An observation that takes longer than [`OBSERVE_WAIT`] says core
+    /// may not be suspended, which starts the grace period over, and repeats the gateway addresses management last
+    /// accepted rather than any it hasn't verified.
     async fn observe(&self, lease: u64, revision: u64) -> status::Observed {
-        let mut gateway_addresses = Vec::new();
-        if let Some(gateway) = self.gateway.get() {
-            let address = self.private_address.gateway(gateway.address()).await;
-            gateway_addresses.extend(address.as_ref().map(SocketAddr::to_string));
+        if let Ok(observed) = tokio::time::timeout(OBSERVE_WAIT, self.observe_now(lease, revision)).await {
+            return observed;
         }
+        tracing::debug!("core's status took too long to observe; it isn't ready to suspend");
+        self.idle.restart(revision);
+        let gateway_addresses = self.reporter.accepted_addresses();
+        status::Observed { lease, revision, gateway_addresses, online_players: 0, ready_to_suspend: false }
+    }
+
+    async fn observe_now(&self, lease: u64, revision: u64) -> status::Observed {
+        let address = async {
+            let gateway = self.gateway.get()?;
+            self.private_address.gateway(gateway.address()).await
+        };
+        let (address, ready_to_suspend) = tokio::join!(address, self.ready_to_suspend(revision));
+        let gateway_addresses = address.as_ref().map(SocketAddr::to_string).into_iter().collect();
         let online_players =
             match self.core.control().and_then(|control| control.online_players().map_err(io::Error::other)) {
                 Ok(online) => u32::try_from(online).unwrap_or(u32::MAX),
@@ -473,7 +488,6 @@ impl<'a> Managed<'a> {
                     0
                 }
             };
-        let ready_to_suspend = self.ready_to_suspend(revision).await;
         status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend }
     }
 

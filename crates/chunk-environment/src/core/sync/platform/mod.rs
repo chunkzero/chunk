@@ -98,9 +98,9 @@ async fn prepare(service: &SyncService, request: &CallRequest) -> Result<Prepare
 /// Records what a gateway, naming its current stream, reports about its connections. Any keeps core from counting as
 /// idle.
 fn active(service: &SyncService, principal: &Principal, request: &CallRequest) -> Result<(), Error> {
-    if !matches!(principal.class, Class::Gateway { .. }) {
+    let Class::Gateway { id } = &principal.class else {
         return Err(errors::denied("only a gateway reports that it's active"));
-    }
+    };
     if !request.operation_id.is_empty() || !request.deployment.is_empty() || request.caller.is_some() {
         return Err(errors::invalid("chunk:active takes no operation ID, deployment or caller"));
     }
@@ -109,7 +109,7 @@ fn active(service: &SyncService, principal: &Principal, request: &CallRequest) -
     if arguments.connections > 0 {
         service.app.backend().activity().touch();
     }
-    service.credentials.gateways.liveness.heard(&request.stream, arguments.connections);
+    service.credentials.gateways.liveness.heard(id, arguments.connections);
     Ok(())
 }
 

@@ -42,6 +42,14 @@ impl Idle {
         self.grace.is_some()
     }
 
+    /// Starts the grace period under desired `revision` over, as when what core observed is unknown.
+    pub(super) fn restart(&self, revision: u64) {
+        let mut since = self.since.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(latest) = since.as_mut().filter(|latest| latest.revision == revision) {
+            latest.at = Instant::now();
+        }
+    }
+
     /// Records `observed` under desired `revision` and returns whether core may be suspended: nothing was active for
     /// the grace period under this revision, the observation is settled, and no job is due within the grace period.
     /// Activity, including work that started or finished since the last observation, or a newer revision such as a
