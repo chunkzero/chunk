@@ -417,8 +417,8 @@ class Smoke:
     def present(self, kind):
         """Which of this run's recorded items of `kind` still exist; None if listing them failed."""
         if kind == 'tag':
-            return {tag for tag in self.created[kind] if self.attempt(f'inspecting image {tag}', lambda: self.run(
-                [self.engine, 'image', 'inspect', tag], check=False, timeout=60).returncode == 0)}
+            return {tag for tag in self.created[kind] if self.attempt(f'inspecting image {tag}',
+                                                                      lambda: self.image_id(tag))}
         listed = self.attempt(f'listing {kind}s', lambda: self.ids(*LISTINGS[kind]))
         return None if listed is None else self.created[kind] & listed
 
@@ -436,12 +436,20 @@ class Smoke:
         if leftovers:
             self.failures.append(f'left behind by the environment delete and compose down, now removed: {leftovers}')
 
+    def image_id(self, tag):
+        """The ID of the image `tag` names, or None if there is none; raises if the engine can't tell."""
+        found = self.run([self.engine, 'image', 'inspect', '--format', '{{.Id}}', tag], check=False, timeout=60)
+        if found.returncode == 0:
+            return found.stdout.strip().removeprefix('sha256:')
+        if any(missing in found.stderr.lower() for missing in ('image not known', 'no such image')):
+            return None
+        raise Failed(f'image inspect {tag} exited {found.returncode}: {found.stderr.strip()}')
+
     def remove_tag(self, tag):
         """Removes a smoke tag, leaving the image and its layers as build cache."""
-        found = self.run([self.engine, 'image', 'inspect', '--format', '{{.Id}}', tag], check=False, timeout=60)
-        if found.returncode != 0:
+        image = self.image_id(tag)
+        if image is None:
             return
-        image = found.stdout.strip().removeprefix('sha256:')
         if self.engine == 'podman':
             self.run([self.engine, 'untag', image, tag], timeout=120)
         elif image in self.images_before:
@@ -504,8 +512,9 @@ def main():
         smoke = Smoke(*choose_engine(args.engine))
         smoke.lock_engine()
         smoke.preflight()
-    except Failed as error:
-        print(f'STOPPED: {error}; nothing was changed', file=sys.stderr)
+    except (Exception, KeyboardInterrupt) as error:
+        reason = error if isinstance(error, Failed) else f'{type(error).__name__}: {error}'
+        print(f'STOPPED: {reason}; nothing was changed', file=sys.stderr)
         if smoke:
             smoke.unlock_engine()
             shutil.rmtree(smoke.work)

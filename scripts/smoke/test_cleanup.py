@@ -11,13 +11,13 @@ spec.loader.exec_module(managed_smoke)
 
 
 class FakeEngine(managed_smoke.Smoke):
-    """An engine holding two recorded containers, a volume and a network, where `rm c1` times out and listing
-    volumes fails."""
+    """An engine holding two recorded containers, a volume, a network and a tag, where `rm c1` times out and listing
+    volumes and inspecting images fail."""
 
     def __init__(self):
         super().__init__('podman', Path('/nonexistent.sock'), 0)
         self.existing = {'container': {'c1', 'c2'}, 'volume': {'v1'}, 'network': {'n1'}}
-        self.created.update(container={'c1', 'c2'}, volume={'v1'}, network={'n1'})
+        self.created.update(container={'c1', 'c2'}, volume={'v1'}, network={'n1'}, tag={'t1'})
         self.engine_locked = True
         self.calls = []
 
@@ -28,6 +28,8 @@ class FakeEngine(managed_smoke.Smoke):
             raise subprocess.TimeoutExpired(argv, timeout)
         if argv[:2] == ['volume', 'ls']:
             raise managed_smoke.Failed('volume ls exited 125')
+        if argv[:2] == ['image', 'inspect']:
+            return subprocess.CompletedProcess(argv, 125, '', 'Error: cannot connect to Podman')
         stdout = ''
         for kind, listing in managed_smoke.LISTINGS.items():
             if tuple(argv) == listing:
@@ -55,6 +57,8 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue(any('removing container c1' in failure for failure in failures))
         self.assertTrue(any('listing volumes' in failure for failure in failures))
         self.assertTrue(any("still present: {'container': ['c1']}" in failure for failure in failures))
+        self.assertTrue(any('removing tag t1' in failure for failure in failures))
+        self.assertTrue(any('inspecting image t1' in failure for failure in failures))
 
 
 if __name__ == '__main__':
