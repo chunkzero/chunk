@@ -80,6 +80,11 @@ impl Gateway {
         self.running.task.is_finished()
     }
 
+    /// Starts closing the listener and every player connection, which [`Self::stop`] waits for.
+    pub(crate) fn close(&self) {
+        self.running.stop.cancel();
+    }
+
     /// Closes the listener and every player connection.
     /// # Errors
     /// Reports listener and shutdown errors.

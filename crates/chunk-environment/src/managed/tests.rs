@@ -176,7 +176,7 @@ async fn handle(
                 None => response.header("content-type", "application/proto").body(Full::default().boxed()).unwrap(),
             }
         }
-        _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body),
+        _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body).await,
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();

@@ -8,7 +8,7 @@ mod retire;
 use crate::{Core, Gateway, GatewayConfig};
 use activation::Activation;
 use chunk_management::{Client, Code, v1};
-pub(crate) use launcher::ManagementLauncher;
+pub(crate) use launcher::{Lease, ManagementLauncher};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -45,8 +45,8 @@ impl ManagementConfig {
 /// Core's attachment to the management service: it follows the desired state and reports deployment progress.
 pub(crate) struct Managed<'a> {
     client: Client,
-    /// Where the lease of each attach is published, for the launcher's calls.
-    lease: watch::Sender<Option<u64>>,
+    /// Where core's hold on the environment is published, for the launcher's calls.
+    lease: watch::Sender<Lease>,
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
@@ -92,12 +92,14 @@ enum Interrupted {
     Retry(io::Error),
     /// This core must stop serving.
     Fatal(io::Error),
+    /// Another core superseded this one, which must stop serving.
+    Fenced(io::Error),
 }
 
 impl From<chunk_management::Error> for Interrupted {
     fn from(error: chunk_management::Error) -> Self {
         if error.code() == Code::FailedPrecondition {
-            Self::Fatal(io::Error::other(format!("management fenced this core: {error}")))
+            Self::Fenced(io::Error::other(format!("management fenced this core: {error}")))
         } else {
             Self::Retry(io::Error::other(error))
         }
@@ -124,7 +126,7 @@ impl Drop for Work<'_> {
 impl<'a> Managed<'a> {
     pub(crate) fn new(
         client: Client,
-        lease: watch::Sender<Option<u64>>,
+        lease: watch::Sender<Lease>,
         environment: String,
         state: &Path,
         core: &'a Core,
@@ -186,6 +188,10 @@ impl<'a> Managed<'a> {
                 Ok(()) => tracing::warn!("management ended the attach"),
                 Err(Interrupted::Retry(error)) => tracing::warn!(%error, "management attach interrupted"),
                 Err(Interrupted::Fatal(error)) => return error,
+                Err(Interrupted::Fenced(error)) => {
+                    self.lease.send_replace(Lease::Superseded);
+                    return error;
+                }
             }
             tokio::time::sleep(REATTACH).await;
         }
@@ -220,7 +226,7 @@ impl<'a> Managed<'a> {
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
                     self.check(&desired)?;
-                    self.lease.send_if_modified(|lease| lease.replace(desired.lease) != Some(desired.lease));
+                    self.lease.send_replace(Lease::Held(desired.lease));
                     lock(&self.deployments).desired = Some(desired.deployment_id.clone());
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
