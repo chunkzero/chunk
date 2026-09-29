@@ -612,6 +612,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunk-edge"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chunk-management",
+ "chunk-protocol",
+ "chunk-service",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "chunk-environment"
 version = "0.1.0"
 dependencies = [
@@ -760,6 +778,7 @@ dependencies = [
  "chunk-protocol",
  "chunk-service",
  "chunk-store",
+ "ipnet",
  "libdeflater",
  "openssl",
  "prost",

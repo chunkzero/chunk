@@ -6,6 +6,7 @@ mod gameplay;
 mod limbo;
 mod managed;
 mod platform;
+mod proxy_header;
 mod transport;
 
 #[cfg(feature = "bench-support")]
@@ -31,7 +32,7 @@ use chunk_protocol::{
 use tokio::{
     net::TcpListener,
     task::JoinSet,
-    time::{Instant, sleep_until},
+    time::{Instant, sleep_until, timeout},
 };
 
 use crate::{Config, PlatformTarget};
@@ -187,7 +188,7 @@ impl Proxy {
                     sleep_until(accept_after).await;
                     self.listener.accept().await
                 } => {
-                    let (stream, peer) = match accepted {
+                    let (mut stream, peer) = match accepted {
                         Ok(accepted) => accepted,
                         Err(error) => {
                             tracing::warn!(%error, "accept failed; retrying");
@@ -211,7 +212,19 @@ impl Proxy {
                     let configuration_timeout = self.config.configuration_timeout;
                     let current = self.retarget();
                     let platform = current.as_ref().map(Retarget::platform);
+                    let trusted_edges = self.config.trusted_edges.clone();
                     connections.spawn(async move {
+                        let peer = match timeout(deadline, proxy_header::player_address(&mut stream, peer, &trusted_edges)).await {
+                            Ok(Ok(player)) => player,
+                            Ok(Err(error)) => {
+                                tracing::debug!(%peer, %error, "edge connection closed");
+                                return;
+                            }
+                            Err(_) => {
+                                tracing::debug!(%peer, "edge connection sent no PROXY header in time");
+                                return;
+                            }
+                        };
                         match connection::serve(stream, &responses, &authentication, deadline, compression, platform.as_ref()).await {
                             Ok(Some(authenticated)) => {
                                 if let Some(current) = current {
