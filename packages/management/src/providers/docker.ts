@@ -36,6 +36,14 @@ interface Inspection {
   NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
 }
 
+interface Summary {
+  Id: string;
+  Names: string[];
+  State: string;
+  Labels?: Labels;
+  NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+}
+
 interface Volume {
   Name: string;
   Labels?: Labels;
@@ -81,11 +89,13 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
 
   const nameOf = (inspection: Inspection) => inspection.Name.replace(/^\//, "");
 
-  const machineFrom = (inspection: Inspection): Machine => {
-    const name = nameOf(inspection);
-    const ip = inspection.NetworkSettings?.Networks?.[network]?.IPAddress;
-    return { id: inspection.Id, name, state: stateOf(inspection.State.Status), addresses: ip ? [name, ip] : [name] };
+  const machine = (id: string, name: string, status: string, networks: Summary["NetworkSettings"]): Machine => {
+    const ip = networks?.Networks?.[network]?.IPAddress;
+    return { id, name, state: stateOf(status), addresses: ip ? [name, ip] : [name] };
   };
+
+  const machineFrom = (inspection: Inspection) =>
+    machine(inspection.Id, nameOf(inspection), inspection.State.Status, inspection.NetworkSettings);
 
   const refuseForeign = (inspection: Inspection | undefined, what: string) => {
     if (inspection && !owned(inspection.Config.Labels)) throw new OwnershipError(`container ${what}`);
@@ -115,6 +125,20 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
     const wanted = Object.entries({ ...spec.labels, ...ownership(spec.name) });
     if (!wanted.every(([key, value]) => labels?.[key] === value)) throw new OwnershipError(`container ${spec.name}`);
     return machineFrom(inspection);
+  };
+
+  /** The volumes this install created, only those for machine `name` when given. */
+  const volumes = async (name?: string) => {
+    const filters = JSON.stringify({
+      label: [`${installLabel}=${installId}`, ...(name === undefined ? [] : [`${machineLabel}=${name}`])],
+    });
+    const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
+    const { Volumes } = (await response.json()) as { Volumes?: Volume[] | null };
+    return (Volumes ?? []).filter((volume) =>
+      name === undefined
+        ? owned(volume.Labels) && Boolean(volume.Labels?.[machineLabel])
+        : ownedFor(volume.Labels, name),
+    );
   };
 
   const containerAction = (id: string, action: string, query = "") =>
@@ -208,20 +232,40 @@ export function dockerProvider({ socketPath, network, installId }: DockerProvide
       return inspection && machineFrom(inspection);
     },
 
-    async destroy(name) {
+    async destroy(name, options) {
       const inspection = refuseForeign(await named(name), name);
+      if (options && inspection?.Id !== options.id) return;
       // `v` also removes the anonymous volumes the image declares, such as the JVM runner's cache.
       if (inspection) {
         await call("DELETE", `/containers/${encodeURIComponent(inspection.Id)}?force=true&v=true`, { allow: [404] });
       }
-      const filters = JSON.stringify({ label: [`${installLabel}=${installId}`, `${machineLabel}=${name}`] });
-      const response = await call("GET", `/volumes?${new URLSearchParams({ filters })}`);
-      const { Volumes } = (await response.json()) as { Volumes?: Volume[] | null };
-      for (const volume of Volumes ?? []) {
-        if (ownedFor(volume.Labels, name)) {
-          await call("DELETE", `/volumes/${encodeURIComponent(volume.Name)}`, { allow: [404] });
-        }
+      for (const volume of await volumes(name)) {
+        await call("DELETE", `/volumes/${encodeURIComponent(volume.Name)}`, { allow: [404] });
       }
+    },
+
+    async list() {
+      const filters = JSON.stringify({ label: [`${installLabel}=${installId}`] });
+      const response = await call("GET", `/containers/json?${new URLSearchParams({ all: "true", filters })}`);
+      const containers = (await response.json()) as Summary[];
+      const machines = containers
+        .filter((container) => owned(container.Labels))
+        .map((container) =>
+          machine(
+            container.Id,
+            (container.Names[0] ?? "").replace(/^\//, ""),
+            container.State,
+            container.NetworkSettings,
+          ),
+        );
+      const names = new Set(machines.map(({ name }) => name));
+      for (const volume of await volumes()) {
+        const name = volume.Labels?.[machineLabel] ?? "";
+        if (names.has(name)) continue;
+        names.add(name);
+        machines.push({ id: "", name, state: "missing", addresses: [] });
+      }
+      return machines;
     },
   };
 }

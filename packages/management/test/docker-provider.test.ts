@@ -63,6 +63,7 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     expect(created).toMatchObject({ name: spec.name, state: "stopped" });
     expect((await provider.create(spec)).id).toBe(created.id);
     expect((await provider.find(spec.name))?.id).toBe(created.id);
+    expect(await provider.list()).toContainEqual(created);
 
     const running = await provider.start(created.id);
     expect(running.state).toBe("running");
@@ -99,6 +100,8 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
     const other = dockerProvider({ socketPath, network: prefix, installId: `${prefix}-other` });
     const spec = specFor("other", { volumes: [] });
     await other.create(spec);
+    expect((await other.list()).map((machine) => machine.name)).toEqual([spec.name]);
+    expect((await provider.list()).map((machine) => machine.name)).not.toContain(spec.name);
     await expect(provider.create(spec)).rejects.toThrow(OwnershipError);
     await expect(provider.find(spec.name)).rejects.toThrow(OwnershipError);
     await expect(provider.destroy(spec.name)).rejects.toThrow(OwnershipError);
@@ -129,6 +132,28 @@ describe.skipIf(!socketExists)("dockerProvider", () => {
 
     await provider.destroy(spec.name);
     expect(await exists(`/volumes/${spec.name}-data`)).toBe(false);
+  }, 60_000);
+
+  test("destroy under an ID leaves a replacement, and list shows names only volumes are left under", async () => {
+    const spec = specFor("scoped");
+    const volume = `/volumes/${spec.name}-data`;
+    const first = await provider.create(spec);
+    await provider.destroy(spec.name, { id: first.id });
+    expect(await provider.find(spec.name)).toBeUndefined();
+    expect(await exists(volume)).toBe(false);
+
+    const replacement = await provider.create(spec);
+    await provider.destroy(spec.name, { id: first.id });
+    expect((await provider.find(spec.name))?.id).toBe(replacement.id);
+    expect(await exists(volume)).toBe(true);
+
+    await engine("DELETE", `/containers/${spec.name}?force=true`);
+    expect(await provider.list()).toContainEqual({ id: "", name: spec.name, state: "missing", addresses: [] });
+    await provider.destroy(spec.name, { id: replacement.id });
+    expect(await exists(volume)).toBe(true);
+    await provider.destroy(spec.name);
+    expect(await exists(volume)).toBe(false);
+    expect((await provider.list()).map(({ name }) => name)).not.toContain(spec.name);
   }, 60_000);
 
   test("maps restart to the container's restart policy", async () => {

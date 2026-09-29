@@ -44,7 +44,7 @@ export function coreMachineName(environmentId: string): string {
 }
 
 /** Stable per request, so a replacement machine takes the name of the one it replaces. */
-export function capacityMachineName(request: CapacityRow): string {
+export function capacityMachineName(request: Pick<CapacityRow, "environment_id" | "request_id" | "workload">): string {
   const workload = workloadNames[request.workload] ?? "unknown";
   return `${namePrefix(request.environment_id)}-${workload}-${sha256(request.request_id).toString("hex").slice(0, 12)}`;
 }
