@@ -79,8 +79,15 @@ See `README.md` for how the pieces fit together.
   TypeScript backend under `server/`, and assets.
 - **App**: a directory under `apps/` whose `app.ts` declares it and its ID,
   with its own Gradle build and executable JAR. Its JVMs run its session types.
+- **Session type**: an app ID and one of its `implementations` keys, such as
+  `lobby/default`. Each key matches exactly one `@SessionType` provider in the
+  app's JAR.
 - **Session**: one gameplay instance of an app's session type, created by the
   app's `SessionProvider`. A JVM can run several.
+- **Destination**: a place an app sends players: a session type, a key,
+  sizing and a capacity policy, referenced through `#chunk/apps`.
+- **Scope**: a `scope.ts` whose hooks and commands apply to every app below
+  its directory; `apps/scope.ts` is the root.
 - **Release**: the immutable archive `chunk build` produces
   (`dist/<id>.tar.gz`): backend code, app JARs, dependencies and assets. Its
   ID derives from its contents.
@@ -96,6 +103,10 @@ See `README.md` for how the pieces fit together.
   subscriptions.
 - **Control**: core's placement side (`chunk-control`). It reserves capacity,
   places sessions on hosts and supervises their JVMs.
+- **Claim**: a player's reservation of a place in a session, and then their
+  ownership of it, fenced by its generation.
+- **Generation**: the `(epoch, revision)` of a commit in control's state.
+  Stale claims, deliveries and reports are rejected by comparing it.
 - **Host**: control's unit of JVM capacity: one capacity request, one JVM
   lifetime, with its own `jvm/<host>` topic. `ProcessHost` runs it as a local
   child process; under management it is a JVM machine running `chunk-jvm`.
@@ -109,8 +120,9 @@ See `README.md` for how the pieces fit together.
 - **Management**: the self-hosted control plane (`packages/management`). It
   serves `chunk.management.v1` (projects, environments, releases,
   deployments) and reconciles each environment's machines through a provider.
-- **Machine**: what management runs for an environment: its core machine,
-  extra gateway machines and JVM machines.
+- **Machine**: what management runs for an environment: its core machine and
+  JVM machines. Management also supports extra gateway machines, which core
+  doesn't request yet.
 - **Provider**: management's hosting backend. It creates, starts, suspends,
   stops and destroys machines. The Docker/Podman provider ships here; an
   install can plug in its own.

@@ -25,25 +25,25 @@ edge wakes when a player logs in.
 
 ## Repository
 
-| Path                                                                | Contents                                                                                   |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `crates/chunk-cli`, `crates/chunk-build`                            | The `chunk` CLI, compiler and release packaging, and the TypeScript SDK                    |
-| `crates/chunk-environment`                                          | The environment process, running core and the gateway                                      |
-| `crates/chunk-backend`, `chunk-store`, `chunk-js`, `chunk-contract` | The backend: sync engine, storage, embedded JavaScript and contracts                       |
-| `crates/chunk-control`                                              | Session placement, capacity and JVM supervision                                            |
-| `crates/chunk-proxy`, `chunk-protocol`, `chunk-protocol-*`          | The gateway's Minecraft proxy and protocol codecs                                          |
-| `crates/chunk-edge`                                                 | The edge in front of self-hosted environments                                              |
-| `crates/chunk-jvm`                                                  | The runner on JVM machines                                                                 |
-| `crates/chunk-management`                                           | A Rust client for the management API                                                       |
-| `crates/chunk-proto`, `chunk-service`, `chunk-bench`                | Generated gRPC bindings, service helpers and workload benchmarks                           |
-| `jvm/`                                                              | Java runtime and Minestom adapter, backend clients, Kotlin adapters, and the Gradle plugin |
-| `packages/management`                                               | The management service (TypeScript on Bun and Postgres)                                    |
-| `packages/dashboard`                                                | The dashboard management serves                                                            |
-| `proto/`                                                            | The `chunk.sync.v1` and `chunk.management.v1` contracts                                    |
-| `deploy/compose/`                                                   | The self-hosting bundle                                                                    |
-| `examples/local/`, `examples/java/`                                 | A Kotlin example project and a Java one                                                    |
-| `scripts/`                                                          | SDK packaging, Maven publishing and end-to-end smoke tests                                 |
-| `docs/distribution.md`                                              | Packaging, installing and publishing the SDK                                               |
+| Path                                                                   | Contents                                                                                                                                                                     |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`crates/chunk-cli`](crates/chunk-cli/README.md), `crates/chunk-build` | The `chunk` CLI, compiler and release packaging, and the TypeScript SDK                                                                                                      |
+| `crates/chunk-environment`                                             | The environment process, running core and the gateway                                                                                                                        |
+| `crates/chunk-backend`, `chunk-store`, `chunk-js`, `chunk-contract`    | The backend: sync engine, storage, embedded JavaScript and contracts                                                                                                         |
+| `crates/chunk-control`                                                 | Session placement, capacity and JVM supervision                                                                                                                              |
+| `crates/chunk-proxy`, `chunk-protocol`, `chunk-protocol-*`             | The gateway's Minecraft proxy and protocol codecs                                                                                                                            |
+| [`crates/chunk-edge`](crates/chunk-edge/README.md)                     | The edge in front of self-hosted environments                                                                                                                                |
+| `crates/chunk-jvm`                                                     | The runner on JVM machines                                                                                                                                                   |
+| `crates/chunk-management`                                              | A Rust client for the management API (the management service itself is `packages/management`)                                                                                |
+| `crates/chunk-proto`, `chunk-service`, `chunk-bench`                   | Generated gRPC bindings, service helpers and workload benchmarks                                                                                                             |
+| `jvm/`                                                                 | Java runtime and Minestom adapter, backend clients, Kotlin adapters, and the Gradle plugin; gameplay code starts at [`jvm/runtime-minestom`](jvm/runtime-minestom/README.md) |
+| `packages/management`                                                  | The management service (TypeScript on Bun and Postgres)                                                                                                                      |
+| `packages/dashboard`                                                   | The dashboard management serves                                                                                                                                              |
+| `proto/`                                                               | The `chunk.sync.v1` and `chunk.management.v1` contracts                                                                                                                      |
+| `deploy/compose/`                                                      | The self-hosting bundle                                                                                                                                                      |
+| `examples/local/`, `examples/java/`                                    | A Kotlin example project and a Java one                                                                                                                                      |
+| `scripts/`                                                             | SDK packaging, Maven publishing and end-to-end smoke tests                                                                                                                   |
+| `docs/distribution.md`                                                 | Packaging, installing and publishing the SDK                                                                                                                                 |
 
 Design decisions are GitHub issues labelled `decision`.
 
@@ -66,9 +66,9 @@ just toolchain
 target/debug/chunk create ../my-server --chunk-source .
 ```
 
-It creates a Kotlin project (`--language java` for Java) and prints the commands to build and run it. `chunk --help`
-lists the CLI's commands: `dev` runs a project locally and rebuilds it on change, `build` packages a release, and
-`players` and `nodes` operate the local environment.
+It creates a Kotlin project (`--language java` for Java) and prints the commands to build and run it. The
+[CLI README](crates/chunk-cli/README.md) covers every command: `dev` runs a project locally and rebuilds it on change,
+`build` packages a release, and `players` and `nodes` operate the local environment.
 
 ## Self-hosting
 
