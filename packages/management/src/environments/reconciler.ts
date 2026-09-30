@@ -369,9 +369,14 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
   }
 
   if (core.state !== "running") {
-    // A stopped core's gateways went with it. A suspended one keeps its gateways, which serve again once it resumes.
+    // A stopped core's gateways went with it, and no report of its lease is accepted after this; its successor attaches
+    // under a new lease. A suspended core keeps its gateways, which serve again once it resumes.
     if (core.state === "stopped") {
-      await fenced((tx) => tx`update environments set gateway_addresses = '{}' where id = ${id}`);
+      await fenced(
+        (tx) => tx`
+          update environments set gateway_addresses = '{}', report_sequence = ${closedSequence}
+          where id = ${id} and lease = ${environment.lease}`,
+      );
     }
     core = await provider.start(core.id);
   }
@@ -390,6 +395,9 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
   }
   for (const request of active) await keepRunning(run, core, request);
 }
+
+/** A report sequence no report exceeds, which closes a lease to further reports. */
+const closedSequence = 2n ** 63n - 1n;
 
 function coreKey(environmentId: string): string {
   return `core/${environmentId}`;

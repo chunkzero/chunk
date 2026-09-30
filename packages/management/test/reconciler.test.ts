@@ -1026,14 +1026,13 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("a stopped core's gateways are dropped, and its successor's report before its start returns runs it", async () => {
-    const env = await running();
-    const stale = `${env.coreName}:25565`;
+  /** Suspends `env` on a provider that stops machines, firing a due alarm that wakes it on the next pass. */
+  async function stoppedWithAlarm(env: Awaited<ReturnType<typeof running>>) {
     await env.client.reportStatus({
       lease: env.lease,
       sequence: 1n,
       desiredRevision: env.revision,
-      gatewayAddresses: [stale],
+      gatewayAddresses: [`${env.coreName}:25565`],
       readyToSuspend: true,
     });
     const now = BigInt(Math.floor(Date.now() / 1000));
@@ -1045,33 +1044,62 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     } finally {
       behaviour.suspendStops = false;
     }
-    env.close();
+  }
 
+  /** Attaches a new core instance and reports its gateway. */
+  async function successor(env: Awaited<ReturnType<typeof running>>, signal: AbortSignal) {
+    const stream = env.client.attach({ instanceId: crypto.randomUUID(), core: true, epoch: 1n }, { signal });
+    const { lease, revision } = await next(stream[Symbol.asyncIterator]());
+    await env.client.reportStatus({
+      lease,
+      sequence: 1n,
+      desiredRevision: revision,
+      gatewayAddresses: ["10.0.0.9:25565"],
+    });
+  }
+
+  test("a stopped core's gateways and late reports are dropped, and its successor's report before its start returns runs it", async () => {
+    const env = await running();
+    await stoppedWithAlarm(env);
     const abort = new AbortController();
     let before: string[] | undefined;
     hooks.start = async (name) => {
       if (name !== env.coreName) return;
       hooks.start = undefined;
+      await env.client.reportStatus({
+        lease: env.lease,
+        sequence: 2n,
+        desiredRevision: env.revision,
+        gatewayAddresses: [`${env.coreName}:25565`],
+      });
       const [row] = await h.sql<{ gateway_addresses: string[] }[]>`
         select gateway_addresses from environments where id = ${env.environmentId}`;
       before = row?.gateway_addresses;
-      const stream = env.client.attach(
-        { instanceId: crypto.randomUUID(), core: true, epoch: 1n },
-        { signal: abort.signal },
-      );
-      const { lease, revision } = await next(stream[Symbol.asyncIterator]());
-      await env.client.reportStatus({
-        lease,
-        sequence: 1n,
-        desiredRevision: revision,
-        gatewayAddresses: ["10.0.0.9:25565"],
-      });
+      await successor(env, abort.signal);
     };
-    await pass();
     await pass();
     expect(before).toEqual([]);
     expect(await env.state()).toBe(EnvironmentState.RUNNING);
     abort.abort();
+    env.close();
+  });
+
+  test("a successor that attached after its core was seen stopped keeps its gateways", async () => {
+    const env = await running();
+    await stoppedWithAlarm(env);
+    const abort = new AbortController();
+    hooks.status = async (name) => {
+      if (name !== env.coreName) return;
+      hooks.status = undefined;
+      await successor(env, abort.signal);
+    };
+    await pass();
+    const [row] = await h.sql<{ gateway_addresses: string[] }[]>`
+      select gateway_addresses from environments where id = ${env.environmentId}`;
+    expect(row?.gateway_addresses).toEqual(["10.0.0.9:25565"]);
+    expect(await env.state()).toBe(EnvironmentState.RUNNING);
+    abort.abort();
+    env.close();
   });
 
   test("a slow environment does not hold up another's progress", async () => {
