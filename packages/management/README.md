@@ -124,7 +124,10 @@ provider, extra Connect services and migrations, its own authentication, and its
 With `CHUNK_LOG_STORE_BUCKET` set, management hands each environment credentials for its own prefix,
 `<prefix><environment ID>/`, in `Attach`: temporary ones from STS `AssumeRole` with an inline policy that allows only
 that prefix, refreshed before they expire. This works with AWS S3 and MinIO. Core replicates its log there, restores it
-from there when it starts without its volume, and picks up the fresh credentials each desired state carries.
+from there when it starts without its volume, and picks up the fresh credentials each desired state carries. Deleting an
+environment removes its prefix, with the environment's own credentials, once its machines are gone; an install's own
+issuer removes it through `LogStoreIssuer.deleteEnvironment`. Deletion removes current objects only, so leave bucket
+versioning off, or add a lifecycle rule that expires noncurrent versions.
 
 | Variable                             | Default                | Meaning                                                                                            |
 | ------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |

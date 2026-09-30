@@ -1,4 +1,5 @@
 import type { LogStore } from "../config.ts";
+import { deletePrefix } from "./s3.ts";
 import { signV4 } from "./sigv4.ts";
 
 /** Object-store access for one environment's log prefix. */
@@ -20,10 +21,18 @@ export interface LogStoreGrant {
  */
 export interface LogStoreIssuer {
   grant(environmentId: string): Promise<LogStoreGrant>;
+  /**
+   * Removes the environment's log objects, stopping once `signal` aborts. A deleted environment's are removed once its
+   * machines are gone and before the environment is. The reconciler gives up on a call that outlasts its provider call
+   * timeout, and retries a failed or abandoned one on a later pass.
+   */
+  deleteEnvironment(environmentId: string, signal: AbortSignal): Promise<void>;
 }
 
 /** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
 const maxRefreshBeforeMs = 15 * 60 * 1000;
+/** How long an AssumeRole request, its response body included, may take before it fails and is no longer cached. */
+const stsTimeoutMs = 30_000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
   return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
@@ -31,22 +40,22 @@ export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch)
 
 /** Every environment gets the operator's credentials; only for installs that trust all environments' code. */
 function sharedIssuer(store: LogStore): LogStoreIssuer {
+  const grant = (environmentId: string): LogStoreGrant => ({
+    ...location(store, environmentId),
+    accessKeyId: store.accessKeyId,
+    secretAccessKey: store.secretAccessKey,
+    sessionToken: "",
+    expireTime: undefined,
+  });
   return {
-    async grant(environmentId) {
-      return {
-        ...location(store, environmentId),
-        accessKeyId: store.accessKeyId,
-        secretAccessKey: store.secretAccessKey,
-        sessionToken: "",
-        expireTime: undefined,
-      };
-    },
+    grant: async (environmentId) => grant(environmentId),
+    deleteEnvironment: (environmentId, signal) => deletePrefix(grant(environmentId), signal),
   };
 }
 
 /**
  * Temporary credentials from STS AssumeRole, limited by an inline session policy to the environment's prefix. Works
- * with AWS S3 and MinIO.
+ * with AWS S3 and MinIO. An environment's objects are deleted with its own credentials.
  */
 function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
   const cache = new Map<string, { grant: Promise<LogStoreGrant>; refreshAt: number }>();
@@ -66,9 +75,11 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
       { method: "POST", url, headers: { "content-type": "application/x-www-form-urlencoded" }, body },
       { accessKeyId: store.accessKeyId, secretAccessKey: store.secretAccessKey, region: store.region, service: "sts" },
     );
-    const response = await fetchImpl(url, { method: "POST", headers, body });
+    const response = await fetchImpl(url, { method: "POST", headers, body, signal: AbortSignal.timeout(stsTimeoutMs) });
     const xml = await response.text();
-    if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}: ${xml.slice(0, 500)}`);
+    // Only the error's code: a response can echo the request.
+    const code = /<Code>(\w+)<\/Code>/.exec(xml)?.[1];
+    if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}${code ? `: ${code}` : ""}`);
     const expiration = new Date(element(xml, "Expiration"));
     if (Number.isNaN(expiration.getTime())) throw new Error("STS AssumeRole returned no expiration");
     const grant: LogStoreGrant = {
@@ -81,23 +92,28 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
     const lifetime = expiration.getTime() - issuedAt;
     return { grant, refreshAt: expiration.getTime() - Math.min(maxRefreshBeforeMs, lifetime / 3) };
   };
+  const grant = (environmentId: string) => {
+    const cached = cache.get(environmentId);
+    if (cached && Date.now() < cached.refreshAt) return cached.grant;
+    // Cached before it settles, so concurrent grants share one AssumeRole; it is refreshed once it has settled.
+    const issued = assume(environmentId);
+    const entry = { grant: issued.then(({ grant }) => grant), refreshAt: Number.POSITIVE_INFINITY };
+    cache.set(environmentId, entry);
+    issued.then(
+      ({ refreshAt }) => {
+        entry.refreshAt = refreshAt;
+      },
+      () => {
+        if (cache.get(environmentId) === entry) cache.delete(environmentId);
+      },
+    );
+    return entry.grant;
+  };
   return {
-    grant(environmentId) {
-      const cached = cache.get(environmentId);
-      if (cached && Date.now() < cached.refreshAt) return cached.grant;
-      // Cached before it settles, so concurrent grants share one AssumeRole; it is refreshed once it has settled.
-      const issued = assume(environmentId);
-      const entry = { grant: issued.then(({ grant }) => grant), refreshAt: Number.POSITIVE_INFINITY };
-      cache.set(environmentId, entry);
-      issued.then(
-        ({ refreshAt }) => {
-          entry.refreshAt = refreshAt;
-        },
-        () => {
-          if (cache.get(environmentId) === entry) cache.delete(environmentId);
-        },
-      );
-      return entry.grant;
+    grant,
+    async deleteEnvironment(environmentId, signal) {
+      await deletePrefix(await grant(environmentId), signal);
+      cache.delete(environmentId);
     },
   };
 }

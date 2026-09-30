@@ -36,18 +36,20 @@ describe.skipIf(!minioUrl)("STS log store credentials against MinIO", () => {
     expect((await s3("PUT", `/${bucket}`, root)).status).toBe(200);
   });
 
+  const store = {
+    endpoint: url,
+    region: "us-east-1",
+    bucket,
+    prefix: "environments/",
+    ...root,
+    sharedCredentials: false,
+    stsEndpoint: url,
+    roleArn: "arn:minio:iam:::role/chunk-logs",
+    credentialSeconds: 900,
+  };
+
   test("issued credentials write under their own prefix and nowhere else", async () => {
-    const issuer = logStoreIssuer({
-      endpoint: url,
-      region: "us-east-1",
-      bucket,
-      prefix: "environments/",
-      ...root,
-      sharedCredentials: false,
-      stsEndpoint: url,
-      roleArn: "arn:minio:iam:::role/chunk-logs",
-      credentialSeconds: 900,
-    });
+    const issuer = logStoreIssuer(store);
     const grant: LogStoreGrant = await issuer.grant("env_a");
     expect(grant.accessKeyId).not.toBe(root.accessKeyId);
     expect(grant.expireTime?.getTime()).toBeGreaterThan(Date.now());
@@ -59,5 +61,17 @@ describe.skipIf(!minioUrl)("STS log store credentials against MinIO", () => {
     expect((await s3("PUT", `/${bucket}/other`, grant, "entry")).status).toBe(403);
     expect((await s3("GET", `/${bucket}?list-type=2&prefix=environments/env_a/`, grant)).status).toBe(200);
     expect((await s3("GET", `/${bucket}?list-type=2&prefix=environments/`, grant)).status).toBe(403);
+  });
+
+  test("deleting an environment removes its objects and no one else's", async () => {
+    const issuer = logStoreIssuer(store);
+    const keys = ["env_c/log/1", "env_c/log/2", "env_c/snapshot", "env_cd/log/1"];
+    for (const key of keys) {
+      expect((await s3("PUT", `/${bucket}/environments/${key}`, root, "entry")).status).toBe(200);
+    }
+    await issuer.deleteEnvironment("env_c", AbortSignal.timeout(10_000));
+    await issuer.deleteEnvironment("env_c", AbortSignal.timeout(10_000));
+    const listed = await (await s3("GET", `/${bucket}?list-type=2&prefix=environments/env_c`, root)).text();
+    expect([...listed.matchAll(/<Key>([^<]*)<\/Key>/g)].map(([, key]) => key)).toEqual(["environments/env_cd/log/1"]);
   });
 });
