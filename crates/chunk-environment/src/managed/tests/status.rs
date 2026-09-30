@@ -137,6 +137,38 @@ async fn reports_repeat_under_one_lease_a_changed_address_reports_at_once_and_a_
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_first_player_online_and_the_last_one_leaving_are_reported_at_once() {
+    let mut harness = Harness::new().await;
+    let _time = hold_time();
+    let reporter = Reporter::new(harness.management_config().client(), CancellationToken::new());
+    let observed = Mutex::new(Observed { lease: 0, revision: 1, ..Observed::default() });
+    let (observing, mut observations) = mpsc::unbounded_channel();
+    let observe = || {
+        observing.send(()).unwrap();
+        std::future::ready(Some(observed.lock().unwrap().clone()))
+    };
+    let reporting = reporter.keep_reporting(observe, |_| false);
+    let checks = async {
+        let applied = &mut harness.reported;
+        observations.recv().await.unwrap();
+        assert_eq!(applied.recv().await.unwrap().online_players, 0);
+        let mut online = async |players| {
+            observed.lock().unwrap().online_players = players;
+            let reports = applied_after(2, &mut observations, applied).await;
+            reports.into_iter().map(|report| report.online_players).collect::<Vec<_>>()
+        };
+        assert_eq!(online(1).await, [1]);
+        // Only the heartbeat reports how many.
+        assert!(online(2).await.is_empty());
+        assert_eq!(online(0).await, [0]);
+    };
+    tokio::select! {
+        error = reporting => panic!("{error}"),
+        () = checks => {}
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_change_management_did_not_accept_is_sent_again_with_backoff_until_it_is() {
     let mut harness = Harness::new().await;
     let _time = hold_time();

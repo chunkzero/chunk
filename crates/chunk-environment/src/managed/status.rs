@@ -44,7 +44,11 @@ pub(super) struct Observed {
 
 impl Observed {
     fn said(&self) -> Said {
-        Said { gateway_addresses: self.gateway_addresses.clone(), ready_to_suspend: self.ready_to_suspend }
+        Said {
+            gateway_addresses: self.gateway_addresses.clone(),
+            ready_to_suspend: self.ready_to_suspend,
+            players_online: self.online_players > 0,
+        }
     }
 }
 
@@ -53,6 +57,9 @@ impl Observed {
 struct Said {
     gateway_addresses: Vec<String>,
     ready_to_suspend: bool,
+    /// Whether any player is online, which management takes as proof that a login wake led to a login, so a player
+    /// who leaves before the next heartbeat is still reported.
+    players_online: bool,
 }
 
 /// Sends reports under increasing sequences, never waiting for one to finish before sending the next. Management
@@ -208,8 +215,8 @@ impl Reporter {
         lock(&self.sent).addresses.clone()
     }
 
-    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
-    /// to suspend change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
+    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses, readiness
+    /// to suspend or whether any player is online change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
     /// sequence. After a failed report, whose outcome is unknown, it reports again after a backoff of one to four
     /// seconds until one is accepted. `observe` finds nothing while core must not report. Observations run beside the
     /// report in flight, so a slow one never holds up that report's timeout. Returns once management fences a lease

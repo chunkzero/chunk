@@ -190,23 +190,48 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     env.close();
   });
 
-  test("a report with players online takes a counted login wake off the count once", async () => {
+  test("reports with players online refund each counted login wake of the current window once", async () => {
     const env = await running();
+    const { environmentId } = env;
     const gatewayAddresses = [`${env.coreAddress}:25565`];
     await env.report({ gatewayAddresses });
-    const wakeCount = async () =>
-      (await h.sql<{ wake_count: number }[]>`select wake_count from environments where id = ${env.environmentId}`)[0]
-        ?.wake_count;
-    await edge.wake({ environmentId: env.environmentId, clientAddress: "192.0.2.30", reason: WakeReason.LOGIN });
-    expect(await wakeCount()).toBe(1);
+    const wakes = async () => {
+      const [row] = await h.sql<{ wake_count: number; wake_logins_pending: number }[]>`
+        select wake_count, wake_logins_pending from environments where id = ${environmentId}`;
+      return [row?.wake_count, row?.wake_logins_pending];
+    };
+    const wake = (reason = WakeReason.LOGIN) => edge.wake({ environmentId, clientAddress: "192.0.2.30", reason });
+    const expire = () =>
+      h.sql`update environments set wake_window_start = wake_window_start - interval '2 minutes'
+        where id = ${environmentId}`;
 
+    // Two login wakes, each followed by a report from before anyone logged in.
+    await wake();
     await env.report({ gatewayAddresses });
-    expect(await wakeCount()).toBe(1);
+    await wake();
+    await env.report({ gatewayAddresses });
+    expect(await wakes()).toEqual([2, 2]);
     await env.report({ gatewayAddresses, onlinePlayers: 1 });
-    expect(await wakeCount()).toBe(0);
-    await h.sql`update environments set wake_count = 1 where id = ${env.environmentId}`;
+    expect(await wakes()).toEqual([1, 1]);
+    await env.report({ gatewayAddresses, onlinePlayers: 3 });
+    expect(await wakes()).toEqual([0, 0]);
+    await h.sql`update environments set wake_count = 2 where id = ${environmentId}`;
+    await env.report({ gatewayAddresses, onlinePlayers: 3 });
+    expect(await wakes()).toEqual([2, 0]);
+
+    // A login wake whose window ended is dropped, not refunded from a later window.
+    await wake();
+    await expire();
     await env.report({ gatewayAddresses, onlinePlayers: 1 });
-    expect(await wakeCount()).toBe(1);
+    expect(await wakes()).toEqual([3, 0]);
+    await wake();
+    await env.report({ gatewayAddresses });
+    await expire();
+    await h.sql`update environments set sleeping_ping = ${SleepingPingMode.WAKE} where id = ${environmentId}`;
+    await wake(WakeReason.PING);
+    expect(await wakes()).toEqual([1, 0]);
+    await env.report({ gatewayAddresses, onlinePlayers: 1 });
+    expect(await wakes()).toEqual([1, 0]);
     env.close();
   });
 
