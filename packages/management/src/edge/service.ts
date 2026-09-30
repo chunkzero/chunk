@@ -18,7 +18,7 @@ import { endIfShuttingDown, failedPrecondition, invalid, notFound, required, str
 import { routeTable } from "./routes.ts";
 
 const keepaliveMs = 30_000;
-/** Accepted wakes that advance an environment's revision, per minute. */
+/** Accepted wakes that advance an environment's revision, per minute, less those whose logins complete. */
 export const wakesPerMinute = 30;
 
 export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceImpl<typeof EdgeService>> {
@@ -61,7 +61,7 @@ export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceIm
       const address = blockKey(required(request.clientAddress, "client_address"));
       if (address === undefined) throw invalid("client_address is not an IP address");
 
-      const { outcome } = await sql.begin(async (tx) => {
+      return sql.begin(async (tx) => {
         const [environment] = await tx<WakeRow[]>`
           select state, sleeping_ping, revision, report_desired_revision,
             wake_window_start > now() - interval '1 minute' as in_window, wake_count
@@ -86,15 +86,27 @@ export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceIm
         if (environment.report_desired_revision < environment.revision) return { outcome: accepted };
         const count = environment.in_window ? environment.wake_count : 0;
         if (count >= wakesPerMinute) return { outcome: WakeOutcome.THROTTLED };
-        await tx`
+        const [window] = await tx<{ refund_token: string }[]>`
           update environments set
             wake_count = ${count + 1},
             wake_window_start = case when ${environment.in_window} then wake_window_start else now() end
-          where id = ${environmentId}`;
+          where id = ${environmentId}
+          returning (extract(epoch from wake_window_start) * 1000000)::bigint::text as refund_token`;
         await advanceRevision(tx, environmentId);
-        return { outcome: accepted };
+        const refundToken = request.reason === WakeReason.LOGIN ? (window?.refund_token ?? "") : "";
+        return { outcome: accepted, refundToken };
       });
-      return { outcome };
+    },
+
+    async refundWake(request) {
+      const environmentId = required(request.environmentId, "environment_id");
+      const refundToken = required(request.refundToken, "refund_token");
+      await sql`
+        update environments set wake_count = greatest(wake_count - 1, 0)
+        where id = ${environmentId}
+          and (extract(epoch from wake_window_start) * 1000000)::bigint::text = ${refundToken}
+          and wake_window_start > now() - interval '1 minute'`;
+      return {};
     },
   };
 }

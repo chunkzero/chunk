@@ -15,7 +15,7 @@ use std::{
 use bytes::Bytes;
 use chunk_edge::{Config, Edge};
 use chunk_management::v1::{
-    Route, SleepingPingMode, WakeOutcome, WakeReason, WakeRequest, WakeResponse, WatchRoutesResponse,
+    RefundWakeRequest, Route, SleepingPingMode, WakeOutcome, WakeReason, WakeRequest, WakeResponse, WatchRoutesResponse,
 };
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 const LOGIN_START: &[u8] = b"\x06\x00\x04Alex";
 const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
+const LOGIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// One `WatchRoutes` response in progress; dropping it ends the stream.
 struct RouteStream(mpsc::Sender<Result<Frame<Bytes>, Infallible>>);
@@ -52,12 +53,13 @@ impl RouteStream {
     }
 }
 
-/// What the fake management service saw, and how it answers `Wake`.
+/// What the fake management service saw, and how it answers `Wake`, whose refund token is always `window-1`.
 struct Management {
     streams: mpsc::UnboundedSender<RouteStream>,
     /// Every method called.
     calls: Mutex<Vec<String>>,
     wakes: Mutex<Vec<WakeRequest>>,
+    refunds: Mutex<Vec<RefundWakeRequest>>,
     outcome: Mutex<WakeOutcome>,
     /// How long `Wake` takes to answer.
     delay: Mutex<Duration>,
@@ -77,8 +79,13 @@ async fn call(
         let delay = *management.delay.lock().unwrap();
         tokio::time::sleep(delay).await;
         let outcome = *management.outcome.lock().unwrap();
-        let body = WakeResponse { outcome: outcome.into() }.encode_to_vec();
+        let body = WakeResponse { outcome: outcome.into(), refund_token: "window-1".into() }.encode_to_vec();
         return response.header("content-type", "application/proto").body(Full::from(body).boxed()).unwrap();
+    }
+    if path.ends_with("/RefundWake") {
+        let body = request.into_body().collect().await.unwrap().to_bytes();
+        management.refunds.lock().unwrap().push(RefundWakeRequest::decode(body).unwrap());
+        return response.header("content-type", "application/proto").body(Full::from(Vec::new()).boxed()).unwrap();
     }
     let (sender, receiver) = mpsc::channel(1);
     _ = management.streams.send(RouteStream(sender));
@@ -183,6 +190,7 @@ impl Harness {
             streams,
             calls: Mutex::default(),
             wakes: Mutex::default(),
+            refunds: Mutex::default(),
             outcome: Mutex::new(WakeOutcome::Waking),
             delay: Mutex::default(),
         });
@@ -192,6 +200,7 @@ impl Harness {
             edge_token: "edge-token".into(),
             handshake_timeout: Duration::from_millis(200),
             wake_timeout: WAKE_TIMEOUT,
+            login_timeout: LOGIN_TIMEOUT,
         };
         let edge = Edge::bind(config).await.unwrap();
         let address = edge.local_addr().unwrap();
@@ -419,6 +428,34 @@ async fn wakes_a_sleeping_environment_for_a_login_and_holds_the_player_until_a_g
     let mut received = vec![0; 28 + expected.len()];
     gateway.read_exact(&mut received).await.unwrap();
     assert_eq!(received[28..], expected);
+    harness.stop.cancel();
+}
+
+#[tokio::test]
+async fn refunds_the_wake_of_a_woken_login_still_spliced_after_the_login_timeout() {
+    let mut harness = Harness::start().await;
+    let routes = harness.next_stream().await;
+    routes.send(true, vec![asleep("play.example.com", SleepingPingMode::Cache, &json!({}))]).await;
+    harness
+        .eventually_pings("play.example.com", |status| *status == json!({ "players": { "max": 0, "online": 0 } }))
+        .await;
+
+    let _players = [harness.login("play.example.com").await, harness.login("play.example.com").await];
+    for _ in 0..100 {
+        if harness.wakes().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(harness.wakes().len(), 2, "both logins woke the environment");
+    routes.send(false, vec![route("play.example.com", &[&harness.gateways[0]])]).await;
+    let accept = || async { timeout(WAKE_TIMEOUT, harness.gateways[0].accept()).await.unwrap().unwrap().0 };
+    // The gateway closes one login before its deadline, as it does a login that fails, and keeps the other.
+    drop(accept().await);
+    let _kept = accept().await;
+    tokio::time::sleep(LOGIN_TIMEOUT * 2).await;
+    let refunds = harness.management.refunds.lock().unwrap().clone();
+    assert_eq!(refunds, [RefundWakeRequest { environment_id: "env_test".into(), refund_token: "window-1".into() }]);
     harness.stop.cancel();
 }
 

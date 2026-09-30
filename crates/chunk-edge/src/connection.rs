@@ -7,7 +7,7 @@ use chunk_management::v1::{SleepingPingMode, WakeReason};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::{Instant, timeout},
+    time::{Instant, sleep, timeout},
 };
 
 use crate::{
@@ -71,8 +71,8 @@ async fn status_of(
     if gateways.is_empty() && entry.route.asleep && entry.route.sleeping_ping() == SleepingPingMode::Wake {
         let deadline = Instant::now() + shared.wake_timeout;
         let woken = wake::wake(&shared.management, &shared.routes, &entry.route, WakeReason::Ping, peer.ip(), deadline);
-        if let Ok(ready) = woken.await {
-            gateways = ready;
+        if let Ok(woken) = woken.await {
+            gateways = woken.gateways;
             entry = shared.routes.get(&handshake.hostname).unwrap_or(entry);
         }
     }
@@ -91,7 +91,8 @@ async fn status_of(
 }
 
 /// Splices a login to a gateway with the player's address and every byte it sent, waking the environment first if it
-/// has no gateway. A login the environment isn't woken for is disconnected with the reason.
+/// has no gateway. A login the environment isn't woken for is disconnected with the reason, and one it is woken for
+/// refunds a wake that counted toward the wake limit once it completes.
 async fn login(
     shared: &Shared,
     mut client: TcpStream,
@@ -101,6 +102,7 @@ async fn login(
     mut sent: Vec<u8>,
 ) -> io::Result<()> {
     let mut gateways = entry.gateways();
+    let mut refund_token = None;
     if gateways.is_empty() {
         let deadline = Instant::now() + shared.wake_timeout;
         let woken = tokio::select! {
@@ -108,7 +110,7 @@ async fn login(
             error = hold(&mut client, &mut sent) => return Err(error),
         };
         match woken {
-            Ok(ready) => gateways = ready,
+            Ok(woken) => (gateways, refund_token) = (woken.gateways, woken.refund_token),
             Err(refusal) => {
                 tracing::debug!(%peer, hostname = entry.route.hostname, ?refusal, "login not woken for");
                 client.write_all(&wire::disconnect(refusal.message())?).await?;
@@ -122,7 +124,15 @@ async fn login(
     gateway.write_all(&preamble).await?;
     drop(permit);
     _ = client.set_nodelay(true);
-    relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED).await
+    let relayed = relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED);
+    let Some(refund_token) = refund_token else { return relayed.await };
+    // Still spliced past the gateway's login deadline, the login completed, so its wake no longer counts.
+    tokio::pin!(relayed);
+    tokio::select! {
+        closed = &mut relayed => return closed,
+        () = sleep(shared.login_timeout) => wake::refund(&shared.management, entry.route.environment_id.clone(), refund_token),
+    }
+    relayed.await
 }
 
 /// Copies both ways, passing on each side's close, until one side closes; the other direction then has `closing` to

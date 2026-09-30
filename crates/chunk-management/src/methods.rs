@@ -62,6 +62,8 @@ unary! {
 
     /// Asks for a sleeping environment to wake for a login or ping.
     wake: "EdgeService" / "Wake" (WakeRequest) -> WakeResponse;
+    /// Stops counting a wake whose login completed toward the wake limit.
+    refund_wake: "EdgeService" / "RefundWake" (RefundWakeRequest) -> RefundWakeResponse;
 }
 
 server_stream! {

@@ -23,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Under the 30 s vanilla clients wait for a login or status response.
 const WAKE_TIMEOUT: Duration = Duration::from_secs(25);
+/// Over the gateway's 10 s login deadline.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Connections not yet spliced to a gateway, in all and from one client.
 const MAX_PENDING: usize = 8192;
 const MAX_PENDING_PER_CLIENT: usize = 32;
@@ -39,11 +41,16 @@ pub struct Config {
     pub handshake_timeout: Duration,
     /// How long a login, or a ping that wakes its environment, is held while the environment wakes.
     pub wake_timeout: Duration,
+    /// How long a login the environment was woken for must stay spliced before its wake stops counting toward the
+    /// environment's wake limit. Longer than the gateway's login deadline, which closes every login not authenticated
+    /// by then, so only completed logins reach it.
+    pub login_timeout: Duration,
 }
 
 impl Config {
     /// Reads `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MANAGEMENT_URL`, `CHUNK_EDGE_TOKEN`,
-    /// `CHUNK_HANDSHAKE_TIMEOUT_MS` (default 5000) and `CHUNK_WAKE_TIMEOUT_MS` (default 25000).
+    /// `CHUNK_HANDSHAKE_TIMEOUT_MS` (default 5000), `CHUNK_WAKE_TIMEOUT_MS` (default 25000) and
+    /// `CHUNK_LOGIN_TIMEOUT_MS` (default 15000).
     /// # Errors
     /// Reports missing or invalid variables.
     pub fn from_env() -> io::Result<Self> {
@@ -53,6 +60,7 @@ impl Config {
             edge_token: required("CHUNK_EDGE_TOKEN")?,
             handshake_timeout: milliseconds("CHUNK_HANDSHAKE_TIMEOUT_MS", HANDSHAKE_TIMEOUT)?,
             wake_timeout: milliseconds("CHUNK_WAKE_TIMEOUT_MS", WAKE_TIMEOUT)?,
+            login_timeout: milliseconds("CHUNK_LOGIN_TIMEOUT_MS", LOGIN_TIMEOUT)?,
         })
     }
 }
@@ -71,6 +79,7 @@ struct Shared {
     management: Client,
     handshake_timeout: Duration,
     wake_timeout: Duration,
+    login_timeout: Duration,
 }
 
 /// The player listener.
@@ -106,6 +115,7 @@ impl Edge {
             management,
             handshake_timeout: self.config.handshake_timeout,
             wake_timeout: self.config.wake_timeout,
+            login_timeout: self.config.login_timeout,
         });
         let limits = limits::Limits::new(MAX_PENDING, MAX_PENDING_PER_CLIENT);
         let mut connections = JoinSet::new();

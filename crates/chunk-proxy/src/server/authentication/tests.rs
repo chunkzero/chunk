@@ -30,6 +30,11 @@ async fn mock_session(response: String) -> (Authentication, JoinHandle<String>) 
     (auth, request)
 }
 
+/// A login deadline no test reaches.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(60)
+}
+
 fn http_response(status: &str, body: &str) -> String {
     format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
@@ -69,7 +74,7 @@ async fn authenticated_profile_reaches_configuration_with_each_compression_mode(
             let (client, server) = tokio::io::duplex(8192);
             let mut client = Transport::new(client);
             let server = async {
-                let mut accepted = auth.login(Transport::new(server), 776, compression).await.unwrap();
+                let mut accepted = auth.login(Transport::new(server), 776, compression, far()).await.unwrap();
                 assert_eq!(
                     accepted.profile.uuid,
                     Uuid([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
@@ -118,7 +123,7 @@ async fn offline_login_skips_encryption_and_uses_the_vanilla_offline_uuid() {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
         let server = async {
-            let accepted = auth.login(Transport::new(server), 776, Some(256)).await.unwrap();
+            let accepted = auth.login(Transport::new(server), 776, Some(256), far()).await.unwrap();
             assert_eq!(accepted.profile.uuid.0, *uuid::uuid!("b50ad385-829d-3141-a216-7e7d7539ba7f").as_bytes());
         };
         let client = async {
@@ -147,7 +152,7 @@ async fn rejected_session_receives_an_encrypted_disconnect() {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
         let server = async {
-            let error = auth.login(Transport::new(server), 776, Some(256)).await.err().unwrap();
+            let error = auth.login(Transport::new(server), 776, Some(256), far()).await.err().unwrap();
             assert!(failed(&error), "{error}");
         };
         let client = async {
@@ -195,7 +200,7 @@ async fn a_client_that_answers_the_encryption_request_with_anything_but_a_valid_
     ] {
         let (client, server) = tokio::io::duplex(8192);
         let mut client = Transport::new(client);
-        let server = auth.login(Transport::new(server), 776, None);
+        let server = auth.login(Transport::new(server), 776, None, far());
         let client = async move {
             begin_login(&mut client).await;
             if let Some(answer) = answer {
@@ -205,6 +210,37 @@ async fn a_client_that_answers_the_encryption_request_with_anything_but_a_valid_
         let (error, ()) = tokio::join!(server, client);
         let error = error.err().unwrap();
         assert!(failed(&error), "{why}: {error}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_silent_until_the_login_deadline_failed() {
+    use super::super::{Responses, connection};
+    use chunk_protocol::versions::v26_2::Handshake;
+
+    let auth = Authentication::new(false).await.unwrap();
+    let responses = Responses::new(&crate::Config::default()).unwrap();
+    // Silent after the handshake, then after the encryption request.
+    for sends_login_start in [false, true] {
+        let (client, server) = tokio::io::duplex(8192);
+        let mut client = Transport::new(client);
+        let server = connection::serve(server, &responses, &auth, Duration::from_secs(10), None, None);
+        let client = async {
+            let handshake = Handshake {
+                protocol_version: VarInt(776),
+                server_address: McString::new("localhost").unwrap(),
+                server_port: 25565,
+                next_state: VarInt(2),
+            };
+            client.write_packet(&handshake).await.unwrap();
+            if sends_login_start {
+                begin_login(&mut client).await;
+            }
+            client
+        };
+        let (error, _client) = tokio::join!(server, client);
+        let error = error.err().unwrap();
+        assert!(failed(&error), "login start sent: {sends_login_start}: {error}");
     }
 }
 

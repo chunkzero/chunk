@@ -184,6 +184,28 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     env.close();
   });
 
+  test("RefundWake takes a completed login's wake off the count of the window it was counted in", async () => {
+    const env = await running();
+    await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`] });
+    const wakeCount = async () =>
+      (await h.sql<{ wake_count: number }[]>`select wake_count from environments where id = ${env.environmentId}`)[0]
+        ?.wake_count;
+    const { refundToken } = await edge.wake({
+      environmentId: env.environmentId,
+      clientAddress: "192.0.2.30",
+      reason: WakeReason.LOGIN,
+    });
+    expect(refundToken).not.toBe("");
+    expect(await wakeCount()).toBe(1);
+
+    await edge.refundWake({ environmentId: env.environmentId, refundToken: "1" });
+    expect(await wakeCount()).toBe(1);
+    await edge.refundWake({ environmentId: env.environmentId, refundToken });
+    await edge.refundWake({ environmentId: env.environmentId, refundToken });
+    expect(await wakeCount()).toBe(0);
+    env.close();
+  });
+
   test("ReadLogs sends the newest stored entries oldest first, then follows", async () => {
     const env = await running();
     let sequence = 0n;

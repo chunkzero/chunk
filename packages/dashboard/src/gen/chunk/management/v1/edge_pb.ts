@@ -13,7 +13,7 @@ import { file_chunk_management_v1_common } from "./common_pb.ts";
  * Describes the file chunk/management/v1/edge.proto.
  */
 export const file_chunk_management_v1_edge: GenFile /*@__PURE__*/ = fileDesc(
-  "Ch5jaHVuay9tYW5hZ2VtZW50L3YxL2VkZ2UucHJvdG8SE2NodW5rLm1hbmFnZW1lbnQudjEiFAoSV2F0Y2hSb3V0ZXNSZXF1ZXN0In0KE1dhdGNoUm91dGVzUmVzcG9uc2USEAoIcmV2aXNpb24YASABKAQSDQoFcmVzZXQYAiABKAgSKgoGcm91dGVzGAMgAygLMhouY2h1bmsubWFuYWdlbWVudC52MS5Sb3V0ZRIZChFyZW1vdmVkX2hvc3RuYW1lcxgEIAMoCSK2AQoFUm91dGUSEAoIaG9zdG5hbWUYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSGQoRZ2F0ZXdheV9hZGRyZXNzZXMYAyADKAkSDgoGYXNsZWVwGAQgASgIEjwKDXNsZWVwaW5nX3BpbmcYBSABKA4yJS5jaHVuay5tYW5hZ2VtZW50LnYxLlNsZWVwaW5nUGluZ01vZGUSGgoSY2FjaGVkX3N0YXR1c19qc29uGAYgASgJIm4KC1dha2VSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJEi8KBnJlYXNvbhgCIAEoDjIfLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZVJlYXNvbhIWCg5jbGllbnRfYWRkcmVzcxgDIAEoCSJBCgxXYWtlUmVzcG9uc2USMQoHb3V0Y29tZRgBIAEoDjIgLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZU91dGNvbWUqVgoKV2FrZVJlYXNvbhIbChdXQUtFX1JFQVNPTl9VTlNQRUNJRklFRBAAEhUKEVdBS0VfUkVBU09OX0xPR0lOEAESFAoQV0FLRV9SRUFTT05fUElORxACKpIBCgtXYWtlT3V0Y29tZRIcChhXQUtFX09VVENPTUVfVU5TUEVDSUZJRUQQABIXChNXQUtFX09VVENPTUVfV0FLSU5HEAESFgoSV0FLRV9PVVRDT01FX0FXQUtFEAISGAoUV0FLRV9PVVRDT01FX0JMT0NLRUQQAxIaChZXQUtFX09VVENPTUVfVEhST1RUTEVEEAQyvgEKC0VkZ2VTZXJ2aWNlEmIKC1dhdGNoUm91dGVzEicuY2h1bmsubWFuYWdlbWVudC52MS5XYXRjaFJvdXRlc1JlcXVlc3QaKC5jaHVuay5tYW5hZ2VtZW50LnYxLldhdGNoUm91dGVzUmVzcG9uc2UwARJLCgRXYWtlEiAuY2h1bmsubWFuYWdlbWVudC52MS5XYWtlUmVxdWVzdBohLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZVJlc3BvbnNlYgZwcm90bzM",
+  "Ch5jaHVuay9tYW5hZ2VtZW50L3YxL2VkZ2UucHJvdG8SE2NodW5rLm1hbmFnZW1lbnQudjEiFAoSV2F0Y2hSb3V0ZXNSZXF1ZXN0In0KE1dhdGNoUm91dGVzUmVzcG9uc2USEAoIcmV2aXNpb24YASABKAQSDQoFcmVzZXQYAiABKAgSKgoGcm91dGVzGAMgAygLMhouY2h1bmsubWFuYWdlbWVudC52MS5Sb3V0ZRIZChFyZW1vdmVkX2hvc3RuYW1lcxgEIAMoCSK2AQoFUm91dGUSEAoIaG9zdG5hbWUYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSGQoRZ2F0ZXdheV9hZGRyZXNzZXMYAyADKAkSDgoGYXNsZWVwGAQgASgIEjwKDXNsZWVwaW5nX3BpbmcYBSABKA4yJS5jaHVuay5tYW5hZ2VtZW50LnYxLlNsZWVwaW5nUGluZ01vZGUSGgoSY2FjaGVkX3N0YXR1c19qc29uGAYgASgJIm4KC1dha2VSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJEi8KBnJlYXNvbhgCIAEoDjIfLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZVJlYXNvbhIWCg5jbGllbnRfYWRkcmVzcxgDIAEoCSJXCgxXYWtlUmVzcG9uc2USMQoHb3V0Y29tZRgBIAEoDjIgLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZU91dGNvbWUSFAoMcmVmdW5kX3Rva2VuGAIgASgJIkEKEVJlZnVuZFdha2VSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJEhQKDHJlZnVuZF90b2tlbhgCIAEoCSIUChJSZWZ1bmRXYWtlUmVzcG9uc2UqVgoKV2FrZVJlYXNvbhIbChdXQUtFX1JFQVNPTl9VTlNQRUNJRklFRBAAEhUKEVdBS0VfUkVBU09OX0xPR0lOEAESFAoQV0FLRV9SRUFTT05fUElORxACKpIBCgtXYWtlT3V0Y29tZRIcChhXQUtFX09VVENPTUVfVU5TUEVDSUZJRUQQABIXChNXQUtFX09VVENPTUVfV0FLSU5HEAESFgoSV0FLRV9PVVRDT01FX0FXQUtFEAISGAoUV0FLRV9PVVRDT01FX0JMT0NLRUQQAxIaChZXQUtFX09VVENPTUVfVEhST1RUTEVEEAQynQIKC0VkZ2VTZXJ2aWNlEmIKC1dhdGNoUm91dGVzEicuY2h1bmsubWFuYWdlbWVudC52MS5XYXRjaFJvdXRlc1JlcXVlc3QaKC5jaHVuay5tYW5hZ2VtZW50LnYxLldhdGNoUm91dGVzUmVzcG9uc2UwARJLCgRXYWtlEiAuY2h1bmsubWFuYWdlbWVudC52MS5XYWtlUmVxdWVzdBohLmNodW5rLm1hbmFnZW1lbnQudjEuV2FrZVJlc3BvbnNlEl0KClJlZnVuZFdha2USJi5jaHVuay5tYW5hZ2VtZW50LnYxLlJlZnVuZFdha2VSZXF1ZXN0GicuY2h1bmsubWFuYWdlbWVudC52MS5SZWZ1bmRXYWtlUmVzcG9uc2ViBnByb3RvMw",
   [file_chunk_management_v1_common],
 );
 
@@ -158,6 +158,14 @@ export type WakeResponse = Message<"chunk.management.v1.WakeResponse"> & {
    * @generated from field: chunk.management.v1.WakeOutcome outcome = 1;
    */
   outcome: WakeOutcome;
+
+  /**
+   * Set when a login's wake counted toward the environment's wake limit;
+   * pass it to RefundWake once the login completes.
+   *
+   * @generated from field: string refund_token = 2;
+   */
+  refundToken: string;
 };
 
 /**
@@ -165,6 +173,44 @@ export type WakeResponse = Message<"chunk.management.v1.WakeResponse"> & {
  * Use `create(WakeResponseSchema)` to create a new message.
  */
 export const WakeResponseSchema: GenMessage<WakeResponse> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_edge, 4);
+
+/**
+ * @generated from message chunk.management.v1.RefundWakeRequest
+ */
+export type RefundWakeRequest = Message<"chunk.management.v1.RefundWakeRequest"> & {
+  /**
+   * @generated from field: string environment_id = 1;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string refund_token = 2;
+   */
+  refundToken: string;
+};
+
+/**
+ * Describes the message chunk.management.v1.RefundWakeRequest.
+ * Use `create(RefundWakeRequestSchema)` to create a new message.
+ */
+export const RefundWakeRequestSchema: GenMessage<RefundWakeRequest> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_edge,
+  5,
+);
+
+/**
+ * @generated from message chunk.management.v1.RefundWakeResponse
+ */
+export type RefundWakeResponse = Message<"chunk.management.v1.RefundWakeResponse"> & {};
+
+/**
+ * Describes the message chunk.management.v1.RefundWakeResponse.
+ * Use `create(RefundWakeResponseSchema)` to create a new message.
+ */
+export const RefundWakeResponseSchema: GenMessage<RefundWakeResponse> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_edge,
+  6,
+);
 
 /**
  * @generated from enum chunk.management.v1.WakeReason
@@ -271,5 +317,18 @@ export const EdgeService: GenService<{
     methodKind: "unary";
     input: typeof WakeRequestSchema;
     output: typeof WakeResponseSchema;
+  };
+  /**
+   * Stops counting a login's wake toward the wake limit once the login
+   * completes. Edges call it at most once per login, with the refund_token
+   * Wake returned, once the login outlives the gateway's login deadline. Has
+   * no effect after the window the wake was counted in ends.
+   *
+   * @generated from rpc chunk.management.v1.EdgeService.RefundWake
+   */
+  refundWake: {
+    methodKind: "unary";
+    input: typeof RefundWakeRequestSchema;
+    output: typeof RefundWakeResponseSchema;
   };
 }> /*@__PURE__*/ = serviceDesc(file_chunk_management_v1_edge, 0);
