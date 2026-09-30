@@ -66,7 +66,7 @@ async fn login(options: Login) -> io::Result<()> {
         let polled = match client.poll_login(&request).await {
             Ok(polled) => polled,
             Err(error) if error.code() == Code::NotFound => return Err(expired()),
-            Err(error) => return Err(api_error(error)),
+            Err(error) => return Err(poll_failed(error, &request.login_id)),
         };
         match polled.state() {
             LoginState::Pending => {}
@@ -85,6 +85,15 @@ async fn login(options: Login) -> io::Result<()> {
     config::save(&Config { target: target.clone(), token: Some(secret) })?;
     cliclack::log::success(format!("Logged in to {target} as {}", principal.display_name))?;
     warn_overrides()
+}
+
+/// A failed poll's error without the login ID, which collects the token once the login is approved.
+pub(super) fn poll_failed(error: chunk_management::Error, login_id: &str) -> io::Error {
+    let message = api_error(error).to_string();
+    match login_id {
+        "" => io::Error::other(message),
+        login_id => io::Error::other(message.replace(login_id, "<redacted>")),
+    }
 }
 
 fn expired() -> io::Error {

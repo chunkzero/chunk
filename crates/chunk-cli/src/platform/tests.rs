@@ -86,3 +86,11 @@ fn projects_and_environments_are_chosen_by_name_or_id() {
     assert!(error.contains("prj_1, prj_2"), "{error}");
     assert_eq!(choose(shared, Some("prj_2"), "project", key).unwrap().0, "prj_2");
 }
+
+#[test]
+fn poll_errors_never_show_the_login_id() {
+    let error =
+        chunk_management::Error::Protocol("expected application/proto, got \"login_id=login-0123456789\"".into());
+    let message = super::auth::poll_failed(error, "login-0123456789").to_string();
+    assert!(!message.contains("login-0123456789"), "{message}");
+}
