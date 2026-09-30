@@ -155,7 +155,8 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     expect((await wake(env.environmentId)).outcome).toBe(WakeOutcome.WAKING);
     expect(await env.revision()).toBe(before + 1n);
     await reconcile(h.deps, options, epoch);
-    expect(await state()).toBe(EnvironmentState.STARTING);
+    // A resumed core's gateways serve again.
+    expect(await state()).toBe(EnvironmentState.RUNNING);
 
     await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`] });
     await h.sql`update environments set wake_count = ${wakesPerMinute} where id = ${env.environmentId}`;

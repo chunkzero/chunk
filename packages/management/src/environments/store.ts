@@ -13,8 +13,8 @@ export async function advanceRevision(db: Db, environmentId: string): Promise<vo
 /**
  * Makes a core instance the environment's owner under a new, higher lease. Refuses instances another core's attach
  * superseded and epochs lower than the environment's. The previous owner, if another instance, is superseded for
- * good, and its capacity requests are released as `ReleaseCapacity` would. A new lease starts with no accepted status
- * report.
+ * good, and its capacity requests are released as `ReleaseCapacity` would, and its gateways are dropped. A new lease
+ * starts with no accepted status report.
  */
 export async function claimLease(sql: Sql, environmentId: string, instanceId: string, epoch: bigint) {
   const { lease } = await sql.begin(async (tx) => {
@@ -41,7 +41,8 @@ export async function claimLease(sql: Sql, environmentId: string, instanceId: st
     const [claimed] = await tx<{ lease: bigint }[]>`
       update environments
       set lease = lease + 1, epoch = ${epoch}, owner_instance_id = ${instanceId},
-        report_sequence = 0, report_desired_revision = 0, ready_to_suspend = false
+        report_sequence = 0, report_desired_revision = 0, ready_to_suspend = false,
+        gateway_addresses = case when owner_instance_id = ${instanceId} then gateway_addresses else '{}' end
       where id = ${environmentId}
       returning lease`;
     await notify(tx, { kind: "environment", environmentId });
