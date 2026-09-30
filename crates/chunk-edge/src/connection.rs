@@ -110,7 +110,7 @@ async fn login(
             error = hold(&mut client, &mut sent) => return Err(error),
         };
         match woken {
-            Ok(woken) => (gateways, refund_token) = (woken.gateways, woken.refund_token),
+            Ok(woken) => (gateways, refund_token) = (woken.gateways, Some(woken.refund_token)),
             Err(refusal) => {
                 tracing::debug!(%peer, hostname = entry.route.hostname, ?refusal, "login not woken for");
                 client.write_all(&wire::disconnect(refusal.message())?).await?;
@@ -124,39 +124,44 @@ async fn login(
     gateway.write_all(&preamble).await?;
     drop(permit);
     _ = client.set_nodelay(true);
-    let relayed = relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED);
-    let Some(refund_token) = refund_token else { return relayed.await };
-    // Still spliced past the gateway's login deadline, the login completed, so its wake no longer counts.
-    tokio::pin!(relayed);
-    tokio::select! {
-        closed = &mut relayed => return closed,
-        () = sleep(shared.login_timeout) => wake::refund(&shared.management, entry.route.environment_id.clone(), refund_token),
-    }
-    relayed.await
+    // Still open both ways past the gateway's login deadline, the login completed, so its wake no longer counts.
+    let completed = async {
+        let Some(refund_token) = refund_token else { return std::future::pending().await };
+        if let ((), Some(refund_token)) = tokio::join!(sleep(shared.login_timeout), refund_token) {
+            wake::refund(&shared.management, entry.route.environment_id.clone(), refund_token);
+        }
+    };
+    relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED, completed).await
 }
 
 /// Copies both ways, passing on each side's close, until one side closes; the other direction then has `closing` to
 /// finish, so a peer that never closes can't keep the relay open. A write that makes no progress for `stalled` ends its
-/// direction too, since a side that stops reading hides the other's close behind the data queued for it.
+/// direction too, since a side that stops reading hides the other's close behind the data queued for it. `open` runs
+/// only while both directions are, and is dropped once either ends.
 async fn relay(
     client: &mut TcpStream,
     gateway: &mut TcpStream,
     closing: Duration,
     stalled: Duration,
+    open: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let (mut client_read, mut client_write) = client.split();
     let (mut gateway_read, mut gateway_write) = gateway.split();
     let upstream = pipe(&mut client_read, &mut gateway_write, stalled);
     let downstream = pipe(&mut gateway_read, &mut client_write, stalled);
-    tokio::pin!(upstream, downstream);
-    tokio::select! {
-        closed = &mut upstream => {
-            _ = timeout(closing, downstream).await;
-            closed
-        }
-        closed = &mut downstream => {
-            _ = timeout(closing, upstream).await;
-            closed
+    tokio::pin!(upstream, downstream, open);
+    let mut opened = false;
+    loop {
+        tokio::select! {
+            closed = &mut upstream => {
+                _ = timeout(closing, &mut downstream).await;
+                return closed;
+            }
+            closed = &mut downstream => {
+                _ = timeout(closing, &mut upstream).await;
+                return closed;
+            }
+            () = &mut open, if !opened => opened = true,
         }
     }
 }
@@ -234,7 +239,8 @@ mod tests {
                 _ = gateway.write_all(&vec![0; queued]).await;
             });
             let closing = Duration::from_millis(50);
-            let relayed = timeout(Duration::from_secs(5), relay(&mut client, &mut to_gateway, closing, closing * 2));
+            let relayed = relay(&mut client, &mut to_gateway, closing, closing * 2, std::future::pending());
+            let relayed = timeout(Duration::from_secs(5), relayed);
             let result = relayed.await.expect("the relay ended");
             drop((client, to_gateway));
             sending.await.unwrap();

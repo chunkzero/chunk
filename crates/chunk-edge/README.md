@@ -34,8 +34,8 @@ for this.
 - **Wake on login.** A login to a sleeping environment calls `EdgeService.Wake` and holds the connection until a gateway
   is listed or the wake timeout passes. A refused wake, for example for a client that recently failed authentication,
   ends the login with a message saying the server is sleeping or starting. A login still connected once the login
-  timeout passes has authenticated, so the edge calls `EdgeService.RefundWake` and its wake stops counting toward the
-  environment's wake limit.
+  timeout passes, open both ways, has authenticated, so the edge calls `EdgeService.RefundWake` and its wake stops
+  counting toward the environment's wake limit.
 - **Limits.** At most 8192 connections may be open before being handed to a gateway, and 32 per client address (per /64
   for IPv6).
 

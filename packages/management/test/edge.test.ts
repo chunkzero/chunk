@@ -203,6 +203,14 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     await edge.refundWake({ environmentId: env.environmentId, refundToken });
     await edge.refundWake({ environmentId: env.environmentId, refundToken });
     expect(await wakeCount()).toBe(0);
+
+    // The token of a window that has ended refunds nothing.
+    const [expired] = await h.sql<{ refund_token: string }[]>`
+      update environments set wake_count = 1, wake_window_start = wake_window_start - interval '2 minutes'
+      where id = ${env.environmentId}
+      returning (extract(epoch from wake_window_start) * 1000000)::bigint::text as refund_token`;
+    await edge.refundWake({ environmentId: env.environmentId, refundToken: expired?.refund_token ?? "" });
+    expect(await wakeCount()).toBe(1);
     env.close();
   });
 

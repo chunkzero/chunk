@@ -450,12 +450,38 @@ async fn refunds_the_wake_of_a_woken_login_still_spliced_after_the_login_timeout
     assert_eq!(harness.wakes().len(), 2, "both logins woke the environment");
     routes.send(false, vec![route("play.example.com", &[&harness.gateways[0]])]).await;
     let accept = || async { timeout(WAKE_TIMEOUT, harness.gateways[0].accept()).await.unwrap().unwrap().0 };
-    // The gateway closes one login before its deadline, as it does a login that fails, and keeps the other.
-    drop(accept().await);
-    let _kept = accept().await;
-    tokio::time::sleep(LOGIN_TIMEOUT * 2).await;
+    let (failed, _kept) = (accept().await, accept().await);
+    // The gateway closes one at its login deadline, as it does a login that never authenticates, while that player
+    // stays open until the relay's grace to close runs past the login timeout.
+    tokio::time::sleep(LOGIN_TIMEOUT * 4 / 5).await;
+    drop(failed);
+    tokio::time::sleep(LOGIN_TIMEOUT).await;
     let refunds = harness.management.refunds.lock().unwrap().clone();
     assert_eq!(refunds, [RefundWakeRequest { environment_id: "env_test".into(), refund_token: "window-1".into() }]);
+    harness.stop.cancel();
+}
+
+#[tokio::test]
+async fn refunds_a_wake_that_answers_after_the_environment_is_ready() {
+    let mut harness = Harness::start().await;
+    let routes = harness.next_stream().await;
+    routes.send(true, vec![asleep("play.example.com", SleepingPingMode::Cache, &json!({}))]).await;
+    harness
+        .eventually_pings("play.example.com", |status| *status == json!({ "players": { "max": 0, "online": 0 } }))
+        .await;
+    *harness.management.delay.lock().unwrap() = LOGIN_TIMEOUT;
+
+    let _player = harness.login("play.example.com").await;
+    for _ in 0..100 {
+        if !harness.wakes().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    routes.send(false, vec![route("play.example.com", &[&harness.gateways[0]])]).await;
+    let _gateway = timeout(WAKE_TIMEOUT / 4, harness.gateways[0].accept()).await.expect("routed before Wake answered");
+    tokio::time::sleep(LOGIN_TIMEOUT * 2).await;
+    assert_eq!(harness.management.refunds.lock().unwrap().len(), 1, "the late token refunded the wake");
     harness.stop.cancel();
 }
 

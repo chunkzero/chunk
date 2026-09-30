@@ -2,6 +2,7 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     time::Duration,
 };
 
@@ -15,10 +16,12 @@ use crate::routes::Routes;
 
 const REFUND_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A woken environment's gateways, and the token that refunds the wake when it counted toward the wake limit.
+/// A woken environment's gateways, and the token that refunds its wake.
 pub(crate) struct Woken {
     pub(crate) gateways: Vec<SocketAddr>,
-    pub(crate) refund_token: Option<String>,
+    /// Resolves once `Wake` answers, within the wake's deadline, to the token that refunds the wake if it counted
+    /// toward the wake limit. `Wake` may answer after the gateways appear.
+    pub(crate) refund_token: Pin<Box<dyn Future<Output = Option<String>> + Send>>,
 }
 
 /// Why an environment isn't ready.
@@ -61,36 +64,54 @@ pub(crate) async fn wake(
         reason: reason.into(),
         client_address: client.to_canonical().to_string(),
     };
-    let ready = timeout_at(deadline, routes.ready(route));
-    tokio::pin!(ready);
-    let waited = |ready: Result<Option<_>, _>, refund_token: Option<String>| match ready {
-        Ok(Some(gateways)) => Ok(Woken { gateways, refund_token }),
-        Ok(None) => Err(Refusal::Failed),
-        Err(_) => Err(Refusal::TimedOut),
-    };
-    let woken = tokio::select! {
-        ready = &mut ready => waited(ready, None),
-        woken = timeout_at(deadline, management.wake(&request)) => match woken {
+    let management = management.clone();
+    let environment_id = route.environment_id.clone();
+    // The refund token if the environment is woken, or the refusal.
+    let mut call = Box::pin(async move {
+        match timeout_at(deadline, management.wake(&request)).await {
             Ok(Ok(response)) => match response.outcome() {
                 WakeOutcome::Waking | WakeOutcome::Awake => {
-                    let refund_token = Some(response.refund_token).filter(|token| !token.is_empty());
-                    waited(ready.await, refund_token)
+                    Ok(Some(response.refund_token).filter(|token| !token.is_empty()))
                 }
                 WakeOutcome::Blocked => Err(Refusal::Blocked),
                 WakeOutcome::Throttled => Err(Refusal::Throttled),
                 WakeOutcome::Unspecified => Err(Refusal::Failed),
             },
             Ok(Err(error)) => {
-                tracing::warn!(environment = route.environment_id, %error, "wake failed");
+                tracing::warn!(environment = environment_id, %error, "wake failed");
                 Err(Refusal::Failed)
             }
             Err(_) => Err(Refusal::TimedOut),
-        },
+        }
+    });
+    let ready = timeout_at(deadline, routes.ready(route));
+    tokio::pin!(ready);
+    let waited = |ready: Result<Option<_>, _>| match ready {
+        Ok(Some(gateways)) => Ok(gateways),
+        Ok(None) => Err(Refusal::Failed),
+        Err(_) => Err(Refusal::TimedOut),
     };
-    woken.or_else(|refusal| {
-        let gateways = routes.gateways(route).filter(|gateways| !gateways.is_empty()).ok_or(refusal)?;
-        Ok(Woken { gateways, refund_token: None })
-    })
+    let mut answer = None;
+    let woken = tokio::select! {
+        ready = &mut ready => waited(ready),
+        answered = &mut call => {
+            answer = Some(answered.clone());
+            match answered {
+                Ok(_) => waited(ready.await),
+                Err(refusal) => Err(refusal),
+            }
+        }
+    };
+    let gateways =
+        woken.or_else(|refusal| routes.gateways(route).filter(|gateways| !gateways.is_empty()).ok_or(refusal))?;
+    let refund_token = async move {
+        let answer = match answer {
+            Some(answer) => answer,
+            None => call.await,
+        };
+        answer.ok().flatten()
+    };
+    Ok(Woken { gateways, refund_token: Box::pin(refund_token) })
 }
 
 /// Tells management, in the background, that the login a counted wake was for completed.
