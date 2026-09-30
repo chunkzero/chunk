@@ -1058,11 +1058,12 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     });
   }
 
-  test("a stopped core's gateways and late reports are dropped, and its successor's report before its start returns runs it", async () => {
+  test("a stopped core's gateways and late reports are dropped, and its successor's report runs it before its start returns", async () => {
     const env = await running();
     await stoppedWithAlarm(env);
     const abort = new AbortController();
     let before: string[] | undefined;
+    let during: EnvironmentState | undefined;
     hooks.start = async (name) => {
       if (name !== env.coreName) return;
       hooks.start = undefined;
@@ -1076,9 +1077,11 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
         select gateway_addresses from environments where id = ${env.environmentId}`;
       before = row?.gateway_addresses;
       await successor(env, abort.signal);
+      during = await env.state();
     };
     await pass();
     expect(before).toEqual([]);
+    expect(during).toBe(EnvironmentState.RUNNING);
     expect(await env.state()).toBe(EnvironmentState.RUNNING);
     abort.abort();
     env.close();
