@@ -707,7 +707,9 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
         (lookup.get(&first.release_id), lookup.get(&second.release_id))
     };
     assert_eq!(restart().await, (None, Some(kept.clone())));
-    fs::OpenOptions::new().append(true).open(&kept.path).unwrap().write_all(b"x").unwrap();
+    let mut corrupt = fs::read(&kept.path).unwrap();
+    corrupt[0] ^= 1;
+    fs::write(&kept.path, corrupt).unwrap();
     assert_eq!(restart().await, (None, None));
 }
 

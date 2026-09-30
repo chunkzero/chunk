@@ -177,8 +177,8 @@ pub(super) fn kept(store: &Store, artifact: &v1::ReleaseArtifact) -> bool {
     kept.is_some_and(|kept| kept.sha256 == artifact.sha256 && kept.size == artifact.size_bytes)
 }
 
-/// Restores core's lookup of the archives kept for the `retained` releases, each only while its file still has the
-/// size recorded when it was verified. Readers check its bytes against the recorded digest as they read.
+/// Restores core's lookup of the archives kept for the `retained` releases, each only while its file still matches the
+/// digest recorded when it was verified.
 pub(super) async fn restore(store: &Store, retained: BTreeSet<String>) -> io::Result<()> {
     let (archives, kept) = (store.archives.clone(), store.kept.clone());
     blocking(move || {
@@ -202,8 +202,8 @@ fn restorable(archives: &Path, id: &str) -> io::Result<Option<ReleaseArchive>> {
     };
     let digest = ArchiveDigest { sha256: checked.sha256, size: checked.size };
     let path = archive_path(archives, id);
-    if fs::metadata(&path)?.len() != digest.size {
-        return Err(io::Error::other("the archive's size differs from the one it was verified with"));
+    if !intact(&path, &digest)? {
+        return Err(io::Error::other("the archive differs from the digest it was verified against"));
     }
     Ok(Some(ReleaseArchive { path, sha256: digest.sha256, size: digest.size }))
 }
