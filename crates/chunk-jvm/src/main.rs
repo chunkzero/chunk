@@ -13,7 +13,7 @@ mod supervise;
 use chunk_proto::sync::v1::{JvmLaunch, jvm_launch::Aot};
 use config::Config;
 use rustix::process::Signal;
-use std::fmt::Display;
+use std::{fmt::Display, time::Instant};
 use tokio::sync::mpsc;
 
 /// Why the runner stops without running Java to its end, and the exit code that reports it.
@@ -134,9 +134,17 @@ async fn install(
         release
     } else {
         tracing::info!(size = launch.archive_size, "downloading the release archive");
+        let downloading = Instant::now();
         let mut staging = cache.staging()?;
         core.download(boot, launch, staging.as_file_mut()).await?;
-        cache::install(staging, launch, &directory).await?
+        let installing = Instant::now();
+        let release = cache::install(staging, launch, &directory).await?;
+        tracing::info!(
+            download = ?installing - downloading,
+            install = ?installing.elapsed(),
+            "installed the release"
+        );
+        release
     };
     let visible = memory::visible_mib(&config.proc);
     let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root, visible).await?;

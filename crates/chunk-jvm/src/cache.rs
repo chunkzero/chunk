@@ -8,6 +8,7 @@ use chunk_proto::sync::v1::JvmLaunch;
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use tempfile::NamedTempFile;
 
@@ -77,9 +78,10 @@ fn plain(id: &str) -> bool {
 /// The install of release `id` at `directory` if it verifies as that release. Anything else there is removed.
 pub(crate) fn cached(directory: &Path, id: &str) -> Result<Option<VerifiedRelease>, Failure> {
     let io = |error: io::Error| Failure::io(format!("cannot check the cached release: {error}"));
+    let checking = Instant::now();
     match installed_release(directory, id).map_err(io)? {
         Installed::Verified(release) => {
-            tracing::info!(release = id, "reusing the cached release");
+            tracing::info!(release = id, elapsed = ?checking.elapsed(), "reusing the cached release");
             Ok(Some(*release))
         }
         Installed::Missing => Ok(None),
