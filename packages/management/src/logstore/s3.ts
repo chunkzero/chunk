@@ -44,6 +44,8 @@ async function s3<T>(what: string, call: () => Promise<T>): Promise<T> {
   } catch (error) {
     const code = (error as { code?: unknown } | undefined)?.code;
     const known = typeof code === "string" && /^\w+$/.test(code) ? `: ${code}` : "";
+    // The cause is left out on purpose: it may carry the response.
+    // oxlint-disable-next-line preserve-caught-error
     throw new Error(`log store ${what} failed${known}`);
   }
 }
