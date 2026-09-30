@@ -69,13 +69,19 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
       (await h.sql<{ revision: bigint }[]>`select revision from environments where id = ${environmentId}`)[0]
         ?.revision ?? 0n;
     let sequence = 0n;
-    const report = async (fields: { gatewayAddresses?: string[]; readyToSuspend?: boolean; hostnamePing?: string }) =>
+    const report = async (fields: {
+      gatewayAddresses?: string[];
+      readyToSuspend?: boolean;
+      hostnamePing?: string;
+      onlinePlayers?: number;
+    }) =>
       client.reportStatus({
         lease,
         sequence: ++sequence,
         desiredRevision: await revision(),
         gatewayAddresses: fields.gatewayAddresses ?? [],
         readyToSuspend: fields.readyToSuspend ?? false,
+        onlinePlayers: fields.onlinePlayers ?? 0,
         pings: fields.hostnamePing
           ? [{ hostname: `${row?.hostname.toUpperCase()}.`, statusJson: fields.hostnamePing }]
           : [],
@@ -184,32 +190,22 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     env.close();
   });
 
-  test("RefundWake takes a completed login's wake off the count of the window it was counted in", async () => {
+  test("a report with players online takes a counted login wake off the count once", async () => {
     const env = await running();
-    await env.report({ gatewayAddresses: [`${env.coreAddress}:25565`] });
+    const gatewayAddresses = [`${env.coreAddress}:25565`];
+    await env.report({ gatewayAddresses });
     const wakeCount = async () =>
       (await h.sql<{ wake_count: number }[]>`select wake_count from environments where id = ${env.environmentId}`)[0]
         ?.wake_count;
-    const { refundToken } = await edge.wake({
-      environmentId: env.environmentId,
-      clientAddress: "192.0.2.30",
-      reason: WakeReason.LOGIN,
-    });
-    expect(refundToken).not.toBe("");
+    await edge.wake({ environmentId: env.environmentId, clientAddress: "192.0.2.30", reason: WakeReason.LOGIN });
     expect(await wakeCount()).toBe(1);
 
-    await edge.refundWake({ environmentId: env.environmentId, refundToken: "1" });
+    await env.report({ gatewayAddresses });
     expect(await wakeCount()).toBe(1);
-    await edge.refundWake({ environmentId: env.environmentId, refundToken });
-    await edge.refundWake({ environmentId: env.environmentId, refundToken });
+    await env.report({ gatewayAddresses, onlinePlayers: 1 });
     expect(await wakeCount()).toBe(0);
-
-    // The token of a window that has ended refunds nothing.
-    const [expired] = await h.sql<{ refund_token: string }[]>`
-      update environments set wake_count = 1, wake_window_start = wake_window_start - interval '2 minutes'
-      where id = ${env.environmentId}
-      returning (extract(epoch from wake_window_start) * 1000000)::bigint::text as refund_token`;
-    await edge.refundWake({ environmentId: env.environmentId, refundToken: expired?.refund_token ?? "" });
+    await h.sql`update environments set wake_count = 1 where id = ${env.environmentId}`;
+    await env.report({ gatewayAddresses, onlinePlayers: 1 });
     expect(await wakeCount()).toBe(1);
     env.close();
   });

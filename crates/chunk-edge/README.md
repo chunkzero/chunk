@@ -15,7 +15,6 @@ streams from management.
 | `CHUNK_BIND`                 | `0.0.0.0:25565` | The player listener.                                                                           |
 | `CHUNK_HANDSHAKE_TIMEOUT_MS` | `5000`          | How long a client gets for its handshake, and for each step of a status exchange.              |
 | `CHUNK_WAKE_TIMEOUT_MS`      | `25000`         | How long a login waits for a sleeping environment to wake.                                     |
-| `CHUNK_LOGIN_TIMEOUT_MS`     | `15000`         | How long a woken login must stay connected to count as completed; over the gateway's deadline. |
 | `RUST_LOG`                   | `info`          | The log filter.                                                                                |
 
 Gateways accept the edge's PROXY headers only from addresses in their `CHUNK_TRUSTED_EDGES`, which management sets from
@@ -33,9 +32,7 @@ for this.
   players online, or wakes it first when the environment's sleeping-ping mode says so.
 - **Wake on login.** A login to a sleeping environment calls `EdgeService.Wake` and holds the connection until a gateway
   is listed or the wake timeout passes. A refused wake, for example for a client that recently failed authentication,
-  ends the login with a message saying the server is sleeping or starting. A login still connected once the login
-  timeout passes, open both ways, has authenticated, so the edge calls `EdgeService.RefundWake` and its wake stops
-  counting toward the environment's wake limit.
+  ends the login with a message saying the server is sleeping or starting.
 - **Limits.** At most 8192 connections may be open before being handed to a gateway, and 32 per client address (per /64
   for IPv6).
 

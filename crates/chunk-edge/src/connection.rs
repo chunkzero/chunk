@@ -7,7 +7,7 @@ use chunk_management::v1::{SleepingPingMode, WakeReason};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::{Instant, sleep, timeout},
+    time::{Instant, timeout},
 };
 
 use crate::{
@@ -71,8 +71,8 @@ async fn status_of(
     if gateways.is_empty() && entry.route.asleep && entry.route.sleeping_ping() == SleepingPingMode::Wake {
         let deadline = Instant::now() + shared.wake_timeout;
         let woken = wake::wake(&shared.management, &shared.routes, &entry.route, WakeReason::Ping, peer.ip(), deadline);
-        if let Ok(woken) = woken.await {
-            gateways = woken.gateways;
+        if let Ok(ready) = woken.await {
+            gateways = ready;
             entry = shared.routes.get(&handshake.hostname).unwrap_or(entry);
         }
     }
@@ -91,8 +91,7 @@ async fn status_of(
 }
 
 /// Splices a login to a gateway with the player's address and every byte it sent, waking the environment first if it
-/// has no gateway. A login the environment isn't woken for is disconnected with the reason, and one it is woken for
-/// refunds a wake that counted toward the wake limit once it completes.
+/// has no gateway. A login the environment isn't woken for is disconnected with the reason.
 async fn login(
     shared: &Shared,
     mut client: TcpStream,
@@ -102,7 +101,6 @@ async fn login(
     mut sent: Vec<u8>,
 ) -> io::Result<()> {
     let mut gateways = entry.gateways();
-    let mut refund_token = None;
     if gateways.is_empty() {
         let deadline = Instant::now() + shared.wake_timeout;
         let woken = tokio::select! {
@@ -110,7 +108,7 @@ async fn login(
             error = hold(&mut client, &mut sent) => return Err(error),
         };
         match woken {
-            Ok(woken) => (gateways, refund_token) = (woken.gateways, Some(woken.refund_token)),
+            Ok(ready) => gateways = ready,
             Err(refusal) => {
                 tracing::debug!(%peer, hostname = entry.route.hostname, ?refusal, "login not woken for");
                 client.write_all(&wire::disconnect(refusal.message())?).await?;
@@ -124,44 +122,31 @@ async fn login(
     gateway.write_all(&preamble).await?;
     drop(permit);
     _ = client.set_nodelay(true);
-    // Still open both ways past the gateway's login deadline, the login completed, so its wake no longer counts.
-    let completed = async {
-        let Some(refund_token) = refund_token else { return std::future::pending().await };
-        if let ((), Some(refund_token)) = tokio::join!(sleep(shared.login_timeout), refund_token) {
-            wake::refund(&shared.management, entry.route.environment_id.clone(), refund_token);
-        }
-    };
-    relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED, completed).await
+    relay(&mut client, &mut gateway, shared.handshake_timeout, STALLED).await
 }
 
 /// Copies both ways, passing on each side's close, until one side closes; the other direction then has `closing` to
 /// finish, so a peer that never closes can't keep the relay open. A write that makes no progress for `stalled` ends its
-/// direction too, since a side that stops reading hides the other's close behind the data queued for it. `open` runs
-/// only while both directions are, and is dropped once either ends.
+/// direction too, since a side that stops reading hides the other's close behind the data queued for it.
 async fn relay(
     client: &mut TcpStream,
     gateway: &mut TcpStream,
     closing: Duration,
     stalled: Duration,
-    open: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let (mut client_read, mut client_write) = client.split();
     let (mut gateway_read, mut gateway_write) = gateway.split();
     let upstream = pipe(&mut client_read, &mut gateway_write, stalled);
     let downstream = pipe(&mut gateway_read, &mut client_write, stalled);
-    tokio::pin!(upstream, downstream, open);
-    let mut opened = false;
-    loop {
-        tokio::select! {
-            closed = &mut upstream => {
-                _ = timeout(closing, &mut downstream).await;
-                return closed;
-            }
-            closed = &mut downstream => {
-                _ = timeout(closing, &mut upstream).await;
-                return closed;
-            }
-            () = &mut open, if !opened => opened = true,
+    tokio::pin!(upstream, downstream);
+    tokio::select! {
+        closed = &mut upstream => {
+            _ = timeout(closing, downstream).await;
+            closed
+        }
+        closed = &mut downstream => {
+            _ = timeout(closing, upstream).await;
+            closed
         }
     }
 }
@@ -239,8 +224,7 @@ mod tests {
                 _ = gateway.write_all(&vec![0; queued]).await;
             });
             let closing = Duration::from_millis(50);
-            let relayed = relay(&mut client, &mut to_gateway, closing, closing * 2, std::future::pending());
-            let relayed = timeout(Duration::from_secs(5), relayed);
+            let relayed = timeout(Duration::from_secs(5), relay(&mut client, &mut to_gateway, closing, closing * 2));
             let result = relayed.await.expect("the relay ended");
             drop((client, to_gateway));
             sending.await.unwrap();

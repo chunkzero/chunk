@@ -22,11 +22,6 @@ service EdgeService {
   // holds the connection until the route lists gateways or its own deadline
   // passes.
   rpc Wake(WakeRequest) returns (WakeResponse);
-  // Stops counting a login's wake toward the wake limit once the login
-  // completes. Edges call it at most once per login, with the refund_token
-  // Wake returned, once the login outlives the gateway's login deadline. Has
-  // no effect after the window the wake was counted in ends.
-  rpc RefundWake(RefundWakeRequest) returns (RefundWakeResponse);
 }
 
 message WatchRoutesRequest {}
@@ -71,17 +66,7 @@ enum WakeReason {
 
 message WakeResponse {
   WakeOutcome outcome = 1;
-  // Set when a login's wake counted toward the environment's wake limit;
-  // pass it to RefundWake once the login completes.
-  string refund_token = 2;
 }
-
-message RefundWakeRequest {
-  string environment_id = 1;
-  string refund_token = 2;
-}
-
-message RefundWakeResponse {}
 
 enum WakeOutcome {
   WAKE_OUTCOME_UNSPECIFIED = 0;
