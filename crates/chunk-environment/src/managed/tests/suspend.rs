@@ -114,7 +114,15 @@ async fn core_is_ready_to_suspend_only_after_the_grace_period_and_a_login_or_a_w
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let config = ManagementConfig { suspend_after: Some(GRACE), ..harness.management_config() };
     let listener = GatewayConfig::new("127.0.0.1:0".parse().unwrap());
-    let managed = Managed::new(&config, lease, "env_test".into(), &harness.state(), &core, &gateway, Some(listener));
+    let managed = Managed::new(
+        &config,
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        Some(listener),
+    );
     let mut running = Box::pin(managed.run());
     let deployed = async {
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;
@@ -230,7 +238,15 @@ async fn a_gateway_core_can_t_hear_from_keeps_it_awake_until_a_new_stream_report
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let config = ManagementConfig { suspend_after: Some(GRACE), ..harness.management_config() };
-    let managed = Managed::new(&config, lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &config,
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let mut running = Box::pin(managed.run());
     let deployed = async {
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;
@@ -313,7 +329,15 @@ async fn a_gateway_cut_off_from_core_keeps_it_awake_for_the_player_it_still_hold
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let config = ManagementConfig { suspend_after: Some(SHORT), ..harness.management_config() };
-    let managed = Managed::new(&config, lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &config,
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let mut running = Box::pin(managed.run());
     let deployed = async {
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;
@@ -363,7 +387,15 @@ async fn a_held_address_lookup_keeps_core_awake_without_holding_up_its_reports()
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let config = ManagementConfig { suspend_after: Some(GRACE), ..harness.management_config() };
-    let managed = Managed::new(&config, lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &config,
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let mut running = Box::pin(managed.run());
     let deployed = async {
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;

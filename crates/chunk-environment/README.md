@@ -45,17 +45,23 @@ such as WireGuard; prefer that network's address to an unspecified one.
 
 With replication on, every write transaction is uploaded to the bucket in batches, with periodic snapshots. A core that
 starts without a local store restores the latest state from the bucket under a new epoch, and an older core writing to
-the same prefix is fenced and stops.
+the same prefix is fenced and stops. Failed uploads are logged and retried; commits keep succeeding locally meanwhile.
+On shutdown, core flushes the log and exits non-zero if that final flush fails, so a clean exit means the bucket holds
+every commit.
 
 ## Under management
 
 With `CHUNK_MANAGEMENT_URL`, core attaches to management (`EnvironmentService.Attach`) and serves the deployment its
-desired state names. It downloads each release archive, unpacks it under `$CHUNK_STATE/releases/`, verifies it with the
-same checks as `chunk build`, makes it the backend's and control's current release, and reports the deployment `ACTIVE`.
-A release it rejects is reported `FAILED`, and the previous deployment keeps serving. The gateway starts with the first
-active deployment. Core retires the versions it no longer needs, stopping their JVMs first, and removes their unpacked
-releases. JVMs run on machines core asks management for (`EnsureCapacity`), each running
-[`chunk-jvm`](../chunk-jvm/README.md). A core that management fences stops.
+desired state names. Before it opens its store, core reads the first desired state from an attach that takes no lease:
+when it grants a log store, core replicates there instead of to the `CHUNK_REPLICATION_*` bucket, restoring an empty
+store from it, and then attaches as core with the epoch it serves. Each later desired state renews the log store's
+credentials in place; a log store moved elsewhere takes effect only when core starts again. Core waits for management
+before opening its store, and exits non-zero if stopped before management answered. It downloads each release archive,
+unpacks it under `$CHUNK_STATE/releases/`, verifies it with the same checks as `chunk build`, makes it the backend's and
+control's current release, and reports the deployment `ACTIVE`. A release it rejects is reported `FAILED`, and the
+previous deployment keeps serving. The gateway starts with the first active deployment. Core retires the versions it no
+longer needs, stopping their JVMs first, and removes their unpacked releases. JVMs run on machines core asks management
+for (`EnsureCapacity`), each running [`chunk-jvm`](../chunk-jvm/README.md). A core that management fences stops.
 
 Core reports its status about every 15 seconds, and at once when it changes. Each report carries the server-list status
 the gateway last answered for each hostname, which the [edge](../chunk-edge/README.md) answers pings with while the

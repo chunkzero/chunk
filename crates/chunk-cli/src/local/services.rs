@@ -123,6 +123,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         environment_token: None,
         // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,
+        replication: None,
     };
     let core = Core::start(config, || {
         reporter.done("Backend", "embedded");

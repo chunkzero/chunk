@@ -44,6 +44,7 @@ mod segment;
 mod uploader;
 
 pub(crate) use restore::{Remote, fork, restore};
+pub use s3::{S3Bucket, S3Credentials};
 pub(crate) use segment::Entry;
 
 /// An S3-compatible bucket, or a stand-in for tests. Keys use `/` separators.
@@ -79,6 +80,7 @@ pub struct Listed {
     pub modified: SystemTime,
 }
 
+#[derive(Clone)]
 pub struct Replication {
     storage: Arc<dyn ObjectStorage>,
     batch_delay: Duration,
@@ -130,6 +132,13 @@ impl Replication {
     /// Rejects incomplete or invalid settings.
     pub fn from_env_with_prefix(prefix: &str) -> Result<Option<Self>> {
         Ok(s3::S3::from_env(Some(prefix))?.map(|storage| Self::new(Arc::new(storage))))
+    }
+
+    /// Replicates to `bucket`, signing each request with `credentials` as they are at the time.
+    /// # Errors
+    /// Rejects invalid settings.
+    pub fn s3(bucket: &S3Bucket, credentials: S3Credentials) -> Result<Self> {
+        Ok(Self::new(Arc::new(s3::S3::new(bucket, credentials)?)))
     }
 
     pub(crate) fn storage(&self) -> &dyn ObjectStorage {

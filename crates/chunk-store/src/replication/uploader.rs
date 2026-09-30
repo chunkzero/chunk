@@ -108,6 +108,7 @@ impl Uploader {
                 }
                 Err(error) => error,
             };
+            tracing::warn!(%error, retry_in = ?backoff, "log upload to object storage failed");
             let mut state = shared.lock();
             state.failures += 1;
             state.error = error.to_string();

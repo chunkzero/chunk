@@ -3,7 +3,8 @@ use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
-    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, ReleaseArtifact, ReportStatusRequest,
+    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, ObjectStore, ReleaseArtifact,
+    ReportStatusRequest,
 };
 use chunk_proto::sync::v1::{CallRequest, call_response::Outcome, core_client::CoreClient, error::Code};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
@@ -53,6 +54,10 @@ struct Management {
     refusal: Notify,
     capacity: Mutex<launcher::Capacities>,
     alarm: Mutex<suspend::Alarms>,
+    /// The epoch of each core attach.
+    epochs: Mutex<Vec<u64>>,
+    /// The object storage each desired state grants.
+    log_store: Mutex<Option<ObjectStore>>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -63,6 +68,16 @@ struct Records {
 }
 
 impl Management {
+    /// The lease a core attach takes, which a later one fences. Other attaches take none, so one fences them at once.
+    fn claim(&self, attach: &AttachRequest) -> u64 {
+        if !attach.core {
+            return 0;
+        }
+        self.epochs.lock().unwrap().push(attach.epoch);
+        self.lease.send_modify(|lease| *lease += 1);
+        *self.lease.borrow()
+    }
+
     /// Supersedes the unfinished deployments with a new one.
     fn deploy(&self, deployment: &str, release: ReleaseArtifact) {
         let mut records = self.records.lock().unwrap();
@@ -116,6 +131,7 @@ impl Management {
             project_id: "prj_test".into(),
             deployment_id: served.map(|(id, _, _)| id.clone()).unwrap_or_default(),
             release: served.map(|(_, release, _)| release.clone()),
+            log_store: self.log_store.lock().unwrap().clone(),
             ..Default::default()
         });
     }
@@ -144,9 +160,8 @@ async fn handle(
     Ok(match path.as_str() {
         "/chunk.management.v1.EnvironmentService/Attach" => {
             let attach = AttachRequest::decode(&body[5..]).unwrap();
-            assert!(attach.core && !attach.instance_id.is_empty() && !attach.version.is_empty());
-            management.lease.send_modify(|lease| *lease += 1);
-            let lease = *management.lease.borrow();
+            assert!(!attach.instance_id.is_empty() && !attach.version.is_empty());
+            let lease = management.claim(&attach);
             let (mut desired, mut leases) = (management.desired.subscribe(), management.lease.subscribe());
             let mut held = management.attach_held.subscribe();
             tokio::spawn(async move {
@@ -355,6 +370,8 @@ impl Harness {
             refusal: Notify::new(),
             capacity: Mutex::default(),
             alarm: Mutex::default(),
+            epochs: Mutex::default(),
+            log_store: Mutex::default(),
         });
         let url = serve(management.clone()).await;
         let release = (release_id, fs::read(&archive).unwrap());
@@ -405,6 +422,7 @@ impl Harness {
             java: "java".into(),
             environment_token: None,
             fresh: false,
+            replication: None,
         }
     }
 
@@ -697,6 +715,7 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
 }
 
 mod launcher;
+mod replication;
 mod runner_image;
 mod status;
 mod suspend;

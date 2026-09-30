@@ -44,9 +44,10 @@ impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
     /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
     /// `CHUNK_OFFLINE_LOGINS` (`1` admits unauthenticated players under any name; insecure, for tests only). With core,
-    /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND` and `CHUNK_PRIVATE_ADDRESS`.
-    /// With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and `CHUNK_SUSPEND_AFTER_SECONDS` and serves
-    /// what management deploys; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
+    /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND`, `CHUNK_PRIVATE_ADDRESS` and the
+    /// `CHUNK_REPLICATION_*` variables. With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and
+    /// `CHUNK_SUSPEND_AFTER_SECONDS` and serves what management deploys, replicating the log where management says when
+    /// it grants object storage; otherwise it serves `CHUNK_BUNDLE`. Control's connection record goes to
     /// `$CHUNK_STATE/control.json`.
     /// The gateway alone reads `CHUNK_CORE_ENDPOINT` and `CHUNK_GATEWAY_CREDENTIAL` instead.
     /// # Errors
@@ -96,6 +97,7 @@ impl Config {
             java: "java".into(),
             environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,
+            replication: chunk_store::Replication::from_env().map_err(io::Error::other)?,
         };
         let gateway = services.contains(Service::Gateway).then_some(gateway);
         Ok(Self::Core { core: Box::new(core), gateway, management })
@@ -103,12 +105,13 @@ impl Config {
 }
 
 /// Runs the configured services until `stop` or until one of them stops. With core, the gateway stops before core;
-/// under management, the gateway starts with the first deployment, JVMs run on machines management provides, and a
-/// core that management fences stops. The gateway alone follows core's current deployment and stops once core revokes
-/// its credential.
+/// under management, core opens its log once management first answers, the gateway starts with the first deployment,
+/// JVMs run on machines management provides, and a core that management fences stops. The gateway alone follows core's
+/// current deployment and stops once core revokes its credential.
 /// # Errors
 /// Reports startup errors, a service that stopped on its own, a fenced core, a gateway credential core rejects, and
-/// shutdown errors.
+/// shutdown errors, including a replicated log whose final flush failed. A managed core stopped before management
+/// answered reports that too.
 pub async fn run(config: Config, stop: CancellationToken) -> io::Result<()> {
     match config {
         Config::Core { core, gateway, management } => run_core(*core, gateway, management, stop, RELEASE_TIMEOUT).await,
@@ -124,21 +127,27 @@ async fn run_core(
     stop: CancellationToken,
     release_bound: Duration,
 ) -> io::Result<()> {
-    let environment = config.environment.clone();
+    let mut config = config;
     let state = config.state.clone();
-    let management = management.map(|management| {
-        let lease = watch::Sender::new(managed::Lease::Waiting);
-        let launcher = Arc::new(managed::ManagementLauncher::new(management.client(), lease.subscribe()));
-        (management, lease, launcher)
-    });
-    let launcher = management.as_ref().map(|(_, _, launcher)| launcher.clone());
+    let management = match management {
+        Some(management) => {
+            let Some(registration) = managed::Registration::attach(&management, &mut config, &stop).await? else {
+                return Err(io::Error::other("stopped before management answered; the log was never opened"));
+            };
+            let lease = watch::Sender::new(managed::Lease::Waiting);
+            let launcher = Arc::new(managed::ManagementLauncher::new(management.client(), lease.subscribe()));
+            Some((management, lease, launcher, registration))
+        }
+        None => None,
+    };
+    let launcher = management.as_ref().map(|(_, _, launcher, ..)| launcher.clone());
     let core = match &launcher {
         Some(launcher) => Core::start_with_launcher(config, RunnerConfig::new(launcher.clone())).await?,
         None => Core::start(config, || {}).await?,
     };
     let gateway = OnceLock::new();
-    let managed = if let Some((management, lease, _)) = management {
-        Some(managed::Managed::new(&management, lease, environment, &state, &core, &gateway, gateway_config))
+    let managed = if let Some((management, lease, _, registration)) = management {
+        Some(managed::Managed::new(&management, lease, registration, &state, &core, &gateway, gateway_config))
     } else {
         if let Some(gateway_config) = gateway_config {
             let started = match core.target() {

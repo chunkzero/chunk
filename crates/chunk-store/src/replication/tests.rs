@@ -825,3 +825,28 @@ fn s3_round_trip() {
     drop(store);
     assert_eq!(dump(&restored), dump(&path));
 }
+
+/// Run like [`s3_round_trip`].
+#[test]
+#[ignore = "needs an S3-compatible server"]
+fn s3_credentials_rotate_without_reopening() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut bucket = s3::S3Bucket::from_env().expect("CHUNK_REPLICATION_BUCKET");
+    let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+    bucket.prefix = Some(format!("{}/rotation-{unique}", bucket.prefix.unwrap_or_default()));
+    let (good, wrong) =
+        (s3::S3Credentials::from_env().unwrap(), s3::S3Credentials::new("wrong".into(), "wrong".into(), None));
+    let credentials = s3::S3Credentials::new(String::new(), String::new(), None);
+    credentials.replace(&good);
+    let replication = Replication::s3(&bucket, credentials.clone()).unwrap();
+    let (mut store, replicator) =
+        open(&directory.path().join("data.db"), Replication { batch_delay: Duration::from_secs(3600), ..replication });
+    let revision = store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+
+    credentials.replace(&wrong);
+    store.commit(commit("rotated", revision.0, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    assert!(matches!(replicator.flush(), Err(Error::Replication(_))));
+    credentials.replace(&good);
+    replicator.flush().unwrap();
+}

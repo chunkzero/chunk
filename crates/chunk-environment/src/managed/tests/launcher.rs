@@ -295,8 +295,15 @@ async fn a_launch_waits_for_the_first_attach_and_a_release_keeps_its_lease_after
 
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let gateway = OnceLock::new();
-    let managed =
-        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &harness.management_config(),
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let ready = async {
         harness.management.ensured(1).await;
         harness.management.provision("host-1", CapacityState::Ready, "");

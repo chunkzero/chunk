@@ -260,8 +260,15 @@ async fn a_report_fenced_under_the_held_lease_stops_core_while_its_attach_delive
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let published = lease.subscribe();
-    let managed =
-        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &harness.management_config(),
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let mut running = Box::pin(managed.run());
     tokio::select! {
         error = &mut running => panic!("{error}"),
@@ -292,8 +299,15 @@ async fn a_report_fenced_while_core_attaches_again_leaves_it_serving_under_the_n
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
     let published = lease.subscribe();
-    let managed =
-        Managed::new(&harness.management_config(), lease, "env_test".into(), &harness.state(), &core, &gateway, None);
+    let managed = Managed::new(
+        &harness.management_config(),
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
     let mut running = Box::pin(managed.run());
     tokio::select! {
         error = &mut running => panic!("{error}"),

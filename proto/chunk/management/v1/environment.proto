@@ -81,7 +81,9 @@ message AttachRequest {
   string instance_id = 1;
   // The environment image version this process runs.
   string version = 2;
-  // Set by core: this process owns the environment's log.
+  // Set by core: this process owns the environment's log. Core first
+  // attaches without it, taking no lease, to read log_store before it opens
+  // its log; only then does it know the epoch to attach with.
   bool core = 3;
   // Set by core: the log epoch it serves. Every restore starts a new, higher epoch.
   uint64 epoch = 4;
