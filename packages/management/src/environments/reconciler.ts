@@ -370,13 +370,19 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
 
   if (core.state !== "running") {
     // A stopped core's gateways went with it, and no report of its lease is accepted after this; its successor attaches
-    // under a new lease. A suspended core keeps its gateways, which serve again once it resumes.
+    // under a new lease. The environment is starting from here, so the successor's first report with gateways runs it
+    // without waiting for the start to return. A suspended core keeps its gateways, which serve again once it resumes.
     if (core.state === "stopped") {
       await fenced(
         (tx) => tx`
-          update environments set gateway_addresses = '{}', report_sequence = ${closedSequence}
+          update environments set gateway_addresses = '{}', report_sequence = ${closedSequence},
+            state = case
+              when state in (${EnvironmentState.PENDING}, ${EnvironmentState.SUSPENDED}) then ${EnvironmentState.STARTING}::smallint
+              else state
+            end
           where id = ${id} and lease = ${environment.lease}`,
       );
+      await notify(sql, { kind: "environment", environmentId: id });
     }
     core = await provider.start(core.id);
   }
