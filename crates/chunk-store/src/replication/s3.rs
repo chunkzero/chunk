@@ -112,7 +112,9 @@ impl S3 {
         let mut builder = AmazonS3Builder::new()
             .with_bucket_name(&bucket.name)
             .with_region(&bucket.region)
-            .with_credentials(Arc::new(credentials));
+            .with_credentials(Arc::new(credentials))
+            // Deletes one object at a time with DELETE, which S3-compatible stores without bulk deletion also serve.
+            .with_disable_bulk_delete(true);
         if let Some(endpoint) = &bucket.endpoint {
             builder = builder.with_allow_http(endpoint.starts_with("http://")).with_endpoint(endpoint);
         }
