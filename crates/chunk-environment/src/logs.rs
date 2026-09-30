@@ -51,19 +51,26 @@ impl<S: Subscriber> Layer<S> for Capture {
     }
 }
 
-/// An event's message, then its other fields as `name=value`.
+/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`].
 #[derive(Default)]
 struct Text(String);
 
+impl fmt::Write for Text {
+    /// Fails once the text is full, which stops formatting the rest.
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let fits = text.floor_char_boundary(MAX_LINE_BYTES - self.0.len());
+        self.0.push_str(&text[..fits]);
+        if fits < text.len() { Err(fmt::Error) } else { Ok(()) }
+    }
+}
+
 impl tracing::field::Visit for Text {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if !self.0.is_empty() {
-            self.0.push(' ');
-        }
+        let separator = if self.0.is_empty() { "" } else { " " };
         _ = if field.name() == "message" {
-            write!(self.0, "{value:?}")
+            write!(self, "{separator}{value:?}")
         } else {
-            write!(self.0, "{}={value:?}", field.name())
+            write!(self, "{separator}{}={value:?}", field.name())
         };
     }
 
@@ -118,9 +125,11 @@ impl Lines {
         self.lock().deployment = Some(deployment.into());
     }
 
-    /// Keeps `message`, cut to [`MAX_LINE_BYTES`], dropping the oldest lines once the buffer is full.
+    /// Keeps `message`, cut to [`MAX_LINE_BYTES`], dropping the oldest lines once the buffer is full. The kept text
+    /// holds no spare capacity, so the buffer's count of its bytes is what it holds.
     pub(crate) fn push(&self, source: LogSource, severity: LogSeverity, mut message: String) {
         message.truncate(message.floor_char_boundary(MAX_LINE_BYTES));
+        message.shrink_to_fit();
         let mut state = self.lock();
         let sequence = state.next;
         state.next += 1;

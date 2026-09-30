@@ -79,8 +79,9 @@ async fn lines_are_shipped_again_until_acknowledged_and_the_oldest_drop_once_the
         assert!(!reports.usage.is_empty() && reports.usage.keys().all(|id| id.starts_with("core-1/")));
     }
 
-    // More than the buffer holds: the oldest go, and what remains ships in batches management accepts.
-    let long = "x".repeat(8 * 1024);
+    // More than the buffer holds, each cut to 8 KiB: the oldest go, and what remains ships in batches management
+    // accepts.
+    let long = "x".repeat(64 * 1024);
     for _ in 0..1_000 {
         lines.push(LogSource::Core, LogSeverity::Info, long.clone());
     }
@@ -93,6 +94,7 @@ async fn lines_are_shipped_again_until_acknowledged_and_the_oldest_drop_once_the
     for batch in later {
         let text: usize = batch.iter().map(|entry| entry.message.len() + entry.instance_id.len()).sum();
         assert!(batch.len() <= 1000 && text <= 512 * 1024);
+        assert!(batch.iter().all(|entry| entry.message.len() == 8 * 1024));
     }
     let sequences: Vec<_> = later.iter().flatten().map(|entry| entry.sequence).collect();
     let kept = 1_000 - dropped;
