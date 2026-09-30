@@ -236,11 +236,17 @@ async function reconcileEnvironment(run: Run, id: string) {
     select * from capacity_requests where environment_id = ${id} and not torn_down order by create_time`;
 
   if (environment.state === EnvironmentState.DELETING) {
-    // By name: a deleting environment's machine names are never used again.
-    for (const request of capacity) await provider.destroy(capacityMachineName(request));
-    await provider.destroy(coreMachineName(id));
+    // By name: a deleting environment's machine names are never used again. A failed removal holds up no other.
+    const failures: unknown[] = [];
+    for (const name of [...capacity.map((request) => capacityMachineName(request)), coreMachineName(id)]) {
+      await provider.destroy(name).catch((error: unknown) => failures.push(error));
+    }
+    if (failures.length > 0) throw failures[0];
     await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
-    for (const request of capacity) retries.clear(capacityKey(request));
+    for (const request of capacity) {
+      retries.clear(capacityKey(request));
+      retries.clear(teardownKey(request));
+    }
     retries.clear(coreKey(id));
     return;
   }
@@ -272,7 +278,7 @@ async function reconcileEnvironment(run: Run, id: string) {
 
 /** Runs core's machine, suspending it and the extra machines while idle, and the extra machines otherwise. */
 async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRow[]) {
-  const { deps, options, fenced } = run;
+  const { deps, options, fenced, retries } = run;
   const { sql } = deps;
   const { provider } = options;
   const id = environment.id;
@@ -299,14 +305,14 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
     // Rechecked before each suspension, outside the transaction like every provider call. A report or wake that lands
     // between the recheck and the suspension notifies, which runs the environment again once this run ends, and that
     // run resumes the machine; so does a later one, for a suspension that finishes after it gave up on the call.
-    const suspendIfIdle = async (machineId: string) => {
+    const stillIdle = async () => {
       const [still] = await fenced(
         (tx) => tx`
           select 1 as idle from environments
           where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
             and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision`,
       );
-      return still ? provider.suspend(machineId) : undefined;
+      return still !== undefined;
     };
     // A provider that stops machines rather than keeping their memory ends a JVM's session, so its request fails and
     // its machine is torn down while the environment sleeps; core asks for new capacity once woken. Judged from the
@@ -321,15 +327,21 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
       );
       await notify(sql, { kind: "environment", environmentId: id });
     };
+    // An extra machine whose calls fail is left for a later run, and the others and core are still suspended. Its
+    // failures are kept until it is seen not running or its suspension succeeds.
     for (const request of active) {
-      if (!request.machine_id) continue;
+      const machineId = request.machine_id;
+      if (!machineId) continue;
+      const key = capacityKey(request);
+      const what = `suspending capacity ${request.request_id}`;
       const jvm = request.workload === Workload.JVM;
-      const machine = await provider.status(request.machine_id);
-      if (jvm && request.started && machine.state === "stopped") {
-        await failStopped(request, machine.id);
+      const machine = await isolated(retries, key, what, () => provider.status(machineId));
+      if (!machine) continue;
+      if (machine.state !== "running") {
+        retries.clear(key);
+        if (jvm && request.started && machine.state === "stopped") await failStopped(request, machine.id);
         continue;
       }
-      if (machine.state !== "running") continue;
       // Seen running, so its resume finished, and the next suspension may be resumed.
       if (request.resuming) {
         await fenced(
@@ -338,11 +350,16 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
             where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}`,
         );
       }
-      const suspended = await suspendIfIdle(machine.id);
-      if (!suspended) return;
+      if (!(await stillIdle())) return;
+      const suspended = await isolated(retries, key, what, () => provider.suspend(machine.id));
+      if (!suspended) continue;
+      retries.clear(key);
       if (jvm && suspended.state === "stopped") await failStopped(request, machine.id);
     }
-    if (core.state === "running" && !(await suspendIfIdle(core.id))) return;
+    if (core.state === "running") {
+      if (!(await stillIdle())) return;
+      await provider.suspend(core.id);
+    }
     await fireDueAlarm(fenced, environment);
     return;
   }
@@ -366,6 +383,26 @@ function coreKey(environmentId: string): string {
 
 function capacityKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
   return `capacity/${request.environment_id}/${request.request_id}`;
+}
+
+function teardownKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
+  return `teardown/${request.environment_id}/${request.request_id}`;
+}
+
+/**
+ * Runs one extra machine's provider call so that its failure holds up no other machine: it is logged, and a later run
+ * retries it once `key` has backed off. Resolves to undefined when the call failed or is backing off. The caller clears
+ * `key` once the machine's step is done.
+ */
+async function isolated<T>(retries: RetryBackoff, key: string, what: string, call: () => Promise<T>) {
+  if (retries.waiting(key)) return undefined;
+  try {
+    return await call();
+  } catch (error) {
+    const overdue = retries.failed(key);
+    (isTransient(error) && !overdue ? console.warn : console.error)(`${what} failed, retrying later:`, error);
+    return undefined;
+  }
 }
 
 /**
@@ -527,11 +564,16 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
 
 /**
  * Removes a releasing or failed request's machine by name, which also finds one whose ID was never saved; the request
- * never runs a machine again, so nothing reuses the name. A releasing request is released once its machine is gone.
+ * never runs a machine again, so nothing reuses the name. A releasing request is released once its machine is gone, and
+ * a removal that fails is retried by a later run.
  */
 async function tearDown({ options: { provider }, fenced, retries }: Run, request: CapacityRow) {
   retries.clear(capacityKey(request));
-  await provider.destroy(capacityMachineName(request));
+  const name = capacityMachineName(request);
+  const what = `tearing down capacity ${request.request_id}`;
+  const key = teardownKey(request);
+  if (!(await isolated(retries, key, what, () => provider.destroy(name).then(() => true)))) return;
+  retries.clear(key);
   await fenced(
     (tx) => tx`
       update capacity_requests

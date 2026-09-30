@@ -244,6 +244,21 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
+  test("a core machine that went missing is created again with the same token", async () => {
+    const env = await running();
+    const first = env.core()?.id;
+    machines.delete(env.coreName);
+    await pass();
+    const core = env.core();
+    expect(core?.id).not.toBe(first);
+    expect(core?.state).toBe("running");
+    expect(machines.get(env.coreName)?.spec.env.CHUNK_ENVIRONMENT_TOKEN).toBe(env.token);
+    const [row] = await h.sql<{ machine_id: string }[]>`
+      select machine_id from environments where id = ${env.environmentId}`;
+    expect(row?.machine_id).toBe(core?.id ?? "");
+    env.close();
+  });
+
   test("capacity requests are durable intents the reconciler provisions and removes", async () => {
     const env = await running();
     const request = capacityRequest(env, "cap-1");
@@ -355,6 +370,23 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     await pass();
     expect(machines.has(name)).toBe(false);
     expect((await release()).capacity?.state).toBe(CapacityState.RELEASED);
+    env.close();
+  });
+
+  test("a started JVM machine that went missing fails its request and is not created again", async () => {
+    const env = await running();
+    const request = capacityRequest(env, "cap-missing");
+    await env.client.ensureCapacity(request);
+    await pass();
+    const name = nameOf(env.environmentId, "cap-missing");
+    machines.delete(name);
+    await pass();
+    expect((await env.client.ensureCapacity(request)).capacity).toMatchObject({
+      state: CapacityState.FAILED,
+      message: "the JVM machine went missing",
+    });
+    expect(machines.has(name)).toBe(false);
+    expect(boots.get(name)).toBe(1);
     env.close();
   });
 
@@ -786,6 +818,9 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     };
     await pass();
     hooks.suspend = undefined;
+    // The failed suspension holds up neither the other machine's nor core's.
+    expect(machines.get(paused)?.machine.state).toBe("suspended");
+    expect(env.core()?.state).toBe("suspended");
     await pass();
     expect(await env.state()).toBe(EnvironmentState.SUSPENDED);
     expect((await env.client.ensureCapacity(capacityRequest(env, "cut-short"))).capacity).toMatchObject({
@@ -1091,6 +1126,52 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     });
     expect(await capacity("room-later")).toMatchObject({ state: CapacityState.READY, machineId: idOf(later) });
     expect(machines.has(full)).toBe(false);
+    env.close();
+  });
+
+  test("a teardown that hangs or fails holds up neither other machines nor core, and is retried later", async () => {
+    const reconciler = createReconciler(h.deps, { ...options, timeouts: { startMs: 100, callMs: 100 } });
+    const env = await running();
+    const state = async (requestId: string) =>
+      (await env.client.ensureCapacity(capacityRequest(env, requestId))).capacity?.state;
+    const released = ["hangs", "fails", "removed"];
+    for (const requestId of released) await env.client.ensureCapacity(capacityRequest(env, requestId));
+    await pass();
+    for (const requestId of released) await env.client.releaseCapacity({ requestId, lease: env.lease });
+    await env.client.ensureCapacity(capacityRequest(env, "fresh"));
+    const [hangs, fails, removed] = released.map((requestId) => nameOf(env.environmentId, requestId));
+    const hung = Promise.withResolvers<void>();
+    let attempts = 0;
+    hooks.destroy = async (name) => {
+      if (name === hangs) await hung.promise;
+      if (name === fails) {
+        attempts++;
+        throw new Error("host unreachable");
+      }
+    };
+    try {
+      await reconciler.pass(epoch, [env.environmentId]);
+      // Backing off, so an immediate run leaves them alone.
+      await reconciler.pass(epoch, [env.environmentId]);
+      expect(attempts).toBe(1);
+      expect(machines.has(hangs ?? "")).toBe(true);
+      expect(machines.has(fails ?? "")).toBe(true);
+      expect(machines.has(removed ?? "")).toBe(false);
+      expect(await state("hangs")).toBe(CapacityState.RELEASING);
+      expect(await state("removed")).toBe(CapacityState.RELEASED);
+      expect(await state("fresh")).toBe(CapacityState.READY);
+      // The same reconciler retries them once they have backed off, while the hung removal is still under way.
+      hooks.destroy = undefined;
+      await Bun.sleep(1050);
+      await reconciler.pass(epoch, [env.environmentId]);
+      for (const requestId of released) {
+        expect(machines.has(nameOf(env.environmentId, requestId))).toBe(false);
+        expect(await state(requestId)).toBe(CapacityState.RELEASED);
+      }
+    } finally {
+      hooks.destroy = undefined;
+      hung.resolve();
+    }
     env.close();
   });
 
