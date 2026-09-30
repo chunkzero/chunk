@@ -630,7 +630,6 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     harness.expect(5, "dep_d", DeploymentState::Active).await;
     harness.expect(5, "dep_e", DeploymentState::InProgress).await;
     harness.expect(5, "dep_e", DeploymentState::Failed).await;
-    harness.expect(6, "dep_d", DeploymentState::InProgress).await;
     harness.expect(6, "dep_d", DeploymentState::Active).await;
     harness.released("dep_c").await;
     assert!(harness.serves("dep_d").await);
@@ -712,6 +711,37 @@ async fn reclaiming_a_release_forgets_its_archive_and_a_restart_restores_the_ret
     corrupt[0] ^= 1;
     fs::write(&kept.path, corrupt).unwrap();
     assert_eq!(restart().await, (None, None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_resumes_the_current_deployment_unchecked_unless_its_archive_is_gone() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+
+    // Restarted, the core serves dep_a again without checking its install, which a check would have repaired.
+    let installed = harness.state().join("releases").join(&harness.release.0);
+    fs::write(installed.join("source.mjs"), "tampered").unwrap();
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+    assert!(harness.serves("dep_a").await);
+    assert!(chunk_build::verify_release(&installed).is_err());
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+
+    // Without its archive, the release is downloaded and installed again first.
+    fs::remove_file(harness.archive(&harness.release.0)).unwrap();
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+    assert!(harness.archive(&harness.release.0).exists());
+    assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
 }
 
 mod launcher;

@@ -26,7 +26,7 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -220,12 +220,14 @@ impl<'a> Managed<'a> {
         if let Err(error) = release::sweep(&self.releases).await {
             tracing::warn!(%error, "abandoned release downloads not removed");
         }
+        let started = Instant::now();
         let restored = match self.core.control().and_then(|control| control.release_ids().map_err(io::Error::other)) {
             Ok(retained) => release::restore(&self.releases, retained).await,
             Err(error) => Err(error),
         };
-        if let Err(error) = restored {
-            tracing::warn!(%error, "kept release archives not restored");
+        match restored {
+            Ok(()) => tracing::info!(elapsed_ms = millis(started), "kept release archives restored"),
+            Err(error) => tracing::warn!(%error, "kept release archives not restored"),
         }
         tokio::select! {
             error = self.follow() => error,
@@ -375,12 +377,20 @@ impl<'a> Managed<'a> {
         };
         let (state, message) = if let Some(known) = known {
             known
+        } else if self.resumes(&desired).await {
+            let started = Instant::now();
+            self.route(deployment).await.map_err(Interrupted::Fatal)?;
+            tracing::info!(deployment, route_ms = millis(started), "current deployment resumed");
+            (v1::DeploymentState::Active, String::new())
         } else {
+            let started = Instant::now();
             self.report(&desired, Some(progress(deployment, v1::DeploymentState::InProgress, String::new()))).await?;
             match self.deploy(&desired, &cancel).await {
                 Ok(false) => return Ok(()),
                 Ok(true) => {
+                    let (deploy_ms, routing) = (millis(started), Instant::now());
                     self.route(deployment).await.map_err(Interrupted::Fatal)?;
+                    tracing::info!(deployment, deploy_ms, route_ms = millis(routing), "deployment activated");
                     (v1::DeploymentState::Active, String::new())
                 }
                 Err(error) => {
@@ -392,6 +402,22 @@ impl<'a> Managed<'a> {
             }
         };
         self.report(&desired, Some(progress(deployment, state, message))).await
+    }
+
+    /// Whether `desired`'s deployment is control's current release, resident in the backend, with its release's archive
+    /// kept as `desired` names it. This core checked that release when it activated it, so it serves it again unchecked.
+    async fn resumes(&self, desired: &v1::AttachResponse) -> bool {
+        let Some(artifact) = &desired.release else { return false };
+        let current = self.core.control().and_then(|control| control.current_release().map_err(io::Error::other));
+        if current.ok().flatten().as_deref() != Some(desired.deployment_id.as_str())
+            || !release::kept(&self.releases, artifact)
+        {
+            return false;
+        }
+        let (Some(backend), Ok(id)) = (self.core.backend(), chunk_js::DeploymentId::new(&desired.deployment_id)) else {
+            return false;
+        };
+        backend.check_deployment(id).await.is_ok()
     }
 
     /// Loads the deployment's release, makes it resident in the backend, and, unless `cancel` superseded it by then,
@@ -667,6 +693,10 @@ async fn deadline<T>(
             format!("management did not answer within {}s", limit.as_secs()),
         ))),
     }
+}
+
+fn millis(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn lock(deployments: &Mutex<Deployments>) -> MutexGuard<'_, Deployments> {

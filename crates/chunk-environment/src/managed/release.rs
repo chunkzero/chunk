@@ -171,6 +171,12 @@ fn reusable(
     chunk_build::install_release(&archive, digest, id, directory).map(Some)
 }
 
+/// Whether the archive of `artifact`'s release is kept with the digest `artifact` names.
+pub(super) fn kept(store: &Store, artifact: &v1::ReleaseArtifact) -> bool {
+    let kept = store.kept.get(&artifact.release_id);
+    kept.is_some_and(|kept| kept.sha256 == artifact.sha256 && kept.size == artifact.size_bytes)
+}
+
 /// Restores core's lookup of the archives kept for the `retained` releases, each only while its file still matches the
 /// digest recorded when it was verified.
 pub(super) async fn restore(store: &Store, retained: BTreeSet<String>) -> io::Result<()> {
