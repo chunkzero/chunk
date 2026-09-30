@@ -327,7 +327,8 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
       );
       await notify(sql, { kind: "environment", environmentId: id });
     };
-    // An extra machine whose calls fail is left for a later run, and the others and core are still suspended.
+    // An extra machine whose calls fail is left for a later run, and the others and core are still suspended. Its
+    // failures are kept until it is seen not running or its suspension succeeds.
     for (const request of active) {
       const machineId = request.machine_id;
       if (!machineId) continue;
@@ -336,11 +337,11 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
       const jvm = request.workload === Workload.JVM;
       const machine = await isolated(retries, key, what, () => provider.status(machineId));
       if (!machine) continue;
-      if (jvm && request.started && machine.state === "stopped") {
-        await failStopped(request, machine.id);
+      if (machine.state !== "running") {
+        retries.clear(key);
+        if (jvm && request.started && machine.state === "stopped") await failStopped(request, machine.id);
         continue;
       }
-      if (machine.state !== "running") continue;
       // Seen running, so its resume finished, and the next suspension may be resumed.
       if (request.resuming) {
         await fenced(
@@ -351,7 +352,9 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
       }
       if (!(await stillIdle())) return;
       const suspended = await isolated(retries, key, what, () => provider.suspend(machine.id));
-      if (jvm && suspended?.state === "stopped") await failStopped(request, machine.id);
+      if (!suspended) continue;
+      retries.clear(key);
+      if (jvm && suspended.state === "stopped") await failStopped(request, machine.id);
     }
     if (core.state === "running") {
       if (!(await stillIdle())) return;
@@ -388,14 +391,13 @@ function teardownKey(request: Pick<CapacityRow, "environment_id" | "request_id">
 
 /**
  * Runs one extra machine's provider call so that its failure holds up no other machine: it is logged, and a later run
- * retries it once `key` has backed off. Resolves to undefined when the call failed or is backing off.
+ * retries it once `key` has backed off. Resolves to undefined when the call failed or is backing off. The caller clears
+ * `key` once the machine's step is done.
  */
 async function isolated<T>(retries: RetryBackoff, key: string, what: string, call: () => Promise<T>) {
   if (retries.waiting(key)) return undefined;
   try {
-    const result = await call();
-    retries.clear(key);
-    return result;
+    return await call();
   } catch (error) {
     const overdue = retries.failed(key);
     (isTransient(error) && !overdue ? console.warn : console.error)(`${what} failed, retrying later:`, error);
@@ -569,7 +571,9 @@ async function tearDown({ options: { provider }, fenced, retries }: Run, request
   retries.clear(capacityKey(request));
   const name = capacityMachineName(request);
   const what = `tearing down capacity ${request.request_id}`;
-  if (!(await isolated(retries, teardownKey(request), what, () => provider.destroy(name).then(() => true)))) return;
+  const key = teardownKey(request);
+  if (!(await isolated(retries, key, what, () => provider.destroy(name).then(() => true)))) return;
+  retries.clear(key);
   await fenced(
     (tx) => tx`
       update capacity_requests

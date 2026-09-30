@@ -1160,14 +1160,17 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       expect(await state("hangs")).toBe(CapacityState.RELEASING);
       expect(await state("removed")).toBe(CapacityState.RELEASED);
       expect(await state("fresh")).toBe(CapacityState.READY);
+      // The same reconciler retries them once they have backed off, while the hung removal is still under way.
+      hooks.destroy = undefined;
+      await Bun.sleep(1050);
+      await reconciler.pass(epoch, [env.environmentId]);
+      for (const requestId of released) {
+        expect(machines.has(nameOf(env.environmentId, requestId))).toBe(false);
+        expect(await state(requestId)).toBe(CapacityState.RELEASED);
+      }
     } finally {
       hooks.destroy = undefined;
       hung.resolve();
-    }
-    await pass();
-    for (const requestId of released) {
-      expect(machines.has(nameOf(env.environmentId, requestId))).toBe(false);
-      expect(await state(requestId)).toBe(CapacityState.RELEASED);
     }
     env.close();
   });
