@@ -116,8 +116,8 @@ operation per environment, gives up on a provider call after its timeout and obs
 pass.
 
 **Providers.** The package exports `start(config, extensions)` from `src/index.ts`. An install can plug in its own
-provider, extra Connect services and migrations, and its own authentication through `Extensions`, instead of the
-Docker/Podman provider `src/main.ts` uses.
+provider, extra Connect services and migrations, its own authentication, and its own log store credential issuer through
+`Extensions`, instead of the Docker/Podman provider `src/main.ts` uses.
 
 ## Log storage
 

@@ -13,6 +13,7 @@ export {
   type Provider,
 } from "./providers/provider.ts";
 export { ProviderTimeoutError } from "./providers/bounded.ts";
+export { type LogStoreGrant, type LogStoreIssuer } from "./logstore/issuer.ts";
 export { localReleaseStore } from "./releases/local-store.ts";
 export { type ExpectedArchive, releaseKey, type ReleaseStore, type UploadTarget } from "./releases/store.ts";
 export { type Authenticator, type Caller, callerOf, type Identity, type Principal, subjectOf } from "./rpc/caller.ts";
