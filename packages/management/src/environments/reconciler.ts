@@ -368,12 +368,22 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
     return;
   }
 
-  if (core.state !== "running") core = await provider.start(core.id);
+  if (core.state !== "running") {
+    // A stopped core's gateways went with it. A suspended one keeps its gateways, which serve again once it resumes.
+    if (core.state === "stopped") {
+      await fenced((tx) => tx`update environments set gateway_addresses = '{}' where id = ${id}`);
+    }
+    core = await provider.start(core.id);
+  }
   await saveCoreAddresses(deps, fenced, environment, core);
   if (environment.state === EnvironmentState.PENDING || environment.state === EnvironmentState.SUSPENDED) {
+    // Core may report its gateways before its start returns, and such a report leaves the state as it is.
     await fenced(
       (tx) => tx`
-        update environments set state = ${EnvironmentState.STARTING}
+        update environments set state = case
+          when cardinality(gateway_addresses) > 0 then ${EnvironmentState.RUNNING}::smallint
+          else ${EnvironmentState.STARTING}::smallint
+        end
         where id = ${id} and state = ${environment.state}`,
     );
     await notify(sql, { kind: "environment", environmentId: id });

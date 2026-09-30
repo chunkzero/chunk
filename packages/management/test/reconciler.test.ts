@@ -1022,8 +1022,56 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     await pass();
     expect(env.core()?.state).toBe("running");
     await pass();
-    expect(await env.state()).toBe(EnvironmentState.STARTING);
+    expect(await env.state()).toBe(EnvironmentState.RUNNING);
     env.close();
+  });
+
+  test("a stopped core's gateways are dropped, and its successor's report before its start returns runs it", async () => {
+    const env = await running();
+    const stale = `${env.coreName}:25565`;
+    await env.client.reportStatus({
+      lease: env.lease,
+      sequence: 1n,
+      desiredRevision: env.revision,
+      gatewayAddresses: [stale],
+      readyToSuspend: true,
+    });
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    await env.client.setWakeAlarm({ lease: env.lease, epoch: 1n, generation: 1n, dueTime: { seconds: now - 1n } });
+    behaviour.suspendStops = true;
+    try {
+      await pass();
+      expect(env.core()?.state).toBe("stopped");
+    } finally {
+      behaviour.suspendStops = false;
+    }
+    env.close();
+
+    const abort = new AbortController();
+    let before: string[] | undefined;
+    hooks.start = async (name) => {
+      if (name !== env.coreName) return;
+      hooks.start = undefined;
+      const [row] = await h.sql<{ gateway_addresses: string[] }[]>`
+        select gateway_addresses from environments where id = ${env.environmentId}`;
+      before = row?.gateway_addresses;
+      const stream = env.client.attach(
+        { instanceId: crypto.randomUUID(), core: true, epoch: 1n },
+        { signal: abort.signal },
+      );
+      const { lease, revision } = await next(stream[Symbol.asyncIterator]());
+      await env.client.reportStatus({
+        lease,
+        sequence: 1n,
+        desiredRevision: revision,
+        gatewayAddresses: ["10.0.0.9:25565"],
+      });
+    };
+    await pass();
+    await pass();
+    expect(before).toEqual([]);
+    expect(await env.state()).toBe(EnvironmentState.RUNNING);
+    abort.abort();
   });
 
   test("a slow environment does not hold up another's progress", async () => {
