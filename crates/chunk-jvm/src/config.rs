@@ -29,6 +29,8 @@ pub(crate) struct Config {
     pub proc: PathBuf,
     /// Where the JVM's working directory is created.
     pub work_root: PathBuf,
+    /// The CPUs this process may run on.
+    pub cpus: usize,
 }
 
 #[derive(Default)]
@@ -85,6 +87,7 @@ impl Config {
             retry: Duration::from_secs(120),
             proc: "/proc".into(),
             work_root: std::env::temp_dir(),
+            cpus: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         })
     }
 }

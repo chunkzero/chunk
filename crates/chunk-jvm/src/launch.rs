@@ -78,7 +78,7 @@ pub(crate) fn prepare(
         .tempdir_in(&config.work_root)
         .map_err(|error| Failure::io(format!("cannot create the JVM's working directory: {error}")))?;
     let java = config.java_home.join("bin/java");
-    let flags = vec![format!("-Xmx{heap}m"), "-XX:+UseG1GC".into(), "-XX:+ExitOnOutOfMemoryError".into()];
+    let flags = flags(heap, config.cpus, matches!(aot, aot::Plan::Record(_)));
     let mut command = Command::new(&java);
     command
         .args(&flags)
@@ -96,8 +96,19 @@ pub(crate) fn prepare(
         .env("CHUNK_ARTIFACT_DIGEST", &app.sha256)
         .env("CHUNK_PLAYER_ADDRESS", player_address.to_string())
         .stdin(Stdio::null());
-    tracing::info!(heap_mib = heap, java = image, aot = aot.name(), "starting the JVM");
+    tracing::info!(heap_mib = heap, cpus = config.cpus, java = image, aot = aot.name(), "starting the JVM");
     Ok(Jvm { command, aot, java, flags, jar, directory: working })
+}
+
+/// The JVM's heap and collector flags for `heap` MiB on `cpus` CPUs. The heap starts at its full size, which spares a
+/// starting JVM the collections that grow it, unless the JVM is `recording` its AOT cache: finishing a recording needs
+/// the memory a heap that grows only as needed leaves. One CPU runs the serial collector, whose work doesn't compete
+/// with the app's from other threads.
+fn flags(heap: u64, cpus: usize, recording: bool) -> Vec<String> {
+    let collector = if cpus == 1 { "-XX:+UseSerialGC" } else { "-XX:+UseG1GC" };
+    let initial = (!recording).then(|| format!("-Xms{heap}m"));
+    let rest = [format!("-Xmx{heap}m"), collector.into(), "-XX:+ExitOnOutOfMemoryError".into()];
+    initial.into_iter().chain(rest).collect()
 }
 
 /// The app JAR at `jar` within `directory`. Its contents are the release's: they came in the archive core named, and

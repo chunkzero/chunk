@@ -24,8 +24,12 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long fetching a cache to use may take in all, well inside the host's readiness deadline.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
-/// The least memory a machine needs to record: finishing a recording takes a few hundred MiB beyond the heap.
-const RECORD_MIN_MIB: u64 = 768;
+/// The least memory a machine needs to record, as finishing a recording takes about 150 MiB beyond the JVM's running
+/// memory: 768 MiB, or 448 MiB on one CPU, where the JVM runs the serial collector and leaves a 512 MiB machine, which
+/// shows about 480 MiB, some 50 MiB to spare.
+fn record_min_mib(cpus: usize) -> u64 {
+    if cpus == 1 { 448 } else { 768 }
+}
 
 pub(crate) enum Plan {
     None,
@@ -37,8 +41,8 @@ pub(crate) enum Plan {
 
 impl Plan {
     /// Makes `launch`'s plan ready: fetches the cache to use into `cache`, or makes the directory a recording writes to
-    /// in `work_root`. A cache that can't be fetched is logged and left out, and a machine with less than
-    /// [`RECORD_MIN_MIB`] of `visible_mib` tells core it won't record.
+    /// in `work_root`. A cache that can't be fetched is logged and left out, and a machine whose `visible_mib` is less
+    /// than [`record_min_mib`] for its `cpus` tells core it won't record.
     pub async fn prepare(
         core: &fetch::Core,
         boot: &str,
@@ -46,6 +50,7 @@ impl Plan {
         cache: &Cache,
         work_root: &Path,
         visible_mib: Option<u64>,
+        cpus: usize,
     ) -> Result<Self, Failure> {
         match &launch.aot {
             None => Ok(Self::None),
@@ -62,7 +67,7 @@ impl Plan {
                     }
                 }
             }
-            Some(Aot::Record(_)) if visible_mib.is_some_and(|memory| memory < RECORD_MIN_MIB) => {
+            Some(Aot::Record(_)) if visible_mib.is_some_and(|memory| memory < record_min_mib(cpus)) => {
                 tracing::info!(
                     memory_mib = visible_mib,
                     "too little memory to record the AOT cache; running without it"
