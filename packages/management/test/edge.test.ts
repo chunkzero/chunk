@@ -69,13 +69,19 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
       (await h.sql<{ revision: bigint }[]>`select revision from environments where id = ${environmentId}`)[0]
         ?.revision ?? 0n;
     let sequence = 0n;
-    const report = async (fields: { gatewayAddresses?: string[]; readyToSuspend?: boolean; hostnamePing?: string }) =>
+    const report = async (fields: {
+      gatewayAddresses?: string[];
+      readyToSuspend?: boolean;
+      hostnamePing?: string;
+      logins?: bigint;
+    }) =>
       client.reportStatus({
         lease,
         sequence: ++sequence,
         desiredRevision: await revision(),
         gatewayAddresses: fields.gatewayAddresses ?? [],
         readyToSuspend: fields.readyToSuspend ?? false,
+        logins: fields.logins ?? 0n,
         pings: fields.hostnamePing
           ? [{ hostname: `${row?.hostname.toUpperCase()}.`, statusJson: fields.hostnamePing }]
           : [],
@@ -181,6 +187,55 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
     });
     expect(outcome).toBe(WakeOutcome.AWAKE);
     expect(await env.revision()).toBe(before);
+    env.close();
+  });
+
+  test("reported logins refund each counted login wake of the current window once", async () => {
+    const env = await running();
+    const { environmentId } = env;
+    const gatewayAddresses = [`${env.coreAddress}:25565`];
+    let logins = 0n;
+    const report = (added = 0n) => env.report({ gatewayAddresses, logins: (logins += added) });
+    await report();
+    const wakes = async () => {
+      const [row] = await h.sql<{ wake_count: number; wake_logins_pending: number }[]>`
+        select wake_count, wake_logins_pending from environments where id = ${environmentId}`;
+      return [row?.wake_count, row?.wake_logins_pending];
+    };
+    const wake = (reason = WakeReason.LOGIN) => edge.wake({ environmentId, clientAddress: "192.0.2.30", reason });
+    const expire = () =>
+      h.sql`update environments set wake_window_start = wake_window_start - interval '2 minutes'
+        where id = ${environmentId}`;
+
+    // Two login wakes, each followed by a report from before anyone logged in.
+    await wake();
+    await report();
+    await wake();
+    await report();
+    expect(await wakes()).toEqual([2, 2]);
+    await report(1n);
+    expect(await wakes()).toEqual([1, 1]);
+    await report();
+    expect(await wakes()).toEqual([1, 1]);
+    await report(3n);
+    expect(await wakes()).toEqual([0, 0]);
+    await h.sql`update environments set wake_count = 2 where id = ${environmentId}`;
+    await report(1n);
+    expect(await wakes()).toEqual([2, 0]);
+
+    // A login wake whose window ended is dropped, not refunded from a later window.
+    await wake();
+    await expire();
+    await report(1n);
+    expect(await wakes()).toEqual([3, 0]);
+    await wake();
+    await report();
+    await expire();
+    await h.sql`update environments set sleeping_ping = ${SleepingPingMode.WAKE} where id = ${environmentId}`;
+    await wake(WakeReason.PING);
+    expect(await wakes()).toEqual([1, 0]);
+    await report(1n);
+    expect(await wakes()).toEqual([1, 0]);
     env.close();
   });
 

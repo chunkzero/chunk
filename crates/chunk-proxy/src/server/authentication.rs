@@ -16,7 +16,10 @@ use openssl::{
 };
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    time::{Instant, timeout_at},
+};
 use zeroize::Zeroizing;
 
 use super::transport::{Transport, invalid_data};
@@ -33,9 +36,9 @@ pub(super) struct Authentication {
     offline: bool,
 }
 
-/// A client that failed authentication: once sent the encryption request, it closed or reset the connection, as
-/// offline-mode clients close it, or sent anything but a valid Encryption Response; or the session service didn't vouch
-/// for the name it claimed.
+/// A client that failed authentication: it sent no Login Start before the login deadline; or, once sent the encryption
+/// request, it closed or reset the connection, as offline-mode clients close it, sent anything but a valid Encryption
+/// Response, or sent nothing before the deadline; or the session service didn't vouch for the name it claimed.
 #[derive(Debug)]
 struct Unauthenticated(String);
 
@@ -84,8 +87,9 @@ impl Authentication {
         mut transport: Transport<S>,
         protocol_version: i32,
         compression: Option<usize>,
+        deadline: Instant,
     ) -> io::Result<Authenticated<S>> {
-        let profile = self.negotiate(&mut transport, compression).await?;
+        let profile = self.negotiate(&mut transport, compression, deadline).await?;
         Ok(Authenticated { protocol_version, profile, transport })
     }
 
@@ -93,16 +97,19 @@ impl Authentication {
         &self,
         transport: &mut Transport<S>,
         compression: Option<usize>,
+        deadline: Instant,
     ) -> io::Result<LoginSuccess> {
-        let start =
-            decode_packet::<LoginStart>(&transport.read_frame(LOGIN_FRAME_LIMIT).await?).map_err(invalid_data)?;
+        let start = timeout_at(deadline, transport.read_frame(LOGIN_FRAME_LIMIT))
+            .await
+            .map_err(|_| unauthenticated("no Login Start before the login deadline"))??;
+        let start = decode_packet::<LoginStart>(&start).map_err(invalid_data)?;
         if !valid_username(start.username.as_str()) {
             return Err(invalid_data("invalid login username"));
         }
         let profile = if self.offline {
             offline_profile(start.username.as_str())?
         } else {
-            self.authenticate(transport, start.username.as_str()).await?
+            self.authenticate(transport, start.username.as_str(), deadline).await?
         };
         if let Some(threshold) = compression {
             transport
@@ -120,6 +127,7 @@ impl Authentication {
         &self,
         transport: &mut Transport<S>,
         username: &str,
+        deadline: Instant,
     ) -> io::Result<LoginSuccess> {
         let mut token = [0; 4];
         rand_bytes(&mut token)?;
@@ -131,9 +139,9 @@ impl Authentication {
                 should_authenticate: true,
             })
             .await?;
-        let secret = self
-            .answer(transport, token)
+        let secret = timeout_at(deadline, self.answer(transport, token))
             .await
+            .map_err(|_| unauthenticated("no answer to the encryption request before the login deadline"))?
             .map_err(|error| unauthenticated(format!("no valid answer to the encryption request: {error}")))?;
         transport.enable_encryption(&secret)?;
         let hash = server_hash(&secret, &self.public_key);

@@ -18,7 +18,7 @@ import { endIfShuttingDown, failedPrecondition, invalid, notFound, required, str
 import { routeTable } from "./routes.ts";
 
 const keepaliveMs = 30_000;
-/** Accepted wakes that advance an environment's revision, per minute. */
+/** Accepted wakes that advance an environment's revision, per minute, less login wakes a report confirms. */
 export const wakesPerMinute = 30;
 
 export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceImpl<typeof EdgeService>> {
@@ -86,10 +86,13 @@ export function edgeService({ sql, changes, shutdown }: Deps): Partial<ServiceIm
         if (environment.report_desired_revision < environment.revision) return { outcome: accepted };
         const count = environment.in_window ? environment.wake_count : 0;
         if (count >= wakesPerMinute) return { outcome: WakeOutcome.THROTTLED };
+        // Only login wakes can be refunded, and only within the window they were counted in.
+        const pending = request.reason === WakeReason.LOGIN ? 1 : 0;
         await tx`
           update environments set
             wake_count = ${count + 1},
-            wake_window_start = case when ${environment.in_window} then wake_window_start else now() end
+            wake_window_start = case when ${environment.in_window} then wake_window_start else now() end,
+            wake_logins_pending = case when ${environment.in_window} then wake_logins_pending else 0 end + ${pending}
           where id = ${environmentId}`;
         await advanceRevision(tx, environmentId);
         return { outcome: accepted };

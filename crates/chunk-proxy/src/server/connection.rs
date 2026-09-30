@@ -9,7 +9,7 @@ use chunk_protocol::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    time::timeout,
+    time::{Instant, timeout_at},
 };
 
 use super::{
@@ -28,7 +28,8 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     compression: Option<usize>,
     platform: Option<&super::platform::Platform>,
 ) -> io::Result<Option<Authenticated<S>>> {
-    timeout(deadline, exchange(Transport::new(stream), responses, authentication, compression, platform))
+    let deadline = Instant::now() + deadline;
+    timeout_at(deadline, exchange(Transport::new(stream), responses, authentication, compression, platform, deadline))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "initial exchange timed out"))?
 }
@@ -39,6 +40,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     authentication: &Authentication,
     compression: Option<usize>,
     platform: Option<&super::platform::Platform>,
+    deadline: Instant,
 ) -> io::Result<Option<Authenticated<S>>> {
     let handshake =
         decode_packet::<Handshake>(&transport.read_frame(INITIAL_FRAME_LIMIT).await?).map_err(invalid_data)?;
@@ -62,7 +64,10 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             transport.write_packet(&Pong { payload: ping.payload }).await?;
         }
         2 if SUPPORTED.iter().any(|version| version.protocol == handshake.protocol_version.0) => {
-            return authentication.login(transport, handshake.protocol_version.0, compression).await.map(Some);
+            return authentication
+                .login(transport, handshake.protocol_version.0, compression, deadline)
+                .await
+                .map(Some);
         }
         2 => transport.write_encoded(&responses.unsupported_version).await?,
         _ => return Err(invalid_data("unsupported handshake intention")),

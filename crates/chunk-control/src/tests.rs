@@ -211,6 +211,7 @@ async fn concurrent_demand_coalesces_and_reservations_release_once() {
     assert_eq!(fixture.runtime.bindings.lock().unwrap().len(), 4);
     let original = control.claim(requests[0].clone()).await.unwrap();
     assert_eq!(original, control.claim(requests[0].clone()).await.unwrap());
+    assert_eq!(control.logins(), 4);
     assert!(matches!(control.claim(request("full", &uuid::Uuid::new_v4().to_string())).await, Err(Error::Capacity)));
     assert_eq!(control.state().unwrap().claims.len(), 4);
     control.cancel(requests[0].clone()).await.unwrap();
@@ -219,6 +220,8 @@ async fn concurrent_demand_coalesces_and_reservations_release_once() {
     assert!(control.activate(original.claim.unwrap()).await.is_err());
     let replacement = control.claim(request("replacement", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     assert_eq!(replacement.phase, ClaimPhase::Reserved as i32);
+    // A player leaving doesn't lower the count.
+    assert_eq!(control.logins(), 5);
     assert_eq!(fixture.runtime.sessions.lock().unwrap().len(), 2);
     assert_eq!(control.state().unwrap().claims.values().filter(|c| c.phase != Phase::Released).count(), 4);
     fixture.close().await;
@@ -336,6 +339,7 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
     let destination = control.move_player(command.clone()).unwrap();
     assert_eq!(pending_move(&control, &source).as_ref(), Some(&destination));
     let second = control.claim(destination.clone()).await.unwrap();
+    assert_eq!(control.logins(), 1, "a move is no login");
     let activation = second.claim.clone().unwrap();
     assert!(control.activate(activation.clone()).await.is_err());
     assert_eq!(

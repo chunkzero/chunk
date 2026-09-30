@@ -219,6 +219,8 @@ pub struct Control {
     jvms: jvm::Jvms,
     /// Wakes the capacity executor.
     capacity: tokio::sync::Notify,
+    /// Login claims reserved since control opened.
+    logins: std::sync::atomic::AtomicU64,
 }
 
 impl Control {
@@ -250,6 +252,7 @@ impl Control {
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
             capacity: tokio::sync::Notify::new(),
+            logins: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 

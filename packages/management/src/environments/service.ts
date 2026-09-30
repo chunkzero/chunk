@@ -85,11 +85,24 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
           else if (state === DeploymentState.FAILED) await failDeployment(tx, deploymentId, message);
           else throw invalid("deployment.state must be IN_PROGRESS, ACTIVE or FAILED");
         }
+        const logins = request.logins;
+        // Gateways admit only players they authenticated, so each new login confirms one of the window's login wakes.
         await tx`
           update environments set
             gateway_addresses = ${tx.array(gateways)}::text[],
             pings = ${JSON.stringify(pings)}::text::jsonb,
             online_players = ${request.onlinePlayers},
+            wake_count = case
+              when wake_window_start > now() - interval '1 minute'
+                then greatest(wake_count - least(greatest(${logins} - report_logins, 0), wake_logins_pending), 0)
+              else wake_count
+            end,
+            wake_logins_pending = case
+              when wake_window_start > now() - interval '1 minute'
+                then wake_logins_pending - least(greatest(${logins} - report_logins, 0), wake_logins_pending)
+              else 0
+            end,
+            report_logins = greatest(report_logins, ${logins}),
             report_sequence = ${request.sequence},
             report_desired_revision = ${request.desiredRevision},
             ready_to_suspend = ${request.readyToSuspend},
