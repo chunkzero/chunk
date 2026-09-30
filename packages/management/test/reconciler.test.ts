@@ -797,7 +797,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   });
 
   test("a request core releases while its suspension is under way is torn down before the suspension ends", async () => {
-    const reconciler = createReconciler(h.deps, options);
+    const reconciler = createReconciler(h.deps, { ...options, concurrency: 1 });
     const env = await running();
     await env.client.ensureCapacity(capacityRequest(env, "stopping"));
     await pass();
