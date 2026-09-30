@@ -116,19 +116,69 @@ pub(crate) struct WireError {
 }
 
 impl WireError {
-    pub(crate) fn into_status(self) -> Status {
-        Status { code: Code::from_name(&self.code).unwrap_or(Code::Unknown), message: self.message }
+    pub(crate) fn into_status(self, token: Option<&str>) -> Status {
+        Status { code: Code::from_name(&self.code).unwrap_or(Code::Unknown), message: redact(&self.message, token) }
     }
 }
 
 /// The error an unsuccessful HTTP response carries: its Connect error body, or else a code from its HTTP status.
-pub(crate) fn from_response(status: StatusCode, body: &[u8]) -> Error {
-    match serde_json::from_slice::<WireError>(body) {
-        Ok(error) => error.into_status().into(),
-        Err(_) => Status {
-            code: Code::from_http(status),
-            message: format!("HTTP {status}: {}", String::from_utf8_lossy(&body[..body.len().min(512)]).trim()),
-        }
-        .into(),
+pub(crate) fn from_response(status: StatusCode, body: &[u8], token: Option<&str>) -> Error {
+    if let Ok(error) = serde_json::from_slice::<WireError>(body) {
+        return error.into_status(token).into();
     }
+    let body = redact(&String::from_utf8_lossy(body), token);
+    let body: String = body.chars().take(512).collect();
+    Status { code: Code::from_http(status), message: format!("HTTP {status}: {}", body.trim()) }.into()
+}
+
+/// A protocol error whose description, which may quote the response, never shows `token`.
+pub(crate) fn protocol(problem: &str, token: Option<&str>) -> Error {
+    Error::Protocol(redact(problem, token))
+}
+
+const REDACTED: &str = "<redacted>";
+
+/// `text` without `token`, `Authorization` values, or long bearer tokens, which a proxy's error page may echo from the
+/// request.
+fn redact(text: &str, token: Option<&str>) -> String {
+    let text = match token {
+        Some(token) if !token.is_empty() => text.replace(token, REDACTED),
+        _ => text.to_owned(),
+    };
+    let text = redact_after(&text, "authorization", header_value);
+    redact_after(&text, "bearer", bearer_value)
+}
+
+/// Replaces the value `value` finds after each case-insensitive `keyword`, as a range of the text after it.
+fn redact_after(text: &str, keyword: &str, value: fn(&str) -> Option<(usize, usize)>) -> String {
+    let lower = text.to_ascii_lowercase();
+    let (mut redacted, mut kept, mut from) = (String::with_capacity(text.len()), 0, 0);
+    while let Some(found) = lower[from..].find(keyword) {
+        from += found + keyword.len();
+        if let Some((start, end)) = value(&text[from..]) {
+            redacted.push_str(&text[kept..from + start]);
+            redacted.push_str(REDACTED);
+            kept = from + end;
+            from = kept;
+        }
+    }
+    redacted.push_str(&text[kept..]);
+    redacted
+}
+
+/// A header's value after `: ` or `=`, as plain text or quoted JSON, up to the end of its line or string.
+fn header_value(rest: &str) -> Option<(usize, usize)> {
+    let quoting = |c: char| matches!(c, '"' | '\'' | '\\' | ' ' | '\t');
+    let value = rest.trim_start_matches(quoting).strip_prefix([':', '='])?.trim_start_matches(quoting);
+    let start = rest.len() - value.len();
+    let length = value.find(['"', '\'', '\\', '\r', '\n', ',', ';', '&', '}']).unwrap_or(value.len());
+    (length > 0).then_some((start, start + length))
+}
+
+/// A token-like word of at least 16 characters after `bearer `, so prose such as "a bearer token" stays readable.
+fn bearer_value(rest: &str) -> Option<(usize, usize)> {
+    let value = rest.trim_start_matches([' ', '\t']);
+    let start = rest.len() - value.len();
+    let length = value.find(|c: char| !(c.is_ascii_alphanumeric() || "-._~+/=".contains(c))).unwrap_or(value.len());
+    (start > 0 && length >= 16).then_some((start, start + length))
 }

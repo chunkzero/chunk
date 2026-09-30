@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use prost::Message;
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
@@ -19,6 +19,7 @@ pub struct Client {
     presigned: reqwest::Client,
     base_url: String,
     token: Option<String>,
+    timeout: Option<Duration>,
 }
 
 impl fmt::Debug for Client {
@@ -45,7 +46,7 @@ impl Client {
     pub fn with_http(http: reqwest::ClientBuilder, base_url: impl Into<String>) -> Self {
         let http = http.redirect(reqwest::redirect::Policy::custom(same_origin)).build().expect("HTTP client");
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        Self { http, presigned: reqwest::Client::new(), base_url, token: None }
+        Self { http, presigned: reqwest::Client::new(), base_url, token: None, timeout: None }
     }
 
     /// Sends `token` as the bearer token of every call to the service.
@@ -55,9 +56,19 @@ impl Client {
         self
     }
 
+    /// Fails a unary call that takes longer than `timeout` as `Unavailable`. Streams have no deadline.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     pub(crate) async fn unary<I: Message, O: Message + Default>(&self, path: &str, request: &I) -> Result<O, Error> {
-        let response = self.post(path, UNARY_CONTENT_TYPE, request.encode_to_vec()).send().await?;
-        let response = accept(response, UNARY_CONTENT_TYPE).await?;
+        let mut request = self.post(path, UNARY_CONTENT_TYPE, request.encode_to_vec());
+        if let Some(timeout) = self.timeout {
+            request = request.timeout(timeout);
+        }
+        let response = accept(request.send().await?, UNARY_CONTENT_TYPE, self.token.as_deref()).await?;
         O::decode(response.bytes().await?).map_err(|error| Error::Protocol(error.to_string()))
     }
 
@@ -68,7 +79,8 @@ impl Client {
     ) -> Result<Stream<O>, Error> {
         let body = envelope(0, &request.encode_to_vec());
         let response = self.post(path, STREAM_CONTENT_TYPE, body).send().await?;
-        Ok(Stream::new(accept(response, STREAM_CONTENT_TYPE).await?))
+        let response = accept(response, STREAM_CONTENT_TYPE, self.token.as_deref()).await?;
+        Ok(Stream::new(response, self.token.clone()))
     }
 
     /// Sends a release archive where `UploadRelease` said to, with only the headers it named: the URL is presigned,
@@ -180,16 +192,17 @@ fn s3_code(body: &[u8]) -> Option<&str> {
 }
 
 /// A Connect success is HTTP 200 with the expected content type. Anything else is an error: the Connect error it
-/// carries, a code from its HTTP status, or, for a 200 of another type such as a proxy's page, a protocol error.
-async fn accept(response: Response, content_type: &str) -> Result<Response, Error> {
+/// carries, a code from its HTTP status, or, for a 200 of another type such as a proxy's page, a protocol error. Its
+/// message never shows `token`.
+async fn accept(response: Response, content_type: &str, token: Option<&str>) -> Result<Response, Error> {
     let status = response.status();
     if status != StatusCode::OK {
-        return Err(error::from_response(status, &response.bytes().await?));
+        return Err(error::from_response(status, &response.bytes().await?, token));
     }
     let actual = response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
     let media_type = actual.split(';').next().unwrap_or_default().trim();
     if !media_type.eq_ignore_ascii_case(content_type) {
-        return Err(Error::Protocol(format!("expected {content_type}, got {actual:?}")));
+        return Err(error::protocol(&format!("expected {content_type}, got {actual:?}"), token));
     }
     Ok(response)
 }

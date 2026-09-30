@@ -19,6 +19,10 @@ fn command_structure_is_valid() {
     assert!(Cli::try_parse_from(["chunk", "local", "example", "--java", "/jdk/bin/java"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "dev", "--project", "project.json"]).is_err());
     assert!(Cli::try_parse_from(["chunk", "auth", "login", "--cloud", "--url", "https://example.com"]).is_err());
+    assert!(Cli::try_parse_from(["chunk", "deploy", "example", "--env", "staging", "--project", "demo"]).is_ok());
+    assert!(Cli::try_parse_from(["chunk", "deploy"]).is_err());
+    assert!(Cli::try_parse_from(["chunk", "environments", "create", "staging", "--project", "demo"]).is_ok());
+    assert!(Cli::try_parse_from(["chunk", "logs", "--env", "staging", "--follow", "--app", "lobby"]).is_ok());
     let host = "5a9e4aba-0000-4000-8000-000000000000";
     for operation in ["6f1c1f3e-8f1b-4c55-9a55-4a3b8f0f6d2e", "operator:6f1c1f3e-8f1b-4c55-9a55-4a3b8f0f6d2e"] {
         assert!(Cli::try_parse_from(["chunk", "nodes", "shutdown", host, "--operation", operation]).is_ok());
