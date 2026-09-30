@@ -3,11 +3,12 @@
 //! verification hashes every file there.
 
 use crate::Failure;
-use chunk_build::{ArchiveDigest, Installed, VerifiedRelease, install_release, installed_release};
+use chunk_build::{Installed, VerifiedRelease, install_trusted_release, installed_release};
 use chunk_proto::sync::v1::JvmLaunch;
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use tempfile::NamedTempFile;
 
@@ -74,12 +75,14 @@ fn plain(id: &str) -> bool {
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-/// The install of release `id` at `directory` if it verifies as that release. Anything else there is removed.
+/// The install of release `id` at `directory` if it verifies as that release, which an install a crash cut short does
+/// not. Anything else there is removed.
 pub(crate) fn cached(directory: &Path, id: &str) -> Result<Option<VerifiedRelease>, Failure> {
     let io = |error: io::Error| Failure::io(format!("cannot check the cached release: {error}"));
+    let checking = Instant::now();
     match installed_release(directory, id).map_err(io)? {
         Installed::Verified(release) => {
-            tracing::info!(release = id, "reusing the cached release");
+            tracing::info!(release = id, elapsed = ?checking.elapsed(), "reusing the cached release");
             Ok(Some(*release))
         }
         Installed::Missing => Ok(None),
@@ -91,19 +94,18 @@ pub(crate) fn cached(directory: &Path, id: &str) -> Result<Option<VerifiedReleas
     }
 }
 
-/// Unpacks the archive staged in `staging`, checked against `launch`'s digest, and installs it at `directory` once it
-/// verifies as `launch`'s release.
+/// Unpacks the archive staged in `staging`, which matched `launch`'s digest as it streamed, and installs it at
+/// `directory` as `launch`'s release. Core verified that release before naming it, so it isn't verified again.
 pub(crate) async fn install(
     staging: NamedTempFile,
     launch: &JvmLaunch,
     directory: &Path,
 ) -> Result<VerifiedRelease, Failure> {
-    let digest = ArchiveDigest { sha256: launch.archive_sha256.clone(), size: launch.archive_size };
     let (id, directory) = (launch.release_id.clone(), directory.to_owned());
-    tokio::task::spawn_blocking(move || install_release(staging.path(), &digest, &id, &directory))
+    tokio::task::spawn_blocking(move || install_trusted_release(staging.path(), &id, &directory))
         .await
         .map_err(Failure::io)?
-        .map_err(|error| Failure::verify(format!("the release archive fails verification: {error}")))
+        .map_err(|error| Failure::verify(format!("cannot install the release archive: {error}")))
 }
 
 fn remove(path: &Path) -> io::Result<()> {

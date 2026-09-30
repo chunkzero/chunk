@@ -70,6 +70,22 @@ fn installs_keep_what_verifies_and_replace_tampered_installs() {
 }
 
 #[test]
+fn trusted_installs_read_what_verification_would_without_verifying() {
+    let fixture = Fixture::new();
+    let release = fixture.publish().unwrap();
+    let archive = release.archive.clone().unwrap();
+    let releases = fixture.root.path().join("cache/releases");
+    let directory = releases.join(&release.id);
+    let error = install_trusted_release(&archive, "other", &directory).unwrap_err().to_string();
+    assert!(error.contains("not other"), "{error}");
+    assert_eq!(fs::read_dir(&releases).unwrap().count(), 0);
+
+    let installed = install_trusted_release(&archive, &release.id, &directory).unwrap();
+    assert_eq!(format!("{installed:?}"), format!("{:?}", verify_release(&directory).unwrap()));
+    assert_eq!(fs::read_dir(&releases).unwrap().count(), 1);
+}
+
+#[test]
 fn verification_rejects_consistently_signed_invalid_releases() {
     let fixture = Fixture::new();
     let (_, directory) = unpacked(&fixture);
