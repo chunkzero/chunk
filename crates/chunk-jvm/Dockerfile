@@ -12,7 +12,7 @@ RUN grep -qx "channel = \"$RUST_VERSION\"" rust-toolchain.toml \
 # are touched to always rebuild its own crates.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/src/target,sharing=locked \
     find crates proto -type f -exec touch {} + \
     && cargo build --release --locked -p chunk-jvm \
     && cp target/release/chunk-jvm /usr/local/bin/ \
