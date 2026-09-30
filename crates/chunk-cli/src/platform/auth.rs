@@ -66,7 +66,7 @@ async fn login(options: Login) -> io::Result<()> {
         let polled = match client.poll_login(&request).await {
             Ok(polled) => polled,
             Err(error) if error.code() == Code::NotFound => return Err(expired()),
-            Err(error) => return Err(poll_failed(error, &request.login_id)),
+            Err(error) => return Err(poll_failed(&error)),
         };
         match polled.state() {
             LoginState::Pending => {}
@@ -87,13 +87,10 @@ async fn login(options: Login) -> io::Result<()> {
     warn_overrides()
 }
 
-/// A failed poll's error without the login ID, which collects the token once the login is approved.
-pub(super) fn poll_failed(error: chunk_management::Error, login_id: &str) -> io::Error {
-    let message = api_error(error).to_string();
-    match login_id {
-        "" => io::Error::other(message),
-        login_id => io::Error::other(message.replace(login_id, "<redacted>")),
-    }
+/// A failed poll's error as its code alone: the server's diagnostic may quote the login ID, which collects the token
+/// once the login is approved.
+pub(super) fn poll_failed(error: &chunk_management::Error) -> io::Error {
+    io::Error::other(format!("Checking the login failed ({}); run `chunk auth login` again.", error.code()))
 }
 
 fn expired() -> io::Error {

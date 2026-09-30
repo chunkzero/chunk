@@ -89,8 +89,7 @@ fn projects_and_environments_are_chosen_by_name_or_id() {
 
 #[test]
 fn poll_errors_never_show_the_login_id() {
-    let error =
-        chunk_management::Error::Protocol("expected application/proto, got \"login_id=login-0123456789\"".into());
-    let message = super::auth::poll_failed(error, "login-0123456789").to_string();
-    assert!(!message.contains("login-0123456789"), "{message}");
+    let error = chunk_management::Error::Protocol(format!("{}login_id=login-0123456789", "x".repeat(600)));
+    let message = super::auth::poll_failed(&error).to_string();
+    assert!(!message.contains("login-01234"), "{message}");
 }
