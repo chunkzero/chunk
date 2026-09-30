@@ -40,6 +40,15 @@ unary! {
     start_login: "AuthService" / "StartLogin" (StartLoginRequest) -> StartLoginResponse;
     /// Polls a device login until it is approved, denied or expired.
     poll_login: "AuthService" / "PollLogin" (PollLoginRequest) -> PollLoginResponse;
+    get_current_principal:
+        "AuthService" / "GetCurrentPrincipal" (GetCurrentPrincipalRequest) -> GetCurrentPrincipalResponse;
+    revoke_token: "AuthService" / "RevokeToken" (RevokeTokenRequest) -> RevokeTokenResponse;
+
+    create_project: "ProjectService" / "CreateProject" (CreateProjectRequest) -> CreateProjectResponse;
+    list_projects: "ProjectService" / "ListProjects" (ListProjectsRequest) -> ListProjectsResponse;
+    create_environment:
+        "ProjectService" / "CreateEnvironment" (CreateEnvironmentRequest) -> CreateEnvironmentResponse;
+    list_environments: "ProjectService" / "ListEnvironments" (ListEnvironmentsRequest) -> ListEnvironmentsResponse;
 
     upload_release: "DeploymentService" / "UploadRelease" (UploadReleaseRequest) -> UploadReleaseResponse;
     complete_release_upload:
@@ -49,6 +58,7 @@ unary! {
     rollback: "DeploymentService" / "Rollback" (RollbackRequest) -> RollbackResponse;
     get_deployment: "DeploymentService" / "GetDeployment" (GetDeploymentRequest) -> GetDeploymentResponse;
     list_deployments: "DeploymentService" / "ListDeployments" (ListDeploymentsRequest) -> ListDeploymentsResponse;
+    list_apps: "DeploymentService" / "ListApps" (ListAppsRequest) -> ListAppsResponse;
 
     /// Core's status report, also its heartbeat; fenced by the lease from `attach`.
     report_status: "EnvironmentService" / "ReportStatus" (ReportStatusRequest) -> ReportStatusResponse;

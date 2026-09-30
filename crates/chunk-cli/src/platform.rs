@@ -1,134 +1,155 @@
-use std::{
-    io::{self, IsTerminal},
-    path::PathBuf,
-};
+//! Commands against a platform's `chunk.management.v1` API: Chunk Cloud or a self-hosted install, identically.
 
+use std::io;
+
+use chunk_management::{
+    Client, Code,
+    v1::{Environment, ListEnvironmentsRequest, ListProjectsRequest, Project},
+};
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
-use url::Url;
+
+mod auth;
+mod config;
+mod deploy;
+mod resources;
+
+use auth::{Auth, Login};
 
 #[derive(Subcommand)]
-pub(crate) enum Auth {
-    /// Choose a platform (login coming soon).
+pub(crate) enum Command {
+    /// Log in to a platform, show the login, or log out.
+    #[command(subcommand)]
+    Auth(Auth),
+    /// Alias for auth login.
     Login(Login),
-    /// Show login status.
-    Status,
+    /// Build the project and deploy its release to an environment.
+    Deploy(deploy::Options),
+    /// List projects, or create one.
+    Projects(resources::Projects),
+    /// List a project's environments, or create one.
+    Environments(resources::Environments),
+    /// List an environment's recent deployments, newest first.
+    Deployments(resources::Deployments),
+    /// List the apps and session types an environment's active release runs.
+    Apps(resources::Apps),
+    /// Print an environment's logs.
+    Logs(resources::Logs),
+}
+
+pub(crate) async fn run(command: Command) -> io::Result<()> {
+    match command {
+        Command::Auth(auth) => auth::run(auth).await,
+        Command::Login(options) => auth::run(Auth::Login(options)).await,
+        Command::Deploy(options) => deploy::run(options).await,
+        Command::Projects(options) => resources::projects(options).await,
+        Command::Environments(options) => resources::environments(options).await,
+        Command::Deployments(options) => resources::deployments(options).await,
+        Command::Apps(options) => resources::apps(options).await,
+        Command::Logs(options) => resources::logs(options).await,
+    }
 }
 
 #[derive(Args)]
-pub(crate) struct Login {
-    /// Use Chunk Cloud.
-    #[arg(long, conflicts_with = "url")]
-    cloud: bool,
-    /// Use a custom API URL.
-    #[arg(long, value_parser = parse_url)]
-    url: Option<Url>,
+struct ProjectArg {
+    /// The project's name or ID; defaults to your only project.
+    #[arg(long, global = true, env = "CHUNK_PROJECT")]
+    project: Option<String>,
 }
 
-#[derive(Default, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(tag = "kind", content = "url", rename_all = "snake_case")]
-enum Target {
-    #[default]
-    Cloud,
-    Custom(Url),
+#[derive(Args)]
+struct EnvironmentArgs {
+    #[command(flatten)]
+    project: ProjectArg,
+    /// The environment's name or ID.
+    #[arg(long = "env")]
+    environment: String,
 }
 
-impl std::fmt::Display for Target {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cloud => f.write_str("Chunk Cloud"),
-            Self::Custom(url) => url.fmt(f),
-        }
-    }
+/// A client for the selected platform, carrying the caller's token.
+struct Session {
+    client: Client,
 }
 
-fn parse_url(value: &str) -> Result<Url, String> {
-    let url = Url::parse(value).map_err(|_| "expected an absolute HTTP(S) platform URL")?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("platform URL must use HTTP(S) without credentials, query, or fragment".into());
-    }
-    Ok(url)
-}
-
-fn config_path() -> io::Result<PathBuf> {
-    let directory = match std::env::var_os("CHUNK_CONFIG_DIR") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        Some(_) => return Err(io::Error::other("CHUNK_CONFIG_DIR must not be empty")),
-        None => dirs::config_dir()
-            .ok_or_else(|| io::Error::other("cannot locate CLI configuration directory"))?
-            .join("chunk"),
-    };
-    Ok(directory.join("target.json"))
-}
-
-fn resolve_target(override_url: Option<&str>, saved: impl FnOnce() -> io::Result<Target>) -> io::Result<Target> {
-    match override_url {
-        Some(value) => parse_url(value).map(Target::Custom).map_err(io::Error::other),
-        None => saved(),
-    }
-}
-
-fn target() -> io::Result<Target> {
-    let override_url = chunk_service::optional::<String>("CHUNK_API_URL")?;
-    resolve_target(override_url.as_deref(), || {
-        let bytes = match std::fs::read(config_path()?) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Target::Cloud),
-            Err(error) => return Err(error),
+impl Session {
+    fn open() -> io::Result<Self> {
+        let credentials = config::credentials()?;
+        let Some(token) = credentials.token else {
+            return Err(io::Error::other(format!(
+                "Not logged in to {}. Run `chunk auth login`, or set CHUNK_TOKEN.",
+                credentials.target
+            )));
         };
-        let target = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if let Target::Custom(ref url) = target {
-            parse_url(url.as_str()).map_err(io::Error::other)?;
-        }
-        Ok(target)
-    })
+        Ok(Self { client: Client::new(credentials.target.url()).with_token(token.expose()) })
+    }
+
+    async fn project(&self, selector: &ProjectArg) -> io::Result<Project> {
+        let client = &self.client;
+        let projects = all(|page_token| async move {
+            let request = ListProjectsRequest { page_token, ..ListProjectsRequest::default() };
+            client.list_projects(&request).await.map(|page| (page.projects, page.next_page_token))
+        })
+        .await?;
+        choose(projects, selector.project.as_deref(), "project", |project| [&project.id, &project.name])
+    }
+
+    async fn environment(&self, selector: &EnvironmentArgs) -> io::Result<(Project, Environment)> {
+        let project = self.project(&selector.project).await?;
+        let client = &self.client;
+        let project_id = &project.id;
+        let environments = all(|page_token| async move {
+            let request = ListEnvironmentsRequest { project_id: project_id.clone(), page_token, page_size: 0 };
+            client.list_environments(&request).await.map(|page| (page.environments, page.next_page_token))
+        })
+        .await?;
+        let environment = choose(environments, Some(&selector.environment), "environment", |environment| {
+            [&environment.id, &environment.name]
+        })?;
+        Ok((project, environment))
+    }
 }
 
-pub(crate) fn auth(command: Auth) -> io::Result<()> {
-    match command {
-        Auth::Login(options) => {
-            let selected = if let Some(url) = options.url {
-                Target::Custom(url)
-            } else if options.cloud {
-                Target::Cloud
-            } else {
-                if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-                    return Err(io::Error::other("Use --cloud or --url URL without a terminal."));
-                }
-                cliclack::intro("Log in")?;
-                let cloud = cliclack::select("Platform")
-                    .item(true, "Chunk Cloud", "Managed hosting")
-                    .item(false, "Custom platform", "Self-hosted")
-                    .interact()?;
-                if cloud {
-                    Target::Cloud
-                } else {
-                    let value: String = cliclack::input("API URL")
-                        .placeholder("https://chunk.example.com")
-                        .validate(|value: &String| parse_url(value).map(|_| ()))
-                        .interact()?;
-                    Target::Custom(parse_url(&value).map_err(io::Error::other)?)
-                }
-            };
-            let path = config_path()?;
-            let directory = path.parent().expect("target configuration has a parent");
-            std::fs::create_dir_all(directory)?;
-            let mut file = tempfile::NamedTempFile::new_in(directory)?;
-            serde_json::to_writer_pretty(&mut file, &selected).map_err(io::Error::other)?;
-            file.persist(path).map_err(io::Error::other)?;
-            cliclack::log::success(format!("Saved: {selected}"))?;
-            if std::env::var_os("CHUNK_API_URL").is_some() {
-                cliclack::log::warning("CHUNK_API_URL overrides your saved platform.")?;
-            }
-            cliclack::log::info("Login coming soon.")
+/// A failed call, pointing at `chunk auth login` when the token was refused.
+fn api_error(error: chunk_management::Error) -> io::Error {
+    if error.code() == Code::Unauthenticated {
+        return io::Error::other(format!("{error}. Log in again with `chunk auth login`."));
+    }
+    io::Error::other(error)
+}
+
+/// Every item of a paginated list, given a call for the page after a page token.
+async fn all<T, Page>(mut page: impl FnMut(String) -> Page) -> io::Result<Vec<T>>
+where
+    Page: Future<Output = Result<(Vec<T>, String), chunk_management::Error>>,
+{
+    let mut items = Vec::new();
+    let mut token = String::new();
+    loop {
+        let (batch, next) = page(token).await.map_err(api_error)?;
+        items.extend(batch);
+        if next.is_empty() {
+            return Ok(items);
         }
-        Auth::Status => cliclack::log::info(format!("{} · Login coming soon", target()?)),
+        token = next;
+    }
+}
+
+/// The item whose ID or name is `selector`; without one, the only item.
+fn choose<T>(items: Vec<T>, selector: Option<&str>, kind: &str, key: fn(&T) -> [&String; 2]) -> io::Result<T> {
+    let names = || items.iter().map(|item| key(item)[1].as_str()).collect::<Vec<_>>().join(", ");
+    let Some(selector) = selector else {
+        return match items.len() {
+            0 => {
+                Err(io::Error::other(format!("There are no {kind}s yet; create one with `chunk {kind}s create NAME`.")))
+            }
+            1 => Ok(items.into_iter().next().expect("one item")),
+            _ => Err(io::Error::other(format!("Choose a {kind} with --{kind}: {}.", names()))),
+        };
+    };
+    let found = items.iter().position(|item| key(item).iter().any(|value| *value == selector));
+    match found {
+        Some(index) => Ok(items.into_iter().nth(index).expect("found item")),
+        None if items.is_empty() => Err(io::Error::other(format!("No {kind} is named {selector}; there are none."))),
+        None => Err(io::Error::other(format!("No {kind} is named {selector}; there are: {}.", names()))),
     }
 }
 

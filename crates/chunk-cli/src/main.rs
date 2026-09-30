@@ -40,11 +40,8 @@ enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
-    /// Manage authentication.
-    #[command(subcommand)]
-    Auth(platform::Auth),
-    /// Alias for auth login.
-    Login(platform::Login),
+    #[command(flatten)]
+    Platform(platform::Command),
     /// Move players or drain runtimes.
     Players(players::Options),
     /// Inspect nodes and request shutdown.
@@ -92,8 +89,7 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
-        Command::Auth(auth) => platform::auth(auth),
-        Command::Login(options) => platform::auth(platform::Auth::Login(options)),
+        Command::Platform(command) => platform::run(command).await,
         Command::Players(options) => players::run(options).await,
         Command::Nodes(options) => nodes::run(options).await,
     }
