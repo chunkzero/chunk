@@ -147,7 +147,7 @@ async fn install(
         release
     };
     let visible = memory::visible_mib(&config.proc);
-    let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root, visible).await?;
+    let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root, visible, config.cpus).await?;
     launch::prepare(config, launch, &release, &directory, player_address, aot)
 }
 
