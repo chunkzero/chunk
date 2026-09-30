@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 use serde::Deserialize;
 
-use crate::error::{Error, WireError};
+use crate::error::{self, Error, WireError};
 
 const COMPRESSED: u8 = 0x01;
 const END_STREAM: u8 = 0x02;
@@ -86,8 +86,8 @@ struct EndOfStream {
 }
 
 fn end_of_stream(payload: &[u8], token: Option<&str>) -> Result<(), Error> {
-    let end: EndOfStream =
-        serde_json::from_slice(payload).map_err(|error| Error::Protocol(format!("end-of-stream message: {error}")))?;
+    let end: EndOfStream = serde_json::from_slice(payload)
+        .map_err(|error| error::protocol(&format!("end-of-stream message: {error}"), token))?;
     match end.error {
         Some(error) => Err(error.into_status(token).into()),
         None => Ok(()),

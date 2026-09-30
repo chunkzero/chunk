@@ -202,7 +202,7 @@ async fn accept(response: Response, content_type: &str, token: Option<&str>) -> 
     let actual = response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
     let media_type = actual.split(';').next().unwrap_or_default().trim();
     if !media_type.eq_ignore_ascii_case(content_type) {
-        return Err(Error::Protocol(format!("expected {content_type}, got {actual:?}")));
+        return Err(error::protocol(&format!("expected {content_type}, got {actual:?}"), token));
     }
     Ok(response)
 }

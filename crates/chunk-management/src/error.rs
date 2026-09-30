@@ -131,6 +131,11 @@ pub(crate) fn from_response(status: StatusCode, body: &[u8], token: Option<&str>
     Status { code: Code::from_http(status), message: format!("HTTP {status}: {}", body.trim()) }.into()
 }
 
+/// A protocol error whose description, which may quote the response, never shows `token`.
+pub(crate) fn protocol(problem: &str, token: Option<&str>) -> Error {
+    Error::Protocol(redact(problem, token))
+}
+
 const REDACTED: &str = "<redacted>";
 
 /// `text` without `token`, `Authorization` values, or long bearer tokens, which a proxy's error page may echo from the

@@ -120,7 +120,9 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             Response::builder().status(204).body(Full::new(Bytes::new()).boxed()).expect("response")
         }
-        "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => full(200, "text/html", "<p>sign in</p>"),
+        "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => {
+            full(200, "text/html; echoed-authorization=Bearer secret", "<p>sign in</p>")
+        }
         "/chunk.management.v1.EnvironmentService/ReportFailedAuth" => {
             let request = ReportFailedAuthRequest::decode(body).expect("report failed auth request");
             assert_eq!(request.failures[0].client_address, "192.0.2.1");
@@ -133,6 +135,7 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
                 "malformed" => [envelope(0, &[0xff, 0xff]), entry, envelope(2, b"{}")].concat(),
                 "no_end" => entry,
                 "mid_frame" => [entry.clone(), entry[..entry.len() - 1].to_vec()].concat(),
+                "echoed_end" => envelope(2, br#"{"error":"Authorization: Bearer secret"}"#),
                 other => panic!("unexpected environment {other}"),
             };
             chunked(stream, 1024)
@@ -239,6 +242,12 @@ async fn errors_never_show_bearer_tokens_the_server_echoes() {
     let anonymous = Client::new(format!("http://{}", serve().await));
     let error = anonymous.deploy(&DeployRequest::default()).await.unwrap_err();
     assert_eq!(error.to_string(), "unauthenticated: a valid bearer token is required");
+
+    let content_type = client.set_wake_alarm(&SetWakeAlarmRequest::default()).await.unwrap_err().to_string();
+    let end = read_logs("echoed_end").await.message().await.unwrap_err().to_string();
+    for output in [content_type, end] {
+        assert!(!output.contains("secret"), "{output}");
+    }
 }
 
 #[tokio::test]
