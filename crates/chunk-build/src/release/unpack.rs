@@ -62,6 +62,12 @@ pub fn unpack_release(
         return Err(io::Error::other("release archive differs from its expected size and SHA-256"));
     }
     file.rewind()?;
+    unpack(file, destination, limits)
+}
+
+/// Extracts the release archive `file` into the new directory `destination` as [`unpack_release`] does, without
+/// checking its digest.
+pub(super) fn unpack(file: fs::File, destination: &Path, limits: &UnpackLimits) -> io::Result<()> {
     let parent = destination.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let staging = tempfile::Builder::new().prefix(".unpack-").tempdir_in(parent)?;

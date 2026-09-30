@@ -27,10 +27,10 @@ pub struct VerifiedRelease {
 }
 
 #[derive(Deserialize)]
-struct Signed {
-    id: String,
+pub(super) struct Signed {
+    pub id: String,
     #[serde(flatten)]
-    metadata: Metadata,
+    pub metadata: Metadata,
 }
 
 /// Validates an unpacked release directory the same way `chunk build` validates the releases it publishes.

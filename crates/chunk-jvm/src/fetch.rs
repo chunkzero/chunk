@@ -116,7 +116,7 @@ impl Core {
         if actual != sha256 {
             return Err(Failure::verify(format!("the {what}'s SHA-256 is {actual}, not {sha256}")));
         }
-        file.sync_all().map_err(|error| Failure::io(format!("cannot stage the {what}: {error}")))
+        Ok(())
     }
 
     /// Uploads the AOT cache at `path`, which this boot recorded, in order.

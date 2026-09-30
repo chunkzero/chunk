@@ -3,7 +3,6 @@
 use crate::{Failure, aot, config::Config, memory};
 use chunk_build::VerifiedRelease;
 use chunk_proto::sync::v1::JvmLaunch;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     net::IpAddr,
@@ -73,7 +72,7 @@ pub(crate) fn prepare(
     }
     let profile = release.profiles.get(&launch.profile).map(|profile| u64::from(profile.memory_mib));
     let heap = heap_mib(memory::visible_mib(&config.proc), profile)?;
-    let jar = checked_jar(directory, &app.jar, &app.sha256)?;
+    let jar = app_jar(directory, &app.jar)?;
     let working = tempfile::Builder::new()
         .prefix("chunk-jvm-")
         .tempdir_in(&config.work_root)
@@ -101,14 +100,14 @@ pub(crate) fn prepare(
     Ok(Jvm { command, aot, java, flags, jar, directory: working })
 }
 
-/// The app JAR at `jar` within `directory`, once its contents hash to `sha256`.
-fn checked_jar(directory: &Path, jar: &str, sha256: &str) -> Result<PathBuf, Failure> {
+/// The app JAR at `jar` within `directory`. Its contents are the release's: they came in the archive core named, and
+/// a cached install verifies before it is reused.
+fn app_jar(directory: &Path, jar: &str) -> Result<PathBuf, Failure> {
     let unreadable = |error: std::io::Error| Failure::verify(format!("cannot read the app JAR {jar}: {error}"));
     let root = directory.canonicalize().map_err(unreadable)?;
     let path = directory.join(jar).canonicalize().map_err(unreadable)?;
-    let bytes = fs::read(&path).map_err(unreadable)?;
-    if !path.starts_with(&root) || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
-        return Err(Failure::verify(format!("the app JAR {jar} differs from its digest")));
+    if !path.starts_with(&root) {
+        return Err(Failure::verify(format!("the app JAR {jar} is outside the release")));
     }
     Ok(path)
 }

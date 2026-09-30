@@ -1,5 +1,5 @@
-//! `chunk-jvm`: the main process of a remote JVM machine. It asks core what its host runs, fetches and verifies that
-//! release, and supervises the JVM until it exits.
+//! `chunk-jvm`: the main process of a remote JVM machine. It asks core what its host runs, fetches that release,
+//! checked against the digest core names, and supervises the JVM until it exits.
 
 mod address;
 mod aot;

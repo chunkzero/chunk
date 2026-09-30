@@ -12,7 +12,7 @@ mod publication;
 mod release;
 pub use release::{
     ArchiveDigest, Installed, JavaRuntime, JvmDescriptor, UnpackLimits, VerifiedRelease, install_release,
-    installed_release, read_jvm_descriptor, unpack_release, verify_release,
+    install_trusted_release, installed_release, read_jvm_descriptor, unpack_release, verify_release,
 };
 #[cfg(feature = "compiler")]
 pub use release::{Release, ReleaseInputs, publish_release};
