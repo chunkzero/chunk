@@ -5,7 +5,7 @@ use std::{
 
 use futures_util::TryStreamExt;
 use object_store::{
-    CredentialProvider, ObjectStore, PutMode, PutOptions, PutPayload,
+    CredentialProvider, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload,
     aws::{AmazonS3Builder, AwsCredential},
     path::Path,
     prefix::PrefixStore,
