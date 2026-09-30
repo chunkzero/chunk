@@ -11,7 +11,7 @@ import { deriveKeys } from "./crypto.ts";
 import { connect, migrate } from "./db.ts";
 import type { Deps } from "./deps.ts";
 import { startReconciler } from "./environments/reconciler.ts";
-import { logStoreIssuer } from "./logstore/issuer.ts";
+import { type LogStoreIssuer, logStoreIssuer } from "./logstore/issuer.ts";
 import { dockerProvider, socketPathFrom } from "./providers/docker.ts";
 import type { Provider } from "./providers/provider.ts";
 import { localReleaseStore } from "./releases/local-store.ts";
@@ -31,6 +31,8 @@ export interface Extensions {
   publicMethods?: readonly DescMethod[];
   /** Replaces the authenticator; `tokens` is chunk's own, for the bearers the install does not recognize itself. */
   authenticator?: (tokens: Authenticator, deps: Deps) => Authenticator;
+  /** Issues environments' log store credentials instead of `config.logStore`. */
+  logStore?: LogStoreIssuer;
   /** Starts background work once the service is set up; the returned function stops it before the database closes. */
   start?: (deps: Deps) => Promise<() => Promise<void>>;
 }
@@ -73,7 +75,7 @@ export async function start(config: Config, extensions: Extensions = {}) {
       resolveTxt,
       publicUrl: config.publicUrl,
       edge: config.edge,
-      logStore: config.logStore && logStoreIssuer(config.logStore),
+      logStore: extensions.logStore ?? (config.logStore && logStoreIssuer(config.logStore)),
       jvmImage: config.machines?.jvmImage,
       changes: await listenForChanges(sql),
       shutdown: shutdown.signal,
