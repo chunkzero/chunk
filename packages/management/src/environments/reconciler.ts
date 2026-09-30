@@ -73,6 +73,8 @@ interface Run {
   options: ReconcilerOptions;
   fenced: Fence;
   retries: RetryBackoff;
+  /** Aborts when the reconciler stops. */
+  signal: AbortSignal | undefined;
 }
 
 /** A timeout or no room: the call may be retried, and the step backs off until it succeeds or the bound passes. */
@@ -187,7 +189,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?
   };
   return {
     async pass(epoch, environmentIds) {
-      const run: Run = { deps, options: bounded, fenced: fence(deps.sql, epoch), retries };
+      const run: Run = { deps, options: bounded, fenced: fence(deps.sql, epoch), retries, signal };
       const ids =
         environmentIds ??
         (await deps.sql<{ id: string }[]>`select id from environments order by seq`).map(({ id }) => id);
@@ -231,8 +233,8 @@ function fence(sql: Sql, epoch: bigint): Fence {
 }
 
 async function reconcileEnvironment(run: Run, id: string) {
-  const { deps, options, fenced, retries } = run;
-  const { sql } = deps;
+  const { deps, options, fenced, retries, signal } = run;
+  const { sql, logStore } = deps;
   const { provider } = options;
   // Read when the run starts, not when it was scheduled, since it may have waited for the pool.
   const [environment] = await sql<EnvironmentRow[]>`
@@ -251,8 +253,11 @@ async function reconcileEnvironment(run: Run, id: string) {
       await provider.destroy(name).catch((error: unknown) => failures.push(error));
     }
     if (failures.length > 0) throw failures[0];
-    // Once no machine is left to write them.
-    await deps.logStore?.deleteEnvironment(id);
+    // Once no machine is left to write them, and bounded like a provider call so a stalled store holds up no worker.
+    if (logStore) {
+      const bound = AbortSignal.any([AbortSignal.timeout(options.timeouts.callMs), ...(signal ? [signal] : [])]);
+      await untilAborted(bound, logStore.deleteEnvironment(id, bound));
+    }
     await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
     for (const request of capacity) {
       retries.clear(capacityKey(request));
@@ -417,6 +422,19 @@ function capacityKey(request: Pick<CapacityRow, "environment_id" | "request_id">
 
 function teardownKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
   return `teardown/${request.environment_id}/${request.request_id}`;
+}
+
+/** Settles like `work`, or rejects once `signal` aborts, whether or not `work` stops then. */
+async function untilAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
+  const aborted = Promise.withResolvers<never>();
+  const abort = () => aborted.reject(signal.reason);
+  if (signal.aborted) abort();
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await Promise.race([work, aborted.promise]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 /**

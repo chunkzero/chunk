@@ -1,5 +1,5 @@
 import type { LogStore } from "../config.ts";
-import { deletePrefix, unescapeXml } from "./s3.ts";
+import { deletePrefix } from "./s3.ts";
 import { signV4 } from "./sigv4.ts";
 
 /** Object-store access for one environment's log prefix. */
@@ -22,21 +22,22 @@ export interface LogStoreGrant {
 export interface LogStoreIssuer {
   grant(environmentId: string): Promise<LogStoreGrant>;
   /**
-   * Removes the environment's log objects. A deleted environment's are removed once its machines are gone and before
-   * the environment is, and a rejection is retried by a later reconciler pass.
+   * Removes the environment's log objects, stopping once `signal` aborts. A deleted environment's are removed once its
+   * machines are gone and before the environment is. The reconciler gives up on a call that outlasts its provider call
+   * timeout, and retries a failed or abandoned one on a later pass.
    */
-  deleteEnvironment(environmentId: string): Promise<void>;
+  deleteEnvironment(environmentId: string, signal: AbortSignal): Promise<void>;
 }
 
 /** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
 const maxRefreshBeforeMs = 15 * 60 * 1000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
-  return store.sharedCredentials ? sharedIssuer(store, fetchImpl) : stsIssuer(store, fetchImpl);
+  return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
 }
 
 /** Every environment gets the operator's credentials; only for installs that trust all environments' code. */
-function sharedIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
+function sharedIssuer(store: LogStore): LogStoreIssuer {
   const grant = (environmentId: string): LogStoreGrant => ({
     ...location(store, environmentId),
     accessKeyId: store.accessKeyId,
@@ -46,7 +47,7 @@ function sharedIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer 
   });
   return {
     grant: async (environmentId) => grant(environmentId),
-    deleteEnvironment: (environmentId) => deletePrefix(grant(environmentId), fetchImpl),
+    deleteEnvironment: (environmentId, signal) => deletePrefix(grant(environmentId), signal),
   };
 }
 
@@ -74,7 +75,9 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
     );
     const response = await fetchImpl(url, { method: "POST", headers, body });
     const xml = await response.text();
-    if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}: ${xml.slice(0, 500)}`);
+    // Only the error's code: a response can echo the request.
+    const code = /<Code>(\w+)<\/Code>/.exec(xml)?.[1];
+    if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}${code ? `: ${code}` : ""}`);
     const expiration = new Date(element(xml, "Expiration"));
     if (Number.isNaN(expiration.getTime())) throw new Error("STS AssumeRole returned no expiration");
     const grant: LogStoreGrant = {
@@ -106,8 +109,8 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
   };
   return {
     grant,
-    async deleteEnvironment(environmentId) {
-      await deletePrefix(await grant(environmentId), fetchImpl);
+    async deleteEnvironment(environmentId, signal) {
+      await deletePrefix(await grant(environmentId), signal);
       cache.delete(environmentId);
     },
   };
@@ -145,5 +148,10 @@ export function prefixPolicy(bucket: string, prefix: string) {
 function element(xml: string, name: string): string {
   const value = new RegExp(`<${name}>([^<]*)</${name}>`).exec(xml)?.[1];
   if (value === undefined) throw new Error(`STS AssumeRole returned no ${name}`);
-  return unescapeXml(value);
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
 }

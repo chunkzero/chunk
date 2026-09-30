@@ -1,66 +1,45 @@
-import { createHash } from "node:crypto";
-
 import type { LogStoreGrant } from "./issuer.ts";
-import { signV4 } from "./sigv4.ts";
+
+/** How many objects are deleted at once. */
+const deleteConcurrency = 16;
 
 /**
- * Deletes every object below the grant's prefix, listing and deleting up to 1000 at a time until none are left. The
- * bucket is addressed by path, as core addresses it.
+ * Deletes every object below the grant's prefix, a listed page at a time until none are left, and stops once `signal`
+ * aborts. The bucket is addressed by path, as core addresses it.
  */
-export async function deletePrefix(grant: LogStoreGrant, fetchImpl: typeof fetch): Promise<void> {
-  const bucket = `${grant.endpoint.replace(/\/+$/, "")}/${grant.bucket}`;
-  const list = new URL(bucket);
-  list.searchParams.set("list-type", "2");
-  list.searchParams.set("prefix", grant.prefix);
+export async function deletePrefix(grant: LogStoreGrant, signal: AbortSignal): Promise<void> {
+  const client = new Bun.S3Client({
+    endpoint: grant.endpoint,
+    region: grant.region,
+    bucket: grant.bucket,
+    accessKeyId: grant.accessKeyId,
+    secretAccessKey: grant.secretAccessKey,
+    ...(grant.sessionToken ? { sessionToken: grant.sessionToken } : {}),
+  });
   for (;;) {
-    const listed = await request(grant, fetchImpl, "GET", list);
-    const keys = [...listed.matchAll(/<Key>([^<]*)<\/Key>/g)].map(([, key = ""]) => unescapeXml(key));
-    if (keys.length === 0) return;
-    const body = `<Delete><Quiet>true</Quiet>${keys.map((key) => `<Object><Key>${escapeXml(key)}</Key></Object>`).join("")}</Delete>`;
-    const result = await request(grant, fetchImpl, "POST", new URL(`${bucket}?delete`), body, {
-      "content-md5": createHash("md5").update(body).digest("base64"),
-    });
-    const failed = /<Error>[\s\S]*?<\/Error>/.exec(result);
-    if (failed) throw new Error(`deleting log objects failed: ${failed[0].slice(0, 500)}`);
+    signal.throwIfAborted();
+    const listed = await s3("listing", () => client.list({ prefix: grant.prefix }));
+    const keys = (listed.contents ?? []).map(({ key }) => key);
+    if (keys.some((key) => !key.startsWith(grant.prefix))) throw new Error("log store listing returned foreign keys");
+    if (keys.length === 0) {
+      if (listed.isTruncated) throw new Error("log store listing was truncated without keys");
+      return;
+    }
+    for (let i = 0; i < keys.length; i += deleteConcurrency) {
+      signal.throwIfAborted();
+      const batch = keys.slice(i, i + deleteConcurrency);
+      await Promise.all(batch.map((key) => s3("deletion", () => client.delete(key))));
+    }
   }
 }
 
-async function request(
-  grant: LogStoreGrant,
-  fetchImpl: typeof fetch,
-  method: string,
-  url: URL,
-  body = "",
-  headers: Record<string, string> = {},
-): Promise<string> {
-  const signed = signV4(
-    {
-      method,
-      url,
-      headers: {
-        ...headers,
-        "x-amz-content-sha256": createHash("sha256").update(body).digest("hex"),
-        ...(grant.sessionToken ? { "x-amz-security-token": grant.sessionToken } : {}),
-      },
-      body,
-    },
-    { accessKeyId: grant.accessKeyId, secretAccessKey: grant.secretAccessKey, region: grant.region, service: "s3" },
-  );
-  const response = await fetchImpl(url, { method, headers: signed, ...(body ? { body } : {}) });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`S3 ${method} failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
-  return text;
-}
-
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-export function unescapeXml(value: string): string {
-  return value
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&apos;", "'")
-    .replaceAll("&amp;", "&");
+/** Runs one request, keeping only the error's code, since a response can echo the request's credentials. */
+async function s3<T>(what: string, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    const known = typeof code === "string" && /^\w+$/.test(code) ? `: ${code}` : "";
+    throw new Error(`log store ${what} failed${known}`);
+  }
 }

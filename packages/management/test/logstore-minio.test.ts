@@ -69,8 +69,8 @@ describe.skipIf(!minioUrl)("STS log store credentials against MinIO", () => {
     for (const key of keys) {
       expect((await s3("PUT", `/${bucket}/environments/${key}`, root, "entry")).status).toBe(200);
     }
-    await issuer.deleteEnvironment("env_c");
-    await issuer.deleteEnvironment("env_c");
+    await issuer.deleteEnvironment("env_c", AbortSignal.timeout(10_000));
+    await issuer.deleteEnvironment("env_c", AbortSignal.timeout(10_000));
     const listed = await (await s3("GET", `/${bucket}?list-type=2&prefix=environments/env_c`, root)).text();
     expect([...listed.matchAll(/<Key>([^<]*)<\/Key>/g)].map(([, key]) => key)).toEqual(["environments/env_cd/log/1"]);
   });
