@@ -1,4 +1,5 @@
 import type { LogStore } from "../config.ts";
+import { deletePrefix, unescapeXml } from "./s3.ts";
 import { signV4 } from "./sigv4.ts";
 
 /** Object-store access for one environment's log prefix. */
@@ -20,33 +21,38 @@ export interface LogStoreGrant {
  */
 export interface LogStoreIssuer {
   grant(environmentId: string): Promise<LogStoreGrant>;
+  /**
+   * Removes the environment's log objects. A deleted environment's are removed once its machines are gone and before
+   * the environment is, and a rejection is retried by a later reconciler pass.
+   */
+  deleteEnvironment(environmentId: string): Promise<void>;
 }
 
 /** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
 const maxRefreshBeforeMs = 15 * 60 * 1000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
-  return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
+  return store.sharedCredentials ? sharedIssuer(store, fetchImpl) : stsIssuer(store, fetchImpl);
 }
 
 /** Every environment gets the operator's credentials; only for installs that trust all environments' code. */
-function sharedIssuer(store: LogStore): LogStoreIssuer {
+function sharedIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
+  const grant = (environmentId: string): LogStoreGrant => ({
+    ...location(store, environmentId),
+    accessKeyId: store.accessKeyId,
+    secretAccessKey: store.secretAccessKey,
+    sessionToken: "",
+    expireTime: undefined,
+  });
   return {
-    async grant(environmentId) {
-      return {
-        ...location(store, environmentId),
-        accessKeyId: store.accessKeyId,
-        secretAccessKey: store.secretAccessKey,
-        sessionToken: "",
-        expireTime: undefined,
-      };
-    },
+    grant: async (environmentId) => grant(environmentId),
+    deleteEnvironment: (environmentId) => deletePrefix(grant(environmentId), fetchImpl),
   };
 }
 
 /**
  * Temporary credentials from STS AssumeRole, limited by an inline session policy to the environment's prefix. Works
- * with AWS S3 and MinIO.
+ * with AWS S3 and MinIO. An environment's objects are deleted with its own credentials.
  */
 function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
   const cache = new Map<string, { grant: Promise<LogStoreGrant>; refreshAt: number }>();
@@ -81,23 +87,28 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
     const lifetime = expiration.getTime() - issuedAt;
     return { grant, refreshAt: expiration.getTime() - Math.min(maxRefreshBeforeMs, lifetime / 3) };
   };
+  const grant = (environmentId: string) => {
+    const cached = cache.get(environmentId);
+    if (cached && Date.now() < cached.refreshAt) return cached.grant;
+    // Cached before it settles, so concurrent grants share one AssumeRole; it is refreshed once it has settled.
+    const issued = assume(environmentId);
+    const entry = { grant: issued.then(({ grant }) => grant), refreshAt: Number.POSITIVE_INFINITY };
+    cache.set(environmentId, entry);
+    issued.then(
+      ({ refreshAt }) => {
+        entry.refreshAt = refreshAt;
+      },
+      () => {
+        if (cache.get(environmentId) === entry) cache.delete(environmentId);
+      },
+    );
+    return entry.grant;
+  };
   return {
-    grant(environmentId) {
-      const cached = cache.get(environmentId);
-      if (cached && Date.now() < cached.refreshAt) return cached.grant;
-      // Cached before it settles, so concurrent grants share one AssumeRole; it is refreshed once it has settled.
-      const issued = assume(environmentId);
-      const entry = { grant: issued.then(({ grant }) => grant), refreshAt: Number.POSITIVE_INFINITY };
-      cache.set(environmentId, entry);
-      issued.then(
-        ({ refreshAt }) => {
-          entry.refreshAt = refreshAt;
-        },
-        () => {
-          if (cache.get(environmentId) === entry) cache.delete(environmentId);
-        },
-      );
-      return entry.grant;
+    grant,
+    async deleteEnvironment(environmentId) {
+      await deletePrefix(await grant(environmentId), fetchImpl);
+      cache.delete(environmentId);
     },
   };
 }
@@ -134,10 +145,5 @@ export function prefixPolicy(bucket: string, prefix: string) {
 function element(xml: string, name: string): string {
   const value = new RegExp(`<${name}>([^<]*)</${name}>`).exec(xml)?.[1];
   if (value === undefined) throw new Error(`STS AssumeRole returned no ${name}`);
-  return value
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&apos;", "'")
-    .replaceAll("&amp;", "&");
+  return unescapeXml(value);
 }

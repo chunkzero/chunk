@@ -1455,14 +1455,28 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("deleting an environment revokes its token and removes its machines", async () => {
+  test("deleting an environment revokes its token and removes its machines, then its log objects", async () => {
     const env = await running();
     env.close();
     await h.client(ProjectService).deleteEnvironment({ environmentId: env.environmentId });
     expect(await env.state()).toBe(EnvironmentState.DELETING);
     expect(await codeOf(env.client.reportUsage({}))).toBe(Code.Unauthenticated);
-    await pass();
+    const deleted: string[] = [];
+    let unavailable = true;
+    const logStore = {
+      grant: () => Promise.reject(new Error("unused")),
+      async deleteEnvironment(environmentId: string) {
+        expect(machines.has(env.coreName)).toBe(false);
+        if (unavailable) throw new Error("log store unavailable");
+        deleted.push(environmentId);
+      },
+    };
+    await reconcile({ ...h.deps, logStore }, options, epoch);
     expect(machines.has(env.coreName)).toBe(false);
+    expect(await env.state()).toBe(EnvironmentState.DELETING);
+    unavailable = false;
+    await reconcile({ ...h.deps, logStore }, options, epoch);
+    expect(deleted).toContain(env.environmentId);
     expect(await codeOf(env.state())).toBe(Code.NotFound);
   });
 });

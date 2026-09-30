@@ -251,6 +251,8 @@ async function reconcileEnvironment(run: Run, id: string) {
       await provider.destroy(name).catch((error: unknown) => failures.push(error));
     }
     if (failures.length > 0) throw failures[0];
+    // Once no machine is left to write them.
+    await deps.logStore?.deleteEnvironment(id);
     await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
     for (const request of capacity) {
       retries.clear(capacityKey(request));
