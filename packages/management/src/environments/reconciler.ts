@@ -21,7 +21,7 @@ import { advanceRevision } from "./store.ts";
 
 export interface ReconcilerOptions extends MachineOptions {
   provider: Provider;
-  /** How many environments the leader works on at once. */
+  /** How many environments the leader works on at once, and how many it tears down released machines for alongside. */
   concurrency: number;
   /** How long each provider call may take before it counts as a transient failure. */
   timeouts: ProviderTimeouts;
@@ -157,7 +157,9 @@ export interface Reconciler {
    * Schedules a run under leader epoch `epoch` for each of `environmentIds`, or for every environment and a sweep of
    * untracked machines when omitted, and resolves once they have all settled. Runs share a pool of
    * `options.concurrency`, and an environment never has two at once, so a slow or failing environment holds up only its
-   * own. Rejects with `Superseded` when a run was superseded.
+   * own. Each environment's failed and releasing requests are torn down by runs in a pool of their own, so a request
+   * released while the environment's run waits on a provider call, such as core's suspension, is torn down at once.
+   * Rejects with `Superseded` when a run was superseded.
    */
   pass(epoch: bigint, environmentIds?: string[]): Promise<void>;
   /** Resolves once no run is scheduled or under way. */
@@ -172,6 +174,7 @@ export interface Reconciler {
 export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?: AbortSignal): Reconciler {
   const bounded = { ...options, provider: boundedProvider(options.provider, options.timeouts, signal) };
   const pool = keyedPool(options.concurrency);
+  const teardowns = keyedPool(options.concurrency);
   const retries = retryBackoff(options.capacityRetryMs);
   const guarded = (what: string, work: () => Promise<void>) => async () => {
     if (signal?.aborted) return;
@@ -188,12 +191,16 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?
       const ids =
         environmentIds ??
         (await deps.sql<{ id: string }[]>`select id from environments order by seq`).map(({ id }) => id);
-      const runs = ids.map((id) =>
+      const runs = ids.flatMap((id) => [
         pool.schedule(
           `environment/${id}`,
           guarded(`reconciling environment ${id}`, () => reconcileEnvironment(run, id)),
         ),
-      );
+        teardowns.schedule(
+          `environment/${id}`,
+          guarded(`tearing down environment ${id}'s capacity`, () => tearDownReleased(run, id)),
+        ),
+      ]);
       if (!environmentIds) {
         const sweeping = guarded("sweeping", () => sweep(run));
         runs.push(pool.schedule("sweep", sweeping));
@@ -201,7 +208,9 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?
       const failed = (await Promise.allSettled(runs)).find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
     },
-    idle: pool.idle,
+    async idle() {
+      await Promise.all([pool.idle(), teardowns.idle()]);
+    },
   };
 }
 
@@ -249,11 +258,6 @@ async function reconcileEnvironment(run: Run, id: string) {
     }
     retries.clear(coreKey(id));
     return;
-  }
-  for (const request of capacity) {
-    if (request.state === CapacityState.FAILED || request.state === CapacityState.RELEASING) {
-      await tearDown(run, request);
-    }
   }
   if (!(await desiredDeployment(sql, id))) return;
 
@@ -560,6 +564,16 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
     );
   }
   await notify(sql, { kind: "environment", environmentId: request.environment_id });
+}
+
+/** Tears down the machines of an environment's failed and releasing requests; a deleting one's run removes its own. */
+async function tearDownReleased(run: Run, id: string) {
+  const requests = await run.deps.sql<CapacityRow[]>`
+    select * from capacity_requests
+    where environment_id = ${id} and not torn_down and state in (${CapacityState.FAILED}, ${CapacityState.RELEASING})
+      and exists (select 1 from environments where id = ${id} and state <> ${EnvironmentState.DELETING})
+    order by create_time`;
+  for (const request of requests) await tearDown(run, request);
 }
 
 /**

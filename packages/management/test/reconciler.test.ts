@@ -796,6 +796,50 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
+  test("a request core releases while its suspension is under way is torn down before the suspension ends", async () => {
+    const reconciler = createReconciler(h.deps, { ...options, concurrency: 1 });
+    const env = await running();
+    await env.client.ensureCapacity(capacityRequest(env, "stopping"));
+    await pass();
+    const name = nameOf(env.environmentId, "stopping");
+    await env.client.reportStatus({
+      lease: env.lease,
+      sequence: 1n,
+      desiredRevision: env.revision,
+      gatewayAddresses: [`${env.coreName}:25565`],
+      readyToSuspend: true,
+    });
+    // Core, stopping, releases its capacity and waits, up to a bound, for the release to finish before its machine stops.
+    let waitedMs: number | undefined;
+    hooks.suspend = async (suspended) => {
+      if (suspended !== env.coreName) return;
+      const started = Date.now();
+      await env.client.releaseCapacity({ requestId: "stopping", lease: env.lease });
+      // What the release's notification schedules.
+      void reconciler.pass(epoch, [env.environmentId]);
+      while (Date.now() - started < 2000) {
+        const released = await env.client.releaseCapacity({ requestId: "stopping", lease: env.lease });
+        if (released.capacity?.state === CapacityState.RELEASED) {
+          waitedMs = Date.now() - started;
+          break;
+        }
+        await Bun.sleep(20);
+      }
+    };
+    behaviour.suspendStops = true;
+    try {
+      await reconciler.pass(epoch, [env.environmentId]);
+      await reconciler.idle();
+    } finally {
+      hooks.suspend = undefined;
+      behaviour.suspendStops = false;
+    }
+    expect(waitedMs).toBeLessThan(1000);
+    expect(machines.has(name)).toBe(false);
+    expect(env.core()?.state).toBe("stopped");
+    env.close();
+  });
+
   test("a JVM machine found stopped while its environment sleeps fails its request, however its suspension ended", async () => {
     const env = await running();
     await env.client.ensureCapacity(capacityRequest(env, "cut-short"));

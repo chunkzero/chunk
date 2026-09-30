@@ -112,8 +112,8 @@ machine stopped instead of pausing fails, and core asks for new capacity once it
 
 Several management processes may share a database; the one holding the reconciler's advisory lock leads, and a new
 leader fences the old one's writes. The leader works on up to `CHUNK_RECONCILE_CONCURRENCY` environments at once, one
-operation per environment, gives up on a provider call after its timeout and observes the machines again on the next
-pass.
+operation per environment, and tears down released machines alongside those operations, so core's suspension never waits
+on its own releases. It gives up on a provider call after its timeout and observes the machines again on the next pass.
 
 **Providers.** The package exports `start(config, extensions)` from `src/index.ts`. An install can plug in its own
 provider, extra Connect services and migrations, its own authentication, and its own log store credential issuer through
