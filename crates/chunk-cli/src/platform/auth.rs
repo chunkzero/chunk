@@ -6,14 +6,14 @@ use std::{
 };
 
 use chunk_management::{
-    Client, Code,
+    Code,
     v1::{GetCurrentPrincipalRequest, LoginState, PollLoginRequest, RevokeTokenRequest, StartLoginRequest},
 };
 use clap::{Args, Subcommand};
 use url::Url;
 
 use super::{
-    api_error,
+    api_error, client,
     config::{self, Config, Secret, Target, parse_url},
 };
 
@@ -47,7 +47,7 @@ pub(super) async fn run(command: Auth) -> io::Result<()> {
 
 async fn login(options: Login) -> io::Result<()> {
     let target = choose_target(options)?;
-    let client = Client::new(target.url());
+    let client = client(&target);
     let started =
         client.start_login(&StartLoginRequest { client_name: "chunk CLI".into() }).await.map_err(api_error)?;
     cliclack::note(
@@ -122,21 +122,22 @@ async fn status() -> io::Result<()> {
     let Some(token) = credentials.token else {
         return cliclack::log::info(format!("{target} · not logged in"));
     };
-    let client = Client::new(target.url()).with_token(token.expose());
+    let client = client(target).with_token(token.expose());
     let current = client.get_current_principal(&GetCurrentPrincipalRequest {}).await.map_err(api_error)?;
     let name = current.principal.unwrap_or_default().display_name;
     let source = if credentials.from_env { " with CHUNK_TOKEN" } else { "" };
     cliclack::log::info(format!("{target} · logged in as {name}{source}"))
 }
 
-/// Revokes the saved token, never `CHUNK_TOKEN`, and forgets it even when the platform can't be reached.
+/// Forgets the saved token, then revokes it; never `CHUNK_TOKEN`. A revocation that fails or times out only warns.
 async fn logout() -> io::Result<()> {
-    let mut config = config::load()?;
-    let Some(token) = config.token.take() else {
-        cliclack::log::info(format!("Not logged in to {}.", config.target))?;
+    let Config { target, token } = config::load()?;
+    let Some(token) = token else {
+        cliclack::log::info(format!("Not logged in to {target}."))?;
         return warn_overrides();
     };
-    let client = Client::new(config.target.url()).with_token(token.expose());
+    config::forget(&token)?;
+    let client = client(&target).with_token(token.expose());
     let revoked = async {
         let current = client.get_current_principal(&GetCurrentPrincipalRequest {}).await?;
         if let Some(token) = current.token {
@@ -145,14 +146,13 @@ async fn logout() -> io::Result<()> {
         Ok::<_, chunk_management::Error>(())
     }
     .await;
-    config::save(&config)?;
     match revoked {
-        Ok(()) => cliclack::log::success(format!("Logged out of {}", config.target))?,
+        Ok(()) => cliclack::log::success(format!("Logged out of {target}"))?,
         Err(error) if error.code() == Code::Unauthenticated => {
-            cliclack::log::success(format!("Logged out of {}; its token was already invalid", config.target))?;
+            cliclack::log::success(format!("Logged out of {target}; its token was already invalid"))?;
         }
         Err(error) => {
-            cliclack::log::warning(format!("Forgot the token, but {} could not revoke it: {error}", config.target))?;
+            cliclack::log::warning(format!("Forgot the token, but {target} could not revoke it: {error}"))?;
         }
     }
     warn_overrides()

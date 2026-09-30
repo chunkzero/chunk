@@ -29,6 +29,10 @@ fn the_saved_token_only_goes_to_its_own_platform() {
     let other = resolve(Some("https://other.example/"), None, || Ok(saved(custom("https://custom.example/")))).unwrap();
     assert_eq!(other.target, custom("https://other.example/"));
     assert!(other.token.is_none());
+    let cloud = resolve(Some("https://API.chunkzero.com/"), None, || Ok(saved(Target::Cloud))).unwrap();
+    assert_eq!((cloud.target, cloud.token.unwrap().expose()), (Target::Cloud, "chunk_saved"));
+    let slash = resolve(Some("https://custom.example/api/"), None, || Ok(saved(custom("https://custom.example/api"))));
+    assert_eq!(slash.unwrap().token.unwrap().expose(), "chunk_saved");
     let overridden = resolve(None, Some("chunk_ci".into()), || Ok(saved(Target::Cloud))).unwrap();
     assert_eq!((overridden.target, overridden.token.unwrap().expose()), (Target::Cloud, "chunk_ci"));
 }
@@ -45,7 +49,11 @@ fn saved_logins_are_private_and_never_debug_print_the_token() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let mode = || std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(load_from(&path).unwrap(), config);
+        assert_eq!(mode(), 0o600);
     }
 }
 
@@ -73,4 +81,8 @@ fn projects_and_environments_are_chosen_by_name_or_id() {
     assert!(choose(items(), Some("missing"), "project", key).is_err());
     assert_eq!(choose(items().split_off(1), None, "project", key).unwrap().1, "arena");
     assert!(choose(Vec::new(), None, "project", key).unwrap_err().to_string().contains("chunk projects create"));
+    let shared = vec![("prj_1".to_owned(), "demo".to_owned()), ("prj_2".to_owned(), "demo".to_owned())];
+    let error = choose(shared.clone(), Some("demo"), "project", key).unwrap_err().to_string();
+    assert!(error.contains("prj_1, prj_2"), "{error}");
+    assert_eq!(choose(shared, Some("prj_2"), "project", key).unwrap().0, "prj_2");
 }

@@ -16,12 +16,14 @@ pub struct Stream<T> {
     response: reqwest::Response,
     buffer: BytesMut,
     finished: bool,
+    /// The bearer token, which error messages never show.
+    token: Option<String>,
     message: PhantomData<fn() -> T>,
 }
 
 impl<T: Message + Default> Stream<T> {
-    pub(crate) fn new(response: reqwest::Response) -> Self {
-        Self { response, buffer: BytesMut::new(), finished: false, message: PhantomData }
+    pub(crate) fn new(response: reqwest::Response, token: Option<String>) -> Self {
+        Self { response, buffer: BytesMut::new(), finished: false, token, message: PhantomData }
     }
 
     /// The next message, or None once the service ended the stream successfully.
@@ -34,7 +36,7 @@ impl<T: Message + Default> Stream<T> {
             if let Some((flags, payload)) = self.frame()? {
                 if flags & END_STREAM != 0 {
                     self.finished = true;
-                    return end_of_stream(&payload).map(|()| None);
+                    return end_of_stream(&payload, self.token.as_deref()).map(|()| None);
                 }
                 if flags & COMPRESSED != 0 {
                     return self.fail("a compressed message, which the client did not ask for".into());
@@ -83,11 +85,11 @@ struct EndOfStream {
     error: Option<WireError>,
 }
 
-fn end_of_stream(payload: &[u8]) -> Result<(), Error> {
+fn end_of_stream(payload: &[u8], token: Option<&str>) -> Result<(), Error> {
     let end: EndOfStream =
         serde_json::from_slice(payload).map_err(|error| Error::Protocol(format!("end-of-stream message: {error}")))?;
     match end.error {
-        Some(error) => Err(error.into_status().into()),
+        Some(error) => Err(error.into_status(token).into()),
         None => Ok(()),
     }
 }

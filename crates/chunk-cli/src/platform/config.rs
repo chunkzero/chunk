@@ -26,6 +26,11 @@ impl Target {
             Self::Custom(url) => url.as_str(),
         }
     }
+
+    /// The URL without a trailing slash, equal for targets that reach the same API.
+    fn endpoint(&self) -> &str {
+        self.url().trim_end_matches('/')
+    }
 }
 
 impl fmt::Display for Target {
@@ -114,11 +119,37 @@ pub(super) fn load_from(path: &Path) -> io::Result<Config> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
         Err(error) => return Err(error),
     };
+    #[cfg(unix)]
+    make_private(path)?;
     let config: Config = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if let Target::Custom(url) = &config.target {
         parse_url(url.as_str()).map_err(io::Error::other)?;
     }
     Ok(config)
+}
+
+/// Gives a saved login the mode 0600 `save_to` creates it with, so only its owner can read it.
+#[cfg(unix)]
+fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata(path)?.permissions().mode() & 0o777 == 0o600 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+        let message = format!("{} must be private to you (mode 0600), and changing it failed: {error}", path.display());
+        io::Error::new(error.kind(), message)
+    })
+}
+
+/// Forgets the saved token if it is still `token`, so a login since it was loaded stays.
+pub(super) fn forget(token: &Secret) -> io::Result<()> {
+    let path = path()?;
+    let mut config = load_from(&path)?;
+    if config.token.as_ref() == Some(token) {
+        config.token = None;
+        save_to(&path, &config)?;
+    }
+    Ok(())
 }
 
 /// Replaces the file atomically. The temporary file it renames is created readable by its owner alone.
@@ -153,6 +184,10 @@ pub(super) fn resolve(
         return Ok(Credentials { target, token: Some(Secret(token)), from_env: true });
     }
     let saved = saved()?;
-    let token = saved.token.filter(|_| target.as_ref().is_none_or(|target| *target == saved.target));
-    Ok(Credentials { target: target.unwrap_or(saved.target), token, from_env: false })
+    Ok(match target {
+        Some(target) if target.endpoint() != saved.target.endpoint() => {
+            Credentials { target, token: None, from_env: false }
+        }
+        _ => Credentials { target: saved.target, token: saved.token, from_env: false },
+    })
 }

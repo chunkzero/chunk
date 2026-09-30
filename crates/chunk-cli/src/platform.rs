@@ -1,6 +1,6 @@
 //! Commands against a platform's `chunk.management.v1` API: Chunk Cloud or a self-hosted install, identically.
 
-use std::io;
+use std::{io, time::Duration};
 
 use chunk_management::{
     Client, Code,
@@ -14,6 +14,10 @@ mod deploy;
 mod resources;
 
 use auth::{Auth, Login};
+use config::Target;
+
+/// How long a unary call may take before it fails as unavailable.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -79,7 +83,7 @@ impl Session {
                 credentials.target
             )));
         };
-        Ok(Self { client: Client::new(credentials.target.url()).with_token(token.expose()) })
+        Ok(Self { client: client(&credentials.target).with_token(token.expose()) })
     }
 
     async fn project(&self, selector: &ProjectArg) -> io::Result<Project> {
@@ -108,6 +112,11 @@ impl Session {
     }
 }
 
+/// A client for `target` without credentials, whose unary calls time out.
+fn client(target: &Target) -> Client {
+    Client::new(target.url()).with_timeout(REQUEST_TIMEOUT)
+}
+
 /// A failed call, pointing at `chunk auth login` when the token was refused.
 fn api_error(error: chunk_management::Error) -> io::Error {
     if error.code() == Code::Unauthenticated {
@@ -133,7 +142,7 @@ where
     }
 }
 
-/// The item whose ID or name is `selector`; without one, the only item.
+/// The item whose ID or name is `selector`; without one, the only item. A name several items share is ambiguous.
 fn choose<T>(items: Vec<T>, selector: Option<&str>, kind: &str, key: fn(&T) -> [&String; 2]) -> io::Result<T> {
     let names = || items.iter().map(|item| key(item)[1].as_str()).collect::<Vec<_>>().join(", ");
     let Some(selector) = selector else {
@@ -145,12 +154,21 @@ fn choose<T>(items: Vec<T>, selector: Option<&str>, kind: &str, key: fn(&T) -> [
             _ => Err(io::Error::other(format!("Choose a {kind} with --{kind}: {}.", names()))),
         };
     };
-    let found = items.iter().position(|item| key(item).iter().any(|value| *value == selector));
-    match found {
-        Some(index) => Ok(items.into_iter().nth(index).expect("found item")),
-        None if items.is_empty() => Err(io::Error::other(format!("No {kind} is named {selector}; there are none."))),
-        None => Err(io::Error::other(format!("No {kind} is named {selector}; there are: {}.", names()))),
-    }
+    let by_id = items.iter().position(|item| key(item)[0] == selector);
+    let by_name: Vec<usize> = (0..items.len()).filter(|&index| key(&items[index])[1] == selector).collect();
+    let index = match (by_id, by_name.as_slice()) {
+        (Some(index), _) => index,
+        (None, [index]) => *index,
+        (None, []) if items.is_empty() => {
+            return Err(io::Error::other(format!("No {kind} is named {selector}; there are none.")));
+        }
+        (None, []) => return Err(io::Error::other(format!("No {kind} is named {selector}; there are: {}.", names()))),
+        (None, _) => {
+            let ids = by_name.iter().map(|&index| key(&items[index])[0].as_str()).collect::<Vec<_>>().join(", ");
+            return Err(io::Error::other(format!("Several {kind}s are named {selector}; choose one by ID: {ids}.")));
+        }
+    };
+    Ok(items.into_iter().nth(index).expect("found item"))
 }
 
 #[cfg(test)]

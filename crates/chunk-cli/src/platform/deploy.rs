@@ -10,7 +10,6 @@ use chunk_management::{
     },
 };
 use sha2::{Digest, Sha256};
-use tokio_util::sync::CancellationToken;
 
 use super::{EnvironmentArgs, Session, api_error};
 use crate::building::{self, BuildMode, progress::Progress};
@@ -44,7 +43,17 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
             } => deployment?,
             () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "deploy stopped")),
         };
-        follow(client, &environment, deployment, &stop).await
+        let id = deployment.id.clone();
+        tokio::select! {
+            followed = follow(client, &environment, deployment) => followed,
+            () = stop.cancelled() => {
+                cliclack::log::info(format!(
+                    "Stopped waiting; deployment {id} continues. `chunk deployments --env {}` shows it.",
+                    environment.name
+                ))?;
+                Err(io::Error::new(io::ErrorKind::Interrupted, "stopped waiting"))
+            }
+        }
     })
     .await
 }
@@ -102,12 +111,7 @@ async fn deploy(client: &Client, environment: &Environment, release_id: &str) ->
 }
 
 /// Prints the deployment's states until it is active, failed or superseded.
-async fn follow(
-    client: &Client,
-    environment: &Environment,
-    mut deployment: Deployment,
-    stop: &CancellationToken,
-) -> io::Result<()> {
+async fn follow(client: &Client, environment: &Environment, mut deployment: Deployment) -> io::Result<()> {
     cliclack::log::info(format!(
         "Deploying release {} to {} as {}",
         short(&deployment.release_id),
@@ -138,22 +142,13 @@ async fn follow(
             }
             _ => {}
         }
-        tokio::select! {
-            () = tokio::time::sleep(POLL_INTERVAL) => {}
-            () = stop.cancelled() => {
-                cliclack::log::info(format!(
-                    "Stopped waiting; deployment {} continues. `chunk deployments --env {}` shows it.",
-                    deployment.id, environment.name
-                ))?;
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped waiting"));
-            }
-        }
+        tokio::time::sleep(POLL_INTERVAL).await;
         let request = GetDeploymentRequest { deployment_id: deployment.id.clone() };
         match client.get_deployment(&request).await {
             Ok(response) => {
                 deployment = response.deployment.ok_or_else(|| io::Error::other("GetDeployment returned none"))?;
             }
-            // A restarting platform answers again shortly; the deployment goes on without it.
+            // A restarting or slow platform answers again shortly; the deployment goes on without it.
             Err(error) if error.code() == Code::Unavailable => {}
             Err(error) => return Err(api_error(error)),
         }

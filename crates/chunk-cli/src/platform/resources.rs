@@ -40,8 +40,8 @@ enum Create {
 pub(crate) struct Deployments {
     #[command(flatten)]
     environment: EnvironmentArgs,
-    /// How many to list.
-    #[arg(long, default_value = "20")]
+    /// How many to list, up to 200.
+    #[arg(long, default_value = "20", value_parser = clap::value_parser!(u8).range(1..=200))]
     limit: u8,
 }
 

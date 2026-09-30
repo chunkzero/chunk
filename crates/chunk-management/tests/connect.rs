@@ -3,12 +3,14 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use chunk_management::v1::{
     AttachRequest, AttachResponse, DeployRequest, DeployResponse, Deployment, FailedAuth, GetDeploymentRequest,
-    LogEntry, ObjectStore, ReadLogsRequest, ReadLogsResponse, ReportFailedAuthRequest, ReportStatusRequest,
-    SetWakeAlarmRequest, UploadTarget, WakeReason, WakeRequest, WatchRoutesRequest, WatchRoutesResponse,
+    ListAppsRequest, ListProjectsRequest, LogEntry, ObjectStore, ReadLogsRequest, ReadLogsResponse,
+    ReportFailedAuthRequest, ReportStatusRequest, RevokeTokenRequest, SetWakeAlarmRequest, UploadTarget, WakeReason,
+    WakeRequest, WatchRoutesRequest, WatchRoutesResponse,
 };
 use chunk_management::{Client, Code, Error};
 use http_body_util::combinators::BoxBody;
@@ -103,6 +105,18 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
             full(404, "application/json", r#"{"code":"not_found","message":"deployment not found"}"#)
         }
         "/chunk.management.v1.EdgeService/Wake" => full(503, "text/plain", "upstream is down"),
+        "/chunk.management.v1.ProjectService/ListProjects" => {
+            full(502, "text/html", "<pre>POST / HTTP/1.1\r\nAuthorization: Bearer secret\r\nAccept: */*</pre>")
+        }
+        "/chunk.management.v1.DeploymentService/ListApps" => full(
+            400,
+            "application/json",
+            r#"{"code":"invalid_argument","message":"{\"authorization\":\"Basic dXNlcg==\"} bearer sentinel0123456789abcdef"}"#,
+        ),
+        "/chunk.management.v1.AuthService/RevokeToken" => {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            full(200, "application/proto", Vec::new())
+        }
         "/chunk.management.v1.EnvironmentService/ReportStatus" => {
             Response::builder().status(204).body(Full::new(Bytes::new()).boxed()).expect("response")
         }
@@ -208,6 +222,29 @@ async fn errors_map_connect_codes_and_plain_http_statuses() {
     let unreachable = Client::new("http://127.0.0.1:9").with_token("secret");
     let error = unreachable.deploy(&DeployRequest::default()).await.unwrap_err();
     assert!(matches!(error, Error::Transport(_)));
+    assert_eq!(error.code(), Code::Unavailable);
+}
+
+#[tokio::test]
+async fn errors_never_show_bearer_tokens_the_server_echoes() {
+    let client = client().await;
+    let plain = client.list_projects(&ListProjectsRequest::default()).await.unwrap_err().to_string();
+    let json = client.list_apps(&ListAppsRequest::default()).await.unwrap_err().to_string();
+    assert_eq!(
+        plain,
+        "unavailable: HTTP 502 Bad Gateway: <pre>POST / HTTP/1.1\r\nAuthorization: <redacted>\r\nAccept: */*</pre>"
+    );
+    assert_eq!(json, r#"invalid_argument: {"authorization":"<redacted>"} bearer <redacted>"#);
+
+    let anonymous = Client::new(format!("http://{}", serve().await));
+    let error = anonymous.deploy(&DeployRequest::default()).await.unwrap_err();
+    assert_eq!(error.to_string(), "unauthenticated: a valid bearer token is required");
+}
+
+#[tokio::test]
+async fn unary_calls_time_out_as_unavailable() {
+    let client = client().await.with_timeout(Duration::from_millis(100));
+    let error = client.revoke_token(&RevokeTokenRequest::default()).await.unwrap_err();
     assert_eq!(error.code(), Code::Unavailable);
 }
 
