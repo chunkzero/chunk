@@ -49,6 +49,8 @@ pub struct CoreConfig {
     /// that outlived it. Only a core with a launcher can stop remote machines, so one without refuses to start while
     /// any are recorded, and so does a core whose stops aren't confirmed.
     pub fresh: bool,
+    /// Where the log replicates; unset keeps it local only.
+    pub replication: Option<chunk_store::Replication>,
 }
 
 /// The environment's backend and the control that writes through its store.
@@ -136,6 +138,7 @@ impl Core {
             bundle: config.bundle.clone(),
             environment: config.environment.clone(),
             state: config.state.join("backend"),
+            replication: config.replication.clone(),
         };
         self.backend =
             Some(Running { task: tokio::spawn(chunk_backend::server::run(backend, ready, stop.clone())), stop });

@@ -6,21 +6,24 @@ mod alarm;
 mod failed_auth;
 mod idle;
 mod launcher;
+mod log_store;
 mod release;
 mod retire;
 mod status;
 
-use crate::{Core, Gateway, GatewayConfig};
+use crate::{Core, CoreConfig, Gateway, GatewayConfig};
 use activation::Activation;
 use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
+pub(crate) use log_store::renewing;
+use log_store::{LogStore, Renewal, Renewer};
 use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Mutex, MutexGuard, OnceLock, PoisonError,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -80,6 +83,10 @@ pub(crate) struct Managed<'a> {
     idle: idle::Idle,
     /// Where edges reach the gateway.
     private_address: status::PrivateAddress,
+    /// Renewed from each desired state of the core attach.
+    log_store: Arc<LogStore>,
+    /// Renews `log_store`'s credentials from an attach that takes no lease until the core attach first answers.
+    renewal: Mutex<Option<Renewal>>,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
     /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
@@ -152,7 +159,7 @@ impl<'a> Managed<'a> {
     pub(crate) fn new(
         management: &ManagementConfig,
         lease: watch::Sender<Lease>,
-        environment: String,
+        registration: Registration,
         state: &Path,
         core: &'a Core,
         gateway: &'a OnceLock<Gateway>,
@@ -167,8 +174,10 @@ impl<'a> Managed<'a> {
             client,
             lease,
             attaching: AtomicBool::new(false),
-            instance_id: uuid::Uuid::new_v4().to_string(),
-            environment,
+            instance_id: registration.instance_id,
+            log_store: registration.log_store,
+            renewal: Mutex::new(registration.renewal),
+            environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
             core,
@@ -182,6 +191,24 @@ impl<'a> Managed<'a> {
     /// The token that tells this attachment core is shutting down.
     pub(crate) fn stopping(&self) -> CancellationToken {
         self.stopping.clone()
+    }
+
+    /// What renews the log store's credentials once this attachment ends.
+    pub(crate) fn renewer(&self) -> Renewer {
+        Renewer {
+            client: self.client.clone(),
+            instance_id: self.instance_id.clone(),
+            environment: self.environment.clone(),
+            log_store: self.log_store.clone(),
+        }
+    }
+
+    /// Stops the renewal from the attach that took no lease, so only the core attach renews from here on.
+    async fn take_over_renewal(&self) {
+        let renewal = self.renewal.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
@@ -290,7 +317,9 @@ impl<'a> Managed<'a> {
                 biased;
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
-                    self.check(&desired)?;
+                    check(&desired, &self.environment)?;
+                    self.take_over_renewal().await;
+                    self.log_store.renew(desired.log_store.as_ref());
                     self.lease.send_replace(Lease::Held(desired.lease));
                     self.attaching.store(false, Ordering::SeqCst);
                     {
@@ -309,16 +338,6 @@ impl<'a> Managed<'a> {
                 }
             }
         }
-    }
-
-    fn check(&self, desired: &v1::AttachResponse) -> Result<(), Interrupted> {
-        if desired.environment_id == self.environment {
-            return Ok(());
-        }
-        Err(Interrupted::Fatal(io::Error::other(format!(
-            "management attached this core to environment {:?}, not {:?}",
-            desired.environment_id, self.environment
-        ))))
     }
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
@@ -543,6 +562,92 @@ impl<'a> Managed<'a> {
         };
         self.idle.ready(revision, &observed)
     }
+}
+
+/// This run of core as management knows it before core starts.
+pub(crate) struct Registration {
+    /// Unique to this run of the process.
+    instance_id: String,
+    environment: String,
+    log_store: Arc<LogStore>,
+    /// Renews `log_store`'s credentials from the attach that took no lease, until the core attach takes over.
+    renewal: Option<Renewal>,
+}
+
+impl Registration {
+    /// Reads the first desired state from an attach that claims no lease, since core must know where its log replicates
+    /// before it opens the log, and only then knows the epoch a core attach carries. Attaches again until management
+    /// answers, or returns `None` once `stop` is cancelled. Object storage management grants replaces `core`'s
+    /// replication, and that attach keeps renewing its credentials while core restores and starts.
+    /// # Errors
+    /// Reports a desired state for another environment or an invalid log store.
+    pub(crate) async fn attach(
+        management: &ManagementConfig,
+        core: &mut CoreConfig,
+        stop: &CancellationToken,
+    ) -> io::Result<Option<Self>> {
+        let environment = core.environment.clone();
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        let client = management.client();
+        let request = log_store::request(&instance_id);
+        let attach = || async {
+            let mut stream = deadline(REQUEST_TIMEOUT, client.attach(&request)).await?;
+            match deadline(REQUEST_TIMEOUT, stream.message()).await? {
+                Some(desired) => check(&desired, &environment).map(|()| (stream, desired)),
+                None => Err(Interrupted::Retry(io::Error::other("management ended the attach"))),
+            }
+        };
+        let (stream, desired) = loop {
+            let error = tokio::select! {
+                () = stop.cancelled() => return Ok(None),
+                attached = attach() => match attached {
+                    Ok(attached) => break attached,
+                    Err(Interrupted::Fatal(error)) => return Err(error),
+                    Err(Interrupted::Retry(error) | Interrupted::Fenced(error)) => error,
+                },
+            };
+            tracing::warn!(%error, "management attach failed; core waits for it before opening its log");
+            tokio::select! {
+                () = stop.cancelled() => return Ok(None),
+                () = tokio::time::sleep(REATTACH) => {}
+            }
+        };
+        let (log_store, replication) = LogStore::open(desired.log_store.as_ref())?;
+        if replication.is_some() {
+            core.replication = replication;
+        }
+        let log_store = Arc::new(log_store);
+        let renewer = Renewer {
+            client,
+            instance_id: instance_id.clone(),
+            environment: environment.clone(),
+            log_store: log_store.clone(),
+        };
+        let renewal = renewer.start(Some(stream));
+        Ok(Some(Self { instance_id, environment, log_store, renewal }))
+    }
+
+    /// A run that replicates nothing management grants.
+    #[cfg(test)]
+    pub(crate) fn local(environment: &str) -> Self {
+        let (log_store, _) = LogStore::open(None).expect("no grant");
+        Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            environment: environment.into(),
+            log_store: Arc::new(log_store),
+            renewal: None,
+        }
+    }
+}
+
+fn check(desired: &v1::AttachResponse, environment: &str) -> Result<(), Interrupted> {
+    if desired.environment_id == environment {
+        return Ok(());
+    }
+    Err(Interrupted::Fatal(io::Error::other(format!(
+        "management attached this core to environment {:?}, not {environment:?}",
+        desired.environment_id
+    ))))
 }
 
 /// What `read` answers within [`READ_WAIT`], or nothing once it fails or takes longer.

@@ -19,12 +19,14 @@ pub struct Config {
     pub bundle: Option<PathBuf>,
     pub environment: String,
     pub state: PathBuf,
+    /// Where the log replicates; unset keeps it local only.
+    pub replication: Option<chunk_store::Replication>,
 }
 
 /// Starts the backend, publishes readiness, and runs until `stop` or until another store fences this one, then stops
 /// the backend and flushes replication.
 /// # Errors
-/// Reports configuration, storage and replication errors.
+/// Reports storage and replication errors, including a final flush that did not put the whole log in object storage.
 pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: CancellationToken) -> io::Result<()> {
     // Cancelled on a fence as well as by the caller, without cancelling the caller's token.
     let stop = stop.child_token();
@@ -35,7 +37,7 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         if !database.exists() {
             chunk_service::private_file(&database)?;
         }
-        let (store, replicator) = match chunk_store::Replication::from_env().map_err(io::Error::other)? {
+        let (store, replicator) = match config.replication {
             Some(replication) => {
                 let (store, replicator) =
                     chunk_store::SqliteStore::open_replicated(database, &config.environment, replication)
@@ -68,6 +70,9 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
     })
     .await
     .map_err(io::Error::other)?;
+    if let Err(error) = &flushed {
+        tracing::error!(%error, "final log flush failed; object storage misses the latest commits");
+    }
     result.and(flushed.map_err(io::Error::other))
 }
 

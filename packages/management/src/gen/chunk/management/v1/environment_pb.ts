@@ -38,7 +38,9 @@ export type AttachRequest = Message<"chunk.management.v1.AttachRequest"> & {
   version: string;
 
   /**
-   * Set by core: this process owns the environment's log.
+   * Set by core: this process owns the environment's log. Core first
+   * attaches without it, taking no lease, to read log_store before it opens
+   * its log; only then does it know the epoch to attach with.
    *
    * @generated from field: bool core = 3;
    */

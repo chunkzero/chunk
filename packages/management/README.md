@@ -123,8 +123,8 @@ Docker/Podman provider `src/main.ts` uses.
 
 With `CHUNK_LOG_STORE_BUCKET` set, management hands each environment credentials for its own prefix,
 `<prefix><environment ID>/`, in `Attach`: temporary ones from STS `AssumeRole` with an inline policy that allows only
-that prefix, refreshed before they expire. This works with AWS S3 and MinIO. The environment process doesn't use these
-credentials yet; it replicates only with its own `CHUNK_REPLICATION_*` variables.
+that prefix, refreshed before they expire. This works with AWS S3 and MinIO. Core replicates its log there, restores it
+from there when it starts without its volume, and picks up the fresh credentials each desired state carries.
 
 | Variable                             | Default                | Meaning                                                                                            |
 | ------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |

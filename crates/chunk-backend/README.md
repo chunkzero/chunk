@@ -8,12 +8,13 @@ authenticates callers and supplies their identity; internal functions can't be c
 
 ## Embedding
 
-`server::run(Config { bundle, environment, state }, ready, stop)` opens `<state>/environment.sqlite` (replicated when
-the `CHUNK_REPLICATION_*` variables are set), deploys the optional bundle, and hands back the `Backend`. To embed it
-directly, `Backend::new(environment, Box<dyn Storage>)` takes a store with exclusive writer authority and starts one
-engine thread, one commit thread, a job timer and one read engine per CPU (up to four). Construction waits for
-initialization, and dropping the last handle drains accepted commits and joins the threads, so do both from a blocking
-task in async code.
+`server::run(Config { bundle, environment, state, replication }, ready, stop)` opens `<state>/environment.sqlite`
+(replicated to object storage when `replication` is set), deploys the optional bundle, and hands back the `Backend`.
+Once stopped, it flushes the replicated log and fails if that final flush does. To embed it directly,
+`Backend::new(environment, Box<dyn Storage>)` takes a store with exclusive writer authority and starts one engine
+thread, one commit thread, a job timer and one read engine per CPU (up to four). Construction waits for initialization,
+and dropping the last handle drains accepted commits and joins the threads, so do both from a blocking task in async
+code.
 
 From transport tasks, use the async `query`, `mutate`, `subscribe` (one query) and `subscribe_group` (up to 16 queries
 that update together). Actions, jobs and commands have their own methods below. Dropping a request cancels queued work
